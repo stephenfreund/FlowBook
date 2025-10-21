@@ -1,0 +1,14 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v4.4.0
+_src_path: https://github.com/jupyterlab/extension-template
+author_email: sfreund@williams.edu
+author_name: Stephen Freund
+has_binder: false
+has_settings: true
+kind: frontend-and-server
+labextension_name: data_ferret
+project_short_description: A JupyterLab extension.
+python_name: data_ferret
+repository: ''
+test: false
+

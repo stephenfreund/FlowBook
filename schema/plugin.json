@@ -1,0 +1,8 @@
+{
+  "jupyter.lab.shortcuts": [],
+  "title": "data_ferret",
+  "description": "data_ferret settings.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

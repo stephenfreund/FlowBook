@@ -1,0 +1,12 @@
+{
+    "argv": [
+      "{python}",
+      "-m",
+      "data_ferret.kernel.ferret_kernel",
+      "-f",
+      "{connection_file}"
+    ],
+    "display_name": "Ferret Kernel",
+    "language": "python"
+  }
+  

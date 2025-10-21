@@ -1,0 +1,17 @@
+/*
+    See the JupyterLab Developer Guide for useful CSS Patterns:
+
+    https://jupyterlab.readthedocs.io/en/stable/developer/css.html
+*/
+
+/* Ferret extension styles */
+
+.ferret-button {
+    margin: 0 2px;
+  }
+  
+  .ferret-cell-toolbar {
+    display: flex;
+    gap: 4px;
+  }
+  
