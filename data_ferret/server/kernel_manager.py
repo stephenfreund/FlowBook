@@ -23,8 +23,7 @@ class FerretKernelClient(BlockingKernelClient):
         stop_on_error: bool = True,
         *,
         cell_id: str = None,
-        cell_metadata: dict = None,
-        **kwargs,
+        cell_metadata: dict = None
     ) -> str:
         """Override execute to optionally include cell_id and cell_metadata in the message to the kernel."""
         if user_expressions is None:
@@ -37,12 +36,15 @@ class FerretKernelClient(BlockingKernelClient):
             allow_stdin=allow_stdin if allow_stdin is not None else self.allow_stdin,
             stop_on_error=stop_on_error,
         )
-        if cell_id is not None:
-            content["cell_id"] = cell_id
+
+        # Define the metadata, including cell_id and any other custom data
+        metadata = {
+            'cell_id': cell_id,
+        }
         if cell_metadata is not None:
-            content["cell_metadata"] = cell_metadata
-        content.update(kwargs)
-        msg = self.session.msg("execute_request", content)
+            metadata.update(cell_metadata)
+
+        msg = self.session.msg("execute_request", content, metadata=metadata)
         self.shell_channel.send(msg)
         return msg["header"]["msg_id"]
 
