@@ -8,32 +8,54 @@ except ImportError:
 
     warnings.warn("Importing 'data_ferret' outside a proper installation.")
     __version__ = "dev"
+
+from jupyter_server.extension.application import ExtensionApp
+from traitlets import Unicode
 from data_ferret.util.output import timer
 from data_ferret.server.handlers import setup_handlers
 
 
+class DataFerretExtension(ExtensionApp):
+    """Data Ferret server extension."""
+
+    name = "data_ferret"
+    load_other_extensions = True
+
+    model_name = Unicode(
+        default_value="gpt-4o",
+        help="The model to use for the extension",
+    ).tag(config=True)
+
+    aliases = {
+        "model-name": "DataFerretExtension.model_name",
+    }
+
+    def initialize_settings(self):
+        """Initialize settings for the extension."""
+        with timer(message="Initializing Data Ferret settings..."):
+            self.log.info(f"Initializing {self.name} extension")
+            self.serverapp.web_app.settings["data_ferret"] = {
+                "ext": self,
+                "model_name": self.model_name,
+            }
+
+    def initialize_handlers(self):
+        """Register HTTP handlers for the extension."""
+        with timer(message="Initializing Data Ferret handlers..."):
+            setup_handlers(self.serverapp.web_app)
+            self.log.info(f"Registered {self.name} server extension handlers")
+
+
 def _jupyter_labextension_paths():
+    """Provide the location of the labextension."""
     with timer(message="JupyterLab extension paths..."):
         return [{"src": "labextension", "dest": "data_ferret"}]
 
 
 def _jupyter_server_extension_points():
+    """Define the server extension entry point."""
     with timer(message="Jupyter server extension points..."):
-        return [{"module": "data_ferret"}]
-
-
-def _load_jupyter_server_extension(server_app):
-    """Registers the API handler to receive HTTP requests from the frontend extension.
-
-    Parameters
-    ----------
-    server_app: jupyterlab.labapp.LabApp
-        JupyterLab application instance
-    """
-    with timer(message="Loading Jupyter server extension..."):
-        setup_handlers(server_app.web_app)
-        name = "data_ferret"
-        server_app.log.info(f"Registered {name} server extension")
+        return [{"module": "data_ferret", "app": DataFerretExtension}]
 
 
 def make_kernels():

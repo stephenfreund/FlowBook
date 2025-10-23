@@ -2,6 +2,7 @@
 Built-in command implementations for notebook processing.
 """
 
+import os
 from typing import Any, Dict, Optional
 import json
 import copy

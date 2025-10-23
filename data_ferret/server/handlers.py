@@ -29,7 +29,6 @@ class FerretCommandHandler(APIHandler):
     @tornado.web.authenticated
     async def post(self):
         """Handle POST requests to execute commands."""
-        print("BEEP")
         try:
             data = self.get_json_body()
             command_name = data.get("command")
@@ -49,31 +48,26 @@ class FerretCommandHandler(APIHandler):
 
             command = self.registry.get_command(command_name)
 
-            print("COMMAND", command)
+            print(
+                "MODEL NAME",
+                self.serverapp.web_app.settings["data_ferret"].model_name,
+            )
 
             kernel_client = None
             if command.requires_kernel:
-                print("KERNEL ID", kernel_id)
-
                 if not kernel_id:
-                    print("NO KERNEL ID")
                     self.set_status(400)
                     self.finish(json.dumps({"error": "Command requires kernel_id"}))
                     return
 
                 try:
                     kernel_manager = self.kernel_manager.get_kernel(kernel_id)
-                    print("KERNEL MANAGER", kernel_manager)
                     kernel_client = FerretKernelClient(kernel_id=kernel_id)
-                    print("KERNEL CLIENT", kernel_client)
                     kernel_client.load_connection_info(
                         kernel_manager.get_connection_info()
                     )
-                    print("LOADED CONNECTION INFO")
                     kernel_client.start_channels()
                     kernel_client.wait_for_ready(timeout=30)
-                    print("STARTED CHANNELS")
-                    print("WAITED FOR READY")
                 except Exception as e:
                     self.set_status(400)
                     self.finish(

@@ -32,6 +32,7 @@ from IPython.core.magic import Magics, cell_magic, line_cell_magic, magics_class
 from data_ferret.kernel.extended_types import get_type_model
 from data_ferret.kernel.checkpoint import Checkpoint
 
+
 async def stop_loky_and_all_children(timeout=3.0, verbose=False, max_passes=2):
     """
     1) Ask loky/joblib to shut down cleanly (cancel futures, wait for exit).
@@ -141,15 +142,15 @@ class FerretKernel(IPythonKernel, Magics):
         )
 
     def display_icon_and_text(
-        self, icon: str, text: str, contents: str | None = None, metadata: dict | None = None
+        self,
+        icon: str,
+        text: str,
+        contents: str | None = None,
+        metadata: dict | None = None,
     ) -> None:
         if contents is None:
             display(
-                Markdown(
-                    f"<div style='{self._div_style}'>"
-                    f"{icon} {text}"
-                    f"</div>"
-                ),
+                Markdown(f"<div style='{self._div_style}'>" f"{icon} {text}" f"</div>"),
                 metadata=metadata,
             )
         else:
@@ -185,15 +186,10 @@ class FerretKernel(IPythonKernel, Magics):
         contents = pprint.pformat(diffs, indent=2)
         if diffs:
             self.display_icon_and_text(
-                "↔️",
-                f"Changed: {', '.join(sorted(diffs.keys()))}",
-                contents=contents
+                "↔️", f"Changed: {', '.join(sorted(diffs.keys()))}", contents=contents
             )
         else:
-            self.display_icon_and_text(
-                "↔️",
-                "No changes"
-            )
+            self.display_icon_and_text("↔️", "No changes")
 
     @line_cell_magic
     def checkpoint(self, line: str, cell: str = "") -> None:
@@ -265,7 +261,9 @@ class FerretKernel(IPythonKernel, Magics):
             )
         elif args[0] == "compare":
             if len(args) != 3:
-                self.display_icon_and_text("❌", "Usage: checkpoint compare <name1> <name2>")
+                self.display_icon_and_text(
+                    "❌", "Usage: checkpoint compare <name1> <name2>"
+                )
                 return
 
             try:
@@ -279,7 +277,6 @@ class FerretKernel(IPythonKernel, Magics):
             self._checkpoint.clear()
         else:
             self.display_icon_and_text("❌", f"Unknown checkpoint command: {line}")
-
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -369,8 +366,14 @@ class FerretKernel(IPythonKernel, Magics):
         cell_meta=None,
         cell_id=None,
     ):
+        if cell_id is not None:
+            self._cell_id = cell_id
+        elif cell_meta is not None:
+            self._cell_id = cell_meta.get("cell_id", None)
+        else:
+            self._cell_id = None
+
         cancel_flag = {"done": False}
-        self._cell_id = cell_id
 
         self.display_cell_id()
 
@@ -445,7 +448,7 @@ class FerretKernel(IPythonKernel, Magics):
             }
             if contents is not None:
                 metadata["ferret"]["profile"] = contents
-                self.display_icon_and_text( 
+                self.display_icon_and_text(
                     "🔍",
                     f"{end_time - start_time:0.2f}s",
                     contents=contents,
@@ -464,7 +467,7 @@ class FerretKernel(IPythonKernel, Magics):
                 assert self.shell is not None, "shell is not set"
                 user_ns = self._checkpoint.checkpointable_vars(self.shell.user_ns)
                 user_ns = self._checkpoint.checkpointable_values(user_ns)
-                dummy_memo = { }
+                dummy_memo = {}
                 old = self._checkpoint.get(f"cell_{cell_id}")
                 self.diff_checkpoints(old, Checkpoint(f"_tmp", user_ns, dummy_memo))
 

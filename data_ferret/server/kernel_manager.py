@@ -1,8 +1,10 @@
 """
 Kernel connection manager for the Jupyter server extension.
 """
-from typing import Dict
-from jupyter_client import BlockingKernelClient, KernelManager
+
+from typing import Any, Dict, Optional
+from jupyter_client.blocking.client import BlockingKernelClient
+from jupyter_client.manager import KernelManager
 from jupyter_server.serverapp import ServerApp
 
 
@@ -18,12 +20,12 @@ class FerretKernelClient(BlockingKernelClient):
         code: str,
         silent: bool = False,
         store_history: bool = True,
-        user_expressions=None,
-        allow_stdin: bool = None,
+        user_expressions: Optional[Dict[str, Any]] = None,
+        allow_stdin: Optional[bool] = None,
         stop_on_error: bool = True,
         *,
-        cell_id: str = None,
-        cell_metadata: dict = None
+        cell_id: Optional[str] = None,
+        cell_metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Override execute to optionally include cell_id and cell_metadata in the message to the kernel."""
         if user_expressions is None:
@@ -39,7 +41,7 @@ class FerretKernelClient(BlockingKernelClient):
 
         # Define the metadata, including cell_id and any other custom data
         metadata = {
-            'cell_id': cell_id,
+            "cell_id": cell_id,
         }
         if cell_metadata is not None:
             metadata.update(cell_metadata)
@@ -61,7 +63,9 @@ class KernelConnectionManager:
         if kernel_id in self._kernel_clients:
             return self._kernel_clients[kernel_id]
 
-        kernel_manager: KernelManager = self.server_app.kernel_manager.get_kernel(kernel_id)
+        kernel_manager: KernelManager = self.server_app.kernel_manager.get_kernel(
+            kernel_id
+        )
 
         # Create our custom FerretKernelClient and configure it with connection info
         client = FerretKernelClient(kernel_id=kernel_id)
@@ -80,4 +84,3 @@ class KernelConnectionManager:
             client = self._kernel_clients[kernel_id]
             client.stop_channels()
             del self._kernel_clients[kernel_id]
-
