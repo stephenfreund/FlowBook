@@ -4,7 +4,7 @@
 
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
 import { Cell } from '@jupyterlab/cells';
-import { ToolbarButton } from '@jupyterlab/apputils';
+// import { ToolbarButton } from '@jupyterlab/apputils';
 
 import { FerretCommandsManager } from './manager';
 
@@ -48,43 +48,43 @@ export class CellToolbarExtension {
    */
   private addCellToolbarButtons(cell: Cell, panel: NotebookPanel): void {
   
-    console.log("CELL", cell);
-    // Skip if button already exists
-    if (cell.node.querySelector('.jp-FerretButton')) {
-      console.log('Button already exists');
-      return;
-    }
+  //   console.log("CELL", cell);
+  //   // Skip if button already exists
+  //   if (cell.node.querySelector('.jp-FerretButton')) {
+  //     console.log('Button already exists');
+  //     return;
+  //   }
 
-  // Button 1: Clear output
-  const clearButton = new ToolbarButton({
-    className: 'clear-output-button',
-    tooltip: 'Clear Output',
-    icon: 'ui-components:clear',
-    onClick: () => {
-      (cell as any).model.outputs.clear();
-    }
-  });
+  // // Button 1: Clear output
+  // const clearButton = new ToolbarButton({
+  //   className: 'clear-output-button',
+  //   tooltip: 'Clear Output',
+  //   icon: 'ui-components:clear',
+  //   onClick: () => {
+  //     (cell as any).model.outputs.clear();
+  //   }
+  // });
 
-  // Button 2: Copy cell
-  const copyButton = new ToolbarButton({
-    className: 'copy-cell-button',
-    tooltip: 'Copy Cell',
-    icon: 'ui-components:copy',
-    onClick: () => {
-      navigator.clipboard.writeText(cell.model.sharedModel.getSource());
-    }
-  });
+  // // Button 2: Copy cell
+  // const copyButton = new ToolbarButton({
+  //   className: 'copy-cell-button',
+  //   tooltip: 'Copy Cell',
+  //   icon: 'ui-components:copy',
+  //   onClick: () => {
+  //     navigator.clipboard.writeText(cell.model.sharedModel.getSource());
+  //   }
+  // });
 
-  console.log("CLEAR BUTTON", clearButton);
-  console.log("COPY BUTTON", copyButton);
-  console.log("CELL TOOLBAR", (cell as any).toolbar);
+  // console.log("CLEAR BUTTON", clearButton);
+  // console.log("COPY BUTTON", copyButton);
+  // console.log("CELL TOOLBAR", (cell as any).toolbar);
 
-  // Add buttons with unique identifiers
-  (cell as any).toolbar.addItem('clear-output', clearButton);
-  (cell as any).toolbar.addItem('copy-cell', copyButton);
+  // // Add buttons with unique identifiers
+  // (cell as any).toolbar.addItem('clear-output', clearButton);
+  // (cell as any).toolbar.addItem('copy-cell', copyButton);
 
 
-    // const commands = 
+  //   // const commands = 
     this.manager.getCommands();
 
     // commands.forEach(cmdInfo => {

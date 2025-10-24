@@ -10,7 +10,7 @@ import copy
 from data_ferret.server.base import NotebookCommand
 from data_ferret.server.kernel_helper import KernelHelper
 from data_ferret.server.kernel_manager import FerretKernelClient
-
+from data_ferret.server.message_broadcaster import get_broadcaster
 
 class AnalyzeNotebookCommand(NotebookCommand):
     """Analyzes notebook structure and content."""
@@ -38,7 +38,15 @@ class AnalyzeNotebookCommand(NotebookCommand):
         **kwargs,
     ) -> Dict[str, Any]:
         """Analyze the notebook and return statistics."""
-        print("BEBEEP BOOP")
+
+        broadcaster = get_broadcaster()
+
+        broadcaster.append("Processing... ")
+        # Do work
+        broadcaster.append("done")
+        broadcaster.newline()
+        broadcaster.end()
+
         cells = notebook_content.get("cells", [])
 
         code_cells = [c for c in cells if c.get("cell_type") == "code"]

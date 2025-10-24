@@ -14,6 +14,7 @@ import { ICommandPalette } from '@jupyterlab/apputils';
 import { FerretCommandsManager } from './manager';
 import { NotebookToolbarExtension } from './toolbar';
 import { CellToolbarExtension } from './celltoolbar';
+import { MessagePanel } from './panel';
 
 /**
  * The main Ferret extension plugin
@@ -51,7 +52,12 @@ const extension: JupyterFrontEndPlugin<void> = {
     // Add cell toolbar buttons
     new CellToolbarExtension(manager, tracker);
 
-    console.log('Ferret toolbar buttons added');
+    // Create and add the message panel to the right area
+    const messagePanel = new MessagePanel();
+    app.shell.add(messagePanel, 'right', { rank: 500 });
+
+    console.log('Ferret toolbar buttons and message panel added');
+
   }
 };
 

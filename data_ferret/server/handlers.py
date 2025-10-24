@@ -4,8 +4,10 @@ Jupyter server API handlers for ferret commands.
 
 import json
 import pprint
+import asyncio
+import uuid
 import tornado
-from jupyter_server.base.handlers import APIHandler
+from jupyter_server.base.handlers import APIHandler, JupyterHandler
 from jupyter_server.utils import url_path_join
 
 from data_ferret.server.registry import CommandRegistry
@@ -13,6 +15,7 @@ from data_ferret.server.kernel_manager import (
     FerretKernelClient,
     KernelConnectionManager,
 )
+from data_ferret.server.message_broadcaster import get_broadcaster
 
 
 # Global kernel manager instance
@@ -103,6 +106,64 @@ class CommandListHandler(APIHandler):
         self.finish(json.dumps({"commands": command_info}))
 
 
+class MessageStreamHandler(JupyterHandler):
+    """Handler for Server-Sent Events (SSE) message streaming."""
+
+    def initialize(self):
+        """Initialize the handler."""
+        self.broadcaster = get_broadcaster()
+        self.client_id = str(uuid.uuid4())
+        self.queue = None
+
+    @tornado.web.authenticated
+    async def get(self):
+        """Stream messages to the client via SSE."""
+        # Set headers for SSE
+        self.set_header('Content-Type', 'text/event-stream')
+        self.set_header('Cache-Control', 'no-cache')
+        self.set_header('Connection', 'keep-alive')
+        self.set_header('X-Accel-Buffering', 'no')
+
+        # Register this client with the broadcaster
+        self.queue = self.broadcaster.register_client(self.client_id)
+
+        try:
+            # Send initial connection message
+            self.write(f'data: {{"type":"connected","client_id":"{self.client_id}"}}\n\n')
+            await self.flush()
+
+            # Stream messages from the queue
+            while True:
+                try:
+                    # Wait for a message with timeout
+                    message = await asyncio.wait_for(self.queue.get(), timeout=30.0)
+
+                    print("MESSAGE", message)
+
+                    # Send the message as SSE event
+                    self.write(f'data: {message.to_json()}\n\n')
+                    await self.flush()
+
+                except asyncio.TimeoutError:
+                    # Send keepalive comment every 30 seconds
+                    self.write(': keepalive\n\n')
+                    await self.flush()
+                except Exception as e:
+                    self.log.error(f"Error streaming message: {e}")
+                    break
+
+        except Exception as e:
+            self.log.error(f"SSE connection error: {e}")
+        finally:
+            # Unregister client on disconnect
+            self.broadcaster.unregister_client(self.client_id)
+
+    def on_connection_close(self):
+        """Handle client disconnection."""
+        if self.client_id:
+            self.broadcaster.unregister_client(self.client_id)
+
+
 def setup_handlers(web_app):
     """Set up the extension handlers."""
     global _kernel_manager
@@ -125,6 +186,11 @@ def setup_handlers(web_app):
             url_path_join(base_url, "ferret", "list"),
             CommandListHandler,
             {"registry": registry},
+        ),
+        (
+            url_path_join(base_url, "ferret", "stream"),
+            MessageStreamHandler,
+            {},
         ),
     ]
 
