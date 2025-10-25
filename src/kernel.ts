@@ -29,7 +29,9 @@ export class KernelUtils {
   /**
    * Ensure a kernel is running for the notebook, prompting the user to start one if needed
    */
-  static async ensureKernel(notebook: NotebookPanel): Promise<KernelInfo | null> {
+  static async ensureKernel(
+    notebook: NotebookPanel
+  ): Promise<KernelInfo | null> {
     await notebook.sessionContext.ready;
 
     let kernelInfo = this.getKernelInfo(notebook);
@@ -38,7 +40,10 @@ export class KernelUtils {
       const shouldStart = await showDialog({
         title: 'Kernel Required',
         body: 'This command requires a running kernel. Would you like to start one?',
-        buttons: [Dialog.cancelButton(), Dialog.okButton({ label: 'Start Kernel' })]
+        buttons: [
+          Dialog.cancelButton(),
+          Dialog.okButton({ label: 'Start Kernel' })
+        ]
       });
 
       if (shouldStart.button.accept) {

@@ -13,7 +13,8 @@ import { FerretCommandsManager } from './manager';
  * Extension that adds Ferret command buttons to the notebook toolbar
  */
 export class NotebookToolbarExtension
-  implements DocumentRegistry.IWidgetExtension<NotebookPanel, DocumentRegistry.IModel>
+  implements
+    DocumentRegistry.IWidgetExtension<NotebookPanel, DocumentRegistry.IModel>
 {
   private manager: FerretCommandsManager;
 
@@ -45,7 +46,9 @@ export class NotebookToolbarExtension
 
     return {
       dispose: () => {},
-      get isDisposed() { return false; }
+      get isDisposed() {
+        return false;
+      }
     };
   }
 }

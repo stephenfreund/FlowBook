@@ -9,7 +9,7 @@ import {
 } from '@jupyterlab/application';
 
 import { INotebookTracker } from '@jupyterlab/notebook';
-import { ICommandPalette } from '@jupyterlab/apputils';
+import { ICommandPalette, IToolbarWidgetRegistry } from '@jupyterlab/apputils';
 
 import { FerretCommandsManager } from './manager';
 import { NotebookToolbarExtension } from './toolbar';
@@ -19,22 +19,20 @@ import { CellToolbarExtension } from './celltoolbar';
  * The main Ferret extension plugin
  */
 const extension: JupyterFrontEndPlugin<void> = {
-  id: 'ferret:plugin',
+  id: 'data_ferret:plugin',
   autoStart: true,
   requires: [INotebookTracker],
-  optional: [ICommandPalette],
-  activate: async (
+  optional: [ICommandPalette, IToolbarWidgetRegistry],
+  activate: (
     app: JupyterFrontEnd,
     tracker: INotebookTracker,
-    palette: ICommandPalette | null
+    palette: ICommandPalette | null,
+    toolbarRegistry: IToolbarWidgetRegistry | null
   ) => {
     console.log('JupyterLab extension ferret is activated!');
 
     // Create the command manager
     const manager = new FerretCommandsManager(app, tracker);
-
-    // Load commands from the server
-    await manager.loadCommands();
 
     // Register commands with JupyterLab
     manager.registerCommands();
@@ -49,7 +47,9 @@ const extension: JupyterFrontEndPlugin<void> = {
     app.docRegistry.addWidgetExtension('Notebook', toolbarExtension);
 
     // Add cell toolbar buttons
-    new CellToolbarExtension(manager, tracker);
+    if (toolbarRegistry) {
+      new CellToolbarExtension(manager, tracker, toolbarRegistry);
+    }
 
     console.log('Ferret toolbar buttons added');
   }

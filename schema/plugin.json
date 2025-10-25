@@ -1,5 +1,25 @@
 {
   "jupyter.lab.shortcuts": [],
+  "jupyter.lab.toolbars": {
+    "Cell": [
+      {
+        "name": "ferret-analyze",
+        "rank": 0
+      },
+      {
+        "name": "ferret-validate",
+        "rank": 1
+      },
+      {
+        "name": "ferret-execute_all",
+        "rank": 2
+      },
+      {
+        "name": "ferret-inspect_vars",
+        "rank": 3
+      }
+    ]
+  },
   "title": "data_ferret",
   "description": "data_ferret settings.",
   "type": "object",

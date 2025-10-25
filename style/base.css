@@ -7,11 +7,15 @@
 /* Ferret extension styles */
 
 .ferret-button {
-    margin: 0 2px;
-  }
-  
-  .ferret-cell-toolbar {
-    display: flex;
-    gap: 4px;
-  }
-  
+  margin: 0 2px;
+}
+
+.ferret-cell-toolbar {
+  display: flex;
+  gap: 4px;
+}
+
+/* Add spacing after the last Ferret button in cell toolbars */
+.jp-Cell-toolbar [data-item-name='ferret-inspect_vars'] {
+  margin-right: 12px;
+}

@@ -9,30 +9,24 @@ import { showDialog, Dialog } from '@jupyterlab/apputils';
 
 import { FerretAPI } from './api';
 import { KernelUtils } from './kernel';
-import { CommandInfo, CommandResult, ExecuteCommandRequest } from './types';
+import {
+  CommandInfo,
+  CommandResult,
+  ExecuteCommandRequest,
+  FERRET_COMMANDS
+} from './types';
 
 /**
  * Manages Ferret commands, their registration, and execution
  */
 export class FerretCommandsManager {
-  private commands: CommandInfo[] = [];
+  private commands: CommandInfo[] = FERRET_COMMANDS;
   private app: JupyterFrontEnd;
   private tracker: INotebookTracker;
 
   constructor(app: JupyterFrontEnd, tracker: INotebookTracker) {
     this.app = app;
     this.tracker = tracker;
-  }
-
-  /**
-   * Load commands from the server
-   */
-  async loadCommands(): Promise<void> {
-    try {
-      this.commands = await FerretAPI.loadCommands();
-    } catch (error) {
-      console.error('Failed to load ferret commands:', error);
-    }
   }
 
   /**
@@ -64,11 +58,16 @@ export class FerretCommandsManager {
 
       const commandInfo = this.commands.find(cmd => cmd.id === commandId);
 
+      // Get selected cell IDs
+      const selectedCells = notebook.content.selectedCells;
+      const selectedCellIds = selectedCells.map(cell => cell.model.id);
+
       // Build the request
       const request: ExecuteCommandRequest = {
         command: commandId,
         notebook: notebookContent,
-        params: {}
+        params: {},
+        selected_cell_ids: selectedCellIds
       };
 
       // Handle kernel requirement
@@ -91,7 +90,7 @@ export class FerretCommandsManager {
 
         showDialog({
           title: `${commandInfo?.label || 'Command'} Complete`,
-          body: `Command executed successfully. Check the console for detailed metadata.`,
+          body: 'Command executed successfully. Check the console for detailed metadata.',
           buttons: [Dialog.okButton()]
         });
       }
@@ -113,7 +112,7 @@ export class FerretCommandsManager {
    */
   registerCommands(): void {
     this.commands.forEach(cmdInfo => {
-      const commandId = `ferret:${cmdInfo.id}`;
+      const commandId = `data_ferret:${cmdInfo.id}`;
 
       this.app.commands.addCommand(commandId, {
         label: cmdInfo.label,
@@ -133,7 +132,7 @@ export class FerretCommandsManager {
    */
   addToPalette(palette: ICommandPalette): void {
     this.commands.forEach(cmdInfo => {
-      const commandId = `ferret:${cmdInfo.id}`;
+      const commandId = `data_ferret:${cmdInfo.id}`;
       palette.addItem({
         command: commandId,
         category: 'Ferret Commands',
