@@ -142,7 +142,8 @@ class Output:
         Output context that streams messages to a file-like object.
 
         This context captures all output and sends it to a stream object
-        that has standard write() and flush() methods.
+        that has standard write() and flush() methods. The stream is
+        responsible for any text processing (e.g., ANSI code handling).
         """
         def __init__(self, outer, stream):
             self.outer = outer
@@ -159,7 +160,7 @@ class Output:
                 self.outer.output_contexts.pop()
 
         def write(self, message):
-            """Write message to the stream."""
+            """Write message to the stream (preserving ANSI codes for stream to process)."""
             self.stream.write(message)
             self.stream.flush()
 

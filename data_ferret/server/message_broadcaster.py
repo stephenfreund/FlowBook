@@ -11,6 +11,8 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from enum import Enum
 
+from data_ferret.util.text import parse_ansi_text
+
 
 class MessageType(Enum):
     """Types of messages that can be sent to the client."""
@@ -182,9 +184,10 @@ class BroadcastStream:
         Write text to the broadcaster.
 
         Handles newlines by splitting and sending appropriate messages.
+        Parses ANSI color codes and includes them as metadata.
 
         Args:
-            text: Text to write
+            text: Text to write (may contain ANSI color codes)
 
         Returns:
             Number of characters written
@@ -192,8 +195,11 @@ class BroadcastStream:
         if not text:
             return 0
 
+        # Parse ANSI codes to extract color/style metadata
+        stripped_text, style_metadata = parse_ansi_text(text)
+
         # Split by newlines
-        parts = text.split('\n')
+        parts = stripped_text.split('\n')
 
         for i, part in enumerate(parts):
             if i > 0:
@@ -202,7 +208,13 @@ class BroadcastStream:
                 self.current_line = ""
 
             if part:
-                self.broadcaster.append(part)
+                # Create message with color metadata if available
+                message = Message(
+                    type=MessageType.APPEND,
+                    content=part,
+                    metadata=style_metadata
+                )
+                self.broadcaster.send_message(message)
                 self.current_line += part
 
         return len(text)

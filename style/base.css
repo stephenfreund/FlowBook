@@ -162,6 +162,24 @@
   min-width: 300px;
   height: 100%;
   background-color: var(--jp-layout-color1);
+
+  /* ANSI color mappings */
+  --ferret-color-black: #000000;
+  --ferret-color-red: #cd3131;
+  --ferret-color-green: #0dbc79;
+  --ferret-color-yellow: #e5e510;
+  --ferret-color-blue: #2472c8;
+  --ferret-color-magenta: #bc3fbc;
+  --ferret-color-cyan: #11a8cd;
+  --ferret-color-white: #e5e5e5;
+  --ferret-color-bright-black: #666666;
+  --ferret-color-bright-red: #f14c4c;
+  --ferret-color-bright-green: #23d18b;
+  --ferret-color-bright-yellow: #f5f543;
+  --ferret-color-bright-blue: #3b8eea;
+  --ferret-color-bright-magenta: #d670d6;
+  --ferret-color-bright-cyan: #29b8db;
+  --ferret-color-bright-white: #e5e5e5;
 }
 
 .ferret-message-display {
