@@ -11,6 +11,7 @@ from data_ferret.server.base import NotebookCommand
 from data_ferret.server.kernel_helper import KernelHelper
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.server.message_broadcaster import get_broadcaster
+from data_ferret.util.output import log, timer
 
 class AnalyzeNotebookCommand(NotebookCommand):
     """Analyzes notebook structure and content."""
@@ -39,13 +40,7 @@ class AnalyzeNotebookCommand(NotebookCommand):
     ) -> Dict[str, Any]:
         """Analyze the notebook and return statistics."""
 
-        broadcaster = get_broadcaster()
-
-        broadcaster.append("Processing... ")
-        # Do work
-        broadcaster.append("done")
-        broadcaster.newline()
-        broadcaster.end()
+        log("Analyzing notebook...")
 
         cells = notebook_content.get("cells", [])
 
@@ -253,32 +248,35 @@ class ExecuteAllCommand(NotebookCommand):
         execution_results = []
         total_executed = 0
 
-        for idx, cell in enumerate(cells):
-            if cell.get("cell_type") == "code":
-                source = cell.get("source", "")
-                if isinstance(source, list):
-                    source = "".join(source)
+        with timer(key="execute_all", message="Executing all cells"):
+            for idx, cell in enumerate(cells):
+                if cell.get("cell_type") == "code":
+                    with timer(key="execute_cell", message=f"Executing cell {idx}:{cell.get('id')}"):
+                        source = cell.get("source", "")
+                        if isinstance(source, list):
+                            source = "".join(source)
 
-                if source.strip():
-                    result = KernelHelper.execute_code(
-                        kernel_client,
-                        source,
-                        cell_id=cell.get("id"),
-                        cell_metadata=cell.get("metadata"),
-                    )
+                        if source.strip():
+                            result = KernelHelper.execute_code(
+                                kernel_client,
+                                source,
+                                cell_id=cell.get("id"),
+                                cell_metadata=cell.get("metadata"),
+                            )
 
-                    cell["execution_count"] = result["execution_count"]
-                    cell["outputs"] = result["outputs"]
+                            cell["execution_count"] = result["execution_count"]
+                            cell["outputs"] = result["outputs"]
 
-                    execution_results.append(
-                        {
-                            "cell_index": idx,
-                            "status": result["status"],
-                            "execution_count": result["execution_count"],
-                        }
-                    )
+                            execution_results.append(
+                                {
+                                    "cell_index": idx,
+                                    "status": result["status"],
+                                    "execution_count": result["execution_count"],
+                                }
+                            )
+                            log(f"[{result['execution_count']}]")
 
-                    total_executed += 1
+                            total_executed += 1
 
         metadata = {
             "status": "success",

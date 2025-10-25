@@ -164,16 +164,23 @@
   background-color: var(--jp-layout-color1);
 }
 
-.ferret-message-content {
+.ferret-message-display {
   flex: 1;
   overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
+  height: 100%;
+}
+
+.ferret-message-content {
   padding: 10px;
+  margin: 0;
   font-family: var(--jp-code-font-family);
   font-size: var(--jp-code-font-size);
   line-height: 1.5;
   color: var(--jp-ui-font-color1);
   background-color: var(--jp-layout-color0);
+  white-space: pre;
+  overflow-x: auto;
 }
 
 .ferret-message-line {
@@ -187,20 +194,21 @@
   content: '\200b'; /* Zero-width space to maintain line height */
 }
 
-/* Scrollbar styling for message content */
-.ferret-message-content::-webkit-scrollbar {
+/* Scrollbar styling for message display */
+.ferret-message-display::-webkit-scrollbar {
   width: 8px;
+  height: 8px;
 }
 
-.ferret-message-content::-webkit-scrollbar-track {
+.ferret-message-display::-webkit-scrollbar-track {
   background: var(--jp-layout-color1);
 }
 
-.ferret-message-content::-webkit-scrollbar-thumb {
+.ferret-message-display::-webkit-scrollbar-thumb {
   background: var(--jp-border-color2);
   border-radius: 4px;
 }
 
-.ferret-message-content::-webkit-scrollbar-thumb:hover {
+.ferret-message-display::-webkit-scrollbar-thumb:hover {
   background: var(--jp-border-color3);
 }

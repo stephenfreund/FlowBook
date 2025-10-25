@@ -15,7 +15,8 @@ from data_ferret.server.kernel_manager import (
     FerretKernelClient,
     KernelConnectionManager,
 )
-from data_ferret.server.message_broadcaster import get_broadcaster
+from data_ferret.server.message_broadcaster import get_broadcaster, get_broadcast_stream
+from data_ferret.util.output import stream_output
 
 
 # Global kernel manager instance
@@ -78,9 +79,11 @@ class FerretCommandHandler(APIHandler):
                     )
                     return
 
-            result = command.process(
-                notebook_content, kernel_client=kernel_client, **params
-            )
+            # Execute command with output streaming to clients
+            with stream_output(get_broadcast_stream()):
+                result = command.process(
+                    notebook_content, kernel_client=kernel_client, **params
+                )
 
             self.finish(json.dumps(result))
 

@@ -157,3 +157,72 @@ _broadcaster = MessageBroadcaster()
 def get_broadcaster() -> MessageBroadcaster:
     """Get the global message broadcaster instance."""
     return _broadcaster
+
+
+class BroadcastStream:
+    """
+    File-like wrapper for MessageBroadcaster.
+
+    Provides standard write() and flush() interface for compatibility
+    with output contexts and other file-like operations.
+    """
+
+    def __init__(self, broadcaster: Optional[MessageBroadcaster] = None):
+        """
+        Initialize the broadcast stream.
+
+        Args:
+            broadcaster: MessageBroadcaster instance to use. If None, uses global instance.
+        """
+        self.broadcaster = broadcaster or get_broadcaster()
+        self.current_line = ""
+
+    def write(self, text: str) -> int:
+        """
+        Write text to the broadcaster.
+
+        Handles newlines by splitting and sending appropriate messages.
+
+        Args:
+            text: Text to write
+
+        Returns:
+            Number of characters written
+        """
+        if not text:
+            return 0
+
+        # Split by newlines
+        parts = text.split('\n')
+
+        for i, part in enumerate(parts):
+            if i > 0:
+                # We had a newline before this part
+                self.broadcaster.newline()
+                self.current_line = ""
+
+            if part:
+                self.broadcaster.append(part)
+                self.current_line += part
+
+        return len(text)
+
+    def flush(self):
+        """Flush the stream (no-op for broadcaster as messages are sent immediately)."""
+        pass
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        # Ensure we end with a newline if there's pending content
+        if self.current_line:
+            self.broadcaster.newline()
+            self.current_line = ""
+
+
+def get_broadcast_stream() -> BroadcastStream:
+    """Get a file-like stream that broadcasts to all connected clients."""
+    return BroadcastStream()
