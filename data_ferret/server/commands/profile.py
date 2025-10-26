@@ -1,5 +1,5 @@
 """
-Execute all cells command implementation.
+Profile command implementation.
 """
 
 import copy
@@ -13,16 +13,16 @@ from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.output import log, timer
 
 
-class ExecuteAllCommand(NotebookCommand):
-    """Executes all code cells in the notebook using the kernel."""
+class ProfileCommand(NotebookCommand):
+    """Profiles code cells with memory and performance tracking."""
 
     @property
     def command_name(self) -> str:
-        return "execute_all"
+        return "profile"
 
     @property
     def display_name(self) -> str:
-        return "Execute All Cells"
+        return "Profile"
 
     @property
     def icon_name(self) -> str:
@@ -30,7 +30,7 @@ class ExecuteAllCommand(NotebookCommand):
 
     @property
     def tooltip(self) -> str:
-        return "Execute all code cells and capture outputs"
+        return "Profile code cells with memory and performance tracking"
 
     @property
     def requires_kernel(self) -> bool:
@@ -44,7 +44,7 @@ class ExecuteAllCommand(NotebookCommand):
         config: Optional[Any] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Execute all code cells."""
+        """Profile code cells."""
         if kernel_client is None:
             return {
                 "notebook": notebook_content,
@@ -63,13 +63,13 @@ class ExecuteAllCommand(NotebookCommand):
 
         kernel_client.execute("%enable_scalene")
 
-        with timer(key="execute_all", message="Executing all cells"):
+        with timer(key="profile", message="Profiling cells"):
             for idx, cell in enumerate(cells):
                 if cell.get("cell_type") == "code":
                     if selected_cell_ids and cell.get("id") not in selected_cell_ids:
                         continue
 
-                    with timer(key="execute_cell", message=f"Executing cell {idx}:{cell.get('id')}"):
+                    with timer(key="profile_cell", message=f"Profiling cell {idx}:{cell.get('id')}"):
                         source = cell.get("source", "")
                         if isinstance(source, list):
                             source = "".join(source)
@@ -87,7 +87,7 @@ class ExecuteAllCommand(NotebookCommand):
 
                             cell["execution_count"] = result["execution_count"]
                             cell["outputs"] = result["outputs"]
-                            
+
                             for output in result["outputs"]:
                                 if 'metadata' in output:
                                     output_metadata = output['metadata']
@@ -116,4 +116,3 @@ class ExecuteAllCommand(NotebookCommand):
         }
 
         return {"notebook": new_notebook, "metadata": metadata}
-

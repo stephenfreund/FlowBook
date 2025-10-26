@@ -46,17 +46,18 @@ export class CellToolbarExtension {
           // Create button for this cell
           const button = new ToolbarButton({
             label: '',
-            tooltip: `${cmdInfo.tooltip} (full notebook)`,
+            tooltip: `${cmdInfo.tooltip} (this cell)`,
             icon: cmdInfo.icon,
             enabled: true,
             onClick: async () => {
               // Get the current notebook panel
               const panel = this.tracker.currentWidget;
               if (panel) {
+                const cellId = cell.model.id;
                 console.log(
-                  `Executing command ${cmdInfo.id} from cell toolbar`
+                  `Executing command ${cmdInfo.id} from cell toolbar on cell ${cellId}`
                 );
-                await this.manager.executeCommand(cmdInfo.id, panel);
+                await this.manager.executeCommand(cmdInfo.id, panel, cellId);
               } else {
                 console.warn('No active notebook panel found');
               }

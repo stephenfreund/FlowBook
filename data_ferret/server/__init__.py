@@ -15,7 +15,7 @@ from data_ferret.server.kernel_helper import KernelHelper
 from data_ferret.server.commands import (
     AnalyzeNotebookCommand,
     ValidateNotebookCommand,
-    ExecuteAllCommand,
+    ProfileCommand,
     InspectVariablesCommand,
     InspectCommand,
     ExampleMessageCommand,
@@ -54,7 +54,7 @@ __all__ = [
     # Command implementations
     "AnalyzeNotebookCommand",
     "ValidateNotebookCommand",
-    "ExecuteAllCommand",
+    "ProfileCommand",
     "InspectVariablesCommand",
     "InspectCommand",
     # Registry and managers

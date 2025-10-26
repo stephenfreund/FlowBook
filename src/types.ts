@@ -32,10 +32,10 @@ export const FERRET_COMMANDS: CommandInfo[] = [
     requires_kernel: false
   },
   {
-    id: 'execute_all',
-    label: 'Execute All Cells',
+    id: 'profile',
+    label: 'Profile',
     icon: 'ui-components:run',
-    tooltip: 'Execute all code cells and capture outputs',
+    tooltip: 'Profile code cells with memory and performance tracking',
     requires_kernel: true
   },
   {

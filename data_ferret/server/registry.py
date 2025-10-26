@@ -7,7 +7,7 @@ from data_ferret.server.base import NotebookCommand
 from data_ferret.server.commands import (
     AnalyzeNotebookCommand,
     ValidateNotebookCommand,
-    ExecuteAllCommand,
+    ProfileCommand,
     InspectVariablesCommand,
     InspectCommand,
     ExampleMessageCommand,
@@ -24,7 +24,7 @@ class CommandRegistry:
         """Register the default command implementations."""
         self.register(AnalyzeNotebookCommand())
         self.register(ValidateNotebookCommand())
-        self.register(ExecuteAllCommand())
+        self.register(ProfileCommand())
         self.register(InspectVariablesCommand())
         self.register(InspectCommand())
         self.register(ExampleMessageCommand())

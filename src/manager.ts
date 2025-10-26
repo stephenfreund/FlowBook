@@ -38,10 +38,14 @@ export class FerretCommandsManager {
 
   /**
    * Execute a command on a notebook
+   * @param commandId - The command to execute
+   * @param notebook - The notebook panel
+   * @param specificCellId - If provided, execute command on this specific cell only (from cell toolbar)
    */
   async executeCommand(
     commandId: string,
-    notebook: NotebookPanel
+    notebook: NotebookPanel,
+    specificCellId?: string
   ): Promise<CommandResult | null> {
     try {
       const notebookContent = notebook.content.model?.toJSON();
@@ -58,19 +62,29 @@ export class FerretCommandsManager {
 
       const commandInfo = this.commands.find(cmd => cmd.id === commandId);
 
-      // Get selected cell IDs
-      const selectedCells = notebook.content.selectedCells;
-      console.log('Selected cells:', selectedCells);
-      const selectedCellIds = selectedCells.map(cell => cell.model.id);
-      console.log('Selected cell IDs:', selectedCellIds);
+      // Determine selected cell IDs based on context
+      let selectedCellIds: string[] | undefined;
+      if (specificCellId) {
+        // Command invoked from cell toolbar - use specific cell
+        selectedCellIds = [specificCellId];
+        console.log('Executing command on specific cell:', specificCellId);
+      } else {
+        // Command invoked from notebook toolbar - no selected cells
+        selectedCellIds = undefined;
+        console.log('Executing command on entire notebook (no specific cells)');
+      }
 
       // Build the request
       const request: ExecuteCommandRequest = {
         command: commandId,
         notebook: notebookContent,
-        params: {},
-        selected_cell_ids: selectedCellIds
+        params: {}
       };
+
+      // Only include selected_cell_ids if defined
+      if (selectedCellIds !== undefined) {
+        request.selected_cell_ids = selectedCellIds;
+      }
 
       // Handle kernel requirement
       if (commandInfo?.requires_kernel) {
