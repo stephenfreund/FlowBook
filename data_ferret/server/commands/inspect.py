@@ -1,0 +1,136 @@
+"""
+Inspect cells command implementation.
+"""
+
+import copy
+import random
+from typing import Any, Dict, Optional
+
+from data_ferret.server.base import NotebookCommand
+from data_ferret.server.kernel_manager import FerretKernelClient
+from data_ferret.server.ferret_metadata import InspectMetadata, set_inspect_ferret_metadata
+from data_ferret.agent.agent import FerretAgent, FerretStats
+from data_ferret.util.prompts import get_prompt
+
+from typing import List, Tuple, Dict, Any, Optional
+import asyncio
+
+import nbformat
+from pydantic import BaseModel, Field
+
+
+class InspectionResultAndStats(BaseModel):
+    inspection_metadata: InspectMetadata
+    stats: FerretStats
+
+class InspectCommand(NotebookCommand):
+    """Adds inspection metadata to all cells in the notebook."""
+
+    @property
+    def command_name(self) -> str:
+        return "inspect"
+
+    @property
+    def display_name(self) -> str:
+        return "Inspect Cells"
+
+    @property
+    def icon_name(self) -> str:
+        return "ui-components:search"
+
+    @property
+    def tooltip(self) -> str:
+        return "Add inspection metadata to cells"
+
+
+
+    async def inspect_cell(
+       self, index: int, cells: List[nbformat.NotebookNode], model: Any
+    ) -> Tuple[str, InspectionResultAndStats]:
+        cell = cells[index]
+        agent = FerretAgent[InspectMetadata](
+            key="cell_inspection",
+            model=model,
+            instructions=get_prompt("cell_inspection_instructions"),
+            output_type=InspectMetadata,
+        )
+
+        prefix = "\n".join([cell["source"] for cell in cells[:index]])
+
+        input_text = get_prompt(
+            "cell_inspection_input", prefix=prefix, cell_source=cell["source"]
+        )
+
+        final_output, stats = await agent.run(input_text)
+
+        print(
+            f"| {index:<9}| {final_output.optimizability:<9}| {stats.usage.total_tokens:<9}| {stats.time:<9.1f}| {stats.cost:<9.4f}|"
+        )
+
+        return cell["id"], InspectionResultAndStats(
+            inspection_metadata=final_output,
+            stats=stats
+        )
+
+
+    async def inspect_cells(self, 
+        nb: nbformat.NotebookNode, model: Any, cell_ids: Optional[List[str]] = None
+    ) -> Tuple[nbformat.NotebookNode, float]:
+        print()
+        print("# Inspecting Cells for Optimization Potential")
+        print()
+
+        tasks = []
+        for index, cell in enumerate(nb.cells):
+            if cell["cell_type"] == "code":
+                if cell["source"].strip():
+                    # Skip cells that already have inspection data unless --all is specified
+                    if cell_ids is None or cell["id"] in cell_ids:
+                        tasks.append(self.inspect_cell(index, nb.cells, model))
+                else:
+                    set_inspect_ferret_metadata(cell, None)
+
+        print(
+            "|{:<10}|{:<10}|{:<10}|{:<10}|{:<10}|".format(
+                "Index", "Potential", "Tokens", "Time (s)", "Cost ($)"
+            )
+        )
+        print("|{:-^10}|{:-^10}|{:-^10}|{:-^10}|{:-^10}|".format("", "", "", "", ""))
+        results = await asyncio.gather(*tasks)
+        print()
+        new_nb: nbformat.NotebookNode = nb.copy()  # type: ignore
+
+        # Update each cell with its inspection results
+        cell_map = {cell["id"]: cell for cell in new_nb.cells}
+        for cell_id, cell_result in results:
+            cell = cell_map.get(cell_id)
+            assert cell is not None, f"Cell {cell_id} not found in notebook"
+            set_inspect_ferret_metadata(cell, cell_result.inspection_metadata)
+
+        total_cost = sum([cell_result.stats.cost for _, cell_result in results])
+
+        return new_nb, total_cost
+
+
+
+
+    async def process(
+        self,
+        notebook_content: Dict[str, Any],
+        kernel_client: Optional[FerretKernelClient] = None,
+        selected_cell_ids: Optional[List[str]] = None,
+        config: Optional[Any] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+
+        """Add inspection metadata to each cell."""
+        new_nb, total_cost = await self.inspect_cells(notebook_content, config.fast_model, selected_cell_ids)
+
+        metadata = {
+            "status": "success",
+            "command": self.command_name,
+            "total_cost": total_cost
+        }
+
+        return {"notebook": new_nb, "metadata": metadata}
+

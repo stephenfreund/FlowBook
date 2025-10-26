@@ -8,6 +8,7 @@ import asyncio
 import traceback
 import uuid
 import tornado
+import concurrent.futures
 from jupyter_server.base.handlers import APIHandler, JupyterHandler
 from jupyter_server.utils import url_path_join
 
@@ -84,16 +85,30 @@ class FerretCommandHandler(APIHandler):
                     return
 
             # Execute command with output streaming to clients
-            with stream_output(get_broadcast_stream()):
-                log(f"Executing command {command_name}")
-                log(f"Selected cell IDs: {selected_cell_ids}")
-                result = await command.process(
-                    notebook_content,
-                    kernel_client=kernel_client,
-                    selected_cell_ids=selected_cell_ids,
-                    config=config,
-                    **params
-                )
+            # Run in executor to prevent blocking the event loop and allow SSE to flush
+            def run_command():
+                with stream_output(get_broadcast_stream()):
+                    log(f"Executing command {command_name}")
+                    log(f"Selected cell IDs: {selected_cell_ids}")
+                    # Create event loop for the thread
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        result = loop.run_until_complete(command.process(
+                            notebook_content,
+                            kernel_client=kernel_client,
+                            selected_cell_ids=selected_cell_ids,
+                            config=config,
+                            **params
+                        ))
+                        return result
+                    finally:
+                        loop.close()
+
+            # Run in thread executor
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            result = await asyncio.get_event_loop().run_in_executor(executor, run_command)
+            executor.shutdown(wait=False)
 
             self.finish(json.dumps(result))
 
