@@ -3,24 +3,12 @@
   "jupyter.lab.toolbars": {
     "Cell": [
       {
-        "name": "ferret-analyze",
+        "name": "ferret-profile",
         "rank": 0
       },
       {
-        "name": "ferret-validate",
-        "rank": 1
-      },
-      {
-        "name": "ferret-execute_all",
-        "rank": 2
-      },
-      {
-        "name": "ferret-inspect_vars",
-        "rank": 3
-      },
-      {
         "name": "ferret-inspect",
-        "rank": 4
+        "rank": 1
       }
     ]
   },

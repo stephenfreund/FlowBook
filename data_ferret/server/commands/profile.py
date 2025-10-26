@@ -106,6 +106,9 @@ class ProfileCommand(NotebookCommand):
 
                             total_executed += 1
 
+
+    NEED A HANDLER IN HERE
+
         metadata = {
             "status": "success",
             "command": self.command_name,

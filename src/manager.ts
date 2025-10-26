@@ -152,7 +152,7 @@ export class FerretCommandsManager {
       palette.addItem({
         command: commandId,
         category: 'Ferret Commands',
-        args: {}
+        args: {},
       });
     });
   }

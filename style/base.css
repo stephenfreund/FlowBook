@@ -16,11 +16,6 @@
   }
 
   
-/* Add spacing after the last Ferret button in cell toolbars */
-.jp-Cell-toolbar [data-item-name='ferret-inspect'] {
-  margin-right: 12px;
-}
-
 /* Cell highlighting based on Ferret metadata */
 .jp-Cell.ferret-cell-warning {
   border-left: 4px solid #f5f543;
