@@ -17,6 +17,8 @@ from data_ferret.server.commands import (
     ValidateNotebookCommand,
     ExecuteAllCommand,
     InspectVariablesCommand,
+    InspectCommand,
+    ExampleMessageCommand,
 )
 
 # Export registry and managers
@@ -27,9 +29,18 @@ from data_ferret.server.kernel_manager import KernelConnectionManager
 from data_ferret.server.handlers import (
     FerretCommandHandler,
     CommandListHandler,
+    MessageStreamHandler,
     setup_handlers,
     # _jupyter_server_extension_points,
     # _load_jupyter_server_extension
+)
+
+# Export message broadcasting
+from data_ferret.server.message_broadcaster import (
+    MessageBroadcaster,
+    get_broadcaster,
+    Message,
+    MessageType,
 )
 
 # Export CLI
@@ -45,15 +56,22 @@ __all__ = [
     "ValidateNotebookCommand",
     "ExecuteAllCommand",
     "InspectVariablesCommand",
+    "InspectCommand",
     # Registry and managers
     "CommandRegistry",
     "KernelConnectionManager",
     # Handlers
     "FerretCommandHandler",
     "CommandListHandler",
+    "MessageStreamHandler",
     "setup_handlers",
     "_jupyter_server_extension_points",
     "_load_jupyter_server_extension",
+    # Message broadcasting
+    "MessageBroadcaster",
+    "get_broadcaster",
+    "Message",
+    "MessageType",
     # CLI
     "cli_main",
 ]

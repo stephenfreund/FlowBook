@@ -137,6 +137,37 @@ class Output:
         def flush(self):
             self.file.flush()
 
+    class StreamOutputContext:
+        """
+        Output context that streams messages to a file-like object.
+
+        This context captures all output and sends it to a stream object
+        that has standard write() and flush() methods. The stream is
+        responsible for any text processing (e.g., ANSI code handling).
+        """
+        def __init__(self, outer, stream):
+            self.outer = outer
+            self.stream = stream
+
+        def __enter__(self):
+            with self.outer.lock:
+                self.outer.output_contexts.append(self)
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            with self.outer.lock:
+                self.stream.flush()
+                self.outer.output_contexts.pop()
+
+        def write(self, message):
+            """Write message to the stream (preserving ANSI codes for stream to process)."""
+            self.stream.write(message)
+            self.stream.flush()
+
+        def flush(self):
+            """Flush the stream."""
+            self.stream.flush()
+
     def write(self, message):
         self.file.write(message)
         self.file.flush()
@@ -249,6 +280,34 @@ def indent(*, message: str):
 
 def tee_output(file_path: Path | str):
     return output.FileOutputContext(output, str(file_path))
+
+def stream_output(stream):
+    """
+    Create an output context that streams to a file-like object.
+
+    The stream object should have standard write() and flush() methods.
+
+    Args:
+        stream: A file-like object with write() and flush() methods
+
+    Returns:
+        StreamOutputContext that will capture and forward all output
+
+    Example:
+        class BroadcastStream:
+            def write(self, text):
+                # Custom write logic here
+                pass
+
+            def flush(self):
+                # Custom flush logic here
+                pass
+
+        with stream_output(BroadcastStream()):
+            log("This message will be streamed")
+            print("This too!")
+    """
+    return output.StreamOutputContext(output, stream)
 
 
 if __name__ == "__main__":

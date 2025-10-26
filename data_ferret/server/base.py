@@ -3,18 +3,21 @@ Abstract base class for notebook processing commands.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from data_ferret.server.kernel_manager import FerretKernelClient
-
+from data_ferret.server.config import FerretConfig
+from jupyter_server.serverapp import ServerApp
 
 class NotebookCommand(ABC):
     """Abstract base class for notebook processing commands."""
 
     @abstractmethod
-    def process(
+    async def process(
         self,
         notebook_content: Dict[str, Any],
         kernel_client: Optional[FerretKernelClient] = None,
+        selected_cell_ids: Optional[List[str]] = None,
+        config: Optional[FerretConfig] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -23,6 +26,8 @@ class NotebookCommand(ABC):
         Args:
             notebook_content: The parsed JSON content of a Jupyter notebook
             kernel_client: Optional kernel client for executing code
+            selected_cell_ids: Optional list of selected cell IDs
+            config: Optional configuration for the command (uses defaults if not provided)
             **kwargs: Additional parameters specific to the command
 
         Returns:
@@ -59,3 +64,12 @@ class NotebookCommand(ABC):
     def requires_kernel(self) -> bool:
         """Return whether this command requires a kernel connection."""
         return False
+
+    @staticmethod
+    def config_from_serverapp(serverapp: ServerApp) -> FerretConfig:
+        """Return the configuration from the serverapp."""
+        return FerretConfig(
+            model=serverapp.web_app.settings["data_ferret"].model,
+            fast_model=serverapp.web_app.settings["data_ferret"].fast_model,
+        )
+    

@@ -17,6 +17,10 @@
       {
         "name": "ferret-inspect_vars",
         "rank": 3
+      },
+      {
+        "name": "ferret-inspect",
+        "rank": 4
       }
     ]
   },

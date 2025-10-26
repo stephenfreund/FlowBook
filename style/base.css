@@ -7,15 +7,360 @@
 /* Ferret extension styles */
 
 .ferret-button {
-  margin: 0 2px;
-}
-
+    margin: 0 2px;
+  }
+  
 .ferret-cell-toolbar {
-  display: flex;
-  gap: 4px;
+    display: flex;
+    gap: 4px;
+  }
+
+  
+/* Add spacing after the last Ferret button in cell toolbars */
+.jp-Cell-toolbar [data-item-name='ferret-inspect'] {
+  margin-right: 12px;
 }
 
-/* Add spacing after the last Ferret button in cell toolbars */
-.jp-Cell-toolbar [data-item-name='ferret-inspect_vars'] {
-  margin-right: 12px;
+/* Cell highlighting based on Ferret metadata */
+.jp-Cell.ferret-cell-warning {
+  border-left: 4px solid #f5f543;
+  background-color: rgba(245, 245, 67, 0.05);
+}
+
+.jp-Cell.ferret-cell-danger {
+  border-left: 4px solid #f14c4c;
+  background-color: rgba(241, 76, 76, 0.05);
+}
+
+/* Ferret Metadata Panel Styles */
+
+.ferret-metadata-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 250px;
+  height: 100%;
+  background-color: var(--jp-layout-color1);
+}
+
+.ferret-metadata-content {
+  padding: 16px;
+  font-family: var(--jp-ui-font-family);
+  font-size: var(--jp-ui-font-size1);
+  color: var(--jp-ui-font-color1);
+  overflow-y: auto;
+}
+
+.ferret-metadata-empty {
+  padding: 16px;
+  font-family: var(--jp-ui-font-family);
+  font-size: var(--jp-ui-font-size1);
+  color: var(--jp-ui-font-color2);
+  text-align: center;
+}
+
+.ferret-metadata-empty p {
+  margin: 8px 0;
+}
+
+.ferret-metadata-header {
+  font-weight: bold;
+  font-size: var(--jp-ui-font-size2);
+  margin-bottom: 12px;
+  color: var(--jp-ui-font-color0);
+  border-bottom: 2px solid var(--jp-border-color2);
+  padding-bottom: 8px;
+}
+
+.ferret-metadata-divider {
+  height: 1px;
+  background: var(--jp-border-color2);
+  margin: 12px 0;
+}
+
+.ferret-metadata-section {
+  margin-bottom: 8px;
+}
+
+.ferret-metadata-item {
+  margin: 6px 0;
+  line-height: 1.6;
+}
+
+.ferret-metadata-list {
+  margin: 8px 0 0 0;
+  padding-left: 20px;
+  list-style-type: disc;
+}
+
+.ferret-metadata-list li {
+  margin: 4px 0;
+  line-height: 1.4;
+}
+
+.ferret-metadata-profile-toggle {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  margin-bottom: 8px;
+  transition: color 0.2s;
+}
+
+.ferret-metadata-profile-toggle:hover {
+  color: var(--jp-brand-color1);
+}
+
+.ferret-metadata-toggle-icon {
+  font-size: 0.8em;
+  margin-left: 8px;
+  color: var(--jp-ui-font-color2);
+}
+
+.ferret-metadata-profile-output {
+  margin: 8px 0 0 0;
+  padding: 12px;
+  background-color: var(--jp-layout-color0);
+  border: 1px solid var(--jp-border-color2);
+  border-radius: 4px;
+  font-family: var(--jp-code-font-family);
+  font-size: var(--jp-code-font-size);
+  line-height: 1.4;
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 400px;
+  white-space: pre;
+  color: var(--jp-content-font-color1);
+}
+
+.ferret-metadata-profile-output::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.ferret-metadata-profile-output::-webkit-scrollbar-track {
+  background: var(--jp-layout-color1);
+}
+
+.ferret-metadata-profile-output::-webkit-scrollbar-thumb {
+  background: var(--jp-border-color2);
+  border-radius: 4px;
+}
+
+.ferret-metadata-profile-output::-webkit-scrollbar-thumb:hover {
+  background: var(--jp-border-color3);
+}
+
+.jp-chat-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.chat-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid var(--jp-border-color1);
+  border-radius: 4px;
+  background-color: var(--jp-layout-color1);
+}
+
+.message {
+  margin-bottom: 15px;
+  padding: 10px;
+  border-radius: 8px;
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message-user {
+  background-color: var(--jp-brand-color1);
+  color: white;
+  margin-left: 20%;
+}
+
+.message-assistant {
+  background-color: var(--jp-layout-color2);
+  margin-right: 20%;
+}
+
+.message-role {
+  font-weight: bold;
+  margin-bottom: 5px;
+  font-size: 0.9em;
+  opacity: 0.8;
+}
+
+.message-content {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  line-height: 1.5;
+}
+
+.chat-input-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--jp-border-color1);
+  border-radius: 4px;
+  font-family: var(--jp-code-font-family);
+  font-size: var(--jp-ui-font-size1);
+  resize: vertical;
+  min-height: 60px;
+  background-color: var(--jp-layout-color1);
+  color: var(--jp-ui-font-color1);
+}
+
+.chat-input:focus {
+  outline: none;
+  border-color: var(--jp-brand-color1);
+  box-shadow: 0 0 0 1px var(--jp-brand-color1);
+}
+
+.chat-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chat-send-button {
+  align-self: flex-end;
+  padding: 8px 20px;
+  background-color: var(--jp-brand-color1);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: var(--jp-ui-font-size1);
+  transition: background-color 0.2s;
+}
+
+.chat-send-button:hover:not(:disabled) {
+  background-color: var(--jp-brand-color0);
+}
+
+.chat-send-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Scrollbar styling */
+.chat-messages::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat-messages::-webkit-scrollbar-track {
+  background: var(--jp-layout-color1);
+}
+
+.chat-messages::-webkit-scrollbar-thumb {
+  background: var(--jp-border-color2);
+  border-radius: 4px;
+}
+
+.chat-messages::-webkit-scrollbar-thumb:hover {
+  background: var(--jp-border-color3);
+}
+
+/* Ferret Message Panel Styles */
+
+.ferret-message-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 300px;
+  height: 100%;
+  background-color: var(--jp-layout-color1);
+
+  /* ANSI color mappings */
+  --ferret-color-black: #000000;
+  --ferret-color-red: #cd3131;
+  --ferret-color-green: #0dbc79;
+  --ferret-color-yellow: #e5e510;
+  --ferret-color-blue: #2472c8;
+  --ferret-color-magenta: #bc3fbc;
+  --ferret-color-cyan: #11a8cd;
+  --ferret-color-white: #e5e5e5;
+  --ferret-color-bright-black: #666666;
+  --ferret-color-bright-red: #f14c4c;
+  --ferret-color-bright-green: #23d18b;
+  --ferret-color-bright-yellow: #f5f543;
+  --ferret-color-bright-blue: #3b8eea;
+  --ferret-color-bright-magenta: #d670d6;
+  --ferret-color-bright-cyan: #29b8db;
+  --ferret-color-bright-white: #e5e5e5;
+}
+
+.ferret-message-display {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: auto;
+  height: 100%;
+}
+
+.ferret-message-content {
+  padding: 10px;
+  margin: 0;
+  font-family: var(--jp-code-font-family);
+  font-size: var(--jp-code-font-size);
+  line-height: 1.5;
+  color: var(--jp-ui-font-color1);
+  background-color: var(--jp-layout-color0);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.ferret-message-line {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  margin-bottom: 2px;
+  min-height: 1em;
+}
+
+.ferret-message-line:empty::before {
+  content: '\200b'; /* Zero-width space to maintain line height */
+}
+
+/* Scrollbar styling for message display */
+.ferret-message-display::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.ferret-message-display::-webkit-scrollbar-track {
+  background: var(--jp-layout-color1);
+}
+
+.ferret-message-display::-webkit-scrollbar-thumb {
+  background: var(--jp-border-color2);
+  border-radius: 4px;
+}
+
+.ferret-message-display::-webkit-scrollbar-thumb:hover {
+  background: var(--jp-border-color3);
 }

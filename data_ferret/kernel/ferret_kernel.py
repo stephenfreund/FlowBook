@@ -31,6 +31,7 @@ from data_ferret.util.output import timer
 from IPython.core.magic import Magics, cell_magic, line_cell_magic, magics_class
 from data_ferret.kernel.extended_types import get_type_model
 from data_ferret.kernel.checkpoint import Checkpoint
+from data_ferret.server.ferret_metadata import FerretMetadata, ProfileMetadata
 
 
 async def stop_loky_and_all_children(timeout=3.0, verbose=False, max_passes=2):
@@ -389,7 +390,7 @@ class FerretKernel(IPythonKernel, Magics):
 
         force_checkpoints = self._force_checkpoints
         if force_checkpoints:
-            self.checkpoint(f"save cell_{cell_id}")
+            self.checkpoint(f"save cell_{self._cell_id}")
 
         def _timeout_handler():
             # 1) raise KeyboardInterrupt in the main thread
@@ -422,8 +423,8 @@ class FerretKernel(IPythonKernel, Magics):
         try:
             has_cell_magics = code.startswith("%") or "\n%" in code
             start_time = time.time()
-            if self._use_scalene and cell_id is not None and not has_cell_magics:
-                result, contents = await self.do_scalene(code, cell_id, store_history)
+            if self._use_scalene and self._cell_id is not None and not has_cell_magics:
+                result, contents = await self.do_scalene(code, self._cell_id, store_history)
             else:
                 result = await super().do_execute(
                     code,
@@ -432,22 +433,23 @@ class FerretKernel(IPythonKernel, Magics):
                     user_expressions,
                     allow_stdin,
                     cell_meta=cell_meta,
-                    cell_id=cell_id,
+                    cell_id=self._cell_id,
                 )
                 contents = None
             normal_exit = True
             end_time = time.time()
+
+            # Serialize to dict for notebook metadata
             metadata = {
-                "ferret": {
-                    "cell_id": cell_id,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "duration": end_time - start_time,
-                    "profile": contents,
+                'profile': {
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'duration': end_time - start_time,
+                    'profile': contents if contents is not None else "",
                 }
             }
+
             if contents is not None:
-                metadata["ferret"]["profile"] = contents
                 self.display_icon_and_text(
                     "🔍",
                     f"{end_time - start_time:0.2f}s",
@@ -455,7 +457,6 @@ class FerretKernel(IPythonKernel, Magics):
                     metadata=metadata,
                 )
             else:
-                metadata["ferret"]["profile"] = None
                 if not has_cell_magics:
                     self.display_icon_and_text(
                         "⏱️",
@@ -468,7 +469,7 @@ class FerretKernel(IPythonKernel, Magics):
                 user_ns = self._checkpoint.checkpointable_vars(self.shell.user_ns)
                 user_ns = self._checkpoint.checkpointable_values(user_ns)
                 dummy_memo = {}
-                old = self._checkpoint.get(f"cell_{cell_id}")
+                old = self._checkpoint.get(f"cell_{self._cell_id}")
                 self.diff_checkpoints(old, Checkpoint(f"_tmp", user_ns, dummy_memo))
 
             return result

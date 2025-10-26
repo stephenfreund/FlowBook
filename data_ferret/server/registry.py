@@ -8,9 +8,10 @@ from data_ferret.server.commands import (
     AnalyzeNotebookCommand,
     ValidateNotebookCommand,
     ExecuteAllCommand,
-    InspectVariablesCommand
+    InspectVariablesCommand,
+    InspectCommand,
+    ExampleMessageCommand,
 )
-
 
 class CommandRegistry:
     """Registry for all available commands."""
@@ -25,6 +26,8 @@ class CommandRegistry:
         self.register(ValidateNotebookCommand())
         self.register(ExecuteAllCommand())
         self.register(InspectVariablesCommand())
+        self.register(InspectCommand())
+        self.register(ExampleMessageCommand())
 
     def register(self, command: NotebookCommand):
         """Register a command."""

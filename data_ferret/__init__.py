@@ -21,13 +21,19 @@ class DataFerretExtension(ExtensionApp):
     name = "data_ferret"
     load_other_extensions = True
 
-    model_name = Unicode(
+    model = Unicode(
         default_value="gpt-4o",
         help="The model to use for the extension",
     ).tag(config=True)
 
+    fast_model = Unicode(
+        default_value="gpt-4o-mini",
+        help="The fast model to use for the extension",
+    ).tag(config=True)
+
     aliases = {
-        "model-name": "DataFerretExtension.model_name",
+        "model": "DataFerretExtension.model",
+        "fast-model": "DataFerretExtension.fast_model",
     }
 
     def initialize_settings(self):
@@ -36,7 +42,8 @@ class DataFerretExtension(ExtensionApp):
             self.log.info(f"Initializing {self.name} extension")
             self.serverapp.web_app.settings["data_ferret"] = {
                 "ext": self,
-                "model_name": self.model_name,
+                "model": self.model,
+                "fast-model": self.fast_model,
             }
 
     def initialize_handlers(self):

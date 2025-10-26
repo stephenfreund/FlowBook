@@ -60,7 +60,9 @@ export class FerretCommandsManager {
 
       // Get selected cell IDs
       const selectedCells = notebook.content.selectedCells;
+      console.log('Selected cells:', selectedCells);
       const selectedCellIds = selectedCells.map(cell => cell.model.id);
+      console.log('Selected cell IDs:', selectedCellIds);
 
       // Build the request
       const request: ExecuteCommandRequest = {

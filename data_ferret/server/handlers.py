@@ -4,8 +4,11 @@ Jupyter server API handlers for ferret commands.
 
 import json
 import pprint
+import asyncio
+import traceback
+import uuid
 import tornado
-from jupyter_server.base.handlers import APIHandler
+from jupyter_server.base.handlers import APIHandler, JupyterHandler
 from jupyter_server.utils import url_path_join
 
 from data_ferret.server.registry import CommandRegistry
@@ -13,6 +16,8 @@ from data_ferret.server.kernel_manager import (
     FerretKernelClient,
     KernelConnectionManager,
 )
+from data_ferret.server.message_broadcaster import get_broadcaster, get_broadcast_stream
+from data_ferret.util.output import error, log, stream_output
 
 
 # Global kernel manager instance
@@ -33,6 +38,7 @@ class FerretCommandHandler(APIHandler):
             data = self.get_json_body()
             command_name = data.get("command")
             notebook_content = data.get("notebook")
+            selected_cell_ids = data.get("selected_cell_ids", None)
             kernel_id = data.get("kernel_id")
             params = data.get("params", {})
 
@@ -48,9 +54,11 @@ class FerretCommandHandler(APIHandler):
 
             command = self.registry.get_command(command_name)
 
-            print(
-                "MODEL NAME",
-                self.serverapp.web_app.settings["data_ferret"].model_name,
+            # Create config from server settings
+            from data_ferret.server.config import FerretConfig
+            config = FerretConfig(
+                model=self.serverapp.web_app.settings["data_ferret"].model,  
+                fast_model=self.serverapp.web_app.settings["data_ferret"].fast_model,
             )
 
             kernel_client = None
@@ -75,9 +83,17 @@ class FerretCommandHandler(APIHandler):
                     )
                     return
 
-            result = command.process(
-                notebook_content, kernel_client=kernel_client, **params
-            )
+            # Execute command with output streaming to clients
+            with stream_output(get_broadcast_stream()):
+                log(f"Executing command {command_name}")
+                log(f"Selected cell IDs: {selected_cell_ids}")
+                result = await command.process(
+                    notebook_content,
+                    kernel_client=kernel_client,
+                    selected_cell_ids=selected_cell_ids,
+                    config=config,
+                    **params
+                )
 
             self.finish(json.dumps(result))
 
@@ -85,6 +101,8 @@ class FerretCommandHandler(APIHandler):
             self.set_status(400)
             self.finish(json.dumps({"error": str(e)}))
         except Exception as e:
+            error(f"Internal error: {str(e)}")
+            traceback.print_exc()
             self.set_status(500)
             self.finish(json.dumps({"error": f"Internal error: {str(e)}"}))
 
@@ -101,6 +119,64 @@ class CommandListHandler(APIHandler):
         """List available commands with UI information."""
         command_info = self.registry.get_command_info()
         self.finish(json.dumps({"commands": command_info}))
+
+
+class MessageStreamHandler(JupyterHandler):
+    """Handler for Server-Sent Events (SSE) message streaming."""
+
+    def initialize(self):
+        """Initialize the handler."""
+        self.broadcaster = get_broadcaster()
+        self.client_id = str(uuid.uuid4())
+        self.queue = None
+
+    @tornado.web.authenticated
+    async def get(self):
+        """Stream messages to the client via SSE."""
+        # Set headers for SSE
+        self.set_header('Content-Type', 'text/event-stream')
+        self.set_header('Cache-Control', 'no-cache')
+        self.set_header('Connection', 'keep-alive')
+        self.set_header('X-Accel-Buffering', 'no')
+
+        # Register this client with the broadcaster
+        self.queue = self.broadcaster.register_client(self.client_id)
+
+        try:
+            # Send initial connection message
+            self.write(f'data: {{"type":"connected","client_id":"{self.client_id}"}}\n\n')
+            await self.flush()
+
+            # Stream messages from the queue
+            while True:
+                try:
+                    # Wait for a message with timeout
+                    message = await asyncio.wait_for(self.queue.get(), timeout=30.0)
+
+                    print("MESSAGE", message)
+
+                    # Send the message as SSE event
+                    self.write(f'data: {message.to_json()}\n\n')
+                    await self.flush()
+
+                except asyncio.TimeoutError:
+                    # Send keepalive comment every 30 seconds
+                    self.write(': keepalive\n\n')
+                    await self.flush()
+                except Exception as e:
+                    self.log.error(f"Error streaming message: {e}")
+                    break
+
+        except Exception as e:
+            self.log.error(f"SSE connection error: {e}")
+        finally:
+            # Unregister client on disconnect
+            self.broadcaster.unregister_client(self.client_id)
+
+    def on_connection_close(self):
+        """Handle client disconnection."""
+        if self.client_id:
+            self.broadcaster.unregister_client(self.client_id)
 
 
 def setup_handlers(web_app):
@@ -125,6 +201,11 @@ def setup_handlers(web_app):
             url_path_join(base_url, "ferret", "list"),
             CommandListHandler,
             {"registry": registry},
+        ),
+        (
+            url_path_join(base_url, "ferret", "stream"),
+            MessageStreamHandler,
+            {},
         ),
     ]
 

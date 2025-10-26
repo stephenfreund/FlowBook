@@ -44,6 +44,13 @@ export const FERRET_COMMANDS: CommandInfo[] = [
     icon: 'ui-components:inspect',
     tooltip: 'Inspect variables in the kernel namespace',
     requires_kernel: true
+  },
+  {
+    id: 'inspect',
+    label: 'Inspect Cells',
+    icon: 'ui-components:search',
+    tooltip: 'Add inspection metadata to cells',
+    requires_kernel: false
   }
 ];
 
@@ -73,4 +80,32 @@ export interface ExecuteCommandRequest {
   kernel_id?: string;
   params?: Record<string, any>;
   selected_cell_ids?: string[];
+}
+
+/**
+ * Ferret inspection metadata structure
+ */
+export interface IFerretInspectMetadata {
+  optimizability: number;
+  readability: number;
+  complexity: number;
+  improvements: string[];
+}
+
+/**
+ * Ferret profile metadata structure
+ */
+export interface IFerretProfileMetadata {
+  start_time: number;
+  end_time: number;
+  duration: number;
+  profile: string;
+}
+
+/**
+ * Ferret cell metadata structure
+ */
+export interface IFerretMetadata {
+  inspect?: IFerretInspectMetadata;
+  profile?: IFerretProfileMetadata;
 }

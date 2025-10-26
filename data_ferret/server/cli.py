@@ -4,10 +4,12 @@ Command-line interface for ferret notebook processing.
 import argparse
 import json
 import sys
+import asyncio
 from jupyter_client import KernelManager
 
 from .registry import CommandRegistry
 from .kernel_manager import FerretKernelClient
+from .config import FerretConfig
 
 
 def cli_main():
@@ -59,7 +61,25 @@ def cli_main():
         help="Pretty-print JSON output"
     )
 
+    parser.add_argument(
+        "--model",
+        default="gpt-4o",
+        help="AI model to use for commands (default: gpt-4o)"
+    )
+
+    parser.add_argument(
+        "--fast-model",
+        default="gpt-4o-mini",
+        help="Fast AI model to use for lightweight operations (default: gpt-4o-mini)"
+    )
+
     args = parser.parse_args()
+
+    # Create config from CLI arguments with same defaults as Jupyter
+    config = FerretConfig(
+        model=args.model,
+        fast_model=args.fast_model
+    )
 
     kernel_manager = None
     kernel_client = None
@@ -88,7 +108,12 @@ def cli_main():
                 assert isinstance(kernel_client, FerretKernelClient)
                 print(f"Kernel started successfully")
 
-        result = command.process(notebook_content, kernel_client=kernel_client)
+        # Run async command.process() in event loop
+        result = asyncio.run(command.process(
+            notebook_content,
+            kernel_client=kernel_client,
+            config=config
+        ))
 
         if args.output:
             notebook_output = args.output
