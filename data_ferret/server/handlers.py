@@ -113,13 +113,15 @@ class FerretCommandHandler(APIHandler):
             self.finish(json.dumps(result))
 
         except ValueError as e:
+            tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
             self.set_status(400)
-            self.finish(json.dumps({"error": str(e)}))
+            self.finish(json.dumps({"error": f"{str(e)}\n\n{tb_str}"}))
         except Exception as e:
+            tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
             error(f"Internal error: {str(e)}")
             traceback.print_exc()
             self.set_status(500)
-            self.finish(json.dumps({"error": f"Internal error: {str(e)}"}))
+            self.finish(json.dumps({"error": f"Internal error: {str(e)}\n\n{tb_str}"}))
 
 
 class CommandListHandler(APIHandler):
@@ -167,8 +169,6 @@ class MessageStreamHandler(JupyterHandler):
                 try:
                     # Wait for a message with timeout
                     message = await asyncio.wait_for(self.queue.get(), timeout=30.0)
-
-                    print("MESSAGE", message)
 
                     # Send the message as SSE event
                     self.write(f'data: {message.to_json()}\n\n')

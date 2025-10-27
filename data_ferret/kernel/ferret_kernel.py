@@ -582,14 +582,14 @@ class FerretKernel(IPythonKernel, Magics):
                 contents = self.display_contents(args.outfile)
             finally:
                 sys.stderr = old_stderr
-            scalene_output = stderr_buffer.getvalue()
-            expected_msg = (
-                "Scalene: The specified code did not run for long enough to profile.\n"
-                "By default, Scalene only profiles code in the file executed and its subdirectories.\n"
-                "To track the time spent in all files, use the `--profile-all` option.\n"
-            )
-            if scalene_output and scalene_output != expected_msg:
-                print(scalene_output, file=sys.stderr)
+                scalene_output = stderr_buffer.getvalue()
+                expected_msg = (
+                    "Scalene: The specified code did not run for long enough to profile.\n"
+                    "By default, Scalene only profiles code in the file executed and its subdirectories.\n"
+                    "To track the time spent in all files, use the `--profile-all` option.\n"
+                )
+                if scalene_output and scalene_output != expected_msg:
+                    print(scalene_output, file=sys.stderr)
 
             result = {"status": "ok", "execution_count": self.shell.execution_count - 1}
             return result, contents

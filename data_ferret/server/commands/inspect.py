@@ -3,6 +3,7 @@ Inspect cells command implementation.
 """
 
 import copy
+import json
 import random
 from typing import Any, Dict, Optional
 
@@ -57,8 +58,10 @@ class InspectCommand(NotebookCommand):
 
         prefix = "\n".join([cell["source"] for cell in cells[:index]])
 
+        profile_data = json.dumps(cell.get("metadata", {}).get("ferret", {}).get("profile", {}), indent=2)
+
         input_text = get_prompt(
-            "cell_inspection_input", prefix=prefix, cell_source=cell["source"]
+            "cell_inspection_input", prefix=prefix, cell_source=cell["source"], profile_data=profile_data
         )
 
         final_output, stats = await agent.run(input_text)
@@ -81,12 +84,12 @@ class InspectCommand(NotebookCommand):
         print()
 
         tasks = []
-        for index, cell in enumerate(nb.cells):
+        for index, cell in enumerate(nb["cells"]):
             if cell["cell_type"] == "code":
                 if cell["source"].strip():
                     # Skip cells that already have inspection data unless --all is specified
                     if cell_ids is None or cell["id"] in cell_ids:
-                        tasks.append(self.inspect_cell(index, nb.cells, model))
+                        tasks.append(self.inspect_cell(index, nb["cells"], model))
                 else:
                     set_inspect_ferret_metadata(cell, None)
 
@@ -101,7 +104,7 @@ class InspectCommand(NotebookCommand):
         new_nb: nbformat.NotebookNode = nb.copy()  # type: ignore
 
         # Update each cell with its inspection results
-        cell_map = {cell["id"]: cell for cell in new_nb.cells}
+        cell_map = {cell["id"]: cell for cell in new_nb["cells"]}
         for cell_id, cell_result in results:
             cell = cell_map.get(cell_id)
             assert cell is not None, f"Cell {cell_id} not found in notebook"

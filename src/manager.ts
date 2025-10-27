@@ -15,6 +15,7 @@ import {
   ExecuteCommandRequest,
   FERRET_COMMANDS
 } from './types';
+import React from 'react';
 
 /**
  * Manages Ferret commands, their registration, and execution
@@ -114,10 +115,23 @@ export class FerretCommandsManager {
       return result;
     } catch (error) {
       console.error(`Failed to execute command ${commandId}:`, error);
+
+      // Extract error message from various error formats
+      let errorMessage = 'Unknown error';
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      } else if (typeof error === 'string') {
+        errorMessage = error;
+      } else if (error && typeof error === 'object') {
+        // Try to extract from common error formats
+        const errorObj = error as any;
+        errorMessage = errorObj.error || errorObj.message || errorObj.toString();
+      }
+
       showDialog({
         title: 'Command Error',
-        body: `Failed to execute command: ${error}`,
-        buttons: [Dialog.okButton()]
+        buttons: [Dialog.okButton()],
+        body: React.createElement('div', { dangerouslySetInnerHTML: { __html: `<pre style="white-space: pre-wrap; word-break: break-word;">${errorMessage}</pre>` } })
       });
       return null;
     }

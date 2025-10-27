@@ -20,6 +20,11 @@ cell_inspection_input: |
   {cell_source}
   ```
 
+  Here is some profile data for the cell, if available:
+  ```
+  {profile_data}
+  ```
+
 optimization_instructions: |
   You are an expert at optimizing Jupyter notebook code.
   Your task is to optimize the given code cell for improved performance.

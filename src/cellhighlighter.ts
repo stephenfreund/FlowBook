@@ -119,8 +119,9 @@ export class CellMetadataHighlighter {
     if (ferretMetadata && (ferretMetadata.inspect || ferretMetadata.profile)) {
       // Apply CSS class based on inspect metadata if present
       if (ferretMetadata.inspect) {
-        const { optimizability, readability, complexity } = ferretMetadata.inspect;
-        const maxValue = Math.max(optimizability, readability, complexity);
+        const { optimizability } = ferretMetadata.inspect;
+        // const maxValue = Math.max(optimizability, readability, complexity);
+        const maxValue = optimizability;
 
         // Apply CSS class based on max value
         if (3 < maxValue && maxValue <= 4) {

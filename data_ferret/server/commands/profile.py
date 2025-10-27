@@ -78,36 +78,50 @@ class ProfileCommand(NotebookCommand):
                         metadata['cell_id'] = cell.get("id")
 
                         if source.strip():
-                            result = KernelHelper.execute_code(
-                                kernel_client,
-                                source,
-                                cell_id=cell.get("id"),
-                                cell_metadata=metadata,
-                            )
+                            try:
+                                result = KernelHelper.execute_code(
+                                    kernel_client,
+                                    source,
+                                    cell_id=cell.get("id"),
+                                    cell_metadata=metadata,
+                                )
 
-                            cell["execution_count"] = result["execution_count"]
-                            cell["outputs"] = result["outputs"]
+                                cell["execution_count"] = result["execution_count"]
+                                cell["outputs"] = result["outputs"]
 
-                            for output in result["outputs"]:
-                                if 'metadata' in output:
-                                    output_metadata = output['metadata']
-                                    if 'profile' in output_metadata:
-                                        profile_metadata = ProfileMetadata.model_validate(output_metadata['profile'])
-                                        set_profile_ferret_metadata(cell, profile_metadata)
+                                for output in result["outputs"]:
+                                    if 'metadata' in output:
+                                        output_metadata = output['metadata']
+                                        if 'profile' in output_metadata:
+                                            profile_metadata = ProfileMetadata.model_validate(output_metadata['profile'])
+                                            set_profile_ferret_metadata(cell, profile_metadata)
 
-                            execution_results.append(
-                                {
-                                    "cell_index": idx,
-                                    "status": result["status"],
-                                    "execution_count": result["execution_count"],
-                                }
-                            )
-                            log(f"[{result['execution_count']}]")
+                                execution_results.append(
+                                    {
+                                        "cell_index": idx,
+                                        "status": result["status"],
+                                        "execution_count": result["execution_count"],
+                                    }
+                                )
+                                log(f"[{result['execution_count']}]")
 
-                            total_executed += 1
+                                total_executed += 1
+                            except Exception as e:
+                                cell["outputs"] = [
+                                    {
+                                        "output_type": "error",
+                                        "ename": e.__class__.__name__,
+                                        "evalue": str(e),
+                                        "traceback": traceback.format_list(e.__traceback__),
+                                    }
+                                ]
 
-
-    NEED A HANDLER IN HERE
+                                execution_results.append(
+                                    {
+                                        "cell_index": idx,
+                                        "status": "error"
+                                    }
+                                )
 
         metadata = {
             "status": "success",
