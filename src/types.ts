@@ -18,25 +18,25 @@ export interface CommandInfo {
  */
 export const FERRET_COMMANDS: CommandInfo[] = [
   {
+    id: 'cleanup',
+    label: 'Tidy',
+    icon: 'ui-components:code',
+    tooltip: 'Generate improved code with AI suggestions',
+    requires_kernel: false
+  },
+  {
     id: 'inspect',
-    label: 'Inspect Cells',
+    label: 'Inspect',
     icon: 'ui-components:search',
     tooltip: 'Inspect for optimization and potential issues',
     requires_kernel: false
   },
   {
     id: 'profile',
-    label: 'Profile Cells',
-    icon: 'ui-components:run',
+    label: 'Profile',
+    icon: 'ui-components:info',
     tooltip: 'Profile code cells',
     requires_kernel: true
-  },
-  {
-    id: 'cleanup',
-    label: 'Cleanup',
-    icon: 'ui-components:run',
-    tooltip: 'Generate improved code with AI suggestions',
-    requires_kernel: false
   }
 ];
 

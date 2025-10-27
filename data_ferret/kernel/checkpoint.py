@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from data_ferret.kernel.diff import Diff
 from data_ferret.kernel.equality import user_ns_diff
-from data_ferret.kernel.extended_types import get_type_model
+from data_ferret.kernel.extended_types import TypeModel, get_type_model
 
 import pandas as pd
 import numpy as np
@@ -103,6 +103,9 @@ class Checkpoints:
         self.saved[name] = Checkpoint(name, cp, memo)
 
         return saved, removed
+
+    def type_models(self, user_ns: Dict[str, Any]) -> Dict[str, TypeModel]:
+        return {k: get_type_model(v) for k, v in self.checkpointable_values(user_ns).items()}
 
     def restore(self, name, user_ns: Dict[str, Any]):
         cp = self.saved[name] 

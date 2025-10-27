@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional, Tuple, Any, Literal, Union, get_type_hints
+from typing import Dict, List, Optional, Tuple, Any, Literal, Union, get_type_hints
 from pydantic import BaseModel
 import numpy as np
 import pandas as pd

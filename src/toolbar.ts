@@ -35,7 +35,7 @@ export class NotebookToolbarExtension
       const button = new ToolbarButton({
         label: cmdInfo.label,
         tooltip: cmdInfo.tooltip,
-        icon: cmdInfo.icon,
+        // icon: cmdInfo.icon,
         onClick: async () => {
           await this.manager.executeCommand(cmdInfo.id, panel);
         }

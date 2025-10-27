@@ -45,9 +45,9 @@ export class CellToolbarExtension {
         (cell: Cell) => {
           // Create button for this cell
           const button = new ToolbarButton({
-            label: '',
+            label: cmdInfo.label,
             tooltip: `${cmdInfo.tooltip} (this cell)`,
-            icon: cmdInfo.icon,
+            // icon: cmdInfo.icon,
             enabled: true,
             onClick: async () => {
               // Get the current notebook panel
