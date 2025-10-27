@@ -9,6 +9,10 @@
       {
         "name": "ferret-inspect",
         "rank": 1
+      },
+      {
+        "name": "ferret-cleanup",
+        "rank": 2
       }
     ]
   },

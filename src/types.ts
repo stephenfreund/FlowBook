@@ -30,6 +30,13 @@ export const FERRET_COMMANDS: CommandInfo[] = [
     icon: 'ui-components:run',
     tooltip: 'Profile code cells',
     requires_kernel: true
+  },
+  {
+    id: 'cleanup',
+    label: 'Cleanup',
+    icon: 'ui-components:run',
+    tooltip: 'Generate improved code with AI suggestions',
+    requires_kernel: false
   }
 ];
 

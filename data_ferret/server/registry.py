@@ -10,6 +10,7 @@ from data_ferret.server.commands import (
     ProfileCommand,
     InspectVariablesCommand,
     InspectCommand,
+    CleanupCommand,
     ExampleMessageCommand,
 )
 
@@ -27,6 +28,7 @@ class CommandRegistry:
         self.register(ProfileCommand())
         self.register(InspectVariablesCommand())
         self.register(InspectCommand())
+        self.register(CleanupCommand())
         self.register(ExampleMessageCommand())
 
     def register(self, command: NotebookCommand):

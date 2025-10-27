@@ -49,6 +49,32 @@ optimization_input: |
   ```python
   {cell_source}
   ```
-  
-  Please provide an optimized version of this code. Include only the optimized code in your response, 
+
+  Please provide an optimized version of this code. Include only the optimized code in your response,
   with no additional text or explanation. The code should be ready to run as-is.
+
+cleanup_instructions: |
+  You are an expert at improving Jupyter notebook code.
+  Your task is to analyze the given code cell and provide:
+  1. A description of improvements that can be made (readability and best practices)
+  2. A cleaned-up, improved version of the code
+
+  Focus on:
+  - Code readability and style
+  - Best practices and pythonic patterns
+  - Type hints -- add them if they're missing
+  - Documentation/comments where helpful
+  - Error handling if missing
+
+  The improved code must maintain the same functionality as the original.
+
+cleanup_input: |
+  Here is the code before the cell (for context):
+  ```python
+  {prefix}
+  ```
+
+  Here is the code cell to improve:
+  ```python
+  {cell_source}
+  ```

@@ -18,6 +18,7 @@ from data_ferret.server.commands import (
     ProfileCommand,
     InspectVariablesCommand,
     InspectCommand,
+    CleanupCommand,
     ExampleMessageCommand,
 )
 
@@ -57,6 +58,7 @@ __all__ = [
     "ProfileCommand",
     "InspectVariablesCommand",
     "InspectCommand",
+    "CleanupCommand",
     # Registry and managers
     "CommandRegistry",
     "KernelConnectionManager",
