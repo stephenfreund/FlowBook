@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from data_ferret.server.base import NotebookCommand
 from data_ferret.server.kernel_manager import FerretKernelClient
-from data_ferret.server.ferret_metadata import InspectMetadata, set_inspect_ferret_metadata
+from data_ferret.server.ferret_metadata import OptimizationPotential, set_optimization_potential_ferret_metadata
 from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.util.prompts import get_prompt
 
@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 
 class InspectionResultAndStats(BaseModel):
-    inspection_metadata: InspectMetadata
+    inspection_metadata: OptimizationPotential
     stats: FerretStats
 
 class InspectCommand(NotebookCommand):
@@ -49,11 +49,11 @@ class InspectCommand(NotebookCommand):
        self, index: int, cells: List[nbformat.NotebookNode], model: Any
     ) -> Tuple[str, InspectionResultAndStats]:
         cell = cells[index]
-        agent = FerretAgent[InspectMetadata](
+        agent = FerretAgent[OptimizationPotential](
             key="cell_inspection",
             model=model,
             instructions=get_prompt("cell_inspection_instructions"),
-            output_type=InspectMetadata,
+            output_type=OptimizationPotential,
         )
 
         prefix = "\n".join([cell["source"] for cell in cells[:index]])
@@ -67,7 +67,7 @@ class InspectCommand(NotebookCommand):
         final_output, stats = await agent.run(input_text)
 
         print(
-            f"| {index:<9}| {final_output.optimizability:<9}| {stats.usage.total_tokens:<9}| {stats.time:<9.1f}| {stats.cost:<9.4f}|"
+            f"| {index:<9}| {final_output.potential:<9}| {stats.usage.total_tokens:<9}| {stats.time:<9.1f}| {stats.cost:<9.4f}|"
         )
 
         return cell["id"], InspectionResultAndStats(
@@ -91,7 +91,7 @@ class InspectCommand(NotebookCommand):
                     if cell_ids is None or cell["id"] in cell_ids:
                         tasks.append(self.inspect_cell(index, nb["cells"], model))
                 else:
-                    set_inspect_ferret_metadata(cell, None)
+                    set_optimization_potential_ferret_metadata(cell, None)
 
         print(
             "|{:<10}|{:<10}|{:<10}|{:<10}|{:<10}|".format(
@@ -108,7 +108,7 @@ class InspectCommand(NotebookCommand):
         for cell_id, cell_result in results:
             cell = cell_map.get(cell_id)
             assert cell is not None, f"Cell {cell_id} not found in notebook"
-            set_inspect_ferret_metadata(cell, cell_result.inspection_metadata)
+            set_optimization_potential_ferret_metadata(cell, cell_result.inspection_metadata)
 
         total_cost = sum([cell_result.stats.cost for _, cell_result in results])
 

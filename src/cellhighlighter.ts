@@ -60,7 +60,7 @@ export class CellMetadataHighlighter {
       const metadata = cell.model.metadata as any;
       const ferretMetadata = metadata?.ferret as IFerretMetadata | undefined;
 
-      if (ferretMetadata && (ferretMetadata.inspect || ferretMetadata.profile)) {
+      if (ferretMetadata && (ferretMetadata.optimization_potential || ferretMetadata.profile)) {
         this.panel.updateMetadata(ferretMetadata);
       } else {
         this.panel.clear();
@@ -115,13 +115,12 @@ export class CellMetadataHighlighter {
     // Remove existing classes
     cell.node.classList.remove('ferret-cell-warning', 'ferret-cell-danger');
 
-    // Check if any ferret metadata exists (inspect or profile)
-    if (ferretMetadata && (ferretMetadata.inspect || ferretMetadata.profile)) {
-      // Apply CSS class based on inspect metadata if present
-      if (ferretMetadata.inspect) {
-        const { optimizability } = ferretMetadata.inspect;
-        // const maxValue = Math.max(optimizability, readability, complexity);
-        const maxValue = optimizability;
+    // Check if any ferret metadata exists (optimization potential or profile)
+    if (ferretMetadata && (ferretMetadata.optimization_potential || ferretMetadata.profile)) {
+      // Apply CSS class based on optimization potential metadata if present
+      if (ferretMetadata.optimization_potential) {
+        const { potential } = ferretMetadata.optimization_potential;
+        const maxValue = potential;
 
         // Apply CSS class based on max value
         if (3 < maxValue && maxValue <= 4) {
@@ -134,7 +133,7 @@ export class CellMetadataHighlighter {
 
     // Update panel if this is the active cell
     if (this.tracker.activeCell === cell) {
-      if (ferretMetadata && (ferretMetadata.inspect || ferretMetadata.profile)) {
+      if (ferretMetadata && (ferretMetadata.optimization_potential || ferretMetadata.profile)) {
         this.panel.updateMetadata(ferretMetadata);
       } else {
         this.panel.clear();

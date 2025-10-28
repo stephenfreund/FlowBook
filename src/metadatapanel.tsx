@@ -12,15 +12,16 @@ interface IMetadataDisplayProps {
 
 const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata }) => {
   const [profileExpanded, setProfileExpanded] = React.useState(false);
+  const [envExpanded, setEnvExpanded] = React.useState(false);
 
   console.log('[MetadataDisplay] Rendering with metadata:', metadata);
 
-  if (!metadata || (!metadata.inspect && !metadata.profile)) {
+  if (!metadata || (!metadata.optimization_potential && !metadata.profile)) {
     console.log('[MetadataDisplay] No metadata, showing empty state');
     return (
       <div className="ferret-metadata-empty">
         <p>No Ferret metadata available.</p>
-        <p>Select a cell with inspection or profile data to view its metadata.</p>
+        <p>Select a cell with optimization potential or profile data to view its metadata.</p>
       </div>
     );
   }
@@ -40,6 +41,28 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata }) => {
               <strong>Duration:</strong> {metadata.profile.duration.toFixed(3)}s
             </div>
           </div>
+
+            <div className="ferret-metadata-divider" />
+            <div className="ferret-metadata-section">
+              <div
+                className="ferret-metadata-profile-toggle"
+                onClick={() => setEnvExpanded(!envExpanded)}
+              >
+                <strong>Environment</strong>
+                <span className="ferret-metadata-toggle-icon">
+                  {envExpanded ? '▼' : '▶'}
+                </span>
+              </div>
+              {envExpanded && (
+                <pre className="ferret-metadata-profile-output">
+                  {Object.entries(metadata.profile.env).map(([key, value]) => (
+                    <div key={key}>
+                      <strong>{key}:</strong> {value}
+                    </div>
+                  ))}
+                </pre>
+              )}
+            </div>
 
           {metadata.profile.profile && metadata.profile.profile.trim() && (
             <>
@@ -65,36 +88,30 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata }) => {
         </>
       )}
 
-      {/* Inspection Metadata Section */}
-      {metadata.inspect && (
+      {/* Optimization Potential Metadata Section */}
+      {metadata.optimization_potential && (
         <>
-          {metadata.profile && <div className="ferret-metadata-divider" />}
+          {metadata.optimization_potential && <div className="ferret-metadata-divider" />}
 
-          <div className="ferret-metadata-header">Inspection Metadata</div>
+          <div className="ferret-metadata-header">Optimization Potential</div>
           <div className="ferret-metadata-divider" />
 
           <div className="ferret-metadata-section">
             <div className="ferret-metadata-item">
-              <strong>Optimizability:</strong> {metadata.inspect.optimizability}
-            </div>
-            <div className="ferret-metadata-item">
-              <strong>Readability:</strong> {metadata.inspect.readability}
-            </div>
-            <div className="ferret-metadata-item">
-              <strong>Complexity:</strong> {metadata.inspect.complexity}
+              <strong>Potential:</strong> {metadata.optimization_potential.potential}
             </div>
           </div>
 
-          {metadata.inspect.improvements &&
-            metadata.inspect.improvements.length > 0 && (
+          {metadata.optimization_potential.optimization_plan &&
+            metadata.optimization_potential.optimization_plan.length > 0 && (
               <>
                 <div className="ferret-metadata-divider" />
                 <div className="ferret-metadata-section">
                   <div className="ferret-metadata-item">
-                    <strong>Improvements:</strong>
+                    <strong>Optimization Plan:</strong>
                   </div>
                   <ul className="ferret-metadata-list">
-                    {metadata.inspect.improvements.map((item, index) => (
+                    {metadata.optimization_potential.optimization_plan.map((item, index) => (
                       <li key={index}>{item}</li>
                     ))}
                   </ul>
@@ -119,7 +136,7 @@ export class FerretMetadataPanel extends Widget {
     this.addClass('ferret-metadata-panel');
     this.title.label = 'Ferret Metadata';
     this.title.closable = true;
-    this.title.caption = 'Ferret cell inspection metadata';
+    this.title.caption = 'Ferret cell optimization potential metadata';
 
     this.render();
   }

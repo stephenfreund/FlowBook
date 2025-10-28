@@ -69,29 +69,26 @@ export interface ExecuteCommandRequest {
 }
 
 /**
- * Ferret inspection metadata structure
+ * Ferret optimization potential metadata structure
  */
-export interface IFerretInspectMetadata {
-  optimizability: number;
-  readability: number;
-  complexity: number;
-  improvements: string[];
+export interface IFerretOptimizationPotential {
+  potential: number;
+  optimization_plan: string[];
 }
 
 /**
  * Ferret profile metadata structure
  */
-export interface IFerretProfileMetadata {
-  start_time: number;
-  end_time: number;
+export interface IFerretProfileData {
   duration: number;
   profile: string;
+  env: Record<string, string>;
 }
 
 /**
  * Ferret cell metadata structure
  */
 export interface IFerretMetadata {
-  inspect?: IFerretInspectMetadata;
-  profile?: IFerretProfileMetadata;
+  optimization_potential?: IFerretOptimizationPotential;
+  profile?: IFerretProfileData;
 }

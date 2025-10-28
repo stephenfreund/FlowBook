@@ -7,7 +7,7 @@ import traceback
 from typing import Any, Dict, Optional
 
 from data_ferret.server.base import NotebookCommand
-from data_ferret.server.ferret_metadata import FerretMetadata, ProfileMetadata, set_profile_ferret_metadata
+from data_ferret.server.ferret_metadata import FerretMetadata, ProfileData, set_profile_ferret_metadata
 from data_ferret.server.kernel_helper import KernelHelper
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.output import log, timer
@@ -93,7 +93,7 @@ class ProfileCommand(NotebookCommand):
                                     if 'metadata' in output:
                                         output_metadata = output['metadata']
                                         if 'profile' in output_metadata:
-                                            profile_metadata = ProfileMetadata.model_validate(output_metadata['profile'])
+                                            profile_metadata = ProfileData.model_validate(output_metadata['profile'])
                                             set_profile_ferret_metadata(cell, profile_metadata)
 
                                 execution_results.append(
@@ -112,7 +112,7 @@ class ProfileCommand(NotebookCommand):
                                         "output_type": "error",
                                         "ename": e.__class__.__name__,
                                         "evalue": str(e),
-                                        "traceback": traceback.format_list(e.__traceback__),
+                                        "traceback": traceback.format_exception(type(e), e, e.__traceback__),
                                     }
                                 ]
 

@@ -105,7 +105,7 @@ class Checkpoints:
         return saved, removed
 
     def type_models(self, user_ns: Dict[str, Any]) -> Dict[str, TypeModel]:
-        return {k: get_type_model(v) for k, v in self.checkpointable_values(user_ns).items()}
+        return {k: get_type_model(v) for k, v in self.checkpointable_vars(user_ns).items()}
 
     def restore(self, name, user_ns: Dict[str, Any]):
         cp = self.saved[name] 

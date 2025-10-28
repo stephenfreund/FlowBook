@@ -31,7 +31,7 @@ from data_ferret.util.output import timer
 from IPython.core.magic import Magics, cell_magic, line_cell_magic, magics_class
 from data_ferret.kernel.extended_types import get_type_model
 from data_ferret.kernel.checkpoint import Checkpoint
-from data_ferret.server.ferret_metadata import FerretMetadata, ProfileMetadata
+from data_ferret.server.ferret_metadata import FerretMetadata, ProfileData
 
 
 async def stop_loky_and_all_children(timeout=3.0, verbose=False, max_passes=2):
@@ -424,7 +424,7 @@ class FerretKernel(IPythonKernel, Magics):
             has_cell_magics = code.startswith("%") or "\n%" in code
             start_time = time.time()
             if self._use_scalene and self._cell_id is not None and not has_cell_magics:
-                type_models = pprint.pformat(self._checkpoint.type_models(self.shell.user_ns), indent=2)
+                type_models = { k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items() }
                 result, contents = await self.do_scalene(code, self._cell_id, store_history)
             else:
                 result = await super().do_execute(
@@ -444,11 +444,9 @@ class FerretKernel(IPythonKernel, Magics):
             # Serialize to dict for notebook metadata
             metadata = {
                 'profile': {
-                    'start_time': start_time,
-                    'end_time': end_time,
                     'duration': end_time - start_time,
                     'profile': contents if contents is not None else "",
-                    'env': type_models if type_models is not None else "",
+                    'env': type_models if type_models is not None else {},
                 }
             }
 

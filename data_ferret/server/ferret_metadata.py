@@ -1,36 +1,32 @@
 from __future__ import annotations
-from typing import List, Optional
+from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 import nbformat
 
-class ProfileMetadata(BaseModel):
-    start_time: float = Field(description="The start time of the profile.")
-    end_time: float = Field(description="The end time of the profile.")
+class ProfileData(BaseModel):
     duration: float = Field(description="The duration of the profile in seconds.")
     profile: str = Field(description="The profile contents.")
+    env: Dict[str, str] = Field(description="The global variables and their types.")
 
-class InspectMetadata(BaseModel):
-    optimizability: int = Field(ge=0, le=5, description="How optimizable is this cell? (0-5)")
-    readability: int = Field(ge=0, le=5, description="How readable is this cell? (0-5)")
-    complexity: int = Field(ge=0, le=5, description="How complex is this cell? (0-5)")
-
-    improvements: List[str] = Field(default_factory=list, description="A list of concrete suggestions for how to improve this cell.")
+class OptimizationPotential(BaseModel):
+    potential: int = Field(ge=0, le=5, description="Optimization potential rating (0-5)")
+    optimization_plan: List[str] = Field(default_factory=list, description="A list of concrete steps for how to optimize the running time of this cell.")
 
 class FerretMetadata(BaseModel):
-    inspect: Optional[InspectMetadata] = None
-    profile: Optional[ProfileMetadata] = None
+    optimization_potential: Optional[OptimizationPotential] = None
+    profile: Optional[ProfileData] = None
 
-    def get_inspect_metadata(self) -> Optional[InspectMetadata]:
-        return self.inspect
+    def get_optimization_potential(self) -> Optional[OptimizationPotential]:
+        return self.optimization_potential
 
-    def set_inspect_metadata(self, metadata: InspectMetadata) -> FerretMetadata:  
-        return self.model_copy(update={"inspect": metadata})
+    def set_optimization_potential(self, metadata: OptimizationPotential) -> FerretMetadata:
+        return self.model_copy(update={"optimization_potential": metadata})
 
-    def get_profile_metadata(self) -> Optional[ProfileMetadata]:
+    def get_profile(self) -> Optional[ProfileData]:
         return self.profile
 
-    def set_profile_metadata(self, metadata: ProfileMetadata) -> FerretMetadata:
+    def set_profile(self, metadata: ProfileData) -> FerretMetadata:
         return self.model_copy(update={"profile": metadata})
 
     @staticmethod
@@ -41,16 +37,16 @@ class FerretMetadata(BaseModel):
             return FerretMetadata.model_validate(cell["metadata"])
 
 
-def set_inspect_ferret_metadata(cell: nbformat.NotebookNode, metadata: InspectMetadata) -> None:
+def set_optimization_potential_ferret_metadata(cell: nbformat.NotebookNode, metadata: OptimizationPotential) -> None:
     if "metadata" not in cell:
         cell["metadata"] = {}
     ferret = cell["metadata"].get("ferret", {})
     if not isinstance(ferret, dict):
         ferret = FerretMetadata.model_validate(ferret).model_dump()
-    ferret["inspect"] = metadata.model_dump()
+    ferret["optimization_potential"] = metadata.model_dump()
     cell["metadata"]["ferret"] = ferret
 
-def set_profile_ferret_metadata(cell: nbformat.NotebookNode, metadata: ProfileMetadata) -> None:
+def set_profile_ferret_metadata(cell: nbformat.NotebookNode, metadata: ProfileData) -> None:
     if "metadata" not in cell:
         cell["metadata"] = {}
     ferret = cell["metadata"].get("ferret", {})

@@ -147,6 +147,8 @@
   background: var(--jp-border-color3);
 }
 
+
+
 .jp-chat-panel {
   display: flex;
   flex-direction: column;
