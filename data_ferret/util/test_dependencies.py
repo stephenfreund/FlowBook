@@ -104,7 +104,8 @@ from numpy import array
     # Modules should be tracked separately
     assert "pd" in deps.modules
     assert "pd" in deps.globals_written
-    # Items from 'from' imports are not modules
+    # Items from 'from' imports are tracked as imported_names
+    assert "array" in deps.imported_names
     assert "array" in deps.globals_written
     assert "array" not in deps.modules
 
@@ -536,3 +537,195 @@ def test_flow_sensitive_in_notebook():
     # Cell 2: both x and y are dependencies (from previous cells)
     assert "x" in dependencies["cell2"].globals_read
     assert "y" in dependencies["cell2"].globals_read
+
+
+def test_include_notebook_defined_functions():
+    """Test that functions defined in the notebook ARE tracked as dependencies."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "def foo():\n    return 42"
+            },
+            {
+                "id": "cell2",
+                "cell_type": "code",
+                "source": "result = foo()"
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # Cell 1 defines foo
+    assert "foo" in dependencies["cell1"].functions_defined
+    assert "foo" in dependencies["cell1"].globals_written
+
+    # Cell 2 calls foo, and foo SHOULD be in globals_read
+    # because it's defined in the notebook and used by this cell
+    assert "foo" in dependencies["cell2"].functions_called
+    assert "foo" in dependencies["cell2"].globals_read
+
+
+def test_include_notebook_defined_classes():
+    """Test that classes defined in the notebook ARE tracked as dependencies."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "class MyClass:\n    def __init__(self):\n        pass"
+            },
+            {
+                "id": "cell2",
+                "cell_type": "code",
+                "source": "obj = MyClass()"
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # Cell 1 defines MyClass
+    assert "MyClass" in dependencies["cell1"].classes_defined
+    assert "MyClass" in dependencies["cell1"].globals_written
+
+    # Cell 2 uses MyClass, and it SHOULD be in globals_read
+    # because it's defined in the notebook
+    assert "MyClass" in dependencies["cell2"].globals_read
+
+
+def test_exclude_external_functions():
+    """Test that externally defined functions are NOT tracked as dependencies."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "result = external_function()"
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # external_function is not defined in notebook, so it should NOT be a dependency
+    assert "external_function" not in dependencies["cell1"].globals_read
+    assert "external_function" in dependencies["cell1"].functions_called
+
+
+def test_function_and_class_across_cells():
+    """Test function/class tracking across multiple cells."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "def helper():\n    return data"
+            },
+            {
+                "id": "cell2",
+                "cell_type": "code",
+                "source": "class Processor:\n    pass"
+            },
+            {
+                "id": "cell3",
+                "cell_type": "code",
+                "source": "data = 5"
+            },
+            {
+                "id": "cell4",
+                "cell_type": "code",
+                "source": "result = helper()\nproc = Processor()"
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # Cell 4 should have data, helper, and Processor as dependencies
+    # (all defined in the notebook)
+    assert "data" in dependencies["cell4"].globals_read
+    assert "helper" in dependencies["cell4"].globals_read
+    assert "Processor" in dependencies["cell4"].globals_read
+
+
+def test_exclude_from_imports():
+    """Test that names imported via 'from...import' are excluded from dependencies."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "from sklearn.linear_model import LinearRegression"
+            },
+            {
+                "id": "cell2",
+                "cell_type": "code",
+                "source": "model = LinearRegression()"
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # Cell 1 imports LinearRegression
+    assert "LinearRegression" in dependencies["cell1"].imported_names
+    # LinearRegression is removed from globals_written because it's imported
+
+    # Cell 2 uses LinearRegression, but it should NOT be in globals_read
+    # because it's imported from an external module
+    assert "LinearRegression" not in dependencies["cell2"].globals_read
+
+
+def test_exclude_from_imports_with_alias():
+    """Test that aliased imports are also excluded."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "from numpy import array as np_array"
+            },
+            {
+                "id": "cell2",
+                "cell_type": "code",
+                "source": "data = np_array([1, 2, 3])"
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # Cell 1 imports array as np_array
+    assert "np_array" in dependencies["cell1"].imported_names
+
+    # Cell 2 uses np_array, but it should NOT be in globals_read
+    assert "np_array" not in dependencies["cell2"].globals_read
+
+
+def test_include_notebook_vs_imported():
+    """Test distinction between notebook-defined and imported names."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "from math import sqrt\ndef my_sqrt(x):\n    return sqrt(x)"
+            },
+            {
+                "id": "cell2",
+                "cell_type": "code",
+                "source": "result = my_sqrt(4)"
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # Cell 2 uses my_sqrt (notebook-defined) - should be a dependency
+    assert "my_sqrt" in dependencies["cell2"].globals_read
+
+    # Cell 2 transitively uses sqrt (imported) - should NOT be a dependency
+    assert "sqrt" not in dependencies["cell2"].globals_read

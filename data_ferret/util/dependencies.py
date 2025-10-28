@@ -19,6 +19,9 @@ class CellDependencies:
     globals_written: Set[str] = field(default_factory=set)
     functions_called: Set[str] = field(default_factory=set)
     modules: Set[str] = field(default_factory=set)  # Imported modules (excluded from dependencies)
+    imported_names: Set[str] = field(default_factory=set)  # Names from 'from ... import' (excluded from dependencies)
+    functions_defined: Set[str] = field(default_factory=set)  # Functions defined in this cell
+    classes_defined: Set[str] = field(default_factory=set)  # Classes defined in this cell
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation."""
@@ -27,7 +30,10 @@ class CellDependencies:
             'globals_read': sorted(list(self.globals_read)),
             'globals_written': sorted(list(self.globals_written)),
             'functions_called': sorted(list(self.functions_called)),
-            'modules': sorted(list(self.modules))
+            'modules': sorted(list(self.modules)),
+            'imported_names': sorted(list(self.imported_names)),
+            'functions_defined': sorted(list(self.functions_defined)),
+            'classes_defined': sorted(list(self.classes_defined))
         }
 
 
@@ -56,12 +62,15 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         self.globals_read: Set[str] = set()
         self.globals_written: Set[str] = set()
         self.functions_called: Set[str] = set()
-        self.modules: Set[str] = set()  # Imported modules
+        self.modules: Set[str] = set()  # Imported modules (import X as Y)
+        self.imported_names: Set[str] = set()  # Names from 'from ... import'
         self.local_vars: Set[str] = set()
         self.scope_stack: List[Set[str]] = [set()]  # Stack of local scopes
         self.function_defs: Dict[str, FunctionInfo] = {}  # Function definitions found
         self.written_at_module_level: Set[str] = set()  # Track module-level writes in order
         self.in_conditional: int = 0  # Track if we're inside conditional/loop (conservative)
+        self.functions_defined: Set[str] = set()  # Function names defined at module level
+        self.classes_defined: Set[str] = set()  # Class names defined at module level
 
     def _current_scope(self) -> Set[str]:
         """Get the current local scope."""
@@ -98,6 +107,7 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         is_global_function = self._is_at_module_level()
         if is_global_function:
             self.globals_written.add(node.name)
+            self.functions_defined.add(node.name)  # Track function definitions
             # Function definitions are always written (not conditional)
             if self.in_conditional == 0:
                 self.written_at_module_level.add(node.name)
@@ -189,6 +199,7 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         # Class name is defined in the enclosing scope
         if self._is_at_module_level():
             self.globals_written.add(node.name)
+            self.classes_defined.add(node.name)  # Track class definitions
             # Class definitions are written (track for flow-sensitivity)
             if self.in_conditional == 0:
                 self.written_at_module_level.add(node.name)
@@ -295,8 +306,8 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
                 # Can't track star imports precisely
                 continue
             if self._is_at_module_level():
-                # Items imported from modules could be functions, classes, or constants
-                # Track them as regular globals, not modules
+                # Items imported from modules - track separately to exclude from dependencies
+                self.imported_names.add(name)
                 self.globals_written.add(name)
                 # Track for flow-sensitivity
                 if self.in_conditional == 0:
@@ -472,6 +483,9 @@ def analyze_cell_dependencies(source: str, cell_id: str) -> tuple[CellDependenci
         deps.globals_written = analyzer.globals_written.copy()
         deps.functions_called = analyzer.functions_called.copy()
         deps.modules = analyzer.modules.copy()
+        deps.imported_names = analyzer.imported_names.copy()
+        deps.functions_defined = analyzer.functions_defined.copy()
+        deps.classes_defined = analyzer.classes_defined.copy()
 
         # Store function definitions with their cell info
         function_defs = analyzer.function_defs.copy()
@@ -563,13 +577,25 @@ def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
         # Add function definitions to global map
         function_map.update(func_defs)
 
-    # Collect all modules defined across all cells
+    # Collect all modules and imported names across all cells
     all_modules = set()
+    all_imported_names = set()
     for deps in dependencies.values():
         all_modules.update(deps.modules)
+        all_imported_names.update(deps.imported_names)
+
+    # Collect ALL variables/functions/classes defined in the notebook
+    # This includes everything written in any cell
+    all_notebook_definitions = set()
+    for deps in dependencies.values():
+        all_notebook_definitions.update(deps.globals_written)
+
+    # Remove imported items from notebook definitions - they're external
+    all_notebook_definitions -= all_modules
+    all_notebook_definitions -= all_imported_names
 
     # Second pass: compute transitive closure for function calls
-    # and remove modules from dependencies
+    # and filter to only include notebook-internal dependencies
     for cell_id, deps in dependencies.items():
         # Compute transitive dependencies for all called functions
         transitive_deps = set()
@@ -580,9 +606,15 @@ def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
         # Add transitive dependencies to globals_read
         deps.globals_read.update(transitive_deps)
 
-        # Remove all modules (from any cell) from globals_read and globals_written
+        # Remove all modules and imported names from globals_read and globals_written
         deps.globals_read -= all_modules
         deps.globals_written -= all_modules
+        deps.globals_read -= all_imported_names
+        deps.globals_written -= all_imported_names
+
+        # KEEP ONLY notebook-defined variables in globals_read
+        # (remove external dependencies - things not defined in the notebook)
+        deps.globals_read &= all_notebook_definitions
 
     return dependencies
 
