@@ -7,6 +7,8 @@ import re
 from random import choice
 from nbformat import NotebookNode
 
+from data_ferret.util.output import error
+
 
 def normalizecase(path: str) -> str:
     """Fixes 'file' uri or path case for easier testing in windows."""
@@ -39,8 +41,9 @@ def cell_uri_to_id(cell_uri: str) -> str:
 def cell_uri_to_code(notebook: NotebookNode, cell_uri: str) -> str:
     try:
         index = cell_uri_to_index(notebook, cell_uri)
-        return notebook.cells[index]["source"]
+        return "".join(notebook['cells'][index]["source"])
     except Exception as e:
+        # error(f"Error getting code for {cell_uri}: {e}")
         return f"Can't get code for {cell_uri}"
 
 

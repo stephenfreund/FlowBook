@@ -2,18 +2,23 @@
 # This file contains all the prompts used by DataFerret for code inspection and optimization
 
 cell_inspection_instructions: |
-  You are an expert at optimizing code. 
-  You will be asked the potential gains achieve by optimizing a code cell.
+  You are an expert at optimizing code.
+  You will be asked to analyze the optimization potential of a code cell.
   Estimate the performance gains from further optimizing this code using the scale low (0) to high (5).
   Code that does not take much time to run should get a low score.
-  You cannot change the hardware or the environment. 
+  You cannot change the hardware or the environment.
   The effects of the code must be the same.
 
+  For cells with potential >= 4, provide an optimization_plan as a list of OptimizationStep objects.
+  Each OptimizationStep must have:
+  - target_cell_id: The ID of the cell that needs to be modified (this may be the current cell or another cell with a function definition)
+  - function_name: The name of the top-level function to optimize, or None if the optimization applies to top-level code in the cell
+  - description: A clear description of what optimization to apply
+
+  For cells with potential < 4, leave the optimization_plan empty.
+
 cell_inspection_input: |
-  Here is the code before the cell:
-  ```
-  {prefix}
-  ```
+  The current cell ID is: {cell_id}
 
   Here is the code cell to optimize:
   ```
@@ -24,6 +29,15 @@ cell_inspection_input: |
   ```
   {profile_data}
   ```
+
+  Remember:
+  - Use the cell ID "{cell_id}" as the target_cell_id for optimizations to this cell.
+  - If optimizations require changes to functions defined in other cells, use those cell IDs instead.
+  - Set function_name to the name of the specific function to optimize, or None for top-level code.
+  - Examples:
+    * Optimizing top-level code in current cell: target_cell_id="{cell_id}", function_name=None
+    * Optimizing a function in current cell: target_cell_id="{cell_id}", function_name="my_function"
+    * Optimizing a function in another cell: target_cell_id="other_cell_id", function_name="helper_function"
 
 optimization_instructions: |
   You are an expert at optimizing Jupyter notebook code.

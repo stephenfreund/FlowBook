@@ -69,11 +69,20 @@ export interface ExecuteCommandRequest {
 }
 
 /**
+ * Ferret optimization step structure
+ */
+export interface IFerretOptimizationStep {
+  target_cell_id: string;
+  function_name: string | null;
+  description: string;
+}
+
+/**
  * Ferret optimization potential metadata structure
  */
 export interface IFerretOptimizationPotential {
   potential: number;
-  optimization_plan: string[];
+  optimization_plan: IFerretOptimizationStep[];
 }
 
 /**

@@ -252,6 +252,8 @@ class LspSession(MethodDispatcher):
             # cell_uri = f"{uri}#{self._last_cell_id}"
             cell_uri = f"{uri}#{cell['id']}"
             source = "".join(cell["source"])
+            metadata = cell.get("metadata", {})
+
             # jedi seems to biff if the last line of the cell ends with a newline
             if source.endswith("\n"):
                 source = source[:-1]
@@ -259,7 +261,7 @@ class LspSession(MethodDispatcher):
                 {
                     "kind": 2 if cell["cell_type"] == "code" else 1,
                     "document": cell_uri,
-                    "metadata": {"metadata": cell.get("metadata", {})},
+                    "metadata": {"metadata": metadata},
                 }
             )
             lsp_cell_text_documents.append(

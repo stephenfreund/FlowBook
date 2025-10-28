@@ -59,9 +59,10 @@ export class CellMetadataHighlighter {
     if (cell && cell.model.type === 'code') {
       const metadata = cell.model.metadata as any;
       const ferretMetadata = metadata?.ferret as IFerretMetadata | undefined;
+      const cellId = cell.model.id;
 
       if (ferretMetadata && (ferretMetadata.optimization_potential || ferretMetadata.profile)) {
-        this.panel.updateMetadata(ferretMetadata);
+        this.panel.updateMetadata(ferretMetadata, cellId);
       } else {
         this.panel.clear();
       }
@@ -111,6 +112,7 @@ export class CellMetadataHighlighter {
   private updateCell(cell: Cell): void {
     const metadata = cell.model.metadata as any;
     const ferretMetadata = metadata?.ferret as IFerretMetadata | undefined;
+    const cellId = cell.model.id;
 
     // Remove existing classes
     cell.node.classList.remove('ferret-cell-warning', 'ferret-cell-danger');
@@ -134,7 +136,7 @@ export class CellMetadataHighlighter {
     // Update panel if this is the active cell
     if (this.tracker.activeCell === cell) {
       if (ferretMetadata && (ferretMetadata.optimization_potential || ferretMetadata.profile)) {
-        this.panel.updateMetadata(ferretMetadata);
+        this.panel.updateMetadata(ferretMetadata, cellId);
       } else {
         this.panel.clear();
       }

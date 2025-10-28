@@ -8,9 +8,10 @@ import { IFerretMetadata } from './types';
  */
 interface IMetadataDisplayProps {
   metadata: IFerretMetadata | null;
+  cellId: string | null;
 }
 
-const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata }) => {
+const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) => {
   const [profileExpanded, setProfileExpanded] = React.useState(false);
   const [envExpanded, setEnvExpanded] = React.useState(false);
 
@@ -30,6 +31,13 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata }) => {
 
   return (
     <div className="ferret-metadata-content">
+      {/* Cell ID Header */}
+      {cellId && (
+        <>
+          <div className="ferret-metadata-header">Cell ID: {cellId}</div>
+          <div className="ferret-metadata-divider" />
+        </>
+      )}
       {/* Profile Metadata Section */}
       {metadata.profile && (
         <>
@@ -111,8 +119,14 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata }) => {
                     <strong>Optimization Plan:</strong>
                   </div>
                   <ul className="ferret-metadata-list">
-                    {metadata.optimization_potential.optimization_plan.map((item, index) => (
-                      <li key={index}>{item}</li>
+                    {metadata.optimization_potential.optimization_plan.map((step, index) => (
+                      <li key={index}>
+                        <strong>Cell {step.target_cell_id}</strong>
+                        {step.function_name && (
+                          <> / <strong>Function {step.function_name}</strong></>
+                        )}
+                        : {step.description}
+                      </li>
                     ))}
                   </ul>
                 </div>
@@ -129,6 +143,7 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata }) => {
  */
 export class FerretMetadataPanel extends Widget {
   private _metadata: IFerretMetadata | null = null;
+  private _cellId: string | null = null;
 
   constructor() {
     super();
@@ -145,15 +160,16 @@ export class FerretMetadataPanel extends Widget {
    * Render the React component into the panel
    */
   private render(): void {
-    ReactDOM.render(<MetadataDisplay metadata={this._metadata} />, this.node);
+    ReactDOM.render(<MetadataDisplay metadata={this._metadata} cellId={this._cellId} />, this.node);
   }
 
   /**
    * Update the displayed metadata
    */
-  public updateMetadata(metadata: IFerretMetadata | null): void {
-    console.log('[MetadataPanel] updateMetadata called with:', metadata);
+  public updateMetadata(metadata: IFerretMetadata | null, cellId: string | null): void {
+    console.log('[MetadataPanel] updateMetadata called with:', metadata, cellId);
     this._metadata = metadata;
+    this._cellId = cellId;
     this.render();
   }
 
@@ -163,6 +179,7 @@ export class FerretMetadataPanel extends Widget {
   public clear(): void {
     console.log('[MetadataPanel] clear called');
     this._metadata = null;
+    this._cellId = null;
     this.render();
   }
 

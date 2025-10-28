@@ -6,6 +6,7 @@ import { JupyterFrontEnd } from '@jupyterlab/application';
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
 import { ICommandPalette } from '@jupyterlab/apputils';
 import { showDialog, Dialog } from '@jupyterlab/apputils';
+import { Notification } from '@jupyterlab/apputils';
 
 import { FerretAPI } from './api';
 import { KernelUtils } from './kernel';
@@ -105,11 +106,8 @@ export class FerretCommandsManager {
 
         console.log('Command metadata:', result.metadata);
 
-        showDialog({
-          title: `${commandInfo?.label || 'Command'} Complete`,
-          body: 'Command executed successfully. Check the console for detailed metadata.',
-          buttons: [Dialog.okButton()]
-        });
+        Notification.success(`${commandInfo?.label || 'Command'} Complete: Command executed successfully.`, { autoClose: 3000 });
+      
       }
 
       return result;

@@ -13,6 +13,7 @@ from data_ferret.server.commands import (
     CleanupCommand,
     ExampleMessageCommand,
 )
+from data_ferret.util.output import log, timer
 
 class CommandRegistry:
     """Registry for all available commands."""
@@ -23,17 +24,31 @@ class CommandRegistry:
 
     def _register_default_commands(self):
         """Register the default command implementations."""
-        self.register(AnalyzeNotebookCommand())
-        self.register(ValidateNotebookCommand())
-        self.register(ProfileCommand())
-        self.register(InspectVariablesCommand())
-        self.register(InspectCommand())
-        self.register(CleanupCommand())
-        self.register(ExampleMessageCommand())
+        # Dynamically import and register all commands in the commands subdirectory
+        import pkgutil
+        import importlib
+        import os
+        from data_ferret.server import commands
 
-    def register(self, command: NotebookCommand):
-        """Register a command."""
-        self._commands[command.command_name] = command
+        with timer(key="register_commands", message="Registering commands"):
+            commands_dir = os.path.dirname(commands.__file__)
+            for _, module_name, is_pkg in pkgutil.iter_modules([commands_dir]):
+                if is_pkg:
+                    continue
+                module = importlib.import_module(f"data_ferret.server.commands.{module_name}")
+                # Register all classes in the module that are subclasses of NotebookCommand
+                for attr_name in dir(module):
+                    attr = getattr(module, attr_name)
+                    try:
+                        if (
+                            isinstance(attr, type)
+                            and issubclass(attr, NotebookCommand)
+                            and attr is not NotebookCommand
+                        ):
+                            log(f"{attr_name}...")
+                            self.register(attr())
+                    except Exception:
+                        continue
 
     def get_command(self, name: str) -> NotebookCommand:
         """Get a command by name."""
@@ -43,7 +58,11 @@ class CommandRegistry:
 
     def list_commands(self) -> List[str]:
         """List all registered command names."""
-        return list(self._commands.keys())
+        return list(self._commands.keys())  
+
+    def register(self, command: NotebookCommand):
+        """Register a command."""
+        self._commands[command.command_name] = command
 
     def get_command_info(self) -> List[dict]:
         """Get information about all commands for the UI."""

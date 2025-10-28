@@ -7,7 +7,7 @@ import traceback
 from typing import Any, Dict, Optional
 
 from data_ferret.server.base import NotebookCommand
-from data_ferret.server.ferret_metadata import FerretMetadata, ProfileData, set_profile_ferret_metadata
+from data_ferret.util.ferret_metadata import FerretMetadata, ProfileData, set_profile_ferret_metadata
 from data_ferret.server.kernel_helper import KernelHelper
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.output import log, timer

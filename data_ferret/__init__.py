@@ -12,7 +12,6 @@ except ImportError:
 from jupyter_server.extension.application import ExtensionApp
 from traitlets import Unicode
 from data_ferret.util.output import timer
-from data_ferret.server.handlers import setup_handlers
 
 
 class DataFerretExtension(ExtensionApp):
@@ -49,6 +48,7 @@ class DataFerretExtension(ExtensionApp):
     def initialize_handlers(self):
         """Register HTTP handlers for the extension."""
         with timer(message="Initializing Data Ferret handlers..."):
+            from data_ferret.server.handlers import setup_handlers
             setup_handlers(self.serverapp.web_app)
             self.log.info(f"Registered {self.name} server extension handlers")
 

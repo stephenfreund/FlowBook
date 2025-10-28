@@ -31,7 +31,7 @@ from data_ferret.util.output import timer
 from IPython.core.magic import Magics, cell_magic, line_cell_magic, magics_class
 from data_ferret.kernel.extended_types import get_type_model
 from data_ferret.kernel.checkpoint import Checkpoint
-from data_ferret.server.ferret_metadata import FerretMetadata, ProfileData
+from data_ferret.util.ferret_metadata import FerretMetadata, ProfileData
 
 
 async def stop_loky_and_all_children(timeout=3.0, verbose=False, max_passes=2):

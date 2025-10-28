@@ -8,8 +8,9 @@ import random
 from typing import Any, Dict, Optional
 
 from data_ferret.server.base import NotebookCommand
+from data_ferret.util.notebook_tools import NotebookTools
 from data_ferret.server.kernel_manager import FerretKernelClient
-from data_ferret.server.ferret_metadata import OptimizationPotential, set_optimization_potential_ferret_metadata
+from data_ferret.util.ferret_metadata import FerretMetadata, OptimizationPotential, set_optimization_potential_ferret_metadata
 from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.util.prompts import get_prompt
 
@@ -46,25 +47,34 @@ class InspectCommand(NotebookCommand):
 
 
     async def inspect_cell(
-       self, index: int, cells: List[nbformat.NotebookNode], model: Any
+       self, index: int, nb : nbformat.NotebookNode, model: Any
     ) -> Tuple[str, InspectionResultAndStats]:
+        cells = nb["cells"]
         cell = cells[index]
-        agent = FerretAgent[OptimizationPotential](
-            key="cell_inspection",
-            model=model,
-            instructions=get_prompt("cell_inspection_instructions"),
-            output_type=OptimizationPotential,
-        )
+        
+        with NotebookTools(nb) as tools:
 
-        prefix = "\n".join([cell["source"] for cell in cells[:index]])
+            agent = FerretAgent[OptimizationPotential](
+                key="cell_inspection",
+                model=model,
+                instructions=get_prompt("cell_inspection_instructions"),
+                output_type=OptimizationPotential,
+                tools=tools.tools(include_profile=True),
+            )
 
-        profile_data = json.dumps(cell.get("metadata", {}).get("ferret", {}).get("profile", {}), indent=2)
+            prefix = "\n".join([f'Cell {cell["id"]}:\n{cell["source"]}' for cell in cells[:index]])
 
-        input_text = get_prompt(
-            "cell_inspection_input", prefix=prefix, cell_source=cell["source"], profile_data=profile_data
-        )
+            profile_data = FerretMetadata.from_cell(cell).profile
 
-        final_output, stats = await agent.run(input_text)
+            input_text = get_prompt(
+                "cell_inspection_input",
+                cell_id=cell["id"],
+                prefix=prefix,
+                cell_source=cell["source"],
+                profile_data=profile_data
+            )
+
+            final_output, stats = await agent.run(input_text)
 
         print(
             f"| {index:<9}| {final_output.potential:<9}| {stats.usage.total_tokens:<9}| {stats.time:<9.1f}| {stats.cost:<9.4f}|"
@@ -86,10 +96,11 @@ class InspectCommand(NotebookCommand):
         tasks = []
         for index, cell in enumerate(nb["cells"]):
             if cell["cell_type"] == "code":
-                if cell["source"].strip():
+                source = "\n".join(cell["source"] if isinstance(cell["source"], list) else [cell["source"]])
+                if source.strip():
                     # Skip cells that already have inspection data unless --all is specified
                     if cell_ids is None or cell["id"] in cell_ids:
-                        tasks.append(self.inspect_cell(index, nb["cells"], model))
+                        tasks.append(self.inspect_cell(index, nb, model))
                 else:
                     set_optimization_potential_ferret_metadata(cell, None)
 
@@ -127,7 +138,7 @@ class InspectCommand(NotebookCommand):
     ) -> Dict[str, Any]:
 
         """Add inspection metadata to each cell."""
-        new_nb, total_cost = await self.inspect_cells(notebook_content, config.fast_model, selected_cell_ids)
+        new_nb, total_cost = await self.inspect_cells(notebook_content, config.model, selected_cell_ids)
 
         metadata = {
             "status": "success",

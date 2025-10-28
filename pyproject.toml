@@ -58,6 +58,9 @@ dependencies = [
 ]
 dynamic = ["version", "description", "authors", "urls", "keywords"]
 
+[project.scripts]
+data_ferret = "data_ferret.server.cli:cli_main"
+
 [tool.hatch.version]
 source = "nodejs"
 

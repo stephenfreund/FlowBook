@@ -41,8 +41,10 @@ class Output:
         #     timings.extend(self.timings)
         # else:
         timings = self.timings
-        json.dump(timings, open(self.timings_file, "w"), indent=2)
-        log(f"Output timer data saved to {self.timings_file}")
+        if timings:
+            json.dump(timings, open(self.timings_file, "w"), indent=2)
+            log(f"Output timer data saved to {self.timings_file}")
+            
 
     def timing_context(self, *, key: str | None = None, message: str | None = None):
         return self.TimedOutputContext(

@@ -39,26 +39,14 @@ def cli_main():
 
     parser.add_argument(
         "--kernel-name",
-        default="python3",
-        help="Kernel name for new kernel (default: python3)"
+        default="ferret_kernel",
+        help="Kernel name for new kernel (default: ferret_kernel)"
     )
 
     parser.add_argument(
         "--output",
         "-o",
         help="Output file for the new notebook (default: adds _processed suffix)"
-    )
-
-    parser.add_argument(
-        "--metadata-output",
-        "-m",
-        help="Output file for metadata JSON (default: stdout)"
-    )
-
-    parser.add_argument(
-        "--pretty",
-        action="store_true",
-        help="Pretty-print JSON output"
     )
 
     parser.add_argument(
@@ -71,6 +59,13 @@ def cli_main():
         "--fast-model",
         default="gpt-4o-mini",
         help="Fast AI model to use for lightweight operations (default: gpt-4o-mini)"
+    )
+
+    parser.add_argument(
+        "--cell-ids",
+        "-c",
+        nargs="+",
+        help="Optional list of cell IDs to process (default: process all cells)"
     )
 
     args = parser.parse_args()
@@ -98,13 +93,30 @@ def cli_main():
                 print(f"Starting new kernel: {args.kernel_name}")
                 # Start kernel manager and create our custom FerretKernelClient
                 kernel_manager = KernelManager(kernel_name=args.kernel_name)
-                kernel_manager.start_kernel()
-                
+                try:
+                    kernel_manager.start_kernel()
+                except Exception as e:
+                    print(f"Error starting kernel: {e}", file=sys.stderr)
+                    import traceback
+                    traceback.print_exc()
+                    return 1
+
                 kernel_client = FerretKernelClient(kernel_id=kernel_manager.kernel_id)
                 kernel_client.load_connection_info(kernel_manager.get_connection_info())
                 kernel_client.start_channels()
-                kernel_client.wait_for_ready(timeout=30)
-                
+                try:
+                    kernel_client.wait_for_ready(timeout=30)
+                except Exception as e:
+                    print(f"Error waiting for kernel to be ready: {e}", file=sys.stderr)
+                    # Try to read kernel stderr/stdout for more details
+                    if kernel_manager.is_alive():
+                        print("Kernel is still running but not responding", file=sys.stderr)
+                    else:
+                        print("Kernel has died", file=sys.stderr)
+                    import traceback
+                    traceback.print_exc()
+                    return 1
+
                 assert isinstance(kernel_client, FerretKernelClient)
                 print(f"Kernel started successfully")
 
@@ -112,6 +124,7 @@ def cli_main():
         result = asyncio.run(command.process(
             notebook_content,
             kernel_client=kernel_client,
+            selected_cell_ids=args.cell_ids,
             config=config
         ))
 
@@ -125,18 +138,10 @@ def cli_main():
             json.dump(result["notebook"], f, indent=2)
         print(f"Processed notebook written to {notebook_output}")
 
-        if args.pretty:
-            metadata_output = json.dumps(result["metadata"], indent=2)
-        else:
-            metadata_output = json.dumps(result["metadata"])
+        metadata_output = json.dumps(result["metadata"], indent=2)
 
-        if args.metadata_output:
-            with open(args.metadata_output, 'w', encoding='utf-8') as f:
-                f.write(metadata_output)
-            print(f"Metadata written to {args.metadata_output}")
-        else:
-            print("\nMetadata:")
-            print(metadata_output)
+        print("\nMetadata:")
+        print(metadata_output)
 
         return 0
 
