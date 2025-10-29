@@ -11,8 +11,12 @@
         "rank": 1
       },
       {
-        "name": "ferret-cleanup",
+        "name": "ferret-document",
         "rank": 2
+      },
+      {
+        "name": "ferret-cleanup",
+        "rank": 3
       }
     ]
   },

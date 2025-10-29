@@ -424,8 +424,9 @@ class FerretKernel(IPythonKernel, Magics):
             has_cell_magics = code.startswith("%") or "\n%" in code
             start_time = time.time()
             if self._use_scalene and self._cell_id is not None and not has_cell_magics:
-                type_models = { k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items() }
+                pre_type_models = { k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items() }
                 result, contents = await self.do_scalene(code, self._cell_id, store_history)
+                post_type_models = { k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items() }
             else:
                 result = await super().do_execute(
                     code,
@@ -437,7 +438,8 @@ class FerretKernel(IPythonKernel, Magics):
                     cell_id=self._cell_id,
                 )
                 contents = None
-                type_models = None
+                pre_type_models = None
+                post_type_models = None
             normal_exit = True
             end_time = time.time()
 
@@ -446,7 +448,8 @@ class FerretKernel(IPythonKernel, Magics):
                 'profile': {
                     'duration': end_time - start_time,
                     'profile': contents if contents is not None else "",
-                    'env': type_models if type_models is not None else {},
+                    'env': pre_type_models if pre_type_models is not None else {},
+                    'env_after': post_type_models if post_type_models is not None else {},
                 }
             }
 

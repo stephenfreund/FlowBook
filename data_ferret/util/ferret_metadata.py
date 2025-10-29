@@ -8,7 +8,8 @@ import nbformat
 class ProfileData(BaseModel):
     duration: float = Field(description="The duration of the profile in seconds.")
     profile: str = Field(description="The profile contents.")
-    env: Dict[str, str] = Field(description="The global variables and their types.")
+    env: Dict[str, str] = Field(description="The global variables and their types before the cell was executed.")
+    env_after: Dict[str, str] = Field(description="The global variables and their types after the cell was executed.")
 
 class OptimizationStep(BaseModel):
     target_cell_id: str = Field(description="The ID of the cell to modify")

@@ -32,6 +32,13 @@ export const FERRET_COMMANDS: CommandInfo[] = [
     requires_kernel: false
   },
   {
+    id: 'document',
+    label: 'Document',
+    icon: 'ui-components:text-editor',
+    tooltip: 'Add documentation comments to code cells',
+    requires_kernel: false
+  },
+  {
     id: 'profile',
     label: 'Profile',
     icon: 'ui-components:info',
@@ -92,6 +99,7 @@ export interface IFerretProfileData {
   duration: number;
   profile: string;
   env: Record<string, string>;
+  env_after: Record<string, string>;
 }
 
 /**

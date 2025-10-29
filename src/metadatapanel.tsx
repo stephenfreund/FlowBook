@@ -14,6 +14,7 @@ interface IMetadataDisplayProps {
 const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) => {
   const [profileExpanded, setProfileExpanded] = React.useState(false);
   const [envExpanded, setEnvExpanded] = React.useState(false);
+  const [envAfterExpanded, setEnvAfterExpanded] = React.useState(false);
 
   console.log('[MetadataDisplay] Rendering with metadata:', metadata);
 
@@ -56,7 +57,7 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
                 className="ferret-metadata-profile-toggle"
                 onClick={() => setEnvExpanded(!envExpanded)}
               >
-                <strong>Environment</strong>
+                <strong>Environment (Before)</strong>
                 <span className="ferret-metadata-toggle-icon">
                   {envExpanded ? '▼' : '▶'}
                 </span>
@@ -70,6 +71,59 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
                   ))}
                 </pre>
               )}
+            </div>
+
+            <div className="ferret-metadata-divider" />
+            <div className="ferret-metadata-section">
+              <div
+                className="ferret-metadata-profile-toggle"
+                onClick={() => setEnvAfterExpanded(!envAfterExpanded)}
+              >
+                <strong>Environment Changes</strong>
+                <span className="ferret-metadata-toggle-icon">
+                  {envAfterExpanded ? '▼' : '▶'}
+                </span>
+              </div>
+              {envAfterExpanded && (() => {
+                const envBefore = metadata.profile.env;
+                const envAfter = metadata.profile.env_after;
+                const additions = Object.entries(envAfter).filter(([key]) => !(key in envBefore));
+                const removals = Object.entries(envBefore).filter(([key]) => !(key in envAfter));
+
+                return (
+                  <pre className="ferret-metadata-profile-output">
+                    {additions.length > 0 && (
+                      <>
+                        <div style={{ color: 'green', marginBottom: '0.5em' }}>
+                          <strong>Added:</strong>
+                        </div>
+                        {additions.map(([key, value]) => (
+                          <div key={key} style={{ paddingLeft: '1em' }}>
+                            <strong>{key}:</strong> {value}
+                          </div>
+                        ))}
+                      </>
+                    )}
+                    {removals.length > 0 && (
+                      <>
+                        <div style={{ color: 'red', marginTop: additions.length > 0 ? '0.5em' : '0', marginBottom: '0.5em' }}>
+                          <strong>Removed:</strong>
+                        </div>
+                        {removals.map(([key, value]) => (
+                          <div key={key} style={{ paddingLeft: '1em' }}>
+                            <strong>{key}:</strong> {value}
+                          </div>
+                        ))}
+                      </>
+                    )}
+                    {additions.length === 0 && removals.length === 0 && (
+                      <div style={{ fontStyle: 'italic', color: '#666' }}>
+                        No variables added or removed
+                      </div>
+                    )}
+                  </pre>
+                );
+              })()}
             </div>
 
           {metadata.profile.profile && metadata.profile.profile.trim() && (
