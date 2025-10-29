@@ -5,6 +5,8 @@ Compares Jupyter kernel user namespaces for equality with isomorphic pointer str
 
 import numpy as np
 import pandas as pd
+from pandas.core.groupby import DataFrameGroupBy, SeriesGroupBy
+from pandas.core.groupby.ops import BaseGrouper
 from typing import Any, Dict, Set, Tuple, Optional
 import math
 
@@ -125,6 +127,8 @@ class Diff:
             result = self._compare_callable(val_a, val_b, path)
         elif isinstance(val_a, np.ndarray):
             result = self._compare_ndarray(val_a, val_b, path)
+        elif isinstance(val_a, (DataFrameGroupBy, SeriesGroupBy)):
+            result = self._compare_groupby(val_a, val_b, path)
         elif isinstance(val_a, pd.Series):
             result = self._compare_series(val_a, val_b, path)
         elif isinstance(val_a, pd.DataFrame):
@@ -320,23 +324,113 @@ class Diff:
         # Check shape
         if val_a.shape != val_b.shape:
             return f"DataFrame shape mismatch at {path}: {val_a.shape} vs {val_b.shape}"
-        
+
         # Check columns
         if not val_a.columns.equals(val_b.columns):
             return f"DataFrame columns mismatch at {path}"
-        
+
         # Check index
         if not val_a.index.equals(val_b.index):
             return f"DataFrame index mismatch at {path}"
-        
+
         # Compare each column
         for col in val_a.columns:
             col_diff = self._compare_series(val_a[col], val_b[col], f"{path}['{col}']")
             if col_diff:
                 return col_diff
-        
+
         return ""
-    
+
+    def _compare_groupby(self, val_a, val_b, path: str) -> str:
+        """
+        Compare DataFrameGroupBy or SeriesGroupBy objects by their semantic properties.
+
+        Excludes internal cache fields (_cache, _grouper._cache) that can differ
+        between otherwise equivalent groupby objects.
+
+        Compares:
+        - The underlying data object (obj)
+        - The grouper configuration (keys, sort, dropna)
+        - Selection state
+        """
+        # Compare the underlying object (DataFrame or Series)
+        if not hasattr(val_a, 'obj') or not hasattr(val_b, 'obj'):
+            return f"GroupBy structure mismatch at {path}: missing obj attribute"
+
+        obj_diff = self._compare_values(val_a.obj, val_b.obj, f"{path}.obj")
+        if obj_diff:
+            return obj_diff
+
+        # Compare the grouper (excluding cache)
+        if not hasattr(val_a, '_grouper') or not hasattr(val_b, '_grouper'):
+            return f"GroupBy structure mismatch at {path}: missing _grouper attribute"
+
+        grouper_diff = self._compare_grouper(val_a._grouper, val_b._grouper, f"{path}._grouper")
+        if grouper_diff:
+            return grouper_diff
+
+        # Compare selection (which columns are selected)
+        if hasattr(val_a, '_selection') and hasattr(val_b, '_selection'):
+            if val_a._selection != val_b._selection:
+                return f"GroupBy selection mismatch at {path}: {val_a._selection} vs {val_b._selection}"
+
+        return ""
+
+    def _compare_grouper(self, val_a: BaseGrouper, val_b: BaseGrouper, path: str) -> str:
+        """
+        Compare BaseGrouper objects, excluding their internal cache.
+
+        Compares the semantic properties that define the grouping:
+        - groupings (keys)
+        - sort flag
+        - dropna flag
+        - axis
+        """
+        # Compare axis (typically a pandas Index)
+        if hasattr(val_a, 'axis') and hasattr(val_b, 'axis'):
+            # Use pandas Index.equals() for proper comparison
+            axes_equal = False
+            if isinstance(val_a.axis, pd.Index) and isinstance(val_b.axis, pd.Index):
+                axes_equal = val_a.axis.equals(val_b.axis)
+            elif isinstance(val_a.axis, np.ndarray) and isinstance(val_b.axis, np.ndarray):
+                axes_equal = np.array_equal(val_a.axis, val_b.axis)
+            else:
+                axes_equal = (val_a.axis == val_b.axis)
+
+            if not axes_equal:
+                return f"Grouper axis mismatch at {path}: {val_a.axis} vs {val_b.axis}"
+
+        # Compare sort flag
+        if hasattr(val_a, '_sort') and hasattr(val_b, '_sort'):
+            if val_a._sort != val_b._sort:
+                return f"Grouper sort mismatch at {path}: {val_a._sort} vs {val_b._sort}"
+
+        # Compare dropna flag
+        if hasattr(val_a, 'dropna') and hasattr(val_b, 'dropna'):
+            if val_a.dropna != val_b.dropna:
+                return f"Grouper dropna mismatch at {path}: {val_a.dropna} vs {val_b.dropna}"
+
+        # Compare groupings (the actual grouping keys)
+        if hasattr(val_a, '_groupings') and hasattr(val_b, '_groupings'):
+            groupings_a = val_a._groupings
+            groupings_b = val_b._groupings
+
+            if len(groupings_a) != len(groupings_b):
+                return f"Grouper groupings count mismatch at {path}: {len(groupings_a)} vs {len(groupings_b)}"
+
+            for i, (grp_a, grp_b) in enumerate(zip(groupings_a, groupings_b)):
+                # Compare key/name
+                if hasattr(grp_a, 'name') and hasattr(grp_b, 'name'):
+                    if grp_a.name != grp_b.name:
+                        return f"Grouping name mismatch at {path}._groupings[{i}]: {grp_a.name} vs {grp_b.name}"
+
+                # Compare key object if available
+                if hasattr(grp_a, 'key') and hasattr(grp_b, 'key'):
+                    if grp_a.key != grp_b.key:
+                        return f"Grouping key mismatch at {path}._groupings[{i}]: {grp_a.key} vs {grp_b.key}"
+
+        return ""
+
     def _compare_list(self, val_a: list, val_b: list, path: str) -> str:
         if len(val_a) != len(val_b):
             return f"List length mismatch at {path}: {len(val_a)} vs {len(val_b)}"
