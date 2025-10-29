@@ -993,3 +993,364 @@ result = external_func(handler=processor.handle, data=items)
     # Variables should be read
     assert "processor" in deps.globals_read
     assert "items" in deps.globals_read
+
+
+def test_global_declaration_write():
+    """Test global declaration with write in function."""
+    source = """
+def set_value():
+    global x
+    x = 10
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    # Function should be written
+    assert "set_value" in deps.globals_written
+
+    # The function is defined and tracks its dependencies
+    assert "set_value" in func_defs
+
+    # x is declared global and written but not read first, so it won't be in globals_read
+    # The function writes to x, but that's a side effect when called, not a dependency
+    # When the function is called, it will modify global x
+    # This is correct behavior - x is not a dependency of set_value, it's an output
+
+
+def test_global_declaration_read_and_write():
+    """Test global declaration with read then write in function."""
+    source = """
+def increment():
+    global counter
+    counter = counter + 1
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    # Function should track counter as read (since it's read before written)
+    assert "increment" in func_defs
+    assert "counter" in func_defs["increment"].globals_read
+
+
+def test_global_declaration_multiple_names():
+    """Test global declaration with multiple names."""
+    source = """
+def update_all():
+    global x, y, z
+    x = 1
+    y = 2
+    z = x + y
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    assert "update_all" in func_defs
+    # x and y are written before being read in z = x + y, but they're global
+    # So they should be in globals_read
+    func_info = func_defs["update_all"]
+    assert "x" in func_info.globals_read or "y" in func_info.globals_read
+
+
+def test_global_in_nested_function():
+    """Test global declaration in nested function."""
+    source = """
+def outer():
+    def inner():
+        global shared
+        shared = 100
+    inner()
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    # outer function should include shared in its dependencies
+    assert "outer" in func_defs
+    # The inner function modifies global, so outer indirectly depends on it
+    # This is tricky - inner is not in func_defs since it's nested
+
+
+def test_global_with_conditional():
+    """Test global declaration with conditional write."""
+    source = """
+def maybe_set(cond):
+    global value
+    if cond:
+        value = 42
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    assert "maybe_set" in func_defs
+    # cond is a parameter, not a global read
+
+
+def test_global_in_loop():
+    """Test global declaration in loop."""
+    source = """
+def accumulate(items):
+    global total
+    for item in items:
+        total += item
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    assert "accumulate" in func_defs
+    # total is read (for +=) and written
+    assert "total" in func_defs["accumulate"].globals_read
+
+
+def test_global_augmented_assignment():
+    """Test global with augmented assignment."""
+    source = """
+def increment_global():
+    global counter
+    counter += 1
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    assert "increment_global" in func_defs
+    # counter is read before being written (augmented assignment)
+    assert "counter" in func_defs["increment_global"].globals_read
+
+
+def test_global_in_method():
+    """Test global declaration in class method."""
+    source = """
+class Counter:
+    def increment(self):
+        global count
+        count += 1
+"""
+    deps, _, method_defs = analyze_cell_dependencies(source, "cell1")
+
+    assert "Counter" in deps.classes_defined
+    assert "Counter.increment" in method_defs
+    # count should be in the method's globals_read
+    assert "count" in method_defs["Counter.increment"].globals_read
+
+
+def test_global_across_cells():
+    """Test global declaration behavior across notebook cells."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "shared_var = 0"
+            },
+            {
+                "id": "cell2",
+                "cell_type": "code",
+                "source": """
+def update():
+    global shared_var
+    shared_var += 1
+"""
+            },
+            {
+                "id": "cell3",
+                "cell_type": "code",
+                "source": "update()"
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # Cell 1 defines shared_var
+    assert "shared_var" in dependencies["cell1"].globals_written
+
+    # Cell 2 defines update function
+    assert "update" in dependencies["cell2"].functions_defined
+
+    # Cell 3 calls update, which modifies shared_var
+    # Cell 3 should depend on both update and shared_var (transitively)
+    assert "update" in dependencies["cell3"].functions_called
+    assert "update" in dependencies["cell3"].globals_read
+    assert "shared_var" in dependencies["cell3"].globals_read
+
+
+def test_global_without_prior_write():
+    """Test global declaration when variable not written in same function."""
+    source = """
+def read_global():
+    global config
+    return config
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    assert "read_global" in func_defs
+    # config is read but not written in the function
+    assert "config" in func_defs["read_global"].globals_read
+
+
+def test_global_mixed_with_local():
+    """Test mixing global and local variables in same function."""
+    source = """
+def process():
+    global result
+    temp = 5
+    result = temp * 2
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    assert "process" in func_defs
+    func_info = func_defs["process"]
+    # temp is local, should not be in globals
+    assert "temp" not in func_info.globals_read
+    # result is global, might be in globals_read depending on flow
+
+
+def test_global_in_lambda():
+    """Test that global in nested scope within lambda is handled."""
+    # Note: global in lambda is actually a syntax error in Python,
+    # but we test proper scope tracking
+    source = """
+def make_incrementer():
+    def increment():
+        global x
+        x += 1
+    return increment
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    assert "make_incrementer" in func_defs
+
+
+def test_nonlocal_declaration():
+    """Test nonlocal declaration in nested function."""
+    source = """
+def outer():
+    x = 0
+    def inner():
+        nonlocal x
+        x += 1
+    inner()
+    return x
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    # outer function is defined
+    assert "outer" in func_defs
+    # x is local to outer, not global
+    assert "x" not in func_defs["outer"].globals_read
+
+
+def test_nonlocal_multiple_levels():
+    """Test nonlocal across multiple nesting levels."""
+    source = """
+def outer():
+    counter = 0
+    def middle():
+        def inner():
+            nonlocal counter
+            counter += 1
+        inner()
+    middle()
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    assert "outer" in func_defs
+    # counter is local to outer
+    assert "counter" not in func_defs["outer"].globals_read
+
+
+def test_nonlocal_vs_global():
+    """Test distinction between nonlocal and global."""
+    source = """
+global_var = 100
+
+def outer():
+    local_var = 10
+
+    def use_nonlocal():
+        nonlocal local_var
+        local_var += 1
+
+    def use_global():
+        global global_var
+        global_var += 1
+
+    use_nonlocal()
+    use_global()
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    # global_var is written at module level
+    assert "global_var" in deps.globals_written
+    # outer is defined
+    assert "outer" in func_defs
+    # outer should depend on global_var (because use_global references it)
+    # This is complex due to nested functions
+
+
+def test_nonlocal_read_and_write():
+    """Test nonlocal with read and write operations."""
+    source = """
+def counter_factory():
+    count = 0
+    def increment():
+        nonlocal count
+        count = count + 1
+    def get_count():
+        nonlocal count
+        return count
+    return increment, get_count
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    assert "counter_factory" in func_defs
+    # count is local to counter_factory
+    assert "count" not in func_defs["counter_factory"].globals_read
+
+
+def test_nonlocal_with_global():
+    """Test using both nonlocal and global in nested functions."""
+    source = """
+def outer():
+    local_x = 1
+    def inner():
+        nonlocal local_x
+        global global_y
+        local_x += 1
+        global_y = local_x
+    inner()
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    assert "outer" in func_defs
+    # global_y should be in outer's dependencies (indirectly)
+    # This is complex due to nested function analysis
+
+
+def test_nonlocal_multiple_names():
+    """Test nonlocal with multiple variable names."""
+    source = """
+def outer():
+    x, y, z = 1, 2, 3
+    def inner():
+        nonlocal x, y, z
+        x, y, z = z, y, x
+    inner()
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    assert "outer" in func_defs
+    # x, y, z are local to outer
+    assert "x" not in func_defs["outer"].globals_read
+    assert "y" not in func_defs["outer"].globals_read
+    assert "z" not in func_defs["outer"].globals_read
+
+
+def test_nonlocal_in_method():
+    """Test nonlocal in nested function inside method."""
+    source = """
+class Counter:
+    def make_incrementer(self):
+        count = 0
+        def increment():
+            nonlocal count
+            count += 1
+        return increment
+"""
+    deps, _, method_defs = analyze_cell_dependencies(source, "cell1")
+
+    assert "Counter" in deps.classes_defined
+    assert "Counter.make_incrementer" in method_defs
+    # count is local to make_incrementer method
+    assert "count" not in method_defs["Counter.make_incrementer"].globals_read

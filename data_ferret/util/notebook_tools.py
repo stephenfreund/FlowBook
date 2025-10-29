@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from agents import Agent, FunctionTool, Runner, Tool, function_tool, RunContextWrapper
 from pathlib import Path
 from nbformat import read, NotebookNode
+from data_ferret.util.dependencies import CellDependencies, analyze_notebook
 from data_ferret.util.ferret_metadata import ProfileData, OptimizationPotential, FerretMetadata
 from data_ferret.util.output import log, timer, error
 import textwrap
@@ -43,6 +44,8 @@ class NotebookTools(LspSession):
         self.notebook = notebook
         self.on_cell_modified = on_cell_modified
         self.can_edit = can_edit
+        self.dependencies: Dict[str, CellDependencies] = {}
+        self.run_analysis()
 
     def __enter__(self):
         result = super().__enter__()
@@ -52,6 +55,23 @@ class NotebookTools(LspSession):
 
     def __exit__(self, exc_type, exc_value, traceback):
         super().__exit__(exc_type, exc_value, traceback)
+
+
+    def run_analysis(self):
+        with timer(key="run_analysis", message="run_analysis()"):
+            self.dependencies = analyze_notebook(self.notebook)
+            return self.dependencies
+
+    def get_dependencies(self, cell_id: str) -> CellDependencies:
+        with timer(key="tool_get_dependencies", message=f"get_dependencies({cell_id})"):
+            if cell_id not in self.dependencies:
+                raise ValueError(f"Cell {cell_id} not found")
+            return self.dependencies[cell_id]
+
+    def notebook_changed(self):
+        log(f"notebook_changed")
+        self.run_analysis()
+
 
     def tools(self, include_profile: bool = False) -> list[Tool]:
 
@@ -76,6 +96,7 @@ class NotebookTools(LspSession):
                 result = self.set_source(cell_id, source)
                 if result is None:
                     raise ValueError(f"Cell {cell_id} not found")
+                self.notebook_changed()
                 return result
 
         @function_tool
@@ -129,7 +150,7 @@ class NotebookTools(LspSession):
                 if data.profile is None:
                     raise ValueError(f"There is no variable information for {cell_id}.")
                 return data.profile.env
-
+ 
         tools: List[Tool] = [
             get_source,
             get_cells_for_definition,

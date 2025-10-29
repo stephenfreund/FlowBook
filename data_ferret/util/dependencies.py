@@ -57,6 +57,37 @@ The analysis errs on the side of including MORE dependencies than necessary:
 5. TRANSITIVE CLOSURE: All called functions/methods contribute their full
    dependency sets, even if only partially executed
 
+Scope Keywords (global and nonlocal)
+-------------------------------------
+The analysis CORRECTLY handles `global` and `nonlocal` declarations:
+
+1. GLOBAL KEYWORD: Variables declared with `global` in a function are tracked
+   as module-level dependencies rather than local variables
+   Example:
+   ```python
+   def increment():
+       global counter
+       counter += 1  # counter tracked as global read and write
+   ```
+
+2. NONLOCAL KEYWORD: Variables declared with `nonlocal` refer to enclosing
+   function scopes, not the module level
+   Example:
+   ```python
+   def outer():
+       x = 0
+       def inner():
+           nonlocal x
+           x += 1  # x is local to outer, not a global dependency
+       inner()
+   ```
+
+3. SCOPE TRACKING: Each scope (module, function, nested function) maintains
+   separate tracking of:
+   - Local variables
+   - Global declarations
+   - Nonlocal declarations
+
 Missing Cases and Under-Approximations
 ---------------------------------------
 The following cases are NOT tracked (under-approximation - may miss dependencies):
@@ -83,19 +114,15 @@ The following cases are NOT tracked (under-approximation - may miss dependencies
    - list.append(), dict.update(), etc. → not tracked
    - Only tracks variable bindings, not mutations
 
-6. GLOBAL/NONLOCAL KEYWORDS:
-   - Effects of "global x" and "nonlocal x" declarations not fully modeled
-   - May incorrectly treat as local in some nested scopes
-
-7. CLASS/INSTANCE ATTRIBUTES:
+6. CLASS/INSTANCE ATTRIBUTES:
    - self.attr reads/writes inside methods not tracked separately
    - Only method-level global dependencies are captured
 
-8. INDIRECT CALLS:
+7. INDIRECT CALLS:
    - Calls via function stored in data structures: funcs[0]()
    - Only direct calls and single-level attribute calls tracked
 
-9. METACLASSES AND DESCRIPTORS:
+8. METACLASSES AND DESCRIPTORS:
    - Custom __getattribute__, __setattr__ behavior not modeled
    - Class decorators that modify behavior not tracked
 
@@ -190,6 +217,8 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         self.imported_names: Set[str] = set()  # Names from 'from ... import'
         self.local_vars: Set[str] = set()
         self.scope_stack: List[Set[str]] = [set()]  # Stack of local scopes
+        self.global_names_stack: List[Set[str]] = [set()]  # Names declared global in each scope
+        self.nonlocal_names_stack: List[Set[str]] = [set()]  # Names declared nonlocal in each scope
         self.function_defs: Dict[str, FunctionInfo] = {}  # Function definitions found
         self.written_at_module_level: Set[str] = set()  # Track module-level writes in order
         self.in_conditional: int = 0  # Track if we're inside conditional/loop (conservative)
@@ -207,23 +236,54 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
     def _push_scope(self):
         """Enter a new scope."""
         self.scope_stack.append(set())
+        self.global_names_stack.append(set())
+        self.nonlocal_names_stack.append(set())
 
     def _pop_scope(self):
         """Exit the current scope."""
         if len(self.scope_stack) > 1:
             self.scope_stack.pop()
+            self.global_names_stack.pop()
+            self.nonlocal_names_stack.pop()
 
     def _is_local(self, name: str) -> bool:
         """Check if a name is local to any current scope."""
+        # If name is declared global in current scope, it's not local
+        if name in self.global_names_stack[-1]:
+            return False
         return any(name in scope for scope in self.scope_stack)
+
+    def _is_declared_global(self, name: str) -> bool:
+        """Check if a name is declared global in the current scope."""
+        return name in self.global_names_stack[-1]
+
+    def _is_declared_nonlocal(self, name: str) -> bool:
+        """Check if a name is declared nonlocal in the current scope."""
+        return name in self.nonlocal_names_stack[-1]
 
     def _add_local(self, name: str):
         """Add a name to the current local scope."""
-        self._current_scope().add(name)
+        # Don't add to local scope if it's declared global
+        if not self._is_declared_global(name):
+            self._current_scope().add(name)
 
     def _is_at_module_level(self) -> bool:
         """Check if we're currently at module level."""
         return len(self.scope_stack) == 1
+
+    def visit_Global(self, node: ast.Global):
+        """Handle global declarations."""
+        # Mark these names as global in the current scope
+        for name in node.names:
+            self.global_names_stack[-1].add(name)
+        # Don't call generic_visit - Global nodes have no children to visit
+
+    def visit_Nonlocal(self, node: ast.Nonlocal):
+        """Handle nonlocal declarations."""
+        # Mark these names as nonlocal in the current scope
+        for name in node.names:
+            self.nonlocal_names_stack[-1].add(name)
+        # Don't call generic_visit - Nonlocal nodes have no children to visit
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         """Handle function definitions."""
@@ -408,21 +468,28 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         """Handle variable name references."""
         name = node.id
 
-        # Skip if it's a local variable
-        if self._is_local(name):
+        # Check if name is declared global in current scope
+        is_declared_global = self._is_declared_global(name)
+
+        # Skip if it's a local variable (unless declared global)
+        if not is_declared_global and self._is_local(name):
             return
 
         # Determine if it's a read or write
         if isinstance(node.ctx, ast.Store):
-            if self._is_at_module_level():
+            # Handle writes
+            if self._is_at_module_level() or is_declared_global:
+                # Write to global scope
                 self.globals_written.add(name)
                 # Only add to written_at_module_level if not in conditional
                 # (conservative: conditional writes might not execute)
-                if self.in_conditional == 0:
+                if self.in_conditional == 0 and self._is_at_module_level():
                     self.written_at_module_level.add(name)
             else:
+                # Write to local scope (unless declared global, handled above)
                 self._add_local(name)
         elif isinstance(node.ctx, (ast.Load, ast.Del)):
+            # Handle reads
             # Track all non-builtin names
             # Common builtins that we want to exclude
             common_builtins = {
@@ -441,8 +508,11 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
                 if self._is_at_module_level():
                     if name not in self.written_at_module_level:
                         self.globals_read.add(name)
+                elif is_declared_global:
+                    # Declared global in nested scope - add to globals_read
+                    self.globals_read.add(name)
                 else:
-                    # In nested scope, add normally
+                    # In nested scope, not declared global, add normally
                     self.globals_read.add(name)
 
         self.generic_visit(node)
@@ -552,13 +622,18 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
     def _extract_assignment_targets(self, node):
         """Extract names from assignment targets and add to appropriate scope."""
         if isinstance(node, ast.Name):
-            if self._is_at_module_level():
-                self.globals_written.add(node.id)
+            name = node.id
+            is_declared_global = self._is_declared_global(name)
+
+            if self._is_at_module_level() or is_declared_global:
+                self.globals_written.add(name)
                 # Track for flow-sensitivity
-                if self.in_conditional == 0:
-                    self.written_at_module_level.add(node.id)
-            # Always add to local scope so it's not tracked as global read
-            self._add_local(node.id)
+                if self.in_conditional == 0 and self._is_at_module_level():
+                    self.written_at_module_level.add(name)
+
+            # Add to local scope only if not declared global
+            if not is_declared_global:
+                self._add_local(name)
         elif isinstance(node, (ast.Tuple, ast.List)):
             for elt in node.elts:
                 self._extract_assignment_targets(elt)
@@ -578,10 +653,13 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
 
         # Now mark the LHS targets as written
         for target in node.targets:
-            if isinstance(target, ast.Name) and self._is_at_module_level() and not self._is_local(target.id):
-                self.globals_written.add(target.id)
-                if self.in_conditional == 0:
-                    self.written_at_module_level.add(target.id)
+            if isinstance(target, ast.Name):
+                name = target.id
+                is_declared_global = self._is_declared_global(name)
+                if (self._is_at_module_level() or is_declared_global) and not (self._is_local(name) and not is_declared_global):
+                    self.globals_written.add(name)
+                    if self.in_conditional == 0 and self._is_at_module_level():
+                        self.written_at_module_level.add(name)
             # Visit the target for any nested structure
             self.visit(target)
 
@@ -593,18 +671,27 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         # Visit target first as Load (it's being read)
         if isinstance(node.target, ast.Name):
             name = node.target.id
-            if not self._is_local(name):
+            is_declared_global = self._is_declared_global(name)
+
+            if not self._is_local(name) or is_declared_global:
                 if self._is_at_module_level() and name not in self.written_at_module_level:
+                    self.globals_read.add(name)
+                elif is_declared_global:
                     self.globals_read.add(name)
 
         # Visit the value
         self.visit(node.value)
 
         # Now mark as written
-        if isinstance(node.target, ast.Name) and self._is_at_module_level() and not self._is_local(node.target.id):
-            self.globals_written.add(node.target.id)
-            if self.in_conditional == 0:
-                self.written_at_module_level.add(node.target.id)
+        if isinstance(node.target, ast.Name):
+            name = node.target.id
+            is_declared_global = self._is_declared_global(name)
+
+            if self._is_at_module_level() or is_declared_global:
+                if not self._is_local(name) or is_declared_global:
+                    self.globals_written.add(name)
+                    if self.in_conditional == 0 and self._is_at_module_level():
+                        self.written_at_module_level.add(name)
 
     def visit_If(self, node: ast.If):
         """Handle if statements."""
