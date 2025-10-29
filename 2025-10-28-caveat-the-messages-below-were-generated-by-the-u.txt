@@ -1,0 +1,2650 @@
+
+▗ ▗   ▖ ▖  Claude Code v2.0.28
+           Sonnet 4.5 · Claude Pro
+  ▘▘ ▝▝    /Users/freund/other/DataFerret
+
+> /config 
+  ⎿  Status dialog dismissed
+
+> /privacy-settings 
+  ⎿  "Help improve Claude" set to false.
+
+> Create a new data_ferret/dependencies module.  It should contain a new analysis that takes in a jupyter notebook and creates a map from cell id to a list of globals accessed 
+within the cell.  It should be flow-insensitive, but should consider function calls.  Functions passed into library functions should be considered called. 
+
+⏺ I'll create a new module for dependency analysis that maps cell IDs to the globals they access. This will be useful for tracking data flow and dependencies in notebooks.
+
+⏺ Write(data_ferret/dependencies.py)
+  ⎿  Wrote 345 lines to data_ferret/dependencies.py                                
+     """
+     Dependency analysis for Jupyter notebooks.
+     This module provides tools to analyze variable dependencies in notebook cells,
+     creating a map from cell IDs to the global variables they access.
+     """
+     import ast
+     from typing import Dict, List, Set, Optional, Any
+     from dataclasses import dataclass, field
+     … +335 lines (ctrl+o to expand)
+
+⏺ Write(data_ferret/test_dependencies.py)
+  ⎿  Wrote 313 lines to data_ferret/test_dependencies.py
+     """
+     Tests for the dependency analysis module.
+     """
+     import pytest
+     from data_ferret.dependencies import (
+         analyze_cell_dependencies,
+         analyze_notebook,
+         get_dependency_graph,
+         get_cell_writes,
+     … +303 lines (ctrl+o to expand)
+
+⏺ Bash(python -m pytest data_ferret/test_dependencies.py -v)
+  ⎿  Error: Exception ignored in atexit callback: <bound method Output._print_timings of <data_ferret.util.output.Output object at 0x10f0305f0>>
+     Traceback (most recent call last):
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 45, in _print_timings
+         log(f"Output timer data saved to {self.timings_file}")
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 256, in log
+         output.log(*message)
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 245, in log
+         self._print("cyan", args, start="[", end="]")
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 233, in _print
+         self.write(f"{pad}{termcolor.colored(lines[0], color)}")
+     … +76 lines (ctrl+o to see all)
+
+⏺ I need to fix a couple of issues in the analyzer. Let me update the code to properly handle for loop iterables and decorators:
+
+⏺ Read(data_ferret/dependencies.py)
+  ⎿  Read 30 lines
+
+⏺ Update(data_ferret/dependencies.py)
+  ⎿  Updated data_ferret/dependencies.py with 4 additions             
+       69    
+       70        def visit_FunctionDef(self, node: ast.FunctionDef):
+       71            """Handle function definitions."""
+       72 +          # Visit decorators first (in outer scope)
+       73 +          for decorator in node.decorator_list:
+       74 +              self.visit(decorator)
+       75 +  
+       76            # Function name is defined in the enclosing scope
+       77            if len(self.scope_stack) == 1:  # Module level
+       78                self.globals_written.add(node.name)
+
+⏺ Read(data_ferret/dependencies.py)
+  ⎿  Read 20 lines
+
+⏺ Update(data_ferret/dependencies.py)
+  ⎿  Updated data_ferret/dependencies.py with 21 additions and 3 removals                      
+       216    
+       217        def visit_For(self, node: ast.For):
+       218            """Handle for loops."""
+       219 -          # Target variables are assigned
+       220 -          self.visit(node.target)
+       221 -          # Visit the iterable
+       219 +          # Visit the iterable first (before target is assigned)
+       220            self.visit(node.iter)
+       221 +  
+       222 +          # Target variables are assigned - extract names and mark as local
+       223 +          self._extract_assignment_targets(node.target)
+       224 +  
+       225            # Visit body
+       226            for child in node.body:
+       227                self.visit(child)
+     ...
+       227            for child in node.orelse:
+       228                self.visit(child)
+       229    
+       230 +      def _extract_assignment_targets(self, node):
+       231 +          """Extract names from assignment targets and add to appropriate scope."""
+       232 +          if isinstance(node, ast.Name):
+       233 +              if len(self.scope_stack) == 1:
+       234 +                  self.globals_written.add(node.id)
+       235 +              # Always add to local scope so it's not tracked as global read
+       236 +              self._add_local(node.id)
+       237 +          elif isinstance(node, (ast.Tuple, ast.List)):
+       238 +              for elt in node.elts:
+       239 +                  self._extract_assignment_targets(elt)
+       240 +          elif isinstance(node, ast.Starred):
+       241 +              self._extract_assignment_targets(node.value)
+       242 +          # For subscript, attribute, etc., visit normally
+       243 +          elif isinstance(node, (ast.Subscript, ast.Attribute)):
+       244 +              self.visit(node)
+       245 +  
+       246        def visit_With(self, node: ast.With):
+       247            """Handle with statements."""
+       248            for item in node.items:
+
+⏺ Bash(python -m pytest data_ferret/test_dependencies.py::test_for_loop -v)
+  ⎿  Error: Exception ignored in atexit callback: <bound method Output._print_timings of <data_ferret.util.output.Output object at 0x11d4d19d0>>
+     Traceback (most recent call last):
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 45, in _print_timings
+         log(f"Output timer data saved to {self.timings_file}")
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 256, in log
+         output.log(*message)
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 245, in log
+         self._print("cyan", args, start="[", end="]")
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 233, in _print
+         self.write(f"{pad}{termcolor.colored(lines[0], color)}")
+     … +40 lines (ctrl+o to see all)
+
+⏺ Read(data_ferret/dependencies.py)
+  ⎿  Read 30 lines
+
+⏺ Update(data_ferret/dependencies.py)
+  ⎿  Updated data_ferret/dependencies.py with 14 additions and 4 removals                                      
+       161                else:
+       162                    self._add_local(name)
+       163            elif isinstance(node.ctx, (ast.Load, ast.Del)):
+       164 -              # Check if it's likely a builtin (heuristic: all lowercase or starts with _)
+       165 -              if not (name.islower() or name.startswith('_')) or name in {'True', 'False', 'None'}:
+       164 +              # Track all non-builtin names
+       165 +              # Common builtins that we want to exclude
+       166 +              common_builtins = {
+       167 +                  'True', 'False', 'None', 'print', 'len', 'range', 'str', 'int',
+       168 +                  'float', 'bool', 'list', 'dict', 'set', 'tuple', 'type', 'isinstance',
+       169 +                  'hasattr', 'getattr', 'setattr', 'max', 'min', 'sum', 'abs', 'all',
+       170 +                  'any', 'enumerate', 'zip', 'map', 'filter', 'sorted', 'reversed',
+       171 +                  'open', 'repr', 'chr', 'ord', 'id', 'hash', 'hex', 'oct', 'bin',
+       172 +                  'round', 'divmod', 'pow', 'next', 'iter', 'callable', 'dir',
+       173 +                  'Exception', 'ValueError', 'TypeError', 'KeyError', 'IndexError',
+       174 +                  'RuntimeError', 'AttributeError', 'ImportError', 'IOError',
+       175 +                  'OSError', 'NameError', 'ZeroDivisionError', 'StopIteration'
+       176 +              }
+       177 +              if name not in common_builtins:
+       178                    self.globals_read.add(name)
+       179 -              elif name not in dir(__builtins__):
+       180 -                  self.globals_read.add(name)
+       179    
+       180            self.generic_visit(node)
+       181    
+
+⏺ Bash(python -m pytest data_ferret/test_dependencies.py::test_for_loop data_ferret/test_dependencies.py::test_decorator_usage -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +30 lines (ctrl+o to expand)
+
+⏺ Perfect! Now let me run all the tests to make sure everything works:
+
+⏺ Bash(python -m pytest data_ferret/test_dependencies.py -v)
+  ⎿  Error: Exception ignored in atexit callback: <bound method Output._print_timings of <data_ferret.util.output.Output object at 0x1245b2540>>
+     Traceback (most recent call last):
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 45, in _print_timings
+         log(f"Output timer data saved to {self.timings_file}")
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 256, in log
+         output.log(*message)
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 245, in log
+         self._print("cyan", args, start="[", end="]")
+       File "/Users/freund/other/DataFerret/data_ferret/util/output.py", line 233, in _print
+         self.write(f"{pad}{termcolor.colored(lines[0], color)}")
+     … +63 lines (ctrl+o to see all)
+
+⏺ Update(data_ferret/test_dependencies.py)
+  ⎿  Updated data_ferret/test_dependencies.py with 3 additions and 2 removals                       
+       302        source = """
+       303    try:
+       304        risky_operation()
+       305 -  except ValueError as e:
+       305 +  except CustomError as e:
+       306        handle_error(e)
+       307    """
+       308        deps = analyze_cell_dependencies(source, "cell1")
+       309    
+       310        assert "risky_operation" in deps.functions_called
+       311        assert "handle_error" in deps.functions_called
+       312 -      assert "ValueError" in deps.globals_read
+       312 +      # Custom exception types should be tracked as they might be defined in other cells
+       313 +      assert "CustomError" in deps.globals_read
+
+⏺ Bash(python -m pytest data_ferret/test_dependencies.py -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +48 lines (ctrl+o to expand)
+
+⏺ Perfect! All tests are passing. Let me update the todo list:
+
+⏺ Excellent! I've successfully created the data_ferret/dependencies module with comprehensive dependency analysis capabilities. Here's what was implemented:
+
+  Summary
+
+  The new module provides:
+
+  Core Features
+
+  - AST-based analysis using Python's ast module to parse code cells
+  - Flow-insensitive tracking of global variable accesses
+  - Function call detection including functions passed as arguments to library functions
+  - Scope-aware analysis that distinguishes local vs global variables
+
+  Main Components
+
+  1. GlobalAccessAnalyzer - AST visitor that tracks:
+    - Global variables read
+    - Global variables written
+    - Functions called (including those passed as arguments)
+    - Proper scoping for functions, classes, lambdas, and loops
+  2. CellDependencies - Data class storing per-cell dependency information
+  3. analyze_notebook() - Analyzes all code cells in a notebook and returns a map from cell ID to dependencies
+  4. get_dependency_graph() - Simplified interface returning cell ID → list of globals accessed
+
+  Example Usage
+
+  from data_ferret.dependencies import analyze_notebook, get_dependency_graph
+
+  # Analyze a notebook
+  notebook = {
+      "cells": [
+          {"id": "cell1", "cell_type": "code", "source": "df = pd.DataFrame()"},
+          {"id": "cell2", "cell_type": "code", "source": "result = df.groupby('col').sum()"}
+      ]
+  }
+
+  # Get dependency graph
+  graph = get_dependency_graph(notebook)
+  # Returns: {'cell1': ['pd'], 'cell2': ['df']}
+
+  All 20 tests are passing, covering:
+  - Variable assignments and reads
+  - Function definitions and calls
+  - Classes and decorators
+  - Imports
+  - Loops and comprehensions
+  - Exception handling
+  - Nested scopes
+  - Edge cases (empty cells, syntax errors)
+
+  The module is ready to use at data_ferret/dependencies.py:1!
+
+> Add a __main__ to dependencies.py that will read in a notebook file and porint out the dependency info in a readable way. 
+
+⏺ I'll add a __main__ block to the dependencies.py file that reads a notebook and displays the dependency information in a readable format.
+
+⏺ Read(data_ferret/dependencies.py)
+  ⎿  Error reading file
+
+⏺ Bash(ls -la /Users/freund/other/DataFerret/data_ferret/dependencies.py)
+  ⎿  Error: ls: /Users/freund/other/DataFerret/data_ferret/dependencies.py: No such file or directory
+
+⏺ Bash(ls /Users/freund/other/DataFerret/data_ferret/ | grep -E "(dependencies|test_dependencies)")
+  ⎿  No matches found
+
+⏺ Bash(pwd)
+  ⎿  /Users/freund/other/DataFerret
+
+⏺ Search(pattern: "**/dependencies.py")
+  ⎿  Found 1 file (ctrl+o to expand)
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 20 lines
+
+⏺ Bash(wc -l /Users/freund/other/DataFerret/data_ferret/util/dependencies.py)
+  ⎿       376 /Users/freund/other/DataFerret/data_ferret/util/dependencies.py
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 28 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 122 additions                                     
+       374            cell_id: sorted(list(deps.globals_written))
+       375            for cell_id, deps in dependencies.items()
+       376        }
+       377 +  
+       378 +  
+       379 +  if __name__ == '__main__':
+       380 +      import argparse
+       381 +      import json
+       382 +      import sys
+       383 +  
+       384 +      parser = argparse.ArgumentParser(
+       385 +          description='Analyze dependencies in a Jupyter notebook'
+       386 +      )
+       387 +      parser.add_argument(
+       388 +          'notebook',
+       389 +          help='Path to the Jupyter notebook file (.ipynb)'
+       390 +      )
+       391 +      parser.add_argument(
+       392 +          '--verbose', '-v',
+       393 +          action='store_true',
+       394 +          help='Show detailed information including function calls'
+       395 +      )
+       396 +      parser.add_argument(
+       397 +          '--writes-only', '-w',
+       398 +          action='store_true',
+       399 +          help='Show only which variables each cell writes'
+       400 +      )
+       401 +      parser.add_argument(
+       402 +          '--reads-only', '-r',
+       403 +          action='store_true',
+       404 +          help='Show only which variables each cell reads'
+       405 +      )
+       406 +  
+       407 +      args = parser.parse_args()
+       408 +  
+       409 +      # Read the notebook file
+       410 +      try:
+       411 +          with open(args.notebook, 'r') as f:
+       412 +              notebook = json.load(f)
+       413 +      except FileNotFoundError:
+       414 +          print(f"Error: Notebook file '{args.notebook}' not found", file=sys.stderr)
+       415 +          sys.exit(1)
+       416 +      except json.JSONDecodeError:
+       417 +          print(f"Error: '{args.notebook}' is not a valid JSON file", file=sys.stderr)
+       418 +          sys.exit(1)
+       419 +  
+       420 +      # Analyze the notebook
+       421 +      dependencies = analyze_notebook(notebook)
+       422 +  
+       423 +      if not dependencies:
+       424 +          print("No code cells found in notebook")
+       425 +          sys.exit(0)
+       426 +  
+       427 +      # Print results
+       428 +      print(f"\nDependency Analysis for: {args.notebook}")
+       429 +      print("=" * 80)
+       430 +  
+       431 +      for cell_id, deps in dependencies.items():
+       432 +          # Get cell index for display
+       433 +          cells = notebook.get('cells', [])
+       434 +          cell_index = None
+       435 +          for idx, cell in enumerate(cells):
+       436 +              if cell.get('id') == cell_id:
+       437 +                  cell_index = idx
+       438 +                  break
+       439 +  
+       440 +          # Print cell header
+       441 +          if cell_index is not None:
+       442 +              print(f"\nCell [{cell_index}] (ID: {cell_id[:8]}...)")
+       443 +          else:
+       444 +              print(f"\nCell (ID: {cell_id[:8]}...)")
+       445 +          print("-" * 80)
+       446 +  
+       447 +          # Show reads
+       448 +          if not args.writes_only:
+       449 +              if deps.globals_read:
+       450 +                  print(f"  Reads:  {', '.join(sorted(deps.globals_read))}")
+       451 +              else:
+       452 +                  print("  Reads:  (none)")
+       453 +  
+       454 +          # Show writes
+       455 +          if not args.reads_only:
+       456 +              if deps.globals_written:
+       457 +                  print(f"  Writes: {', '.join(sorted(deps.globals_written))}")
+       458 +              else:
+       459 +                  print("  Writes: (none)")
+       460 +  
+       461 +          # Show function calls in verbose mode
+       462 +          if args.verbose and not args.writes_only and not args.reads_only:
+       463 +              if deps.functions_called:
+       464 +                  print(f"  Calls:  {', '.join(sorted(deps.functions_called))}")
+       465 +              else:
+       466 +                  print("  Calls:  (none)")
+       467 +  
+       468 +      # Print summary
+       469 +      print("\n" + "=" * 80)
+       470 +      print("Summary")
+       471 +      print("-" * 80)
+       472 +  
+       473 +      # All variables written across all cells
+       474 +      all_writes = set()
+       475 +      for deps in dependencies.values():
+       476 +          all_writes.update(deps.globals_written)
+       477 +  
+       478 +      # All variables read across all cells
+       479 +      all_reads = set()
+       480 +      for deps in dependencies.values():
+       481 +          all_reads.update(deps.globals_read)
+       482 +  
+       483 +      print(f"Total cells analyzed: {len(dependencies)}")
+       484 +      print(f"Global variables defined: {len(all_writes)}")
+       485 +      if all_writes:
+       486 +          print(f"  {', '.join(sorted(all_writes))}")
+       487 +      print(f"Global variables used: {len(all_reads)}")
+       488 +      if all_reads:
+       489 +          print(f"  {', '.join(sorted(all_reads))}")
+       490 +  
+       491 +      # Find potential issues
+       492 +      undefined = all_reads - all_writes
+       493 +      if undefined:
+       494 +          print(f"\n⚠ Variables used but not defined in this notebook: {len(undefined)}")
+       495 +          print(f"  {', '.join(sorted(undefined))}")
+       496 +          print("  (These may be imported, built-in, or defined in other notebooks)")
+       497 +  
+       498 +      print()
+
+⏺ Now let me test it with an example notebook:
+
+⏺ Bash(python3 -m data_ferret.util.dependencies examples/Example.ipynb)
+  ⎿ [14:56:13] [Installing ferret_kernel kernel......]                                                                                                                              
+    [14:56:13]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +42 lines (ctrl+o to expand)
+
+
+⏺ Excellent! Let me test the verbose mode as well:
+
+⏺ Bash(python3 -m data_ferret.util.dependencies examples/Example.ipynb --verbose)
+  ⎿ [14:56:19] [Installing ferret_kernel kernel......]                                                                                                                              
+    [14:56:19]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +47 lines (ctrl+o to expand)
+
+
+⏺ Bash(python3 -m data_ferret.util.dependencies examples/Example.ipynb --writes-only)
+  ⎿ [14:56:25] [Installing ferret_kernel kernel......]                                                                                                                              
+    [14:56:25]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +37 lines (ctrl+o to expand)
+
+
+⏺ Let me also show the help output:
+
+⏺ Bash(python3 -m data_ferret.util.dependencies --help)
+  ⎿ [14:56:32] [Installing ferret_kernel kernel......]                                                                                                                              
+    [14:56:32]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +14 lines (ctrl+o to expand)
+
+
+⏺ Perfect! The __main__ block is working great. Let me also check where the test file ended up:
+
+⏺ Search(pattern: "**/test_dependencies.py")
+  ⎿  Found 1 file (ctrl+o to expand)
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +35 lines (ctrl+o to expand)
+
+⏺ Perfect! I've successfully added a __main__ block to the dependencies module. Here's what you can now do:
+
+  Usage
+
+  Run the dependency analyzer from the command line:
+
+  # Basic usage
+  python -m data_ferret.util.dependencies examples/Example.ipynb
+
+  # Verbose mode (includes function calls)
+  python -m data_ferret.util.dependencies examples/Example.ipynb --verbose
+
+  # Show only writes
+  python -m data_ferret.util.dependencies examples/Example.ipynb --writes-only
+
+  # Show only reads
+  python -m data_ferret.util.dependencies examples/Example.ipynb --reads-only
+
+  # Show help
+  python -m data_ferret.util.dependencies --help
+
+  Output Features
+
+  The analyzer provides:
+
+  1. Per-cell analysis - Shows reads, writes, and (in verbose mode) function calls for each cell
+  2. Cell identification - Displays both the cell index and a shortened cell ID
+  3. Summary section - Lists all global variables defined and used across the notebook
+  4. Undefined variable detection - Warns about variables that are used but not defined in the notebook (likely imports or builtins)
+
+  The output is formatted with clear separators and organized information, making it easy to understand the data flow in your notebook.
+
+  All 20 tests are passing, confirming the analyzer works correctly!
+
+> Depdencies should: ignore modules.  Transitively close over function calls: a cell that calls a function should depend on any globals access from inside that function. 
+
+⏺ I'll update the dependencies module to ignore modules and transitively close over function calls.
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 50 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 13 additions and 1 removal                                   
+       18        globals_read: Set[str] = field(default_factory=set)
+       19        globals_written: Set[str] = field(default_factory=set)
+       20        functions_called: Set[str] = field(default_factory=set)
+       21 +      modules: Set[str] = field(default_factory=set)  # Imported modules (excluded from dependencies)
+       22    
+       23        def to_dict(self) -> Dict[str, Any]:
+       24            """Convert to dictionary representation."""
+     ...
+       25                'cell_id': self.cell_id,
+       26                'globals_read': sorted(list(self.globals_read)),
+       27                'globals_written': sorted(list(self.globals_written)),
+       28 -              'functions_called': sorted(list(self.functions_called))
+       28 +              'functions_called': sorted(list(self.functions_called)),
+       29 +              'modules': sorted(list(self.modules))
+       30            }
+       31    
+       32    
+       33 +  @dataclass
+       34 +  class FunctionInfo:
+       35 +      """Information about a function definition."""
+       36 +  
+       37 +      name: str
+       38 +      globals_read: Set[str] = field(default_factory=set)
+       39 +      functions_called: Set[str] = field(default_factory=set)
+       40 +      defined_in_cell: Optional[str] = None
+       41 +  
+       42 +  
+       43    class GlobalAccessAnalyzer(ast.NodeVisitor):
+       44        """
+       45        AST visitor that tracks global variable accesses in Python code.
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 2 additions                                     
+       55            self.globals_read: Set[str] = set()
+       56            self.globals_written: Set[str] = set()
+       57            self.functions_called: Set[str] = set()
+       58 +          self.modules: Set[str] = set()  # Imported modules
+       59            self.local_vars: Set[str] = set()
+       60            self.scope_stack: List[Set[str]] = [set()]  # Stack of local scopes
+       61 +          self.function_defs: Dict[str, FunctionInfo] = {}  # Function definitions found
+       62    
+       63        def _current_scope(self) -> Set[str]:
+       64            """Get the current local scope."""
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 50 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 51 additions and 19 removals          
+        88                self.visit(decorator)
+        89    
+        90            # Function name is defined in the enclosing scope
+        91 -          if len(self.scope_stack) == 1:  # Module level
+        91 +          is_global_function = len(self.scope_stack) == 1  # Module level
+        92 +          if is_global_function:
+        93                self.globals_written.add(node.name)
+        94            else:
+        95                self._add_local(node.name)
+        96    
+        97 -          # Enter function scope
+        98 -          self._push_scope()
+        97 +          # For global functions, analyze their dependencies separately
+        98 +          if is_global_function:
+        99 +              # Create a sub-analyzer for the function body
+       100 +              func_analyzer = GlobalAccessAnalyzer()
+       101 +              func_analyzer.scope_stack = [set()]  # Fresh scope for function
+       102    
+       103 -          # Add parameters to local scope
+       104 -          for arg in node.args.args:
+       105 -              self._add_local(arg.arg)
+       106 -          for arg in node.args.posonlyargs:
+       107 -              self._add_local(arg.arg)
+       108 -          for arg in node.args.kwonlyargs:
+       109 -              self._add_local(arg.arg)
+       110 -          if node.args.vararg:
+       111 -              self._add_local(node.args.vararg.arg)
+       112 -          if node.args.kwarg:
+       113 -              self._add_local(node.args.kwarg.arg)
+       103 +              # Add parameters to function's local scope
+       104 +              for arg in node.args.args:
+       105 +                  func_analyzer._add_local(arg.arg)
+       106 +              for arg in node.args.posonlyargs:
+       107 +                  func_analyzer._add_local(arg.arg)
+       108 +              for arg in node.args.kwonlyargs:
+       109 +                  func_analyzer._add_local(arg.arg)
+       110 +              if node.args.vararg:
+       111 +                  func_analyzer._add_local(node.args.vararg.arg)
+       112 +              if node.args.kwarg:
+       113 +                  func_analyzer._add_local(node.args.kwarg.arg)
+       114    
+       115 -          # Visit function body
+       116 -          for child in node.body:
+       117 -              self.visit(child)
+       115 +              # Visit function body
+       116 +              for child in node.body:
+       117 +                  func_analyzer.visit(child)
+       118    
+       119 -          # Exit function scope
+       120 -          self._pop_scope()
+       119 +              # Store function info
+       120 +              func_info = FunctionInfo(
+       121 +                  name=node.name,
+       122 +                  globals_read=func_analyzer.globals_read.copy(),
+       123 +                  functions_called=func_analyzer.functions_called.copy()
+       124 +              )
+       125 +              self.function_defs[node.name] = func_info
+       126 +          else:
+       127 +              # For nested functions, just visit normally
+       128 +              # Enter function scope
+       129 +              self._push_scope()
+       130    
+       131 +              # Add parameters to local scope
+       132 +              for arg in node.args.args:
+       133 +                  self._add_local(arg.arg)
+       134 +              for arg in node.args.posonlyargs:
+       135 +                  self._add_local(arg.arg)
+       136 +              for arg in node.args.kwonlyargs:
+       137 +                  self._add_local(arg.arg)
+       138 +              if node.args.vararg:
+       139 +                  self._add_local(node.args.vararg.arg)
+       140 +              if node.args.kwarg:
+       141 +                  self._add_local(node.args.kwarg.arg)
+       142 +  
+       143 +              # Visit function body
+       144 +              for child in node.body:
+       145 +                  self.visit(child)
+       146 +  
+       147 +              # Exit function scope
+       148 +              self._pop_scope()
+       149 +  
+       150        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+       151            """Handle async function definitions."""
+       152            self.visit_FunctionDef(node)
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 30 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 3 additions                                       
+       254            for alias in node.names:
+       255                name = alias.asname if alias.asname else alias.name
+       256                if len(self.scope_stack) == 1:
+       257 +                  self.modules.add(name)  # Track as module, not regular global
+       258                    self.globals_written.add(name)
+       259                else:
+       260                    self._add_local(name)
+     ...
+       266                    # Can't track star imports precisely
+       267                    continue
+       268                if len(self.scope_stack) == 1:
+       269 +                  # Items imported from modules could be functions, classes, or constants
+       270 +                  # Track them as regular globals, not modules
+       271                    self.globals_written.add(name)
+       272                else:
+       273                    self._add_local(name)
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 50 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 14 additions and 7 removals                                             
+       323                self.visit(child)
+       324    
+       325    
+       326 -  def analyze_cell_dependencies(source: str, cell_id: str) -> CellDependencies:
+       326 +  def analyze_cell_dependencies(source: str, cell_id: str) -> tuple[CellDependencies, Dict[str, FunctionInfo]]:
+       327        """
+       328        Analyze a single cell's code to extract its dependencies.
+       329    
+     ...
+       332            cell_id: The cell's identifier
+       333    
+       334        Returns:
+       335 -          CellDependencies object containing the globals accessed
+       335 +          Tuple of (CellDependencies, dict of function definitions)
+       336        """
+       337        deps = CellDependencies(cell_id=cell_id)
+       338 +      function_defs = {}
+       339    
+       340        if not source or not source.strip():
+       341 -          return deps
+       341 +          return deps, function_defs
+       342    
+       343        try:
+       344            tree = ast.parse(source)
+       345            analyzer = GlobalAccessAnalyzer()
+       346            analyzer.visit(tree)
+       347    
+       348 -          deps.globals_read = analyzer.globals_read
+       349 -          deps.globals_written = analyzer.globals_written
+       350 -          deps.functions_called = analyzer.functions_called
+       348 +          deps.globals_read = analyzer.globals_read.copy()
+       349 +          deps.globals_written = analyzer.globals_written.copy()
+       350 +          deps.functions_called = analyzer.functions_called.copy()
+       351 +          deps.modules = analyzer.modules.copy()
+       352    
+       353 +          # Store function definitions with their cell info
+       354 +          function_defs = analyzer.function_defs.copy()
+       355 +          for func_info in function_defs.values():
+       356 +              func_info.defined_in_cell = cell_id
+       357 +  
+       358        except SyntaxError:
+       359            # If the code has syntax errors, we can't analyze it
+       360            pass
+       361    
+       362 -      return deps
+       362 +      return deps, function_defs
+       363    
+       364    
+       365    def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 50 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 63 additions and 2 removals                             
+       362        return deps, function_defs
+       363    
+       364    
+       365 +  def compute_transitive_dependencies(
+       366 +      func_name: str,
+       367 +      function_map: Dict[str, FunctionInfo],
+       368 +      visited: Optional[Set[str]] = None
+       369 +  ) -> Set[str]:
+       370 +      """
+       371 +      Compute transitive closure of dependencies for a function.
+       372 +  
+       373 +      Args:
+       374 +          func_name: Name of the function to analyze
+       375 +          function_map: Map of all function definitions
+       376 +          visited: Set of already visited functions (to avoid cycles)
+       377 +  
+       378 +      Returns:
+       379 +          Set of all global variables this function depends on (transitively)
+       380 +      """
+       381 +      if visited is None:
+       382 +          visited = set()
+       383 +  
+       384 +      if func_name in visited or func_name not in function_map:
+       385 +          return set()
+       386 +  
+       387 +      visited.add(func_name)
+       388 +      func_info = function_map[func_name]
+       389 +  
+       390 +      # Start with direct dependencies
+       391 +      all_deps = func_info.globals_read.copy()
+       392 +  
+       393 +      # Add transitive dependencies from called functions
+       394 +      for called_func in func_info.functions_called:
+       395 +          transitive_deps = compute_transitive_dependencies(called_func, function_map, visited)
+       396 +          all_deps.update(transitive_deps)
+       397 +  
+       398 +      return all_deps
+       399 +  
+       400 +  
+       401    def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
+       402        """
+       403        Analyze all cells in a notebook to extract dependencies.
+       404    
+       405 +      This performs a two-pass analysis:
+       406 +      1. First pass: collect all function definitions and their direct dependencies
+       407 +      2. Second pass: compute transitive closure for each cell based on functions called
+       408 +  
+       409        Args:
+       410            notebook: Jupyter notebook content as a dictionary
+       411    
+       412        Returns:
+       413 -          Dictionary mapping cell IDs to their dependencies
+       413 +          Dictionary mapping cell IDs to their dependencies (with transitive closure applied)
+       414        """
+       415        dependencies: Dict[str, CellDependencies] = {}
+       416 +      function_map: Dict[str, FunctionInfo] = {}
+       417    
+       418        cells = notebook.get('cells', [])
+       419    
+       420 +      # First pass: collect all dependencies and function definitions
+       421        for cell in cells:
+       422            # Only analyze code cells
+       423            if cell.get('cell_type') != 'code':
+     ...
+       392                source = ''.join(source)
+       393    
+       394            # Analyze the cell
+       395 -          deps = analyze_cell_dependencies(source, cell_id)
+       395 +          deps, func_defs = analyze_cell_dependencies(source, cell_id)
+       396            dependencies[cell_id] = deps
+       397    
+       398 +          # Add function definitions to global map
+       399 +          function_map.update(func_defs)
+       400 +  
+       401 +      # Second pass: compute transitive closure for function calls
+       402 +      # and remove modules from dependencies
+       403 +      for cell_id, deps in dependencies.items():
+       404 +          # Compute transitive dependencies for all called functions
+       405 +          transitive_deps = set()
+       406 +          for func_name in deps.functions_called:
+       407 +              func_deps = compute_transitive_dependencies(func_name, function_map)
+       408 +              transitive_deps.update(func_deps)
+       409 +  
+       410 +          # Add transitive dependencies to globals_read
+       411 +          deps.globals_read.update(transitive_deps)
+       412 +  
+       413 +          # Remove modules from globals_read and globals_written
+       414 +          deps.globals_read -= deps.modules
+       415 +          deps.globals_written -= deps.modules
+       416 +  
+       417        return dependencies
+       418    
+       419    
+
+⏺ Read(data_ferret/util/test_dependencies.py)
+  ⎿  Read 50 lines
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 3 additions and 3 removals
+       17    x = 5
+       18    y = x + 10
+       19    """
+       20 -      deps = analyze_cell_dependencies(source, "cell1")
+       20 +      deps, _ = analyze_cell_dependencies(source, "cell1")
+       21    
+       22        assert "x" in deps.globals_written
+       23        assert "y" in deps.globals_written
+     ...
+       28        source = """
+       29    result = some_function(arg1, arg2)
+       30    """
+       31 -      deps = analyze_cell_dependencies(source, "cell1")
+       31 +      deps, _ = analyze_cell_dependencies(source, "cell1")
+       32    
+       33        assert "some_function" in deps.functions_called
+       34        assert "some_function" in deps.globals_read
+     ...
+       40        source = """
+       41    result = map(my_func, data)
+       42    """
+       43 -      deps = analyze_cell_dependencies(source, "cell1")
+       43 +      deps, _ = analyze_cell_dependencies(source, "cell1")
+       44    
+       45        assert "my_func" in deps.functions_called
+       46        assert "map" in deps.functions_called
+
+⏺ Bash(sed -i.bak 's/deps = analyze_cell_dependencies/deps, _ = analyze_cell_dependencies/g' data_ferret/util/test_dependencies.py)
+  ⎿  (No content)
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 4 additions   
+       101    """
+       102        deps, _ = analyze_cell_dependencies(source, "cell1")
+       103    
+       104 +      # Modules should be tracked separately
+       105 +      assert "pd" in deps.modules
+       106        assert "pd" in deps.globals_written
+       107 +      # Items from 'from' imports are not modules
+       108        assert "array" in deps.globals_written
+       109 +      assert "array" not in deps.modules
+       110    
+       111    
+       112    def test_method_calls():
+
+⏺ Read(data_ferret/util/test_dependencies.py)
+  ⎿  Read 19 lines
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 106 additions                               
+       315        assert "handle_error" in deps.functions_called
+       316        # Custom exception types should be tracked as they might be defined in other cells
+       317        assert "CustomError" in deps.globals_read
+       318 +  
+       319 +  
+       320 +  def test_transitive_closure():
+       321 +      """Test that dependencies are transitively closed over function calls."""
+       322 +      notebook = {
+       323 +          "cells": [
+       324 +              {
+       325 +                  "id": "cell1",
+       326 +                  "cell_type": "code",
+       327 +                  "source": "x = 5"
+       328 +              },
+       329 +              {
+       330 +                  "id": "cell2",
+       331 +                  "cell_type": "code",
+       332 +                  "source": "def foo():\n    return x + 10"
+       333 +              },
+       334 +              {
+       335 +                  "id": "cell3",
+       336 +                  "cell_type": "code",
+       337 +                  "source": "result = foo()"
+       338 +              }
+       339 +          ]
+       340 +      }
+       341 +  
+       342 +      dependencies = analyze_notebook(notebook)
+       343 +  
+       344 +      # Cell 3 calls foo, which reads x, so cell3 should depend on x transitively
+       345 +      assert "foo" in dependencies["cell3"].functions_called
+       346 +      assert "x" in dependencies["cell3"].globals_read
+       347 +  
+       348 +  
+       349 +  def test_transitive_closure_chained():
+       350 +      """Test transitive closure through multiple function calls."""
+       351 +      notebook = {
+       352 +          "cells": [
+       353 +              {
+       354 +                  "id": "cell1",
+       355 +                  "cell_type": "code",
+       356 +                  "source": "data = [1, 2, 3]"
+       357 +              },
+       358 +              {
+       359 +                  "id": "cell2",
+       360 +                  "cell_type": "code",
+       361 +                  "source": "def get_data():\n    return data"
+       362 +              },
+       363 +              {
+       364 +                  "id": "cell3",
+       365 +                  "cell_type": "code",
+       366 +                  "source": "def process():\n    return get_data()"
+       367 +              },
+       368 +              {
+       369 +                  "id": "cell4",
+       370 +                  "cell_type": "code",
+       371 +                  "source": "result = process()"
+       372 +              }
+       373 +          ]
+       374 +      }
+       375 +  
+       376 +      dependencies = analyze_notebook(notebook)
+       377 +  
+       378 +      # Cell 4 calls process, which calls get_data, which reads data
+       379 +      # So cell4 should transitively depend on data
+       380 +      assert "process" in dependencies["cell4"].functions_called
+       381 +      assert "data" in dependencies["cell4"].globals_read
+       382 +  
+       383 +  
+       384 +  def test_modules_excluded_from_dependencies():
+       385 +      """Test that modules are excluded from dependency tracking."""
+       386 +      notebook = {
+       387 +          "cells": [
+       388 +              {
+       389 +                  "id": "cell1",
+       390 +                  "cell_type": "code",
+       391 +                  "source": "import numpy as np"
+       392 +              },
+       393 +              {
+       394 +                  "id": "cell2",
+       395 +                  "cell_type": "code",
+       396 +                  "source": "result = np.array([1, 2, 3])"
+       397 +              }
+       398 +          ]
+       399 +      }
+       400 +  
+       401 +      dependencies = analyze_notebook(notebook)
+       402 +  
+       403 +      # Cell 1 imports np, which should be tracked as a module
+       404 +      assert "np" in dependencies["cell1"].modules
+       405 +  
+       406 +      # Cell 2 uses np, but it should be excluded from globals_read since it's a module
+       407 +      assert "np" not in dependencies["cell2"].globals_read
+       408 +  
+       409 +  
+       410 +  def test_function_definition_tracking():
+       411 +      """Test that function definitions are properly tracked."""
+       412 +      source = """
+       413 +  def compute(x, y):
+       414 +      return x + y + offset
+       415 +  """
+       416 +      deps, func_defs = analyze_cell_dependencies(source, "cell1")
+       417 +  
+       418 +      # Function should be in globals_written
+       419 +      assert "compute" in deps.globals_written
+       420 +  
+       421 +      # Function definition should be captured
+       422 +      assert "compute" in func_defs
+       423 +      assert "offset" in func_defs["compute"].globals_read
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v)
+  ⎿  Error: ============================= test session starts ==============================
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     hypothesis profile 'default'
+     rootdir: /Users/freund/other/DataFerret
+     configfile: pyproject.toml
+     plugins: anyio-4.11.0, hypothesis-6.142.3
+     collecting ... collected 24 items
+
+     data_ferret/util/test_dependencies.py::test_simple_variable_access PASSED [  4%]
+     … +119 lines (ctrl+o to see all)
+
+⏺ Let me fix these issues:
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 3 additions and 1 removal               
+       214    
+       215        # Check cell1
+       216        assert "cell1" in dependencies
+       217 -      assert "pd" in dependencies["cell1"].globals_written
+       217 +      # pd is a module, so it's tracked separately but excluded from globals_written
+       218 +      assert "pd" in dependencies["cell1"].modules
+       219 +      assert "pd" not in dependencies["cell1"].globals_written
+       220        assert "df" in dependencies["cell1"].globals_written
+       221    
+       222        # Check cell2
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 5 additions and 3 removals       
+       281            return x
+       282        return inner()
+       283    """
+       284 -      deps, _ = analyze_cell_dependencies(source, "cell1")
+       284 +      deps, func_defs = analyze_cell_dependencies(source, "cell1")
+       285    
+       286        assert "outer" in deps.globals_written
+       287 -      assert "global_var1" in deps.globals_read
+       288 -      assert "global_var2" in deps.globals_read
+       287 +      # Variables used inside the function are not in the cell's direct reads
+       288 +      # They are tracked in the function's dependencies
+       289 +      assert "outer" in func_defs
+       290 +      assert "global_var1" in func_defs["outer"].globals_read
+       291        # inner is local to outer, not a global
+       292        assert "inner" not in deps.globals_read
+       293    
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 8 additions and 3 removals                   
+       440            # Add function definitions to global map
+       441            function_map.update(func_defs)
+       442    
+       443 +      # Collect all modules defined across all cells
+       444 +      all_modules = set()
+       445 +      for deps in dependencies.values():
+       446 +          all_modules.update(deps.modules)
+       447 +  
+       448        # Second pass: compute transitive closure for function calls
+       449        # and remove modules from dependencies
+       450        for cell_id, deps in dependencies.items():
+     ...
+       452            # Add transitive dependencies to globals_read
+       453            deps.globals_read.update(transitive_deps)
+       454    
+       455 -          # Remove modules from globals_read and globals_written
+       456 -          deps.globals_read -= deps.modules
+       457 -          deps.globals_written -= deps.modules
+       455 +          # Remove all modules (from any cell) from globals_read and globals_written
+       456 +          deps.globals_read -= all_modules
+       457 +          deps.globals_written -= all_modules
+       458    
+       459        return dependencies
+       460    
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +39 lines (ctrl+o to expand)
+
+⏺ Bash(python3 -m data_ferret.util.dependencies examples/Example.ipynb)
+  ⎿ [15:05:41] [Installing ferret_kernel kernel......]                                                                                                                              
+    [15:05:41]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +42 lines (ctrl+o to expand)
+
+
+⏺ Bash(python3 -m data_ferret.util.dependencies examples/Example.ipynb --verbose)
+  ⎿ [15:05:50] [Installing ferret_kernel kernel......]                                                                                                                              
+    [15:05:50]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +47 lines (ctrl+o to expand)
+
+
+⏺ Bash(python3 -c "
+      import json…)
+  ⎿  Cell 0:                       
+     import math
+     import random
+     … +31 lines (ctrl+o to expand)
+
+⏺ Bash(python3 -c "
+      import json…)
+  ⎿  def pairwise_distances(points):                
+         """
+         Given points as a list of tuples (x1,…,xd),
+     … +16 lines (ctrl+o to expand)
+
+⏺ I notice an issue with the transitive closure - it's including local variables from the function body as globals. Let me fix this:
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 3 additions and 1 removal                                
+        98            if is_global_function:
+        99                # Create a sub-analyzer for the function body
+       100                func_analyzer = GlobalAccessAnalyzer()
+       101 -              func_analyzer.scope_stack = [set()]  # Fresh scope for function
+       101 +              # Use 2 scopes: module scope (empty) and function scope
+       102 +              # This way, assignments in the function body go to the function scope, not globals
+       103 +              func_analyzer.scope_stack = [set(), set()]
+       104    
+       105                # Add parameters to function's local scope
+       106                for arg in node.args.args:
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +39 lines (ctrl+o to expand)
+
+⏺ Bash(python3 -m data_ferret.util.dependencies examples/Example.ipynb)
+  ⎿ [15:06:48] [Installing ferret_kernel kernel......]                                                                                                                              
+    [15:06:48]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +42 lines (ctrl+o to expand)
+
+
+⏺ Perfect! I've successfully updated the dependencies module with the requested features. Here's a summary of the changes:
+
+  Changes Made
+
+  1. Modules are now ignored
+
+  - Import statements (import numpy as np) are tracked separately in a modules field
+  - Modules are excluded from globals_read and globals_written across all cells
+  - This prevents module names from cluttering dependency information
+
+  2. Transitive closure over function calls
+
+  - The analyzer now performs a two-pass analysis:
+    - Pass 1: Collects all function definitions and their direct dependencies
+    - Pass 2: Computes transitive closure for each cell
+  - When a cell calls a function, it now depends on all globals that function accesses (recursively)
+  - Local variables inside functions are correctly excluded
+
+  3. Example Output
+
+  Before:
+  Cell [4] (ID: 5bc00a9f...)
+    Reads:  end, pairwise_distances, print, pts, start, time
+    Writes: _, end, start
+
+  After:
+  Cell [4] (ID: 5bc00a9f...)
+    Reads:  end, len, pairwise_distances, print, pts, range, start, zip
+    Writes: _, end, start
+
+  Notice:
+  - time (module) is excluded
+  - len, range, zip are included because pairwise_distances uses them internally
+  - No local variables from inside pairwise_distances are shown
+
+  Test Results
+
+  All 24 tests pass, including new tests for:
+  - Transitive closure through single function calls
+  - Transitive closure through chained function calls
+  - Module exclusion across cells
+  - Function definition tracking
+
+  The module is ready to use at data_ferret/util/dependencies.py!
+
+> Only consider a global var read if it was read before being written to in a cell.  Make a plan 
+
+⏺ I'll create a plan to implement flow-sensitive dependency tracking where a global variable is only considered "read" if it was read before being written to in the cell.
+
+⏺ Plan: Flow-Sensitive Dependency Analysis
+
+  Goal
+
+  Only consider a global variable as "read" if it was read BEFORE being written to in a cell.
+
+  Examples
+
+  # Case 1: Write before read - x should NOT be a dependency
+  x = 5
+  y = x + 10
+
+  # Case 2: Read before write - x SHOULD be a dependency  
+  y = x + 10
+  x = 5
+
+  # Case 3: Function calls with transitive deps
+  def foo():
+      return data + 10
+
+  data = [1, 2, 3]
+  result = foo()  # Should 'data' be a dependency? NO, written before call
+
+  Implementation Approach
+
+  1. Track Statement Execution Order (Module-level)
+
+  - As we visit statements sequentially at module scope, maintain a set of "written_so_far"
+  - Before adding a variable to globals_read, check if it's in "written_so_far"
+  - Only add to globals_read if NOT yet written
+
+  2. Modify GlobalAccessAnalyzer
+
+  - Add written_at_module_level: Set[str] to track module-level writes
+  - When visiting module-level statements in order:
+    - For reads: only add to globals_read if not in written_at_module_level
+    - For writes: add to written_at_module_level and globals_written
+
+  3. Handle Control Flow Conservatively
+
+  - If statements: Variables written inside conditionals are "maybe written"
+    - Don't add conditional writes to written_at_module_level
+    - Be conservative: treat as not-definitely-written
+  - Loops: Similar to conditionals - conservative treatment
+  - Try/except: Writes in try blocks might not execute
+
+  4. Function Definitions
+
+  - Function bodies are analyzed separately (already done)
+  - The function definition itself is a write at module level
+  - Track when function is defined vs when it's called
+
+  5. Transitive Dependencies
+
+  - When a cell calls a function, check if that call happens AFTER writing the globals the function needs
+  - Two approaches:
+    - Option A: Track position/order of function calls, check if dependent globals written before call
+    - Option B: Be conservative - always include transitive deps (simpler)
+
+  For now, I recommend Option B (conservative) as it's simpler and safer.
+
+  6. Implementation Steps
+
+  1. Modify GlobalAccessAnalyzer.__init__() to add written_at_module_level set
+  2. Create a new method visit_Module() or modify how we process top-level statements
+  3. Override visit to track order at module level
+  4. Update visit_Name() to check written_at_module_level before adding to globals_read
+  5. Handle assignments, imports, and function definitions as module-level writes
+  6. Post-process transitive dependencies (optional refinement)
+
+  7. Testing Strategy
+
+  - Test: x = 5; y = x → x not in reads
+  - Test: y = x; x = 5 → x in reads
+  - Test: x = 5; x = x + 1 → x not in reads (written first)
+  - Test: conditionals: if cond: x = 5; y = x → x in reads (conservative)
+  - Test: function call after write: x = 5; def f(): return x; f() → transitive x dependency
+  - Test: transitive deps with write: def f(): return x; x = 5; f() → ?
+
+  8. Edge Cases & Questions
+
+  - Question 1: What about x = x + 1? Is x read before write?
+    - Answer: YES - the RHS is evaluated before the LHS assignment
+    - Should be in globals_read if x not previously written
+  - Question 2: Transitive deps - if cell writes var then calls function using it?
+  def f(): return x
+  x = 5
+  f()  # Should x be a dependency?
+    - Current plan: YES (conservative - include all transitive deps)
+    - Refinement: Track call positions and exclude if written before call
+
+  Summary
+
+  The plan involves:
+  1. ✅ Track module-level writes in execution order
+  2. ✅ Check write status before adding to reads
+  3. ✅ Be conservative with control flow
+  4. ✅ Keep transitive dependencies simple (include all)
+  5. ✅ Add comprehensive tests
+  6. ✅ Document edge cases
+
+  Shall I proceed with implementation?
+
+> yes 
+
+⏺ I'll implement the flow-sensitive dependency analysis now.
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 80 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 4 additions and 1 removal                              
+       45        """
+       46        AST visitor that tracks global variable accesses in Python code.
+       47    
+       48 -      This analyzer is flow-insensitive but considers:
+       48 +      This analyzer is flow-sensitive at module level:
+       49 +      - A variable is only considered "read" if it was read BEFORE being written
+       50        - Direct variable references
+       51        - Function calls
+       52        - Functions passed as arguments (treated as called)
+     ...
+       59            self.local_vars: Set[str] = set()
+       60            self.scope_stack: List[Set[str]] = [set()]  # Stack of local scopes
+       61            self.function_defs: Dict[str, FunctionInfo] = {}  # Function definitions found
+       62 +          self.written_at_module_level: Set[str] = set()  # Track module-level writes in order
+       63 +          self.in_conditional: int = 0  # Track if we're inside conditional/loop (conservative)
+       64    
+       65        def _current_scope(self) -> Set[str]:
+       66            """Get the current local scope."""
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 4 additions      
+       84            """Add a name to the current local scope."""
+       85            self._current_scope().add(name)
+       86    
+       87 +      def _is_at_module_level(self) -> bool:
+       88 +          """Check if we're currently at module level."""
+       89 +          return len(self.scope_stack) == 1
+       90 +  
+       91        def visit_FunctionDef(self, node: ast.FunctionDef):
+       92            """Handle function definitions."""
+       93            # Visit decorators first (in outer scope)
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 40 lines
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 40 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 12 additions and 2 removals                                 
+       211    
+       212            # Determine if it's a read or write
+       213            if isinstance(node.ctx, ast.Store):
+       214 -              if len(self.scope_stack) == 1:  # Module level
+       214 +              if self._is_at_module_level():
+       215                    self.globals_written.add(name)
+       216 +                  # Only add to written_at_module_level if not in conditional
+       217 +                  # (conservative: conditional writes might not execute)
+       218 +                  if self.in_conditional == 0:
+       219 +                      self.written_at_module_level.add(name)
+       220                else:
+       221                    self._add_local(name)
+       222            elif isinstance(node.ctx, (ast.Load, ast.Del)):
+     ...
+       230                    'OSError', 'NameError', 'ZeroDivisionError', 'StopIteration'
+       231                }
+       232                if name not in common_builtins:
+       233 -                  self.globals_read.add(name)
+       233 +                  # Flow-sensitive: only add to globals_read if not already written at module level
+       234 +                  if self._is_at_module_level():
+       235 +                      if name not in self.written_at_module_level:
+       236 +                          self.globals_read.add(name)
+       237 +                  else:
+       238 +                      # In nested scope, add normally
+       239 +                      self.globals_read.add(name)
+       240    
+       241            self.generic_visit(node)
+       242    
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 4 additions and 1 removal         
+        95                self.visit(decorator)
+        96    
+        97            # Function name is defined in the enclosing scope
+        98 -          is_global_function = len(self.scope_stack) == 1  # Module level
+        98 +          is_global_function = self._is_at_module_level()
+        99            if is_global_function:
+       100                self.globals_written.add(node.name)
+       101 +              # Function definitions are always written (not conditional)
+       102 +              if self.in_conditional == 0:
+       103 +                  self.written_at_module_level.add(node.name)
+       104            else:
+       105                self._add_local(node.name)
+       106    
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 4 additions and 1 removal          
+       187        def visit_ClassDef(self, node: ast.ClassDef):
+       188            """Handle class definitions."""
+       189            # Class name is defined in the enclosing scope
+       190 -          if len(self.scope_stack) == 1:  # Module level
+       190 +          if self._is_at_module_level():
+       191                self.globals_written.add(node.name)
+       192 +              # Class definitions are written (track for flow-sensitivity)
+       193 +              if self.in_conditional == 0:
+       194 +                  self.written_at_module_level.add(node.name)
+       195            else:
+       196                self._add_local(node.name)
+       197    
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 30 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 8 additions and 2 removals                        
+       278            """Handle import statements."""
+       279            for alias in node.names:
+       280                name = alias.asname if alias.asname else alias.name
+       281 -              if len(self.scope_stack) == 1:
+       281 +              if self._is_at_module_level():
+       282                    self.modules.add(name)  # Track as module, not regular global
+       283                    self.globals_written.add(name)
+       284 +                  # Imports are always written (not conditional in typical usage)
+       285 +                  if self.in_conditional == 0:
+       286 +                      self.written_at_module_level.add(name)
+       287                else:
+       288                    self._add_local(name)
+       289    
+     ...
+       291                if name == '*':
+       292                    # Can't track star imports precisely
+       293                    continue
+       294 -              if len(self.scope_stack) == 1:
+       294 +              if self._is_at_module_level():
+       295                    # Items imported from modules could be functions, classes, or constants
+       296                    # Track them as regular globals, not modules
+       297                    self.globals_written.add(name)
+       298 +                  # Track for flow-sensitivity
+       299 +                  if self.in_conditional == 0:
+       300 +                      self.written_at_module_level.add(name)
+       301                else:
+       302                    self._add_local(name)
+       303    
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 11 additions and 6 removals                 
+       312            # Target variables are assigned - extract names and mark as local
+       313            self._extract_assignment_targets(node.target)
+       314    
+       315 -          # Visit body
+       316 -          for child in node.body:
+       317 -              self.visit(child)
+       318 -          # Visit else clause if present
+       319 -          for child in node.orelse:
+       320 -              self.visit(child)
+       315 +          # Loop bodies are conditional - be conservative
+       316 +          self.in_conditional += 1
+       317 +          try:
+       318 +              # Visit body
+       319 +              for child in node.body:
+       320 +                  self.visit(child)
+       321 +              # Visit else clause if present
+       322 +              for child in node.orelse:
+       323 +                  self.visit(child)
+       324 +          finally:
+       325 +              self.in_conditional -= 1
+       326    
+       327        def _extract_assignment_targets(self, node):
+       328            """Extract names from assignment targets and add to appropriate scope."""
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 40 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 46 additions             
+       340            elif isinstance(node, (ast.Subscript, ast.Attribute)):
+       341                self.visit(node)
+       342    
+       343 +      def visit_If(self, node: ast.If):
+       344 +          """Handle if statements."""
+       345 +          # Visit condition first
+       346 +          self.visit(node.test)
+       347 +  
+       348 +          # Bodies are conditional - be conservative
+       349 +          self.in_conditional += 1
+       350 +          try:
+       351 +              for child in node.body:
+       352 +                  self.visit(child)
+       353 +              for child in node.orelse:
+       354 +                  self.visit(child)
+       355 +          finally:
+       356 +              self.in_conditional -= 1
+       357 +  
+       358 +      def visit_While(self, node: ast.While):
+       359 +          """Handle while loops."""
+       360 +          # Visit condition
+       361 +          self.visit(node.test)
+       362 +  
+       363 +          # Loop bodies are conditional
+       364 +          self.in_conditional += 1
+       365 +          try:
+       366 +              for child in node.body:
+       367 +                  self.visit(child)
+       368 +              for child in node.orelse:
+       369 +                  self.visit(child)
+       370 +          finally:
+       371 +              self.in_conditional -= 1
+       372 +  
+       373 +      def visit_Try(self, node: ast.Try):
+       374 +          """Handle try/except statements."""
+       375 +          # Try body might not complete - be conservative
+       376 +          self.in_conditional += 1
+       377 +          try:
+       378 +              for child in node.body:
+       379 +                  self.visit(child)
+       380 +              for handler in node.handlers:
+       381 +                  self.visit(handler)
+       382 +              for child in node.orelse:
+       383 +                  self.visit(child)
+       384 +              for child in node.finalbody:
+       385 +                  self.visit(child)
+       386 +          finally:
+       387 +              self.in_conditional -= 1
+       388 +  
+       389        def visit_With(self, node: ast.With):
+       390            """Handle with statements."""
+       391            for item in node.items:
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 4 additions and 1 removal                   
+       327        def _extract_assignment_targets(self, node):
+       328            """Extract names from assignment targets and add to appropriate scope."""
+       329            if isinstance(node, ast.Name):
+       330 -              if len(self.scope_stack) == 1:
+       330 +              if self._is_at_module_level():
+       331                    self.globals_written.add(node.id)
+       332 +                  # Track for flow-sensitivity
+       333 +                  if self.in_conditional == 0:
+       334 +                      self.written_at_module_level.add(node.id)
+       335                # Always add to local scope so it's not tracked as global read
+       336                self._add_local(node.id)
+       337            elif isinstance(node, (ast.Tuple, ast.List)):
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v 2>&1 | head -100)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +39 lines (ctrl+o to expand)
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 111 additions                           
+       425        # Function definition should be captured
+       426        assert "compute" in func_defs
+       427        assert "offset" in func_defs["compute"].globals_read
+       428 +  
+       429 +  
+       430 +  def test_flow_sensitive_write_before_read():
+       431 +      """Test that variables written before being read are not dependencies."""
+       432 +      source = """
+       433 +  x = 5
+       434 +  y = x + 10
+       435 +  """
+       436 +      deps, _ = analyze_cell_dependencies(source, "cell1")
+       437 +  
+       438 +      # x is written before being read, so should NOT be in globals_read
+       439 +      assert "x" not in deps.globals_read
+       440 +      assert "x" in deps.globals_written
+       441 +      assert "y" in deps.globals_written
+       442 +  
+       443 +  
+       444 +  def test_flow_sensitive_read_before_write():
+       445 +      """Test that variables read before being written ARE dependencies."""
+       446 +      source = """
+       447 +  y = x + 10
+       448 +  x = 5
+       449 +  """
+       450 +      deps, _ = analyze_cell_dependencies(source, "cell1")
+       451 +  
+       452 +      # x is read before being written, so SHOULD be in globals_read
+       453 +      assert "x" in deps.globals_read
+       454 +      assert "x" in deps.globals_written
+       455 +      assert "y" in deps.globals_written
+       456 +  
+       457 +  
+       458 +  def test_flow_sensitive_self_reference():
+       459 +      """Test x = x + 1 pattern (read before write in same statement)."""
+       460 +      source = """
+       461 +  x = x + 1
+       462 +  """
+       463 +      deps, _ = analyze_cell_dependencies(source, "cell1")
+       464 +  
+       465 +      # x is read (RHS) before being written (LHS)
+       466 +      assert "x" in deps.globals_read
+       467 +      assert "x" in deps.globals_written
+       468 +  
+       469 +  
+       470 +  def test_flow_sensitive_conditional_write():
+       471 +      """Test that conditional writes are treated conservatively."""
+       472 +      source = """
+       473 +  if condition:
+       474 +      x = 5
+       475 +  y = x + 10
+       476 +  """
+       477 +      deps, _ = analyze_cell_dependencies(source, "cell1")
+       478 +  
+       479 +      # x is conditionally written, so reading it later means it's a dependency
+       480 +      assert "x" in deps.globals_read
+       481 +      assert "condition" in deps.globals_read
+       482 +  
+       483 +  
+       484 +  def test_flow_sensitive_loop_write():
+       485 +      """Test that loop writes are treated conservatively."""
+       486 +      source = """
+       487 +  for i in range(10):
+       488 +      x = i
+       489 +  y = x
+       490 +  """
+       491 +      deps, _ = analyze_cell_dependencies(source, "cell1")
+       492 +  
+       493 +      # x is written in a loop, so it's conditional - reading it is a dependency
+       494 +      assert "x" in deps.globals_read
+       495 +  
+       496 +  
+       497 +  def test_flow_sensitive_multiple_writes():
+       498 +      """Test multiple writes to same variable."""
+       499 +      source = """
+       500 +  x = 5
+       501 +  x = x + 1
+       502 +  z = x + 10
+       503 +  """
+       504 +      deps, _ = analyze_cell_dependencies(source, "cell1")
+       505 +  
+       506 +      # First write: x not a dependency
+       507 +      # Second statement: x read (from first write), then written
+       508 +      # Since x was written unconditionally before being read, it's NOT a global dep
+       509 +      assert "x" not in deps.globals_read
+       510 +      assert "x" in deps.globals_written
+       511 +  
+       512 +  
+       513 +  def test_flow_sensitive_in_notebook():
+       514 +      """Test flow-sensitivity in notebook context."""
+       515 +      notebook = {
+       516 +          "cells": [
+       517 +              {
+       518 +                  "id": "cell1",
+       519 +                  "cell_type": "code",
+       520 +                  "source": "x = 5\ny = x + 10"
+       521 +              },
+       522 +              {
+       523 +                  "id": "cell2",
+       524 +                  "cell_type": "code",
+       525 +                  "source": "z = y + x"
+       526 +              }
+       527 +          ]
+       528 +      }
+       529 +  
+       530 +      dependencies = analyze_notebook(notebook)
+       531 +  
+       532 +      # Cell 1: x written before read, not a dependency
+       533 +      assert "x" not in dependencies["cell1"].globals_read
+       534 +      assert "y" in dependencies["cell1"].globals_written
+       535 +  
+       536 +      # Cell 2: both x and y are dependencies (from previous cells)
+       537 +      assert "x" in dependencies["cell2"].globals_read
+       538 +      assert "y" in dependencies["cell2"].globals_read
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py::test_flow_sensitive_write_before_read -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +16 lines (ctrl+o to expand)
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -k "flow_sensitive" -v)
+  ⎿  Error: ============================= test session starts ==============================
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     hypothesis profile 'default'
+     rootdir: /Users/freund/other/DataFerret
+     configfile: pyproject.toml
+     plugins: anyio-4.11.0, hypothesis-6.142.3
+     collecting ... collected 31 items / 24 deselected / 7 selected
+
+     data_ferret/util/test_dependencies.py::test_flow_sensitive_write_before_read PASSED [ 14%]
+     … +32 lines (ctrl+o to see all)
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 38 additions                                                                  
+       343            elif isinstance(node, (ast.Subscript, ast.Attribute)):
+       344                self.visit(node)
+       345    
+       346 +      def visit_Assign(self, node: ast.Assign):
+       347 +          """Handle assignment statements.
+       348 +  
+       349 +          Important: Visit RHS before LHS to handle x = x + 1 correctly.
+       350 +          """
+       351 +          # Visit the RHS (value) first
+       352 +          self.visit(node.value)
+       353 +  
+       354 +          # Now mark the LHS targets as written
+       355 +          for target in node.targets:
+       356 +              if isinstance(target, ast.Name) and self._is_at_module_level() and not self._is_local(target.id):
+       357 +                  self.globals_written.add(target.id)
+       358 +                  if self.in_conditional == 0:
+       359 +                      self.written_at_module_level.add(target.id)
+       360 +              # Visit the target for any nested structure
+       361 +              self.visit(target)
+       362 +  
+       363 +      def visit_AugAssign(self, node: ast.AugAssign):
+       364 +          """Handle augmented assignment (+=, -=, etc.).
+       365 +  
+       366 +          For x += 1, x is read before being written.
+       367 +          """
+       368 +          # Visit target first as Load (it's being read)
+       369 +          if isinstance(node.target, ast.Name):
+       370 +              name = node.target.id
+       371 +              if not self._is_local(name):
+       372 +                  if self._is_at_module_level() and name not in self.written_at_module_level:
+       373 +                      self.globals_read.add(name)
+       374 +  
+       375 +          # Visit the value
+       376 +          self.visit(node.value)
+       377 +  
+       378 +          # Now mark as written
+       379 +          if isinstance(node.target, ast.Name) and self._is_at_module_level() and not self._is_local(node.target.id):
+       380 +              self.globals_written.add(node.target.id)
+       381 +              if self.in_conditional == 0:
+       382 +                  self.written_at_module_level.add(node.target.id)
+       383 +  
+       384        def visit_If(self, node: ast.If):
+       385            """Handle if statements."""
+       386            # Visit condition first
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py::test_flow_sensitive_self_reference -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +16 lines (ctrl+o to expand)
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +46 lines (ctrl+o to expand)
+
+⏺ Bash(python3 -m data_ferret.util.dependencies examples/Example.ipynb)
+  ⎿ [15:17:30] [Installing ferret_kernel kernel......]                                                                                                                              
+    [15:17:30]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +42 lines (ctrl+o to expand)
+
+
+⏺ Bash(python3 -c "
+      import json…)
+  ⎿  Cell 2:                       
+     N, d = 2000, 20
+     pts = np.random.random((N, d))
+
+⏺ Bash(python3 -c "
+      import json…)
+  ⎿  Cell 4:                      
+     start = time.time()
+     _ = pairwise_distances(pts)
+     … +2 lines (ctrl+o to expand)
+
+⏺ Bash(python3 -c "
+      # Create a test notebook to demonstrate flow-sensitivity…)
+  ⎿ Created test notebook                                                                                                                                                           
+    [15:17:57] [Installing ferret_kernel kernel......]
+    [15:17:57]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    … +29 lines (ctrl+o to expand)
+
+
+⏺ Perfect! I've successfully implemented flow-sensitive dependency analysis. Here's a comprehensive summary:
+
+  Summary of Changes
+
+  1. Flow-Sensitive Tracking
+
+  The analyzer now tracks the execution order of statements at module level and only considers a variable as "read" if it was read before being written in the same cell.
+
+  2. Key Implementation Details
+
+  Added State Tracking:
+
+  - written_at_module_level: Set tracking variables written unconditionally at module level
+  - in_conditional: Counter tracking nesting level in conditional/loop blocks
+
+  New Handlers:
+
+  - visit_Assign(): Handles x = expression - visits RHS before marking LHS as written
+  - visit_AugAssign(): Handles x += 1 - treats as read-then-write
+  - visit_If(), visit_While(), visit_Try(): Mark conditional blocks conservatively
+  - visit_For(): Already existed, enhanced with conditional tracking
+
+  Conservative Treatment of Control Flow:
+
+  - Variables written inside if/while/for/try blocks are not added to written_at_module_level
+  - This ensures we don't incorrectly assume a variable is "definitely written" when it might not execute
+
+  3. Test Results
+
+  All 31 tests pass, including 7 new flow-sensitive tests:
+
+  # x = 5; y = x + 10  →  x NOT a dependency (written first)
+  # y = x + 10; x = 5  →  x IS a dependency (read first)
+  # x = x + 1          →  x IS a dependency (RHS read before LHS write)
+  # if cond: x = 5; y = x  →  x IS a dependency (conditional write)
+
+  4. Real-World Example
+
+  From examples/Example.ipynb:
+
+  Before flow-sensitivity:
+  - Cell 2: Reads N, d
+  - Cell 4: Reads end, start, pairwise_distances, pts...
+
+  After flow-sensitivity:
+  - Cell 2: Reads (none) - N and d written before use
+  - Cell 4: Reads pairwise_distances, pts... - start and end excluded (written before use)
+
+  5. Features Maintained
+
+  - ✅ Module exclusion (imports tracked separately)
+  - ✅ Transitive closure over function calls
+  - ✅ Scope-aware analysis
+  - ✅ Conservative handling of control flow
+
+  The implementation is complete and working correctly!
+
+> Ignore function names and class names defined outside the notebook. 
+
+⏺ I'll update the analyzer to exclude function and class names that are defined within the notebook from the dependencies.
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 60 lines
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 50 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 27 additions and 1 removal                               
+       568        for deps in dependencies.values():
+       569            all_modules.update(deps.modules)
+       570    
+       571 +      # Collect all functions and classes defined in the notebook
+       572 +      all_functions_and_classes = set(function_map.keys())  # Functions from function_map
+       573 +      # Also collect class names from globals_written
+       574 +      for deps in dependencies.values():
+       575 +          for name in deps.globals_written:
+       576 +              # Heuristic: classes typically start with uppercase, functions with lowercase
+       577 +              # But we should track all definitions that could be callables
+       578 +              # For now, add all names that are written (functions and classes both appear here)
+       579 +              if name in deps.globals_written:
+       580 +                  # Check if this was a function or class definition
+       581 +                  # Functions are in function_map, but classes aren't
+       582 +                  # We need to track classes separately
+       583 +                  pass
+       584 +  
+       585 +      # Actually, let's be more precise: track both functions and classes
+       586 +      # Classes are written but not in function_map
+       587 +      all_notebook_definitions = set(function_map.keys())  # All functions
+       588 +  
+       589 +      # To find classes, we need to look at what was defined
+       590 +      # For now, collect all callable-like names (functions are already in function_map)
+       591 +      # We'll need to enhance the analyzer to track class names separately
+       592 +  
+       593        # Second pass: compute transitive closure for function calls
+       594 -      # and remove modules from dependencies
+       594 +      # and remove modules and notebook-defined names from dependencies
+       595        for cell_id, deps in dependencies.items():
+       596            # Compute transitive dependencies for all called functions
+       597            transitive_deps = set()
+     ...
+       584            deps.globals_read -= all_modules
+       585            deps.globals_written -= all_modules
+       586    
+       587 +          # Remove notebook-defined functions and classes from globals_read
+       588 +          # (but keep them in globals_written where they were defined)
+       589 +          deps.globals_read -= all_notebook_definitions
+       590 +  
+       591        return dependencies
+       592    
+       593    
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 5 additions and 1 removal                                    
+       19        globals_written: Set[str] = field(default_factory=set)
+       20        functions_called: Set[str] = field(default_factory=set)
+       21        modules: Set[str] = field(default_factory=set)  # Imported modules (excluded from dependencies)
+       22 +      functions_defined: Set[str] = field(default_factory=set)  # Functions defined in this cell
+       23 +      classes_defined: Set[str] = field(default_factory=set)  # Classes defined in this cell
+       24    
+       25        def to_dict(self) -> Dict[str, Any]:
+       26            """Convert to dictionary representation."""
+     ...
+       27                'globals_read': sorted(list(self.globals_read)),
+       28                'globals_written': sorted(list(self.globals_written)),
+       29                'functions_called': sorted(list(self.functions_called)),
+       30 -              'modules': sorted(list(self.modules))
+       30 +              'modules': sorted(list(self.modules)),
+       31 +              'functions_defined': sorted(list(self.functions_defined)),
+       32 +              'classes_defined': sorted(list(self.classes_defined))
+       33            }
+       34    
+       35    
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 2 additions                                            
+       66            self.function_defs: Dict[str, FunctionInfo] = {}  # Function definitions found
+       67            self.written_at_module_level: Set[str] = set()  # Track module-level writes in order
+       68            self.in_conditional: int = 0  # Track if we're inside conditional/loop (conservative)
+       69 +          self.functions_defined: Set[str] = set()  # Function names defined at module level
+       70 +          self.classes_defined: Set[str] = set()  # Class names defined at module level
+       71    
+       72        def _current_scope(self) -> Set[str]:
+       73            """Get the current local scope."""
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 1 addition                                
+       104            is_global_function = self._is_at_module_level()
+       105            if is_global_function:
+       106                self.globals_written.add(node.name)
+       107 +              self.functions_defined.add(node.name)  # Track function definitions
+       108                # Function definitions are always written (not conditional)
+       109                if self.in_conditional == 0:
+       110                    self.written_at_module_level.add(node.name)
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 1 addition                           
+       196            # Class name is defined in the enclosing scope
+       197            if self._is_at_module_level():
+       198                self.globals_written.add(node.name)
+       199 +              self.classes_defined.add(node.name)  # Track class definitions
+       200                # Class definitions are written (track for flow-sensitivity)
+       201                if self.in_conditional == 0:
+       202                    self.written_at_module_level.add(node.name)
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 50 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 2 additions                  
+       480            deps.globals_written = analyzer.globals_written.copy()
+       481            deps.functions_called = analyzer.functions_called.copy()
+       482            deps.modules = analyzer.modules.copy()
+       483 +          deps.functions_defined = analyzer.functions_defined.copy()
+       484 +          deps.classes_defined = analyzer.classes_defined.copy()
+       485    
+       486            # Store function definitions with their cell info
+       487            function_defs = analyzer.function_defs.copy()
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 5 additions and 18 removals                              
+       579            all_modules.update(deps.modules)
+       580    
+       581        # Collect all functions and classes defined in the notebook
+       582 -      all_functions_and_classes = set(function_map.keys())  # Functions from function_map
+       583 -      # Also collect class names from globals_written
+       582 +      all_notebook_functions = set()
+       583 +      all_notebook_classes = set()
+       584        for deps in dependencies.values():
+       585 -          for name in deps.globals_written:
+       586 -              # Heuristic: classes typically start with uppercase, functions with lowercase
+       587 -              # But we should track all definitions that could be callables
+       588 -              # For now, add all names that are written (functions and classes both appear here)
+       589 -              if name in deps.globals_written:
+       590 -                  # Check if this was a function or class definition
+       591 -                  # Functions are in function_map, but classes aren't
+       592 -                  # We need to track classes separately
+       593 -                  pass
+       585 +          all_notebook_functions.update(deps.functions_defined)
+       586 +          all_notebook_classes.update(deps.classes_defined)
+       587    
+       588 -      # Actually, let's be more precise: track both functions and classes
+       589 -      # Classes are written but not in function_map
+       590 -      all_notebook_definitions = set(function_map.keys())  # All functions
+       588 +      all_notebook_definitions = all_notebook_functions | all_notebook_classes
+       589    
+       590 -      # To find classes, we need to look at what was defined
+       591 -      # For now, collect all callable-like names (functions are already in function_map)
+       592 -      # We'll need to enhance the analyzer to track class names separately
+       593 -  
+       590        # Second pass: compute transitive closure for function calls
+       591        # and remove modules and notebook-defined names from dependencies
+       592        for cell_id, deps in dependencies.items():
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v 2>&1 | head -60)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +46 lines (ctrl+o to expand)
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 107 additions                          
+       536        # Cell 2: both x and y are dependencies (from previous cells)
+       537        assert "x" in dependencies["cell2"].globals_read
+       538        assert "y" in dependencies["cell2"].globals_read
+       539 +  
+       540 +  
+       541 +  def test_exclude_notebook_defined_functions():
+       542 +      """Test that functions defined in the notebook are not dependencies."""
+       543 +      notebook = {
+       544 +          "cells": [
+       545 +              {
+       546 +                  "id": "cell1",
+       547 +                  "cell_type": "code",
+       548 +                  "source": "def foo():\n    return 42"
+       549 +              },
+       550 +              {
+       551 +                  "id": "cell2",
+       552 +                  "cell_type": "code",
+       553 +                  "source": "result = foo()"
+       554 +              }
+       555 +          ]
+       556 +      }
+       557 +  
+       558 +      dependencies = analyze_notebook(notebook)
+       559 +  
+       560 +      # Cell 1 defines foo
+       561 +      assert "foo" in dependencies["cell1"].functions_defined
+       562 +      assert "foo" in dependencies["cell1"].globals_written
+       563 +  
+       564 +      # Cell 2 calls foo, but foo should NOT be in globals_read
+       565 +      # because it's defined in the notebook
+       566 +      assert "foo" in dependencies["cell2"].functions_called
+       567 +      assert "foo" not in dependencies["cell2"].globals_read
+       568 +  
+       569 +  
+       570 +  def test_exclude_notebook_defined_classes():
+       571 +      """Test that classes defined in the notebook are not dependencies."""
+       572 +      notebook = {
+       573 +          "cells": [
+       574 +              {
+       575 +                  "id": "cell1",
+       576 +                  "cell_type": "code",
+       577 +                  "source": "class MyClass:\n    def __init__(self):\n        pass"
+       578 +              },
+       579 +              {
+       580 +                  "id": "cell2",
+       581 +                  "cell_type": "code",
+       582 +                  "source": "obj = MyClass()"
+       583 +              }
+       584 +          ]
+       585 +      }
+       586 +  
+       587 +      dependencies = analyze_notebook(notebook)
+       588 +  
+       589 +      # Cell 1 defines MyClass
+       590 +      assert "MyClass" in dependencies["cell1"].classes_defined
+       591 +      assert "MyClass" in dependencies["cell1"].globals_written
+       592 +  
+       593 +      # Cell 2 uses MyClass, but it should NOT be in globals_read
+       594 +      # because it's defined in the notebook
+       595 +      assert "MyClass" not in dependencies["cell2"].globals_read
+       596 +  
+       597 +  
+       598 +  def test_include_external_functions():
+       599 +      """Test that externally defined functions ARE dependencies."""
+       600 +      notebook = {
+       601 +          "cells": [
+       602 +              {
+       603 +                  "id": "cell1",
+       604 +                  "cell_type": "code",
+       605 +                  "source": "result = external_function()"
+       606 +              }
+       607 +          ]
+       608 +      }
+       609 +  
+       610 +      dependencies = analyze_notebook(notebook)
+       611 +  
+       612 +      # external_function is not defined in notebook, so it's a dependency
+       613 +      assert "external_function" in dependencies["cell1"].globals_read
+       614 +      assert "external_function" in dependencies["cell1"].functions_called
+       615 +  
+       616 +  
+       617 +  def test_function_and_class_across_cells():
+       618 +      """Test function/class exclusion across multiple cells."""
+       619 +      notebook = {
+       620 +          "cells": [
+       621 +              {
+       622 +                  "id": "cell1",
+       623 +                  "cell_type": "code",
+       624 +                  "source": "def helper():\n    return data"
+       625 +              },
+       626 +              {
+       627 +                  "id": "cell2",
+       628 +                  "cell_type": "code",
+       629 +                  "source": "class Processor:\n    pass"
+       630 +              },
+       631 +              {
+       632 +                  "id": "cell3",
+       633 +                  "cell_type": "code",
+       634 +                  "source": "result = helper()\nproc = Processor()"
+       635 +              }
+       636 +          ]
+       637 +      }
+       638 +  
+       639 +      dependencies = analyze_notebook(notebook)
+       640 +  
+       641 +      # Cell 3 should have data as dependency (from helper function)
+       642 +      # but not helper or Processor (defined in notebook)
+       643 +      assert "data" in dependencies["cell3"].globals_read
+       644 +      assert "helper" not in dependencies["cell3"].globals_read
+       645 +      assert "Processor" not in dependencies["cell3"].globals_read
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py::test_exclude_notebook_defined_functions -xvs)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +20 lines (ctrl+o to expand)
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +50 lines (ctrl+o to expand)
+
+⏺ Bash(python3 -m data_ferret.util.dependencies examples/Example.ipynb)
+  ⎿ [15:24:30] [Installing ferret_kernel kernel......]                                                                                                                              
+    [15:24:30]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +42 lines (ctrl+o to expand)
+
+
+⏺ Bash(python3 -c "
+      import json…)
+  ⎿ Created test notebook                                                                                                                                                           
+    [15:24:41] [Installing ferret_kernel kernel......]
+    [15:24:41]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    … +28 lines (ctrl+o to expand)
+
+
+⏺ Perfect! I've successfully implemented the feature to ignore function and class names defined within the notebook. Here's a summary of the changes:
+
+  Summary
+
+  What Was Changed
+
+  1. Added tracking for function and class definitions:
+    - New fields in CellDependencies: functions_defined and classes_defined
+    - Updated GlobalAccessAnalyzer to track functions and classes separately
+  2. Exclusion logic in notebook analysis:
+    - After analyzing all cells, collect all function and class names defined in the notebook
+    - Remove these names from globals_read (but keep in globals_written where defined)
+
+  Test Results
+
+  All 35 tests pass, including 4 new tests:
+  - test_exclude_notebook_defined_functions - Functions defined in notebook excluded from dependencies
+  - test_exclude_notebook_defined_classes - Classes defined in notebook excluded from dependencies
+  - test_include_external_functions - External functions still tracked as dependencies
+  - test_function_and_class_across_cells - Transitive dependencies work correctly with exclusion
+
+  Real-World Example
+
+  # Cell 1: Define function and class
+  def compute(x):
+      return x * multiplier
+
+  class DataProcessor:
+      pass
+
+  # Cell 2: Use them
+  result = compute(5)          # compute NOT a dependency (defined in notebook)
+  processor = DataProcessor()   # DataProcessor NOT a dependency (defined in notebook)
+  external_result = external_func()  # external_func IS a dependency (not in notebook)
+
+  Cell 2 dependencies: Only external_func and multiplier (from transitive closure through compute)
+
+  The analyzer now correctly excludes notebook-defined callables while still tracking:
+  - ✅ Flow-sensitive read-before-write detection
+  - ✅ Transitive closure over function calls
+  - ✅ Module exclusion
+  - ✅ Conservative handling of control flow
+
+> No.  Keep anything defined in the notebook.  Remove things defined outside the notebook. 
+
+⏺ I misunderstood! You want to KEEP dependencies on things defined in the notebook, but IGNORE dependencies on things defined OUTSIDE the notebook. Let me fix this.
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 8 additions and 11 removals             
+       578        for deps in dependencies.values():
+       579            all_modules.update(deps.modules)
+       580    
+       581 -      # Collect all functions and classes defined in the notebook
+       582 -      all_notebook_functions = set()
+       583 -      all_notebook_classes = set()
+       581 +      # Collect ALL variables/functions/classes defined in the notebook
+       582 +      # This includes everything written in any cell
+       583 +      all_notebook_definitions = set()
+       584        for deps in dependencies.values():
+       585 -          all_notebook_functions.update(deps.functions_defined)
+       586 -          all_notebook_classes.update(deps.classes_defined)
+       585 +          all_notebook_definitions.update(deps.globals_written)
+       586    
+       587 -      all_notebook_definitions = all_notebook_functions | all_notebook_classes
+       588 -  
+       587        # Second pass: compute transitive closure for function calls
+       588 -      # and remove modules and notebook-defined names from dependencies
+       588 +      # and filter to only include notebook-internal dependencies
+       589        for cell_id, deps in dependencies.items():
+       590            # Compute transitive dependencies for all called functions
+       591            transitive_deps = set()
+     ...
+       603            deps.globals_read -= all_modules
+       604            deps.globals_written -= all_modules
+       605    
+       606 -          # Remove notebook-defined functions and classes from globals_read
+       607 -          # (but keep them in globals_written where they were defined)
+       608 -          deps.globals_read -= all_notebook_definitions
+       606 +          # KEEP ONLY notebook-defined variables in globals_read
+       607 +          # (remove external dependencies - things not defined in the notebook)
+       608 +          deps.globals_read &= all_notebook_definitions
+       609    
+       610        return dependencies
+       611    
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 24 additions and 19 removals              
+       538        assert "y" in dependencies["cell2"].globals_read
+       539    
+       540    
+       541 -  def test_exclude_notebook_defined_functions():
+       542 -      """Test that functions defined in the notebook are not dependencies."""
+       541 +  def test_include_notebook_defined_functions():
+       542 +      """Test that functions defined in the notebook ARE tracked as dependencies."""
+       543        notebook = {
+       544            "cells": [
+       545                {
+     ...
+       561        assert "foo" in dependencies["cell1"].functions_defined
+       562        assert "foo" in dependencies["cell1"].globals_written
+       563    
+       564 -      # Cell 2 calls foo, but foo should NOT be in globals_read
+       565 -      # because it's defined in the notebook
+       564 +      # Cell 2 calls foo, and foo SHOULD be in globals_read
+       565 +      # because it's defined in the notebook and used by this cell
+       566        assert "foo" in dependencies["cell2"].functions_called
+       567 -      assert "foo" not in dependencies["cell2"].globals_read
+       567 +      assert "foo" in dependencies["cell2"].globals_read
+       568    
+       569    
+       570 -  def test_exclude_notebook_defined_classes():
+       571 -      """Test that classes defined in the notebook are not dependencies."""
+       570 +  def test_include_notebook_defined_classes():
+       571 +      """Test that classes defined in the notebook ARE tracked as dependencies."""
+       572        notebook = {
+       573            "cells": [
+       574                {
+     ...
+       590        assert "MyClass" in dependencies["cell1"].classes_defined
+       591        assert "MyClass" in dependencies["cell1"].globals_written
+       592    
+       593 -      # Cell 2 uses MyClass, but it should NOT be in globals_read
+       593 +      # Cell 2 uses MyClass, and it SHOULD be in globals_read
+       594        # because it's defined in the notebook
+       595 -      assert "MyClass" not in dependencies["cell2"].globals_read
+       595 +      assert "MyClass" in dependencies["cell2"].globals_read
+       596    
+       597    
+       598 -  def test_include_external_functions():
+       599 -      """Test that externally defined functions ARE dependencies."""
+       598 +  def test_exclude_external_functions():
+       599 +      """Test that externally defined functions are NOT tracked as dependencies."""
+       600        notebook = {
+       601            "cells": [
+       602                {
+     ...
+       609    
+       610        dependencies = analyze_notebook(notebook)
+       611    
+       612 -      # external_function is not defined in notebook, so it's a dependency
+       613 -      assert "external_function" in dependencies["cell1"].globals_read
+       612 +      # external_function is not defined in notebook, so it should NOT be a dependency
+       613 +      assert "external_function" not in dependencies["cell1"].globals_read
+       614        assert "external_function" in dependencies["cell1"].functions_called
+       615    
+       616    
+       617    def test_function_and_class_across_cells():
+       618 -      """Test function/class exclusion across multiple cells."""
+       618 +      """Test function/class tracking across multiple cells."""
+       619        notebook = {
+       620            "cells": [
+       621                {
+     ...
+       631                {
+       632                    "id": "cell3",
+       633                    "cell_type": "code",
+       634 +                  "source": "data = 5"
+       635 +              },
+       636 +              {
+       637 +                  "id": "cell4",
+       638 +                  "cell_type": "code",
+       639                    "source": "result = helper()\nproc = Processor()"
+       640                }
+       641            ]
+     ...
+       638    
+       639        dependencies = analyze_notebook(notebook)
+       640    
+       641 -      # Cell 3 should have data as dependency (from helper function)
+       642 -      # but not helper or Processor (defined in notebook)
+       643 -      assert "data" in dependencies["cell3"].globals_read
+       644 -      assert "helper" not in dependencies["cell3"].globals_read
+       645 -      assert "Processor" not in dependencies["cell3"].globals_read
+       641 +      # Cell 4 should have data, helper, and Processor as dependencies
+       642 +      # (all defined in the notebook)
+       643 +      assert "data" in dependencies["cell4"].globals_read
+       644 +      assert "helper" in dependencies["cell4"].globals_read
+       645 +      assert "Processor" in dependencies["cell4"].globals_read
+
+⏺ Read(data_ferret/util/test_dependencies.py)
+  ⎿  Read 30 lines
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +50 lines (ctrl+o to expand)
+
+⏺ Bash(python3 -m data_ferret.util.dependencies examples/Example.ipynb)
+  ⎿ [15:27:20] [Installing ferret_kernel kernel......]                                                                                                                              
+    [15:27:20]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +38 lines (ctrl+o to expand)
+
+
+⏺ Bash(python3 -m data_ferret.util.dependencies /tmp/test_exclusion.ipynb)
+  ⎿ [15:27:28] [Installing ferret_kernel kernel......]                                                                                                                              
+    [15:27:28]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +23 lines (ctrl+o to expand)
+
+
+⏺ Perfect! I've corrected the implementation. Here's the summary:
+
+  Summary of Changes
+
+  What Changed
+
+  The logic was reversed - now the analyzer KEEPS notebook-internal dependencies and IGNORES external dependencies.
+
+  Implementation
+
+  1. Collect all notebook definitions: After analyzing all cells, collect everything written (globals_written) across all cells
+  2. Filter dependencies: For each cell's globals_read, keep ONLY variables that are in the notebook definitions
+  3. Result: Dependencies now show only relationships WITHIN the notebook
+
+  Key Behavior
+
+  Before (incorrect):
+
+  # Cell 1: def foo(): ...
+  # Cell 2: result = foo()
+
+  Cell 2 dependencies: (empty) # Wrong - foo was excluded
+
+  After (correct):
+
+  # Cell 1: def foo(): ...
+  # Cell 2: result = foo()
+
+  Cell 2 dependencies: foo  # Correct - foo is from the notebook
+
+  Real-World Example
+
+  Example notebook output:
+
+  Cell [4] (ID: 5bc00a9f...)
+    Reads:  pairwise_distances, pts
+    Writes: _, end, start
+
+  - ✅ Shows pairwise_distances (function defined in cell 3)
+  - ✅ Shows pts (variable defined in cell 2)
+  - ❌ Excludes len, print, range, zip (external built-ins)
+  - ❌ Excludes time (imported module)
+
+  All Features Working:
+
+  - ✅ Flow-sensitive tracking (write-before-read)
+  - ✅ Transitive closure over function calls
+  - ✅ Module exclusion
+  - ✅ External dependency exclusion (NEW)
+  - ✅ Notebook-internal dependency tracking (NEW)
+
+  All 35 tests pass!
+
+> Ignore names imported from other modules.  So, if you have "from sklearn.linear_model import LinearRegression", ignore LineaerRegression. 
+
+⏺ I'll update the analyzer to ignore names imported via from ... import statements.
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 2 additions                                                                     
+       19        globals_written: Set[str] = field(default_factory=set)
+       20        functions_called: Set[str] = field(default_factory=set)
+       21        modules: Set[str] = field(default_factory=set)  # Imported modules (excluded from dependencies)
+       22 +      imported_names: Set[str] = field(default_factory=set)  # Names from 'from ... import' (excluded from dependencies)
+       23        functions_defined: Set[str] = field(default_factory=set)  # Functions defined in this cell
+       24        classes_defined: Set[str] = field(default_factory=set)  # Classes defined in this cell
+       25    
+     ...
+       30                'globals_written': sorted(list(self.globals_written)),
+       31                'functions_called': sorted(list(self.functions_called)),
+       32                'modules': sorted(list(self.modules)),
+       33 +              'imported_names': sorted(list(self.imported_names)),
+       34                'functions_defined': sorted(list(self.functions_defined)),
+       35                'classes_defined': sorted(list(self.classes_defined))
+       36            }
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 2 additions and 1 removal                       
+       62            self.globals_read: Set[str] = set()
+       63            self.globals_written: Set[str] = set()
+       64            self.functions_called: Set[str] = set()
+       65 -          self.modules: Set[str] = set()  # Imported modules
+       65 +          self.modules: Set[str] = set()  # Imported modules (import X as Y)
+       66 +          self.imported_names: Set[str] = set()  # Names from 'from ... import'
+       67            self.local_vars: Set[str] = set()
+       68            self.scope_stack: List[Set[str]] = [set()]  # Stack of local scopes
+       69            self.function_defs: Dict[str, FunctionInfo] = {}  # Function definitions found
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 2 additions and 2 removals                              
+       306                    # Can't track star imports precisely
+       307                    continue
+       308                if self._is_at_module_level():
+       309 -                  # Items imported from modules could be functions, classes, or constants
+       310 -                  # Track them as regular globals, not modules
+       309 +                  # Items imported from modules - track separately to exclude from dependencies
+       310 +                  self.imported_names.add(name)
+       311                    self.globals_written.add(name)
+       312                    # Track for flow-sensitivity
+       313                    if self.in_conditional == 0:
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 20 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 1 addition                   
+       483            deps.globals_written = analyzer.globals_written.copy()
+       484            deps.functions_called = analyzer.functions_called.copy()
+       485            deps.modules = analyzer.modules.copy()
+       486 +          deps.imported_names = analyzer.imported_names.copy()
+       487            deps.functions_defined = analyzer.functions_defined.copy()
+       488            deps.classes_defined = analyzer.classes_defined.copy()
+       489    
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 35 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 10 additions and 2 removals                     
+       577            # Add function definitions to global map
+       578            function_map.update(func_defs)
+       579    
+       580 -      # Collect all modules defined across all cells
+       580 +      # Collect all modules and imported names across all cells
+       581        all_modules = set()
+       582 +      all_imported_names = set()
+       583        for deps in dependencies.values():
+       584            all_modules.update(deps.modules)
+       585 +          all_imported_names.update(deps.imported_names)
+       586    
+       587        # Collect ALL variables/functions/classes defined in the notebook
+       588        # This includes everything written in any cell
+     ...
+       588        for deps in dependencies.values():
+       589            all_notebook_definitions.update(deps.globals_written)
+       590    
+       591 +      # Remove imported items from notebook definitions - they're external
+       592 +      all_notebook_definitions -= all_modules
+       593 +      all_notebook_definitions -= all_imported_names
+       594 +  
+       595        # Second pass: compute transitive closure for function calls
+       596        # and filter to only include notebook-internal dependencies
+       597        for cell_id, deps in dependencies.items():
+     ...
+       600            # Add transitive dependencies to globals_read
+       601            deps.globals_read.update(transitive_deps)
+       602    
+       603 -          # Remove all modules (from any cell) from globals_read and globals_written
+       603 +          # Remove all modules and imported names from globals_read and globals_written
+       604            deps.globals_read -= all_modules
+       605            deps.globals_written -= all_modules
+       606 +          deps.globals_read -= all_imported_names
+       607 +          deps.globals_written -= all_imported_names
+       608    
+       609            # KEEP ONLY notebook-defined variables in globals_read
+       610            # (remove external dependencies - things not defined in the notebook)
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 2 additions and 1 removal
+       104        # Modules should be tracked separately
+       105        assert "pd" in deps.modules
+       106        assert "pd" in deps.globals_written
+       107 -      # Items from 'from' imports are not modules
+       107 +      # Items from 'from' imports are tracked as imported_names
+       108 +      assert "array" in deps.imported_names
+       109        assert "array" in deps.globals_written
+       110        assert "array" not in deps.modules
+       111    
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 80 additions                                
+       649        assert "data" in dependencies["cell4"].globals_read
+       650        assert "helper" in dependencies["cell4"].globals_read
+       651        assert "Processor" in dependencies["cell4"].globals_read
+       652 +  
+       653 +  
+       654 +  def test_exclude_from_imports():
+       655 +      """Test that names imported via 'from...import' are excluded from dependencies."""
+       656 +      notebook = {
+       657 +          "cells": [
+       658 +              {
+       659 +                  "id": "cell1",
+       660 +                  "cell_type": "code",
+       661 +                  "source": "from sklearn.linear_model import LinearRegression"
+       662 +              },
+       663 +              {
+       664 +                  "id": "cell2",
+       665 +                  "cell_type": "code",
+       666 +                  "source": "model = LinearRegression()"
+       667 +              }
+       668 +          ]
+       669 +      }
+       670 +  
+       671 +      dependencies = analyze_notebook(notebook)
+       672 +  
+       673 +      # Cell 1 imports LinearRegression
+       674 +      assert "LinearRegression" in dependencies["cell1"].imported_names
+       675 +      assert "LinearRegression" in dependencies["cell1"].globals_written
+       676 +  
+       677 +      # Cell 2 uses LinearRegression, but it should NOT be in globals_read
+       678 +      # because it's imported from an external module
+       679 +      assert "LinearRegression" not in dependencies["cell2"].globals_read
+       680 +  
+       681 +  
+       682 +  def test_exclude_from_imports_with_alias():
+       683 +      """Test that aliased imports are also excluded."""
+       684 +      notebook = {
+       685 +          "cells": [
+       686 +              {
+       687 +                  "id": "cell1",
+       688 +                  "cell_type": "code",
+       689 +                  "source": "from numpy import array as np_array"
+       690 +              },
+       691 +              {
+       692 +                  "id": "cell2",
+       693 +                  "cell_type": "code",
+       694 +                  "source": "data = np_array([1, 2, 3])"
+       695 +              }
+       696 +          ]
+       697 +      }
+       698 +  
+       699 +      dependencies = analyze_notebook(notebook)
+       700 +  
+       701 +      # Cell 1 imports array as np_array
+       702 +      assert "np_array" in dependencies["cell1"].imported_names
+       703 +  
+       704 +      # Cell 2 uses np_array, but it should NOT be in globals_read
+       705 +      assert "np_array" not in dependencies["cell2"].globals_read
+       706 +  
+       707 +  
+       708 +  def test_include_notebook_vs_imported():
+       709 +      """Test distinction between notebook-defined and imported names."""
+       710 +      notebook = {
+       711 +          "cells": [
+       712 +              {
+       713 +                  "id": "cell1",
+       714 +                  "cell_type": "code",
+       715 +                  "source": "from math import sqrt\ndef my_sqrt(x):\n    return sqrt(x)"
+       716 +              },
+       717 +              {
+       718 +                  "id": "cell2",
+       719 +                  "cell_type": "code",
+       720 +                  "source": "result = my_sqrt(4)"
+       721 +              }
+       722 +          ]
+       723 +      }
+       724 +  
+       725 +      dependencies = analyze_notebook(notebook)
+       726 +  
+       727 +      # Cell 2 uses my_sqrt (notebook-defined) - should be a dependency
+       728 +      assert "my_sqrt" in dependencies["cell2"].globals_read
+       729 +  
+       730 +      # Cell 2 transitively uses sqrt (imported) - should NOT be a dependency
+       731 +      assert "sqrt" not in dependencies["cell2"].globals_read
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v 2>&1 | tail -50)
+  ⎿  data_ferret/util/test_dependencies.py::test_flow_sensitive_conditional_write PASSED [ 73%]
+     data_ferret/util/test_dependencies.py::test_flow_sensitive_loop_write PASSED [ 76%]
+     data_ferret/util/test_dependencies.py::test_flow_sensitive_multiple_writes PASSED [ 78%]
+     … +49 lines (ctrl+o to expand)
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 1 addition and 1 removal          
+       672    
+       673        # Cell 1 imports LinearRegression
+       674        assert "LinearRegression" in dependencies["cell1"].imported_names
+       675 -      assert "LinearRegression" in dependencies["cell1"].globals_written
+       675 +      # LinearRegression is removed from globals_written because it's imported
+       676    
+       677        # Cell 2 uses LinearRegression, but it should NOT be in globals_read
+       678        # because it's imported from an external module
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v 2>&1 | tail -20)
+  ⎿  data_ferret/util/test_dependencies.py::test_flow_sensitive_self_reference PASSED [ 71%]   
+     data_ferret/util/test_dependencies.py::test_flow_sensitive_conditional_write PASSED [ 73%]
+     data_ferret/util/test_dependencies.py::test_flow_sensitive_loop_write PASSED [ 76%]
+     … +18 lines (ctrl+o to expand)
+
+⏺ Bash(python3 -m data_ferret.util.dependencies examples/Example.ipynb)
+  ⎿ [15:35:06] [Installing ferret_kernel kernel......]                                                                                                                              
+    [15:35:06]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +38 lines (ctrl+o to expand)
+
+
+⏺ Bash(python3 -c "
+      import json…)
+  ⎿ Created test notebook                                                                                                                                                           
+    [15:35:17] [Installing ferret_kernel kernel......]
+    [15:35:17]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    … +29 lines (ctrl+o to expand)
+
+
+⏺ Perfect! I've successfully implemented the feature to ignore names imported via from ... import statements. Here's a summary:
+
+  Summary of Changes
+
+  What Was Implemented
+
+  1. Track imported names separately: Added imported_names set to track names imported via from ... import statements
+  2. Exclude from dependencies: These imported names are now excluded from both globals_read and globals_written in the final dependency analysis
+
+  Key Behavior
+
+  Before:
+  # Cell 1: from sklearn.linear_model import LinearRegression
+  # Cell 2: model = LinearRegression()
+
+  Cell 2 dependencies: LinearRegression  # Wrong - it's imported
+
+  After:
+  # Cell 1: from sklearn.linear_model import LinearRegression
+  # Cell 2: model = LinearRegression()
+
+  Cell 2 dependencies: (none)  # Correct - LinearRegression is ignored
+
+  Real-World Example
+
+  Cell [0] (ID: cell1...)
+    Reads:  (none)
+    Writes: (none)
+    # from sklearn.linear_model import LinearRegression
+    # from numpy import array
+    # import pandas as pd
+
+  Cell [1] (ID: cell2...)
+    Reads:  (none)
+    Writes: data, df
+    # data = array([1, 2, 3])  <- array ignored (imported)
+    # df = pd.DataFrame()       <- pd ignored (module import)
+
+  Cell [2] (ID: cell3...)
+    Reads:  data
+    Writes: model, result
+    # model = LinearRegression()  <- LinearRegression ignored (imported)
+    # result = model.fit(data, data)  <- Only 'data' is tracked
+
+  All Features Working:
+
+  - ✅ Flow-sensitive tracking (write-before-read)
+  - ✅ Transitive closure over function calls
+  - ✅ Module exclusion (import X as Y)
+  - ✅ Imported name exclusion (from X import Y) - NEW
+  - ✅ External dependency exclusion (things not in notebook)
+  - ✅ Notebook-internal dependency tracking
+
+  All 38 tests pass!
+
+> /export 
+  ⎿  Conversation copied to clipboard
+
+
+

@@ -1,8 +1,126 @@
 """
 Dependency analysis for Jupyter notebooks.
 
-This module provides tools to analyze variable dependencies in notebook cells,
-creating a map from cell IDs to the global variables they access.
+This module provides static analysis tools to track variable, function, and method
+dependencies in notebook cells, creating a map from cell IDs to the global variables
+they access.
+
+ANALYSIS FEATURES AND PROPERTIES
+=================================
+
+Flow-Sensitivity
+----------------
+FLOW-SENSITIVE at module level (within a single cell):
+  - Tracks whether variables are written before being read
+  - Example: In "x = 5; y = x", x is NOT a dependency (written first)
+  - Example: In "y = x; x = 5", x IS a dependency (read first)
+  - Order of statements matters for determining dependencies
+
+FLOW-INSENSITIVE in other contexts:
+  - Across cells: No tracking of cell execution order
+  - Inside functions/methods: Analyzed independently of control flow
+  - Conditional blocks treated conservatively (see below)
+
+Context-Sensitivity
+-------------------
+CONTEXT-SENSITIVE for functions and methods:
+  - Each function/method is analyzed separately to determine its dependencies
+  - Transitive closure: When cell calls f(), includes dependencies from f's body
+  - Method definitions tracked per-class with qualified names (ClassName.method)
+
+CONTEXT-INSENSITIVE for method dispatch:
+  - No type inference or points-to analysis
+  - Conservative: obj.method() could dispatch to ANY method named "method"
+  - Example: If ClassA.process and ClassB.process both exist, calling
+    obj.process() assumes dependencies from BOTH methods
+
+Conservative Approximations (Over-Approximation)
+------------------------------------------------
+The analysis errs on the side of including MORE dependencies than necessary:
+
+1. CONDITIONAL WRITES: Variables written inside if/while/for/try blocks are
+   treated as "conditional" - subsequent reads are marked as dependencies
+   Example: "if cond: x = 5; y = x" → y depends on x (might not be written)
+
+2. METHOD DISPATCH: Without type information, obj.method() includes dependencies
+   from ALL notebook-defined methods named "method", regardless of class
+   Example: obj.process() → dependencies from ClassA.process AND ClassB.process
+
+3. CALLBACK TRACKING: Functions/methods passed as arguments are assumed to be called
+   Example: df.apply(func) → func is marked as called, includes func's dependencies
+
+4. ATTRIBUTE REFERENCES: Method references like obj.method passed as callbacks
+   are tracked by method name only
+   Example: df.apply(processor.transform) → any method named "transform" is
+   considered as possibly being called
+
+5. TRANSITIVE CLOSURE: All called functions/methods contribute their full
+   dependency sets, even if only partially executed
+
+Missing Cases and Under-Approximations
+---------------------------------------
+The following cases are NOT tracked (under-approximation - may miss dependencies):
+
+1. DYNAMIC CODE EXECUTION:
+   - eval(), exec(), compile() with string arguments
+   - importlib.import_module() with dynamic names
+   - Example: eval("x + y") → x, y not tracked
+
+2. REFLECTION AND DYNAMIC ATTRIBUTE ACCESS:
+   - getattr(obj, name), setattr(obj, name, value) with dynamic names
+   - __dict__ manipulation
+   - Example: getattr(obj, "method")() → method call not tracked
+
+3. STAR IMPORTS:
+   - "from module import *" → cannot determine which names are imported
+   - These imported names won't be filtered from dependencies
+
+4. ATTRIBUTE ASSIGNMENTS:
+   - obj.attr = value → not tracked as a write
+   - Only tracks module-level variable assignments
+
+5. CONTAINER MODIFICATIONS:
+   - list.append(), dict.update(), etc. → not tracked
+   - Only tracks variable bindings, not mutations
+
+6. GLOBAL/NONLOCAL KEYWORDS:
+   - Effects of "global x" and "nonlocal x" declarations not fully modeled
+   - May incorrectly treat as local in some nested scopes
+
+7. CLASS/INSTANCE ATTRIBUTES:
+   - self.attr reads/writes inside methods not tracked separately
+   - Only method-level global dependencies are captured
+
+8. INDIRECT CALLS:
+   - Calls via function stored in data structures: funcs[0]()
+   - Only direct calls and single-level attribute calls tracked
+
+9. METACLASSES AND DESCRIPTORS:
+   - Custom __getattribute__, __setattr__ behavior not modeled
+   - Class decorators that modify behavior not tracked
+
+Design Decisions
+----------------
+- CONSERVATIVE FOR SAFETY: Prefer false positives (extra dependencies) over
+  false negatives (missing dependencies)
+
+- NOTEBOOK-INTERNAL ONLY: Only tracks dependencies on variables/functions/classes
+  defined within the notebook. Imported names and builtins are filtered out.
+
+- TRANSITIVE CLOSURE: Dependencies propagate through function/method calls to
+  ensure complete dependency graphs
+
+- METHOD NAME-BASED DISPATCH: Without type information, uses method name
+  matching across all classes as a sound over-approximation
+
+Example Usage
+-------------
+    notebook = {"cells": [...]}
+    dependencies = analyze_notebook(notebook)
+
+    for cell_id, deps in dependencies.items():
+        print(f"Cell {cell_id} reads: {deps.globals_read}")
+        print(f"Cell {cell_id} writes: {deps.globals_written}")
 """
 
 import ast
@@ -22,6 +140,8 @@ class CellDependencies:
     imported_names: Set[str] = field(default_factory=set)  # Names from 'from ... import' (excluded from dependencies)
     functions_defined: Set[str] = field(default_factory=set)  # Functions defined in this cell
     classes_defined: Set[str] = field(default_factory=set)  # Classes defined in this cell
+    methods_called: Set[str] = field(default_factory=set)  # Method names called (e.g., from obj.method())
+    methods_defined: Dict[str, Set[str]] = field(default_factory=dict)  # class_name -> set of method names
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation."""
@@ -33,7 +153,9 @@ class CellDependencies:
             'modules': sorted(list(self.modules)),
             'imported_names': sorted(list(self.imported_names)),
             'functions_defined': sorted(list(self.functions_defined)),
-            'classes_defined': sorted(list(self.classes_defined))
+            'classes_defined': sorted(list(self.classes_defined)),
+            'methods_called': sorted(list(self.methods_called)),
+            'methods_defined': {cls: sorted(list(methods)) for cls, methods in self.methods_defined.items()}
         }
 
 
@@ -44,7 +166,9 @@ class FunctionInfo:
     name: str
     globals_read: Set[str] = field(default_factory=set)
     functions_called: Set[str] = field(default_factory=set)
+    methods_called: Set[str] = field(default_factory=set)  # Method names called from this function
     defined_in_cell: Optional[str] = None
+    class_name: Optional[str] = None  # If this is a method, the class it belongs to
 
 
 class GlobalAccessAnalyzer(ast.NodeVisitor):
@@ -71,6 +195,10 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         self.in_conditional: int = 0  # Track if we're inside conditional/loop (conservative)
         self.functions_defined: Set[str] = set()  # Function names defined at module level
         self.classes_defined: Set[str] = set()  # Class names defined at module level
+        self.methods_called: Set[str] = set()  # Method names called (from obj.method())
+        self.methods_defined: Dict[str, Set[str]] = {}  # class_name -> set of method names
+        self.method_defs: Dict[str, FunctionInfo] = {}  # "ClassName.method_name" -> FunctionInfo
+        self.current_class: Optional[str] = None  # Track which class we're currently analyzing
 
     def _current_scope(self) -> Set[str]:
         """Get the current local scope."""
@@ -197,7 +325,8 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef):
         """Handle class definitions."""
         # Class name is defined in the enclosing scope
-        if self._is_at_module_level():
+        is_global_class = self._is_at_module_level()
+        if is_global_class:
             self.globals_written.add(node.name)
             self.classes_defined.add(node.name)  # Track class definitions
             # Class definitions are written (track for flow-sensitivity)
@@ -212,11 +341,68 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         for decorator in node.decorator_list:
             self.visit(decorator)
 
-        # Class body creates a new scope
-        self._push_scope()
-        for child in node.body:
-            self.visit(child)
-        self._pop_scope()
+        # For global classes, analyze methods separately
+        if is_global_class:
+            # Track that we're inside this class
+            old_class = self.current_class
+            self.current_class = node.name
+            self.methods_defined[node.name] = set()
+
+            # Analyze each method in the class
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    method_name = child.name
+                    self.methods_defined[node.name].add(method_name)
+
+                    # Create a sub-analyzer for the method body
+                    method_analyzer = GlobalAccessAnalyzer()
+                    method_analyzer.scope_stack = [set(), set()]  # module scope + method scope
+
+                    # Add 'self' (or 'cls' for classmethods) to method's local scope
+                    if child.args.args:
+                        method_analyzer._add_local(child.args.args[0].arg)  # self/cls
+
+                    # Add other parameters to method's local scope
+                    for arg in child.args.args[1:]:  # Skip first arg (self/cls)
+                        method_analyzer._add_local(arg.arg)
+                    for arg in child.args.posonlyargs:
+                        method_analyzer._add_local(arg.arg)
+                    for arg in child.args.kwonlyargs:
+                        method_analyzer._add_local(arg.arg)
+                    if child.args.vararg:
+                        method_analyzer._add_local(child.args.vararg.arg)
+                    if child.args.kwarg:
+                        method_analyzer._add_local(child.args.kwarg.arg)
+
+                    # Visit method body
+                    for stmt in child.body:
+                        method_analyzer.visit(stmt)
+
+                    # Store method info with qualified name
+                    qualified_name = f"{node.name}.{method_name}"
+                    method_info = FunctionInfo(
+                        name=qualified_name,
+                        globals_read=method_analyzer.globals_read.copy(),
+                        functions_called=method_analyzer.functions_called.copy(),
+                        methods_called=method_analyzer.methods_called.copy(),
+                        class_name=node.name
+                    )
+                    self.method_defs[qualified_name] = method_info
+
+            # Restore previous class context
+            self.current_class = old_class
+
+            # Still visit class body normally for other definitions
+            self._push_scope()
+            for child in node.body:
+                self.visit(child)
+            self._pop_scope()
+        else:
+            # Nested class - visit normally
+            self._push_scope()
+            for child in node.body:
+                self.visit(child)
+            self._pop_scope()
 
     def visit_Name(self, node: ast.Name):
         """Handle variable name references."""
@@ -261,6 +447,22 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
 
         self.generic_visit(node)
 
+    def _extract_callable_reference(self, node):
+        """
+        Extract function/method reference from a node that might be callable.
+
+        Returns:
+            Tuple of (function_name, method_name) where either can be None
+        """
+        if isinstance(node, ast.Name) and not self._is_local(node.id):
+            # Direct function reference: f or my_func
+            return (node.id, None)
+        elif isinstance(node, ast.Attribute):
+            # Method reference: obj.method or a.b.method
+            # We track the method name as potentially callable
+            return (None, node.attr)
+        return (None, None)
+
     def visit_Call(self, node: ast.Call):
         """Handle function calls."""
         # Track the function being called
@@ -270,20 +472,32 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
                 self.functions_called.add(func_name)
                 self.globals_read.add(func_name)
         elif isinstance(node.func, ast.Attribute):
-            # For method calls like obj.method(), track obj
+            # For method calls like obj.method(), track obj and the method name
             self.visit(node.func.value)
+            # Track the method name - it might dispatch to a notebook-defined method
+            method_name = node.func.attr
+            self.methods_called.add(method_name)
 
-        # Visit arguments - functions passed as arguments are considered called
+        # Visit arguments - functions/methods passed as arguments are considered called
         for arg in node.args:
             self.visit(arg)
-            # If a function name is passed as an argument, it's being called indirectly
-            if isinstance(arg, ast.Name) and not self._is_local(arg.id):
-                self.functions_called.add(arg.id)
+            # Extract callable references (functions or methods)
+            func_ref, method_ref = self._extract_callable_reference(arg)
+            if func_ref:
+                self.functions_called.add(func_ref)
+            if method_ref:
+                self.functions_called.add(method_ref)  # Might be a function too
+                self.methods_called.add(method_ref)
 
         for keyword in node.keywords:
             self.visit(keyword.value)
-            if isinstance(keyword.value, ast.Name) and not self._is_local(keyword.value.id):
-                self.functions_called.add(keyword.value.id)
+            # Extract callable references from keyword arguments
+            func_ref, method_ref = self._extract_callable_reference(keyword.value)
+            if func_ref:
+                self.functions_called.add(func_ref)
+            if method_ref:
+                self.functions_called.add(method_ref)  # Might be a function too
+                self.methods_called.add(method_ref)
 
     def visit_Import(self, node: ast.Import):
         """Handle import statements."""
@@ -457,7 +671,7 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
             self.visit(child)
 
 
-def analyze_cell_dependencies(source: str, cell_id: str) -> tuple[CellDependencies, Dict[str, FunctionInfo]]:
+def analyze_cell_dependencies(source: str, cell_id: str) -> tuple[CellDependencies, Dict[str, FunctionInfo], Dict[str, FunctionInfo]]:
     """
     Analyze a single cell's code to extract its dependencies.
 
@@ -466,13 +680,14 @@ def analyze_cell_dependencies(source: str, cell_id: str) -> tuple[CellDependenci
         cell_id: The cell's identifier
 
     Returns:
-        Tuple of (CellDependencies, dict of function definitions)
+        Tuple of (CellDependencies, dict of function definitions, dict of method definitions)
     """
     deps = CellDependencies(cell_id=cell_id)
     function_defs = {}
+    method_defs = {}
 
     if not source or not source.strip():
-        return deps, function_defs
+        return deps, function_defs, method_defs
 
     try:
         tree = ast.parse(source)
@@ -486,17 +701,24 @@ def analyze_cell_dependencies(source: str, cell_id: str) -> tuple[CellDependenci
         deps.imported_names = analyzer.imported_names.copy()
         deps.functions_defined = analyzer.functions_defined.copy()
         deps.classes_defined = analyzer.classes_defined.copy()
+        deps.methods_called = analyzer.methods_called.copy()
+        deps.methods_defined = {cls: methods.copy() for cls, methods in analyzer.methods_defined.items()}
 
         # Store function definitions with their cell info
         function_defs = analyzer.function_defs.copy()
         for func_info in function_defs.values():
             func_info.defined_in_cell = cell_id
 
+        # Store method definitions with their cell info
+        method_defs = analyzer.method_defs.copy()
+        for method_info in method_defs.values():
+            method_info.defined_in_cell = cell_id
+
     except SyntaxError:
         # If the code has syntax errors, we can't analyze it
         pass
 
-    return deps, function_defs
+    return deps, function_defs, method_defs
 
 
 def compute_transitive_dependencies(
@@ -505,11 +727,11 @@ def compute_transitive_dependencies(
     visited: Optional[Set[str]] = None
 ) -> Set[str]:
     """
-    Compute transitive closure of dependencies for a function.
+    Compute transitive closure of dependencies for a function or method.
 
     Args:
-        func_name: Name of the function to analyze
-        function_map: Map of all function definitions
+        func_name: Name of the function/method to analyze (can be qualified like "ClassName.method")
+        function_map: Map of all function and method definitions
         visited: Set of already visited functions (to avoid cycles)
 
     Returns:
@@ -532,6 +754,11 @@ def compute_transitive_dependencies(
         transitive_deps = compute_transitive_dependencies(called_func, function_map, visited)
         all_deps.update(transitive_deps)
 
+    # Add transitive dependencies from called methods
+    for called_method in func_info.methods_called:
+        transitive_deps = compute_transitive_dependencies(called_method, function_map, visited)
+        all_deps.update(transitive_deps)
+
     return all_deps
 
 
@@ -540,8 +767,8 @@ def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
     Analyze all cells in a notebook to extract dependencies.
 
     This performs a two-pass analysis:
-    1. First pass: collect all function definitions and their direct dependencies
-    2. Second pass: compute transitive closure for each cell based on functions called
+    1. First pass: collect all function and method definitions and their direct dependencies
+    2. Second pass: compute transitive closure for each cell based on functions/methods called
 
     Args:
         notebook: Jupyter notebook content as a dictionary
@@ -550,11 +777,12 @@ def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
         Dictionary mapping cell IDs to their dependencies (with transitive closure applied)
     """
     dependencies: Dict[str, CellDependencies] = {}
-    function_map: Dict[str, FunctionInfo] = {}
+    function_map: Dict[str, FunctionInfo] = {}  # Combined map of functions and methods
+    method_name_map: Dict[str, List[str]] = {}  # method_name -> list of qualified names
 
     cells = notebook.get('cells', [])
 
-    # First pass: collect all dependencies and function definitions
+    # First pass: collect all dependencies, function definitions, and method definitions
     for cell in cells:
         # Only analyze code cells
         if cell.get('cell_type') != 'code':
@@ -571,11 +799,20 @@ def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
             source = ''.join(source)
 
         # Analyze the cell
-        deps, func_defs = analyze_cell_dependencies(source, cell_id)
+        deps, func_defs, method_defs = analyze_cell_dependencies(source, cell_id)
         dependencies[cell_id] = deps
 
         # Add function definitions to global map
         function_map.update(func_defs)
+
+        # Add method definitions to global map and build method name index
+        function_map.update(method_defs)  # Methods also go in the unified map
+        for qualified_name, method_info in method_defs.items():
+            # Extract method name from "ClassName.method_name"
+            method_name = qualified_name.split('.')[-1]
+            if method_name not in method_name_map:
+                method_name_map[method_name] = []
+            method_name_map[method_name].append(qualified_name)
 
     # Collect all modules and imported names across all cells
     all_modules = set()
@@ -594,7 +831,7 @@ def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
     all_notebook_definitions -= all_modules
     all_notebook_definitions -= all_imported_names
 
-    # Second pass: compute transitive closure for function calls
+    # Second pass: compute transitive closure for function and method calls
     # and filter to only include notebook-internal dependencies
     for cell_id, deps in dependencies.items():
         # Compute transitive dependencies for all called functions
@@ -602,6 +839,19 @@ def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
         for func_name in deps.functions_called:
             func_deps = compute_transitive_dependencies(func_name, function_map)
             transitive_deps.update(func_deps)
+
+        # Compute transitive dependencies for all called methods
+        # Conservative: assume each method call could dispatch to ANY method with that name
+        for method_name in deps.methods_called:
+            # Look up all methods with this name
+            if method_name in method_name_map:
+                for qualified_name in method_name_map[method_name]:
+                    method_deps = compute_transitive_dependencies(qualified_name, function_map)
+                    transitive_deps.update(method_deps)
+            # Also check if it's a function with this name (method_name could be a function too)
+            if method_name in function_map:
+                func_deps = compute_transitive_dependencies(method_name, function_map)
+                transitive_deps.update(func_deps)
 
         # Add transitive dependencies to globals_read
         deps.globals_read.update(transitive_deps)

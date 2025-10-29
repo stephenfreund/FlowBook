@@ -17,7 +17,7 @@ def test_simple_variable_access():
 x = 5
 y = x + 10
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "x" in deps.globals_written
     assert "y" in deps.globals_written
@@ -28,7 +28,7 @@ def test_function_call_detection():
     source = """
 result = some_function(arg1, arg2)
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "some_function" in deps.functions_called
     assert "some_function" in deps.globals_read
@@ -40,7 +40,7 @@ def test_function_passed_as_argument():
     source = """
 result = map(my_func, data)
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "my_func" in deps.functions_called
     assert "map" in deps.functions_called
@@ -53,7 +53,7 @@ def test_function_definition():
 def my_function(x, y):
     return x + y
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "my_function" in deps.globals_written
 
@@ -67,7 +67,7 @@ def process_data(df):
 
 output = process_data(data)
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     # Function definition is global
     assert "process_data" in deps.globals_written
@@ -88,7 +88,7 @@ class MyClass:
     def __init__(self, value):
         self.value = value
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "MyClass" in deps.globals_written
 
@@ -99,7 +99,7 @@ def test_imports():
 import pandas as pd
 from numpy import array
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     # Modules should be tracked separately
     assert "pd" in deps.modules
@@ -115,10 +115,13 @@ def test_method_calls():
     source = """
 result = df.groupby('column').mean()
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "df" in deps.globals_read
     assert "result" in deps.globals_written
+    # Method names should be tracked
+    assert "groupby" in deps.methods_called
+    assert "mean" in deps.methods_called
 
 
 def test_lambda_with_globals():
@@ -126,7 +129,7 @@ def test_lambda_with_globals():
     source = """
 f = lambda x: x + global_offset
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "global_offset" in deps.globals_read
     assert "f" in deps.globals_written
@@ -137,7 +140,7 @@ def test_comprehension_with_globals():
     source = """
 result = [x * multiplier for x in data]
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "data" in deps.globals_read
     assert "multiplier" in deps.globals_read
@@ -150,7 +153,7 @@ def test_for_loop():
 for item in items:
     process(item)
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "items" in deps.globals_read
     assert "process" in deps.functions_called
@@ -162,7 +165,7 @@ def test_with_statement():
 with open(filename) as f:
     data = f.read()
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "filename" in deps.globals_read
     assert "data" in deps.globals_written
@@ -170,7 +173,7 @@ with open(filename) as f:
 
 def test_empty_cell():
     """Test that empty cells don't cause errors."""
-    deps, _ = analyze_cell_dependencies("", "cell1")
+    deps, _, _ = analyze_cell_dependencies("", "cell1")
 
     assert len(deps.globals_read) == 0
     assert len(deps.globals_written) == 0
@@ -182,7 +185,7 @@ def test_syntax_error():
 def broken(
     this is not valid python
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     # Should return empty dependencies
     assert len(deps.globals_read) == 0
@@ -282,7 +285,7 @@ def outer():
         return x
     return inner()
 """
-    deps, func_defs = analyze_cell_dependencies(source, "cell1")
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "outer" in deps.globals_written
     # Variables used inside the function are not in the cell's direct reads
@@ -300,7 +303,7 @@ def test_decorator_usage():
 def decorated_func():
     pass
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "my_decorator" in deps.globals_read
     assert "decorated_func" in deps.globals_written
@@ -314,7 +317,7 @@ try:
 except CustomError as e:
     handle_error(e)
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     assert "risky_operation" in deps.functions_called
     assert "handle_error" in deps.functions_called
@@ -418,7 +421,7 @@ def test_function_definition_tracking():
 def compute(x, y):
     return x + y + offset
 """
-    deps, func_defs = analyze_cell_dependencies(source, "cell1")
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
 
     # Function should be in globals_written
     assert "compute" in deps.globals_written
@@ -434,7 +437,7 @@ def test_flow_sensitive_write_before_read():
 x = 5
 y = x + 10
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     # x is written before being read, so should NOT be in globals_read
     assert "x" not in deps.globals_read
@@ -448,7 +451,7 @@ def test_flow_sensitive_read_before_write():
 y = x + 10
 x = 5
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     # x is read before being written, so SHOULD be in globals_read
     assert "x" in deps.globals_read
@@ -461,7 +464,7 @@ def test_flow_sensitive_self_reference():
     source = """
 x = x + 1
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     # x is read (RHS) before being written (LHS)
     assert "x" in deps.globals_read
@@ -475,7 +478,7 @@ if condition:
     x = 5
 y = x + 10
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     # x is conditionally written, so reading it later means it's a dependency
     assert "x" in deps.globals_read
@@ -489,7 +492,7 @@ for i in range(10):
     x = i
 y = x
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     # x is written in a loop, so it's conditional - reading it is a dependency
     assert "x" in deps.globals_read
@@ -502,7 +505,7 @@ x = 5
 x = x + 1
 z = x + 10
 """
-    deps, _ = analyze_cell_dependencies(source, "cell1")
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
 
     # First write: x not a dependency
     # Second statement: x read (from first write), then written
@@ -729,3 +732,264 @@ def test_include_notebook_vs_imported():
 
     # Cell 2 transitively uses sqrt (imported) - should NOT be a dependency
     assert "sqrt" not in dependencies["cell2"].globals_read
+
+
+def test_method_call_tracking():
+    """Test that method calls like obj.method() are tracked."""
+    source = """
+result = obj.process(data)
+"""
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
+
+    # The method name should be tracked
+    assert "process" in deps.methods_called
+    # obj and data should be read
+    assert "obj" in deps.globals_read
+    assert "data" in deps.globals_read
+
+
+def test_method_definition_tracking():
+    """Test that methods inside classes are tracked."""
+    source = """
+class MyClass:
+    def process(self, x):
+        return helper(x)
+
+    def helper(self, x):
+        return x * 2
+"""
+    deps, _, method_defs = analyze_cell_dependencies(source, "cell1")
+
+    # Class should be tracked
+    assert "MyClass" in deps.classes_defined
+
+    # Methods should be tracked
+    assert "MyClass" in deps.methods_defined
+    assert "process" in deps.methods_defined["MyClass"]
+    assert "helper" in deps.methods_defined["MyClass"]
+
+    # Method definitions should be in method_defs with qualified names
+    assert "MyClass.process" in method_defs
+    assert "MyClass.helper" in method_defs
+
+
+def test_method_dispatch():
+    """Test that method calls dispatch to notebook-defined methods."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "data = [1, 2, 3]"
+            },
+            {
+                "id": "cell2",
+                "cell_type": "code",
+                "source": """
+class Processor:
+    def transform(self, items):
+        return [x * 2 for x in items]
+"""
+            },
+            {
+                "id": "cell3",
+                "cell_type": "code",
+                "source": """
+processor = Processor()
+result = processor.transform(data)
+"""
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # Cell 3 calls transform method
+    assert "transform" in dependencies["cell3"].methods_called
+
+    # Cell 3 should depend on data (directly read)
+    assert "data" in dependencies["cell3"].globals_read
+
+    # Cell 3 should depend on Processor (directly read)
+    assert "Processor" in dependencies["cell3"].globals_read
+
+
+def test_method_reference_as_callback():
+    """Test that obj.method passed as argument is tracked as called."""
+    source = """
+df.apply(processor.transform)
+"""
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
+
+    # The method reference should be tracked
+    assert "transform" in deps.methods_called
+    # processor should be read
+    assert "processor" in deps.globals_read
+
+
+def test_function_reference_to_method():
+    """Test that functions passed to methods are tracked as called."""
+    source = """
+def my_func(x):
+    return process(x)
+
+external_obj.apply(my_func)
+"""
+    deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+
+    # my_func should be tracked as called
+    assert "my_func" in deps.functions_called
+    # apply method should be tracked
+    assert "apply" in deps.methods_called
+
+
+def test_multiple_classes_same_method():
+    """Test that multiple classes with same method name are handled."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "shared_data = 100"
+            },
+            {
+                "id": "cell2",
+                "cell_type": "code",
+                "source": """
+class ClassA:
+    def process(self):
+        return shared_data * 2
+
+class ClassB:
+    def process(self):
+        return shared_data * 3
+"""
+            },
+            {
+                "id": "cell3",
+                "cell_type": "code",
+                "source": """
+obj = ClassA()
+result = obj.process()
+"""
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # Cell 3 calls process method
+    assert "process" in dependencies["cell3"].methods_called
+
+    # Cell 3 should depend on shared_data transitively
+    # (conservative: could dispatch to either ClassA.process or ClassB.process)
+    assert "shared_data" in dependencies["cell3"].globals_read
+
+
+def test_method_calls_function():
+    """Test that methods calling notebook functions create dependencies."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "data = [1, 2, 3]"
+            },
+            {
+                "id": "cell2",
+                "cell_type": "code",
+                "source": """
+def helper(x):
+    return x * 2
+"""
+            },
+            {
+                "id": "cell3",
+                "cell_type": "code",
+                "source": """
+class Processor:
+    def transform(self, items):
+        return [helper(x) for x in items]
+"""
+            },
+            {
+                "id": "cell4",
+                "cell_type": "code",
+                "source": """
+p = Processor()
+result = p.transform(data)
+"""
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # Cell 4 should depend on data directly
+    assert "data" in dependencies["cell4"].globals_read
+
+    # Cell 4 should depend on helper transitively (via transform method)
+    assert "helper" in dependencies["cell4"].globals_read
+
+
+def test_chained_method_calls():
+    """Test that chained method calls are tracked."""
+    source = """
+result = obj.method1().method2().method3()
+"""
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
+
+    # All method names should be tracked
+    assert "method1" in deps.methods_called
+    assert "method2" in deps.methods_called
+    assert "method3" in deps.methods_called
+
+
+def test_method_with_function_callback():
+    """Test method receiving function as callback."""
+    notebook = {
+        "cells": [
+            {
+                "id": "cell1",
+                "cell_type": "code",
+                "source": "shared_value = 42"
+            },
+            {
+                "id": "cell2",
+                "cell_type": "code",
+                "source": """
+def callback(x):
+    return x + shared_value
+"""
+            },
+            {
+                "id": "cell3",
+                "cell_type": "code",
+                "source": """
+result = df.apply(callback)
+"""
+            }
+        ]
+    }
+
+    dependencies = analyze_notebook(notebook)
+
+    # Cell 3 calls callback (passed as argument)
+    assert "callback" in dependencies["cell3"].functions_called
+
+    # Cell 3 should depend on shared_value transitively through callback
+    assert "shared_value" in dependencies["cell3"].globals_read
+
+
+def test_method_reference_in_keyword_argument():
+    """Test that method references in keyword arguments are tracked."""
+    source = """
+result = external_func(handler=processor.handle, data=items)
+"""
+    deps, _, _ = analyze_cell_dependencies(source, "cell1")
+
+    # The method reference should be tracked
+    assert "handle" in deps.methods_called
+    # Variables should be read
+    assert "processor" in deps.globals_read
+    assert "items" in deps.globals_read

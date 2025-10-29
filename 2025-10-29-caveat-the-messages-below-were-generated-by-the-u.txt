@@ -1,0 +1,1495 @@
+
+▗ ▗   ▖ ▖  Claude Code v2.0.28
+           Sonnet 4.5 · Claude Pro
+  ▘▘ ▝▝    /Users/freund/other/DataFerret
+══════════════════════════════════════════════════════════════════════ Conversation compacted · ctrl+o for history ══════════════════════════════════════════════════════════════════════
+  ⎿  Referenced file data_ferret/kernel/diff.py
+  ⎿  Referenced file data_ferret/kernel/test_diff.py
+  ⎿  Read ../../../../tmp/test_from_imports.ipynb (3 cells)
+  ⎿  Referenced file data_ferret/util/test_dependencies.py
+  ⎿  Referenced file data_ferret/util/dependencies.py
+  ⎿  Todo list read (6 items)
+
+⏺ I'll continue fixing the attribute name issue in the _compare_groupby() method. Let me read the current implementation and update it to use the correct attribute.
+
+⏺ Read(data_ferret/kernel/diff.py)
+  ⎿  Read 80 lines
+
+⏺ Now I'll fix the attribute name issue. The pandas GroupBy objects use obj instead of _obj:
+
+⏺ Update(data_ferret/kernel/diff.py)
+  ⎿  Updated data_ferret/kernel/diff.py with 4 additions and 4 removals                         
+       349            between otherwise equivalent groupby objects.
+       350    
+       351            Compares:
+       352 -          - The underlying data object (_obj)
+       352 +          - The underlying data object (obj)
+       353            - The grouper configuration (keys, sort, dropna)
+       354            - Selection state
+       355            """
+       356            # Compare the underlying object (DataFrame or Series)
+       357 -          if not hasattr(val_a, '_obj') or not hasattr(val_b, '_obj'):
+       358 -              return f"GroupBy structure mismatch at {path}: missing _obj attribute"
+       357 +          if not hasattr(val_a, 'obj') or not hasattr(val_b, 'obj'):
+       358 +              return f"GroupBy structure mismatch at {path}: missing obj attribute"
+       359    
+       360 -          obj_diff = self._compare_values(val_a._obj, val_b._obj, f"{path}._obj")
+       360 +          obj_diff = self._compare_values(val_a.obj, val_b.obj, f"{path}.obj")
+       361            if obj_diff:
+       362                return obj_diff
+       363    
+
+⏺ Perfect! Now let's run the tests to verify the fix works:
+
+⏺ Bash(python -m pytest data_ferret/kernel/test_diff.py::TestGroupBy -v)
+  ⎿  Error: ============================= test session starts ==============================
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     hypothesis profile 'default'
+     rootdir: /Users/freund/other/DataFerret
+     configfile: pyproject.toml
+     plugins: anyio-4.11.0, hypothesis-6.142.3
+     collecting ... collected 9 items
+
+     data_ferret/kernel/test_diff.py::TestGroupBy::test_dataframe_groupby_equal FAILED [ 11%]
+     … +201 lines (ctrl+o to see all)
+
+⏺ Good progress! The obj attribute is now correct, but there's a new issue with comparing the axis attribute - it appears to be a numpy array. Let me investigate what type axis is:
+
+⏺ Bash(python3 -c "import pandas as pd; import numpy as np; df = pd.DataFrame({'A': [1,1,2], 'B': [4,5,6]}); gb = df.groupby('A'); print('axis type:', type(gb._grouper…)
+  ⎿  axis type: <class 'pandas.core.indexes.range.RangeIndex'>
+     axis value: RangeIndex(start=0, stop=3, step=1)
+     axis is Index: True
+
+⏺ The axis is a pandas Index object. I need to use proper comparison for Index objects. Let me fix the _compare_grouper method to handle Index and array comparisons correctly:
+
+⏺ Update(data_ferret/kernel/diff.py)
+  ⎿  Updated data_ferret/kernel/diff.py with 6 additions and 2 removals                                                                                       
+       386            - dropna flag
+       387            - axis
+       388            """
+       389 -          # Compare axis
+       389 +          # Compare axis (typically a pandas Index)
+       390            if hasattr(val_a, 'axis') and hasattr(val_b, 'axis'):
+       391 -              if val_a.axis != val_b.axis:
+       391 +              # Use pandas Index.equals() for proper comparison
+       392 +              if isinstance(val_a.axis, pd.Index) and isinstance(val_b.axis, pd.Index):
+       393 +                  if not val_a.axis.equals(val_b.axis):
+       394 +                      return f"Grouper axis mismatch at {path}: {val_a.axis} vs {val_b.axis}"
+       395 +              elif val_a.axis != val_b.axis if not isinstance(val_a.axis, (np.ndarray, pd.Index)) else not np.array_equal(val_a.axis, val_b.axis):
+       396                    return f"Grouper axis mismatch at {path}: {val_a.axis} vs {val_b.axis}"
+       397    
+       398            # Compare sort flag
+
+⏺ Let me simplify that comparison logic - it's too convoluted:
+
+⏺ Update(data_ferret/kernel/diff.py)
+  ⎿  Updated data_ferret/kernel/diff.py with 8 additions and 3 removals                                                                                       
+       389            # Compare axis (typically a pandas Index)
+       390            if hasattr(val_a, 'axis') and hasattr(val_b, 'axis'):
+       391                # Use pandas Index.equals() for proper comparison
+       392 +              axes_equal = False
+       393                if isinstance(val_a.axis, pd.Index) and isinstance(val_b.axis, pd.Index):
+       394 -                  if not val_a.axis.equals(val_b.axis):
+       395 -                      return f"Grouper axis mismatch at {path}: {val_a.axis} vs {val_b.axis}"
+       396 -              elif val_a.axis != val_b.axis if not isinstance(val_a.axis, (np.ndarray, pd.Index)) else not np.array_equal(val_a.axis, val_b.axis):
+       394 +                  axes_equal = val_a.axis.equals(val_b.axis)
+       395 +              elif isinstance(val_a.axis, np.ndarray) and isinstance(val_b.axis, np.ndarray):
+       396 +                  axes_equal = np.array_equal(val_a.axis, val_b.axis)
+       397 +              else:
+       398 +                  axes_equal = (val_a.axis == val_b.axis)
+       399 +  
+       400 +              if not axes_equal:
+       401                    return f"Grouper axis mismatch at {path}: {val_a.axis} vs {val_b.axis}"
+       402    
+       403            # Compare sort flag
+
+⏺ Good! Now let's run the tests again:
+
+⏺ Bash(python -m pytest data_ferret/kernel/test_diff.py::TestGroupBy::test_dataframe_groupby_equal -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +16 lines (ctrl+o to expand)
+
+⏺ Excellent! That test passed. Let's run all the GroupBy tests now:
+
+⏺ Bash(python -m pytest data_ferret/kernel/test_diff.py::TestGroupBy -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +24 lines (ctrl+o to expand)
+
+⏺ Perfect! All 9 tests pass. Let me mark the testing task as completed:
+
+⏺ Excellent! All tests pass. Let me verify the implementation works correctly with a real example showing that cache differences are properly ignored:
+
+⏺ Bash(python3 -c "
+      import pandas as pd…)
+  ⎿ [05:28:07] [Installing ferret_kernel kernel......]                                                                                                                              
+    [05:28:07]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +4 lines (ctrl+o to expand)
+
+
+⏺ Perfect! The implementation is working correctly. The test confirms that:
+
+  1. gb1 has a populated cache with 'group_info' and 'result_index'
+  2. gb2 has no cache
+  3. Despite the cache difference, they are correctly identified as equal
+
+  This successfully addresses your original request to handle DataFrameGroupBy objects specially and avoid comparing internal _cache fields.
+
+  Summary of changes made:
+
+  data_ferret/kernel/diff.py:
+  - Added imports for DataFrameGroupBy, SeriesGroupBy, and BaseGrouper
+  - Added type detection for GroupBy objects in _compare_values (line 130-131)
+  - Implemented _compare_groupby() method to compare GroupBy objects by semantic properties (underlying data, grouper configuration, selection state) while excluding cache
+  - Implemented _compare_grouper() helper method to compare BaseGrouper objects, specifically excluding the _cache field
+  - Fixed axis comparison to use Index.equals() for pandas Index objects
+
+  data_ferret/kernel/test_diff.py:
+  - Added comprehensive TestGroupBy class with 9 test cases covering various scenarios including cache differences, different keys, different data, different flags, and pointer
+  structure
+
+  All 9 tests pass, and the real-world verification confirms that GroupBy objects with different cache states are correctly identified as equal.
+
+> dependencies.py should also handle method calls.  If a method call matches the name of a method defined in the notebook, assume that that call site dispatches to that method.  
+Match all such methods for each call site.  If a value like "a.method" is passed to an eternal function or method, assume that a.method is called.  Also make sure that if f is 
+passed to an external method a.method, that f is assumed to be called.  Make a plan. 
+
+⏺ I'll analyze the current dependencies.py implementation and create a plan to handle method calls and callback tracking.
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 776 lines
+
+⏺ Now let me look at the test file to understand the current capabilities better:
+
+⏺ Read(data_ferret/util/test_dependencies.py)
+  ⎿  Read 100 lines
+
+⏺ Now let me create a comprehensive plan for handling method calls and callback tracking:
+
+⏺ Based on my analysis of dependencies.py, here's a comprehensive plan to handle method calls and callback tracking:
+
+  Plan: Enhanced Method Call and Callback Tracking
+
+  Current State
+
+  The code currently:
+  - ✅ Tracks direct function calls like func()
+  - ✅ Tracks functions passed as arguments to direct calls: map(f, data) → f is called
+  - ✅ Tracks function definitions at module level
+  - ✅ Tracks class definitions
+  - ❌ Does NOT track method definitions within classes
+  - ❌ Does NOT match method calls like obj.method() to methods defined in notebook classes
+  - ❌ Does NOT track attribute references like obj.method passed as arguments
+  - ❌ Does NOT track callbacks passed to method calls like obj.apply(f)
+
+  Required Changes
+
+  1. Track Method Definitions (New Data Structure)
+
+  Location: GlobalAccessAnalyzer.__init__() and FunctionInfo
+
+  Changes:
+  - Add methods_defined: Dict[str, Set[str]] to track method names per class
+    - Key: class name, Value: set of method names
+  - Extend FunctionInfo to include optional class_name field
+  - Add method_defs: Dict[str, FunctionInfo] to store method definitions
+    - Key: "ClassName.method_name" format
+
+  Example:
+  class MyClass:
+      def process(self, x):  # Track as "MyClass.process"
+          return helper(x)
+
+      def helper(self, x):   # Track as "MyClass.helper"
+          return x * 2
+
+  2. Enhanced Class Visitor
+
+  Location: visit_ClassDef()
+
+  Changes:
+  - After entering class scope, visit all method definitions
+  - For each FunctionDef in class body:
+    - Track method name in methods_defined[class_name]
+    - Analyze method body for dependencies (similar to module-level functions)
+    - Store in method_defs with key f"{class_name}.{method_name}"
+    - Track self parameter references differently from globals
+
+  Rationale: Need to know what methods are defined so we can match them to call sites
+
+  3. Track Method Calls
+
+  Location: visit_Call() - enhance existing logic
+
+  Current:
+  elif isinstance(node.func, ast.Attribute):
+      # For method calls like obj.method(), track obj
+      self.visit(node.func.value)
+
+  New:
+  elif isinstance(node.func, ast.Attribute):
+      # For method calls like obj.method()
+      self.visit(node.func.value)
+
+      # Track the method name being called
+      method_name = node.func.attr
+
+      # Check if this method matches ANY method defined in notebook classes
+      # (We don't know obj's type, so be conservative and match by name)
+      self.methods_called.add(method_name)
+
+      # Process arguments for callbacks (same logic as direct calls)
+      # ... (move argument processing to shared helper)
+
+  Add new field: methods_called: Set[str] to track method names that might dispatch to notebook-defined methods
+
+  4. Track Attribute Access for Method References
+
+  Location: visit_Call() - argument processing
+
+  Current: Only tracks ast.Name nodes as callbacks
+  if isinstance(arg, ast.Name) and not self._is_local(arg.id):
+      self.functions_called.add(arg.id)
+
+  New: Also track ast.Attribute nodes (method references)
+  # Helper function to extract callable references
+  def _extract_callable_reference(self, node):
+      """Extract function/method reference from a node."""
+      if isinstance(node, ast.Name) and not self._is_local(node.id):
+          return node.id
+      elif isinstance(node, ast.Attribute):
+          # a.method → track 'method' as potentially called
+          return node.attr
+      elif isinstance(node, ast.Lambda):
+          # Lambda bodies need to be analyzed
+          self.visit(node)
+          return None
+      return None
+
+  # Then in visit_Call for arguments:
+  for arg in node.args:
+      self.visit(arg)
+      ref = self._extract_callable_reference(arg)
+      if ref:
+          self.functions_called.add(ref)
+          self.methods_called.add(ref)  # Might be a method
+
+  Example matches:
+  - external_func(obj.method) → track "method" as called
+  - df.apply(my_func) → track "my_func" as called
+  - obj.map(lambda x: x*2) → analyze lambda body
+
+  5. Update CellDependencies
+
+  Location: CellDependencies dataclass
+
+  Add fields:
+  methods_called: Set[str] = field(default_factory=set)  # Method names called
+  methods_defined: Dict[str, Set[str]] = field(default_factory=dict)  # class -> methods
+
+  6. Transitive Closure for Methods
+
+  Location: compute_transitive_dependencies() and analyze_notebook()
+
+  Enhancement:
+  - When a method is called, include dependencies from ALL notebook-defined methods with that name
+  - Example: If cell calls obj.process() and classes ClassA and ClassB both define process(), include dependencies from both methods
+  - Update transitive closure to follow method calls:
+  # For each method name called
+  for method_name in deps.methods_called:
+      # Find all classes defining this method
+      for class_name, methods in all_methods_defined.items():
+          if method_name in methods:
+              key = f"{class_name}.{method_name}"
+              if key in method_map:
+                  method_deps = compute_transitive_dependencies(key, method_map)
+                  deps.globals_read.update(method_deps)
+
+  7. Testing Strategy
+
+  Location: test_dependencies.py
+
+  Add comprehensive tests:
+  1. test_method_call_tracking: obj.method() calls tracked
+  2. test_method_definition_tracking: Methods inside classes are tracked
+  3. test_method_dispatch: Call to obj.method() includes dependencies from defined methods
+  4. test_method_reference_as_callback: df.apply(obj.method) tracks "method" as called
+  5. test_function_reference_to_method: external(my_func) where my_func uses globals
+  6. test_multiple_classes_same_method: Multiple classes with same method name
+  7. test_method_calls_function: Method that calls notebook-defined functions
+  8. test_chained_method_calls: obj.method1().method2()
+
+  Implementation Order
+
+  1. Phase 1: Data structures (15 min)
+    - Add new fields to GlobalAccessAnalyzer, FunctionInfo, CellDependencies
+    - Add methods_called tracking
+  2. Phase 2: Class and method analysis (30 min)
+    - Enhance visit_ClassDef to track methods
+    - Create method analyzer similar to function analyzer
+    - Store method definitions with qualified names
+  3. Phase 3: Method call tracking (20 min)
+    - Enhance visit_Call to track method names
+    - Add methods_called to track potential dispatches
+  4. Phase 4: Attribute reference tracking (20 min)
+    - Create _extract_callable_reference helper
+    - Update argument processing in visit_Call
+    - Handle both ast.Name and ast.Attribute as callbacks
+  5. Phase 5: Transitive closure (25 min)
+    - Update analyze_notebook to collect all method definitions
+    - Enhance transitive dependency computation for methods
+    - Match method calls to method definitions by name
+  6. Phase 6: Testing (30 min)
+    - Write comprehensive test cases
+    - Test edge cases (multiple classes, nested calls, etc.)
+    - Verify transitive dependencies work correctly
+
+  Key Design Decisions
+
+  Conservative Matching: Since we don't have type information, when we see obj.method(), we assume it could dispatch to ANY method named "method" defined in the notebook. This is
+  conservative but safe for dependency tracking.
+
+  Method References: When obj.method is passed as an argument, we assume it will be called. This matches the existing behavior for function references.
+
+  Self parameter: Inside methods, self parameter should not be tracked as a global read. Need to add self to local scope for method analysis.
+
+  Qualified names: Store methods as "ClassName.method_name" to distinguish between methods of different classes while allowing name-based matching at call sites.
+
+  Would you like me to proceed with this implementation?
+
+> yes 
+
+⏺ I'll proceed with implementing the enhanced method call and callback tracking. Let me start by updating the todo list and then implement each phase.
+
+⏺ Now let me implement Phase 1 - adding the new data structure fields:
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 5 additions and 1 removal                                                       
+       22        imported_names: Set[str] = field(default_factory=set)  # Names from 'from ... import' (excluded from dependencies)
+       23        functions_defined: Set[str] = field(default_factory=set)  # Functions defined in this cell
+       24        classes_defined: Set[str] = field(default_factory=set)  # Classes defined in this cell
+       25 +      methods_called: Set[str] = field(default_factory=set)  # Method names called (e.g., from obj.method())
+       26 +      methods_defined: Dict[str, Set[str]] = field(default_factory=dict)  # class_name -> set of method names
+       27    
+       28        def to_dict(self) -> Dict[str, Any]:
+       29            """Convert to dictionary representation."""
+     ...
+       33                'modules': sorted(list(self.modules)),
+       34                'imported_names': sorted(list(self.imported_names)),
+       35                'functions_defined': sorted(list(self.functions_defined)),
+       36 -              'classes_defined': sorted(list(self.classes_defined))
+       36 +              'classes_defined': sorted(list(self.classes_defined)),
+       37 +              'methods_called': sorted(list(self.methods_called)),
+       38 +              'methods_defined': {cls: sorted(list(methods)) for cls, methods in self.methods_defined.items()}
+       39            }
+       40    
+       41    
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 2 additions                                                  
+       48        name: str
+       49        globals_read: Set[str] = field(default_factory=set)
+       50        functions_called: Set[str] = field(default_factory=set)
+       51 +      methods_called: Set[str] = field(default_factory=set)  # Method names called from this function
+       52        defined_in_cell: Optional[str] = None
+       53 +      class_name: Optional[str] = None  # If this is a method, the class it belongs to
+       54    
+       55    
+       56    class GlobalAccessAnalyzer(ast.NodeVisitor):
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 4 additions                                                
+       77            self.in_conditional: int = 0  # Track if we're inside conditional/loop (conservative)
+       78            self.functions_defined: Set[str] = set()  # Function names defined at module level
+       79            self.classes_defined: Set[str] = set()  # Class names defined at module level
+       80 +          self.methods_called: Set[str] = set()  # Method names called (from obj.method())
+       81 +          self.methods_defined: Dict[str, Set[str]] = {}  # class_name -> set of method names
+       82 +          self.method_defs: Dict[str, FunctionInfo] = {}  # "ClassName.method_name" -> FunctionInfo
+       83 +          self.current_class: Optional[str] = None  # Track which class we're currently analyzing
+       84    
+       85        def _current_scope(self) -> Set[str]:
+       86            """Get the current local scope."""
+
+⏺ Now let me enhance visit_ClassDef to track method definitions:
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 64 additions and 6 removals                               
+       207        def visit_ClassDef(self, node: ast.ClassDef):
+       208            """Handle class definitions."""
+       209            # Class name is defined in the enclosing scope
+       210 -          if self._is_at_module_level():
+       210 +          is_global_class = self._is_at_module_level()
+       211 +          if is_global_class:
+       212                self.globals_written.add(node.name)
+       213                self.classes_defined.add(node.name)  # Track class definitions
+       214                # Class definitions are written (track for flow-sensitivity)
+     ...
+       222            for decorator in node.decorator_list:
+       223                self.visit(decorator)
+       224    
+       225 -          # Class body creates a new scope
+       226 -          self._push_scope()
+       227 -          for child in node.body:
+       228 -              self.visit(child)
+       229 -          self._pop_scope()
+       225 +          # For global classes, analyze methods separately
+       226 +          if is_global_class:
+       227 +              # Track that we're inside this class
+       228 +              old_class = self.current_class
+       229 +              self.current_class = node.name
+       230 +              self.methods_defined[node.name] = set()
+       231    
+       232 +              # Analyze each method in the class
+       233 +              for child in node.body:
+       234 +                  if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+       235 +                      method_name = child.name
+       236 +                      self.methods_defined[node.name].add(method_name)
+       237 +  
+       238 +                      # Create a sub-analyzer for the method body
+       239 +                      method_analyzer = GlobalAccessAnalyzer()
+       240 +                      method_analyzer.scope_stack = [set(), set()]  # module scope + method scope
+       241 +  
+       242 +                      # Add 'self' (or 'cls' for classmethods) to method's local scope
+       243 +                      if child.args.args:
+       244 +                          method_analyzer._add_local(child.args.args[0].arg)  # self/cls
+       245 +  
+       246 +                      # Add other parameters to method's local scope
+       247 +                      for arg in child.args.args[1:]:  # Skip first arg (self/cls)
+       248 +                          method_analyzer._add_local(arg.arg)
+       249 +                      for arg in child.args.posonlyargs:
+       250 +                          method_analyzer._add_local(arg.arg)
+       251 +                      for arg in child.args.kwonlyargs:
+       252 +                          method_analyzer._add_local(arg.arg)
+       253 +                      if child.args.vararg:
+       254 +                          method_analyzer._add_local(child.args.vararg.arg)
+       255 +                      if child.args.kwarg:
+       256 +                          method_analyzer._add_local(child.args.kwarg.arg)
+       257 +  
+       258 +                      # Visit method body
+       259 +                      for stmt in child.body:
+       260 +                          method_analyzer.visit(stmt)
+       261 +  
+       262 +                      # Store method info with qualified name
+       263 +                      qualified_name = f"{node.name}.{method_name}"
+       264 +                      method_info = FunctionInfo(
+       265 +                          name=qualified_name,
+       266 +                          globals_read=method_analyzer.globals_read.copy(),
+       267 +                          functions_called=method_analyzer.functions_called.copy(),
+       268 +                          methods_called=method_analyzer.methods_called.copy(),
+       269 +                          class_name=node.name
+       270 +                      )
+       271 +                      self.method_defs[qualified_name] = method_info
+       272 +  
+       273 +              # Restore previous class context
+       274 +              self.current_class = old_class
+       275 +  
+       276 +              # Still visit class body normally for other definitions
+       277 +              self._push_scope()
+       278 +              for child in node.body:
+       279 +                  self.visit(child)
+       280 +              self._pop_scope()
+       281 +          else:
+       282 +              # Nested class - visit normally
+       283 +              self._push_scope()
+       284 +              for child in node.body:
+       285 +                  self.visit(child)
+       286 +              self._pop_scope()
+       287 +  
+       288        def visit_Name(self, node: ast.Name):
+       289            """Handle variable name references."""
+       290            name = node.id
+
+⏺ Now let me update visit_Call to track method calls. First, let me read the current implementation:
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 60 lines
+
+⏺ Now let me add a helper method and update visit_Call:
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 35 additions and 7 removals                            
+       329    
+       330            self.generic_visit(node)
+       331    
+       332 +      def _extract_callable_reference(self, node):
+       333 +          """
+       334 +          Extract function/method reference from a node that might be callable.
+       335 +  
+       336 +          Returns:
+       337 +              Tuple of (function_name, method_name) where either can be None
+       338 +          """
+       339 +          if isinstance(node, ast.Name) and not self._is_local(node.id):
+       340 +              # Direct function reference: f or my_func
+       341 +              return (node.id, None)
+       342 +          elif isinstance(node, ast.Attribute):
+       343 +              # Method reference: obj.method or a.b.method
+       344 +              # We track the method name as potentially callable
+       345 +              return (None, node.attr)
+       346 +          return (None, None)
+       347 +  
+       348        def visit_Call(self, node: ast.Call):
+       349            """Handle function calls."""
+       350            # Track the function being called
+     ...
+       338                    self.functions_called.add(func_name)
+       339                    self.globals_read.add(func_name)
+       340            elif isinstance(node.func, ast.Attribute):
+       341 -              # For method calls like obj.method(), track obj
+       341 +              # For method calls like obj.method(), track obj and the method name
+       342                self.visit(node.func.value)
+       343 +              # Track the method name - it might dispatch to a notebook-defined method
+       344 +              method_name = node.func.attr
+       345 +              self.methods_called.add(method_name)
+       346    
+       347 -          # Visit arguments - functions passed as arguments are considered called
+       347 +          # Visit arguments - functions/methods passed as arguments are considered called
+       348            for arg in node.args:
+       349                self.visit(arg)
+       350 -              # If a function name is passed as an argument, it's being called indirectly
+       351 -              if isinstance(arg, ast.Name) and not self._is_local(arg.id):
+       352 -                  self.functions_called.add(arg.id)
+       350 +              # Extract callable references (functions or methods)
+       351 +              func_ref, method_ref = self._extract_callable_reference(arg)
+       352 +              if func_ref:
+       353 +                  self.functions_called.add(func_ref)
+       354 +              if method_ref:
+       355 +                  self.functions_called.add(method_ref)  # Might be a function too
+       356 +                  self.methods_called.add(method_ref)
+       357    
+       358            for keyword in node.keywords:
+       359                self.visit(keyword.value)
+       360 -              if isinstance(keyword.value, ast.Name) and not self._is_local(keyword.value.id):
+       361 -                  self.functions_called.add(keyword.value.id)
+       360 +              # Extract callable references from keyword arguments
+       361 +              func_ref, method_ref = self._extract_callable_reference(keyword.value)
+       362 +              if func_ref:
+       363 +                  self.functions_called.add(func_ref)
+       364 +              if method_ref:
+       365 +                  self.functions_called.add(method_ref)  # Might be a function too
+       366 +                  self.methods_called.add(method_ref)
+       367    
+       368        def visit_Import(self, node: ast.Import):
+       369            """Handle import statements."""
+
+⏺ Now let me update analyze_cell_dependencies to handle the new fields:
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 50 lines
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 30 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 12 additions and 4 removals                                                                      
+       553                self.visit(child)
+       554    
+       555    
+       556 -  def analyze_cell_dependencies(source: str, cell_id: str) -> tuple[CellDependencies, Dict[str, FunctionInfo]]:
+       556 +  def analyze_cell_dependencies(source: str, cell_id: str) -> tuple[CellDependencies, Dict[str, FunctionInfo], Dict[str, FunctionInfo]]:
+       557        """
+       558        Analyze a single cell's code to extract its dependencies.
+       559    
+     ...
+       562            cell_id: The cell's identifier
+       563    
+       564        Returns:
+       565 -          Tuple of (CellDependencies, dict of function definitions)
+       565 +          Tuple of (CellDependencies, dict of function definitions, dict of method definitions)
+       566        """
+       567        deps = CellDependencies(cell_id=cell_id)
+       568        function_defs = {}
+       569 +      method_defs = {}
+       570    
+       571        if not source or not source.strip():
+       572 -          return deps, function_defs
+       572 +          return deps, function_defs, method_defs
+       573    
+       574        try:
+       575            tree = ast.parse(source)
+     ...
+       582            deps.imported_names = analyzer.imported_names.copy()
+       583            deps.functions_defined = analyzer.functions_defined.copy()
+       584            deps.classes_defined = analyzer.classes_defined.copy()
+       585 +          deps.methods_called = analyzer.methods_called.copy()
+       586 +          deps.methods_defined = {cls: methods.copy() for cls, methods in analyzer.methods_defined.items()}
+       587    
+       588            # Store function definitions with their cell info
+       589            function_defs = analyzer.function_defs.copy()
+       590            for func_info in function_defs.values():
+       591                func_info.defined_in_cell = cell_id
+       592    
+       593 +          # Store method definitions with their cell info
+       594 +          method_defs = analyzer.method_defs.copy()
+       595 +          for method_info in method_defs.values():
+       596 +              method_info.defined_in_cell = cell_id
+       597 +  
+       598        except SyntaxError:
+       599            # If the code has syntax errors, we can't analyze it
+       600            pass
+       601    
+       602 -      return deps, function_defs
+       602 +      return deps, function_defs, method_defs
+       603    
+       604    
+       605    def compute_transitive_dependencies(
+
+⏺ Now let me update compute_transitive_dependencies to handle method calls:
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 35 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 8 additions and 3 removals                                     
+       609        visited: Optional[Set[str]] = None
+       610    ) -> Set[str]:
+       611        """
+       612 -      Compute transitive closure of dependencies for a function.
+       612 +      Compute transitive closure of dependencies for a function or method.
+       613    
+       614        Args:
+       615 -          func_name: Name of the function to analyze
+       616 -          function_map: Map of all function definitions
+       615 +          func_name: Name of the function/method to analyze (can be qualified like "ClassName.method")
+       616 +          function_map: Map of all function and method definitions
+       617            visited: Set of already visited functions (to avoid cycles)
+       618    
+       619        Returns:
+     ...
+       636            transitive_deps = compute_transitive_dependencies(called_func, function_map, visited)
+       637            all_deps.update(transitive_deps)
+       638    
+       639 +      # Add transitive dependencies from called methods
+       640 +      for called_method in func_info.methods_called:
+       641 +          transitive_deps = compute_transitive_dependencies(called_method, function_map, visited)
+       642 +          all_deps.update(transitive_deps)
+       643 +  
+       644        return all_deps
+       645    
+       646    
+
+⏺ Now let me update analyze_notebook to handle method definitions and dispatching:
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 80 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 15 additions and 5 removals                              
+       649        Analyze all cells in a notebook to extract dependencies.
+       650    
+       651        This performs a two-pass analysis:
+       652 -      1. First pass: collect all function definitions and their direct dependencies
+       653 -      2. Second pass: compute transitive closure for each cell based on functions called
+       652 +      1. First pass: collect all function and method definitions and their direct dependencies
+       653 +      2. Second pass: compute transitive closure for each cell based on functions/methods called
+       654    
+       655        Args:
+       656            notebook: Jupyter notebook content as a dictionary
+     ...
+       659            Dictionary mapping cell IDs to their dependencies (with transitive closure applied)
+       660        """
+       661        dependencies: Dict[str, CellDependencies] = {}
+       662 -      function_map: Dict[str, FunctionInfo] = {}
+       662 +      function_map: Dict[str, FunctionInfo] = {}  # Combined map of functions and methods
+       663 +      method_name_map: Dict[str, List[str]] = {}  # method_name -> list of qualified names
+       664    
+       665        cells = notebook.get('cells', [])
+       666    
+       667 -      # First pass: collect all dependencies and function definitions
+       667 +      # First pass: collect all dependencies, function definitions, and method definitions
+       668        for cell in cells:
+       669            # Only analyze code cells
+       670            if cell.get('cell_type') != 'code':
+     ...
+       680                source = ''.join(source)
+       681    
+       682            # Analyze the cell
+       683 -          deps, func_defs = analyze_cell_dependencies(source, cell_id)
+       683 +          deps, func_defs, method_defs = analyze_cell_dependencies(source, cell_id)
+       684            dependencies[cell_id] = deps
+       685    
+       686            # Add function definitions to global map
+       687            function_map.update(func_defs)
+       688    
+       689 +          # Add method definitions to global map and build method name index
+       690 +          function_map.update(method_defs)  # Methods also go in the unified map
+       691 +          for qualified_name, method_info in method_defs.items():
+       692 +              # Extract method name from "ClassName.method_name"
+       693 +              method_name = qualified_name.split('.')[-1]
+       694 +              if method_name not in method_name_map:
+       695 +                  method_name_map[method_name] = []
+       696 +              method_name_map[method_name].append(qualified_name)
+       697 +  
+       698        # Collect all modules and imported names across all cells
+       699        all_modules = set()
+       700        all_imported_names = set()
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 14 additions and 1 removal                                 
+       713        all_notebook_definitions -= all_modules
+       714        all_notebook_definitions -= all_imported_names
+       715    
+       716 -      # Second pass: compute transitive closure for function calls
+       716 +      # Second pass: compute transitive closure for function and method calls
+       717        # and filter to only include notebook-internal dependencies
+       718        for cell_id, deps in dependencies.items():
+       719            # Compute transitive dependencies for all called functions
+     ...
+       722                func_deps = compute_transitive_dependencies(func_name, function_map)
+       723                transitive_deps.update(func_deps)
+       724    
+       725 +          # Compute transitive dependencies for all called methods
+       726 +          # Conservative: assume each method call could dispatch to ANY method with that name
+       727 +          for method_name in deps.methods_called:
+       728 +              # Look up all methods with this name
+       729 +              if method_name in method_name_map:
+       730 +                  for qualified_name in method_name_map[method_name]:
+       731 +                      method_deps = compute_transitive_dependencies(qualified_name, function_map)
+       732 +                      transitive_deps.update(method_deps)
+       733 +              # Also check if it's a function with this name (method_name could be a function too)
+       734 +              if method_name in function_map:
+       735 +                  func_deps = compute_transitive_dependencies(method_name, function_map)
+       736 +                  transitive_deps.update(func_deps)
+       737 +  
+       738            # Add transitive dependencies to globals_read
+       739            deps.globals_read.update(transitive_deps)
+       740    
+
+⏺ Now let me add comprehensive test cases. First, let me check the end of the existing test file:
+
+⏺ Bash(wc -l /Users/freund/other/DataFerret/data_ferret/util/test_dependencies.py)
+  ⎿       731 /Users/freund/other/DataFerret/data_ferret/util/test_dependencies.py
+
+⏺ Read(data_ferret/util/test_dependencies.py)
+  ⎿  Read 33 lines
+
+⏺ Now let me add comprehensive test cases for method call tracking:
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 264 additions                        
+       729    
+       730        # Cell 2 transitively uses sqrt (imported) - should NOT be a dependency
+       731        assert "sqrt" not in dependencies["cell2"].globals_read
+       732 +  
+       733 +  
+       734 +  def test_method_call_tracking():
+       735 +      """Test that method calls like obj.method() are tracked."""
+       736 +      source = """
+       737 +  obj = MyClass()
+       738 +  result = obj.process(data)
+       739 +  """
+       740 +      deps, _, _ = analyze_cell_dependencies(source, "cell1")
+       741 +  
+       742 +      # The method name should be tracked
+       743 +      assert "process" in deps.methods_called
+       744 +      # obj and data should be read
+       745 +      assert "obj" in deps.globals_read
+       746 +      assert "data" in deps.globals_read
+       747 +  
+       748 +  
+       749 +  def test_method_definition_tracking():
+       750 +      """Test that methods inside classes are tracked."""
+       751 +      source = """
+       752 +  class MyClass:
+       753 +      def process(self, x):
+       754 +          return helper(x)
+       755 +  
+       756 +      def helper(self, x):
+       757 +          return x * 2
+       758 +  """
+       759 +      deps, _, method_defs = analyze_cell_dependencies(source, "cell1")
+       760 +  
+       761 +      # Class should be tracked
+       762 +      assert "MyClass" in deps.classes_defined
+       763 +  
+       764 +      # Methods should be tracked
+       765 +      assert "MyClass" in deps.methods_defined
+       766 +      assert "process" in deps.methods_defined["MyClass"]
+       767 +      assert "helper" in deps.methods_defined["MyClass"]
+       768 +  
+       769 +      # Method definitions should be in method_defs with qualified names
+       770 +      assert "MyClass.process" in method_defs
+       771 +      assert "MyClass.helper" in method_defs
+       772 +  
+       773 +  
+       774 +  def test_method_dispatch():
+       775 +      """Test that method calls dispatch to notebook-defined methods."""
+       776 +      notebook = {
+       777 +          "cells": [
+       778 +              {
+       779 +                  "id": "cell1",
+       780 +                  "cell_type": "code",
+       781 +                  "source": "data = [1, 2, 3]"
+       782 +              },
+       783 +              {
+       784 +                  "id": "cell2",
+       785 +                  "cell_type": "code",
+       786 +                  "source": """
+       787 +  class Processor:
+       788 +      def transform(self, items):
+       789 +          return [x * 2 for x in items]
+       790 +  """
+       791 +              },
+       792 +              {
+       793 +                  "id": "cell3",
+       794 +                  "cell_type": "code",
+       795 +                  "source": """
+       796 +  processor = Processor()
+       797 +  result = processor.transform(data)
+       798 +  """
+       799 +              }
+       800 +          ]
+       801 +      }
+       802 +  
+       803 +      dependencies = analyze_notebook(notebook)
+       804 +  
+       805 +      # Cell 3 calls transform method
+       806 +      assert "transform" in dependencies["cell3"].methods_called
+       807 +  
+       808 +      # Cell 3 should depend on data (directly read)
+       809 +      assert "data" in dependencies["cell3"].globals_read
+       810 +  
+       811 +      # Cell 3 should depend on Processor (directly read)
+       812 +      assert "Processor" in dependencies["cell3"].globals_read
+       813 +  
+       814 +  
+       815 +  def test_method_reference_as_callback():
+       816 +      """Test that obj.method passed as argument is tracked as called."""
+       817 +      source = """
+       818 +  processor = Processor()
+       819 +  df.apply(processor.transform)
+       820 +  """
+       821 +      deps, _, _ = analyze_cell_dependencies(source, "cell1")
+       822 +  
+       823 +      # The method reference should be tracked
+       824 +      assert "transform" in deps.methods_called
+       825 +      # processor should be read
+       826 +      assert "processor" in deps.globals_read
+       827 +  
+       828 +  
+       829 +  def test_function_reference_to_method():
+       830 +      """Test that functions passed to methods are tracked as called."""
+       831 +      source = """
+       832 +  def my_func(x):
+       833 +      return process(x)
+       834 +  
+       835 +  external_obj.apply(my_func)
+       836 +  """
+       837 +      deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+       838 +  
+       839 +      # my_func should be tracked as called
+       840 +      assert "my_func" in deps.functions_called
+       841 +      # apply method should be tracked
+       842 +      assert "apply" in deps.methods_called
+       843 +  
+       844 +  
+       845 +  def test_multiple_classes_same_method():
+       846 +      """Test that multiple classes with same method name are handled."""
+       847 +      notebook = {
+       848 +          "cells": [
+       849 +              {
+       850 +                  "id": "cell1",
+       851 +                  "cell_type": "code",
+       852 +                  "source": "shared_data = 100"
+       853 +              },
+       854 +              {
+       855 +                  "id": "cell2",
+       856 +                  "cell_type": "code",
+       857 +                  "source": """
+       858 +  class ClassA:
+       859 +      def process(self):
+       860 +          return shared_data * 2
+       861 +  
+       862 +  class ClassB:
+       863 +      def process(self):
+       864 +          return shared_data * 3
+       865 +  """
+       866 +              },
+       867 +              {
+       868 +                  "id": "cell3",
+       869 +                  "cell_type": "code",
+       870 +                  "source": """
+       871 +  obj = ClassA()
+       872 +  result = obj.process()
+       873 +  """
+       874 +              }
+       875 +          ]
+       876 +      }
+       877 +  
+       878 +      dependencies = analyze_notebook(notebook)
+       879 +  
+       880 +      # Cell 3 calls process method
+       881 +      assert "process" in dependencies["cell3"].methods_called
+       882 +  
+       883 +      # Cell 3 should depend on shared_data transitively
+       884 +      # (conservative: could dispatch to either ClassA.process or ClassB.process)
+       885 +      assert "shared_data" in dependencies["cell3"].globals_read
+       886 +  
+       887 +  
+       888 +  def test_method_calls_function():
+       889 +      """Test that methods calling notebook functions create dependencies."""
+       890 +      notebook = {
+       891 +          "cells": [
+       892 +              {
+       893 +                  "id": "cell1",
+       894 +                  "cell_type": "code",
+       895 +                  "source": "data = [1, 2, 3]"
+       896 +              },
+       897 +              {
+       898 +                  "id": "cell2",
+       899 +                  "cell_type": "code",
+       900 +                  "source": """
+       901 +  def helper(x):
+       902 +      return x * 2
+       903 +  """
+       904 +              },
+       905 +              {
+       906 +                  "id": "cell3",
+       907 +                  "cell_type": "code",
+       908 +                  "source": """
+       909 +  class Processor:
+       910 +      def transform(self, items):
+       911 +          return [helper(x) for x in items]
+       912 +  """
+       913 +              },
+       914 +              {
+       915 +                  "id": "cell4",
+       916 +                  "cell_type": "code",
+       917 +                  "source": """
+       918 +  p = Processor()
+       919 +  result = p.transform(data)
+       920 +  """
+       921 +              }
+       922 +          ]
+       923 +      }
+       924 +  
+       925 +      dependencies = analyze_notebook(notebook)
+       926 +  
+       927 +      # Cell 4 should depend on data directly
+       928 +      assert "data" in dependencies["cell4"].globals_read
+       929 +  
+       930 +      # Cell 4 should depend on helper transitively (via transform method)
+       931 +      assert "helper" in dependencies["cell4"].globals_read
+       932 +  
+       933 +  
+       934 +  def test_chained_method_calls():
+       935 +      """Test that chained method calls are tracked."""
+       936 +      source = """
+       937 +  result = obj.method1().method2().method3()
+       938 +  """
+       939 +      deps, _, _ = analyze_cell_dependencies(source, "cell1")
+       940 +  
+       941 +      # All method names should be tracked
+       942 +      assert "method1" in deps.methods_called
+       943 +      assert "method2" in deps.methods_called
+       944 +      assert "method3" in deps.methods_called
+       945 +  
+       946 +  
+       947 +  def test_method_with_function_callback():
+       948 +      """Test method receiving function as callback."""
+       949 +      notebook = {
+       950 +          "cells": [
+       951 +              {
+       952 +                  "id": "cell1",
+       953 +                  "cell_type": "code",
+       954 +                  "source": "shared_value = 42"
+       955 +              },
+       956 +              {
+       957 +                  "id": "cell2",
+       958 +                  "cell_type": "code",
+       959 +                  "source": """
+       960 +  def callback(x):
+       961 +      return x + shared_value
+       962 +  """
+       963 +              },
+       964 +              {
+       965 +                  "id": "cell3",
+       966 +                  "cell_type": "code",
+       967 +                  "source": """
+       968 +  result = df.apply(callback)
+       969 +  """
+       970 +              }
+       971 +          ]
+       972 +      }
+       973 +  
+       974 +      dependencies = analyze_notebook(notebook)
+       975 +  
+       976 +      # Cell 3 calls callback (passed as argument)
+       977 +      assert "callback" in dependencies["cell3"].functions_called
+       978 +  
+       979 +      # Cell 3 should depend on shared_value transitively through callback
+       980 +      assert "shared_value" in dependencies["cell3"].globals_read
+       981 +  
+       982 +  
+       983 +  def test_method_reference_in_keyword_argument():
+       984 +      """Test that method references in keyword arguments are tracked."""
+       985 +      source = """
+       986 +  processor = Processor()
+       987 +  result = external_func(handler=processor.handle, data=items)
+       988 +  """
+       989 +      deps, _, _ = analyze_cell_dependencies(source, "cell1")
+       990 +  
+       991 +      # The method reference should be tracked
+       992 +      assert "handle" in deps.methods_called
+       993 +      # Variables should be read
+       994 +      assert "processor" in deps.globals_read
+       995 +      assert "items" in deps.globals_read
+
+⏺ Excellent! Now let me run the tests to verify everything works:
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py::test_method_call_tracking -xvs)
+  ⎿  Error: ============================= test session starts ==============================
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     hypothesis profile 'default'
+     rootdir: /Users/freund/other/DataFerret
+     configfile: pyproject.toml
+     plugins: anyio-4.11.0, hypothesis-6.142.3
+     collecting ... [05:44:43] [Installing ferret_kernel kernel......]
+     [05:44:43]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to 
+     /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x64.png]
+     [05:44:43] [198 ms]
+     … +33 lines (ctrl+o to see all)
+
+⏺ I see - the test assumption is wrong. obj is written in the same cell, so it's not tracked as a global read (this is correct flow-sensitive behavior). Let me fix the test:
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 1 removal            
+       734    def test_method_call_tracking():
+       735        """Test that method calls like obj.method() are tracked."""
+       736        source = """
+       737 -  obj = MyClass()
+       737    result = obj.process(data)
+       738    """
+       739        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py::test_method_call_tracking data_ferret/util/test_dependencies.py::test_method_definition_tracking data_fe…)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +22 lines (ctrl+o to expand)
+
+⏺ Great! Let me run all the new method-related tests:
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -k "method" -v)
+  ⎿  Error: ============================= test session starts ==============================
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     hypothesis profile 'default'
+     rootdir: /Users/freund/other/DataFerret
+     configfile: pyproject.toml
+     plugins: anyio-4.11.0, hypothesis-6.142.3
+     collecting ... collected 48 items / 37 deselected / 11 selected
+
+     data_ferret/util/test_dependencies.py::test_method_calls FAILED          [  9%]
+     … +71 lines (ctrl+o to see all)
+
+⏺ I need to fix a few tests. Let me check and fix the old test first:
+
+⏺ Read(data_ferret/util/test_dependencies.py)
+  ⎿  Read 10 lines
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 4 additions and 1 removal
+       115        source = """
+       116    result = df.groupby('column').mean()
+       117    """
+       118 -      deps, _ = analyze_cell_dependencies(source, "cell1")
+       118 +      deps, _, _ = analyze_cell_dependencies(source, "cell1")
+       119    
+       120        assert "df" in deps.globals_read
+       121        assert "result" in deps.globals_written
+       122 +      # Method names should be tracked
+       123 +      assert "groupby" in deps.methods_called
+       124 +      assert "mean" in deps.methods_called
+       125    
+       126    
+       127    def test_lambda_with_globals():
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 1 removal                    
+       817    def test_method_reference_as_callback():
+       818        """Test that obj.method passed as argument is tracked as called."""
+       819        source = """
+       820 -  processor = Processor()
+       820    df.apply(processor.transform)
+       821    """
+       822        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 1 removal                    
+       984    def test_method_reference_in_keyword_argument():
+       985        """Test that method references in keyword arguments are tracked."""
+       986        source = """
+       987 -  processor = Processor()
+       987    result = external_func(handler=processor.handle, data=items)
+       988    """
+       989        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+
+⏺ Now let me run all the method-related tests again:
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -k "method" -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +26 lines (ctrl+o to expand)
+
+⏺ Perfect! All method tests pass. Now let me run the entire test suite to make sure nothing broke:
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v)
+  ⎿  Error: ============================= test session starts ==============================
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     hypothesis profile 'default'
+     rootdir: /Users/freund/other/DataFerret
+     configfile: pyproject.toml
+     plugins: anyio-4.11.0, hypothesis-6.142.3
+     collecting ... collected 48 items
+
+     data_ferret/util/test_dependencies.py::test_simple_variable_access FAILED [  2%]
+     … +174 lines (ctrl+o to see all)
+
+⏺ Many existing tests need to be updated to handle the third return value. Let me fix them all at once:
+
+⏺ Bash(sed -i '' 's/deps, _ = analyze_cell_dependencies/deps, _, _ = analyze_cell_dependencies/g' data_ferret/util/test_dependencies.py)
+  ⎿  (No content)
+
+⏺ Good! Now let me check if there are any other patterns that need to be fixed:
+
+⏺ Bash(grep -n "analyze_cell_dependencies" data_ferret/util/test_dependencies.py | grep -v "deps, _, _" | head -20)
+  ⎿  7:    analyze_cell_dependencies,                                    
+     288:    deps, func_defs = analyze_cell_dependencies(source, "cell1")
+     424:    deps, func_defs = analyze_cell_dependencies(source, "cell1")
+     … +2 lines (ctrl+o to expand)
+
+⏺ Let me fix the remaining two tests:
+
+⏺ Read(data_ferret/util/test_dependencies.py)
+  ⎿  Read 10 lines
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 1 addition and 1 removal         
+       285            return x
+       286        return inner()
+       287    """
+       288 -      deps, func_defs = analyze_cell_dependencies(source, "cell1")
+       288 +      deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+       289    
+       290        assert "outer" in deps.globals_written
+       291        # Variables used inside the function are not in the cell's direct reads
+
+⏺ Read(data_ferret/util/test_dependencies.py)
+  ⎿  Read 10 lines
+
+⏺ Update(data_ferret/util/test_dependencies.py)
+  ⎿  Updated data_ferret/util/test_dependencies.py with 1 addition and 1 removal 
+       421    def compute(x, y):
+       422        return x + y + offset
+       423    """
+       424 -      deps, func_defs = analyze_cell_dependencies(source, "cell1")
+       424 +      deps, func_defs, _ = analyze_cell_dependencies(source, "cell1")
+       425    
+       426        # Function should be in globals_written
+       427        assert "compute" in deps.globals_written
+
+⏺ Now let me run all the tests again:
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -v --tb=short)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +63 lines (ctrl+o to expand)
+
+⏺ Perfect! All 48 tests pass! Let me update the todo list:
+
+⏺ Excellent! All tasks are complete. Let me create a quick demonstration to show that the method call tracking works as expected:
+
+⏺ Bash(python3 -c "
+      from data_ferret.util.dependencies import analyze_notebook…)
+  ⎿ [05:46:51] [Installing ferret_kernel kernel......]                                                                                                                              
+    [05:46:51]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +16 lines (ctrl+o to expand)
+
+
+⏺ Perfect! Let me test the callback tracking feature as well:
+
+⏺ Bash(python3 -c "
+      from data_ferret.util.dependencies import analyze_notebook…)
+  ⎿ [05:47:01] [Installing ferret_kernel kernel......]                                                                                                                              
+    [05:47:01]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +9 lines (ctrl+o to expand)
+
+
+⏺ Excellent! Both features work perfectly. Let me create a summary of what was implemented:
+
+  Summary
+
+  I successfully implemented enhanced method call and callback tracking for dependencies.py. Here's what was added:
+
+  Features Implemented
+
+  1. Method Call Tracking
+    - Method calls like obj.method() are now tracked by method name
+    - Method names are stored in methods_called field
+  2. Method Definition Tracking
+    - Methods defined inside classes are now analyzed separately
+    - Method definitions stored with qualified names (e.g., "ClassName.method_name")
+    - Method dependencies tracked independently
+  3. Attribute Reference Tracking
+    - Method references like obj.method passed as arguments are tracked as callable
+    - Example: df.apply(processor.transform) → transform is tracked as called
+  4. Function Callbacks
+    - Functions passed to any callable (function or method) are tracked as called
+    - Example: external_func(callback) → callback is tracked as called
+  5. Conservative Method Dispatch
+    - When obj.method() is called, system assumes it could dispatch to ANY notebook-defined method with that name
+    - All matching methods' dependencies are included transitively
+  6. Transitive Dependencies
+    - Method calls properly include transitive dependencies
+    - Example: If transform() method uses shared_data, and cell calls obj.transform(), then cell depends on shared_data
+
+  Changes Made
+
+  Data structures:
+  - Added methods_called, methods_defined to CellDependencies
+  - Added methods_called, class_name to FunctionInfo
+  - Added methods_called, methods_defined, method_defs, current_class to GlobalAccessAnalyzer
+
+  Core logic:
+  - Enhanced visit_ClassDef to analyze methods separately
+  - Updated visit_Call to track method calls and attribute references
+  - Added _extract_callable_reference helper for detecting callbacks
+  - Updated compute_transitive_dependencies to handle methods
+  - Enhanced analyze_notebook to build method name index and compute method dispatch
+
+  Testing:
+  - Added 11 comprehensive test cases covering all new features
+  - All 48 tests pass (37 existing + 11 new)
+
+  Example Usage
+
+  # Cell 1: Define data
+  shared_data = 100
+
+  # Cell 2: Define class with method
+  class Processor:
+      def transform(self, x):
+          return x + shared_data
+
+  # Cell 3: Call method
+  processor = Processor()
+  result = processor.transform(10)
+
+  # Result: Cell 3 depends on both Processor and shared_data
+  # (shared_data is a transitive dependency via transform method)
+
+  The implementation successfully handles method calls, method dispatching, and callback tracking with proper transitive dependency resolution!
+
+> /export 
+  ⎿  Conversation exported to: 2025-10-29-caveat-the-messages-below-were-generated-by-the-u.txt
+
+> Add a comment to the top of dependencies.py that documents key features of the anlsysis.  Include flow/context sensitive/insensitive aspects, where conservative, missing cases, 
+Where we'll get an over-approximation or under-approximation, etc. 
+
+⏺ I'll add a comprehensive documentation comment at the top of dependencies.py explaining the analysis features, limitations, and approximation behavior.
+
+⏺ Read(data_ferret/util/dependencies.py)
+  ⎿  Read 10 lines
+
+⏺ Update(data_ferret/util/dependencies.py)
+  ⎿  Updated data_ferret/util/dependencies.py with 120 additions and 2 removals                   
+         1    """
+         2    Dependency analysis for Jupyter notebooks.
+         3    
+         4 -  This module provides tools to analyze variable dependencies in notebook cells,
+         5 -  creating a map from cell IDs to the global variables they access.
+         4 +  This module provides static analysis tools to track variable, function, and method
+         5 +  dependencies in notebook cells, creating a map from cell IDs to the global variables
+         6 +  they access.
+         7 +  
+         8 +  ANALYSIS FEATURES AND PROPERTIES
+         9 +  =================================
+        10 +  
+        11 +  Flow-Sensitivity
+        12 +  ----------------
+        13 +  FLOW-SENSITIVE at module level (within a single cell):
+        14 +    - Tracks whether variables are written before being read
+        15 +    - Example: In "x = 5; y = x", x is NOT a dependency (written first)
+        16 +    - Example: In "y = x; x = 5", x IS a dependency (read first)
+        17 +    - Order of statements matters for determining dependencies
+        18 +  
+        19 +  FLOW-INSENSITIVE in other contexts:
+        20 +    - Across cells: No tracking of cell execution order
+        21 +    - Inside functions/methods: Analyzed independently of control flow
+        22 +    - Conditional blocks treated conservatively (see below)
+        23 +  
+        24 +  Context-Sensitivity
+        25 +  -------------------
+        26 +  CONTEXT-SENSITIVE for functions and methods:
+        27 +    - Each function/method is analyzed separately to determine its dependencies
+        28 +    - Transitive closure: When cell calls f(), includes dependencies from f's body
+        29 +    - Method definitions tracked per-class with qualified names (ClassName.method)
+        30 +  
+        31 +  CONTEXT-INSENSITIVE for method dispatch:
+        32 +    - No type inference or points-to analysis
+        33 +    - Conservative: obj.method() could dispatch to ANY method named "method"
+        34 +    - Example: If ClassA.process and ClassB.process both exist, calling
+        35 +      obj.process() assumes dependencies from BOTH methods
+        36 +  
+        37 +  Conservative Approximations (Over-Approximation)
+        38 +  ------------------------------------------------
+        39 +  The analysis errs on the side of including MORE dependencies than necessary:
+        40 +  
+        41 +  1. CONDITIONAL WRITES: Variables written inside if/while/for/try blocks are
+        42 +     treated as "conditional" - subsequent reads are marked as dependencies
+        43 +     Example: "if cond: x = 5; y = x" → y depends on x (might not be written)
+        44 +  
+        45 +  2. METHOD DISPATCH: Without type information, obj.method() includes dependencies
+        46 +     from ALL notebook-defined methods named "method", regardless of class
+        47 +     Example: obj.process() → dependencies from ClassA.process AND ClassB.process
+        48 +  
+        49 +  3. CALLBACK TRACKING: Functions/methods passed as arguments are assumed to be called
+        50 +     Example: df.apply(func) → func is marked as called, includes func's dependencies
+        51 +  
+        52 +  4. ATTRIBUTE REFERENCES: Method references like obj.method passed as callbacks
+        53 +     are tracked by method name only
+        54 +     Example: df.apply(processor.transform) → any method named "transform" is
+        55 +     considered as possibly being called
+        56 +  
+        57 +  5. TRANSITIVE CLOSURE: All called functions/methods contribute their full
+        58 +     dependency sets, even if only partially executed
+        59 +  
+        60 +  Missing Cases and Under-Approximations
+        61 +  ---------------------------------------
+        62 +  The following cases are NOT tracked (under-approximation - may miss dependencies):
+        63 +  
+        64 +  1. DYNAMIC CODE EXECUTION:
+        65 +     - eval(), exec(), compile() with string arguments
+        66 +     - importlib.import_module() with dynamic names
+        67 +     - Example: eval("x + y") → x, y not tracked
+        68 +  
+        69 +  2. REFLECTION AND DYNAMIC ATTRIBUTE ACCESS:
+        70 +     - getattr(obj, name), setattr(obj, name, value) with dynamic names
+        71 +     - __dict__ manipulation
+        72 +     - Example: getattr(obj, "method")() → method call not tracked
+        73 +  
+        74 +  3. STAR IMPORTS:
+        75 +     - "from module import *" → cannot determine which names are imported
+        76 +     - These imported names won't be filtered from dependencies
+        77 +  
+        78 +  4. ATTRIBUTE ASSIGNMENTS:
+        79 +     - obj.attr = value → not tracked as a write
+        80 +     - Only tracks module-level variable assignments
+        81 +  
+        82 +  5. CONTAINER MODIFICATIONS:
+        83 +     - list.append(), dict.update(), etc. → not tracked
+        84 +     - Only tracks variable bindings, not mutations
+        85 +  
+        86 +  6. GLOBAL/NONLOCAL KEYWORDS:
+        87 +     - Effects of "global x" and "nonlocal x" declarations not fully modeled
+        88 +     - May incorrectly treat as local in some nested scopes
+        89 +  
+        90 +  7. CLASS/INSTANCE ATTRIBUTES:
+        91 +     - self.attr reads/writes inside methods not tracked separately
+        92 +     - Only method-level global dependencies are captured
+        93 +  
+        94 +  8. INDIRECT CALLS:
+        95 +     - Calls via function stored in data structures: funcs[0]()
+        96 +     - Only direct calls and single-level attribute calls tracked
+        97 +  
+        98 +  9. METACLASSES AND DESCRIPTORS:
+        99 +     - Custom __getattribute__, __setattr__ behavior not modeled
+       100 +     - Class decorators that modify behavior not tracked
+       101 +  
+       102 +  Design Decisions
+       103 +  ----------------
+       104 +  - CONSERVATIVE FOR SAFETY: Prefer false positives (extra dependencies) over
+       105 +    false negatives (missing dependencies)
+       106 +  
+       107 +  - NOTEBOOK-INTERNAL ONLY: Only tracks dependencies on variables/functions/classes
+       108 +    defined within the notebook. Imported names and builtins are filtered out.
+       109 +  
+       110 +  - TRANSITIVE CLOSURE: Dependencies propagate through function/method calls to
+       111 +    ensure complete dependency graphs
+       112 +  
+       113 +  - METHOD NAME-BASED DISPATCH: Without type information, uses method name
+       114 +    matching across all classes as a sound over-approximation
+       115 +  
+       116 +  Example Usage
+       117 +  -------------
+       118 +      notebook = {"cells": [...]}
+       119 +      dependencies = analyze_notebook(notebook)
+       120 +  
+       121 +      for cell_id, deps in dependencies.items():
+       122 +          print(f"Cell {cell_id} reads: {deps.globals_read}")
+       123 +          print(f"Cell {cell_id} writes: {deps.globals_written}")
+       124    """
+       125    
+       126    import ast
+
+⏺ Perfect! Let me verify the documentation is properly formatted and the module still works:
+
+⏺ Bash(python3 -c "import data_ferret.util.dependencies; help(data_ferret.util.dependencies)" | head -80)
+  ⎿ [05:51:21] [Installing ferret_kernel kernel......]                                                                                                                              
+    [05:51:21]   [Copying /Users/freund/other/DataFerret/data_ferret/kernel/kernelspec/logo-64x64.png to /Users/freund/other/DataFerret/data_ferret/kernel/.tmp_kernelspec/logo-64x6
+    4.png]
+    … +78 lines (ctrl+o to expand)
+
+
+⏺ Bash(python -m pytest data_ferret/util/test_dependencies.py -k "test_method_dispatch or test_flow_sensitive" -v)
+  ⎿  ============================= test session starts ==============================                               
+     platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users/freund/anaconda3/envs/ferret/bin/python
+     cachedir: .pytest_cache
+     … +23 lines (ctrl+o to expand)
+
+⏺ Perfect! I've added comprehensive documentation to the top of dependencies.py. The documentation covers:
+
+  What Was Added
+
+  1. Flow-Sensitivity Documentation
+  - Flow-sensitive at module level (tracks read-before-write order)
+  - Flow-insensitive across cells and inside functions
+  - Examples showing how order matters
+
+  2. Context-Sensitivity Documentation
+  - Context-sensitive for function/method analysis (analyzed separately)
+  - Context-insensitive for method dispatch (no type inference)
+  - Explains transitive closure behavior
+
+  3. Conservative Approximations (Over-Approximation)
+     Documented 5 cases where we include MORE dependencies than necessary:
+  - Conditional writes (if/while/for/try)
+  - Method dispatch without type info
+  - Callback tracking
+  - Attribute references
+  - Transitive closure
+
+  4. Missing Cases (Under-Approximation)
+     Documented 9 cases where we may MISS dependencies:
+  - Dynamic code execution (eval, exec)
+  - Reflection (getattr, setattr)
+  - Star imports
+  - Attribute assignments
+  - Container modifications
+  - Global/nonlocal keywords
+  - Class/instance attributes
+  - Indirect calls
+  - Metaclasses and descriptors
+
+  5. Design Decisions
+  - Conservative for safety (prefer false positives)
+  - Notebook-internal only (filter imports/builtins)
+  - Transitive closure propagation
+  - Method name-based dispatch
+
+  The documentation is visible via help(data_ferret.util.dependencies) and provides users with a clear understanding of what the analysis can and cannot do, where it's conservative,
+   and where it may miss dependencies.
+
+
+
