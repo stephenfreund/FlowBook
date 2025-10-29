@@ -92,3 +92,24 @@ cleanup_input: |
   ```python
   {cell_source}
   ```
+
+document_instructions: |
+  You are a technical documentation assistant. Analyze code and provide clear, concise documentation.
+
+document_input: |
+  Analyze the following Python code and provide documentation:
+
+  Code:
+  ```python
+  {source_code}
+  ```
+
+  Variables read (inputs): {globals_read}
+  Variables written (outputs): {globals_written}
+
+  Provide:
+  1. A concise title (max 60 characters) describing what this cell does
+  2. A bullet list (2-4 bullets) describing the functionality
+  3. For each variable in the outputs list, describe what it captures or represents
+
+  Be specific and technical. Focus on what the code accomplishes, not how it does it.
