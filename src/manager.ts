@@ -143,12 +143,30 @@ export class FerretCommandsManager {
       const commandId = `data_ferret:${cmdInfo.id}`;
 
       this.app.commands.addCommand(commandId, {
-        label: cmdInfo.label,
+        label: `Ferret: ${cmdInfo.label}`,
         caption: cmdInfo.tooltip,
-        execute: async () => {
+        execute: async (args?: any) => {
           const current = this.tracker.currentWidget;
           if (current) {
-            await this.executeCommand(cmdInfo.id, current);
+            // Determine which cell(s) to operate on:
+            // 1. If cellId is explicitly provided (from cell toolbar), use it
+            // 2. If fromContextMenu is true, use the active cell
+            // 3. Otherwise, operate on the entire notebook (no cellId)
+            let cellId: string | undefined;
+
+            if (args?.cellId) {
+              // Explicit cell ID from cell toolbar
+              cellId = args.cellId as string;
+            } else if (args?.fromContextMenu) {
+              // From context menu - use active cell
+              const activeCell = current.content.activeCell;
+              if (activeCell) {
+                cellId = activeCell.model.id;
+              }
+            }
+            // else: undefined, which means operate on entire notebook
+
+            await this.executeCommand(cmdInfo.id, current, cellId);
           }
         }
       });
@@ -166,6 +184,33 @@ export class FerretCommandsManager {
         category: 'Ferret Commands',
         args: {},
       });
+    });
+  }
+
+  /**
+   * Add commands to the code cell context menu
+   */
+  addToContextMenu(tracker: INotebookTracker): void {
+    // Add each Ferret command to the context menu
+    [...this.commands].reverse().forEach((cmdInfo, index) => {
+      const commandId = `data_ferret:${cmdInfo.id}`;
+
+      // Add menu item to the context menu
+      // Using rank 0-3 to place at the top of the context menu
+      this.app.contextMenu.addItem({
+        command: commandId,
+        selector: '.jp-Cell.jp-CodeCell',
+        rank: 0,
+        // Pass fromContextMenu flag to indicate this execution is from context menu
+        args: { fromContextMenu: true }
+      });
+    });
+
+    // Add a separator after Ferret commands to create a distinct section
+    this.app.contextMenu.addItem({
+      type: 'separator',
+      selector: '.jp-Cell.jp-CodeCell',
+      rank: this.commands.length
     });
   }
 }

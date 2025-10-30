@@ -45,6 +45,9 @@ const extension: JupyterFrontEndPlugin<void> = {
       manager.addToPalette(palette);
     }
 
+    // Add to context menu
+    manager.addToContextMenu(tracker);
+
     // Add toolbar buttons to notebooks
     const toolbarExtension = new NotebookToolbarExtension(manager);
     app.docRegistry.addWidgetExtension('Notebook', toolbarExtension);
