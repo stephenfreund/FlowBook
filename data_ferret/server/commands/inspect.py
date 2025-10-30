@@ -10,7 +10,11 @@ from typing import Any, Dict, Optional
 from data_ferret.server.base import NotebookCommand
 from data_ferret.util.notebook_tools import NotebookTools
 from data_ferret.server.kernel_manager import FerretKernelClient
-from data_ferret.util.ferret_metadata import FerretMetadata, OptimizationPotential, set_optimization_potential_ferret_metadata
+from data_ferret.util.ferret_metadata import (
+    FerretMetadata,
+    OptimizationPotential,
+    set_optimization_potential_ferret_metadata,
+)
 from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.util.prompts import get_prompt
 
@@ -24,6 +28,7 @@ from pydantic import BaseModel, Field
 class InspectionResultAndStats(BaseModel):
     inspection_metadata: OptimizationPotential
     stats: FerretStats
+
 
 class InspectCommand(NotebookCommand):
     """Adds inspection metadata to all cells in the notebook."""
@@ -44,14 +49,12 @@ class InspectCommand(NotebookCommand):
     def tooltip(self) -> str:
         return "Add inspection metadata to cells"
 
-
-
     async def inspect_cell(
-       self, index: int, nb : nbformat.NotebookNode, model: Any
+        self, index: int, nb: nbformat.NotebookNode, model: Any
     ) -> Tuple[str, InspectionResultAndStats]:
         cells = nb["cells"]
         cell = cells[index]
-        
+
         with NotebookTools(nb) as tools:
 
             agent = FerretAgent[OptimizationPotential](
@@ -62,7 +65,9 @@ class InspectCommand(NotebookCommand):
                 tools=tools.tools(include_profile=True),
             )
 
-            prefix = "\n".join([f'Cell {cell["id"]}:\n{cell["source"]}' for cell in cells[:index]])
+            prefix = "\n".join(
+                [f'Cell {cell["id"]}:\n{cell["source"]}' for cell in cells[:index]]
+            )
 
             profile_data = FerretMetadata.from_cell(cell).profile
 
@@ -71,7 +76,7 @@ class InspectCommand(NotebookCommand):
                 cell_id=cell["id"],
                 prefix=prefix,
                 cell_source=cell["source"],
-                profile_data=profile_data
+                profile_data=profile_data,
             )
 
             final_output, stats = await agent.run(input_text)
@@ -81,13 +86,14 @@ class InspectCommand(NotebookCommand):
         )
 
         return cell["id"], InspectionResultAndStats(
-            inspection_metadata=final_output,
-            stats=stats
+            inspection_metadata=final_output, stats=stats
         )
 
-
-    async def inspect_cells(self, 
-        nb: nbformat.NotebookNode, model: Any, cell_ids: Optional[List[str]] = None
+    async def inspect_cells(
+        self,
+        nb: nbformat.NotebookNode,
+        model: Any,
+        cell_ids: Optional[List[str]] = None,
     ) -> Tuple[nbformat.NotebookNode, float]:
         print()
         print("# Inspecting Cells for Optimization Potential")
@@ -96,13 +102,19 @@ class InspectCommand(NotebookCommand):
         tasks = []
         for index, cell in enumerate(nb["cells"]):
             if cell["cell_type"] == "code":
-                source = "\n".join(cell["source"] if isinstance(cell["source"], list) else [cell["source"]])
+                source = "\n".join(
+                    cell["source"]
+                    if isinstance(cell["source"], list)
+                    else [cell["source"]]
+                )
                 if source.strip():
                     # Skip cells that already have inspection data unless --all is specified
                     if cell_ids is None or cell["id"] in cell_ids:
                         tasks.append(self.inspect_cell(index, nb, model))
                 else:
-                    set_optimization_potential_ferret_metadata(cell, None)
+                    set_optimization_potential_ferret_metadata(
+                        cell, OptimizationPotential(potential=0, optimization_plan=[])
+                    )
 
         print(
             "|{:<10}|{:<10}|{:<10}|{:<10}|{:<10}|".format(
@@ -119,14 +131,13 @@ class InspectCommand(NotebookCommand):
         for cell_id, cell_result in results:
             cell = cell_map.get(cell_id)
             assert cell is not None, f"Cell {cell_id} not found in notebook"
-            set_optimization_potential_ferret_metadata(cell, cell_result.inspection_metadata)
+            set_optimization_potential_ferret_metadata(
+                cell, cell_result.inspection_metadata
+            )
 
         total_cost = sum([cell_result.stats.cost for _, cell_result in results])
 
         return new_nb, total_cost
-
-
-
 
     async def process(
         self,
@@ -136,15 +147,15 @@ class InspectCommand(NotebookCommand):
         config: Optional[Any] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-
         """Add inspection metadata to each cell."""
-        new_nb, total_cost = await self.inspect_cells(notebook_content, config.model, selected_cell_ids)
+        new_nb, total_cost = await self.inspect_cells(
+            notebook_content, config.model, selected_cell_ids
+        )
 
         metadata = {
             "status": "success",
             "command": self.command_name,
-            "total_cost": total_cost
+            "total_cost": total_cost,
         }
 
         return {"notebook": new_nb, "metadata": metadata}
-

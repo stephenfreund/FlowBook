@@ -4,18 +4,20 @@ Document command implementation.
 Adds descriptive comments to code cells based on dependency analysis and profiling data.
 """
 
+import asyncio
 import copy
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
+from agents import Usage
+from data_ferret.util.output import timer
 import nbformat
 from pydantic import BaseModel, Field
 
-from data_ferret.agent.agent import FerretAgent
+from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.server.base import NotebookCommand
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.dependencies import analyze_notebook
 from data_ferret.util.ferret_metadata import FerretMetadata
-from data_ferret.util.output import log
 from data_ferret.util.prompts import get_prompt
 
 
@@ -37,6 +39,13 @@ class CellDocumentation(BaseModel):
         description="Descriptions of what each output variable captures",
         default_factory=list,
     )
+
+
+class DocumentationResultAndStats(BaseModel):
+    """Result of documenting a cell with stats."""
+
+    comment: str = Field(description="The generated documentation comment")
+    stats: FerretStats = Field(description="Statistics from the LLM call")
 
 
 class DocumentCommand(NotebookCommand):
@@ -84,46 +93,48 @@ class DocumentCommand(NotebookCommand):
         source_code: str,
         globals_written: List[str],
         globals_read: List[str],
-    ) -> Optional[CellDocumentation]:
+        model: str,
+    ) -> Tuple[Optional[CellDocumentation], FerretStats]:
         """Use LLM to generate documentation for a code cell."""
-        try:
-            # Format variables for the prompt
-            read_vars = ", ".join(globals_read) if globals_read else "None"
-            written_vars = ", ".join(globals_written) if globals_written else "None"
+        # Format variables for the prompt
+        read_vars = ", ".join(globals_read) if globals_read else "None"
+        written_vars = ", ".join(globals_written) if globals_written else "None"
 
-            # Get prompts from the prompt manager
-            instructions = get_prompt("document_instructions")
-            prompt = get_prompt(
-                "document_input",
-                source_code=source_code,
-                globals_read=read_vars,
-                globals_written=written_vars,
-            )
+        # Get prompts from the prompt manager
+        instructions = get_prompt("document_instructions")
+        prompt = get_prompt(
+            "document_input",
+            source_code=source_code,
+            globals_read=read_vars,
+            globals_written=written_vars,
+        )
 
-            doc, stats = await FerretAgent.make_and_run_agent(
-                key="document-cell",
-                model="gpt-4o-mini",
-                instructions=instructions,
-                output_type=CellDocumentation,
-                input=prompt,
-                log_dir="agent-logs",
-            )
+        doc, stats = await FerretAgent.make_and_run_agent(
+            key="document-cell",
+            model=model,
+            instructions=instructions,
+            output_type=CellDocumentation,
+            input=prompt,
+            log_dir="agent-logs",
+        )
 
-            log(f"LLM documentation generated (cost: ${stats.cost:.4f})")
-            return doc
-        except Exception as e:
-            log(f"Failed to generate LLM documentation: {e}")
-            return None
+        return doc, stats
 
     async def _generate_cell_comment(
         self,
         cell: nbformat.NotebookNode,
         cell_id: str,
         dependencies: Dict[str, Any],
-    ) -> str:
+        model: str,
+    ) -> Tuple[str, FerretStats]:
         """Generate a documentation comment for a cell."""
         if cell_id not in dependencies:
-            return ""
+            return "", FerretStats(
+                model=model,
+                log_path="",
+                time=0.0,
+                usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0),
+            )
 
         deps = dependencies[cell_id]
 
@@ -148,8 +159,8 @@ class DocumentCommand(NotebookCommand):
         ]
 
         # Generate LLM documentation
-        llm_doc = await self._generate_llm_documentation(
-            source, globals_written, globals_read
+        llm_doc, stats = await self._generate_llm_documentation(
+            source, globals_written, globals_read, model
         )
 
         comment_lines = []
@@ -216,7 +227,7 @@ class DocumentCommand(NotebookCommand):
         comment_lines.append("")  # Empty line after comment block
         comment_lines.append("")  # Empty line after comment block
 
-        return "\n".join(comment_lines)
+        return "\n".join(comment_lines), stats
 
     def _remove_old_comment_from_source(self, source: str) -> str:
         """Remove old documentation comment from source code."""
@@ -243,6 +254,105 @@ class DocumentCommand(NotebookCommand):
 
         return source
 
+    async def document_cell(
+        self,
+        index: int,
+        nb: nbformat.NotebookNode,
+        dependencies_dict: Dict[str, Any],
+        model: str,
+    ) -> Tuple[str, DocumentationResultAndStats]:
+        """Document a single cell and return the result with stats."""
+        cells = nb["cells"]
+        cell = cells[index]
+        cell_id = cell["id"]
+
+        # Generate documentation comment
+        comment, stats = await self._generate_cell_comment(
+            cell, cell_id, dependencies_dict, model
+        )
+
+        # Print progress for this cell
+        status = "✓" if comment else "✗"
+        tokens = stats.usage.total_tokens if stats.usage else 0
+        print(
+            f"| {index:<9}| {status:<9}| {tokens:<9}| {stats.time:<9.1f}| {stats.cost:<9.4f}|"
+        )
+
+        return cell_id, DocumentationResultAndStats(comment=comment, stats=stats)
+
+    async def document_cells(
+        self,
+        nb: nbformat.NotebookNode,
+        dependencies_dict: Dict[str, Any],
+        model: str,
+        cell_ids: Optional[List[str]] = None,
+    ) -> Tuple[nbformat.NotebookNode, float]:
+        """Document all code cells concurrently."""
+        print()
+        print("# Documenting Cells")
+        print()
+
+        # Clean old comments first
+        for cell in nb["cells"]:
+            if cell.get("cell_type") == "code":
+                source = cell.get("source", "")
+                if isinstance(source, list):
+                    source = "".join(source)
+                cleaned_source = self._remove_old_comment_from_source(source)
+                cell["source"] = cleaned_source
+
+        # Create tasks for cells to document
+        tasks = []
+        for index, cell in enumerate(nb["cells"]):
+            if cell.get("cell_type") == "code":
+                source = "\n".join(
+                    cell["source"]
+                    if isinstance(cell["source"], list)
+                    else [cell["source"]]
+                )
+                if source.strip():
+                    # Only document selected cells if specified
+                    if cell_ids is None or cell["id"] in cell_ids:
+                        tasks.append(
+                            self.document_cell(index, nb, dependencies_dict, model)
+                        )
+
+        # Print table header
+        print(
+            "|{:<10}|{:<10}|{:<10}|{:<10}|{:<10}|".format(
+                "Index", "Status", "Tokens", "Time (s)", "Cost ($)"
+            )
+        )
+        print("|{:-^10}|{:-^10}|{:-^10}|{:-^10}|{:-^10}|".format("", "", "", "", ""))
+
+        # Execute all documentation tasks concurrently
+        results = await asyncio.gather(*tasks)
+        print()
+
+        # Create new notebook with documentation
+        new_nb: nbformat.NotebookNode = nb.copy()  # type: ignore
+        cell_map = {cell["id"]: cell for cell in new_nb["cells"]}
+
+        # Apply documentation to cells
+        for cell_id, cell_result in results:
+            with timer(message=f"Cell {cell_id}"):
+                cell = cell_map.get(cell_id)
+                assert cell is not None, f"Cell {cell_id} not found in notebook"
+
+                if cell_result.comment:
+                    # Get the cleaned source
+                    source = cell.get("source", "")
+                    if isinstance(source, list):
+                        source = "".join(source)
+
+                    # Add comment at the beginning
+                    new_source = cell_result.comment + source
+                    cell["source"] = new_source
+
+        total_cost = sum([cell_result.stats.cost for _, cell_result in results])
+
+        return new_nb, total_cost
+
     async def process(
         self,
         notebook_content: Dict[str, Any],
@@ -252,50 +362,18 @@ class DocumentCommand(NotebookCommand):
         **kwargs,
     ) -> Dict[str, Any]:
         """Add documentation to code cells as comments."""
-        log("Documenting code cells with comments")
-
         # Analyze dependencies for the entire notebook
         dependencies_dict = analyze_notebook(notebook_content)
 
-        # Create new notebook with documented cells
-        new_nb = copy.deepcopy(notebook_content)
-
-        cells_documented = 0
-
-        for cell in new_nb["cells"]:
-            if cell.get("cell_type") == "code":
-                cell_id = cell.get("id", "")
-                source = cell.get("source", "")
-
-                if isinstance(source, list):
-                    source = "".join(source)
-
-                # Skip if no source or if not in selected cells
-                if not source.strip():
-                    continue
-
-                if selected_cell_ids and cell_id not in selected_cell_ids:
-                    continue
-
-                cleaned_source = self._remove_old_comment_from_source(source)
-                cell["source"] = cleaned_source
-                # Generate comment
-                comment = await self._generate_cell_comment(
-                    cell, cell_id, dependencies_dict
-                )
-
-                if comment:
-                    # Add new comment at the beginning
-                    new_source = comment + cleaned_source
-                    cell["source"] = new_source
-                    cells_documented += 1
-
-        log(f"Documented {cells_documented} cells")
+        # Document cells concurrently
+        new_nb, total_cost = await self.document_cells(
+            notebook_content, dependencies_dict, config.model, selected_cell_ids
+        )
 
         metadata = {
             "status": "success",
             "command": self.command_name,
-            "cells_documented": cells_documented,
+            "total_cost": total_cost,
         }
 
         return {"notebook": new_nb, "metadata": metadata}
