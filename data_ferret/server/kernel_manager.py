@@ -2,10 +2,18 @@
 Kernel connection manager for the Jupyter server extension.
 """
 
+import uuid
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from jupyter_client.blocking.client import BlockingKernelClient
 from jupyter_client.manager import KernelManager
 from jupyter_server.serverapp import ServerApp
+
+
+@dataclass
+class TestCodeData:
+    ok: bool
+    result: str
 
 
 class FerretKernelClient(BlockingKernelClient):
@@ -49,6 +57,48 @@ class FerretKernelClient(BlockingKernelClient):
         msg = self.session.msg("execute_request", content, metadata=metadata)
         self.shell_channel.send(msg)
         return msg["header"]["msg_id"]
+
+    def test_code(self) -> TestCodeData:
+        """Send test_code comm message to kernel and return response."""
+        comm_id = uuid.uuid4().hex
+
+        original_code = """
+import pandas as pd
+df = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+"""
+        modified_code = """
+import pandas as pd
+df = pd.DataFrame({'A': [1, 2, 4], 'B': [4.4, 5, 6]})
+"""
+        output_variables = ['df']
+
+        # Build and send the comm_open for test_code
+        content = {
+            "comm_id": comm_id,
+            "target_name": "test_code",
+            "target_module": "",
+            "data": {
+                "original_code": original_code,
+                "modified_code": modified_code,
+                "output_variables": output_variables,
+            },
+        }
+        open_msg = self.session.msg("comm_open", content)
+        self.shell_channel.send(open_msg)
+
+        # Wait for the reply on iopub channel
+        timeout = 5
+        while True:
+            reply = self.get_iopub_msg(timeout=timeout)
+            if (
+                reply["header"]["msg_type"] == "comm_msg"
+                and reply["content"].get("comm_id") == comm_id
+            ):
+                data = reply["content"]["data"]
+                break
+
+        result = data.get("result") if data.get("ok") else data.get("error")
+        return TestCodeData(ok=data.get("ok"), result=result)
 
 
 class KernelConnectionManager:

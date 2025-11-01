@@ -7,14 +7,13 @@ import pprint
 import re
 import threading
 import types
-from typing import Tuple
+from typing import Dict, List, Set, Tuple
 import traceback
 from typing import Any
 from IPython.display import HTML, display, Markdown
 from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
 from comm import create_comm
-from scalene import ScaleneArguments, scalene_profiler
 from data_ferret.kernel.checkpoint import Checkpoints, checkpoint_diff
 from data_ferret.kernel.equality import user_ns_diff
 from data_ferret.kernel.ferret_pdb import FerretPdb
@@ -359,20 +358,34 @@ class FerretKernel(IPythonKernel, Magics):
             resp = {"ok": False, "error": str(e)}
         comm.send(resp)
 
+    def test_code(self, original_code: str, modified_code: str, output_variables: Set[str] | None = None) -> Dict[str, str]:
+        """Test the code and return the result."""
+        print(f"Saving original environment")
+        self.checkpoint(f"save original_environment")
+        print(f"Executing original code")
+        self.shell.run_cell(original_code)
+        print(f"Saving original result")
+        self.checkpoint(f"save original_result")
+        print(f"Restoring original environment")
+        self.checkpoint(f"restore original_environment")
+        print(f"Executing modified code")
+        self.shell.run_cell(modified_code)
+        print(f"Saving modified result")
+        self.checkpoint(f"save modified_result")
+        print(f"Diffing original and modified environments")
+        diff = checkpoint_diff(self._checkpoint.get(f"original_result"), self._checkpoint.get(f"modified_result"), keys_to_include=output_variables)
+        return diff
+
     def _test_code_comm_open(self, comm, open_msg):
-        """Handler for test_code comm messages - returns a random string."""
-        import random
-        import string
-
-        # Generate random string
-        length = 20
-        random_string = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
-
         try:
-            resp = {"ok": True, "result": random_string}
+            original_code = open_msg["content"]["data"]["original_code"]
+            modified_code = open_msg["content"]["data"]["modified_code"]
+            output_variables = set[str](open_msg["content"]["data"]["output_variables"])
+            print(f"Output variables: {output_variables}")
+            result = {"ok": True, "result": self.test_code(original_code, modified_code, output_variables)}
         except Exception as e:
-            resp = {"ok": False, "error": str(e)}
-        comm.send(resp)
+            result = {"ok": False, "error": str(e)}
+        comm.send(result)
 
     async def do_execute(
         self,
@@ -569,6 +582,7 @@ class FerretKernel(IPythonKernel, Magics):
     async def do_scalene(
         self, code: str, cell_id: str, store_history: bool
     ) -> Tuple[dict[str, Any], str | None]:
+        from scalene import ScaleneArguments, scalene_profiler
 
         code = self.wrap_last_expr_with_print_repr(code)
 

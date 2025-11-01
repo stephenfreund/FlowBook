@@ -104,18 +104,22 @@ def cli_main():
                 kernel_client = FerretKernelClient(kernel_id=kernel_manager.kernel_id)
                 kernel_client.load_connection_info(kernel_manager.get_connection_info())
                 kernel_client.start_channels()
-                try:
-                    kernel_client.wait_for_ready(timeout=30)
-                except Exception as e:
-                    print(f"Error waiting for kernel to be ready: {e}", file=sys.stderr)
-                    # Try to read kernel stderr/stdout for more details
-                    if kernel_manager.is_alive():
-                        print("Kernel is still running but not responding", file=sys.stderr)
-                    else:
-                        print("Kernel has died", file=sys.stderr)
-                    import traceback
-                    traceback.print_exc()
-                    return 1
+                for i in range(3):
+                    try:
+                        kernel_client.wait_for_ready(timeout=30)
+                        break
+                    except Exception as e:
+                        print(f"Error waiting for kernel to be ready: {e}", file=sys.stderr)
+                        # Try to read kernel stderr/stdout for more details
+                        if kernel_manager.is_alive():
+                            print("Kernel is still running but not responding", file=sys.stderr)
+                        else:
+                            print("Kernel has died", file=sys.stderr)
+                        if i < 2:
+                            print(f"Retrying...")
+                        else:
+                            print(f"Giving up after 3 attempts")
+                            return 1
 
                 assert isinstance(kernel_client, FerretKernelClient)
                 print(f"Kernel started successfully")

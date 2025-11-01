@@ -10,6 +10,7 @@ from data_ferret.server.commands.inspect import InspectCommand
 from data_ferret.server.commands.cleanup import CleanupCommand
 from data_ferret.server.commands.document import DocumentCommand
 from data_ferret.server.commands.example_message_command import ExampleMessageCommand
+from data_ferret.server.commands.test_comm import TestCommCommand
 
 __all__ = [
     "AnalyzeNotebookCommand",
@@ -20,5 +21,6 @@ __all__ = [
     "CleanupCommand",
     "DocumentCommand",
     "ExampleMessageCommand",
+    "TestCommCommand",
 ]
 

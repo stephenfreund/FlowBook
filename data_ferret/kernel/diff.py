@@ -32,7 +32,7 @@ class Diff:
         self.id_map_b = {}  # Maps id(obj_b) -> canonical_id
         self.next_canonical_id = 0
     
-    def diff(self, a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, str]:
+    def diff(self, a: Dict[str, Any], b: Dict[str, Any], keys_to_include: Set[str] | None = None) -> Dict[str, str]:
         """
         Compare two user namespaces.
         
@@ -44,6 +44,9 @@ class Diff:
             Dictionary mapping variable names to difference descriptions.
             Empty dict if namespaces are equal.
         """
+        if keys_to_include is None:
+            keys_to_include = set(a.keys()) | set(b.keys())
+
         # Reset identity tracking for each comparison
         self.id_map_a = {}
         self.id_map_b = {}
@@ -53,17 +56,17 @@ class Diff:
         
         # Check for variables only in a
         only_in_a = set(a.keys()) - set(b.keys())
-        for var in only_in_a:
+        for var in only_in_a & keys_to_include:
             differences[var] = f"Variable was removed"
         
         # Check for variables only in b
         only_in_b = set(b.keys()) - set(a.keys())
-        for var in only_in_b:
+        for var in only_in_b & keys_to_include:
             differences[var] = f"Variable was added"
         
         # Compare common variables
         common_vars = set(a.keys()) & set(b.keys())
-        for var in sorted(common_vars):  # Sort for deterministic output
+        for var in sorted(common_vars & keys_to_include):  # Sort for deterministic output
             diff_msg = self._compare_values(a[var], b[var], path=var)
             if diff_msg:
                 differences[var] = diff_msg

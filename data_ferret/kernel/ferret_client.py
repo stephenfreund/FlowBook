@@ -124,12 +124,28 @@ class FerretClient(NotebookClient):
         """Send test_code comm message to kernel and return random string response."""
         comm_id = uuid.uuid4().hex
 
+        original_code = """
+import pandas as pd
+df = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+"""
+        modified_code = """
+import pandas as pd
+df = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+"""
+        output_variables = """
+['df']
+"""
+
         # Build and send the comm_open for test_code
         content = {
             "comm_id": comm_id,
             "target_name": "test_code",
             "target_module": "",
-            "data": {},  # No input data needed
+            "data": {
+                "original_code": original_code,
+                "modified_code": modified_code,
+                "output_variables": output_variables,
+            },  # No input data needed
         }
         open_msg = self.debug_kc.session.msg("comm_open", content)
         self.debug_kc.shell_channel.send(open_msg)

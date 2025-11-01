@@ -1,6 +1,6 @@
 import copy
 import types
-from typing import Any, Dict
+from typing import Any, Dict, Set
 
 from data_ferret.kernel.diff import Diff
 from data_ferret.kernel.equality import user_ns_diff
@@ -21,7 +21,7 @@ class Checkpoint:
     def original(self, id: int) -> int:
         return self.reverse_memo.get(id, id)
 
-def checkpoint_diff(a: Checkpoint, b: Checkpoint) -> Dict[str, str]:
+def checkpoint_diff(a: Checkpoint, b: Checkpoint, keys_to_include: Set[str] | None = None) -> Dict[str, str]:
     # all_keys = set(a.user_ns.keys()) | set(b.user_ns.keys())
     # diffs = {}
     # for k in all_keys:
@@ -35,7 +35,7 @@ def checkpoint_diff(a: Checkpoint, b: Checkpoint) -> Dict[str, str]:
     # return user_ns_diff(a.user_ns, b.user_ns, ignore_keys) | diffs
     
     differ = Diff()
-    return differ.diff(a.user_ns, b.user_ns)
+    return differ.diff(a.user_ns, b.user_ns, keys_to_include)
 
 
 class Checkpoints:
