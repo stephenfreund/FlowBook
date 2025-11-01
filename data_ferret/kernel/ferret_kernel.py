@@ -288,6 +288,9 @@ class FerretKernel(IPythonKernel, Magics):
         self.comm_manager.register_target(
             "debug_command", self._debug_command_comm_open
         )
+        self.comm_manager.register_target(
+            "test_code", self._test_code_comm_open
+        )
         self.pdb = FerretPdb()
         self._default_cell_timeout = 30 * 60
         self._cell_timeout = self._default_cell_timeout
@@ -352,6 +355,21 @@ class FerretKernel(IPythonKernel, Magics):
         cmd = open_msg["content"]["data"]["cmd"]
         try:
             resp = {"ok": True, "result": self._do_cmd(cmd)}
+        except Exception as e:
+            resp = {"ok": False, "error": str(e)}
+        comm.send(resp)
+
+    def _test_code_comm_open(self, comm, open_msg):
+        """Handler for test_code comm messages - returns a random string."""
+        import random
+        import string
+
+        # Generate random string
+        length = 20
+        random_string = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+
+        try:
+            resp = {"ok": True, "result": random_string}
         except Exception as e:
             resp = {"ok": False, "error": str(e)}
         comm.send(resp)

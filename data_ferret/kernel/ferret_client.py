@@ -30,6 +30,12 @@ class DebugCommandData:
 
 
 @dataclass
+class TestCodeData:
+    ok: bool
+    result: str
+
+
+@dataclass
 class FileRecord:
     cell_id: str
     source: str | List[str]
@@ -99,7 +105,7 @@ class FerretClient(NotebookClient):
         open_msg = self.debug_kc.session.msg("comm_open", content)
         self.debug_kc.shell_channel.send(open_msg)
 
-        # now pull messages off debug_kc’s IOPub until we see our reply
+        # now pull messages off debug_kc's IOPub until we see our reply
         while True:
             reply = self.debug_kc.get_iopub_msg(timeout=5)
             if (
@@ -113,6 +119,33 @@ class FerretClient(NotebookClient):
         return DebugCommandData(
             cmd=cmd, ok=data.get("ok"), result=self.replace_filenames(result)
         )
+
+    def test_code(self) -> TestCodeData:
+        """Send test_code comm message to kernel and return random string response."""
+        comm_id = uuid.uuid4().hex
+
+        # Build and send the comm_open for test_code
+        content = {
+            "comm_id": comm_id,
+            "target_name": "test_code",
+            "target_module": "",
+            "data": {},  # No input data needed
+        }
+        open_msg = self.debug_kc.session.msg("comm_open", content)
+        self.debug_kc.shell_channel.send(open_msg)
+
+        # Pull messages off debug_kc's IOPub until we see our reply
+        while True:
+            reply = self.debug_kc.get_iopub_msg(timeout=5)
+            if (
+                reply["header"]["msg_type"] == "comm_msg"
+                and reply["content"].get("comm_id") == comm_id
+            ):
+                data = reply["content"]["data"]
+                break
+
+        result = data.get("result") if data.get("ok") else data.get("error")
+        return TestCodeData(ok=data.get("ok"), result=result)
 
     async def async_execute_cell(
         self,
