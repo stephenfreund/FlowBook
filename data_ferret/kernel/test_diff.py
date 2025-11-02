@@ -15,6 +15,65 @@ import sys
 
 # Import the Diff class
 from data_ferret.kernel.diff import Diff
+from data_ferret.kernel.types import ValueComparison, DiffNode, DiffResult
+
+
+# ============================================================================
+# TEST HELPERS
+# ============================================================================
+
+def assert_no_diff(result: DiffResult):
+    """Assert that result contains no differences."""
+    assert result == {}, f"Expected no differences, but got: {result}"
+
+
+def assert_has_diff(result: DiffResult, var: str):
+    """Assert that variable has a difference."""
+    assert var in result, f"Expected difference in '{var}', but not found. Result: {result}"
+
+
+def assert_message_contains(result: DiffResult, var: str, expected_text: str):
+    """Assert that the difference message for a variable contains expected text."""
+    assert var in result, f"Variable '{var}' not in result"
+
+    diff_node = result[var]
+
+    # If it's a ValueComparison, check its message
+    if isinstance(diff_node, ValueComparison):
+        assert expected_text in diff_node.message, \
+            f"Expected '{expected_text}' in message, but got: {diff_node.message}"
+    # If it's a dict (compound diff), look for the text in any nested message
+    elif isinstance(diff_node, dict):
+        # Recursively search for message containing text
+        def find_message(node):
+            if isinstance(node, ValueComparison):
+                if expected_text in node.message:
+                    return True
+            elif isinstance(node, dict):
+                for value in node.values():
+                    if find_message(value):
+                        return True
+            return False
+
+        assert find_message(diff_node), \
+            f"Expected '{expected_text}' in nested messages, but not found. Result: {diff_node}"
+    else:
+        raise AssertionError(f"Unexpected diff node type: {type(diff_node)}")
+
+
+def get_comparison(result: DiffResult, var: str) -> ValueComparison:
+    """Get ValueComparison for a variable (assumes simple diff)."""
+    assert var in result, f"Variable '{var}' not in result"
+    assert isinstance(result[var], ValueComparison), \
+        f"Expected ValueComparison but got {type(result[var])}"
+    return result[var]
+
+
+def assert_status(result: DiffResult, var: str, expected_status: str):
+    """Assert that a variable has a specific comparison status."""
+    comparison = get_comparison(result, var)
+    assert comparison.status == expected_status, \
+        f"Expected status '{expected_status}' but got '{comparison.status}'"
 
 
 # ============================================================================
@@ -45,8 +104,8 @@ class TestBasicTypes:
         a = {'flag': True}
         b = {'flag': False}
         result = differ.diff(a, b)
-        assert 'flag' in result
-        assert 'Bool mismatch' in result['flag']
+        assert_has_diff(result, 'flag')
+        assert_message_contains(result, 'flag', 'Bool mismatch')
     
     def test_int_equal(self):
         differ = Diff()
@@ -59,8 +118,8 @@ class TestBasicTypes:
         a = {'x': 42}
         b = {'x': 43}
         result = differ.diff(a, b)
-        assert 'x' in result
-        assert 'Integer mismatch' in result['x']
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'Integer mismatch')
     
     def test_float_equal(self):
         differ = Diff()
@@ -72,14 +131,18 @@ class TestBasicTypes:
         differ = Diff(rtol=1e-6)
         a = {'x': 1.0000001}
         b = {'x': 1.0000002}
-        assert differ.diff(a, b) == {}
+        result = differ.diff(a, b)
+        # Should be "close" not equal
+        assert_has_diff(result, 'x')
+        assert_status(result, 'x', 'close')
     
     def test_float_not_close_enough(self):
         differ = Diff(rtol=1e-9, atol=0)
         a = {'x': 1.0000001}
         b = {'x': 1.0000002}
         result = differ.diff(a, b)
-        assert 'x' in result
+        assert_has_diff(result, 'x')
+        assert_status(result, 'x', 'different')
     
     def test_nan_equality(self):
         differ = Diff()
@@ -92,8 +155,8 @@ class TestBasicTypes:
         a = {'x': float('nan')}
         b = {'x': 1.0}
         result = differ.diff(a, b)
-        assert 'x' in result
-        assert 'one is NaN' in result['x']
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'one is NaN')
     
     def test_complex_equal(self):
         differ = Diff()
@@ -119,7 +182,7 @@ class TestBasicTypes:
         b = {'msg': 'world'}
         result = differ.diff(a, b)
         assert 'msg' in result
-        assert 'String mismatch' in result['msg']
+        assert_message_contains(result, 'msg', 'String mismatch')
     
     def test_bytes_equal(self):
         differ = Diff()
@@ -150,7 +213,7 @@ class TestCollections:
         b = {'lst': [1, 2]}
         result = differ.diff(a, b)
         assert 'lst' in result
-        assert 'length mismatch' in result['lst']
+        assert_message_contains(result, 'lst', 'length mismatch')
     
     def test_list_different_values(self):
         differ = Diff()
@@ -219,7 +282,10 @@ class TestCollections:
         b = {'d': {'x': 1}}
         result = differ.diff(a, b)
         assert 'd' in result
-        assert 'keys mismatch' in result['d']
+        # Now we get a structured diff showing the specific key
+        assert isinstance(result['d'], dict)
+        assert "['y']" in result['d']
+        assert_message_contains(result, 'd', "only in first")
     
     def test_dict_extra_key(self):
         differ = Diff()
@@ -244,7 +310,7 @@ class TestNumpy:
         b = {'arr': np.array([[1, 2, 3]])}
         result = differ.diff(a, b)
         assert 'arr' in result
-        assert 'shape mismatch' in result['arr']
+        assert_message_contains(result, 'arr', 'shape mismatch')
     
     def test_array_different_dtype(self):
         differ = Diff()
@@ -252,7 +318,7 @@ class TestNumpy:
         b = {'arr': np.array([1, 2, 3], dtype=np.int64)}
         result = differ.diff(a, b)
         assert 'arr' in result
-        assert 'dtype mismatch' in result['arr']
+        assert_message_contains(result, 'arr', 'dtype mismatch')
     
     def test_array_different_values(self):
         differ = Diff()
@@ -295,7 +361,7 @@ class TestPandas:
         b = {'s': pd.Series([1, 2, 3], index=['x', 'y', 'z'])}
         result = differ.diff(a, b)
         assert 's' in result
-        assert 'index mismatch' in result['s']
+        assert_message_contains(result, 's', 'index mismatch')
     
     def test_series_different_name(self):
         differ = Diff()
@@ -303,7 +369,7 @@ class TestPandas:
         b = {'s': pd.Series([1, 2, 3], name='bar')}
         result = differ.diff(a, b)
         assert 's' in result
-        assert 'name mismatch' in result['s']
+        assert_message_contains(result, 's', 'name mismatch')
     
     def test_series_with_nan(self):
         differ = Diff()
@@ -330,7 +396,7 @@ class TestPandas:
         b = {'df': pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})}
         result = differ.diff(a, b)
         assert 'df' in result
-        assert 'shape mismatch' in result['df']
+        assert_message_contains(result, 'df', 'shape mismatch')
     
     def test_dataframe_different_columns(self):
         differ = Diff()
@@ -338,7 +404,7 @@ class TestPandas:
         b = {'df': pd.DataFrame({'A': [1, 2], 'C': [3, 4]})}
         result = differ.diff(a, b)
         assert 'df' in result
-        assert 'columns mismatch' in result['df']
+        assert_message_contains(result, 'df', 'columns mismatch')
     
     def test_dataframe_with_nan(self):
         differ = Diff()
@@ -369,7 +435,7 @@ class TestPointerStructure:
         
         result = differ.diff(a, b)
         assert 'y' in result
-        assert 'Pointer structure mismatch' in result['y']
+        assert_message_contains(result, 'y', 'Pointer structure mismatch')
     
     def test_mismatched_then_correct_reference(self):
         """
@@ -388,7 +454,7 @@ class TestPointerStructure:
         result = differ.diff(a, b)
         # Should report 'x' is different (values don't match)
         assert 'x' in result
-        assert 'Integer mismatch' in result['x'] or 'values mismatch' in result['x']
+        assert_message_contains(result, 'x', 'mismatch')
         # Should NOT report pointer structure mismatch for 'y'
         # since both obj_a and obj_b_correct haven't been successfully matched before
         if 'y' in result:
@@ -525,7 +591,7 @@ class TestUserObjects:
         
         result = differ.diff(a, b)
         assert 'c' in result
-        assert 'Pointer structure mismatch' in result['c']
+        assert_message_contains(result, 'c', 'Pointer structure mismatch')
 
 
 class TestNamespaceLevel:
@@ -537,7 +603,7 @@ class TestNamespaceLevel:
         b = {'x': 1}
         result = differ.diff(a, b)
         assert 'y' in result
-        assert 'removed' in result['y']
+        assert_message_contains(result, 'y', 'removed')
     
     def test_variable_only_in_second(self):
         differ = Diff()
@@ -545,7 +611,7 @@ class TestNamespaceLevel:
         b = {'x': 1, 'y': 2}
         result = differ.diff(a, b)
         assert 'y' in result
-        assert 'added' in result['y']
+        assert_message_contains(result, 'y', 'added')
     
     def test_multiple_differences(self):
         differ = Diff()
@@ -567,7 +633,7 @@ class TestTypeMismatch:
         b = {'x': 1.0}
         result = differ.diff(a, b)
         assert 'x' in result
-        assert 'Type mismatch' in result['x']
+        assert_message_contains(result, 'x', 'Type mismatch')
     
     def test_list_vs_tuple(self):
         differ = Diff()
@@ -575,7 +641,7 @@ class TestTypeMismatch:
         b = {'x': (1, 2, 3)}
         result = differ.diff(a, b)
         assert 'x' in result
-        assert 'Type mismatch' in result['x']
+        assert_message_contains(result, 'x', 'Type mismatch')
     
     def test_array_vs_list(self):
         differ = Diff()
@@ -583,7 +649,7 @@ class TestTypeMismatch:
         b = {'x': [1, 2, 3]}
         result = differ.diff(a, b)
         assert 'x' in result
-        assert 'Type mismatch' in result['x']
+        assert_message_contains(result, 'x', 'Type mismatch')
 
 
 class TestSetRecursion:
@@ -637,7 +703,7 @@ class TestCallables:
         b = {'f': bar}
         result = differ.diff(a, b)
         assert 'f' in result
-        assert 'Callable mismatch' in result['f']
+        assert_message_contains(result, 'f', 'Callable mismatch')
     
     def test_lambda_same(self):
         """Same lambda should be equal."""
@@ -655,7 +721,7 @@ class TestCallables:
         b = {'f': lambda x: x + 1}
         result = differ.diff(a, b)
         assert 'f' in result
-        assert 'Callable mismatch' in result['f']
+        assert_message_contains(result, 'f', 'Callable mismatch')
     
     def test_method_same(self):
         """Bound methods to same method on same instance should be equal."""
@@ -687,7 +753,9 @@ class TestCallables:
         result = differ.diff(a, b)
         assert 'm' in result
         # Should detect that __self__ differs
-        assert '__self__' in result['m'] or 'Pointer structure mismatch' in result['m']
+        # Now returns nested structure with .__self__ key
+        assert isinstance(result['m'], dict)
+        assert '.__self__' in result['m']
     
     def test_method_comparable_instances(self):
         """Methods from different instances with same values should be equal."""
@@ -719,7 +787,7 @@ class TestCallables:
         b = {'f': sum}
         result = differ.diff(a, b)
         assert 'f' in result
-        assert 'Callable mismatch' in result['f']
+        assert_message_contains(result, 'f', 'Callable mismatch')
     
     def test_callable_reference_structure(self):
         """Pointer structure with callables should be tracked."""
@@ -770,9 +838,10 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 'arr' in result
         # Should show the index
-        assert '[2]' in result['arr'] or '(2,)' in result['arr']
+        comp = get_comparison(result, 'arr')
+        assert '[2]' in comp.message or '(2,)' in comp.message
         # Should show the values
-        assert '3' in result['arr'] and '99' in result['arr']
+        assert '3' in comp.message and '99' in comp.message
     
     def test_multidim_array_shows_index(self):
         """Multidimensional array should show full index."""
@@ -782,8 +851,9 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 'arr' in result
         # Should show 2D index
-        assert '1' in result['arr'] and '1' in result['arr']
-        assert '4' in result['arr'] and '99' in result['arr']
+        comp = get_comparison(result, 'arr')
+        assert '(1, 1)' in comp.message  # 2D index
+        assert '4' in comp.message and '99' in comp.message  # Values
     
     def test_series_shows_label_and_values(self):
         """Series mismatch should show the index label and values."""
@@ -792,10 +862,10 @@ class TestDetailedErrorMessages:
         b = {'s': pd.Series([1, 99, 3], index=['a', 'b', 'c'])}
         result = differ.diff(a, b)
         assert 's' in result
-        # Should show the index label
-        assert "'b'" in result['s'] or 'b' in result['s']
-        # Should show the values
-        assert '2' in result['s'] and '99' in result['s']
+        # With new format, check message contains label and values
+        comp = get_comparison(result, 's')
+        assert 'b' in comp.message  # Index label
+        assert '2' in comp.message and '99' in comp.message  # Values
     
     def test_series_nan_position_shows_label(self):
         """Series NaN position mismatch should show the label."""
@@ -805,8 +875,9 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 's' in result
         # Should show which label has the NaN mismatch
-        assert "'b'" in result['s'] or 'b' in result['s']
-        assert 'NaN' in result['s'] or 'is_nan' in result['s']
+        comp = get_comparison(result, 's')
+        assert 'b' in comp.message
+        assert 'NaN' in comp.message or 'nan' in comp.message.lower()
     
     def test_set_shows_unmatched_element(self):
         """Set mismatch should show which element couldn't be matched."""
@@ -816,8 +887,8 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 's' in result
         # Should mention an element value (either 3 or 99)
-        msg = result['s']
-        assert ('3' in msg or '99' in msg)
+        comp = get_comparison(result, 's')
+        assert ('3' in comp.message or '99' in comp.message)
     
     def test_float_array_shows_values(self):
         """Float array with tolerance mismatch should show values."""
@@ -827,7 +898,7 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 'arr' in result
         # Should show the differing values
-        assert '3.0000' in result['arr']
+        assert_message_contains(result, 'arr', '3.0000')
         """Array mismatch should show which index differs and the values."""
         differ = Diff()
         a = {'arr': np.array([1, 2, 3, 4, 5])}
@@ -835,9 +906,10 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 'arr' in result
         # Should show the index
-        assert '[2]' in result['arr'] or '(2,)' in result['arr']
+        comp = get_comparison(result, 'arr')
+        assert '[2]' in comp.message or '(2,)' in comp.message
         # Should show the values
-        assert '3' in result['arr'] and '99' in result['arr']
+        assert '3' in comp.message and '99' in comp.message
     
     def test_multidim_array_shows_index(self):
         """Multidimensional array should show full index."""
@@ -847,8 +919,9 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 'arr' in result
         # Should show 2D index
-        assert '1' in result['arr'] and '1' in result['arr']
-        assert '4' in result['arr'] and '99' in result['arr']
+        comp = get_comparison(result, 'arr')
+        assert '(1, 1)' in comp.message  # 2D index
+        assert '4' in comp.message and '99' in comp.message  # Values
     
     def test_series_shows_label_and_values(self):
         """Series mismatch should show the index label and values."""
@@ -857,10 +930,10 @@ class TestDetailedErrorMessages:
         b = {'s': pd.Series([1, 99, 3], index=['a', 'b', 'c'])}
         result = differ.diff(a, b)
         assert 's' in result
-        # Should show the index label
-        assert "'b'" in result['s'] or 'b' in result['s']
-        # Should show the values
-        assert '2' in result['s'] and '99' in result['s']
+        # With new format, check message contains label and values
+        comp = get_comparison(result, 's')
+        assert 'b' in comp.message  # Index label
+        assert '2' in comp.message and '99' in comp.message  # Values
     
     def test_series_nan_position_shows_label(self):
         """Series NaN position mismatch should show the label."""
@@ -870,8 +943,9 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 's' in result
         # Should show which label has the NaN mismatch
-        assert "'b'" in result['s'] or 'b' in result['s']
-        assert 'NaN' in result['s'] or 'is_nan' in result['s']
+        comp = get_comparison(result, 's')
+        assert 'b' in comp.message
+        assert 'NaN' in comp.message or 'nan' in comp.message.lower()
     
     def test_set_shows_unmatched_element(self):
         """Set mismatch should show which element couldn't be matched."""
@@ -881,8 +955,8 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 's' in result
         # Should mention an element value (either 3 or 99)
-        msg = result['s']
-        assert ('3' in msg or '99' in msg)
+        comp = get_comparison(result, 's')
+        assert ('3' in comp.message or '99' in comp.message)
     
     def test_float_array_shows_values(self):
         """Float array with tolerance mismatch should show values."""
@@ -892,7 +966,7 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 'arr' in result
         # Should show the differing values
-        assert '3.0000' in result['arr']
+        assert_message_contains(result, 'arr', '3.0000')
 
 
 # ============================================================================
@@ -930,7 +1004,8 @@ class TestGroupBy:
 
         result = differ.diff(a, b)
         assert 'gb' in result
-        assert 'Grouping' in result['gb'] or 'name' in result['gb']
+        comp = get_comparison(result, 'gb')
+        assert 'Grouping' in comp.message or 'name' in comp.message
 
     def test_dataframe_groupby_different_data(self):
         """GroupBy objects with different underlying data should be different."""
@@ -946,7 +1021,8 @@ class TestGroupBy:
 
         result = differ.diff(a, b)
         assert 'gb' in result
-        assert 'DataFrame' in result['gb'] or 'Series' in result['gb']
+        comp = get_comparison(result, 'gb')
+        assert 'DataFrame' in comp.message or 'Series' in comp.message
 
     def test_dataframe_groupby_sort_difference(self):
         """GroupBy objects with different sort flags should be different."""
@@ -961,7 +1037,7 @@ class TestGroupBy:
 
         result = differ.diff(a, b)
         assert 'gb' in result
-        assert 'sort' in result['gb']
+        assert_message_contains(result, 'gb', 'sort')
 
     def test_dataframe_groupby_dropna_difference(self):
         """GroupBy objects with different dropna flags should be different."""
@@ -976,7 +1052,7 @@ class TestGroupBy:
 
         result = differ.diff(a, b)
         assert 'gb' in result
-        assert 'dropna' in result['gb']
+        assert_message_contains(result, 'gb', 'dropna')
 
     def test_dataframe_groupby_with_cache_access(self):
         """GroupBy objects should be equal even after cache is populated."""
@@ -1045,7 +1121,7 @@ class TestGroupBy:
 
         result = differ.diff(a, b)
         assert 'gb2' in result
-        assert 'Pointer structure mismatch' in result['gb2']
+        assert_message_contains(result, 'gb2', 'Pointer structure mismatch')
 
 
 # ============================================================================
@@ -1198,7 +1274,7 @@ class TestPropertyBased:
         b['y'] = lst_copy.copy()
         result = differ.diff(a, b)
         assert 'y' in result
-        assert 'Pointer structure mismatch' in result['y']
+        assert_message_contains(result, 'y', 'Pointer structure mismatch')
     
     @given(st.sets(st.integers(), max_size=10))
     def test_set_reflexivity(self, s):
@@ -1214,6 +1290,419 @@ class TestPropertyBased:
         a = {'s': s}
         b = {'s': s.copy()}
         assert differ.diff(a, b) == {}
+
+
+# ============================================================================
+# NEW FUNCTIONALITY TESTS
+# ============================================================================
+
+class TestFloatCloseStatus:
+    """Test the new 'close' status for floats within tolerance."""
+
+    def test_float_exactly_equal_no_diff(self):
+        """Exactly equal floats should return no diff."""
+        differ = Diff()
+        result = differ.diff({'x': 1.0}, {'x': 1.0})
+        assert result == {}
+
+    def test_float_close_returns_close_status(self):
+        """Floats within tolerance should return 'close' status."""
+        differ = Diff(rtol=1e-5, atol=1e-8)
+        result = differ.diff({'x': 1.0}, {'x': 1.0 + 1e-6})
+        assert 'x' in result
+        assert_status(result, 'x', 'close')
+        assert_message_contains(result, 'x', 'within tolerance')
+
+    def test_float_far_apart_returns_different_status(self):
+        """Floats outside tolerance should return 'different' status."""
+        differ = Diff(rtol=1e-9, atol=1e-12)
+        result = differ.diff({'x': 1.0}, {'x': 1.001})
+        assert 'x' in result
+        assert_status(result, 'x', 'different')
+
+    def test_float_close_in_array(self):
+        """Close floats in arrays should be detected."""
+        from data_ferret.kernel.types import DiffResult
+
+        differ = Diff(rtol=1e-5)
+        a = {'arr': np.array([1.0, 2.0, 3.0])}
+        b = {'arr': np.array([1.0, 2.0 + 1e-6, 3.0])}
+        result = differ.diff(a, b)
+        # Array comparison doesn't currently return 'close' status per element
+        # but at least shouldn't crash
+        assert isinstance(result, DiffResult)
+
+    def test_float_close_in_complex(self):
+        """Close floats in complex numbers should be detected."""
+        differ = Diff(rtol=1e-5)
+        result = differ.diff({'z': 1.0 + 2.0j}, {'z': 1.0 + (2.0 + 1e-6) * 1j})
+        assert 'z' in result
+        # Complex returns nested dict with .imag key
+        assert isinstance(result['z'], dict)
+        assert '.imag' in result['z']
+
+
+class TestCollectAllDifferences:
+    """Test that ALL differences are collected, not just the first one."""
+
+    def test_list_collects_all_differences(self):
+        """List comparison should find all differing elements."""
+        differ = Diff()
+        a = {'lst': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}
+        b = {'lst': [1, 99, 3, 88, 5, 77, 7, 66, 9, 55]}
+        result = differ.diff(a, b)
+
+        assert 'lst' in result
+        assert isinstance(result['lst'], dict)
+
+        # Should have differences at indices 1, 3, 5, 7, 9
+        assert '[1]' in result['lst']
+        assert '[3]' in result['lst']
+        assert '[5]' in result['lst']
+        assert '[7]' in result['lst']
+        assert '[9]' in result['lst']
+
+        # Should NOT have differences at even indices
+        assert '[0]' not in result['lst']
+        assert '[2]' not in result['lst']
+        assert '[4]' not in result['lst']
+
+    def test_dict_collects_all_differences(self):
+        """Dict comparison should find all differing values."""
+        differ = Diff()
+        a = {'d': {'a': 1, 'b': 2, 'c': 3, 'd': 4, 'e': 5}}
+        b = {'d': {'a': 1, 'b': 99, 'c': 3, 'd': 88, 'e': 5}}
+        result = differ.diff(a, b)
+
+        assert 'd' in result
+        assert isinstance(result['d'], dict)
+
+        # Should have differences at keys 'b' and 'd'
+        assert "['b']" in result['d']
+        assert "['d']" in result['d']
+
+        # Should NOT have differences at keys 'a', 'c', 'e'
+        assert "['a']" not in result['d']
+        assert "['c']" not in result['d']
+        assert "['e']" not in result['d']
+
+    def test_object_collects_all_attribute_differences(self):
+        """Object comparison should find all differing attributes."""
+        class Obj:
+            def __init__(self, a, b, c, d):
+                self.a = a
+                self.b = b
+                self.c = c
+                self.d = d
+
+        differ = Diff()
+        result = differ.diff(
+            {'o': Obj(1, 2, 3, 4)},
+            {'o': Obj(1, 99, 3, 88)}
+        )
+
+        assert 'o' in result
+        assert isinstance(result['o'], dict)
+
+        # Should have differences at attributes b and d
+        assert '.b' in result['o']
+        assert '.d' in result['o']
+
+        # Should NOT have differences at attributes a and c
+        assert '.a' not in result['o']
+        assert '.c' not in result['o']
+
+    def test_nested_structure_collects_all_levels(self):
+        """Nested structures should collect differences at all levels."""
+        differ = Diff()
+        a = {'data': {'users': [{'name': 'Alice', 'age': 30}, {'name': 'Bob', 'age': 25}]}}
+        b = {'data': {'users': [{'name': 'Alice', 'age': 31}, {'name': 'Charlie', 'age': 25}]}}
+        result = differ.diff(a, b)
+
+        assert 'data' in result
+        assert isinstance(result['data'], dict)
+        assert "['users']" in result['data']
+
+        # Should have differences in both list elements
+        users_diff = result['data']["['users']"]
+        assert '[0]' in users_diff  # First user age changed
+        assert '[1]' in users_diff  # Second user name changed
+
+
+class TestDiffLimits:
+    """Test configurable limits on number of differences reported."""
+
+    def test_list_respects_max_diffs(self):
+        """List should stop after max_diffs_per_container."""
+        differ = Diff(max_diffs_per_container=3)
+        # Create list with 10 differences
+        a = {'lst': list(range(10))}
+        b = {'lst': [x + 1 for x in range(10)]}
+        result = differ.diff(a, b)
+
+        assert 'lst' in result
+        diff_dict = result['lst']
+        # Should have at most 3 diffs + 1 truncation message
+        assert len(diff_dict) <= 4
+        assert '_truncated' in diff_dict
+
+    def test_dict_respects_max_diffs(self):
+        """Dict should stop after max_diffs_per_container."""
+        differ = Diff(max_diffs_per_container=5)
+        # Create dict with 10 differences
+        a = {'d': {str(i): i for i in range(10)}}
+        b = {'d': {str(i): i + 1 for i in range(10)}}
+        result = differ.diff(a, b)
+
+        assert 'd' in result
+        diff_dict = result['d']
+        # Should have at most 5 diffs + 1 truncation message
+        assert len(diff_dict) <= 6
+        assert '_truncated' in diff_dict
+
+    def test_truncation_message_explains_limit(self):
+        """Truncation message should explain why stopped."""
+        differ = Diff(max_diffs_per_container=2)
+        a = {'lst': [1, 2, 3, 4, 5]}
+        b = {'lst': [11, 12, 13, 14, 15]}
+        result = differ.diff(a, b)
+
+        truncation = result['lst']['_truncated']
+        assert isinstance(truncation, ValueComparison)
+        assert 'max_diffs_per_container' in truncation.message
+        assert '2' in truncation.message
+
+
+class TestOnlyDifferences:
+    """Test that only differences are included in results."""
+
+    def test_equal_namespace_returns_empty(self):
+        """Equal namespaces should return empty dict."""
+        differ = Diff()
+        a = {'x': 1, 'y': 2, 'z': 3}
+        b = {'x': 1, 'y': 2, 'z': 3}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_mostly_equal_only_shows_diffs(self):
+        """Namespace with one diff should only show that diff."""
+        differ = Diff()
+        a = {'a': 1, 'b': 2, 'c': 3, 'd': 4, 'e': 5, 'f': 6, 'g': 7}
+        b = {'a': 1, 'b': 2, 'c': 3, 'd': 99, 'e': 5, 'f': 6, 'g': 7}
+        result = differ.diff(a, b)
+
+        # Only 'd' should be in result
+        assert len(result) == 1
+        assert 'd' in result
+
+    def test_equal_list_elements_not_in_result(self):
+        """Equal list elements should not appear in diff."""
+        differ = Diff()
+        a = {'lst': [1, 2, 3, 4, 5]}
+        b = {'lst': [1, 2, 99, 4, 5]}
+        result = differ.diff(a, b)
+
+        diff_dict = result['lst']
+        # Only index 2 should differ
+        assert '[2]' in diff_dict
+        assert '[0]' not in diff_dict
+        assert '[1]' not in diff_dict
+        assert '[3]' not in diff_dict
+        assert '[4]' not in diff_dict
+
+
+class TestDiffNodeStructure:
+    """Test the tree structure of DiffNode results."""
+
+    def test_simple_diff_returns_value_comparison(self):
+        """Simple type diff should return ValueComparison."""
+        differ = Diff()
+        result = differ.diff({'x': 1}, {'x': 2})
+        assert isinstance(result['x'], ValueComparison)
+        assert result['x'].status == 'different'
+        assert result['x'].value1 == 1
+        assert result['x'].value2 == 2
+
+    def test_compound_diff_returns_dict(self):
+        """Compound structure diff should return dict."""
+        differ = Diff()
+        result = differ.diff({'lst': [1, 2]}, {'lst': [1, 99]})
+        assert isinstance(result['lst'], dict)
+        assert '[1]' in result['lst']
+
+    def test_nested_diff_has_nested_dicts(self):
+        """Nested structures should have nested dicts."""
+        differ = Diff()
+        result = differ.diff(
+            {'outer': {'inner': [1, 2, 3]}},
+            {'outer': {'inner': [1, 99, 3]}}
+        )
+
+        assert isinstance(result['outer'], dict)
+        assert "['inner']" in result['outer']
+        assert isinstance(result['outer']["['inner']"], dict)
+        assert '[1]' in result['outer']["['inner']"]
+
+    def test_value_comparison_has_expected_fields(self):
+        """ValueComparison should have all expected fields."""
+        differ = Diff()
+        result = differ.diff({'x': 1}, {'x': 2})
+        comp = result['x']
+
+        assert hasattr(comp, 'status')
+        assert hasattr(comp, 'value1')
+        assert hasattr(comp, 'value2')
+        assert hasattr(comp, 'message')
+        assert hasattr(comp, 'is_close')
+
+    def test_close_status_has_is_close_true(self):
+        """ValueComparison with 'close' status should have is_close=True."""
+        differ = Diff(rtol=1e-5)
+        result = differ.diff({'x': 1.0}, {'x': 1.0 + 1e-6})
+        comp = result['x']
+
+        assert comp.status == 'close'
+        assert comp.is_close is True
+
+    def test_different_status_has_is_close_false(self):
+        """ValueComparison with 'different' status should have is_close=False."""
+        differ = Diff()
+        result = differ.diff({'x': 1}, {'x': 2})
+        comp = result['x']
+
+        assert comp.status == 'different'
+        assert comp.is_close is False
+
+
+class TestVariableAddedRemoved:
+    """Test that added/removed variables are properly detected."""
+
+    def test_variable_removed(self):
+        """Removed variable should appear in result."""
+        differ = Diff()
+        result = differ.diff({'x': 1, 'y': 2}, {'x': 1})
+
+        assert 'y' in result
+        assert isinstance(result['y'], ValueComparison)
+        assert_message_contains(result, 'y', 'removed')
+
+    def test_variable_added(self):
+        """Added variable should appear in result."""
+        differ = Diff()
+        result = differ.diff({'x': 1}, {'x': 1, 'y': 2})
+
+        assert 'y' in result
+        assert isinstance(result['y'], ValueComparison)
+        assert_message_contains(result, 'y', 'added')
+
+    def test_multiple_added_and_removed(self):
+        """Multiple added and removed variables should all appear."""
+        differ = Diff()
+        result = differ.diff(
+            {'a': 1, 'b': 2, 'c': 3},
+            {'a': 1, 'd': 4, 'e': 5}
+        )
+
+        # 'a' unchanged, 'b' and 'c' removed, 'd' and 'e' added
+        assert 'a' not in result  # Unchanged
+        assert 'b' in result  # Removed
+        assert 'c' in result  # Removed
+        assert 'd' in result  # Added
+        assert 'e' in result  # Added
+
+
+class TestMarkdownFormatting:
+    """Test the format_diff_as_markdown function."""
+
+    def test_empty_diff_formatting(self):
+        """Empty diff should show 'No Differences Found'."""
+        from data_ferret.kernel.types import format_diff_as_markdown
+
+        result = {}
+        markdown = format_diff_as_markdown(result)
+
+        assert "No Differences Found" in markdown
+        assert "All variables are equal" in markdown
+
+    def test_simple_diff_formatting(self):
+        """Simple difference should be formatted as bullet point."""
+        from data_ferret.kernel.types import format_diff_as_markdown
+
+        differ = Diff()
+        result = differ.diff({'x': 1}, {'x': 2})
+        markdown = format_diff_as_markdown(result)
+
+        assert "## Differences Found" in markdown
+        assert "- **x**:" in markdown
+
+    def test_close_float_shows_indicator(self):
+        """Close floats should show (close) indicator."""
+        from data_ferret.kernel.types import format_diff_as_markdown
+
+        differ = Diff(rtol=1e-5)
+        result = differ.diff({'y': 1.0000001}, {'y': 1.0000002})
+        markdown = format_diff_as_markdown(result)
+
+        assert "**y** *(close)*:" in markdown
+        assert "Float close" in markdown
+
+    def test_nested_structure_formatting(self):
+        """Nested structures should show full paths."""
+        from data_ferret.kernel.types import format_diff_as_markdown
+
+        differ = Diff()
+        result = differ.diff(
+            {'data': {'a': 1, 'b': 2}},
+            {'data': {'a': 1, 'b': 99}}
+        )
+        markdown = format_diff_as_markdown(result)
+
+        assert "**data['b']**:" in markdown
+
+    def test_list_formatting(self):
+        """List differences should show indices."""
+        from data_ferret.kernel.types import format_diff_as_markdown
+
+        differ = Diff()
+        result = differ.diff(
+            {'items': [1, 2, 3]},
+            {'items': [1, 99, 3]}
+        )
+        markdown = format_diff_as_markdown(result)
+
+        assert "**items[1]**:" in markdown
+
+    def test_multiple_variables_sorted(self):
+        """Multiple variables should be sorted alphabetically."""
+        from data_ferret.kernel.types import format_diff_as_markdown
+
+        differ = Diff()
+        result = differ.diff(
+            {'z': 1, 'a': 2, 'm': 3},
+            {'z': 10, 'a': 20, 'm': 30}
+        )
+        markdown = format_diff_as_markdown(result)
+
+        lines = markdown.split('\n')
+        var_lines = [l for l in lines if l.startswith('- **')]
+
+        # Should be in alphabetical order: a, m, z
+        assert '**a**' in var_lines[0]
+        assert '**m**' in var_lines[1]
+        assert '**z**' in var_lines[2]
+
+    def test_truncation_appears_in_markdown(self):
+        """Truncation messages should appear in output."""
+        from data_ferret.kernel.types import format_diff_as_markdown
+
+        differ = Diff(max_diffs_per_container=2)
+        result = differ.diff(
+            {'nums': [1, 2, 3, 4, 5]},
+            {'nums': [10, 20, 30, 40, 50]}
+        )
+        markdown = format_diff_as_markdown(result)
+
+        assert "Truncated" in markdown
 
 
 # ============================================================================

@@ -10,6 +10,7 @@ import traceback
 from typing import Any, Dict, List, Optional, Set
 from pydantic import BaseModel, Field
 
+from data_ferret.kernel.types import DiffResult, format_diff_as_markdown
 from data_ferret.server.base import NotebookCommand
 from data_ferret.server.kernel_manager import FerretKernelClient, TestCodeData
 from data_ferret.util.dependencies import analyze_notebook, CellDependencies
@@ -33,8 +34,11 @@ class TestCodeRequest(BaseModel):
 class TestCodeResponse(BaseModel):
     """Response model for test_code comm message."""
     ok: bool = Field(..., description="Whether the test succeeded")
-    result: Optional[Dict[str, Any]] = Field(None, description="The diff result if successful")
+    result: Optional[DiffResult] = Field(None, description="The diff result if successful")
     error: Optional[str] = Field(None, description="Error message if failed")
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class ValidateChangeCommand(NotebookCommand):
@@ -261,18 +265,21 @@ class ValidateChangeCommand(NotebookCommand):
                         # Store result
                         results[cell_id] = {
                             "ok": result.ok,
-                            "result": result.result if result.ok else None,
+                            "result": result.result.model_dump() if result.ok and result.result else None,
                             "error": result.result if not result.ok else None,
                         }
 
                         # Log result
                         status_str = "✓" if result.ok else "✗"
-                        log(f"  [{status_str}] Cell {idx}: {pprint.pformat(result.result)}")
+                        if result.ok and result.result:
+                            log(f"[{status_str}] Cell {idx}: {format_diff_as_markdown(result.result)}")
+                        else:
+                            log(f"[{status_str}] Cell {idx}: {result.result}")
 
                         total_processed += 1
 
                     except Exception as e:
-                        log(f"  [✗] Cell {idx}: Error - {str(e)}")
+                        log(f"[✗] Cell {idx}: Error - {str(e)}")
                         log(traceback.format_exc())
                         results[cell_id] = {
                             "ok": False,

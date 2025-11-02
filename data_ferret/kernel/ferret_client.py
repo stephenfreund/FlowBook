@@ -9,8 +9,9 @@ import asyncio
 from jupyter_client import BlockingKernelClient
 from dataclasses import dataclass
 from ipykernel.compiler import get_file_name
-from typing import List
+from typing import List, Union
 
+from data_ferret.kernel.types import DiffResult
 from data_ferret.util.output import timer
 
 
@@ -28,11 +29,6 @@ class DebugCommandData:
     ok: bool
     result: str
 
-
-@dataclass
-class TestCodeData:
-    ok: bool
-    result: str
 
 
 @dataclass
@@ -120,48 +116,6 @@ class FerretClient(NotebookClient):
             cmd=cmd, ok=data.get("ok"), result=self.replace_filenames(result)
         )
 
-    def test_code(self) -> TestCodeData:
-        """Send test_code comm message to kernel and return random string response."""
-        comm_id = uuid.uuid4().hex
-
-        original_code = """
-import pandas as pd
-df = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
-"""
-        modified_code = """
-import pandas as pd
-df = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
-"""
-        output_variables = """
-['df']
-"""
-
-        # Build and send the comm_open for test_code
-        content = {
-            "comm_id": comm_id,
-            "target_name": "test_code",
-            "target_module": "",
-            "data": {
-                "original_code": original_code,
-                "modified_code": modified_code,
-                "output_variables": output_variables,
-            },  # No input data needed
-        }
-        open_msg = self.debug_kc.session.msg("comm_open", content)
-        self.debug_kc.shell_channel.send(open_msg)
-
-        # Pull messages off debug_kc's IOPub until we see our reply
-        while True:
-            reply = self.debug_kc.get_iopub_msg(timeout=5)
-            if (
-                reply["header"]["msg_type"] == "comm_msg"
-                and reply["content"].get("comm_id") == comm_id
-            ):
-                data = reply["content"]["data"]
-                break
-
-        result = data.get("result") if data.get("ok") else data.get("error")
-        return TestCodeData(ok=data.get("ok"), result=result)
 
     async def async_execute_cell(
         self,

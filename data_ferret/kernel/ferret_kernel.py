@@ -358,7 +358,7 @@ class FerretKernel(IPythonKernel, Magics):
         except Exception as e:
             comm.send({"type": "final", "ok": False, "error": str(e)})
 
-    def test_code(self, comm, original_code: str, modified_code: str, output_variables: Set[str] | None = None) -> Dict[str, str]:
+    def test_code(self, comm, original_code: str, modified_code: str, output_variables: Set[str] | None = None) -> Dict[str, Any]:
         """Test the code and return the result, sending progress messages via comm."""
         comm.send({"type": "progress", "message": "Saving original environment"})
         self.checkpoint(f"save original_environment")
@@ -379,8 +379,11 @@ class FerretKernel(IPythonKernel, Magics):
         self.checkpoint(f"save modified_result")
 
         comm.send({"type": "progress", "message": "Diffing original and modified environments"})
-        diff = checkpoint_diff(self._checkpoint.get(f"original_result"), self._checkpoint.get(f"modified_result"), keys_to_include=output_variables)
-        return diff
+        diff_result = checkpoint_diff(self._checkpoint.get(f"original_result"), self._checkpoint.get(f"modified_result"), keys_to_include=output_variables)
+
+        # Serialize DiffResult to JSON-compatible format using Pydantic
+        serialized = diff_result.model_dump()
+        return serialized
 
     def _test_code_comm_open(self, comm, open_msg):
         try:

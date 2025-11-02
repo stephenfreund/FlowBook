@@ -21,7 +21,13 @@ class Checkpoint:
     def original(self, id: int) -> int:
         return self.reverse_memo.get(id, id)
 
-def checkpoint_diff(a: Checkpoint, b: Checkpoint, keys_to_include: Set[str] | None = None) -> Dict[str, str]:
+def checkpoint_diff(a: Checkpoint, b: Checkpoint, keys_to_include: Set[str] | None = None):
+    """
+    Compare two checkpoints and return structured diff results.
+
+    Returns:
+        DiffResult: Structured diff tree with only differences
+    """
     # all_keys = set(a.user_ns.keys()) | set(b.user_ns.keys())
     # diffs = {}
     # for k in all_keys:

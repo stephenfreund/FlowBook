@@ -114,12 +114,12 @@ def cli_main():
                             log(f"Kernel started successfully")
                             break
                         except Exception as e:
-                            log(f"Error waiting for kernel to be ready: {e}", file=sys.stderr)
+                            log(f"Error waiting for kernel to be ready: {e}")
                             # Try to read kernel stderr/stdout for more details
                             if kernel_manager.is_alive():
-                                log("Kernel is still running but not responding", file=sys.stderr)
+                                log("Kernel is still running but not responding")
                             else:
-                                log("Kernel has died", file=sys.stderr)
+                                log("Kernel has died")
                             if i < 2:
                                 log(f"Retrying...")
                             else:
