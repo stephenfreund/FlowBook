@@ -17,13 +17,13 @@ class Diff:
     Checks value equality and isomorphic pointer structure.
     """
     
-    def __init__(self, rtol=1e-5, atol=1e-5):
+    def __init__(self, rtol=1e-5, atol=1e-8):
         """
         Initialize the Diff comparator.
         
         Args:
             rtol: Relative tolerance for floating point comparisons (default: 1e-5)
-            atol: Absolute tolerance for floating point comparisons (default: 1e-5)
+            atol: Absolute tolerance for floating point comparisons (default: 1e-8)
         """
         self.rtol = rtol
         self.atol = atol
@@ -70,6 +70,8 @@ class Diff:
             diff_msg = self._compare_values(a[var], b[var], path=var)
             if diff_msg:
                 differences[var] = diff_msg
+            else:
+                differences[var] = f"Variable is equal"
         
         return differences
     
@@ -228,10 +230,10 @@ class Diff:
             return f"Callable type mismatch at {path}: bound method vs function"
         else:
             # Both are regular functions/callables - use identity
-            if val_a is not val_b:
-                name_a = getattr(val_a, '__name__', repr(val_a))
-                name_b = getattr(val_b, '__name__', repr(val_b))
-                return f"Callable mismatch at {path}: {name_a} vs {name_b} (different objects)"
+            # if val_a is not val_b:
+            #     name_a = getattr(val_a, '__name__', repr(val_a))
+            #     name_b = getattr(val_b, '__name__', repr(val_b))
+            #     return f"Callable mismatch at {path}: {name_a} vs {name_b} (different objects)"
             return ""
     
     def _compare_ndarray(self, val_a: np.ndarray, val_b: np.ndarray, path: str) -> str:

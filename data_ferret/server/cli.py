@@ -7,6 +7,9 @@ import sys
 import asyncio
 from jupyter_client import KernelManager
 
+from data_ferret import make_kernels
+from data_ferret.util.output import error, log, timer
+
 from .registry import CommandRegistry
 from .kernel_manager import FerretKernelClient
 from .config import FerretConfig
@@ -70,6 +73,8 @@ def cli_main():
 
     args = parser.parse_args()
 
+    make_kernels()
+
     # Create config from CLI arguments with same defaults as Jupyter
     config = FerretConfig(
         model=args.model,
@@ -90,39 +95,37 @@ def cli_main():
                 print(f"Connecting to kernel: {args.kernel_id}")
                 raise NotImplementedError("Connecting to existing kernel by ID not yet implemented in CLI")
             else:
-                print(f"Starting new kernel: {args.kernel_name}")
-                # Start kernel manager and create our custom FerretKernelClient
-                kernel_manager = KernelManager(kernel_name=args.kernel_name)
-                try:
-                    kernel_manager.start_kernel()
-                except Exception as e:
-                    print(f"Error starting kernel: {e}", file=sys.stderr)
-                    import traceback
-                    traceback.print_exc()
-                    return 1
-
-                kernel_client = FerretKernelClient(kernel_id=kernel_manager.kernel_id)
-                kernel_client.load_connection_info(kernel_manager.get_connection_info())
-                kernel_client.start_channels()
-                for i in range(3):
+                with timer(key="start_kernel", message=f"Starting new kernel: {args.kernel_name}"):
+                    # Start kernel manager and create our custom FerretKernelClient
+                    kernel_manager = KernelManager(kernel_name=args.kernel_name)
                     try:
-                        kernel_client.wait_for_ready(timeout=30)
-                        break
+                        kernel_manager.start_kernel()
                     except Exception as e:
-                        print(f"Error waiting for kernel to be ready: {e}", file=sys.stderr)
-                        # Try to read kernel stderr/stdout for more details
-                        if kernel_manager.is_alive():
-                            print("Kernel is still running but not responding", file=sys.stderr)
-                        else:
-                            print("Kernel has died", file=sys.stderr)
-                        if i < 2:
-                            print(f"Retrying...")
-                        else:
-                            print(f"Giving up after 3 attempts")
-                            return 1
+                        error(f"Error starting kernel: {e}")
+                        return 1
 
-                assert isinstance(kernel_client, FerretKernelClient)
-                print(f"Kernel started successfully")
+                    kernel_client = FerretKernelClient(kernel_id=kernel_manager.kernel_id)
+                    kernel_client.load_connection_info(kernel_manager.get_connection_info())
+                    kernel_client.start_channels()
+                    for i in range(3):
+                        try:
+                            kernel_client.wait_for_ready(timeout=30)
+                            assert isinstance(kernel_client, FerretKernelClient)
+                            log(f"Kernel started successfully")
+                            break
+                        except Exception as e:
+                            log(f"Error waiting for kernel to be ready: {e}", file=sys.stderr)
+                            # Try to read kernel stderr/stdout for more details
+                            if kernel_manager.is_alive():
+                                log("Kernel is still running but not responding", file=sys.stderr)
+                            else:
+                                log("Kernel has died", file=sys.stderr)
+                            if i < 2:
+                                log(f"Retrying...")
+                            else:
+                                error(f"Giving up after 3 attempts")
+                                return 1
+
 
         # Run async command.process() in event loop
         result = asyncio.run(command.process(

@@ -5,9 +5,10 @@ Validates selected cells by comparing their code with the next cell's code,
 using the current cell's output variables.
 """
 
+import pprint
 import traceback
-import uuid
 from typing import Any, Dict, List, Optional, Set
+from pydantic import BaseModel, Field
 
 from data_ferret.server.base import NotebookCommand
 from data_ferret.server.kernel_manager import FerretKernelClient, TestCodeData
@@ -20,6 +21,20 @@ SYSTEM_VARIABLES = {
     "get_ipython", "In", "Out", "exit", "quit",
     "_", "__", "___", "_i", "_ii", "_iii", "_dh"
 }
+
+
+class TestCodeRequest(BaseModel):
+    """Request model for test_code comm message."""
+    original_code: str = Field(..., description="The original cell's code")
+    modified_code: str = Field(..., description="The modified cell's code")
+    output_variables: List[str] = Field(..., description="List of variable names to compare")
+
+
+class TestCodeResponse(BaseModel):
+    """Response model for test_code comm message."""
+    ok: bool = Field(..., description="Whether the test succeeded")
+    result: Optional[Dict[str, Any]] = Field(None, description="The diff result if successful")
+    error: Optional[str] = Field(None, description="Error message if failed")
 
 
 class ValidateChangeCommand(NotebookCommand):
@@ -55,8 +70,8 @@ class ValidateChangeCommand(NotebookCommand):
         """
         Send test_code comm message to kernel and return response.
 
-        Receives and logs progress messages from the kernel until the final
-        message is received.
+        Uses the base class _send_comm_message method with type-safe
+        Pydantic models for request and response.
 
         Args:
             kernel_client: The kernel client to send the message to
@@ -67,57 +82,24 @@ class ValidateChangeCommand(NotebookCommand):
         Returns:
             TestCodeData with ok and result/error fields
         """
-        comm_id = uuid.uuid4().hex
+        # Create type-safe request model
+        request = TestCodeRequest(
+            original_code=original_code,
+            modified_code=modified_code,
+            output_variables=output_variables
+        )
 
-        # Build and send the comm_open for test_code
-        content = {
-            "comm_id": comm_id,
-            "target_name": "test_code",
-            "target_module": "",
-            "data": {
-                "original_code": original_code,
-                "modified_code": modified_code,
-                "output_variables": output_variables,
-            },
-        }
-        open_msg = kernel_client.session.msg("comm_open", content)
-        kernel_client.shell_channel.send(open_msg)
+        # Send comm and receive validated response
+        response: TestCodeResponse = self._send_comm_message(
+            kernel_client,
+            target_name="test_code",
+            request=request,
+            response_type=TestCodeResponse
+        )
 
-        # Wait for messages on iopub channel, logging progress until final message
-        timeout = 60  # Increased timeout for longer operations
-        while True:
-            try:
-                # Use iopub_channel directly for better compatibility
-                reply = kernel_client.iopub_channel.get_msg(timeout=timeout)
-                msg_type = reply["header"]["msg_type"]
-
-                # Only process comm_msg messages with our comm_id
-                if msg_type == "comm_msg" and reply["content"].get("comm_id") == comm_id:
-                    data = reply["content"]["data"]
-
-                    # Check if this is a progress message or final message
-                    data_type = data.get("type")
-
-                    if data_type == "progress":
-                        # Log progress messages
-                        message = data.get("message", "")
-                        log(f"    {message}")
-                    elif data_type == "final":
-                        # Final message - extract result and return
-                        ok = data.get("ok")
-                        result = data.get("result") if ok else data.get("error")
-                        return TestCodeData(ok=ok, result=result)
-                    else:
-                        # Legacy format (no type field) - treat as final message
-                        ok = data.get("ok")
-                        result = data.get("result") if ok else data.get("error")
-                        return TestCodeData(ok=ok, result=result)
-                # Skip other message types (status, display_data, etc.)
-            except KeyboardInterrupt:
-                raise
-            except Exception as e:
-                # If we get a timeout or other error, re-raise it
-                raise
+        # Extract result from validated response (with full IDE autocomplete!)
+        result = response.result if response.ok else response.error
+        return TestCodeData(ok=response.ok, result=result)
 
     def _get_next_cell_source(
         self,
@@ -238,7 +220,7 @@ class ValidateChangeCommand(NotebookCommand):
         with timer(key="analyze_dependencies", message="Analyzing notebook dependencies"):
             dependencies_dict = analyze_notebook(notebook_content)
 
-        log(f"[Validating {len(selected_cell_ids)} selected cell(s)...]")
+        log(f"Validating {len(selected_cell_ids)} selected cell(s)...")
 
         # Process each cell
         with timer(key="validate_cells", message="Validating cells"):
@@ -285,7 +267,7 @@ class ValidateChangeCommand(NotebookCommand):
 
                         # Log result
                         status_str = "✓" if result.ok else "✗"
-                        log(f"  [{status_str}] Cell {idx}: {str(result.result)[:100] if result.result else 'None'}")
+                        log(f"  [{status_str}] Cell {idx}: {pprint.pformat(result.result)}")
 
                         total_processed += 1
 

@@ -353,10 +353,10 @@ class FerretKernel(IPythonKernel, Magics):
     def _debug_command_comm_open(self, comm, open_msg):
         cmd = open_msg["content"]["data"]["cmd"]
         try:
-            resp = {"ok": True, "result": self._do_cmd(cmd)}
+            result = self._do_cmd(cmd)
+            comm.send({"type": "final", "ok": True, "result": result})
         except Exception as e:
-            resp = {"ok": False, "error": str(e)}
-        comm.send(resp)
+            comm.send({"type": "final", "ok": False, "error": str(e)})
 
     def test_code(self, comm, original_code: str, modified_code: str, output_variables: Set[str] | None = None) -> Dict[str, str]:
         """Test the code and return the result, sending progress messages via comm."""

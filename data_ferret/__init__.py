@@ -44,6 +44,7 @@ class DataFerretExtension(ExtensionApp):
                 "model": self.model,
                 "fast-model": self.fast_model,
             }
+        make_kernels()
 
     def initialize_handlers(self):
         """Register HTTP handlers for the extension."""
@@ -72,6 +73,3 @@ def make_kernels():
     install_kernel_spec(
         "ferret_kernel", Path(__file__).parent / "kernel" / "kernelspec"
     )
-
-
-make_kernels()
