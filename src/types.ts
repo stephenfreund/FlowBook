@@ -44,6 +44,13 @@ export const FERRET_COMMANDS: CommandInfo[] = [
     icon: 'ui-components:info',
     tooltip: 'Profile code cells',
     requires_kernel: true
+  },
+  {
+    id: 'validate_change',
+    label: 'Validate Change',
+    icon: 'ui-components:check',
+    tooltip: 'Validate selected cells with next cell comparison',
+    requires_kernel: true
   }
 ];
 

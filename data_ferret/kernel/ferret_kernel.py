@@ -358,21 +358,27 @@ class FerretKernel(IPythonKernel, Magics):
             resp = {"ok": False, "error": str(e)}
         comm.send(resp)
 
-    def test_code(self, original_code: str, modified_code: str, output_variables: Set[str] | None = None) -> Dict[str, str]:
-        """Test the code and return the result."""
-        print(f"Saving original environment")
+    def test_code(self, comm, original_code: str, modified_code: str, output_variables: Set[str] | None = None) -> Dict[str, str]:
+        """Test the code and return the result, sending progress messages via comm."""
+        comm.send({"type": "progress", "message": "Saving original environment"})
         self.checkpoint(f"save original_environment")
-        print(f"Executing original code")
+
+        comm.send({"type": "progress", "message": "Executing original code"})
         self.shell.run_cell(original_code)
-        print(f"Saving original result")
+
+        comm.send({"type": "progress", "message": "Saving original result"})
         self.checkpoint(f"save original_result")
-        print(f"Restoring original environment")
+
+        comm.send({"type": "progress", "message": "Restoring original environment"})
         self.checkpoint(f"restore original_environment")
-        print(f"Executing modified code")
+
+        comm.send({"type": "progress", "message": "Executing modified code"})
         self.shell.run_cell(modified_code)
-        print(f"Saving modified result")
+
+        comm.send({"type": "progress", "message": "Saving modified result"})
         self.checkpoint(f"save modified_result")
-        print(f"Diffing original and modified environments")
+
+        comm.send({"type": "progress", "message": "Diffing original and modified environments"})
         diff = checkpoint_diff(self._checkpoint.get(f"original_result"), self._checkpoint.get(f"modified_result"), keys_to_include=output_variables)
         return diff
 
@@ -381,11 +387,13 @@ class FerretKernel(IPythonKernel, Magics):
             original_code = open_msg["content"]["data"]["original_code"]
             modified_code = open_msg["content"]["data"]["modified_code"]
             output_variables = set[str](open_msg["content"]["data"]["output_variables"])
-            print(f"Output variables: {output_variables}")
-            result = {"ok": True, "result": self.test_code(original_code, modified_code, output_variables)}
+            comm.send({"type": "progress", "message": f"Output variables: {output_variables}"})
+            result = self.test_code(comm, original_code, modified_code, output_variables)
+            comm.send({"type": "final", "ok": True, "result": result})
         except Exception as e:
-            result = {"ok": False, "error": str(e)}
-        comm.send(result)
+            import traceback
+            error_msg = f"{str(e)}\n{traceback.format_exc()}"
+            comm.send({"type": "final", "ok": False, "error": error_msg})
 
     async def do_execute(
         self,

@@ -37,7 +37,9 @@ export class NotebookToolbarExtension
         tooltip: cmdInfo.tooltip,
         // icon: cmdInfo.icon,
         onClick: async () => {
-          await this.manager.executeCommand(cmdInfo.id, panel);
+          // Get selected cell IDs for commands that need them
+          const selectedCellIds = this.getSelectedCellIds(panel);
+          await this.manager.executeCommand(cmdInfo.id, panel, selectedCellIds);
         }
       });
 
@@ -50,5 +52,24 @@ export class NotebookToolbarExtension
         return false;
       }
     };
+  }
+
+  /**
+   * Get the IDs of all selected cells in the notebook
+   */
+  private getSelectedCellIds(panel: NotebookPanel): string[] | undefined {
+    const notebook = panel.content;
+    const selectedCells: string[] = [];
+
+    // Iterate through all cells
+    for (let i = 0; i < notebook.widgets.length; i++) {
+      const cell = notebook.widgets[i];
+      if (notebook.isSelectedOrActive(cell)) {
+        selectedCells.push(cell.model.id);
+      }
+    }
+
+    // Return undefined if no cells selected (for backward compatibility)
+    return selectedCells.length > 0 ? selectedCells : undefined;
   }
 }
