@@ -10,6 +10,15 @@ from pandas.core.groupby.ops import BaseGrouper
 from typing import Any, Dict, Set, Tuple, Optional
 import math
 
+from pydantic import BaseModel
+from typing import Literal
+
+class ValueDiff(BaseModel):
+    status: Literal[ "close", "different"]
+    message: Optional[str] = None
+
+    
+
 
 class Diff:
     """
