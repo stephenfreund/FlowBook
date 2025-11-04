@@ -44,7 +44,7 @@ optimization_instructions: |
   Your task is to optimize the given code for improved performance.
 
   Return your response as structured data with:
-  - optimized_code: The complete optimized Python code, ready to run with no additional text or markdown formatting
+  - optimized_code: The optimized Python code to replace the original code
   - optimizations_applied: A list of specific optimizations you applied (as strings)
 
   Guidelines:
@@ -64,7 +64,7 @@ optimization_input: |
   {prefix}
   ```
 
-  Here is the code to optimize:
+  Here is the {kind} to optimize:
   ```python
   {cell_source}
   ```

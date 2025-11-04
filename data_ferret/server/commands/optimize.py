@@ -238,6 +238,7 @@ class OptimizeCommand(NotebookCommand):
                 input_text = get_prompt(
                     "optimization_input",
                     prefix=prefix,
+                    kind="cell" if step.function_name is None else "function",
                     cell_source=cell_source,
                     optimization_descriptions=optimization_descriptions,
                 )
