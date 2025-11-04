@@ -23,6 +23,8 @@ from data_ferret.util.ferret_metadata import ProfileData, OptimizationPotential,
 from data_ferret.util.output import log, timer, error
 import textwrap
 
+import ast
+
 
 class CellContents(BaseModel):
     id: str = Field(title="The id of the cell containing the code")
@@ -31,6 +33,10 @@ class CellContents(BaseModel):
     def __str__(self):
         return f"CellContents(id={self.id}, code={self.code[:20]}...)"
 
+class FunctionContents(BaseModel):
+    cell_id: str = Field(title="The id of the cell containing the function")
+    function_name: str = Field(title="The name of the function")
+    code: str = Field(title="The code of the function")
 
 class NotebookTools(LspSession):
     def __init__(
@@ -176,6 +182,35 @@ class NotebookTools(LspSession):
             return None
         source = "".join(cell["source"])
         return CellContents(id=cell["id"], code=source)
+
+    def get_source_for_function(self, cell_id: str, function_name: str) -> CellContents | None:
+        cell = self.get_cell_by_id(cell_id)
+        if cell is None:
+            return None
+
+        source_code = "".join(cell["source"])
+        try:
+            parsed = ast.parse(source_code)
+            func_code = None
+            for node in parsed.body:
+                if isinstance(node, ast.FunctionDef) and node.name == function_name:
+                    # Extract source lines for the function definition
+                    # ast nodes have "lineno" and (for python>=3.8) "end_lineno"
+                    if hasattr(node, "lineno") and hasattr(node, "end_lineno"):
+                        start = node.lineno - 1
+                        end = node.end_lineno
+                        lines = source_code.splitlines()
+                        func_code = "\n".join(lines[start:end])
+                    else:
+                        # fallback, just return full source
+                        func_code = ast.get_source_segment(source_code, node) or source_code
+                    break
+            if func_code is None:
+                raise ValueError(f"Function {function_name} not found in cell {cell_id}")
+            else:
+                return FunctionContents(cell_id=cell["id"], function_name=function_name, code=func_code)
+        except Exception:
+            raise ValueError(f"Error parsing function {function_name} in cell {cell_id}")
 
     def sanity_check_source(self, cell: NotebookNode, source: str):
         """

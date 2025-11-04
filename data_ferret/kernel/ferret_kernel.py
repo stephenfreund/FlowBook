@@ -600,16 +600,16 @@ class FerretKernel(IPythonKernel, Magics):
         cell_id = cell_id
         args = {"outfile": f"_ipython-profile-{cell_id}.txt", "memory": False}
 
-        n = self.shell.execution_count - 1
-        filename = f"_ipython-input-{n}-profile"
-        with open(filename, "w") as tmpfile:
-            tmpfile.write(code)
-
-        self._executed_cell_ids[self.shell.execution_count - 1] = cell_id
-
-        scalene_profiler.Scalene.set_initialized()
-
         try:
+            n = self.shell.execution_count - 1
+            filename = f"_ipython-input-{n}-profile"
+            with open(filename, "w") as tmpfile:
+                tmpfile.write(code)
+
+            self._executed_cell_ids[self.shell.execution_count - 1] = cell_id
+
+            scalene_profiler.Scalene.set_initialized()
+
             args = ScaleneArguments()
             args.outfile = f"_ipython-profile-{cell_id}.txt"
             args.memory = False
@@ -650,6 +650,11 @@ class FerretKernel(IPythonKernel, Magics):
                 "evalue": str(e),
             }
             return result, None
+        finally:
+            if os.path.exists(args.outfile):
+                os.remove(args.outfile)
+            if os.path.exists(filename):
+                os.remove(filename)
 
     def replace_filenames_with_cell_ids(self, text: str) -> str:
         # This pattern matches any path ending in _ipython-input-<N>-profile
