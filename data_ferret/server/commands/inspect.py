@@ -13,6 +13,7 @@ from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.ferret_metadata import (
     FerretMetadata,
     OptimizationPotential,
+    OptimizationStep,
     set_optimization_potential_ferret_metadata,
 )
 from data_ferret.agent.agent import FerretAgent, FerretStats
@@ -80,6 +81,29 @@ class InspectCommand(NotebookCommand):
             )
 
             final_output, stats = await agent.run(input_text)
+
+            # Merge optimization steps with the same target_cell_id and function_name into a single string,
+            # with each description separated by a newline, in Markdown list format.
+            merged_steps: Dict[Tuple[str, Optional[str]], List[str]] = {}
+            for step in final_output.optimization_plan:
+                key = (step.target_cell_id, step.function_name)
+                if key not in merged_steps:
+                    merged_steps[key] = []
+                merged_steps[key].extend(step.description)
+
+            # Create new optimization plan with merged descriptions
+            new_optimization_plan = []
+            for (target_cell_id, function_name), descriptions in merged_steps.items():
+                new_optimization_plan.append(
+                    OptimizationStep(
+                        target_cell_id=target_cell_id,
+                        function_name=function_name,
+                        description=descriptions
+                    )
+                )
+
+            final_output.optimization_plan = new_optimization_plan
+
 
         print(
             f"| {index:<9}| {final_output.potential:<9}| {stats.usage.total_tokens:<9}| {stats.time:<9.1f}| {stats.cost:<9.4f}|"

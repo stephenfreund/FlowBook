@@ -172,17 +172,30 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
                   <div className="ferret-metadata-item">
                     <strong>Optimization Plan:</strong>
                   </div>
-                  <ul className="ferret-metadata-list">
+                  <div className="ferret-metadata-optimization-plan">
                     {metadata.optimization_potential.optimization_plan.map((step, index) => (
-                      <li key={index}>
-                        <strong>Cell {step.target_cell_id}</strong>
-                        {step.function_name && (
-                          <> / <strong>Function {step.function_name}</strong></>
-                        )}
-                        : {step.description}
-                      </li>
+                      <div key={index} className="ferret-metadata-optimization-step">
+                        <div className="ferret-metadata-optimization-step-header">
+                          <strong>Target: </strong>
+                          Cell <code>{step.target_cell_id.substring(0, 8)}...</code>
+                          {step.function_name && (
+                            <>
+                              {' '}/{' '}
+                              Function <code>{step.function_name}</code>
+                            </>
+                          )}
+                        </div>
+                        <div className="ferret-metadata-optimization-step-descriptions">
+                          <strong>Optimizations:</strong>
+                          <ul>
+                            {step.description.map((desc, descIndex) => (
+                              <li key={descIndex}>{desc}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
                     ))}
-                  </ul>
+                  </div>
                 </div>
               </>
             )}

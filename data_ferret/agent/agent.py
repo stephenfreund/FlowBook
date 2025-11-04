@@ -51,7 +51,11 @@ class FerretStats:
         self.model = model if isinstance(model, str) else model.model
         self.time = time
         self.usage = usage
-        self.cost = cost(self.model.split("/")[1], usage)
+        if "/" in self.model:
+            model = self.model.split("/")[1]
+        else:
+            model = self.model
+        self.cost = cost(model, usage)
         self.log_path = log_path
 
 

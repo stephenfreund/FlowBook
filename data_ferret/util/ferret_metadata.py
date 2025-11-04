@@ -23,8 +23,8 @@ class OptimizationStep(BaseModel):
         default=None,
         description="The name of the top-level function to optimize. None if the optimization applies to top-level code in the cell.",
     )
-    description: str = Field(
-        description="Description of the optimization step to apply"
+    description: List[str] = Field(
+        description="The optimizations to apply"
     )
 
 
@@ -35,6 +35,30 @@ class OptimizationPotential(BaseModel):
     optimization_plan: List[OptimizationStep] = Field(
         default_factory=list,
         description="A list of concrete optimization steps. Empty if potential < 4.",
+    )
+
+
+class CodeSnippet(BaseModel):
+    cell_id: str = Field(description="The ID of the cell")
+    function_name: Optional[str] = Field(
+        default=None,
+        description="The name of the function. None if this is the entire cell.",
+    )
+    source: str = Field(
+        description="The source code for the function or cell"
+    )
+    optimizations_applied: Optional[List[str]] = Field(
+        default=None,
+        description="List of optimizations that were applied (for optimized code only)"
+    )
+
+
+class OptimizedCodeResponse(BaseModel):
+    optimized_code: str = Field(
+        description="The optimized Python code, ready to run with no additional text"
+    )
+    optimizations_applied: List[str] = Field(
+        description="A bullet list of optimizations that were applied"
     )
 
 

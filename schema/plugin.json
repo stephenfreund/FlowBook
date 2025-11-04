@@ -17,6 +17,10 @@
       {
         "name": "ferret-cleanup",
         "rank": 3
+      },
+      {
+        "name": "ferret-optimize",
+        "rank": 4
       }
     ]
   },

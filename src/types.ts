@@ -32,6 +32,13 @@ export const FERRET_COMMANDS: CommandInfo[] = [
     requires_kernel: false
   },
   {
+    id: 'optimize',
+    label: 'Optimize',
+    icon: 'ui-components:flash',
+    tooltip: 'Optimize cells based on inspection metadata',
+    requires_kernel: false
+  },
+  {
     id: 'document',
     label: 'Document',
     icon: 'ui-components:text-editor',
@@ -88,7 +95,7 @@ export interface ExecuteCommandRequest {
 export interface IFerretOptimizationStep {
   target_cell_id: string;
   function_name: string | null;
-  description: string;
+  description: string[];
 }
 
 /**

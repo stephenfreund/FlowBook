@@ -13,7 +13,7 @@ cell_inspection_instructions: |
   Each OptimizationStep must have:
   - target_cell_id: The ID of the cell that needs to be modified (this may be the current cell or another cell with a function definition)
   - function_name: The name of the top-level function to optimize, or None if the optimization applies to top-level code in the cell
-  - description: A clear description of what optimization to apply
+  - description: A clear description of what optimizations to apply (one or more)
 
   For cells with potential < 4, leave the optimization_plan empty.
 
@@ -41,17 +41,22 @@ cell_inspection_input: |
 
 optimization_instructions: |
   You are an expert at optimizing Jupyter notebook code.
-  Your task is to optimize the given code cell for improved performance.
-  Your response should be valid Python code and nothing else.
-  - Vectorize where possible.
+  Your task is to optimize the given code for improved performance.
+
+  Return your response as structured data with:
+  - optimized_code: The complete optimized Python code, ready to run with no additional text or markdown formatting
+  - optimizations_applied: A list of specific optimizations you applied (as strings)
+
+  Guidelines:
+  - Vectorize operations where possible
   - Keep the same functionality but make it more efficient
   - Use built-in functions and libraries when possible
   - Consider time and space complexity
   - Add type hints if they're missing
   - Keep the code readable and maintainable
   - The optimized code must produce the same output as the original
-  - If the code is already optimal, return it as-is
-  - Include a brief explanation of the optimizations made
+  - If the code is already optimal, return it as-is with an empty optimizations list
+  - Each optimization in the list should be a clear, concise description
 
 optimization_input: |
   Here is the code before the cell (for context):
@@ -64,8 +69,9 @@ optimization_input: |
   {cell_source}
   ```
 
-  Please provide an optimized version of this code. Include only the optimized code in your response,
-  with no additional text or explanation. The code should be ready to run as-is.
+  {optimization_descriptions}
+
+  Provide the optimized code and a list of specific optimizations you applied.
 
 cleanup_instructions: |
   You are an expert at improving Jupyter notebook code.
