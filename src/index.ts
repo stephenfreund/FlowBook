@@ -17,6 +17,8 @@ import { CellToolbarExtension } from './celltoolbar';
 import { MessagePanel } from './panel';
 import { FerretMetadataPanel } from './metadatapanel';
 import { CellMetadataHighlighter } from './cellhighlighter';
+import { NotebookHistoryManager } from './history';
+import { HistoryPanel } from './historypanel';
 
 /**
  * The main Ferret extension plugin
@@ -34,8 +36,11 @@ const extension: JupyterFrontEndPlugin<void> = {
   ) => {
     console.log('JupyterLab extension ferret is activated!');
 
+    // Create the history manager
+    const historyManager = new NotebookHistoryManager();
+
     // Create the command manager
-    const manager = new FerretCommandsManager(app, tracker);
+    const manager = new FerretCommandsManager(app, tracker, historyManager);
 
     // Register commands with JupyterLab
     manager.registerCommands();
@@ -65,10 +70,34 @@ const extension: JupyterFrontEndPlugin<void> = {
     const metadataPanel = new FerretMetadataPanel();
     app.shell.add(metadataPanel, 'right', { rank: 501 });
 
+    // Create and add the history panel to the right area
+    const historyPanel = new HistoryPanel(tracker, historyManager);
+    app.shell.add(historyPanel, 'right', { rank: 502 });
+
     // Create cell metadata highlighter for visual indicators
     new CellMetadataHighlighter(tracker, metadataPanel);
 
-    console.log('Ferret toolbar buttons, panels, and cell highlighter added');
+    // Set up history monitoring for notebooks
+    tracker.widgetAdded.connect((sender: any, widget: any) => {
+      historyManager.startMonitoring(widget.context.path, widget);
+
+      // Set up cleanup when notebook is closed
+      widget.disposed.connect(() => {
+        historyManager.stopMonitoring(widget.context.path);
+      });
+    });
+
+    // Start monitoring any already open notebooks
+    tracker.forEach(widget => {
+      historyManager.startMonitoring(widget.context.path, widget);
+
+      // Set up cleanup for already open notebooks
+      widget.disposed.connect(() => {
+        historyManager.stopMonitoring(widget.context.path);
+      });
+    });
+
+    console.log('Ferret toolbar buttons, panels, history, and cell highlighter added');
 
   }
 };

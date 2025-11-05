@@ -16,6 +16,7 @@ import {
   ExecuteCommandRequest,
   FERRET_COMMANDS
 } from './types';
+import { NotebookHistoryManager } from './history';
 import React from 'react';
 
 /**
@@ -25,10 +26,16 @@ export class FerretCommandsManager {
   private commands: CommandInfo[] = FERRET_COMMANDS;
   private app: JupyterFrontEnd;
   private tracker: INotebookTracker;
+  private historyManager: NotebookHistoryManager;
 
-  constructor(app: JupyterFrontEnd, tracker: INotebookTracker) {
+  constructor(
+    app: JupyterFrontEnd,
+    tracker: INotebookTracker,
+    historyManager: NotebookHistoryManager
+  ) {
     this.app = app;
     this.tracker = tracker;
+    this.historyManager = historyManager;
   }
 
   /**
@@ -63,6 +70,9 @@ export class FerretCommandsManager {
       }
 
       const commandInfo = this.commands.find(cmd => cmd.id === commandId);
+
+      // Flush any pending user edits before executing command
+      this.historyManager.flushPendingEdit(notebook.context.path, notebook);
 
       // Determine selected cell IDs based on context
       let selectedCellIds: string[] | undefined;
@@ -108,12 +118,26 @@ export class FerretCommandsManager {
 
       // Update the notebook with results
       if (result.notebook) {
+        // Add history entry for this command
+        const affectedCells = selectedCellIds || this.getAllCellIds(result.notebook);
+        this.historyManager.addCommandEntry(notebook.context.path, {
+          id: `cmd-${Date.now()}`,
+          timestamp: Date.now(),
+          commandId: commandId,
+          commandLabel: commandInfo?.label || commandId,
+          icon: commandInfo?.icon || 'ui-components:edit',
+          notebookSnapshot: result.notebook,
+          affectedCells: affectedCells,
+          metadata: result.metadata,
+          description: this.generateCommandDescription(commandId, commandInfo?.label, affectedCells.length, result.metadata)
+        });
+
         notebook.content.model?.fromJSON(result.notebook);
 
         console.log('Command metadata:', result.metadata);
 
         Notification.success(`${commandInfo?.label || 'Command'} Complete: Command executed successfully.`, { autoClose: 3000 });
-      
+
       }
 
       return result;
@@ -218,5 +242,25 @@ export class FerretCommandsManager {
       selector: '.jp-Cell.jp-CodeCell',
       rank: this.commands.length
     });
+  }
+
+  /**
+   * Get all cell IDs from a notebook
+   */
+  private getAllCellIds(notebook: any): string[] {
+    return notebook.cells?.map((cell: any) => cell.id) || [];
+  }
+
+  /**
+   * Generate a human-readable description for a command execution
+   */
+  private generateCommandDescription(
+    commandId: string,
+    label?: string,
+    cellCount?: number,
+    metadata?: any
+  ): string {
+    const cellText = cellCount ? ` (${cellCount} cell${cellCount !== 1 ? 's' : ''})` : '';
+    return `${label || commandId}${cellText}`;
   }
 }
