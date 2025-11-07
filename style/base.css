@@ -7,15 +7,14 @@
 /* Ferret extension styles */
 
 .ferret-button {
-    margin: 0 2px;
-  }
-  
-.ferret-cell-toolbar {
-    display: flex;
-    gap: 4px;
-  }
+  margin: 0 2px;
+}
 
-  
+.ferret-cell-toolbar {
+  display: flex;
+  gap: 4px;
+}
+
 /* Cell highlighting based on Ferret metadata */
 .jp-Cell.ferret-cell-warning {
   border-left: 4px solid #f5f543;
@@ -202,8 +201,6 @@
   line-height: 1.5;
   color: var(--jp-ui-font-color1);
 }
-
-
 
 .jp-chat-panel {
   display: flex;

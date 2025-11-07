@@ -14,6 +14,40 @@ export interface CommandInfo {
 }
 
 /**
+ * History entry representing a single operation (command or user edit)
+ */
+export interface IHistoryEntry {
+  id: string;
+  timestamp: number;
+  type: 'command' | 'user-edit';
+  commandId?: string;
+  commandLabel?: string;
+  icon: string;
+  notebookSnapshot: any;
+  affectedCells: string[];
+  metadata?: any;
+  description: string;
+  editSummary?: {
+    cellsAdded: number;
+    cellsDeleted: number;
+    cellsModified: number;
+    cellsMoved: number;
+  };
+}
+
+/**
+ * History state for a notebook
+ */
+export interface IHistoryState {
+  entries: IHistoryEntry[];
+  currentIndex: number;
+  maxEntries: number;
+  pendingEdit: boolean;
+  lastSnapshotTime: number;
+  editDebounceMs: number;
+}
+
+/**
  * Hardcoded list of available Ferret commands
  */
 export const FERRET_COMMANDS: CommandInfo[] = [
