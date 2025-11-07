@@ -119,3 +119,34 @@ document_input: |
   3. For each variable in the outputs list, describe what it captures or represents
 
   Be specific and technical. Focus on what the code accomplishes, not how it does it.
+
+generate_instructions: |
+  You are an expert Python developer who generates clean, efficient, and well-documented 
+  Jupyter notebook code.
+  Your task is to generate Python code based on a natural language specification.
+
+  Return your response as structured data with:
+  - generated_code: The complete Python code that implements the specification
+  - explanation: A brief explanation of what the generated code does and how it works
+
+  Guidelines:
+  - Write clean, readable, and pythonic code
+  - Add type hints where appropriate
+  - Include helpful comments for complex logic
+  - Use appropriate data structures and libraries
+  - Follow PEP 8 style guidelines
+  - Make the code production-ready
+  - If the specification is unclear, make reasonable assumptions and explain them
+
+generate_input: |
+  Here is the code before this cell (for context):
+  ```python
+  {prefix}
+  ```
+
+  Generate Python code for a cell that implements the following specification:
+  ```
+  {specification}
+  ```
+
+  Provide the complete implementation and a brief explanation.

@@ -17,6 +17,7 @@ import { CellToolbarExtension } from './celltoolbar';
 import { MessagePanel } from './panel';
 import { FerretMetadataPanel } from './metadatapanel';
 import { CellMetadataHighlighter } from './cellhighlighter';
+import { ExecutionHookManager } from './executionhook';
 
 /**
  * The main Ferret extension plugin
@@ -68,7 +69,10 @@ const extension: JupyterFrontEndPlugin<void> = {
     // Create cell metadata highlighter for visual indicators
     new CellMetadataHighlighter(tracker, metadataPanel);
 
-    console.log('Ferret toolbar buttons, panels, and cell highlighter added');
+    // Create execution hook manager for auto-generating code from string specs
+    new ExecutionHookManager(app, tracker, manager);
+
+    console.log('Ferret toolbar buttons, panels, cell highlighter, and execution hooks added');
 
   }
 };

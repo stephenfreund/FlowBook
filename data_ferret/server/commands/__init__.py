@@ -12,6 +12,7 @@ from data_ferret.server.commands.cleanup import CleanupCommand
 from data_ferret.server.commands.document import DocumentCommand
 from data_ferret.server.commands.example_message_command import ExampleMessageCommand
 from data_ferret.server.commands.validate_change import ValidateChangeCommand
+from data_ferret.server.commands.generate import GenerateCodeCommand
 
 __all__ = [
     "AnalyzeNotebookCommand",
@@ -24,5 +25,6 @@ __all__ = [
     "DocumentCommand",
     "ExampleMessageCommand",
     "ValidateChangeCommand",
+    "GenerateCodeCommand",
 ]
 

@@ -58,6 +58,13 @@ export const FERRET_COMMANDS: CommandInfo[] = [
     icon: 'ui-components:check',
     tooltip: 'Validate selected cells with next cell comparison',
     requires_kernel: true
+  },
+  {
+    id: 'generate',
+    label: 'Generate',
+    icon: 'ui-components:code',
+    tooltip: 'Generate code from string specification',
+    requires_kernel: false
   }
 ];
 
