@@ -62,9 +62,42 @@ class OptimizedCodeResponse(BaseModel):
     )
 
 
+class GeneratedCodeMetadata(BaseModel):
+    """Metadata for AI-generated code from string specifications."""
+    explanation: str = Field(
+        description="Brief explanation of what the generated code does"
+    )
+    original_spec: str = Field(
+        description="The original string specification that was used to generate the code"
+    )
+
+
+class OptimizedCodeMetadata(BaseModel):
+    """Metadata for AI-optimized code."""
+    original_code: str = Field(
+        description="The original code before optimization"
+    )
+    optimized_code: str = Field(
+        description="The optimized code that replaced the original"
+    )
+    optimizations_applied: List[str] = Field(
+        description="List of optimizations that were applied"
+    )
+
+
+class OptimizationAppliedMetadata(BaseModel):
+    """Metadata for cells that triggered optimizations applied to other cells."""
+    modified_cell_ids: List[str] = Field(
+        description="List of cell IDs that were modified as a result of optimizing this cell"
+    )
+
+
 class FerretMetadata(BaseModel):
     optimization_potential: Optional[OptimizationPotential] = None
     profile: Optional[ProfileData] = None
+    generated: Optional[GeneratedCodeMetadata] = None
+    optimized: Optional[OptimizedCodeMetadata] = None
+    optimization_applied: Optional[OptimizationAppliedMetadata] = None
 
     def get_optimization_potential(self) -> Optional[OptimizationPotential]:
         return self.optimization_potential
@@ -79,6 +112,24 @@ class FerretMetadata(BaseModel):
 
     def set_profile(self, metadata: ProfileData) -> FerretMetadata:
         return self.model_copy(update={"profile": metadata})
+
+    def get_generated(self) -> Optional[GeneratedCodeMetadata]:
+        return self.generated
+
+    def set_generated(self, metadata: GeneratedCodeMetadata) -> FerretMetadata:
+        return self.model_copy(update={"generated": metadata})
+
+    def get_optimized(self) -> Optional[OptimizedCodeMetadata]:
+        return self.optimized
+
+    def set_optimized(self, metadata: OptimizedCodeMetadata) -> FerretMetadata:
+        return self.model_copy(update={"optimized": metadata})
+
+    def get_optimization_applied(self) -> Optional[OptimizationAppliedMetadata]:
+        return self.optimization_applied
+
+    def set_optimization_applied(self, metadata: OptimizationAppliedMetadata) -> FerretMetadata:
+        return self.model_copy(update={"optimization_applied": metadata})
 
     @staticmethod
     def from_cell(cell: nbformat.NotebookNode) -> FerretMetadata:
@@ -109,6 +160,45 @@ def set_profile_ferret_metadata(
     if not isinstance(ferret, dict):
         ferret = FerretMetadata.model_validate(ferret).model_dump()
     ferret["profile"] = metadata.model_dump()
+    cell["metadata"]["ferret"] = ferret
+
+
+def set_generated_ferret_metadata(
+    cell: nbformat.NotebookNode, metadata: GeneratedCodeMetadata
+) -> None:
+    """Set the generated code metadata for a cell."""
+    if "metadata" not in cell:
+        cell["metadata"] = {}
+    ferret = cell["metadata"].get("ferret", {})
+    if not isinstance(ferret, dict):
+        ferret = FerretMetadata.model_validate(ferret).model_dump()
+    ferret["generated"] = metadata.model_dump()
+    cell["metadata"]["ferret"] = ferret
+
+
+def set_optimized_ferret_metadata(
+    cell: nbformat.NotebookNode, metadata: OptimizedCodeMetadata
+) -> None:
+    """Set the optimized code metadata for a cell."""
+    if "metadata" not in cell:
+        cell["metadata"] = {}
+    ferret = cell["metadata"].get("ferret", {})
+    if not isinstance(ferret, dict):
+        ferret = FerretMetadata.model_validate(ferret).model_dump()
+    ferret["optimized"] = metadata.model_dump()
+    cell["metadata"]["ferret"] = ferret
+
+
+def set_optimization_applied_ferret_metadata(
+    cell: nbformat.NotebookNode, metadata: OptimizationAppliedMetadata
+) -> None:
+    """Set the optimization applied metadata for a cell that triggered optimizations."""
+    if "metadata" not in cell:
+        cell["metadata"] = {}
+    ferret = cell["metadata"].get("ferret", {})
+    if not isinstance(ferret, dict):
+        ferret = FerretMetadata.model_validate(ferret).model_dump()
+    ferret["optimization_applied"] = metadata.model_dump()
     cell["metadata"]["ferret"] = ferret
 
 

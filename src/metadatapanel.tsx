@@ -15,15 +15,18 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
   const [profileExpanded, setProfileExpanded] = React.useState(false);
   const [envExpanded, setEnvExpanded] = React.useState(false);
   const [envAfterExpanded, setEnvAfterExpanded] = React.useState(false);
+  const [originalCodeExpanded, setOriginalCodeExpanded] = React.useState(false);
+  const [optimizedCodeExpanded, setOptimizedCodeExpanded] = React.useState(false);
+  const [generatedCodeExpanded, setGeneratedCodeExpanded] = React.useState(false);
 
   console.log('[MetadataDisplay] Rendering with metadata:', metadata);
 
-  if (!metadata || (!metadata.optimization_potential && !metadata.profile)) {
+  if (!metadata || (!metadata.optimization_potential && !metadata.profile && !metadata.generated && !metadata.optimized && !metadata.optimization_applied)) {
     console.log('[MetadataDisplay] No metadata, showing empty state');
     return (
       <div className="ferret-metadata-empty">
         <p>No Ferret metadata available.</p>
-        <p>Select a cell with optimization potential or profile data to view its metadata.</p>
+        <p>Select a cell with Ferret metadata to view it.</p>
       </div>
     );
   }
@@ -150,10 +153,121 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
         </>
       )}
 
+      {/* Generated Code Metadata Section */}
+      {metadata.generated && (
+        <>
+          <div className="ferret-metadata-divider" />
+          <div className="ferret-metadata-header">Generated Code</div>
+          <div className="ferret-metadata-divider" />
+
+          <div className="ferret-metadata-section">
+            <div className="ferret-metadata-item">
+              <strong>Explanation:</strong> {metadata.generated.explanation}
+            </div>
+          </div>
+
+          <div className="ferret-metadata-divider" />
+          <div className="ferret-metadata-section">
+            <div
+              className="ferret-metadata-profile-toggle"
+              onClick={() => setGeneratedCodeExpanded(!generatedCodeExpanded)}
+            >
+              <strong>Original Specification</strong>
+              <span className="ferret-metadata-toggle-icon">
+                {generatedCodeExpanded ? '▼' : '▶'}
+              </span>
+            </div>
+            {generatedCodeExpanded && (
+              <pre className="ferret-metadata-profile-output">
+                {metadata.generated.original_spec}
+              </pre>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Optimized Code Metadata Section */}
+      {metadata.optimized && (
+        <>
+          <div className="ferret-metadata-divider" />
+          <div className="ferret-metadata-header">Optimized Code</div>
+          <div className="ferret-metadata-divider" />
+
+          <div className="ferret-metadata-section">
+            <div className="ferret-metadata-item">
+              <strong>Optimizations Applied:</strong>
+              <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
+                {metadata.optimized.optimizations_applied.map((opt, idx) => (
+                  <li key={idx}>{opt}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+
+          <div className="ferret-metadata-divider" />
+          <div className="ferret-metadata-section">
+            <div
+              className="ferret-metadata-profile-toggle"
+              onClick={() => setOriginalCodeExpanded(!originalCodeExpanded)}
+            >
+              <strong>Original Code</strong>
+              <span className="ferret-metadata-toggle-icon">
+                {originalCodeExpanded ? '▼' : '▶'}
+              </span>
+            </div>
+            {originalCodeExpanded && (
+              <pre className="ferret-metadata-profile-output">
+                {metadata.optimized.original_code}
+              </pre>
+            )}
+          </div>
+
+          <div className="ferret-metadata-divider" />
+          <div className="ferret-metadata-section">
+            <div
+              className="ferret-metadata-profile-toggle"
+              onClick={() => setOptimizedCodeExpanded(!optimizedCodeExpanded)}
+            >
+              <strong>Optimized Code</strong>
+              <span className="ferret-metadata-toggle-icon">
+                {optimizedCodeExpanded ? '▼' : '▶'}
+              </span>
+            </div>
+            {optimizedCodeExpanded && (
+              <pre className="ferret-metadata-profile-output">
+                {metadata.optimized.optimized_code}
+              </pre>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Optimization Applied Metadata Section */}
+      {metadata.optimization_applied && (
+        <>
+          <div className="ferret-metadata-divider" />
+          <div className="ferret-metadata-header">Optimizations Applied</div>
+          <div className="ferret-metadata-divider" />
+
+          <div className="ferret-metadata-section">
+            <div className="ferret-metadata-item">
+              <strong>Modified Cells:</strong>
+              <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
+                {metadata.optimization_applied.modified_cell_ids.map((cellId, idx) => (
+                  <li key={idx}>
+                    <code>{cellId.substring(0, 8)}...</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </>
+      )}
+
       {/* Optimization Potential Metadata Section */}
       {metadata.optimization_potential && (
         <>
-          {metadata.optimization_potential && <div className="ferret-metadata-divider" />}
+          <div className="ferret-metadata-divider" />
 
           <div className="ferret-metadata-header">Optimization Potential</div>
           <div className="ferret-metadata-divider" />

@@ -15,6 +15,10 @@ from data_ferret.util.ferret_metadata import (
     OptimizationStep,
     CodeSnippet,
     OptimizedCodeResponse,
+    OptimizedCodeMetadata,
+    OptimizationAppliedMetadata,
+    set_optimized_ferret_metadata,
+    set_optimization_applied_ferret_metadata,
 )
 from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.util.prompts import get_prompt
@@ -349,10 +353,42 @@ class OptimizeCommand(NotebookCommand):
         # Create a mapping from cell_id to cell
         cell_map = {cell["id"]: cell for cell in new_nb["cells"]}
 
+        # Group optimizations by target cell (the cell that was actually modified)
+        from collections import defaultdict
+        target_cell_metadata = defaultdict(lambda: {
+            'original': [],
+            'optimized': [],
+            'optimizations': []
+        })
+
+        # Track which cells were modified for each triggering cell
+        triggering_cell_modifications = defaultdict(set)
+
+        # First pass: apply optimizations and collect metadata per target cell
         for cell_id, result_and_stats in all_results:
             for opt_snippet in result_and_stats.optimized_code:
                 target_cell = cell_map.get(opt_snippet.cell_id)
                 if target_cell:
+                    # Find the matching original snippet
+                    original_snippet = next(
+                        (orig for orig in result_and_stats.original_code
+                         if orig.cell_id == opt_snippet.cell_id and orig.function_name == opt_snippet.function_name),
+                        None
+                    )
+
+                    # Accumulate metadata for this target cell
+                    target_cell_id = opt_snippet.cell_id
+                    if original_snippet:
+                        target_cell_metadata[target_cell_id]['original'].append(original_snippet.source)
+                        target_cell_metadata[target_cell_id]['optimized'].append(opt_snippet.source)
+
+                    if opt_snippet.optimizations_applied:
+                        target_cell_metadata[target_cell_id]['optimizations'].extend(opt_snippet.optimizations_applied)
+
+                    # Track that this triggering cell caused modification of target_cell_id
+                    triggering_cell_modifications[cell_id].add(target_cell_id)
+
+                    # Apply the optimization to the source
                     if opt_snippet.function_name:
                         # Replace just the function in the cell
                         target_cell["source"] = replace_function(
@@ -363,6 +399,24 @@ class OptimizeCommand(NotebookCommand):
                     else:
                         # Replace the whole cell
                         target_cell["source"] = opt_snippet.source
+
+        # Second pass: store metadata on each modified cell
+        for target_cell_id, metadata_parts in target_cell_metadata.items():
+            if target_cell_id in cell_map and metadata_parts['original']:
+                optimized_metadata = OptimizedCodeMetadata(
+                    original_code="\n\n".join(metadata_parts['original']),
+                    optimized_code="\n\n".join(metadata_parts['optimized']),
+                    optimizations_applied=metadata_parts['optimizations'],
+                )
+                set_optimized_ferret_metadata(cell_map[target_cell_id], optimized_metadata)
+
+        # Third pass: store list of modified cells on each triggering cell
+        for triggering_cell_id, modified_cell_ids in triggering_cell_modifications.items():
+            if triggering_cell_id in cell_map and modified_cell_ids:
+                optimization_applied_metadata = OptimizationAppliedMetadata(
+                    modified_cell_ids=list(modified_cell_ids)
+                )
+                set_optimization_applied_ferret_metadata(cell_map[triggering_cell_id], optimization_applied_metadata)
 
         total_cost = sum([result.stats.cost for _, result in all_results])
 

@@ -124,9 +124,36 @@ export interface IFerretProfileData {
 }
 
 /**
+ * Ferret generated code metadata structure
+ */
+export interface IFerretGeneratedCodeMetadata {
+  explanation: string;
+  original_spec: string;
+}
+
+/**
+ * Ferret optimized code metadata structure
+ */
+export interface IFerretOptimizedCodeMetadata {
+  original_code: string;
+  optimized_code: string;
+  optimizations_applied: string[];
+}
+
+/**
+ * Ferret optimization applied metadata structure
+ */
+export interface IFerretOptimizationAppliedMetadata {
+  modified_cell_ids: string[];
+}
+
+/**
  * Ferret cell metadata structure
  */
 export interface IFerretMetadata {
   optimization_potential?: IFerretOptimizationPotential;
   profile?: IFerretProfileData;
+  generated?: IFerretGeneratedCodeMetadata;
+  optimized?: IFerretOptimizedCodeMetadata;
+  optimization_applied?: IFerretOptimizationAppliedMetadata;
 }

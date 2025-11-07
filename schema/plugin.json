@@ -21,6 +21,10 @@
       {
         "name": "ferret-optimize",
         "rank": 4
+      },
+      {
+        "name": "ferret-generate",
+        "rank": 5
       }
     ]
   },
