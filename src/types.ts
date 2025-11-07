@@ -36,7 +36,7 @@ export const FERRET_COMMANDS: CommandInfo[] = [
     label: 'Optimize',
     icon: 'ui-components:flash',
     tooltip: 'Optimize cells based on inspection metadata',
-    requires_kernel: false
+    requires_kernel: true
   },
   {
     id: 'document',

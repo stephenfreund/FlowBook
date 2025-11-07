@@ -1,10 +1,12 @@
 """
 Command-line interface for ferret notebook processing.
 """
+
 import argparse
 import json
 import sys
 import asyncio
+from typing import Any, Dict
 from jupyter_client import KernelManager
 
 from data_ferret import make_kernels
@@ -13,6 +15,13 @@ from data_ferret.util.output import error, log, timer
 from .registry import CommandRegistry
 from .kernel_manager import FerretKernelClient
 from .config import FerretConfig
+
+
+def convert_all_source_to_strings(notebook_content: Dict[str, Any]) -> Dict[str, Any]:
+    for cell in notebook_content["cells"]:
+        if cell["cell_type"] == "code" and isinstance(cell["source"], list):
+            cell["source"] = "\n".join(cell["source"])
+    return notebook_content
 
 
 def cli_main():
@@ -24,51 +33,42 @@ def cli_main():
     registry = CommandRegistry()
 
     parser.add_argument(
-        "command",
-        choices=registry.list_commands(),
-        help="Command to execute"
+        "command", choices=registry.list_commands(), help="Command to execute"
     )
 
-    parser.add_argument(
-        "notebook",
-        help="Path to the Jupyter notebook file"
-    )
+    parser.add_argument("notebook", help="Path to the Jupyter notebook file")
 
-    parser.add_argument(
-        "--kernel-id",
-        "-k",
-        help="ID of running kernel to connect to"
-    )
+    parser.add_argument("--kernel-id", "-k", help="ID of running kernel to connect to")
 
     parser.add_argument(
         "--kernel-name",
         default="ferret_kernel",
-        help="Kernel name for new kernel (default: ferret_kernel)"
+        help="Kernel name for new kernel (default: ferret_kernel)",
     )
 
     parser.add_argument(
         "--output",
         "-o",
-        help="Output file for the new notebook (default: adds _processed suffix)"
+        help="Output file for the new notebook (default: adds _processed suffix)",
     )
 
     parser.add_argument(
         "--model",
         default="gpt-4o",
-        help="AI model to use for commands (default: gpt-4o)"
+        help="AI model to use for commands (default: gpt-4o)",
     )
 
     parser.add_argument(
         "--fast-model",
         default="gpt-4o-mini",
-        help="Fast AI model to use for lightweight operations (default: gpt-4o-mini)"
+        help="Fast AI model to use for lightweight operations (default: gpt-4o-mini)",
     )
 
     parser.add_argument(
         "--cell-ids",
         "-c",
         nargs="+",
-        help="Optional list of cell IDs to process (default: process all cells)"
+        help="Optional list of cell IDs to process (default: process all cells)",
     )
 
     args = parser.parse_args()
@@ -76,26 +76,30 @@ def cli_main():
     make_kernels()
 
     # Create config from CLI arguments with same defaults as Jupyter
-    config = FerretConfig(
-        model=args.model,
-        fast_model=args.fast_model
-    )
+    config = FerretConfig(model=args.model, fast_model=args.fast_model)
 
     kernel_manager = None
     kernel_client = None
 
     try:
-        with open(args.notebook, 'r', encoding='utf-8') as f:
+        with open(args.notebook, "r", encoding="utf-8") as f:
             notebook_content = json.load(f)
+
+        notebook_content = convert_all_source_to_strings(notebook_content)
 
         command = registry.get_command(args.command)
 
         if command.requires_kernel:
             if args.kernel_id:
                 print(f"Connecting to kernel: {args.kernel_id}")
-                raise NotImplementedError("Connecting to existing kernel by ID not yet implemented in CLI")
+                raise NotImplementedError(
+                    "Connecting to existing kernel by ID not yet implemented in CLI"
+                )
             else:
-                with timer(key="start_kernel", message=f"Starting new kernel: {args.kernel_name}"):
+                with timer(
+                    key="start_kernel",
+                    message=f"Starting new kernel: {args.kernel_name}",
+                ):
                     # Start kernel manager and create our custom FerretKernelClient
                     kernel_manager = KernelManager(kernel_name=args.kernel_name)
                     try:
@@ -104,8 +108,12 @@ def cli_main():
                         error(f"Error starting kernel: {e}")
                         return 1
 
-                    kernel_client = FerretKernelClient(kernel_id=kernel_manager.kernel_id)
-                    kernel_client.load_connection_info(kernel_manager.get_connection_info())
+                    kernel_client = FerretKernelClient(
+                        kernel_id=kernel_manager.kernel_id
+                    )
+                    kernel_client.load_connection_info(
+                        kernel_manager.get_connection_info()
+                    )
                     kernel_client.start_channels()
                     for i in range(3):
                         try:
@@ -126,22 +134,23 @@ def cli_main():
                                 error(f"Giving up after 3 attempts")
                                 return 1
 
-
         # Run async command.process() in event loop
-        result = asyncio.run(command.process(
-            notebook_content,
-            kernel_client=kernel_client,
-            selected_cell_ids=args.cell_ids,
-            config=config
-        ))
+        result = asyncio.run(
+            command.process(
+                notebook_content,
+                kernel_client=kernel_client,
+                selected_cell_ids=args.cell_ids,
+                config=config,
+            )
+        )
 
         if args.output:
             notebook_output = args.output
         else:
-            base_name = args.notebook.rsplit('.', 1)[0]
+            base_name = args.notebook.rsplit(".", 1)[0]
             notebook_output = f"{base_name}_processed.ipynb"
 
-        with open(notebook_output, 'w', encoding='utf-8') as f:
+        with open(notebook_output, "w", encoding="utf-8") as f:
             json.dump(result["notebook"], f, indent=2)
         print(f"Processed notebook written to {notebook_output}")
 
@@ -161,6 +170,7 @@ def cli_main():
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         return 1
     finally:

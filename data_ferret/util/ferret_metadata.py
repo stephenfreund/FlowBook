@@ -23,9 +23,7 @@ class OptimizationStep(BaseModel):
         default=None,
         description="The name of the top-level function to optimize. None if the optimization applies to top-level code in the cell.",
     )
-    description: List[str] = Field(
-        description="The optimizations to apply"
-    )
+    description: List[str] = Field(description="The optimizations to apply")
 
 
 class OptimizationPotential(BaseModel):
@@ -44,12 +42,10 @@ class CodeSnippet(BaseModel):
         default=None,
         description="The name of the function. None if this is the entire cell.",
     )
-    source: str = Field(
-        description="The source code for the function or cell"
-    )
+    source: str = Field(description="The source code for the function or cell")
     optimizations_applied: Optional[List[str]] = Field(
         default=None,
-        description="List of optimizations that were applied (for optimized code only)"
+        description="List of optimizations that were applied (for optimized code only)",
     )
 
 
@@ -64,6 +60,7 @@ class OptimizedCodeResponse(BaseModel):
 
 class GeneratedCodeMetadata(BaseModel):
     """Metadata for AI-generated code from string specifications."""
+
     explanation: str = Field(
         description="Brief explanation of what the generated code does"
     )
@@ -74,9 +71,8 @@ class GeneratedCodeMetadata(BaseModel):
 
 class OptimizedCodeMetadata(BaseModel):
     """Metadata for AI-optimized code."""
-    original_code: str = Field(
-        description="The original code before optimization"
-    )
+
+    original_code: str = Field(description="The original code before optimization")
     optimized_code: str = Field(
         description="The optimized code that replaced the original"
     )
@@ -87,6 +83,7 @@ class OptimizedCodeMetadata(BaseModel):
 
 class OptimizationAppliedMetadata(BaseModel):
     """Metadata for cells that triggered optimizations applied to other cells."""
+
     modified_cell_ids: List[str] = Field(
         description="List of cell IDs that were modified as a result of optimizing this cell"
     )
@@ -128,7 +125,9 @@ class FerretMetadata(BaseModel):
     def get_optimization_applied(self) -> Optional[OptimizationAppliedMetadata]:
         return self.optimization_applied
 
-    def set_optimization_applied(self, metadata: OptimizationAppliedMetadata) -> FerretMetadata:
+    def set_optimization_applied(
+        self, metadata: OptimizationAppliedMetadata
+    ) -> FerretMetadata:
         return self.model_copy(update={"optimization_applied": metadata})
 
     @staticmethod
