@@ -69,6 +69,8 @@ optimization_input: |
   {cell_source}
   ```
 
+  {env_section}
+
   {optimization_descriptions}
 
   Provide the optimized code and a list of specific optimizations you applied.
@@ -143,6 +145,8 @@ generate_input: |
   ```python
   {prefix}
   ```
+
+  {env_section}
 
   Generate Python code for a cell that implements the following specification:
   ```

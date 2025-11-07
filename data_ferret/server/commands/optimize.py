@@ -191,6 +191,11 @@ class OptimizeCommand(NotebookCommand):
                     print(f"Warning: Target cell {step.target_cell_id} not found")
                     continue
 
+                # Extract profile metadata to get environment information
+                target_ferret_metadata = FerretMetadata.from_cell(target_cell)
+                target_profile = target_ferret_metadata.get_profile()
+                env_data = target_profile.env if target_profile else None
+
                 # Build context prefix (all cells before the target cell)
                 prefix = "\n\n".join(
                     [f'# Cell {c["id"]}\n{c["source"]}' for c in cells[:target_index]]
@@ -230,6 +235,13 @@ class OptimizeCommand(NotebookCommand):
                 else:
                     optimization_descriptions = f"Optimizations to apply:\n- {step.description}"
 
+                # Format environment information from profile metadata
+                if env_data:
+                    env_lines = [f"  {var}: {type_}" for var, type_ in env_data.items()]
+                    env_section = "Available variables in the environment (from profiling):\n" + "\n".join(env_lines)
+                else:
+                    env_section = ""
+
                 # Create agent with structured output
                 agent = FerretAgent[OptimizedCodeResponse](
                     key="cell_optimization",
@@ -244,6 +256,7 @@ class OptimizeCommand(NotebookCommand):
                     prefix=prefix,
                     kind="cell" if step.function_name is None else "function",
                     cell_source=cell_source,
+                    env_section=env_section,
                     optimization_descriptions=optimization_descriptions,
                 )
 
