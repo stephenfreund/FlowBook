@@ -23,10 +23,14 @@ function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
   const [currentIndex, setCurrentIndex] = useState<number>(-1);
   const [notebookPath, setNotebookPath] = useState<string>('');
 
+  // Track current widget for notebook change listener
+  const [currentWidget, setCurrentWidget] = useState(tracker.currentWidget);
+
   // Update history when active notebook changes or history changes
   useEffect(() => {
     const updateHistory = () => {
       const current = tracker.currentWidget;
+      setCurrentWidget(current || null);
       if (current) {
         const path = current.context.path;
         setNotebookPath(path);
@@ -58,6 +62,30 @@ function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
       historyManager.historyChanged.disconnect(onHistoryChanged);
     };
   }, [tracker, historyManager]);
+
+  // Listen to notebook cell changes to update displayed indices
+  useEffect(() => {
+    if (!currentWidget?.content.model) {
+      return;
+    }
+
+    const onNotebookChanged = () => {
+      // Force a re-render by updating state to refresh displayed indices
+      setEntries([...historyManager.getHistory(currentWidget.context.path)]);
+    };
+
+    currentWidget.content.model.cells.changed.connect(onNotebookChanged);
+
+    return () => {
+      if (currentWidget?.content.model) {
+        try {
+          currentWidget.content.model.cells.changed.disconnect(onNotebookChanged);
+        } catch (e) {
+          // Ignore if already disconnected
+        }
+      }
+    };
+  }, [currentWidget, historyManager]);
 
   const handleEntryClick = (index: number) => {
     const current = tracker.currentWidget;
@@ -103,6 +131,9 @@ function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
     );
   }
 
+  // Get current notebook snapshot for dynamic descriptions
+  const currentNotebook = tracker.currentWidget?.content.model?.toJSON();
+
   return (
     <div className="ferret-history-panel">
       <div className="ferret-history-controls">
@@ -129,6 +160,11 @@ function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
           const isFuture = index > currentIndex;
           const entryClass = `ferret-history-entry ${isCurrent ? 'current' : ''} ${isFuture ? 'future' : ''}`.trim();
 
+          // Get dynamic description based on current notebook state
+          const description = currentNotebook
+            ? historyManager.getDynamicDescription(entry, currentNotebook)
+            : entry.description;
+
           if (index === 0) {
             console.log('[HistoryPanel] First entry - index:', index, 'currentIndex:', currentIndex, 'isCurrent:', isCurrent, 'class:', entryClass);
           }
@@ -138,7 +174,7 @@ function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
               key={entry.id}
               className={entryClass}
               onClick={() => handleEntryClick(index)}
-              title={entry.description}
+              title={description}
             >
               <div className="ferret-history-entry-icon">
                 <LabIcon.resolveReact
@@ -152,15 +188,8 @@ function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
                   {entry.type === 'command' ? entry.commandLabel : 'User Edit'}
                 </div>
                 <div className="ferret-history-entry-description">
-                  {entry.description}
+                  {description}
                 </div>
-                {entry.editSummary && (
-                  <div className="ferret-history-entry-summary">
-                    {entry.editSummary.cellsAdded > 0 && `+${entry.editSummary.cellsAdded} `}
-                    {entry.editSummary.cellsDeleted > 0 && `-${entry.editSummary.cellsDeleted} `}
-                    {entry.editSummary.cellsModified > 0 && `~${entry.editSummary.cellsModified} `}
-                  </div>
-                )}
               </div>
             </div>
           );

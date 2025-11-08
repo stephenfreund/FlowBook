@@ -25,6 +25,9 @@ export interface IHistoryEntry {
   icon: string;
   notebookSnapshot: any;
   affectedCells: string[];
+  addedCells?: string[];
+  deletedCells?: string[];
+  modifiedCells?: string[];
   metadata?: any;
   description: string;
   editSummary?: {

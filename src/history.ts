@@ -114,6 +114,14 @@ export class NotebookHistoryManager {
       const combinedCells = new Set([...lastEntry.affectedCells, ...changes.affectedCells]);
       lastEntry.affectedCells = Array.from(combinedCells);
 
+      // Merge categorized cells
+      const combinedAdded = new Set([...(lastEntry.addedCells || []), ...changes.addedCells]);
+      const combinedDeleted = new Set([...(lastEntry.deletedCells || []), ...changes.deletedCells]);
+      const combinedModified = new Set([...(lastEntry.modifiedCells || []), ...changes.modifiedCells]);
+      lastEntry.addedCells = Array.from(combinedAdded);
+      lastEntry.deletedCells = Array.from(combinedDeleted);
+      lastEntry.modifiedCells = Array.from(combinedModified);
+
       // Combine edit summaries
       if (lastEntry.editSummary && changes.summary) {
         lastEntry.editSummary.cellsAdded += changes.summary.cellsAdded;
@@ -138,6 +146,9 @@ export class NotebookHistoryManager {
         icon: 'ui-components:edit',
         notebookSnapshot: currentSnapshot,
         affectedCells: changes.affectedCells,
+        addedCells: changes.addedCells,
+        deletedCells: changes.deletedCells,
+        modifiedCells: changes.modifiedCells,
         description: this.generateEditDescription(
           changes.summary,
           currentSnapshot,
@@ -292,6 +303,9 @@ export class NotebookHistoryManager {
   ): {
     hasChanges: boolean;
     affectedCells: string[];
+    addedCells: string[];
+    deletedCells: string[];
+    modifiedCells: string[];
     summary: {
       cellsAdded: number;
       cellsDeleted: number;
@@ -306,18 +320,23 @@ export class NotebookHistoryManager {
     let deleted = 0;
     let modified = 0;
     const affectedCells: string[] = [];
+    const addedCells: string[] = [];
+    const deletedCells: string[] = [];
+    const modifiedCells: string[] = [];
 
     // Check for deletions and modifications
     beforeCells.forEach((cell: any, id: string) => {
       if (!afterCells.has(id)) {
         deleted++;
         affectedCells.push(id);
+        deletedCells.push(id);
       } else {
         const afterCell = afterCells.get(id);
         // Only compare content, not metadata
         if (this.hasCellContentChanged(cell, afterCell)) {
           modified++;
           affectedCells.push(id);
+          modifiedCells.push(id);
         }
       }
     });
@@ -327,6 +346,7 @@ export class NotebookHistoryManager {
       if (!beforeCells.has(id)) {
         added++;
         affectedCells.push(id);
+        addedCells.push(id);
       }
     });
 
@@ -343,6 +363,9 @@ export class NotebookHistoryManager {
     return {
       hasChanges: added > 0 || deleted > 0 || modified > 0 || moved > 0,
       affectedCells,
+      addedCells,
+      deletedCells,
+      modifiedCells,
       summary: {
         cellsAdded: added,
         cellsDeleted: deleted,
@@ -477,6 +500,62 @@ export class NotebookHistoryManager {
   getCurrentIndex(notebookPath: string): number {
     const state = this._history.get(notebookPath);
     return state ? state.currentIndex : -1;
+  }
+
+  /**
+   * Generate a dynamic description for a history entry based on current notebook state
+   */
+  getDynamicDescription(entry: IHistoryEntry, currentNotebook: any): string {
+    // For command entries, show affected cells if available
+    if (entry.type === 'command') {
+      if (entry.affectedCells && entry.affectedCells.length > 0) {
+        const indices = this.getCellIndices(currentNotebook, entry.affectedCells);
+        if (indices.length > 0) {
+          const indexStr = indices.map(i => `#${i}`).join(', ');
+          // Get the base description without any existing cell information
+          const baseDesc = entry.description.split(/\[.*?\]|\(.*?\)/)[0].trim();
+          return `${baseDesc} ${indexStr}`;
+        }
+      }
+      return entry.description;
+    }
+
+    // For user edits, generate description with current cell indices
+    const parts: string[] = [];
+
+    // Added cells
+    if (entry.addedCells && entry.addedCells.length > 0) {
+      const indices = this.getCellIndices(currentNotebook, entry.addedCells);
+      if (indices.length > 0) {
+        const indexStr = indices.map(i => `#${i}`).join(', ');
+        parts.push(`added ${indexStr}`);
+      } else if (entry.editSummary?.cellsAdded) {
+        parts.push(`added ${entry.editSummary.cellsAdded} cell${entry.editSummary.cellsAdded > 1 ? 's' : ''}`);
+      }
+    }
+
+    // Modified cells
+    if (entry.modifiedCells && entry.modifiedCells.length > 0) {
+      const indices = this.getCellIndices(currentNotebook, entry.modifiedCells);
+      if (indices.length > 0) {
+        const indexStr = indices.map(i => `#${i}`).join(', ');
+        parts.push(`edited ${indexStr}`);
+      } else if (entry.editSummary?.cellsModified) {
+        parts.push(`edited ${entry.editSummary.cellsModified} cell${entry.editSummary.cellsModified > 1 ? 's' : ''}`);
+      }
+    }
+
+    // Deleted cells (can't show indices since cells don't exist)
+    if (entry.editSummary?.cellsDeleted && entry.editSummary.cellsDeleted > 0) {
+      parts.push(`deleted ${entry.editSummary.cellsDeleted} cell${entry.editSummary.cellsDeleted > 1 ? 's' : ''}`);
+    }
+
+    // Moved cells
+    if (entry.editSummary?.cellsMoved && entry.editSummary.cellsMoved > 0) {
+      parts.push('cells reordered');
+    }
+
+    return parts.length > 0 ? parts.join(', ') : 'No changes';
   }
 
   /**
