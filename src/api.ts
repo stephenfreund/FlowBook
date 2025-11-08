@@ -26,4 +26,22 @@ export class FerretAPI {
       throw error;
     }
   }
+
+  /**
+   * Get the kernel connection file path for a given kernel ID
+   */
+  static async getKernelConnectionFile(kernelId: string): Promise<string> {
+    try {
+      const result = await requestAPI<{ connection_file: string }>(
+        `kernel/${kernelId}/connection`,
+        {
+          method: 'GET'
+        }
+      );
+      return result.connection_file;
+    } catch (error) {
+      console.error('Failed to get kernel connection file:', error);
+      throw error;
+    }
+  }
 }

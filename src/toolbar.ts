@@ -5,9 +5,10 @@
 import { NotebookPanel } from '@jupyterlab/notebook';
 import { DocumentRegistry } from '@jupyterlab/docregistry';
 import { IDisposable } from '@lumino/disposable';
-import { ToolbarButton } from '@jupyterlab/apputils';
+import { ToolbarButton, Clipboard, showErrorMessage } from '@jupyterlab/apputils';
 
 import { FerretCommandsManager } from './manager';
+import { FerretAPI } from './api';
 
 /**
  * Extension that adds Ferret command buttons to the notebook toolbar
@@ -46,12 +47,52 @@ export class NotebookToolbarExtension
       panel.toolbar.insertItem(10, `ferret-${cmdInfo.id}-button`, button);
     });
 
+    // Add Copy Connection File button
+    const copyConnectionButton = new ToolbarButton({
+      label: 'Copy Connection',
+      tooltip: 'Copy kernel connection file path to clipboard',
+      onClick: async () => {
+        await this.copyKernelConnectionFile(panel);
+      }
+    });
+
+    panel.toolbar.insertItem(100, 'ferret-copy-connection-button', copyConnectionButton);
+
     return {
       dispose: () => {},
       get isDisposed() {
         return false;
       }
     };
+  }
+
+  /**
+   * Copy the kernel connection file path to clipboard
+   */
+  private async copyKernelConnectionFile(panel: NotebookPanel): Promise<void> {
+    try {
+      const session = panel.sessionContext.session;
+
+      if (!session || !session.kernel) {
+        await showErrorMessage(
+          'No Kernel',
+          'No kernel is running. Please start a kernel first.'
+        );
+        return;
+      }
+
+      const kernelId = session.kernel.id;
+      const connectionFile = await FerretAPI.getKernelConnectionFile(kernelId);
+
+      Clipboard.copyToSystem(connectionFile);
+
+      console.log(`Copied kernel connection file to clipboard: ${connectionFile}`);
+    } catch (error) {
+      await showErrorMessage(
+        'Error',
+        `Failed to get kernel connection file: ${error}`
+      );
+    }
   }
 
   // /**

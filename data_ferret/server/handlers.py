@@ -138,6 +138,24 @@ class CommandListHandler(APIHandler):
         self.finish(json.dumps({"commands": command_info}))
 
 
+class KernelConnectionFileHandler(APIHandler):
+    """Handler for getting kernel connection file path."""
+
+    @tornado.web.authenticated
+    async def get(self, kernel_id):
+        """Get the connection file path for a kernel."""
+        try:
+            kernel_manager = self.kernel_manager.get_kernel(kernel_id)
+            connection_file = kernel_manager.connection_file
+
+            self.finish(json.dumps({
+                "connection_file": connection_file
+            }))
+        except Exception as e:
+            self.set_status(404)
+            self.finish(json.dumps({"error": f"Kernel not found: {str(e)}"}))
+
+
 class MessageStreamHandler(JupyterHandler):
     """Handler for Server-Sent Events (SSE) message streaming."""
 
@@ -216,6 +234,11 @@ def setup_handlers(web_app):
             url_path_join(base_url, "ferret", "list"),
             CommandListHandler,
             {"registry": registry},
+        ),
+        (
+            url_path_join(base_url, "ferret", "kernel", "(.+)", "connection"),
+            KernelConnectionFileHandler,
+            {},
         ),
         (
             url_path_join(base_url, "ferret", "stream"),
