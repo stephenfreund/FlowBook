@@ -129,7 +129,12 @@ export class FerretCommandsManager {
           notebookSnapshot: result.notebook,
           affectedCells: affectedCells,
           metadata: result.metadata,
-          description: this.generateCommandDescription(commandId, commandInfo?.label, affectedCells.length, result.metadata)
+          description: this.generateCommandDescription(
+            commandId,
+            commandInfo?.label,
+            result.notebook,
+            affectedCells
+          )
         });
 
         notebook.content.model?.fromJSON(result.notebook);
@@ -257,10 +262,40 @@ export class FerretCommandsManager {
   private generateCommandDescription(
     commandId: string,
     label?: string,
-    cellCount?: number,
-    metadata?: any
+    notebook?: any,
+    affectedCells?: string[]
   ): string {
-    const cellText = cellCount ? ` (${cellCount} cell${cellCount !== 1 ? 's' : ''})` : '';
-    return `${label || commandId}${cellText}`;
+    if (!affectedCells || affectedCells.length === 0) {
+      return label || commandId;
+    }
+
+    const indices = this.getCellIndices(notebook, affectedCells);
+    const indicesText = indices.length > 0 ? ` [${indices.join(', ')}]` : '';
+    return `${label || commandId}${indicesText}`;
+  }
+
+  /**
+   * Get 1-based cell indices from cell IDs
+   */
+  private getCellIndices(notebook: any, cellIds: string[]): number[] {
+    if (!notebook || !notebook.cells || !cellIds) {
+      return [];
+    }
+
+    const indices: number[] = [];
+    const cellIdToIndex = new Map<string, number>();
+
+    notebook.cells.forEach((cell: any, index: number) => {
+      cellIdToIndex.set(cell.id, index + 1); // 1-based indexing
+    });
+
+    cellIds.forEach(cellId => {
+      const index = cellIdToIndex.get(cellId);
+      if (index !== undefined) {
+        indices.push(index);
+      }
+    });
+
+    return indices.sort((a, b) => a - b);
   }
 }

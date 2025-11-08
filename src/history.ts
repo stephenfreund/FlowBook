@@ -120,7 +120,11 @@ export class NotebookHistoryManager {
         lastEntry.editSummary.cellsDeleted += changes.summary.cellsDeleted;
         lastEntry.editSummary.cellsModified += changes.summary.cellsModified;
         lastEntry.editSummary.cellsMoved += changes.summary.cellsMoved;
-        lastEntry.description = this.generateEditDescription(lastEntry.editSummary);
+        lastEntry.description = this.generateEditDescription(
+          lastEntry.editSummary,
+          currentSnapshot,
+          lastEntry.affectedCells
+        );
       }
 
       state.lastSnapshotTime = Date.now();
@@ -134,7 +138,11 @@ export class NotebookHistoryManager {
         icon: 'ui-components:edit',
         notebookSnapshot: currentSnapshot,
         affectedCells: changes.affectedCells,
-        description: this.generateEditDescription(changes.summary),
+        description: this.generateEditDescription(
+          changes.summary,
+          currentSnapshot,
+          changes.affectedCells
+        ),
         editSummary: changes.summary
       };
 
@@ -306,7 +314,8 @@ export class NotebookHistoryManager {
         affectedCells.push(id);
       } else {
         const afterCell = afterCells.get(id);
-        if (JSON.stringify(cell) !== JSON.stringify(afterCell)) {
+        // Only compare content, not metadata
+        if (this.hasCellContentChanged(cell, afterCell)) {
           modified++;
           affectedCells.push(id);
         }
@@ -346,12 +355,16 @@ export class NotebookHistoryManager {
   /**
    * Generate a human-readable description of an edit
    */
-  private generateEditDescription(summary: {
-    cellsAdded: number;
-    cellsDeleted: number;
-    cellsModified: number;
-    cellsMoved: number;
-  }): string {
+  private generateEditDescription(
+    summary: {
+      cellsAdded: number;
+      cellsDeleted: number;
+      cellsModified: number;
+      cellsMoved: number;
+    },
+    notebook?: any,
+    affectedCells?: string[]
+  ): string {
     const parts: string[] = [];
 
     if (summary.cellsAdded > 0) {
@@ -367,7 +380,42 @@ export class NotebookHistoryManager {
       parts.push('cells reordered');
     }
 
-    return parts.length > 0 ? parts.join(', ') : 'No changes';
+    let description = parts.length > 0 ? parts.join(', ') : 'No changes';
+
+    // Add cell indices if available
+    if (notebook && affectedCells && affectedCells.length > 0) {
+      const indices = this.getCellIndices(notebook, affectedCells);
+      if (indices.length > 0) {
+        description += ` [${indices.join(', ')}]`;
+      }
+    }
+
+    return description;
+  }
+
+  /**
+   * Get 1-based cell indices from cell IDs
+   */
+  private getCellIndices(notebook: any, cellIds: string[]): number[] {
+    if (!notebook || !notebook.cells || !cellIds) {
+      return [];
+    }
+
+    const indices: number[] = [];
+    const cellIdToIndex = new Map<string, number>();
+
+    notebook.cells.forEach((cell: any, index: number) => {
+      cellIdToIndex.set(cell.id, index + 1); // 1-based indexing
+    });
+
+    cellIds.forEach(cellId => {
+      const index = cellIdToIndex.get(cellId);
+      if (index !== undefined) {
+        indices.push(index);
+      }
+    });
+
+    return indices.sort((a, b) => a - b);
   }
 
   /**
@@ -468,6 +516,32 @@ export class NotebookHistoryManager {
       state.entries = state.entries.slice(removeCount);
       state.currentIndex = Math.max(0, state.currentIndex - removeCount);
     }
+  }
+
+  /**
+   * Check if cell content has changed (ignoring metadata, outputs, and execution count)
+   * Only tracks changes to source code, cell type, and attachments
+   */
+  private hasCellContentChanged(before: any, after: any): boolean {
+    // Compare cell type
+    if (before.cell_type !== after.cell_type) {
+      return true;
+    }
+
+    // Compare source
+    if (JSON.stringify(before.source) !== JSON.stringify(after.source)) {
+      return true;
+    }
+
+    // For markdown cells, compare attachments if present
+    if (before.cell_type === 'markdown' && before.attachments) {
+      if (JSON.stringify(before.attachments) !== JSON.stringify(after.attachments)) {
+        return true;
+      }
+    }
+
+    // Ignore outputs and execution_count - running cells shouldn't create history entries
+    return false;
   }
 
   /**

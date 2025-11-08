@@ -20,6 +20,7 @@ import { CellMetadataHighlighter } from './cellhighlighter';
 import { ExecutionHookManager } from './executionhook';
 import { NotebookHistoryManager } from './history';
 import { HistoryPanel } from './historypanel';
+import { CellIndexManager } from './cellindex';
 
 /**
  * The main Ferret extension plugin
@@ -39,6 +40,9 @@ const extension: JupyterFrontEndPlugin<void> = {
 
     // Create the history manager
     const historyManager = new NotebookHistoryManager();
+
+    // Create the cell index manager
+    const cellIndexManager = new CellIndexManager();
 
     // Create the command manager
     const manager = new FerretCommandsManager(app, tracker, historyManager);
@@ -82,16 +86,18 @@ const extension: JupyterFrontEndPlugin<void> = {
     new ExecutionHookManager(app, tracker, manager);
 
     console.log('Ferret toolbar buttons, panels, cell highlighter, and execution hooks added');
-    // Set up history monitoring for notebooks
+    // Set up history and cell index monitoring for notebooks
     tracker.widgetAdded.connect((sender: any, widget: any) => {
       // Wait for the notebook context to be ready before starting monitoring
       widget.context.ready.then(() => {
         historyManager.startMonitoring(widget.context.path, widget);
+        cellIndexManager.startMonitoring(widget.context.path, widget);
       });
 
       // Set up cleanup when notebook is closed
       widget.disposed.connect(() => {
         historyManager.stopMonitoring(widget.context.path);
+        cellIndexManager.stopMonitoring(widget.context.path);
       });
     });
 
@@ -100,11 +106,13 @@ const extension: JupyterFrontEndPlugin<void> = {
       // Wait for the notebook context to be ready before starting monitoring
       widget.context.ready.then(() => {
         historyManager.startMonitoring(widget.context.path, widget);
+        cellIndexManager.startMonitoring(widget.context.path, widget);
       });
 
       // Set up cleanup for already open notebooks
       widget.disposed.connect(() => {
         historyManager.stopMonitoring(widget.context.path);
+        cellIndexManager.stopMonitoring(widget.context.path);
       });
     });
 
