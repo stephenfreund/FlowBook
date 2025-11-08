@@ -209,6 +209,87 @@ class DiffResult(BaseModel):
         """Get diff tree with default."""
         return self.differences.get(key, default)
 
+    def close_only(self) -> 'DiffResult':
+        """
+        Return a new DiffResult containing only 'close' comparisons.
+
+        Filters the diff tree to include only ValueComparison nodes with
+        status='close', along with all parent paths needed to reach them.
+
+        Returns:
+            DiffResult: New DiffResult with only close comparisons
+
+        Example:
+            >>> result = differ.diff(a, b)
+            >>> close_results = result.close_only()
+            >>> # close_results contains only float comparisons within tolerance
+        """
+        return self._filter_by_status('close')
+
+    def different_only(self) -> 'DiffResult':
+        """
+        Return a new DiffResult containing only 'different' comparisons.
+
+        Filters the diff tree to include only ValueComparison nodes with
+        status='different', along with all parent paths needed to reach them.
+
+        Returns:
+            DiffResult: New DiffResult with only different comparisons
+
+        Example:
+            >>> result = differ.diff(a, b)
+            >>> diff_results = result.different_only()
+            >>> # diff_results excludes close float comparisons
+        """
+        return self._filter_by_status('different')
+
+    def _filter_by_status(self, status: str) -> 'DiffResult':
+        """
+        Filter diff tree by ValueComparison status.
+
+        Args:
+            status: Status to filter for ('close' or 'different')
+
+        Returns:
+            DiffResult: New DiffResult with only matching comparisons
+        """
+        filtered_diffs = {}
+
+        for var_name, diff_node in self.differences.items():
+            filtered_node = self._filter_node_by_status(diff_node, status)
+            if filtered_node is not None:
+                filtered_diffs[var_name] = filtered_node
+
+        return DiffResult(differences=filtered_diffs)
+
+    def _filter_node_by_status(self, node: DiffNode, status: str):
+        """
+        Recursively filter a DiffNode by status.
+
+        Args:
+            node: DiffNode to filter (ValueComparison or dict)
+            status: Status to filter for
+
+        Returns:
+            Filtered node, or None if no matches found
+        """
+        if isinstance(node, ValueComparison):
+            # Leaf node - return it only if status matches
+            return node if node.status == status else None
+        elif isinstance(node, dict):
+            # Compound node - recursively filter children
+            filtered_dict = {}
+            for key, child_node in node.items():
+                filtered_child = self._filter_node_by_status(child_node, status)
+                if filtered_child is not None:
+                    filtered_dict[key] = filtered_child
+
+            # Return filtered dict only if it has content
+            return filtered_dict if filtered_dict else None
+        else:
+            # Unknown node type, return as-is (shouldn't happen)
+            return node
+
 
 def serialize_diff_result(diff_result: DiffResult) -> Dict[str, Any]:
     """

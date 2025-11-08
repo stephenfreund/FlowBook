@@ -364,7 +364,10 @@ class FerretKernel(IPythonKernel, Magics):
         self.checkpoint(f"save original_environment")
 
         comm.send({"type": "progress", "message": "Executing original code"})
+        start_time = time.time()
         self.shell.run_cell(original_code)
+        end_time = time.time()
+        original_duration = end_time - start_time
 
         comm.send({"type": "progress", "message": "Saving original result"})
         self.checkpoint(f"save original_result")
@@ -373,13 +376,19 @@ class FerretKernel(IPythonKernel, Magics):
         self.checkpoint(f"restore original_environment")
 
         comm.send({"type": "progress", "message": "Executing modified code"})
+        start_time = time.time()
         self.shell.run_cell(modified_code)
+        end_time = time.time()
+        modified_duration = end_time - start_time
 
         comm.send({"type": "progress", "message": "Saving modified result"})
         self.checkpoint(f"save modified_result")
 
         comm.send({"type": "progress", "message": "Diffing original and modified environments"})
-        diff_result = checkpoint_diff(self._checkpoint.get(f"original_result"), self._checkpoint.get(f"modified_result"), keys_to_include=output_variables)
+        diff_result = checkpoint_diff(self._checkpoint.get(f"original_result"), self._checkpoint.get(f"modified_result"), 
+                                      keys_to_include=output_variables)
+
+        comm.send({"type": "progress", "message": f"Speedup: {original_duration / modified_duration:0.2f}x (Original duration: {original_duration:0.2f}s, Modified duration: {modified_duration:0.2f}s)"})
 
         # Serialize DiffResult to JSON-compatible format using Pydantic
         serialized = diff_result.model_dump()

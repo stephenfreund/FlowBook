@@ -1705,6 +1705,864 @@ class TestMarkdownFormatting:
         assert "Truncated" in markdown
 
 
+class TestStrictMode:
+    """Test the strict parameter for flexible type comparisons."""
+
+    def test_int_vs_float_strict_mode(self):
+        """In strict mode, int vs float should fail."""
+        differ = Diff(strict=True)
+        a = {'x': 1}
+        b = {'x': 1.0}
+        result = differ.diff(a, b)
+        assert 'x' in result
+        assert_message_contains(result, 'x', 'Type mismatch')
+
+    def test_int_vs_float_nonstrict_mode(self):
+        """In non-strict mode, int vs float with same value should pass."""
+        differ = Diff(strict=False)
+        a = {'x': 1}
+        b = {'x': 1.0}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_float_vs_int_nonstrict_mode(self):
+        """In non-strict mode, float vs int with same value should pass."""
+        differ = Diff(strict=False)
+        a = {'x': 2.0}
+        b = {'x': 2}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_int_vs_float_different_values_nonstrict(self):
+        """In non-strict mode, int vs float with different values should fail."""
+        differ = Diff(strict=False)
+        a = {'x': 1}
+        b = {'x': 2.0}
+        result = differ.diff(a, b)
+        assert 'x' in result
+        assert_message_contains(result, 'x', 'Float mismatch')
+
+    def test_numpy_int_vs_float_nonstrict(self):
+        """In non-strict mode, np.int64 vs float should pass."""
+        differ = Diff(strict=False)
+        a = {'x': np.int64(42)}
+        b = {'x': 42.0}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_numpy_float_vs_int_nonstrict(self):
+        """In non-strict mode, np.float64 vs int should pass."""
+        differ = Diff(strict=False)
+        a = {'x': np.float64(42.0)}
+        b = {'x': 42}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_list_vs_array_1d_strict(self):
+        """In strict mode, list vs array should fail."""
+        differ = Diff(strict=True)
+        a = {'x': [1, 2, 3]}
+        b = {'x': np.array([1, 2, 3])}
+        result = differ.diff(a, b)
+        assert 'x' in result
+        assert_message_contains(result, 'x', 'Type mismatch')
+
+    def test_list_vs_array_1d_nonstrict(self):
+        """In non-strict mode, list vs array with same values should pass."""
+        differ = Diff(strict=False)
+        a = {'x': [1, 2, 3]}
+        b = {'x': np.array([1, 2, 3])}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_array_vs_list_1d_nonstrict(self):
+        """In non-strict mode, array vs list with same values should pass."""
+        differ = Diff(strict=False)
+        a = {'x': np.array([4, 5, 6])}
+        b = {'x': [4, 5, 6]}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_nested_list_vs_array_2d_nonstrict(self):
+        """In non-strict mode, nested list vs 2D array should pass."""
+        differ = Diff(strict=False)
+        a = {'x': [[1, 2], [3, 4]]}
+        b = {'x': np.array([[1, 2], [3, 4]])}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_deeply_nested_list_vs_array_3d_nonstrict(self):
+        """In non-strict mode, 3D nested list vs 3D array should pass."""
+        differ = Diff(strict=False)
+        a = {'x': [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]}
+        b = {'x': np.array([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_list_vs_array_dimension_mismatch_nonstrict(self):
+        """In non-strict mode, dimension mismatch should still fail."""
+        differ = Diff(strict=False)
+        a = {'x': [1, 2, 3]}
+        b = {'x': np.array([[1, 2, 3]])}
+        result = differ.diff(a, b)
+        assert 'x' in result
+        assert_message_contains(result, 'x', 'Structure mismatch')
+
+    def test_list_vs_array_shape_mismatch_nonstrict(self):
+        """In non-strict mode, shape mismatch should fail."""
+        differ = Diff(strict=False)
+        a = {'x': [[1, 2], [3, 4]]}
+        b = {'x': np.array([[1, 2, 3], [4, 5, 6]])}
+        result = differ.diff(a, b)
+        assert 'x' in result
+        assert_message_contains(result, 'x', 'Shape mismatch')
+
+    def test_list_vs_array_value_mismatch_nonstrict(self):
+        """In non-strict mode, value mismatch should fail."""
+        differ = Diff(strict=False)
+        a = {'x': [1, 2, 3]}
+        b = {'x': np.array([1, 2, 99])}
+        result = differ.diff(a, b)
+        assert 'x' in result
+        assert_message_contains(result, 'x', 'Element mismatch')
+
+    def test_tuple_vs_array_strict(self):
+        """In strict mode, tuple vs array should fail."""
+        differ = Diff(strict=True)
+        a = {'x': (1, 2, 3)}
+        b = {'x': np.array([1, 2, 3])}
+        result = differ.diff(a, b)
+        assert 'x' in result
+        assert_message_contains(result, 'x', 'Type mismatch')
+
+    def test_tuple_vs_array_nonstrict(self):
+        """In non-strict mode, tuple vs array with same values should pass."""
+        differ = Diff(strict=False)
+        a = {'x': (1, 2, 3)}
+        b = {'x': np.array([1, 2, 3])}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_nested_tuple_vs_array_2d_nonstrict(self):
+        """In non-strict mode, nested tuple vs 2D array should pass."""
+        differ = Diff(strict=False)
+        a = {'x': ((1, 2), (3, 4))}
+        b = {'x': np.array([[1, 2], [3, 4]])}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_mixed_list_vs_array_nonstrict(self):
+        """In non-strict mode, list with mixed int/float vs int array should pass."""
+        differ = Diff(strict=False)
+        a = {'x': [1, 2.0, 3]}
+        b = {'x': np.array([1, 2, 3])}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_float_list_vs_int_array_nonstrict(self):
+        """In non-strict mode, float list vs int array with compatible values should pass."""
+        differ = Diff(strict=False)
+        a = {'x': [1.0, 2.0, 3.0]}
+        b = {'x': np.array([1, 2, 3], dtype=np.int32)}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_float_list_vs_int_array_incompatible_values_nonstrict(self):
+        """In non-strict mode, float list vs int array with incompatible values should fail."""
+        differ = Diff(strict=False)
+        a = {'x': [1.5, 2.5, 3.5]}
+        b = {'x': np.array([1, 2, 3])}
+        result = differ.diff(a, b)
+        assert 'x' in result
+        assert_message_contains(result, 'x', 'Element mismatch')
+
+    def test_complex_nested_structure_nonstrict(self):
+        """In non-strict mode, complex nested structures with mixed types should pass."""
+        differ = Diff(strict=False)
+        a = {
+            'data': {
+                'scores': [10, 20, 30],
+                'matrix': [[1, 2], [3, 4]],
+                'value': 42,
+                'ratio': 0.5
+            }
+        }
+        b = {
+            'data': {
+                'scores': np.array([10, 20, 30]),
+                'matrix': np.array([[1, 2], [3, 4]]),
+                'value': 42.0,
+                'ratio': 0.5
+            }
+        }
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_list_in_dict_in_list_nonstrict(self):
+        """In non-strict mode, list inside dict inside list vs array should pass."""
+        differ = Diff(strict=False)
+        a = {'x': [{'nums': [1, 2, 3]}]}
+        b = {'x': [{'nums': np.array([1, 2, 3])}]}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_pointer_structure_preserved_in_nonstrict(self):
+        """In non-strict mode, pointer structure should still be checked."""
+        differ = Diff(strict=False)
+        lst = [1, 2, 3]
+        a = {'x': lst, 'y': lst}
+
+        # Break pointer structure with array
+        b = {'x': np.array([1, 2, 3]), 'y': np.array([1, 2, 3])}
+
+        result = differ.diff(a, b)
+        # Should detect pointer structure mismatch
+        assert 'y' in result
+        assert_message_contains(result, 'y', 'Pointer structure mismatch')
+
+    def test_pointer_structure_maintained_nonstrict(self):
+        """In non-strict mode, matching pointer structure should pass."""
+        differ = Diff(strict=False)
+        lst_a = [1, 2, 3]
+        a = {'x': lst_a, 'y': lst_a}
+
+        lst_b = [1, 2, 3]
+        b = {'x': lst_b, 'y': lst_b}
+
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_empty_list_vs_empty_array_nonstrict(self):
+        """In non-strict mode, empty list vs empty array should pass."""
+        differ = Diff(strict=False)
+        a = {'x': []}
+        b = {'x': np.array([])}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_bool_not_confused_with_int_nonstrict(self):
+        """In non-strict mode, bool should not be treated as int."""
+        differ = Diff(strict=False)
+        a = {'x': True}
+        b = {'x': 1}
+        result = differ.diff(a, b)
+        # Bools should not match ints even in non-strict mode
+        assert 'x' in result
+
+    def test_bool_vs_float_nonstrict(self):
+        """In non-strict mode, bool should not be treated as float."""
+        differ = Diff(strict=False)
+        a = {'x': True}
+        b = {'x': 1.0}
+        result = differ.diff(a, b)
+        # Bools should not match floats even in non-strict mode
+        assert 'x' in result
+
+    def test_list_with_nan_vs_array_with_nan_nonstrict(self):
+        """In non-strict mode, list with NaN vs array with NaN should pass."""
+        differ = Diff(strict=False)
+        a = {'x': [1.0, float('nan'), 3.0]}
+        b = {'x': np.array([1.0, np.nan, 3.0])}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_ragged_list_vs_array_nonstrict(self):
+        """In non-strict mode, ragged list cannot convert to array properly."""
+        differ = Diff(strict=False)
+        a = {'x': [[1, 2], [3, 4, 5]]}  # Ragged - different lengths
+        b = {'x': np.array([[1, 2], [3, 4]])}
+        result = differ.diff(a, b)
+        # Should fail to convert
+        assert 'x' in result
+
+    def test_backwards_compatibility_default_strict(self):
+        """Default behavior should be strict=True for backwards compatibility."""
+        differ = Diff()
+        a = {'x': 1}
+        b = {'x': 1.0}
+        result = differ.diff(a, b)
+        # Default is strict, so should fail
+        assert 'x' in result
+        assert_message_contains(result, 'x', 'Type mismatch')
+
+    def test_multiple_compatible_types_in_namespace_nonstrict(self):
+        """In non-strict mode, multiple variables with compatible types."""
+        differ = Diff(strict=False)
+        a = {
+            'a': 1,
+            'b': [1, 2, 3],
+            'c': (4, 5, 6),
+            'd': [[1, 2], [3, 4]]
+        }
+        b = {
+            'a': 1.0,
+            'b': np.array([1, 2, 3]),
+            'c': np.array([4, 5, 6]),
+            'd': np.array([[1, 2], [3, 4]])
+        }
+        result = differ.diff(a, b)
+        assert result == {}
+
+
+class TestDiffResultFiltering:
+    """Test the close_only() and different_only() filtering methods."""
+
+    def test_close_only_returns_only_close_comparisons(self):
+        """close_only() should return only close float comparisons."""
+        differ = Diff(rtol=1e-5)
+        a = {
+            'x': 1.0000001,  # Close
+            'y': 1.0,        # Different
+            'z': 2.0000001   # Close
+        }
+        b = {
+            'x': 1.0000002,  # Close
+            'y': 2.0,        # Different
+            'z': 2.0000002   # Close
+        }
+        result = differ.diff(a, b)
+
+        close_result = result.close_only()
+
+        # Should only have x and z
+        assert 'x' in close_result
+        assert 'z' in close_result
+        assert 'y' not in close_result
+        assert len(close_result) == 2
+
+    def test_different_only_returns_only_different_comparisons(self):
+        """different_only() should return only different comparisons."""
+        differ = Diff(rtol=1e-5)
+        a = {
+            'x': 1.0000001,  # Close
+            'y': 1.0,        # Different
+            'z': 2.0000001   # Close
+        }
+        b = {
+            'x': 1.0000002,  # Close
+            'y': 2.0,        # Different
+            'z': 2.0000002   # Close
+        }
+        result = differ.diff(a, b)
+
+        diff_result = result.different_only()
+
+        # Should only have y
+        assert 'y' in diff_result
+        assert 'x' not in diff_result
+        assert 'z' not in diff_result
+        assert len(diff_result) == 1
+
+    def test_close_only_with_no_close_comparisons(self):
+        """close_only() should return empty DiffResult if no close comparisons."""
+        differ = Diff()
+        a = {'x': 1, 'y': 2}
+        b = {'x': 10, 'y': 20}
+        result = differ.diff(a, b)
+
+        close_result = result.close_only()
+
+        assert close_result == {}
+        assert len(close_result) == 0
+
+    def test_different_only_with_only_close_comparisons(self):
+        """different_only() should return empty DiffResult if only close comparisons."""
+        differ = Diff(rtol=1e-5)
+        a = {'x': 1.0000001, 'y': 2.0000001}
+        b = {'x': 1.0000002, 'y': 2.0000002}
+        result = differ.diff(a, b)
+
+        diff_result = result.different_only()
+
+        assert diff_result == {}
+        assert len(diff_result) == 0
+
+    def test_filtering_with_nested_structures(self):
+        """Filtering should work with nested structures."""
+        differ = Diff(rtol=1e-5)
+        a = {
+            'data': {
+                'a': 1.0000001,  # Close
+                'b': 1.0,        # Different
+                'c': 2.0000001   # Close
+            }
+        }
+        b = {
+            'data': {
+                'a': 1.0000002,  # Close
+                'b': 2.0,        # Different
+                'c': 2.0000002   # Close
+            }
+        }
+        result = differ.diff(a, b)
+
+        close_result = result.close_only()
+        diff_result = result.different_only()
+
+        # close_result should have data with only a and c
+        assert 'data' in close_result
+        assert isinstance(close_result['data'], dict)
+        assert "['a']" in close_result['data']
+        assert "['c']" in close_result['data']
+        assert "['b']" not in close_result['data']
+
+        # diff_result should have data with only b
+        assert 'data' in diff_result
+        assert isinstance(diff_result['data'], dict)
+        assert "['b']" in diff_result['data']
+        assert "['a']" not in diff_result['data']
+        assert "['c']" not in diff_result['data']
+
+    def test_filtering_with_lists(self):
+        """Filtering should work with lists containing mixed close/different."""
+        differ = Diff(rtol=1e-5)
+        a = {'lst': [1.0000001, 2.0, 3.0000001]}
+        b = {'lst': [1.0000002, 99.0, 3.0000002]}
+        result = differ.diff(a, b)
+
+        close_result = result.close_only()
+        diff_result = result.different_only()
+
+        # close_result should have list with indices 0 and 2
+        assert 'lst' in close_result
+        assert '[0]' in close_result['lst']
+        assert '[2]' in close_result['lst']
+        assert '[1]' not in close_result['lst']
+
+        # diff_result should have list with index 1
+        assert 'lst' in diff_result
+        assert '[1]' in diff_result['lst']
+        assert '[0]' not in diff_result['lst']
+        assert '[2]' not in diff_result['lst']
+
+    def test_filtering_returns_new_diffresult(self):
+        """Filtering should return new DiffResult instances."""
+        differ = Diff(rtol=1e-5)
+        a = {'x': 1.0000001, 'y': 1.0}
+        b = {'x': 1.0000002, 'y': 2.0}
+        result = differ.diff(a, b)
+
+        close_result = result.close_only()
+        diff_result = result.different_only()
+
+        # All should be different objects
+        assert result is not close_result
+        assert result is not diff_result
+        assert close_result is not diff_result
+
+        # All should be DiffResult instances
+        assert isinstance(result, DiffResult)
+        assert isinstance(close_result, DiffResult)
+        assert isinstance(diff_result, DiffResult)
+
+    def test_filtering_preserves_valuecomparison_objects(self):
+        """Filtered results should contain same ValueComparison objects."""
+        differ = Diff(rtol=1e-5)
+        a = {'x': 1.0000001, 'y': 1.0}
+        b = {'x': 1.0000002, 'y': 2.0}
+        result = differ.diff(a, b)
+
+        close_result = result.close_only()
+
+        # The ValueComparison object should be the same
+        assert result['x'] is close_result['x']
+
+    def test_filtering_with_complex_object(self):
+        """Filtering should work with complex nested objects."""
+        class Container:
+            def __init__(self, a, b):
+                self.a = a
+                self.b = b
+
+        differ = Diff(rtol=1e-5)
+        a = {'obj': Container(1.0000001, 2.0)}
+        b = {'obj': Container(1.0000002, 99.0)}
+        result = differ.diff(a, b)
+
+        close_result = result.close_only()
+        diff_result = result.different_only()
+
+        # close_result should have obj with only .a
+        assert 'obj' in close_result
+        assert '.a' in close_result['obj']
+        assert '.b' not in close_result['obj']
+
+        # diff_result should have obj with only .b
+        assert 'obj' in diff_result
+        assert '.b' in diff_result['obj']
+        assert '.a' not in diff_result['obj']
+
+    def test_filtering_empty_diffresult(self):
+        """Filtering an empty DiffResult should return empty DiffResult."""
+        result = DiffResult(differences={})
+
+        close_result = result.close_only()
+        diff_result = result.different_only()
+
+        assert close_result == {}
+        assert diff_result == {}
+
+    def test_filtering_all_different(self):
+        """Filtering all different should leave different_only unchanged."""
+        differ = Diff()
+        a = {'x': 1, 'y': 2, 'z': 3}
+        b = {'x': 10, 'y': 20, 'z': 30}
+        result = differ.diff(a, b)
+
+        diff_result = result.different_only()
+
+        # Should have all three
+        assert len(diff_result) == 3
+        assert 'x' in diff_result
+        assert 'y' in diff_result
+        assert 'z' in diff_result
+
+    def test_deeply_nested_filtering(self):
+        """Filtering should work with deeply nested structures."""
+        differ = Diff(rtol=1e-5)
+        a = {
+            'level1': {
+                'level2': {
+                    'level3': [
+                        {'val': 1.0000001},  # Close
+                        {'val': 2.0}         # Different
+                    ]
+                }
+            }
+        }
+        b = {
+            'level1': {
+                'level2': {
+                    'level3': [
+                        {'val': 1.0000002},  # Close
+                        {'val': 99.0}        # Different
+                    ]
+                }
+            }
+        }
+        result = differ.diff(a, b)
+
+        close_result = result.close_only()
+        diff_result = result.different_only()
+
+        # Both should have the nested structure
+        assert 'level1' in close_result
+        assert 'level1' in diff_result
+
+        # Navigate down to check filtering worked
+        close_leaf = close_result['level1']["['level2']"]["['level3']"]
+        assert '[0]' in close_leaf
+        assert '[1]' not in close_leaf
+
+        diff_leaf = diff_result['level1']["['level2']"]["['level3']"]
+        assert '[1]' in diff_leaf
+        assert '[0]' not in diff_leaf
+
+    def test_filtering_with_format_diff_as_markdown(self):
+        """Filtered results should work with format_diff_as_markdown."""
+        from data_ferret.kernel.types import format_diff_as_markdown
+
+        differ = Diff(rtol=1e-5)
+        a = {'x': 1.0000001, 'y': 1.0}
+        b = {'x': 1.0000002, 'y': 2.0}
+        result = differ.diff(a, b)
+
+        close_result = result.close_only()
+        diff_result = result.different_only()
+
+        close_markdown = format_diff_as_markdown(close_result)
+        diff_markdown = format_diff_as_markdown(diff_result)
+
+        # close_markdown should mention x and close indicator
+        assert '**x**' in close_markdown
+        assert '*(close)*' in close_markdown
+        assert '**y**' not in close_markdown
+
+        # diff_markdown should mention y but not close indicator
+        assert '**y**' in diff_markdown
+        assert '*(close)*' not in diff_markdown
+        assert '**x**' not in diff_markdown
+
+
+class TestReportCloseFlag:
+    """Test the report_close flag for controlling close value reporting."""
+
+    def test_report_close_true_default(self):
+        """Default behavior (report_close=True) should report close values."""
+        differ = Diff(rtol=1e-5)
+        a = {'x': 1.0000001}
+        b = {'x': 1.0000002}
+        result = differ.diff(a, b)
+
+        # Should report the close value
+        assert 'x' in result
+        assert_status(result, 'x', 'close')
+
+    def test_report_close_false_hides_close_values(self):
+        """report_close=False should not report close values."""
+        differ = Diff(rtol=1e-5, report_close=False)
+        a = {'x': 1.0000001}
+        b = {'x': 1.0000002}
+        result = differ.diff(a, b)
+
+        # Should NOT report the close value
+        assert 'x' not in result
+        assert result == {}
+
+    def test_report_close_false_still_reports_different(self):
+        """report_close=False should still report different values."""
+        differ = Diff(rtol=1e-5, report_close=False)
+        a = {'x': 1.0}
+        b = {'x': 2.0}
+        result = differ.diff(a, b)
+
+        # Should report the different value
+        assert 'x' in result
+        assert_status(result, 'x', 'different')
+
+    def test_report_close_false_with_exact_match(self):
+        """report_close=False with exact match should not report."""
+        differ = Diff(report_close=False)
+        a = {'x': 1.0}
+        b = {'x': 1.0}
+        result = differ.diff(a, b)
+
+        # Should not report (exact match)
+        assert 'x' not in result
+        assert result == {}
+
+    def test_report_close_mixed_values(self):
+        """report_close=False with mixed close and different values."""
+        differ = Diff(rtol=1e-5, report_close=False)
+        a = {
+            'close1': 1.0000001,  # Close
+            'different': 1.0,     # Different
+            'close2': 2.0000001,  # Close
+            'exact': 3.0          # Exact match
+        }
+        b = {
+            'close1': 1.0000002,  # Close
+            'different': 99.0,    # Different
+            'close2': 2.0000002,  # Close
+            'exact': 3.0          # Exact match
+        }
+        result = differ.diff(a, b)
+
+        # Should only report different
+        assert 'different' in result
+        assert 'close1' not in result
+        assert 'close2' not in result
+        assert 'exact' not in result
+        assert len(result) == 1
+
+    def test_report_close_false_all_close(self):
+        """report_close=False with all close values should return empty."""
+        differ = Diff(rtol=1e-5, report_close=False)
+        a = {'x': 1.0000001, 'y': 2.0000001, 'z': 3.0000001}
+        b = {'x': 1.0000002, 'y': 2.0000002, 'z': 3.0000002}
+        result = differ.diff(a, b)
+
+        # Should return empty - all values are close
+        assert result == {}
+        assert len(result) == 0
+
+    def test_report_close_false_complex_numbers(self):
+        """report_close=False with complex numbers (both parts close)."""
+        differ = Diff(rtol=1e-5, report_close=False)
+        a = {'z': 1.0000001 + 2.0000001j}
+        b = {'z': 1.0000002 + 2.0000002j}
+        result = differ.diff(a, b)
+
+        # Should not report - both real and imag are close
+        assert 'z' not in result
+        assert result == {}
+
+    def test_report_close_false_complex_one_part_different(self):
+        """report_close=False with complex (one part close, one different)."""
+        differ = Diff(rtol=1e-5, report_close=False)
+        a = {'z': 1.0000001 + 2.0j}
+        b = {'z': 1.0000002 + 99.0j}
+        result = differ.diff(a, b)
+
+        # Should report only the imaginary part difference
+        assert 'z' in result
+        assert isinstance(result['z'], dict)
+        assert '.imag' in result['z']
+        assert '.real' not in result['z']
+
+    def test_report_close_false_nested_structures(self):
+        """report_close=False with nested structures."""
+        differ = Diff(rtol=1e-5, report_close=False)
+        a = {
+            'data': {
+                'close': 1.0000001,
+                'different': 2.0
+            }
+        }
+        b = {
+            'data': {
+                'close': 1.0000002,
+                'different': 99.0
+            }
+        }
+        result = differ.diff(a, b)
+
+        # Should only report different
+        assert 'data' in result
+        assert "['different']" in result['data']
+        assert "['close']" not in result['data']
+
+    def test_report_close_false_list_values(self):
+        """report_close=False with lists containing close values."""
+        differ = Diff(rtol=1e-5, report_close=False)
+        a = {'lst': [1.0000001, 2.0, 3.0000001]}
+        b = {'lst': [1.0000002, 99.0, 3.0000002]}
+        result = differ.diff(a, b)
+
+        # Should only report index 1 (different)
+        assert 'lst' in result
+        assert '[1]' in result['lst']
+        assert '[0]' not in result['lst']
+        assert '[2]' not in result['lst']
+
+    def test_report_close_false_object_attributes(self):
+        """report_close=False with object attributes."""
+        class Container:
+            def __init__(self, a, b):
+                self.a = a
+                self.b = b
+
+        differ = Diff(rtol=1e-5, report_close=False)
+        a = {'obj': Container(1.0000001, 2.0)}
+        b = {'obj': Container(1.0000002, 99.0)}
+        result = differ.diff(a, b)
+
+        # Should only report .b
+        assert 'obj' in result
+        assert '.b' in result['obj']
+        assert '.a' not in result['obj']
+
+    def test_equivalence_with_different_only(self):
+        """Verify report_close=False is equivalent to different_only()."""
+        a = {
+            'close1': 1.0000001,
+            'different': 1.0,
+            'close2': 2.0000001,
+            'exact': 3.0
+        }
+        b = {
+            'close1': 1.0000002,
+            'different': 99.0,
+            'close2': 2.0000002,
+            'exact': 3.0
+        }
+
+        # With report_close=False
+        differ_no_report = Diff(rtol=1e-5, report_close=False)
+        result_no_report = differ_no_report.diff(a, b)
+
+        # With different_only()
+        differ_filter = Diff(rtol=1e-5, report_close=True)
+        result_filter = differ_filter.diff(a, b).different_only()
+
+        # Should be equivalent
+        assert set(result_no_report.keys()) == set(result_filter.keys())
+        assert 'different' in result_no_report
+        assert 'different' in result_filter
+
+    def test_backwards_compatibility_default_true(self):
+        """Default report_close=True maintains backward compatibility."""
+        differ_default = Diff(rtol=1e-5)
+        differ_explicit = Diff(rtol=1e-5, report_close=True)
+
+        a = {'x': 1.0000001}
+        b = {'x': 1.0000002}
+
+        result_default = differ_default.diff(a, b)
+        result_explicit = differ_explicit.diff(a, b)
+
+        # Should behave identically
+        assert 'x' in result_default
+        assert 'x' in result_explicit
+        assert result_default['x'].status == result_explicit['x'].status
+
+    def test_report_close_false_with_nan(self):
+        """report_close=False with NaN values."""
+        differ = Diff(report_close=False)
+        a = {'x': float('nan')}
+        b = {'x': float('nan')}
+        result = differ.diff(a, b)
+
+        # NaN == NaN should not report
+        assert 'x' not in result
+
+    def test_report_close_false_performance_benefit(self):
+        """report_close=False should create fewer ValueComparison objects."""
+        differ_true = Diff(rtol=1e-5, report_close=True)
+        differ_false = Diff(rtol=1e-5, report_close=False)
+
+        # Create data with many close values
+        # Use values that are actually close: 100.0000001 vs 100.0000002
+        a = {f'x{i}': float(i + 100) + 0.0000001 for i in range(100)}
+        b = {f'x{i}': float(i + 100) + 0.0000002 for i in range(100)}
+
+        result_true = differ_true.diff(a, b)
+        result_false = differ_false.diff(a, b)
+
+        # report_close=True should have 100 results
+        assert len(result_true) == 100
+
+        # report_close=False should have 0 results
+        assert len(result_false) == 0
+
+    def test_report_close_false_deeply_nested(self):
+        """report_close=False with deeply nested structures."""
+        differ = Diff(rtol=1e-5, report_close=False)
+        a = {
+            'level1': {
+                'level2': {
+                    'level3': [
+                        {'val': 1.0000001},  # Close
+                        {'val': 2.0}         # Different
+                    ]
+                }
+            }
+        }
+        b = {
+            'level1': {
+                'level2': {
+                    'level3': [
+                        {'val': 1.0000002},  # Close
+                        {'val': 99.0}        # Different
+                    ]
+                }
+            }
+        }
+        result = differ.diff(a, b)
+
+        # Should only report the different value
+        assert 'level1' in result
+        level3 = result['level1']["['level2']"]["['level3']"]
+        assert '[1]' in level3
+        assert '[0]' not in level3
+
+    def test_report_close_false_with_format_markdown(self):
+        """report_close=False results should format correctly."""
+        from data_ferret.kernel.types import format_diff_as_markdown
+
+        differ = Diff(rtol=1e-5, report_close=False)
+        a = {'close': 1.0000001, 'different': 1.0}
+        b = {'close': 1.0000002, 'different': 99.0}
+        result = differ.diff(a, b)
+
+        markdown = format_diff_as_markdown(result)
+
+        # Should only mention different, not close
+        assert '**different**' in markdown
+        assert '**close**' not in markdown
+        assert '*(close)*' not in markdown
+
+
 # ============================================================================
 # MAIN RUNNER
 # ============================================================================

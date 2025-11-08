@@ -35,7 +35,9 @@ class Diff:
         rtol=1e-5,
         atol=1e-8,
         max_diffs_per_container: int = 1000,
-        sample_large_arrays: bool = True
+        sample_large_arrays: bool = True,
+        strict: bool = True,
+        report_close: bool = True
     ):
         """
         Initialize the Diff comparator.
@@ -45,11 +47,28 @@ class Diff:
             atol: Absolute tolerance for floating point comparisons (default: 1e-8)
             max_diffs_per_container: Maximum differences to collect per container (default: 1000)
             sample_large_arrays: Whether to sample large arrays instead of full comparison (default: True)
+            strict: If True, require exact type matches. If False, allow compatible types
+                    (e.g., int vs float, list vs ndarray) (default: True)
+            report_close: If True, report floats that are close (within tolerance) with status='close'.
+                         If False, treat close values as equal and don't report them (default: True)
+
+        Example:
+            >>> # Default behavior - reports close values
+            >>> differ = Diff(rtol=1e-5)
+            >>> result = differ.diff({'x': 1.0000001}, {'x': 1.0000002})
+            >>> 'x' in result  # True - close value is reported
+
+            >>> # With report_close=False - treats close as equal
+            >>> differ = Diff(rtol=1e-5, report_close=False)
+            >>> result = differ.diff({'x': 1.0000001}, {'x': 1.0000002})
+            >>> 'x' in result  # False - close value not reported
         """
         self.rtol = rtol
         self.atol = atol
         self.max_diffs_per_container = max_diffs_per_container
         self.sample_large_arrays = sample_large_arrays
+        self.strict = strict
+        self.report_close = report_close
         # Track object identities to ensure pointer structure matches
         self.id_map_a = {}  # Maps id(obj_a) -> canonical_id
         self.id_map_b = {}  # Maps id(obj_b) -> canonical_id
@@ -154,7 +173,32 @@ class Diff:
 
         # Type checking
         if type(val_a) != type(val_b):
-            # Unregister since they're not equal
+            # In non-strict mode, check if types are compatible
+            if not self.strict:
+                is_compatible, compat_type = self._types_compatible(val_a, val_b)
+                if is_compatible:
+                    # Use flexible comparison for compatible types
+                    if compat_type == "numeric":
+                        result = self._compare_numeric_flexible(val_a, val_b, path)
+                    elif compat_type in ("list_array", "tuple_array"):
+                        result = self._compare_list_array_flexible(val_a, val_b, path)
+                    else:
+                        # Should not happen, but handle gracefully
+                        result = ValueComparison(
+                            status="different",
+                            value1=val_a,
+                            value2=val_b,
+                            message=f"Type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}"
+                        )
+
+                    # If comparison found a difference, unregister these objects
+                    if result is not None:
+                        del self.id_map_a[id_a]
+                        del self.id_map_b[id_b]
+
+                    return result
+
+            # Strict mode or incompatible types - unregister and return type mismatch
             del self.id_map_a[id_a]
             del self.id_map_b[id_b]
             return ValueComparison(
@@ -211,7 +255,149 @@ class Diff:
             del self.id_map_b[id_b]
 
         return result
-    
+
+    def _types_compatible(self, val_a: Any, val_b: Any) -> Tuple[bool, str]:
+        """
+        Check if two values have compatible types for non-strict comparison.
+
+        Returns:
+            Tuple of (is_compatible, compatibility_type) where compatibility_type is:
+            - "numeric": int vs float compatibility
+            - "list_array": list vs ndarray compatibility
+            - "tuple_array": tuple vs ndarray compatibility
+            - "": not compatible
+        """
+        # Check numeric compatibility (int vs float)
+        is_int_a = isinstance(val_a, (int, np.integer)) and not isinstance(val_a, bool)
+        is_int_b = isinstance(val_b, (int, np.integer)) and not isinstance(val_b, bool)
+        is_float_a = isinstance(val_a, (float, np.floating))
+        is_float_b = isinstance(val_b, (float, np.floating))
+
+        if (is_int_a and is_float_b) or (is_float_a and is_int_b):
+            return (True, "numeric")
+
+        # Check list vs array compatibility
+        if isinstance(val_a, list) and isinstance(val_b, np.ndarray):
+            return (True, "list_array")
+        if isinstance(val_a, np.ndarray) and isinstance(val_b, list):
+            return (True, "list_array")
+
+        # Check tuple vs array compatibility
+        if isinstance(val_a, tuple) and isinstance(val_b, np.ndarray):
+            return (True, "tuple_array")
+        if isinstance(val_a, np.ndarray) and isinstance(val_b, tuple):
+            return (True, "tuple_array")
+
+        return (False, "")
+
+    def _get_list_depth(self, lst: Any) -> int:
+        """
+        Determine the nesting depth of a list/tuple.
+
+        Returns:
+            0 for non-list/tuple
+            1 for flat list/tuple
+            2 for list/tuple of lists/tuples
+            etc.
+        """
+        if not isinstance(lst, (list, tuple)):
+            return 0
+
+        if len(lst) == 0:
+            return 1
+
+        # Check first element to determine depth
+        max_depth = 0
+        for item in lst:
+            if isinstance(item, (list, tuple)):
+                depth = 1 + self._get_list_depth(item)
+                max_depth = max(max_depth, depth)
+            else:
+                max_depth = max(max_depth, 1)
+
+        return max_depth
+
+    def _compare_numeric_flexible(self, val_a: Any, val_b: Any, path: str) -> Optional[ValueComparison]:
+        """
+        Compare int vs float values in non-strict mode.
+        Converts int to float and uses float comparison logic.
+        """
+        # Convert both to float for comparison
+        float_a = float(val_a)
+        float_b = float(val_b)
+
+        return self._compare_float(float_a, float_b, path)
+
+    def _compare_list_array_flexible(self, val_a: Any, val_b: Any, path: str) -> Optional[DiffNode]:
+        """
+        Compare list/tuple vs ndarray in non-strict mode.
+        Validates structure matches and compares element-by-element.
+        """
+        # Determine which is the list/tuple and which is the array
+        if isinstance(val_a, (list, tuple)):
+            lst, arr = val_a, val_b
+            lst_is_a = True
+        else:
+            lst, arr = val_b, val_a
+            lst_is_a = False
+
+        # Check that list depth matches array dimensions
+        list_depth = self._get_list_depth(lst)
+        array_ndim = arr.ndim
+
+        if list_depth != array_ndim:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Structure mismatch at {path}: {'list' if isinstance(lst, list) else 'tuple'} depth {list_depth} vs array ndim {array_ndim}"
+            )
+
+        # Convert list/tuple to array for shape comparison
+        try:
+            lst_as_array = np.array(lst)
+        except (ValueError, TypeError) as e:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Cannot convert {'list' if isinstance(lst, list) else 'tuple'} to array at {path}: {str(e)}"
+            )
+
+        # Check shapes match
+        if lst_as_array.shape != arr.shape:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Shape mismatch at {path}: {'list' if isinstance(lst, list) else 'tuple'} shape {lst_as_array.shape} vs array shape {arr.shape}"
+            )
+
+        # Compare element-by-element
+        # Flatten both for easier iteration
+        flat_lst = lst_as_array.ravel()
+        flat_arr = arr.ravel()
+
+        for i in range(len(flat_lst)):
+            lst_val = flat_lst[i]
+            arr_val = flat_arr[i]
+
+            # Use flexible comparison for elements
+            elem_diff = self._compare_values(lst_val, arr_val, f"{path}[{i}]")
+            if elem_diff:
+                # Return first difference found
+                idx = np.unravel_index(i, arr.shape)
+                idx_tuple = tuple(int(x) for x in idx)
+                return ValueComparison(
+                    status="different",
+                    value1=val_a,
+                    value2=val_b,
+                    message=f"Element mismatch at {path}[{idx_tuple}]: {lst_val} vs {arr_val}"
+                )
+
+        # All elements match
+        return None
+
     def _compare_bool(self, val_a: bool, val_b: bool, path: str) -> Optional[ValueComparison]:
         if val_a != val_b:
             return ValueComparison(
@@ -253,6 +439,9 @@ class Diff:
 
         # Check if close within tolerance
         if math.isclose(val_a, val_b, rel_tol=self.rtol, abs_tol=self.atol):
+            # If report_close is False, treat close values as equal (no difference)
+            if not self.report_close:
+                return None
             return ValueComparison(
                 status="close",
                 value1=val_a,
