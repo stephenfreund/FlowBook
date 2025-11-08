@@ -43,6 +43,19 @@ class LspSession(MethodDispatcher):
 
         shell=True needed for pytest-cov to work in subprocess.
         """
+        # Create a separate environment to avoid conflicts with JupyterLab's jedi-language-server
+        env = os.environ.copy()
+
+        # Use a separate cache directory for this jedi instance
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "ferret-jedi")
+        os.makedirs(cache_dir, exist_ok=True)
+        env["XDG_CACHE_HOME"] = cache_dir
+        env["JEDI_CACHE_DIRECTORY"] = cache_dir
+
+        # Prevent conflicts with jupyter-lsp by using different temp directory
+        env["TMPDIR"] = os.path.join(cache_dir, "tmp")
+        os.makedirs(env["TMPDIR"], exist_ok=True)
+
         self._sub = subprocess.Popen(
             [
                 sys.executable,
@@ -52,7 +65,7 @@ class LspSession(MethodDispatcher):
             stdin=subprocess.PIPE,
             bufsize=0,
             cwd=self.cwd,
-            env=os.environ,
+            env=env,
             shell="WITH_COVERAGE" in os.environ,
         )
 

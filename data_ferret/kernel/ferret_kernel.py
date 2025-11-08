@@ -385,6 +385,55 @@ class FerretKernel(IPythonKernel, Magics):
         serialized = diff_result.model_dump()
         return serialized
 
+    def _make_json_safe(self, obj):
+        """Convert an object to a JSON-safe format, handling numpy arrays and NaN values."""
+        import numpy as np
+
+        if isinstance(obj, dict):
+            return {k: self._make_json_safe(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._make_json_safe(item) for item in obj]
+        elif isinstance(obj, np.ndarray):
+            # For large arrays, just return a summary instead of the full array
+            if obj.size > 100:
+                return {
+                    "_type": "ndarray",
+                    "shape": obj.shape,
+                    "dtype": str(obj.dtype),
+                    "size": int(obj.size),
+                    "summary": f"Array of shape {obj.shape}"
+                }
+            # For small arrays, try to convert to list with NaN handling
+            try:
+                # Replace NaN with None for JSON compatibility
+                result = obj.tolist()
+                return self._make_json_safe(result)
+            except:
+                return {
+                    "_type": "ndarray",
+                    "shape": obj.shape,
+                    "dtype": str(obj.dtype),
+                    "size": int(obj.size)
+                }
+        elif isinstance(obj, (np.integer, np.floating)):
+            # Convert numpy scalars to Python types
+            if np.isnan(obj):
+                return None
+            elif np.isinf(obj):
+                return "Infinity" if obj > 0 else "-Infinity"
+            else:
+                return obj.item()
+        elif isinstance(obj, float):
+            # Handle Python float NaN and Inf
+            if np.isnan(obj):
+                return None
+            elif np.isinf(obj):
+                return "Infinity" if obj > 0 else "-Infinity"
+            else:
+                return obj
+        else:
+            return obj
+
     def _test_code_comm_open(self, comm, open_msg):
         try:
             original_code = open_msg["content"]["data"]["original_code"]
@@ -392,7 +441,10 @@ class FerretKernel(IPythonKernel, Magics):
             output_variables = set[str](open_msg["content"]["data"]["output_variables"])
             comm.send({"type": "progress", "message": f"Output variables: {output_variables}"})
             result = self.test_code(comm, original_code, modified_code, output_variables)
-            comm.send({"type": "final", "ok": True, "result": result})
+
+            # Make result JSON-safe before sending
+            safe_result = self._make_json_safe(result)
+            comm.send({"type": "final", "ok": True, "result": safe_result})
         except Exception as e:
             import traceback
             error_msg = f"{str(e)}\n{traceback.format_exc()}"
