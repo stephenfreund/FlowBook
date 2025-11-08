@@ -99,25 +99,53 @@ export class NotebookHistoryManager {
       state.entries = state.entries.slice(0, state.currentIndex + 1);
     }
 
-    // Create user edit entry
-    const editEntry: IHistoryEntry = {
-      id: generateId(),
-      timestamp: Date.now(),
-      type: 'user-edit',
-      icon: 'ui-components:edit',
-      notebookSnapshot: currentSnapshot,
-      affectedCells: changes.affectedCells,
-      description: this.generateEditDescription(changes.summary),
-      editSummary: changes.summary
-    };
+    // Check if we should combine with the previous user edit entry
+    const shouldCombine = lastEntry.type === 'user-edit' && this.hasCellOverlap(
+      lastEntry.affectedCells,
+      changes.affectedCells
+    );
 
-    state.entries.push(editEntry);
-    state.currentIndex = state.entries.length - 1;
-    state.lastSnapshotTime = Date.now();
-    state.pendingEdit = false;
+    if (shouldCombine) {
+      // Update the existing user edit entry
+      lastEntry.notebookSnapshot = currentSnapshot;
+      lastEntry.timestamp = Date.now();
 
-    // Prune if exceeds max
-    this.pruneOldEntries(notebookPath);
+      // Merge affected cells (unique cells only)
+      const combinedCells = new Set([...lastEntry.affectedCells, ...changes.affectedCells]);
+      lastEntry.affectedCells = Array.from(combinedCells);
+
+      // Combine edit summaries
+      if (lastEntry.editSummary && changes.summary) {
+        lastEntry.editSummary.cellsAdded += changes.summary.cellsAdded;
+        lastEntry.editSummary.cellsDeleted += changes.summary.cellsDeleted;
+        lastEntry.editSummary.cellsModified += changes.summary.cellsModified;
+        lastEntry.editSummary.cellsMoved += changes.summary.cellsMoved;
+        lastEntry.description = this.generateEditDescription(lastEntry.editSummary);
+      }
+
+      state.lastSnapshotTime = Date.now();
+      state.pendingEdit = false;
+    } else {
+      // Create new user edit entry
+      const editEntry: IHistoryEntry = {
+        id: generateId(),
+        timestamp: Date.now(),
+        type: 'user-edit',
+        icon: 'ui-components:edit',
+        notebookSnapshot: currentSnapshot,
+        affectedCells: changes.affectedCells,
+        description: this.generateEditDescription(changes.summary),
+        editSummary: changes.summary
+      };
+
+      state.entries.push(editEntry);
+      state.currentIndex = state.entries.length - 1;
+      state.lastSnapshotTime = Date.now();
+      state.pendingEdit = false;
+
+      // Prune if exceeds max
+      this.pruneOldEntries(notebookPath);
+    }
 
     this._historyChanged.emit(notebookPath);
   }
@@ -440,5 +468,16 @@ export class NotebookHistoryManager {
       state.entries = state.entries.slice(removeCount);
       state.currentIndex = Math.max(0, state.currentIndex - removeCount);
     }
+  }
+
+  /**
+   * Check if two cell ID lists have any overlap
+   */
+  private hasCellOverlap(cells1: string[], cells2: string[]): boolean {
+    if (cells1.length === 0 || cells2.length === 0) {
+      return false;
+    }
+    const set1 = new Set(cells1);
+    return cells2.some(cellId => set1.has(cellId));
   }
 }
