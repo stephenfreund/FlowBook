@@ -84,7 +84,10 @@ const extension: JupyterFrontEndPlugin<void> = {
     console.log('Ferret toolbar buttons, panels, cell highlighter, and execution hooks added');
     // Set up history monitoring for notebooks
     tracker.widgetAdded.connect((sender: any, widget: any) => {
-      historyManager.startMonitoring(widget.context.path, widget);
+      // Wait for the notebook context to be ready before starting monitoring
+      widget.context.ready.then(() => {
+        historyManager.startMonitoring(widget.context.path, widget);
+      });
 
       // Set up cleanup when notebook is closed
       widget.disposed.connect(() => {
@@ -94,7 +97,10 @@ const extension: JupyterFrontEndPlugin<void> = {
 
     // Start monitoring any already open notebooks
     tracker.forEach(widget => {
-      historyManager.startMonitoring(widget.context.path, widget);
+      // Wait for the notebook context to be ready before starting monitoring
+      widget.context.ready.then(() => {
+        historyManager.startMonitoring(widget.context.path, widget);
+      });
 
       // Set up cleanup for already open notebooks
       widget.disposed.connect(() => {
