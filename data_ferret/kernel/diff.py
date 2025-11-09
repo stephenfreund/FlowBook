@@ -74,6 +74,41 @@ class Diff:
         self.id_map_b = {}  # Maps id(obj_b) -> canonical_id
         self.next_canonical_id = 0
     
+    def _is_immutable_atomic(self, val: Any) -> bool:
+        """
+        Check if a value is an immutable atomic type that doesn't need pointer tracking.
+
+        Immutable atomics are values where identity doesn't matter - only value matters.
+        These include: None, bool, int, float, complex, str, bytes
+
+        Args:
+            val: The value to check
+
+        Returns:
+            True if val is an immutable atomic, False otherwise
+        """
+        # None is always immutable atomic
+        if val is None:
+            return True
+
+        # bool (must check before int since bool is subclass of int)
+        if isinstance(val, bool):
+            return True
+
+        # Numeric types
+        if isinstance(val, (int, np.integer)):
+            return True
+        if isinstance(val, (float, np.floating)):
+            return True
+        if isinstance(val, (complex, np.complexfloating)):
+            return True
+
+        # String and bytes
+        if isinstance(val, (str, bytes)):
+            return True
+
+        return False
+
     def diff(self, a: Dict[str, Any], b: Dict[str, Any], keys_to_include: Set[str] | None = None) -> DiffResult:
         """
         Compare two user namespaces.
@@ -131,45 +166,56 @@ class Diff:
         Compare two values, dispatching to type-specific methods.
         Returns None if equal, otherwise returns DiffNode with differences.
         """
-        # Check pointer structure
-        id_a, id_b = id(val_a), id(val_b)
+        # Skip pointer tracking for immutable atomic values
+        # For these types, only value equality matters, not object identity
+        both_immutable_atomic = (
+            self._is_immutable_atomic(val_a) and self._is_immutable_atomic(val_b)
+        )
 
-        # If we've seen val_a before, check if pointer structure matches
-        if id_a in self.id_map_a:
-            canonical_a = self.id_map_a[id_a]
-            if id_b in self.id_map_b:
-                canonical_b = self.id_map_b[id_b]
-                if canonical_a != canonical_b:
+        # Get IDs for all values (needed for error handling even if not tracking)
+        id_a, id_b = id(val_a), id(val_b)
+        registered_ids = False  # Track whether we registered these IDs
+
+        if not both_immutable_atomic:
+            # Pointer tracking for mutable containers and complex objects
+
+            # If we've seen val_a before, check if pointer structure matches
+            if id_a in self.id_map_a:
+                canonical_a = self.id_map_a[id_a]
+                if id_b in self.id_map_b:
+                    canonical_b = self.id_map_b[id_b]
+                    if canonical_a != canonical_b:
+                        return ValueComparison(
+                            status="different",
+                            value1=val_a,
+                            value2=val_b,
+                            message=f"Pointer structure mismatch at {path}"
+                        )
+                else:
                     return ValueComparison(
                         status="different",
                         value1=val_a,
                         value2=val_b,
-                        message=f"Pointer structure mismatch at {path}"
+                        message=f"Pointer structure mismatch at {path} (first namespace has reference to earlier object)"
                     )
-            else:
+                return None  # Already compared, and structure matches
+
+            # If we've seen val_b before but not val_a
+            if id_b in self.id_map_b:
                 return ValueComparison(
                     status="different",
                     value1=val_a,
                     value2=val_b,
-                    message=f"Pointer structure mismatch at {path} (first namespace has reference to earlier object)"
+                    message=f"Pointer structure mismatch at {path} (second namespace has reference to earlier object)"
                 )
-            return None  # Already compared, and structure matches
 
-        # If we've seen val_b before but not val_a
-        if id_b in self.id_map_b:
-            return ValueComparison(
-                status="different",
-                value1=val_a,
-                value2=val_b,
-                message=f"Pointer structure mismatch at {path} (second namespace has reference to earlier object)"
-            )
-
-        # Register these objects with the same canonical ID
-        # We do this before comparing to handle circular references
-        canonical_id = self.next_canonical_id
-        self.next_canonical_id += 1
-        self.id_map_a[id_a] = canonical_id
-        self.id_map_b[id_b] = canonical_id
+            # Register these objects with the same canonical ID
+            # We do this before comparing to handle circular references
+            canonical_id = self.next_canonical_id
+            self.next_canonical_id += 1
+            self.id_map_a[id_a] = canonical_id
+            self.id_map_b[id_b] = canonical_id
+            registered_ids = True  # Mark that we registered these IDs
 
         # Type checking
         if type(val_a) != type(val_b):
@@ -192,15 +238,16 @@ class Diff:
                         )
 
                     # If comparison found a difference, unregister these objects
-                    if result is not None:
+                    if result is not None and registered_ids:
                         del self.id_map_a[id_a]
                         del self.id_map_b[id_b]
 
                     return result
 
             # Strict mode or incompatible types - unregister and return type mismatch
-            del self.id_map_a[id_a]
-            del self.id_map_b[id_b]
+            if registered_ids:
+                del self.id_map_a[id_a]
+                del self.id_map_b[id_b]
             return ValueComparison(
                 status="different",
                 value1=val_a,
@@ -250,7 +297,8 @@ class Diff:
 
         # If comparison found a difference, unregister these objects
         # so they don't pollute future comparisons
-        if result is not None:
+        # Only unregister if we actually registered (i.e., not immutable atomics)
+        if result is not None and registered_ids:
             del self.id_map_a[id_a]
             del self.id_map_b[id_b]
 

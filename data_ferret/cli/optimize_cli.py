@@ -50,7 +50,8 @@ async def optimize_cell(
     notebook_content: Dict[str, Any],
     kernel_client,
     config: FerretConfig,
-    registry: CommandRegistry
+    registry: CommandRegistry,
+    quiet: bool = False
 ) -> Dict[str, Any]:
     """
     Run the optimization pipeline on a single cell.
@@ -68,13 +69,15 @@ async def optimize_cell(
         kernel_client: The kernel client
         config: Ferret configuration
         registry: Command registry
+        quiet: If True, suppress progress messages
 
     Returns:
         Dictionary with results from each step
     """
-    print(f"\n{'='*70}")
-    print(f"Processing cell {cell_index}/{total_cells}: {cell_id}")
-    print(f"{'='*70}")
+    if not quiet:
+        print(f"\n{'='*70}")
+        print(f"Processing cell {cell_index}/{total_cells}: {cell_id}")
+        print(f"{'='*70}")
 
     results = {
         'cell_id': cell_id,
@@ -330,9 +333,20 @@ def optimize_cli_main():
         for cell_result in metadata['cell_results']:
             cell_id = cell_result['cell_id']
 
-            # Get profile data (always available for all cells)
-            profile_meta = cell_result.get('profile', {})
-            profile_duration = profile_meta.get('duration', 0) if isinstance(profile_meta, dict) else 0
+            # Find the actual cell in the notebook to get its ferret metadata
+            cell = None
+            for c in notebook_content.get('cells', []):
+                if c.get('id') == cell_id:
+                    cell = c
+                    break
+
+            # Get profile duration from cell's ferret metadata
+            profile_duration = 0.0
+            if cell:
+                ferret_metadata = FerretMetadata.from_cell(cell)
+                profile_data = ferret_metadata.get_profile()
+                if profile_data:
+                    profile_duration = profile_data.duration
 
             # Get optimization timing data
             optimize_meta = cell_result.get('optimize', {})
@@ -368,22 +382,24 @@ def optimize_cli_main():
 
         # Display timing summary table for all cells
         if timing_summary:
-            print(f"\n{'='*80}")
+            print(f"\n{'='*88}")
             print("## Optimization Timing Results\n")
-            print("| Cell ID | Initial (s) | Optimized (s) | Speedup | Status |")
-            print("|---------|-------------|---------------|---------|--------|")
+            # Column widths: Cell ID=19, Initial=13, Optimized=15, Speedup=9, Status=16
+            print("| Cell ID             | Initial (s) | Optimized (s) | Speedup | Status           |")
+            print("|---------------------|-------------|---------------|---------|------------------|")
 
             total_initial = 0
             total_final = 0
 
             for timing in timing_summary:
-                cell_id = timing['cell_id'][:15] + '..' if len(timing['cell_id']) > 17 else timing['cell_id']
+                # Truncate cell ID to 17 chars + '..' if needed
+                cell_id = timing['cell_id'][:17] + '..' if len(timing['cell_id']) > 19 else timing['cell_id']
                 initial = timing['initial_time']
                 final = timing['final_time']
                 speedup = timing['speedup']
                 status = "✓ Optimized" if timing['optimized'] else "- Not optimized"
 
-                print(f"| {cell_id:<17} | {initial:>11.2f} | {final:>13.2f} | {speedup:>6.2f}x | {status:<14} |")
+                print(f"| {cell_id:<19} | {initial:>11.2f} | {final:>13.2f} | {speedup:>6.2f}x | {status:<16} |")
                 total_initial += initial
                 total_final += final
 
@@ -391,11 +407,11 @@ def optimize_cli_main():
             overall_speedup = total_initial / total_final if total_final > 0 else 1.0
             time_saved = total_initial - total_final
 
-            print("|---------|-------------|---------------|---------|--------|")
-            print(f"| **TOTAL** | **{total_initial:>9.2f}** | **{total_final:>11.2f}** | **{overall_speedup:>4.2f}x** | |")
+            print("|---------------------|-------------|---------------|---------|------------------|")
+            print(f"| {'TOTAL':<19} | {total_initial:>11.2f} | {total_final:>13.2f} | {overall_speedup:>6.2f}x | {'':<16} |")
 
             print(f"\n**Time saved:** {time_saved:.2f}s ({(time_saved/total_initial*100 if total_initial > 0 else 0):.1f}%)")
-            print(f"{'='*80}")
+            print(f"{'='*88}")
 
         # Show brief summary for each cell
         print(f"\n{'='*70}")
