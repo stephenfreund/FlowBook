@@ -45,9 +45,6 @@ from data_ferret.server.message_broadcaster import (
     MessageType,
 )
 
-# Export CLI
-from data_ferret.server.cli import cli_main
-
 __all__ = [
     # Base classes
     "NotebookCommand",
@@ -76,8 +73,9 @@ __all__ = [
     "get_broadcaster",
     "Message",
     "MessageType",
-    # CLI
-    "cli_main",
 ]
+
+# Note: CLI functions (cli_main, optimize_cli_main) are now in data_ferret.cli package
+# to avoid circular imports. Import them directly from data_ferret.cli if needed.
 
 __version__ = "0.1.0"

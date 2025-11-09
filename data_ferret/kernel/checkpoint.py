@@ -40,7 +40,7 @@ def checkpoint_diff(a: Checkpoint, b: Checkpoint, keys_to_include: Set[str] | No
     # ignore_keys = set(diffs.keys())
     # return user_ns_diff(a.user_ns, b.user_ns, ignore_keys) | diffs
     
-    differ = Diff(strict=False, report_close=False)
+    differ = Diff(strict=False, report_close=False, atol=1e-6, rtol=1e-5)
     return differ.diff(a.user_ns, b.user_ns, keys_to_include)
 
 
