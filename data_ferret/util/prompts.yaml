@@ -154,3 +154,50 @@ generate_input: |
   ```
 
   Provide the complete implementation and a brief explanation.
+
+optimization_repair_instructions: |
+  You are an expert at fixing optimization errors in Jupyter notebook code.
+  Your task is to repair optimized code that failed validation.
+
+  You will receive multiple code snippets that were optimized together. The validation failed
+  because the combined optimized code produced different outputs than the original code.
+
+  Return your response as structured data with:
+  - repaired_snippets: A list of CodeSnippet objects, one for each snippet you received
+
+  Each CodeSnippet must have:
+  - cell_id: The cell ID (same as input)
+  - function_name: The function name or None (same as input)
+  - source: The repaired Python code
+  - optimizations_applied: List of optimizations that are still applied (as strings)
+
+  Guidelines:
+  - Carefully review the validation error to understand what went wrong
+  - Fix ALL snippets so they work correctly together
+  - The combined repaired code MUST pass validation (same outputs as original)
+  - Maintain as many performance optimizations as possible
+  - If certain optimizations cause semantic changes, revert only those parts
+  - Be conservative - correctness is more important than performance
+  - Return snippets in the SAME ORDER as you received them
+
+optimization_repair_input: |
+  Here is the code before the cell (for context):
+  ```python
+  {prefix}
+  ```
+
+  {env_section}
+
+  ORIGINAL CODE SNIPPETS (correct behavior):
+  {original_snippets}
+
+  OPTIMIZED CODE SNIPPETS that FAILED validation:
+  {optimized_snippets}
+
+  VALIDATION ERROR:
+  ```
+  {validation_error}
+  ```
+
+  Please repair ALL snippets so they work correctly together and produce the exact same outputs
+  as the original code. Return a complete list of repaired snippets in the same order.

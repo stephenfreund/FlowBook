@@ -79,9 +79,11 @@ class ProfileCommand(NotebookCommand):
 
                         if source.strip():
                             try:
+                                # Use a longer timeout for profiling (30 minutes to match kernel timeout)
                                 result = KernelHelper.execute_code(
                                     kernel_client,
                                     source,
+                                    timeout=30 * 60,  # 30 minutes
                                     cell_id=cell.get("id"),
                                     cell_metadata=metadata,
                                 )

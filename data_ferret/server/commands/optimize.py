@@ -136,6 +136,14 @@ class OptimizationResultAndStats(BaseModel):
     )
 
 
+class RepairedOptimizationResponse(BaseModel):
+    """Response from LLM when repairing failed optimizations."""
+
+    repaired_snippets: List[CodeSnippet] = Field(
+        description="Complete list of repaired code snippets, one for each optimization step"
+    )
+
+
 class TestCodeRequest(BaseModel):
     """Request model for test_code comm message."""
 
@@ -564,6 +572,224 @@ class OptimizeCommand(NotebookCommand):
 
         return TestCodeData(ok=response.ok, result=result)
 
+    def _format_snippets_for_repair(self, snippets: List[CodeSnippet]) -> str:
+        """Format snippets for the repair prompt."""
+        formatted = []
+        for i, snippet in enumerate(snippets, 1):
+            func_desc = f" (function: {snippet.function_name})" if snippet.function_name else " (whole cell)"
+            formatted.append(f"## Snippet {i}: Cell {snippet.cell_id}{func_desc}")
+            formatted.append(f"```python")
+            formatted.append(snippet.source)
+            formatted.append(f"```")
+            if snippet.optimizations_applied:
+                formatted.append(f"Optimizations applied: {', '.join(snippet.optimizations_applied)}")
+            formatted.append("")
+        return "\n".join(formatted)
+
+    async def _repair_optimization(
+        self,
+        cells: List[Any],
+        cell: Any,
+        original_snippets: List[CodeSnippet],
+        failed_snippets: List[CodeSnippet],
+        validation_error: str,
+        model: Any,
+        tools: NotebookTools,
+        stats_aggregator: StatsAggregator,
+    ) -> Optional[List[CodeSnippet]]:
+        """
+        Attempt to repair failed optimizations using LLM.
+
+        Args:
+            cells: All notebook cells
+            cell: The cell being optimized
+            original_snippets: All original code snippets
+            failed_snippets: All optimized snippets that failed validation
+            validation_error: The validation error message
+            model: The LLM model to use
+            tools: NotebookTools instance
+            stats_aggregator: Stats aggregator for tracking costs
+
+        Returns:
+            List of repaired CodeSnippets or None if repair failed
+        """
+        with timer(
+            key="repair_optimization",
+            message=f"Repairing optimization for cell {cell['id']}",
+        ):
+            # Get profile metadata for environment information
+            target_ferret_metadata = FerretMetadata.from_cell(cell)
+            target_profile = target_ferret_metadata.get_profile()
+            env_data = target_profile.env if target_profile else None
+
+            # Build context prefix (code before this cell)
+            cell_index = next(i for i, c in enumerate(cells) if c["id"] == cell["id"])
+            prefix = CodeExtractor.build_context_prefix(cells, cell_index)
+
+            # Format snippets and environment
+            original_snippets_text = self._format_snippets_for_repair(original_snippets)
+            optimized_snippets_text = self._format_snippets_for_repair(failed_snippets)
+            env_section = CodeExtractor.format_environment_section(env_data)
+
+            # Create repair agent
+            agent = FerretAgent[RepairedOptimizationResponse](
+                key="optimization_repair",
+                model=model,
+                instructions=get_prompt("optimization_repair_instructions"),
+                output_type=RepairedOptimizationResponse,
+                tools=tools.tools(include_profile=True),
+            )
+
+            # Build repair input
+            input_text = get_prompt(
+                "optimization_repair_input",
+                prefix=prefix,
+                original_snippets=original_snippets_text,
+                optimized_snippets=optimized_snippets_text,
+                env_section=env_section,
+                validation_error=validation_error,
+            )
+
+            try:
+                repair_response, stats = await agent.run(input_text)
+                stats_aggregator.add_stats(stats)
+
+                log(f"Repair attempt completed with {len(repair_response.repaired_snippets)} snippets")
+                for snippet in repair_response.repaired_snippets:
+                    if snippet.optimizations_applied:
+                        log(f"  {snippet.cell_id}/{snippet.function_name or 'whole'}: {', '.join(snippet.optimizations_applied)}")
+
+                return repair_response.repaired_snippets
+
+            except Exception as e:
+                error(f"Repair failed with exception: {str(e)}")
+                return None
+
+    async def _validate_optimization_with_retry(
+        self,
+        cell: Any,
+        cells: List[Any],
+        original_snippets: List[CodeSnippet],
+        optimized_snippets: List[CodeSnippet],
+        model: Any,
+        tools: NotebookTools,
+        kernel_client: FerretKernelClient,
+        dependencies_dict: Dict[str, CellDependencies],
+        stats_aggregator: StatsAggregator,
+    ) -> Tuple[bool, List[CodeSnippet], Optional[Dict[str, float]]]:
+        """
+        Validate optimization with retry logic.
+
+        Args:
+            cell: The cell being optimized
+            cells: All notebook cells
+            original_snippets: Original code snippets
+            optimized_snippets: Optimized code snippets
+            model: LLM model to use for repairs
+            tools: NotebookTools instance
+            kernel_client: Kernel client for validation
+            dependencies_dict: Cell dependencies
+            stats_aggregator: Stats aggregator
+
+        Returns:
+            Tuple of (success, validated_snippets, timing_data)
+            - success: True if validation passed (possibly after repairs)
+            - validated_snippets: The snippets that passed validation (may be repaired)
+            - timing_data: Timing information from validation
+        """
+        MAX_RETRIES = 3
+        current_snippets = optimized_snippets.copy()
+
+        for attempt in range(MAX_RETRIES + 1):  # 0 = initial, 1-3 = retries
+            if attempt == 0:
+                log(f"Validating optimization for cell {cell['id']}")
+            else:
+                log(f"Retry attempt {attempt}/{MAX_RETRIES} for cell {cell['id']}")
+
+            # Get modified globals for validation
+            modified_globals = ValidationHelper.get_modified_globals_for_cell(
+                cell["id"], dependencies_dict
+            )
+
+            if not modified_globals:
+                log("No globals to validate, skipping validation")
+                return (True, current_snippets, None)
+
+            log(f"Modified globals to validate: {modified_globals}")
+
+            # Build code for validation
+            original_code = cell["source"]
+            cell_map = {c["id"]: c for c in cells}
+            optimized_code = ValidationHelper.build_optimized_code_for_validation(
+                original_snippets, current_snippets, cell_map, cell["id"]
+            )
+
+            log(f"Original code length: {len(original_code)} chars")
+            log(f"Optimized code length: {len(optimized_code)} chars")
+
+            # Validate
+            is_valid, error_msg, test_result = ValidationHelper.validate_optimization(
+                original_code,
+                optimized_code,
+                modified_globals,
+                lambda **kwargs: self._send_test_code_comm(kernel_client, **kwargs),
+            )
+
+            if is_valid:
+                log("✓ Validation passed")
+                # Extract timing data
+                timing_data = None
+                if test_result:
+                    timing_data = {
+                        "original_duration": test_result.original_duration,
+                        "modified_duration": test_result.modified_duration,
+                        "speedup": test_result.speedup,
+                    }
+                    log(
+                        f"Timing: {test_result.original_duration:.2f}s → "
+                        f"{test_result.modified_duration:.2f}s "
+                        f"(speedup: {test_result.speedup:.2f}x)"
+                    )
+                return (True, current_snippets, timing_data)
+
+            # Validation failed
+            error(f"Validation failed (attempt {attempt + 1}/{MAX_RETRIES + 1}): {error_msg}")
+
+            # If this was the last attempt, give up
+            if attempt >= MAX_RETRIES:
+                error(
+                    f"Validation failed after {MAX_RETRIES} retries, "
+                    f"reverting to original code"
+                )
+                return (False, [], None)
+
+            # Try to repair ALL snippets at once
+            log(f"Attempting to repair all snippets (retry {attempt + 1}/{MAX_RETRIES})")
+
+            repaired_snippets = await self._repair_optimization(
+                cells,
+                cell,
+                original_snippets,
+                current_snippets,
+                error_msg,
+                model,
+                tools,
+                stats_aggregator,
+            )
+
+            if not repaired_snippets:
+                error("Repair failed, giving up")
+                return (False, [], None)
+
+            # Replace all snippets with repaired versions
+            current_snippets = repaired_snippets
+            log(f"✓ Replaced all snippets with repaired versions")
+
+            # Loop back to validate the repaired code
+
+        # Should not reach here, but just in case
+        return (False, [], None)
+
     def _find_target_cell(
         self, cells: List[Any], target_cell_id: str
     ) -> Optional[Tuple[Any, int]]:
@@ -576,6 +802,129 @@ class OptimizeCommand(NotebookCommand):
             if c["id"] == target_cell_id:
                 return c, idx
         return None
+
+    def _extract_target_cell_and_metadata(
+        self, cells: List[Any], step: OptimizationStep
+    ) -> Tuple[Any, int, Optional[Dict[str, str]]]:
+        """
+        Extract target cell and its metadata.
+
+        Args:
+            cells: All notebook cells
+            step: The optimization step
+
+        Returns:
+            Tuple of (target_cell, target_index, env_data)
+
+        Raises:
+            ValueError: If target cell not found
+        """
+        result = self._find_target_cell(cells, step.target_cell_id)
+        if result is None:
+            error(f"Target cell {step.target_cell_id} not found")
+            raise ValueError(f"Target cell {step.target_cell_id} not found")
+
+        target_cell, target_index = result
+
+        # Extract profile metadata to get environment information
+        target_ferret_metadata = FerretMetadata.from_cell(target_cell)
+        target_profile = target_ferret_metadata.get_profile()
+        env_data = target_profile.env if target_profile else None
+
+        return target_cell, target_index, env_data
+
+    def _build_optimization_context(
+        self,
+        cells: List[Any],
+        target_cell: Any,
+        target_index: int,
+        step: OptimizationStep,
+        env_data: Optional[Dict[str, str]],
+    ) -> Tuple[str, str, str, str, str]:
+        """
+        Build context and extract code for optimization.
+
+        Args:
+            cells: All notebook cells
+            target_cell: The target cell
+            target_index: Index of target cell
+            step: The optimization step
+            env_data: Environment data from profile
+
+        Returns:
+            Tuple of (prefix, original_function_code, optimization_context,
+                     optimization_descriptions, env_section)
+        """
+        # Build context prefix
+        prefix = CodeExtractor.build_context_prefix(cells, target_index)
+
+        # Extract code to optimize
+        _, original_function_code, optimization_context = (
+            CodeExtractor.extract_optimization_target(target_cell, step)
+        )
+
+        # Format optimization descriptions and environment section
+        optimization_descriptions = CodeExtractor.format_optimization_descriptions(
+            step.description
+        )
+        env_section = CodeExtractor.format_environment_section(env_data)
+
+        return (
+            prefix,
+            original_function_code,
+            optimization_context,
+            optimization_descriptions,
+            env_section,
+        )
+
+    async def _run_llm_optimization(
+        self,
+        step: OptimizationStep,
+        prefix: str,
+        cell_source: str,
+        optimization_descriptions: str,
+        env_section: str,
+        model: Any,
+        tools: NotebookTools,
+        stats_aggregator: StatsAggregator,
+    ) -> Tuple[OptimizedCodeResponse, FerretStats]:
+        """
+        Run LLM optimization.
+
+        Args:
+            step: The optimization step
+            prefix: Context prefix (code before the cell)
+            cell_source: The source code to optimize
+            optimization_descriptions: Formatted optimization descriptions
+            env_section: Formatted environment section
+            model: LLM model to use
+            tools: NotebookTools instance
+            stats_aggregator: Stats aggregator
+
+        Returns:
+            Tuple of (optimization_response, stats)
+        """
+        agent = FerretAgent[OptimizedCodeResponse](
+            key="cell_optimization",
+            model=model,
+            instructions=get_prompt("optimization_instructions"),
+            output_type=OptimizedCodeResponse,
+            tools=tools.tools(include_profile=True),
+        )
+
+        input_text = get_prompt(
+            "optimization_input",
+            prefix=prefix,
+            kind="cell" if step.function_name is None else "function",
+            cell_source=cell_source,
+            env_section=env_section,
+            optimization_descriptions=optimization_descriptions,
+        )
+
+        optimization_response, stats = await agent.run(input_text)
+        stats_aggregator.add_stats(stats)
+
+        return optimization_response, stats
 
     async def _process_optimization_step(
         self,
@@ -596,26 +945,23 @@ class OptimizeCommand(NotebookCommand):
             key="process_optimization_step",
             message=f"Processing optimization for {step.target_cell_id} ({target_desc})",
         ):
-            # Find the target cell
-            result = self._find_target_cell(cells, step.target_cell_id)
-            if result is None:
-                error(f"Target cell {step.target_cell_id} not found")
-                raise ValueError(f"Target cell {step.target_cell_id} not found")
-
-            target_cell, target_index = result
-
-            # Extract profile metadata to get environment information
-            target_ferret_metadata = FerretMetadata.from_cell(target_cell)
-            target_profile = target_ferret_metadata.get_profile()
-            env_data = target_profile.env if target_profile else None
+            # Extract target cell and metadata
+            target_cell, target_index, env_data = self._extract_target_cell_and_metadata(
+                cells, step
+            )
 
             # Build context and extract code
             with timer(
                 key="build_context", message="Building context and extracting code"
             ):
-                prefix = CodeExtractor.build_context_prefix(cells, target_index)
-                cell_source, original_function_code, optimization_context = (
-                    CodeExtractor.extract_optimization_target(target_cell, step)
+                (
+                    prefix,
+                    original_function_code,
+                    _,
+                    optimization_descriptions,
+                    env_section,
+                ) = self._build_optimization_context(
+                    cells, target_cell, target_index, step, env_data
                 )
 
             # Store original code snippet
@@ -625,33 +971,23 @@ class OptimizeCommand(NotebookCommand):
                 source=original_function_code,
             )
 
-            # Build optimization descriptions and environment section
-            optimization_descriptions = CodeExtractor.format_optimization_descriptions(
-                step.description
-            )
-            env_section = CodeExtractor.format_environment_section(env_data)
-
-            # Create agent and run optimization
+            # Run LLM optimization
             with timer(key="agent_optimization", message="Running LLM optimization"):
-                agent = FerretAgent[OptimizedCodeResponse](
-                    key="cell_optimization",
-                    model=model,
-                    instructions=get_prompt("optimization_instructions"),
-                    output_type=OptimizedCodeResponse,
-                    tools=tools.tools(include_profile=True),
+                # Need to get cell_source for the optimization
+                cell_source, _, _ = CodeExtractor.extract_optimization_target(
+                    target_cell, step
                 )
 
-                input_text = get_prompt(
-                    "optimization_input",
-                    prefix=prefix,
-                    kind="cell" if step.function_name is None else "function",
-                    cell_source=cell_source,
-                    env_section=env_section,
-                    optimization_descriptions=optimization_descriptions,
+                optimization_response, stats = await self._run_llm_optimization(
+                    step,
+                    prefix,
+                    cell_source,
+                    optimization_descriptions,
+                    env_section,
+                    model,
+                    tools,
+                    stats_aggregator,
                 )
-
-                optimization_response, stats = await agent.run(input_text)
-                stats_aggregator.add_stats(stats)
 
             # Store optimized code snippet
             optimized_snippet = CodeSnippet(
@@ -673,6 +1009,77 @@ class OptimizeCommand(NotebookCommand):
 
             return original_snippet, optimized_snippet
 
+    async def _process_all_optimization_steps(
+        self,
+        optimization_plan: List[OptimizationStep],
+        cells: List[Any],
+        index: int,
+        model: Any,
+        tools: NotebookTools,
+        stats_aggregator: StatsAggregator,
+    ) -> Tuple[List[CodeSnippet], List[CodeSnippet]]:
+        """
+        Process all optimization steps for a cell.
+
+        Args:
+            optimization_plan: List of optimization steps
+            cells: All notebook cells
+            index: Index of the cell being optimized
+            model: LLM model to use
+            tools: NotebookTools instance
+            stats_aggregator: Stats aggregator
+
+        Returns:
+            Tuple of (original_snippets, optimized_snippets)
+        """
+        original_snippets = []
+        optimized_snippets = []
+
+        for step in optimization_plan:
+            try:
+                original_snippet, optimized_snippet = (
+                    await self._process_optimization_step(
+                        step, cells, index, model, tools, stats_aggregator
+                    )
+                )
+                original_snippets.append(original_snippet)
+                optimized_snippets.append(optimized_snippet)
+            except ValueError:
+                # Target cell not found, skip this step
+                continue
+
+        return original_snippets, optimized_snippets
+
+    def _build_optimization_result(
+        self,
+        cell_id: str,
+        original_snippets: List[CodeSnippet],
+        optimized_snippets: List[CodeSnippet],
+        stats_aggregator: StatsAggregator,
+        timing_data: Optional[Dict[str, float]] = None,
+    ) -> OptimizationResultAndStats:
+        """
+        Build the optimization result.
+
+        Args:
+            cell_id: The cell ID
+            original_snippets: Original code snippets
+            optimized_snippets: Optimized code snippets
+            stats_aggregator: Stats aggregator
+            timing_data: Optional timing data from validation
+
+        Returns:
+            OptimizationResultAndStats
+        """
+        return OptimizationResultAndStats(
+            original_code=original_snippets,
+            optimized_code=optimized_snippets,
+            stats=stats_aggregator.get_aggregated_stats(),
+            original_duration=timing_data["original_duration"] if timing_data else None,
+            modified_duration=timing_data["modified_duration"] if timing_data else None,
+            speedup=timing_data["speedup"] if timing_data else None,
+        )
+
     async def optimize_cell(
         self,
         index: int,
@@ -684,7 +1091,8 @@ class OptimizeCommand(NotebookCommand):
         """Optimize a single cell based on its optimization plan.
 
         This method iterates over the optimization steps for a cell and uses
-        the LLM to generate optimized code for each step.
+        the LLM to generate optimized code for each step. It validates the
+        optimizations and retries up to 3 times if validation fails.
 
         Args:
             index: Index of the cell in the notebook
@@ -706,29 +1114,22 @@ class OptimizeCommand(NotebookCommand):
         stats_aggregator = StatsAggregator(model)
 
         if not optimization_potential or not optimization_potential.optimization_plan:
-            return cell["id"], OptimizationResultAndStats(
-                original_code=[],
-                optimized_code=[],
-                stats=stats_aggregator.get_empty_stats(),
+            return cell["id"], self._build_optimization_result(
+                cell["id"], [], [], stats_aggregator
             )
 
-        original_snippets = []
-        optimized_snippets = []
-
+        # Process all optimization steps
         with NotebookTools(nb) as tools:
-            # Iterate over each optimization step (non-concurrent)
-            for step in optimization_potential.optimization_plan:
-                try:
-                    original_snippet, optimized_snippet = (
-                        await self._process_optimization_step(
-                            step, cells, index, model, tools, stats_aggregator
-                        )
-                    )
-                    original_snippets.append(original_snippet)
-                    optimized_snippets.append(optimized_snippet)
-                except ValueError:
-                    # Target cell not found, skip this step
-                    continue
+            original_snippets, optimized_snippets = (
+                await self._process_all_optimization_steps(
+                    optimization_potential.optimization_plan,
+                    cells,
+                    index,
+                    model,
+                    tools,
+                    stats_aggregator,
+                )
+            )
 
         log(f"Kernel client available: {kernel_client is not None}")
         log(f"Dependencies dict available: {dependencies_dict is not None}")
@@ -736,68 +1137,132 @@ class OptimizeCommand(NotebookCommand):
         # Initialize timing data
         timing_data = None
 
-        # VALIDATION: Check if optimization preserves semantics
-        if kernel_client and dependencies_dict:
+        # VALIDATION WITH RETRY: Check if optimization preserves semantics
+        if kernel_client and dependencies_dict and optimized_snippets:
             with timer(
-                key="validation", message="Validating optimization preserves semantics"
+                key="validation", message="Validating optimization with retry support"
             ):
-                modified_globals = ValidationHelper.get_modified_globals_for_cell(
-                    cell["id"], dependencies_dict
-                )
-
-                log(f"Modified globals to validate: {modified_globals}")
-
-                if modified_globals:
-                    # Build original and optimized code for comparison
-                    original_code = cell["source"]
-                    cell_map = {c["id"]: c for c in cells}
-                    optimized_code = (
-                        ValidationHelper.build_optimized_code_for_validation(
-                            original_snippets, optimized_snippets, cell_map, cell["id"]
+                with NotebookTools(nb) as tools:
+                    is_valid, validated_snippets, timing_data = (
+                        await self._validate_optimization_with_retry(
+                            cell,
+                            cells,
+                            original_snippets,
+                            optimized_snippets,
+                            model,
+                            tools,
+                            kernel_client,
+                            dependencies_dict,
+                            stats_aggregator,
                         )
                     )
 
-                    log(f"Original code length: {len(original_code)} chars")
-                    log(f"Optimized code length: {len(optimized_code)} chars")
-
-                    # Validate using lambda to wrap the kernel client call
-                    is_valid, error_msg, test_result = ValidationHelper.validate_optimization(
-                        original_code,
-                        optimized_code,
-                        modified_globals,
-                        lambda **kwargs: self._send_test_code_comm(
-                            kernel_client, **kwargs
-                        ),
+                if not is_valid:
+                    # Validation failed after retries, return empty result
+                    log(f"Skipping optimization for cell {index} after validation failures")
+                    return cell["id"], self._build_optimization_result(
+                        cell["id"], [], [], stats_aggregator
                     )
 
-                    if not is_valid:
-                        error(f"Validation failed: {error_msg}")
+                # Use validated snippets (may have been repaired)
+                optimized_snippets = validated_snippets
 
-                        log(f"Skipping optimization for cell {index}")
-                        return cell["id"], OptimizationResultAndStats(
-                            original_code=[],
-                            optimized_code=[],
-                            stats=stats_aggregator.get_aggregated_stats(),
-                        )
-                    else:
-                        log("✓ Validation passed")
-                        # Capture timing data from validation
-                        if test_result:
-                            timing_data = {
-                                "original_duration": test_result.original_duration,
-                                "modified_duration": test_result.modified_duration,
-                                "speedup": test_result.speedup
-                            }
-                            log(f"Timing: {test_result.original_duration:.2f}s → {test_result.modified_duration:.2f}s (speedup: {test_result.speedup:.2f}x)")
-
-        return cell["id"], OptimizationResultAndStats(
-            original_code=original_snippets,
-            optimized_code=optimized_snippets,
-            stats=stats_aggregator.get_aggregated_stats(),
-            original_duration=timing_data["original_duration"] if timing_data else None,
-            modified_duration=timing_data["modified_duration"] if timing_data else None,
-            speedup=timing_data["speedup"] if timing_data else None,
+        return cell["id"], self._build_optimization_result(
+            cell["id"], original_snippets, optimized_snippets, stats_aggregator, timing_data
         )
+
+    def _identify_cells_to_optimize(
+        self,
+        nb: nbformat.NotebookNode,
+        cell_ids: Optional[List[str]] = None,
+    ) -> List[int]:
+        """
+        Identify cells that need optimization.
+
+        Args:
+            nb: The notebook
+            cell_ids: Optional filter for specific cell IDs
+
+        Returns:
+            List of cell indices to process
+        """
+        cells_to_process = []
+        for index, cell in enumerate(nb["cells"]):
+            if cell["cell_type"] == "code":
+                # Check if cell has optimization plan
+                ferret_metadata = FerretMetadata.from_cell(cell)
+                opt_potential = ferret_metadata.get_optimization_potential()
+
+                if opt_potential and opt_potential.optimization_plan:
+                    # Only process if in cell_ids list (or if no filter)
+                    if cell_ids is None or cell["id"] in cell_ids:
+                        cells_to_process.append(index)
+
+        return cells_to_process
+
+    async def _process_cells_sequentially(
+        self,
+        cells_to_process: List[int],
+        nb: nbformat.NotebookNode,
+        model: Any,
+        kernel_client: Optional[FerretKernelClient],
+        dependencies_dict: Optional[Dict[str, CellDependencies]],
+    ) -> List[Tuple[str, OptimizationResultAndStats]]:
+        """
+        Process all cells sequentially.
+
+        Args:
+            cells_to_process: List of cell indices to process
+            nb: The notebook
+            model: LLM model to use
+            kernel_client: Optional kernel client
+            dependencies_dict: Optional dependencies dict
+
+        Returns:
+            List of (cell_id, result) tuples
+        """
+        all_results = []
+        for index in cells_to_process:
+            cell_id, result = await self.optimize_cell(
+                index, nb, model, kernel_client, dependencies_dict
+            )
+            all_results.append((cell_id, result))
+        return all_results
+
+    def _apply_and_finalize(
+        self,
+        nb: nbformat.NotebookNode,
+        all_results: List[Tuple[str, OptimizationResultAndStats]],
+    ) -> Tuple[float, Dict[str, Dict[str, float]]]:
+        """
+        Apply optimizations to notebook and compile final metadata.
+
+        Args:
+            nb: The notebook
+            all_results: List of optimization results
+
+        Returns:
+            Tuple of (total_cost, cell_timing)
+        """
+        # Apply optimization results to the notebook
+        cell_map = {cell["id"]: cell for cell in nb["cells"]}
+        MetadataManager.apply_optimizations_to_notebook(cell_map, all_results)
+
+        # Calculate total cost
+        total_cost = sum([result.stats.cost for _, result in all_results])
+        log(f"Total optimization cost: ${total_cost:.4f}")
+
+        # Collect timing data for cells that were optimized
+        cell_timing = {}
+        for cell_id, result in all_results:
+            if result.original_duration is not None and result.modified_duration is not None:
+                cell_timing[cell_id] = {
+                    "original_duration": result.original_duration,
+                    "modified_duration": result.modified_duration,
+                    "speedup": result.speedup,
+                }
+
+        return total_cost, cell_timing
 
     async def optimize_cells(
         self,
@@ -833,23 +1298,13 @@ class OptimizeCommand(NotebookCommand):
 
             new_nb: nbformat.NotebookNode = copy.deepcopy(nb)
 
-            # Track which cells we need to process
+            # Identify cells to optimize
             with timer(key="identify_cells", message="Identifying cells to optimize"):
-                cells_to_process = []
-                for index, cell in enumerate(new_nb["cells"]):
-                    if cell["cell_type"] == "code":
-                        # Check if cell has optimization plan
-                        ferret_metadata = FerretMetadata.from_cell(cell)
-                        opt_potential = ferret_metadata.get_optimization_potential()
-
-                        if opt_potential and opt_potential.optimization_plan:
-                            # Only process if in cell_ids list (or if no filter)
-                            if cell_ids is None or cell["id"] in cell_ids:
-                                cells_to_process.append(index)
+                cells_to_process = self._identify_cells_to_optimize(new_nb, cell_ids)
 
             if not cells_to_process:
                 log("No cells to optimize (no optimization plans found)")
-                return new_nb, 0.0
+                return new_nb, 0.0, {}
 
             log(f"Found {len(cells_to_process)} cell(s) to optimize")
             log("")
@@ -864,38 +1319,21 @@ class OptimizeCommand(NotebookCommand):
                 )
             )
 
-            # Process cells sequentially (non-concurrent)
-            all_results = []
+            # Process cells sequentially
             with timer(
                 key="process_all_cells", message="Processing all optimization steps"
             ):
-                for index in cells_to_process:
-                    cell_id, result = await self.optimize_cell(
-                        index, new_nb, model, kernel_client, dependencies_dict
-                    )
-                    all_results.append((cell_id, result))
+                all_results = await self._process_cells_sequentially(
+                    cells_to_process, new_nb, model, kernel_client, dependencies_dict
+                )
 
             log("")
 
-            # Apply optimization results to the notebook
+            # Apply optimizations and compile final metadata
             with timer(
                 key="apply_optimizations", message="Applying optimizations to notebook"
             ):
-                cell_map = {cell["id"]: cell for cell in new_nb["cells"]}
-                MetadataManager.apply_optimizations_to_notebook(cell_map, all_results)
-
-            total_cost = sum([result.stats.cost for _, result in all_results])
-            log(f"Total optimization cost: ${total_cost:.4f}")
-
-            # Collect timing data for cells that were optimized
-            cell_timing = {}
-            for cell_id, result in all_results:
-                if result.original_duration is not None and result.modified_duration is not None:
-                    cell_timing[cell_id] = {
-                        "original_duration": result.original_duration,
-                        "modified_duration": result.modified_duration,
-                        "speedup": result.speedup
-                    }
+                total_cost, cell_timing = self._apply_and_finalize(new_nb, all_results)
 
             return new_nb, total_cost, cell_timing
 

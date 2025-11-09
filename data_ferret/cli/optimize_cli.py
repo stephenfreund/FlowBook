@@ -17,7 +17,7 @@ from typing import Optional, List, Dict, Any
 from data_ferret.server.registry import CommandRegistry
 from data_ferret.server.config import FerretConfig
 from data_ferret.util.output import error, log, timer, quiet
-from data_ferret.util.ferret_metadata import FerretMetadata
+from data_ferret.util.ferret_metadata import FerretMetadata, OptimizationPotential
 
 from .helpers import (
     load_notebook,
@@ -25,6 +25,41 @@ from .helpers import (
     save_notebook,
     cleanup_kernel,
 )
+
+
+def print_inspection_report(optimization_potential: OptimizationPotential, cell_index: int) -> None:
+    """
+    Print a formatted inspection report for a cell.
+
+    Args:
+        optimization_potential: The optimization potential metadata
+        cell_index: 1-based index for display
+    """
+    print(f"\n{'─'*70}")
+    print(f"📊 INSPECTION REPORT - Cell {cell_index}")
+    print(f"{'─'*70}")
+
+    # Print potential score
+    potential_bar = "█" * optimization_potential.potential + "░" * (5 - optimization_potential.potential)
+    print(f"\n🎯 Optimization Potential: {optimization_potential.potential}/5 [{potential_bar}]")
+
+    # Print optimization plan
+    if optimization_potential.optimization_plan:
+        print(f"\n📋 Optimization Plan ({len(optimization_potential.optimization_plan)} step(s)):")
+        for i, step in enumerate(optimization_potential.optimization_plan, 1):
+            target_desc = f"function '{step.function_name}'" if step.function_name else "whole cell"
+            print(f"\n   Step {i}: {step.target_cell_id} ({target_desc})")
+
+            # Handle description as either string or list
+            if isinstance(step.description, list):
+                for desc in step.description:
+                    print(f"      • {desc}")
+            else:
+                print(f"      • {step.description}")
+    else:
+        print(f"\n📋 Optimization Plan: None")
+
+    print(f"\n{'─'*70}")
 
 
 def get_code_cell_ids(notebook_content: Dict[str, Any]) -> List[str]:
@@ -119,6 +154,20 @@ async def optimize_cell(
             notebook_content = inspect_result["notebook"]
             results['inspect'] = inspect_result.get("metadata", {})
             log(f"Inspection completed for cell {cell_index}")
+
+            # Print the full inspection report
+            cell = None
+            for c in notebook_content.get('cells', []):
+                if c.get('id') == cell_id:
+                    cell = c
+                    break
+
+            if cell:
+                ferret_metadata = FerretMetadata.from_cell(cell)
+                optimization_potential = ferret_metadata.get_optimization_potential()
+                if optimization_potential:
+                    print_inspection_report(optimization_potential, cell_index)
+
         except Exception as e:
             error(f"Inspection failed for cell {cell_index}: {e}")
             results['inspect'] = {'error': str(e)}
