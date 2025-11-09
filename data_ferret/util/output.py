@@ -30,6 +30,7 @@ class Output:
         self.lock = threading.RLock()
         self.timings: Timings = []
         self.timings_file = timings_file
+        self.quiet = 0
         atexit.register(self._print_timings)
 
     def set_timings_file(self, timings_file: str):
@@ -73,13 +74,19 @@ class Output:
 
         def __enter__(self):
             with self.outer.lock:
-                if self.message is not None:
-                    self.outer.print_enter(self.message, start=self.start, end=self.end)
-                    self.outer.contexts += [self]
+                if self.outer.quiet > 0:
+                    self.suppressed = True
+                else:
+                    self.suppressed = False
+                    if self.message is not None:
+                        self.outer.print_enter(self.message, start=self.start, end=self.end)
+                        self.outer.contexts += [self]
                 self.start_time = time.time()
 
         def __exit__(self, exc_type, exc_value, traceback):
             with self.outer.lock:
+                if self.suppressed:
+                    return
                 end_time = time.time()
                 duration = (end_time - self.start_time) * 1000
                 if self.key is not None:
@@ -170,6 +177,28 @@ class Output:
             """Flush the stream."""
             self.stream.flush()
 
+    class QuietOutputContext:
+        """
+        Context manager that suppresses log() and timer output.
+
+        When active, log messages and timer messages are not displayed,
+        and timing data is not collected. error() and print() remain visible.
+
+        Can be nested - suppression is active while any QuietOutputContext
+        is active.
+        """
+        def __init__(self, outer):
+            self.outer = outer
+
+        def __enter__(self):
+            with self.outer.lock:
+                self.outer.quiet += 1
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            with self.outer.lock:
+                self.outer.quiet -= 1
+
     def write(self, message):
         self.file.write(message)
         self.file.flush()
@@ -244,6 +273,8 @@ class Output:
 
     def log(self, *args):
         with self.lock:
+            if self.quiet > 0:
+                return
             self._print("cyan", args, start="[", end="]")
 
     def error(self, *args):
@@ -279,6 +310,24 @@ def timer(*, key: str | None = None, message: str | None = None):
 
 def indent(*, message: str):
     return output.IndentedOutputContext(output, message)
+
+def quiet():
+    """
+    Context manager that suppresses log() and timer output.
+
+    When active, log messages and timer messages are not displayed,
+    and timing data is not collected. error() and print() remain visible.
+
+    Example:
+        with quiet():
+            log("This will not be shown")
+            with timer(key="test", message="Test"):
+                # Timer message and data collection suppressed
+                pass
+            error("This WILL be shown")
+            print("This WILL be shown too")
+    """
+    return output.QuietOutputContext(output)
 
 def tee_output(file_path: Path | str):
     return output.FileOutputContext(output, str(file_path))

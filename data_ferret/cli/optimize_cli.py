@@ -11,11 +11,12 @@ import argparse
 import json
 import sys
 import asyncio
+from contextlib import nullcontext
 from typing import Optional, List, Dict, Any
 
 from data_ferret.server.registry import CommandRegistry
 from data_ferret.server.config import FerretConfig
-from data_ferret.util.output import error, log, timer
+from data_ferret.util.output import error, log, timer, quiet
 from data_ferret.util.ferret_metadata import FerretMetadata
 
 from .helpers import (
@@ -274,185 +275,197 @@ def optimize_cli_main():
         help="Fast AI model to use for lightweight operations (default: gpt-4o-mini)",
     )
 
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress log and timer messages (errors and main output still shown)",
+    )
+
     args = parser.parse_args()
 
-    # Create config from CLI arguments
-    config = FerretConfig(model=args.model, fast_model=args.fast_model)
+    # Use quiet context manager if --quiet flag is set
+    quiet_context = quiet() if args.quiet else nullcontext()
 
-    kernel_manager = None
-    kernel_client = None
-    registry = CommandRegistry()
+    with quiet_context:
 
-    try:
-        # Load notebook
-        notebook_content = load_notebook(args.notebook_path)
 
-        # Setup kernel - always start a new kernel for optimization
-        kernel_manager, kernel_client = setup_kernel(
-            kernel_name=args.kernel_name
-        )
+        # Create config from CLI arguments
+        config = FerretConfig(model=args.model, fast_model=args.fast_model)
 
-        # Run optimization pipeline
-        print(f"\n{'='*70}")
-        print("Starting Optimization Pipeline")
-        print(f"{'='*70}")
+        kernel_manager = None
+        kernel_client = None
+        registry = CommandRegistry()
 
-        result = asyncio.run(
-            run_optimization_pipeline(
-                notebook_content,
-                kernel_client=kernel_client,
-                selected_cell_ids=None,  # Always process all code cells
-                config=config,
-                registry=registry
+        try:
+            # Load notebook
+            notebook_content = load_notebook(args.notebook_path)
+
+            # Setup kernel - always start a new kernel for optimization
+            kernel_manager, kernel_client = setup_kernel(
+                kernel_name=args.kernel_name
             )
-        )
 
-        # Determine output path
-        if args.output:
-            output_path = args.output
-        else:
-            base_name = args.notebook_path.rsplit(".", 1)[0]
-            output_path = f"{base_name}_optimized.ipynb"
+            # Run optimization pipeline
+            print(f"\n{'='*70}")
+            print("Starting Optimization Pipeline")
+            print(f"{'='*70}")
 
-        # Save optimized notebook
-        save_notebook(
-            result["notebook"],
-            output_path=output_path
-        )
-        print(f"\n{'='*70}")
-        print(f"Optimized notebook written to {output_path}")
-        print(f"{'='*70}")
+            result = asyncio.run(
+                run_optimization_pipeline(
+                    notebook_content,
+                    kernel_client=kernel_client,
+                    selected_cell_ids=None,  # Always process all code cells
+                    config=config,
+                    registry=registry
+                )
+            )
 
-        # Display summary metadata
-        metadata = result["metadata"]
-        print(f"\nProcessed {metadata['total_cells_processed']} cell(s)")
+            # Determine output path
+            if args.output:
+                output_path = args.output
+            else:
+                base_name = args.notebook_path.rsplit(".", 1)[0]
+                output_path = f"{base_name}_optimized.ipynb"
 
-        # Collect timing data for ALL code cells
-        timing_summary = []
+            # Save optimized notebook
+            save_notebook(
+                result["notebook"],
+                output_path=output_path
+            )
+            print(f"\n{'='*70}")
+            print(f"Optimized notebook written to {output_path}")
+            print(f"{'='*70}")
 
-        for cell_result in metadata['cell_results']:
-            cell_id = cell_result['cell_id']
+            # Display summary metadata
+            metadata = result["metadata"]
+            print(f"\nProcessed {metadata['total_cells_processed']} cell(s)")
 
-            # Find the actual cell in the notebook to get its ferret metadata
-            cell = None
-            for c in notebook_content.get('cells', []):
-                if c.get('id') == cell_id:
-                    cell = c
-                    break
+            # Collect timing data for ALL code cells
+            timing_summary = []
 
-            # Get profile duration from cell's ferret metadata
-            profile_duration = 0.0
-            if cell:
-                ferret_metadata = FerretMetadata.from_cell(cell)
-                profile_data = ferret_metadata.get_profile()
-                if profile_data:
-                    profile_duration = profile_data.duration
+            for cell_result in metadata['cell_results']:
+                cell_id = cell_result['cell_id']
 
-            # Get optimization timing data
-            optimize_meta = cell_result.get('optimize', {})
+                # Find the actual cell in the notebook to get its ferret metadata
+                cell = None
+                for c in notebook_content.get('cells', []):
+                    if c.get('id') == cell_id:
+                        cell = c
+                        break
 
-            # Check if cell was actually optimized (not skipped)
-            was_optimized = False
-            if optimize_meta and not optimize_meta.get('skipped') and not optimize_meta.get('error'):
-                # Get timing data from optimize command metadata
-                opt_metadata = optimize_meta if isinstance(optimize_meta, dict) else {}
-                cell_timing = opt_metadata.get('cell_timing', {})
+                # Get profile duration from cell's ferret metadata
+                profile_duration = 0.0
+                if cell:
+                    ferret_metadata = FerretMetadata.from_cell(cell)
+                    profile_data = ferret_metadata.get_profile()
+                    if profile_data:
+                        profile_duration = profile_data.duration
 
-                # Get timing for this cell
-                if cell_id in cell_timing:
-                    timing_info = cell_timing[cell_id]
+                # Get optimization timing data
+                optimize_meta = cell_result.get('optimize', {})
+
+                # Check if cell was actually optimized (not skipped)
+                was_optimized = False
+                if optimize_meta and not optimize_meta.get('skipped') and not optimize_meta.get('error'):
+                    # Get timing data from optimize command metadata
+                    opt_metadata = optimize_meta if isinstance(optimize_meta, dict) else {}
+                    cell_timing = opt_metadata.get('cell_timing', {})
+
+                    # Get timing for this cell
+                    if cell_id in cell_timing:
+                        timing_info = cell_timing[cell_id]
+                        timing_summary.append({
+                            'cell_id': cell_id,
+                            'initial_time': timing_info.get('original_duration', profile_duration),
+                            'final_time': timing_info.get('modified_duration', profile_duration),
+                            'speedup': timing_info.get('speedup', 1.0),
+                            'optimized': True
+                        })
+                        was_optimized = True
+
+                # If not optimized, use profile duration for both initial and final
+                if not was_optimized:
                     timing_summary.append({
                         'cell_id': cell_id,
-                        'initial_time': timing_info.get('original_duration', profile_duration),
-                        'final_time': timing_info.get('modified_duration', profile_duration),
-                        'speedup': timing_info.get('speedup', 1.0),
-                        'optimized': True
+                        'initial_time': profile_duration,
+                        'final_time': profile_duration,
+                        'speedup': 1.0,
+                        'optimized': False
                     })
-                    was_optimized = True
 
-            # If not optimized, use profile duration for both initial and final
-            if not was_optimized:
-                timing_summary.append({
-                    'cell_id': cell_id,
-                    'initial_time': profile_duration,
-                    'final_time': profile_duration,
-                    'speedup': 1.0,
-                    'optimized': False
-                })
+            # Display timing summary table for all cells
+            if timing_summary:
+                print(f"\n{'='*88}")
+                print("## Optimization Timing Results\n")
+                # Column widths: Cell ID=19, Initial=13, Optimized=15, Speedup=9, Status=16
+                print("| Cell ID             | Initial (s) | Optimized (s) | Speedup | Status           |")
+                print("|---------------------|-------------|---------------|---------|------------------|")
 
-        # Display timing summary table for all cells
-        if timing_summary:
-            print(f"\n{'='*88}")
-            print("## Optimization Timing Results\n")
-            # Column widths: Cell ID=19, Initial=13, Optimized=15, Speedup=9, Status=16
-            print("| Cell ID             | Initial (s) | Optimized (s) | Speedup | Status           |")
-            print("|---------------------|-------------|---------------|---------|------------------|")
+                total_initial = 0
+                total_final = 0
 
-            total_initial = 0
-            total_final = 0
+                for timing in timing_summary:
+                    # Truncate cell ID to 17 chars + '..' if needed
+                    cell_id = timing['cell_id'][:17] + '..' if len(timing['cell_id']) > 19 else timing['cell_id']
+                    initial = timing['initial_time']
+                    final = timing['final_time']
+                    speedup = timing['speedup']
+                    status = "✓ Optimized" if timing['optimized'] else "- Not optimized"
 
-            for timing in timing_summary:
-                # Truncate cell ID to 17 chars + '..' if needed
-                cell_id = timing['cell_id'][:17] + '..' if len(timing['cell_id']) > 19 else timing['cell_id']
-                initial = timing['initial_time']
-                final = timing['final_time']
-                speedup = timing['speedup']
-                status = "✓ Optimized" if timing['optimized'] else "- Not optimized"
+                    print(f"| {cell_id:<19} | {initial:>11.2f} | {final:>13.2f} | {speedup:>6.2f}x | {status:<16} |")
+                    total_initial += initial
+                    total_final += final
 
-                print(f"| {cell_id:<19} | {initial:>11.2f} | {final:>13.2f} | {speedup:>6.2f}x | {status:<16} |")
-                total_initial += initial
-                total_final += final
+                # Calculate overall speedup
+                overall_speedup = total_initial / total_final if total_final > 0 else 1.0
+                time_saved = total_initial - total_final
 
-            # Calculate overall speedup
-            overall_speedup = total_initial / total_final if total_final > 0 else 1.0
-            time_saved = total_initial - total_final
+                print("|---------------------|-------------|---------------|---------|------------------|")
+                print(f"| {'TOTAL':<19} | {total_initial:>11.2f} | {total_final:>13.2f} | {overall_speedup:>6.2f}x | {'':<16} |")
 
-            print("|---------------------|-------------|---------------|---------|------------------|")
-            print(f"| {'TOTAL':<19} | {total_initial:>11.2f} | {total_final:>13.2f} | {overall_speedup:>6.2f}x | {'':<16} |")
+                print(f"\n**Time saved:** {time_saved:.2f}s ({(time_saved/total_initial*100 if total_initial > 0 else 0):.1f}%)")
+                print(f"{'='*88}")
 
-            print(f"\n**Time saved:** {time_saved:.2f}s ({(time_saved/total_initial*100 if total_initial > 0 else 0):.1f}%)")
-            print(f"{'='*88}")
-
-        # Show brief summary for each cell
-        print(f"\n{'='*70}")
-        print("Cell Processing Summary")
-        print(f"{'='*70}")
-        for cell_result in metadata['cell_results']:
-            cell_id = cell_result['cell_id']
-            print(f"\nCell {cell_id}:")
-            for step in ['profile', 'inspect', 'optimize']:
-                if cell_result.get(step):
-                    if 'error' in cell_result[step]:
-                        print(f"  {step}: ERROR - {cell_result[step]['error']}")
-                    elif 'skipped' in cell_result[step]:
-                        reason = cell_result[step].get('reason', 'unknown reason')
-                        print(f"  {step}: SKIPPED - {reason}")
+            # Show brief summary for each cell
+            print(f"\n{'='*70}")
+            print("Cell Processing Summary")
+            print(f"{'='*70}")
+            for cell_result in metadata['cell_results']:
+                cell_id = cell_result['cell_id']
+                print(f"\nCell {cell_id}:")
+                for step in ['profile', 'inspect', 'optimize']:
+                    if cell_result.get(step):
+                        if 'error' in cell_result[step]:
+                            print(f"  {step}: ERROR - {cell_result[step]['error']}")
+                        elif 'skipped' in cell_result[step]:
+                            reason = cell_result[step].get('reason', 'unknown reason')
+                            print(f"  {step}: SKIPPED - {reason}")
+                        else:
+                            print(f"  {step}: OK")
                     else:
-                        print(f"  {step}: OK")
-                else:
-                    print(f"  {step}: SKIPPED")
+                        print(f"  {step}: SKIPPED")
 
-        # Save full metadata to JSON file
-        metadata_path = output_path.rsplit(".", 1)[0] + "_metadata.json"
-        with open(metadata_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2)
-        print(f"\nFull metadata written to {metadata_path}")
+            # Save full metadata to JSON file
+            metadata_path = output_path.rsplit(".", 1)[0] + "_metadata.json"
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2)
+            print(f"\nFull metadata written to {metadata_path}")
 
-        return 0
+            return 0
 
-    except FileNotFoundError as e:
-        print(f"Error: File not found: {e}", file=sys.stderr)
-        return 1
-    except json.JSONDecodeError as e:
-        print(f"Error: Invalid JSON in notebook: {e}", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
-        return 1
-    finally:
-        cleanup_kernel(kernel_client, kernel_manager)
+        except FileNotFoundError as e:
+            print(f"Error: File not found: {e}", file=sys.stderr)
+            return 1
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON in notebook: {e}", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            return 1
+        finally:
+            cleanup_kernel(kernel_client, kernel_manager)
 
 
 if __name__ == "__main__":
