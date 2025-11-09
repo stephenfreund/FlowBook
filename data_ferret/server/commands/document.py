@@ -14,6 +14,7 @@ import nbformat
 from pydantic import BaseModel, Field
 
 from data_ferret.agent.agent import FerretAgent, FerretStats
+from data_ferret.kernel.checkpoint import is_valid_variable_name
 from data_ferret.server.base import NotebookCommand
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.dependencies import analyze_notebook
@@ -151,12 +152,7 @@ class DocumentCommand(NotebookCommand):
         globals_read = sorted(deps.globals_read)
         globals_written = sorted(deps.globals_written)
 
-        globals_written = [
-            k
-            for k in globals_written
-            if not k.startswith("_")
-            and k not in ("get_ipython", "In", "Out", "exit", "quit")
-        ]
+        globals_written = [k for k in globals_written if is_valid_variable_name(k)]
 
         # Generate LLM documentation
         llm_doc, stats = await self._generate_llm_documentation(

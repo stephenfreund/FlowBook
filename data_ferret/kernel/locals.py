@@ -11,6 +11,7 @@ from types import *
 from typing import *
 
 from data_ferret.kernel.extended_types import get_type_model
+from data_ferret.kernel.checkpoint import filter_user_namespace
 
 
 class SymbolFinder(ast.NodeVisitor):
@@ -194,13 +195,7 @@ def print_locals(file: StringIO, frame: FrameType) -> None:
 
 
 def print_user_globals(file: StringIO, user_ns: Dict[str, Any]) -> None:
-    current = {
-        k: v
-        for k, v in user_ns.items()
-        if not k.startswith("_")
-        and k not in ("get_ipython", "In", "Out", "exit", "quit")
-        and not isinstance(v, ModuleType)
-    }
+    current = filter_user_namespace(user_ns)
     if len(current) > 0:
         for name in sorted(current):
             value = current[name]

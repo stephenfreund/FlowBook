@@ -14,6 +14,7 @@ from scalene.scalene_arguments import ScaleneArguments
 from data_ferret.profiler.user_ns import UserNS, CellNS
 from data_ferret.util.output import log, print, error, timer
 from data_ferret.analysis.idempotent_cells import check_idempotent
+from data_ferret.kernel.checkpoint import filter_user_namespace
 
 
 @magics_class
@@ -69,12 +70,7 @@ class FerretMagics(Magics):
 
     def snapshot_delta(self, cell_id: str):
         ip = get_ipython()
-        current = {
-            k: v for k, v in ip.user_ns.items()
-            if not k.startswith("_")
-            and k not in ("get_ipython", "In", "Out", "exit", "quit")
-            and not isinstance(v, types.ModuleType)
-        }
+        current = filter_user_namespace(ip.user_ns)
         added_keys = set(current) - set(self._last_state)
         removed_keys = set(self._last_state) - set(current)
         common = set(current) & set(self._last_state)

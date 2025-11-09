@@ -6,6 +6,7 @@ import asyncio
 import copy
 from typing import Any, Dict, Optional, List, Tuple, Set
 
+from data_ferret.kernel.checkpoint import is_valid_variable_name
 from data_ferret.server.base import NotebookCommand
 from data_ferret.util.notebook_tools import NotebookTools
 from data_ferret.server.kernel_manager import FerretKernelClient, TestCodeData
@@ -23,7 +24,7 @@ from data_ferret.util.ferret_metadata import (
 from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.util.prompts import get_prompt
 from data_ferret.util.dependencies import analyze_notebook, CellDependencies
-from data_ferret.kernel.types import DiffResult, format_diff_as_markdown
+from data_ferret.kernel.types import DiffResult, TestCodeResult, format_diff_as_markdown
 from data_ferret.util.output import log, error, timer
 
 import nbformat
@@ -124,6 +125,15 @@ class OptimizationResultAndStats(BaseModel):
     )
     optimized_code: List[CodeSnippet] = Field(description="Optimized code snippets")
     stats: FerretStats
+    original_duration: Optional[float] = Field(
+        None, description="Original execution time in seconds (from validation)"
+    )
+    modified_duration: Optional[float] = Field(
+        None, description="Modified execution time in seconds (from validation)"
+    )
+    speedup: Optional[float] = Field(
+        None, description="Speedup ratio (original / modified)"
+    )
 
 
 class TestCodeRequest(BaseModel):
@@ -140,8 +150,8 @@ class TestCodeResponse(BaseModel):
     """Response model for test_code comm message."""
 
     ok: bool = Field(..., description="Whether the test succeeded")
-    result: Optional[DiffResult] = Field(
-        None, description="The diff result if successful"
+    result: Optional[TestCodeResult] = Field(
+        None, description="The test code result with timing info if successful"
     )
     error: Optional[str] = Field(None, description="Error message if failed")
 
@@ -151,22 +161,6 @@ class TestCodeResponse(BaseModel):
 
 class ValidationHelper:
     """Helper class for optimization validation operations."""
-
-    # System variables to exclude from validation
-    SYSTEM_VARIABLES = {
-        "get_ipython",
-        "In",
-        "Out",
-        "exit",
-        "quit",
-        "_",
-        "__",
-        "___",
-        "_i",
-        "_ii",
-        "_iii",
-        "_dh",
-    }
 
     @classmethod
     def get_modified_globals_for_cell(
@@ -179,11 +173,7 @@ class ValidationHelper:
         deps = dependencies_dict[cell_id]
 
         # Filter out private and system variables
-        globals_written = {
-            var
-            for var in deps.globals_written
-            if not var.startswith("_") and var not in cls.SYSTEM_VARIABLES
-        }
+        globals_written = {var for var in deps.globals_written if is_valid_variable_name(var)}
 
         return globals_written
 
@@ -243,7 +233,7 @@ class ValidationHelper:
         optimized_code: str,
         modified_globals: Set[str],
         test_code_func,
-    ) -> Tuple[bool, Optional[str]]:
+    ) -> Tuple[bool, Optional[str], Optional[TestCodeResult]]:
         """
         Validate that optimization preserves semantics.
 
@@ -254,12 +244,12 @@ class ValidationHelper:
             test_code_func: Function to call for testing code (takes original, modified, variables)
 
         Returns:
-            (True, None) if validation passes
-            (False, error_message) if validation fails
+            (True, None, test_code_result) if validation passes
+            (False, error_message, None) if validation fails
         """
         if not modified_globals:
             # No globals to validate, automatically pass
-            return (True, None)
+            return (True, None, None)
 
         try:
             result = test_code_func(
@@ -268,16 +258,19 @@ class ValidationHelper:
                 output_variables=sorted(list(modified_globals)),
             )
 
-            if result.ok and isinstance(result.result, DiffResult):
+            if result.ok and isinstance(result.result, TestCodeResult):
+                # Extract the diff from the TestCodeResult
+                diff_result = result.result.diff
+                print(diff_result)
                 # Check if all variables are equal
-                if not result.result.differences:
-                    return (True, None)
+                if not diff_result.differences:
+                    return (True, None, result.result)
                 else:
                     # Format which variables differ
-                    diff_vars = list(result.result.differences.keys())
+                    diff_vars = list(diff_result.differences.keys())
                     error_msg = f"Variables changed: {', '.join(diff_vars)}"
-                    error_msg += f"\n\n{format_diff_as_markdown(result.result)}"
-                    return (False, error_msg)
+                    error_msg += f"\n\n{format_diff_as_markdown(diff_result)}"
+                    return (False, error_msg, None)
             else:
                 # test_code failed with error
                 error_msg = (
@@ -285,10 +278,10 @@ class ValidationHelper:
                     if isinstance(result.result, str)
                     else "Unknown error"
                 )
-                return (False, error_msg)
+                return (False, error_msg, None)
 
         except Exception as e:
-            return (False, f"Validation exception: {str(e)}")
+            return (False, f"Validation exception: {str(e)}", None)
 
 
 class StatsAggregator:
@@ -740,6 +733,9 @@ class OptimizeCommand(NotebookCommand):
         log(f"Kernel client available: {kernel_client is not None}")
         log(f"Dependencies dict available: {dependencies_dict is not None}")
 
+        # Initialize timing data
+        timing_data = None
+
         # VALIDATION: Check if optimization preserves semantics
         if kernel_client and dependencies_dict:
             with timer(
@@ -765,7 +761,7 @@ class OptimizeCommand(NotebookCommand):
                     log(f"Optimized code length: {len(optimized_code)} chars")
 
                     # Validate using lambda to wrap the kernel client call
-                    is_valid, error_msg = ValidationHelper.validate_optimization(
+                    is_valid, error_msg, test_result = ValidationHelper.validate_optimization(
                         original_code,
                         optimized_code,
                         modified_globals,
@@ -785,11 +781,22 @@ class OptimizeCommand(NotebookCommand):
                         )
                     else:
                         log("✓ Validation passed")
+                        # Capture timing data from validation
+                        if test_result:
+                            timing_data = {
+                                "original_duration": test_result.original_duration,
+                                "modified_duration": test_result.modified_duration,
+                                "speedup": test_result.speedup
+                            }
+                            log(f"Timing: {test_result.original_duration:.2f}s → {test_result.modified_duration:.2f}s (speedup: {test_result.speedup:.2f}x)")
 
         return cell["id"], OptimizationResultAndStats(
             original_code=original_snippets,
             optimized_code=optimized_snippets,
             stats=stats_aggregator.get_aggregated_stats(),
+            original_duration=timing_data["original_duration"] if timing_data else None,
+            modified_duration=timing_data["modified_duration"] if timing_data else None,
+            speedup=timing_data["speedup"] if timing_data else None,
         )
 
     async def optimize_cells(
@@ -798,7 +805,7 @@ class OptimizeCommand(NotebookCommand):
         model: Any,
         cell_ids: Optional[List[str]] = None,
         kernel_client: Optional[FerretKernelClient] = None,
-    ) -> Tuple[nbformat.NotebookNode, float]:
+    ) -> Tuple[nbformat.NotebookNode, float, Dict[str, Dict[str, float]]]:
         """Optimize cells in the notebook.
 
         Args:
@@ -808,7 +815,7 @@ class OptimizeCommand(NotebookCommand):
             kernel_client: Optional kernel client for validation
 
         Returns:
-            Tuple of (modified_notebook, total_cost)
+            Tuple of (modified_notebook, total_cost, cell_timing)
         """
         with timer(key="optimize_cells_total", message="Optimizing cells"):
             log("=" * 60)
@@ -880,7 +887,17 @@ class OptimizeCommand(NotebookCommand):
             total_cost = sum([result.stats.cost for _, result in all_results])
             log(f"Total optimization cost: ${total_cost:.4f}")
 
-            return new_nb, total_cost
+            # Collect timing data for cells that were optimized
+            cell_timing = {}
+            for cell_id, result in all_results:
+                if result.original_duration is not None and result.modified_duration is not None:
+                    cell_timing[cell_id] = {
+                        "original_duration": result.original_duration,
+                        "modified_duration": result.modified_duration,
+                        "speedup": result.speedup
+                    }
+
+            return new_nb, total_cost, cell_timing
 
     async def process(
         self,
@@ -891,7 +908,7 @@ class OptimizeCommand(NotebookCommand):
         **kwargs,
     ) -> Dict[str, Any]:
         """Optimize cells in the notebook based on their optimization plans."""
-        new_nb, total_cost = await self.optimize_cells(
+        new_nb, total_cost, cell_timing = await self.optimize_cells(
             notebook_content, config.model, selected_cell_ids, kernel_client
         )
 
@@ -899,6 +916,7 @@ class OptimizeCommand(NotebookCommand):
             "status": "success",
             "command": self.command_name,
             "total_cost": total_cost,
+            "cell_timing": cell_timing,
         }
 
         return {"notebook": new_nb, "metadata": metadata}

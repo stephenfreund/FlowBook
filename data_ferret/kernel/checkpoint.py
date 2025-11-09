@@ -12,6 +12,78 @@ import numpy as np
 pd.options.mode.copy_on_write = True
 
 
+# System variables to filter out from user namespace
+SYSTEM_VARIABLES = {
+    "get_ipython",
+    "In",
+    "Out",
+    "exit",
+    "quit",
+    "_",
+    "__",
+    "___",
+    "_i",
+    "_ii",
+    "_iii",
+    "_dh",
+}
+
+
+def is_valid_variable_name(name: str) -> bool:
+    """
+    Check if a variable name should be included in processing.
+
+    Filters out:
+    - Names starting with underscore (private/internal)
+    - IPython system variables
+
+    Args:
+        name: Variable name to check
+
+    Returns:
+        True if the variable should be included, False otherwise
+    """
+    return not name.startswith("_") and name not in SYSTEM_VARIABLES
+
+
+def is_valid_variable(name: str, value: Any) -> bool:
+    """
+    Check if a variable (name and value) should be included in processing.
+
+    Filters out:
+    - Names starting with underscore (private/internal)
+    - IPython system variables
+    - Module objects
+
+    Args:
+        name: Variable name to check
+        value: Variable value to check
+
+    Returns:
+        True if the variable should be included, False otherwise
+    """
+    return (
+        is_valid_variable_name(name)
+        and not isinstance(value, types.ModuleType)
+    )
+
+
+def filter_user_namespace(user_ns: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Filter a user namespace to include only valid variables.
+
+    This is a convenience function that applies is_valid_variable() to
+    an entire namespace dictionary.
+
+    Args:
+        user_ns: User namespace dictionary
+
+    Returns:
+        Filtered dictionary with only valid variables
+    """
+    return {k: v for k, v in user_ns.items() if is_valid_variable(k, v)}
+
+
 class Checkpoint:
     def __init__(self, name: str, user_ns: Dict[str, Any], memo: Dict[int, Any]):
         self.name = name
@@ -75,7 +147,7 @@ class Checkpoints:
         return True
 
     def checkpointable_vars(self, user_ns: Dict[str, Any]) -> Dict[str, Any]:
-        return {k: v for k, v in user_ns.items() if not k.startswith("_") and k not in ("get_ipython", "In", "Out", "exit", "quit") and not isinstance(v, types.ModuleType)}
+        return filter_user_namespace(user_ns)
 
     def checkpointable_values(self, user_ns: Dict[str, Any]) -> Dict[str, Any]:
         return {k: v for k, v in user_ns.items() if self.checkpointable_value(v)}

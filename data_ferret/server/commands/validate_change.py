@@ -10,18 +10,12 @@ import traceback
 from typing import Any, Dict, List, Optional, Set
 from pydantic import BaseModel, Field
 
-from data_ferret.kernel.types import DiffResult, format_diff_as_markdown
+from data_ferret.kernel.checkpoint import is_valid_variable_name
+from data_ferret.kernel.types import DiffResult, TestCodeResult, format_diff_as_markdown
 from data_ferret.server.base import NotebookCommand
 from data_ferret.server.kernel_manager import FerretKernelClient, TestCodeData
 from data_ferret.util.dependencies import analyze_notebook, CellDependencies
 from data_ferret.util.output import log, timer
-
-
-# System variables to filter out from output_variables
-SYSTEM_VARIABLES = {
-    "get_ipython", "In", "Out", "exit", "quit",
-    "_", "__", "___", "_i", "_ii", "_iii", "_dh"
-}
 
 
 class TestCodeRequest(BaseModel):
@@ -34,7 +28,7 @@ class TestCodeRequest(BaseModel):
 class TestCodeResponse(BaseModel):
     """Response model for test_code comm message."""
     ok: bool = Field(..., description="Whether the test succeeded")
-    result: Optional[DiffResult] = Field(None, description="The diff result if successful")
+    result: Optional[TestCodeResult] = Field(None, description="The test code result with timing info if successful")
     error: Optional[str] = Field(None, description="Error message if failed")
 
     class Config:
@@ -167,11 +161,7 @@ class ValidateChangeCommand(NotebookCommand):
         deps = dependencies_dict[cell_id]
 
         # Filter out private and system variables
-        globals_written = [
-            var for var in deps.globals_written
-            if not var.startswith("_")
-            and var not in SYSTEM_VARIABLES
-        ]
+        globals_written = [var for var in deps.globals_written if is_valid_variable_name(var)]
 
         return sorted(globals_written)
 
@@ -272,7 +262,8 @@ class ValidateChangeCommand(NotebookCommand):
                         # Log result
                         status_str = "✓" if result.ok else "✗"
                         if result.ok and result.result:
-                            log(f"[{status_str}] Cell {idx}: {format_diff_as_markdown(result.result)}")
+                            # Extract diff from TestCodeResult for formatting
+                            log(f"[{status_str}] Cell {idx}: {format_diff_as_markdown(result.result.diff)}")
                         else:
                             log(f"[{status_str}] Cell {idx}: {result.result}")
 

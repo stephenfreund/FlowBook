@@ -321,6 +321,28 @@ def serialize_diff_result(diff_result: DiffResult) -> Dict[str, Any]:
     return {var: serialize_node(node) for var, node in diff_result.items()}
 
 
+class TestCodeResult(BaseModel):
+    """
+    Result of a test_code operation with timing information.
+
+    This model wraps the DiffResult along with execution timing data
+    for both the original and modified code.
+
+    Attributes:
+        diff: The diff result comparing variables from both executions
+        original_duration: Execution time of the original code in seconds
+        modified_duration: Execution time of the modified code in seconds
+        speedup: Calculated speedup ratio (original_duration / modified_duration)
+    """
+    diff: DiffResult = Field(..., description="Diff result comparing variables")
+    original_duration: float = Field(..., description="Original code execution time in seconds")
+    modified_duration: float = Field(..., description="Modified code execution time in seconds")
+    speedup: float = Field(..., description="Speedup ratio (original / modified)")
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
 def format_diff_as_markdown(diff_result: DiffResult) -> str:
     """
     Format a DiffResult as a human-readable markdown list.

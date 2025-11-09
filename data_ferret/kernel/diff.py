@@ -385,14 +385,22 @@ class Diff:
             # Use flexible comparison for elements
             elem_diff = self._compare_values(lst_val, arr_val, f"{path}[{i}]")
             if elem_diff:
+                message = elem_diff.message
+                message += f" - {type(lst_val)} vs {type(arr_val)}"
+                message += f" - {self.rtol} - {self.atol}"
+                message += f" - {math.isclose(lst_val, arr_val, rel_tol=self.rtol, abs_tol=self.atol)}"
+                message += f" - {np.isclose(lst_val, arr_val, rtol=self.rtol, atol=self.atol)}"
+                message += f" - {lst_val == arr_val} vs {np.array_equal(lst_val, arr_val)}"
+                message += f" - {lst_val} vs {arr_val}"
+                message += f" - {type(lst_val) == type(arr_val)}"
                 # Return first difference found
                 idx = np.unravel_index(i, arr.shape)
                 idx_tuple = tuple(int(x) for x in idx)
                 return ValueComparison(
                     status="different",
-                    value1=val_a,
-                    value2=val_b,
-                    message=f"Element mismatch at {path}[{idx_tuple}]: {lst_val} vs {arr_val}"
+                    value1=lst_val,
+                    value2=arr_val,
+                    message=f"Element mismatch at {path}[{idx_tuple}]: {lst_val} vs {arr_val} - {type(lst_val)} vs {type(arr_val)}" + message
                 )
 
         # All elements match
@@ -438,7 +446,8 @@ class Diff:
             return None  # Exactly equal
 
         # Check if close within tolerance
-        if math.isclose(val_a, val_b, rel_tol=self.rtol, abs_tol=self.atol):
+        is_close = math.isclose(val_a, val_b, rel_tol=self.rtol, abs_tol=self.atol) if isinstance(val_a, float) else np.isclose(val_a, val_b, rel_tol=self.rtol, abs_tol=self.atol)
+        if is_close:
             # If report_close is False, treat close values as equal (no difference)
             if not self.report_close:
                 return None
@@ -518,17 +527,20 @@ class Diff:
                 message=f"Callable type mismatch at {path}: bound method vs function"
             )
         else:
-            # Both are regular functions/callables - use identity
-            if val_a is not val_b:
-                name_a = getattr(val_a, '__name__', repr(val_a))
-                name_b = getattr(val_b, '__name__', repr(val_b))
-                return ValueComparison(
-                    status="different",
-                    value1=val_a,
-                    value2=val_b,
-                    message=f"Callable mismatch at {path}: {name_a} vs {name_b} (different objects)"
-                )
+            # ignore function/callable mismatch
             return None
+
+            # # Both are regular functions/callables - use identity
+            # if val_a is not val_b:
+            #     name_a = getattr(val_a, '__name__', repr(val_a))
+            #     name_b = getattr(val_b, '__name__', repr(val_b))
+            #     return ValueComparison(
+            #         status="different",
+            #         value1=val_a,
+            #         value2=val_b,
+            #         message=f"Callable mismatch at {path}: {name_a} vs {name_b} (different objects)"
+            #     )
+            # return None
     
     def _compare_ndarray(self, val_a: np.ndarray, val_b: np.ndarray, path: str) -> Optional[ValueComparison]:
         """Compare numpy arrays (TODO: implement full diff collection with sampling)."""

@@ -17,6 +17,7 @@ from comm import create_comm
 from data_ferret.kernel.checkpoint import Checkpoints, checkpoint_diff
 from data_ferret.kernel.equality import user_ns_diff
 from data_ferret.kernel.ferret_pdb import FerretPdb
+from data_ferret.kernel.types import TestCodeResult, DiffResult
 import io
 import sys
 import time
@@ -385,13 +386,24 @@ class FerretKernel(IPythonKernel, Magics):
         self.checkpoint(f"save modified_result")
 
         comm.send({"type": "progress", "message": "Diffing original and modified environments"})
-        diff_result = checkpoint_diff(self._checkpoint.get(f"original_result"), self._checkpoint.get(f"modified_result"), 
+        diff_result = checkpoint_diff(self._checkpoint.get(f"original_result"), self._checkpoint.get(f"modified_result"),
                                       keys_to_include=output_variables)
 
-        comm.send({"type": "progress", "message": f"Speedup: {original_duration / modified_duration:0.2f}x (Original duration: {original_duration:0.2f}s, Modified duration: {modified_duration:0.2f}s)"})
+        # Calculate speedup (avoid division by zero)
+        speedup = original_duration / modified_duration if modified_duration > 0 else 0.0
 
-        # Serialize DiffResult to JSON-compatible format using Pydantic
-        serialized = diff_result.model_dump()
+        comm.send({"type": "progress", "message": f"Speedup: {speedup:0.2f}x (Original duration: {original_duration:0.2f}s, Modified duration: {modified_duration:0.2f}s)"})
+
+        # Create TestCodeResult with timing information
+        result = TestCodeResult(
+            diff=diff_result,
+            original_duration=original_duration,
+            modified_duration=modified_duration,
+            speedup=speedup
+        )
+
+        # Serialize to JSON-compatible format using Pydantic
+        serialized = result.model_dump()
         return serialized
 
     def _make_json_safe(self, obj):
