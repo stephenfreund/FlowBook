@@ -24,7 +24,10 @@ from data_ferret.util.ferret_metadata import (
 from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.util.prompts import get_prompt
 from data_ferret.util.dependencies import analyze_notebook, CellDependencies
-from data_ferret.kernel.types import DiffResult, TestCodeResult, format_diff_as_markdown
+from data_ferret.kernel.types import (
+    DiffResult, TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
+    format_diff_as_markdown
+)
 from data_ferret.util.output import log, error, timer
 
 import nbformat
@@ -141,6 +144,10 @@ class RepairedOptimizationResponse(BaseModel):
 
     repaired_snippets: List[CodeSnippet] = Field(
         description="Complete list of repaired code snippets, one for each optimization step"
+    )
+
+    explanation: str = Field(
+        description="Explanation of the repair process and the changes made"
     )
 
 
@@ -266,30 +273,61 @@ class ValidationHelper:
                 output_variables=sorted(list(modified_globals)),
             )
 
-            if result.ok and isinstance(result.result, TestCodeResult):
-                # Extract the diff from the TestCodeResult
-                diff_result = result.result.diff
-                print(diff_result)
-                # Check if all variables are equal
-                if not diff_result.differences:
-                    return (True, None, result.result)
+            # Handle the three possible result types
+            if result.ok:
+                # Check which type of result we got (discriminated union)
+                if isinstance(result.result, TestCodeSuccess):
+                    # Both codes succeeded - check if outputs match
+                    diff_result = result.result.diff
+                    print(diff_result)
+
+                    if not diff_result.differences:
+                        # All variables match - validation passed
+                        return (True, None, result.result)
+                    else:
+                        # Variables differ - validation failed
+                        diff_vars = list(diff_result.differences.keys())
+                        error_msg = f"Variables changed: {', '.join(diff_vars)}"
+                        error_msg += f"\n\n{format_diff_as_markdown(diff_result)}"
+                        return (False, error_msg, None)
+
+                elif isinstance(result.result, TestCodeOriginalCrash):
+                    # Original code crashed - cannot optimize broken code
+                    error = result.result.error
+                    error_msg = "Original code crashes - cannot optimize broken code:\n\n"
+                    error_msg += f"**{error.error_type}**: {error.error_message}\n\n"
+                    error_msg += "**Traceback:**\n```\n"
+                    error_msg += error.traceback
+                    error_msg += "\n```"
+                    return (False, error_msg, None)
+
+                elif isinstance(result.result, TestCodeModifiedCrash):
+                    # Optimized code crashed - optimization introduced a bug
+                    error = result.result.error
+                    error_msg = "Optimized code crashes (original works) - optimization introduced a bug:\n\n"
+                    error_msg += f"**{error.error_type}**: {error.error_message}\n\n"
+                    error_msg += "**Traceback:**\n```\n"
+                    error_msg += error.traceback
+                    error_msg += "\n```"
+                    return (False, error_msg, None)
+
                 else:
-                    # Format which variables differ
-                    diff_vars = list(diff_result.differences.keys())
-                    error_msg = f"Variables changed: {', '.join(diff_vars)}"
-                    error_msg += f"\n\n{format_diff_as_markdown(diff_result)}"
+                    # Unknown result type
+                    error_msg = f"Unknown test result type: {type(result.result)}"
                     return (False, error_msg, None)
             else:
-                # test_code failed with error
+                # Communication error (not a code crash)
                 error_msg = (
                     str(result.result)
                     if isinstance(result.result, str)
-                    else "Unknown error"
+                    else "Unknown communication error"
                 )
                 return (False, error_msg, None)
 
         except Exception as e:
-            return (False, f"Validation exception: {str(e)}", None)
+            import traceback
+            error_msg = f"Validation exception: {type(e).__name__}: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+            return (False, error_msg, None)
 
 
 class StatsAggregator:
@@ -662,7 +700,9 @@ class OptimizeCommand(NotebookCommand):
                 return repair_response.repaired_snippets
 
             except Exception as e:
-                error(f"Repair failed with exception: {str(e)}")
+                import traceback
+                error(f"Repair failed with exception: {type(e).__name__}: {str(e)}")
+                error(f"Traceback:\n{traceback.format_exc()}")
                 return None
 
     async def _validate_optimization_with_retry(

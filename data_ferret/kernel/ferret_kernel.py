@@ -17,7 +17,10 @@ from comm import create_comm
 from data_ferret.kernel.checkpoint import Checkpoints, checkpoint_diff
 from data_ferret.kernel.equality import user_ns_diff
 from data_ferret.kernel.ferret_pdb import FerretPdb
-from data_ferret.kernel.types import TestCodeResult, DiffResult
+from data_ferret.kernel.types import (
+    TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
+    DiffResult, ExecutionError
+)
 import io
 import sys
 import time
@@ -360,15 +363,43 @@ class FerretKernel(IPythonKernel, Magics):
             comm.send({"type": "final", "ok": False, "error": str(e)})
 
     def test_code(self, comm, original_code: str, modified_code: str, output_variables: Set[str] | None = None) -> Dict[str, Any]:
-        """Test the code and return the result, sending progress messages via comm."""
+        """
+        Test the code and return the result, sending progress messages via comm.
+
+        Returns a TestCodeResult (union type) that can be:
+        - TestCodeSuccess: Both codes executed successfully
+        - TestCodeOriginalCrash: Original code crashed
+        - TestCodeModifiedCrash: Modified code crashed (original succeeded)
+        """
         comm.send({"type": "progress", "message": "Saving original environment"})
         self.checkpoint(f"save original_environment")
 
+        # Execute original code with crash handling
         comm.send({"type": "progress", "message": "Executing original code"})
         start_time = time.time()
-        self.shell.run_cell(original_code)
-        end_time = time.time()
-        original_duration = end_time - start_time
+        try:
+            result = self.shell.run_cell(original_code)
+            original_duration = time.time() - start_time
+
+            # Check if execution had an error
+            if result.error_in_exec is not None:
+                raise result.error_in_exec
+
+        except Exception as e:
+            original_duration = time.time() - start_time
+            comm.send({"type": "progress", "message": f"Original code crashed: {type(e).__name__}"})
+
+            # Create error result for original code crash
+            crash_result = TestCodeOriginalCrash(
+                error=ExecutionError(
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    traceback=traceback.format_exc(),
+                    code_snippet=original_code
+                ),
+                original_duration=original_duration
+            )
+            return crash_result.model_dump()
 
         comm.send({"type": "progress", "message": "Saving original result"})
         self.checkpoint(f"save original_result")
@@ -376,26 +407,52 @@ class FerretKernel(IPythonKernel, Magics):
         comm.send({"type": "progress", "message": "Restoring original environment"})
         self.checkpoint(f"restore original_environment")
 
+        # Execute modified code with crash handling
         comm.send({"type": "progress", "message": "Executing modified code"})
         start_time = time.time()
-        self.shell.run_cell(modified_code)
-        end_time = time.time()
-        modified_duration = end_time - start_time
+        try:
+            result = self.shell.run_cell(modified_code)
+            modified_duration = time.time() - start_time
+
+            # Check if execution had an error
+            if result.error_in_exec is not None:
+                raise result.error_in_exec
+
+        except Exception as e:
+            modified_duration = time.time() - start_time
+            comm.send({"type": "progress", "message": f"Modified code crashed: {type(e).__name__}"})
+
+            # Create error result for modified code crash
+            crash_result = TestCodeModifiedCrash(
+                error=ExecutionError(
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    traceback=traceback.format_exc(),
+                    code_snippet=modified_code
+                ),
+                original_duration=original_duration,
+                modified_duration=modified_duration
+            )
+            return crash_result.model_dump()
 
         comm.send({"type": "progress", "message": "Saving modified result"})
         self.checkpoint(f"save modified_result")
 
+        # Both codes succeeded - perform diff
         comm.send({"type": "progress", "message": "Diffing original and modified environments"})
-        diff_result = checkpoint_diff(self._checkpoint.get(f"original_result"), self._checkpoint.get(f"modified_result"),
-                                      keys_to_include=output_variables)
+        diff_result = checkpoint_diff(
+            self._checkpoint.get(f"original_result"),
+            self._checkpoint.get(f"modified_result"),
+            keys_to_include=output_variables
+        )
 
         # Calculate speedup (avoid division by zero)
         speedup = original_duration / modified_duration if modified_duration > 0 else 0.0
 
         comm.send({"type": "progress", "message": f"Speedup: {speedup:0.2f}x (Original duration: {original_duration:0.2f}s, Modified duration: {modified_duration:0.2f}s)"})
 
-        # Create TestCodeResult with timing information
-        result = TestCodeResult(
+        # Create success result with timing information
+        success_result = TestCodeSuccess(
             diff=diff_result,
             original_duration=original_duration,
             modified_duration=modified_duration,
@@ -403,8 +460,7 @@ class FerretKernel(IPythonKernel, Magics):
         )
 
         # Serialize to JSON-compatible format using Pydantic
-        serialized = result.model_dump()
-        return serialized
+        return success_result.model_dump()
 
     def _make_json_safe(self, obj):
         """Convert an object to a JSON-safe format, handling numpy arrays and NaN values."""
@@ -456,19 +512,30 @@ class FerretKernel(IPythonKernel, Magics):
             return obj
 
     def _test_code_comm_open(self, comm, open_msg):
+        """
+        Handle test_code comm requests.
+
+        Note: test_code() now always returns a structured result (success or crash),
+        so we always send ok=True. The result's 'status' field discriminates between
+        success, original_crash, and modified_crash.
+        """
         try:
             original_code = open_msg["content"]["data"]["original_code"]
             modified_code = open_msg["content"]["data"]["modified_code"]
             output_variables = set[str](open_msg["content"]["data"]["output_variables"])
             comm.send({"type": "progress", "message": f"Output variables: {output_variables}"})
+
+            # test_code() returns a structured result (TestCodeSuccess/TestCodeOriginalCrash/TestCodeModifiedCrash)
             result = self.test_code(comm, original_code, modified_code, output_variables)
 
             # Make result JSON-safe before sending
             safe_result = self._make_json_safe(result)
             comm.send({"type": "final", "ok": True, "result": safe_result})
+
         except Exception as e:
-            import traceback
-            error_msg = f"{str(e)}\n{traceback.format_exc()}"
+            # This catches unexpected errors in comm message parsing or kernel internals,
+            # not code execution errors (those are handled in test_code)
+            error_msg = f"{type(e).__name__}: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             comm.send({"type": "final", "ok": False, "error": error_msg})
 
     async def do_execute(

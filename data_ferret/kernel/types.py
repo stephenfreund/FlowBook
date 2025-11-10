@@ -10,7 +10,7 @@ Key Functions:
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Literal, Union
+from typing import Annotated, Any, Dict, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -89,6 +89,12 @@ class ValueComparison(BaseModel):
     value1: Any = Field(..., description="First value")
     value2: Any = Field(..., description="Second value")
     message: str = Field(..., description="Description of the difference")
+
+    # sprecial initializer to mask out value1 and value2
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.value1 = None
+        self.value2 = None
 
     @property
     def is_close(self) -> bool:
@@ -321,19 +327,43 @@ def serialize_diff_result(diff_result: DiffResult) -> Dict[str, Any]:
     return {var: serialize_node(node) for var, node in diff_result.items()}
 
 
-class TestCodeResult(BaseModel):
+class ExecutionError(BaseModel):
     """
-    Result of a test_code operation with timing information.
+    Details about a code execution error/crash.
 
-    This model wraps the DiffResult along with execution timing data
-    for both the original and modified code.
+    Captures comprehensive error information including the exception type,
+    message, and full stack trace for debugging purposes.
 
     Attributes:
+        error_type: The type of exception (e.g., "ValueError", "ZeroDivisionError")
+        error_message: The exception message
+        traceback: Full formatted stack trace
+        code_snippet: Optional snippet of the code that crashed
+    """
+    error_type: str = Field(..., description="Exception type name")
+    error_message: str = Field(..., description="Exception message")
+    traceback: str = Field(..., description="Full formatted stack trace")
+    code_snippet: Optional[str] = Field(None, description="Code that crashed")
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class TestCodeSuccess(BaseModel):
+    """
+    Result when both original and modified code execute successfully.
+
+    This model contains the diff result comparing the outputs of both
+    code versions, along with timing information to calculate speedup.
+
+    Attributes:
+        status: Discriminator tag, always "success"
         diff: The diff result comparing variables from both executions
         original_duration: Execution time of the original code in seconds
         modified_duration: Execution time of the modified code in seconds
         speedup: Calculated speedup ratio (original_duration / modified_duration)
     """
+    status: Literal["success"] = Field(default="success", description="Result status discriminator")
     diff: DiffResult = Field(..., description="Diff result comparing variables")
     original_duration: float = Field(..., description="Original code execution time in seconds")
     modified_duration: float = Field(..., description="Modified code execution time in seconds")
@@ -341,6 +371,56 @@ class TestCodeResult(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+
+class TestCodeOriginalCrash(BaseModel):
+    """
+    Result when the original code crashes during execution.
+
+    This indicates the original code has a bug or runtime error,
+    so optimization cannot proceed.
+
+    Attributes:
+        status: Discriminator tag, always "original_crash"
+        error: Detailed information about the crash
+        original_duration: Optional partial execution time before crash
+    """
+    status: Literal["original_crash"] = Field(default="original_crash", description="Result status discriminator")
+    error: ExecutionError = Field(..., description="Error details")
+    original_duration: Optional[float] = Field(None, description="Time before crash (if measurable)")
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+class TestCodeModifiedCrash(BaseModel):
+    """
+    Result when the modified code crashes but the original succeeded.
+
+    This indicates the optimization introduced a bug or behavioral change
+    that causes the code to fail.
+
+    Attributes:
+        status: Discriminator tag, always "modified_crash"
+        error: Detailed information about the crash
+        original_duration: Execution time of the original code (succeeded)
+        modified_duration: Optional partial execution time before crash
+    """
+    status: Literal["modified_crash"] = Field(default="modified_crash", description="Result status discriminator")
+    error: ExecutionError = Field(..., description="Error details")
+    original_duration: float = Field(..., description="Original code execution time in seconds")
+    modified_duration: Optional[float] = Field(None, description="Time before crash (if measurable)")
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+# Discriminated union type for test_code results
+# The 'status' field is used to discriminate between the three possible outcomes
+TestCodeResult = Annotated[
+    Union[TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash],
+    Field(discriminator="status")
+]
 
 
 def format_diff_as_markdown(diff_result: DiffResult) -> str:

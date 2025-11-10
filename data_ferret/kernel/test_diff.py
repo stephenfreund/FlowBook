@@ -633,7 +633,7 @@ class TestTypeMismatch:
         b = {'x': 1.0}
         result = differ.diff(a, b)
         assert 'x' in result
-        assert_message_contains(result, 'x', 'Type mismatch')
+        assert_message_contains(result, 'x', 'Type category mismatch')
     
     def test_list_vs_tuple(self):
         differ = Diff()
@@ -1715,7 +1715,7 @@ class TestStrictMode:
         b = {'x': 1.0}
         result = differ.diff(a, b)
         assert 'x' in result
-        assert_message_contains(result, 'x', 'Type mismatch')
+        assert_message_contains(result, 'x', 'Type category mismatch')
 
     def test_int_vs_float_nonstrict_mode(self):
         """In non-strict mode, int vs float with same value should pass."""
@@ -1757,6 +1757,65 @@ class TestStrictMode:
         b = {'x': 42}
         result = differ.diff(a, b)
         assert result == {}
+
+    def test_int_vs_np_int64(self):
+        """Python int should equal np.int64 with same value."""
+        differ = Diff(strict=False)
+        a = {'x': 5}
+        b = {'x': np.int64(5)}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_np_int64_vs_np_int32(self):
+        """Different numpy int types should be compatible."""
+        differ = Diff(strict=False)
+        a = {'x': np.int64(42)}
+        b = {'x': np.int32(42)}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_np_int64_vs_np_int16(self):
+        """np.int64 should equal np.int16 with same value."""
+        differ = Diff(strict=False)
+        a = {'x': np.int64(100)}
+        b = {'x': np.int16(100)}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_float_vs_np_float64(self):
+        """Python float should equal np.float64 with same value."""
+        differ = Diff(strict=False)
+        a = {'x': 3.14}
+        b = {'x': np.float64(3.14)}
+        result = differ.diff(a, b)
+        assert result == {}
+
+    def test_np_float64_vs_np_float32(self):
+        """Different numpy float types should be compatible."""
+        differ = Diff(strict=False)
+        a = {'x': np.float64(3.14)}
+        b = {'x': np.float32(3.14)}
+        result = differ.diff(a, b)
+        # May have small precision differences, so check if equal or close
+        assert len(result) == 0 or (result['x'].status == 'close')
+
+    def test_np_int64_different_values(self):
+        """Different values should still be detected even with same numpy type."""
+        differ = Diff(strict=False)
+        a = {'x': np.int64(5)}
+        b = {'x': np.int64(10)}
+        result = differ.diff(a, b)
+        assert 'x' in result
+        assert_message_contains(result, 'x', 'Integer mismatch')
+
+    def test_int_vs_np_int64_different_values(self):
+        """Different values should be detected across int and np.int64."""
+        differ = Diff(strict=False)
+        a = {'x': 5}
+        b = {'x': np.int64(10)}
+        result = differ.diff(a, b)
+        assert 'x' in result
+        assert_message_contains(result, 'x', 'Integer mismatch')
 
     def test_list_vs_array_1d_strict(self):
         """In strict mode, list vs array should fail."""
@@ -1983,7 +2042,7 @@ class TestStrictMode:
         result = differ.diff(a, b)
         # Default is strict, so should fail
         assert 'x' in result
-        assert_message_contains(result, 'x', 'Type mismatch')
+        assert_message_contains(result, 'x', 'Type category mismatch')
 
     def test_multiple_compatible_types_in_namespace_nonstrict(self):
         """In non-strict mode, multiple variables with compatible types."""

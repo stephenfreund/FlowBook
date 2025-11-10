@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Type, TypeVar
 from pydantic import BaseModel
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.server.config import FerretConfig
-from data_ferret.util.output import log
+from data_ferret.util.output import error, log
 from jupyter_server.serverapp import ServerApp
 
 # Type variables for generic request/response
@@ -87,7 +87,7 @@ class NotebookCommand(ABC):
         request: TRequest,
         response_type: Type[TResponse],
         *,
-        timeout: int = 60
+        timeout: int = 60 * 30
     ) -> TResponse:
         """
         Send a comm message to the kernel with type-safe request/response.
@@ -160,8 +160,12 @@ class NotebookCommand(ABC):
                         return response_type.model_validate(reply_data)
                 # Skip other message types (status, display_data, etc.)
             except KeyboardInterrupt:
+                error(f"KeyboardInterrupt in _send_comm_message")
                 raise
             except Exception as e:
+                error(f"Error in _send_comm_message: {type(e).__name__}: {str(e)}")
+                import traceback
+                error(f"Traceback:\n{traceback.format_exc()}")
                 # If we get a timeout or other error, re-raise it
                 raise
 

@@ -258,7 +258,8 @@ def get_type_model(obj: Any) -> TypeModel:
 
     # --- sets ---
     if isinstance(obj, Set) and not isinstance(obj, (str, bytes)):
-        elems = [get_type_model(e) for e in obj[:INSPECTION_LIMIT]]
+        # Sets don't support slicing, so convert to list first
+        elems = [get_type_model(e) for e in list(obj)[:INSPECTION_LIMIT]]
         elem_union = (
             _make_union(elems)
             if elems

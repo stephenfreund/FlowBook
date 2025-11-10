@@ -11,7 +11,10 @@ from typing import Any, Dict, List, Optional, Set
 from pydantic import BaseModel, Field
 
 from data_ferret.kernel.checkpoint import is_valid_variable_name
-from data_ferret.kernel.types import DiffResult, TestCodeResult, format_diff_as_markdown
+from data_ferret.kernel.types import (
+    DiffResult, TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
+    format_diff_as_markdown
+)
 from data_ferret.server.base import NotebookCommand
 from data_ferret.server.kernel_manager import FerretKernelClient, TestCodeData
 from data_ferret.util.dependencies import analyze_notebook, CellDependencies
@@ -259,23 +262,35 @@ class ValidateChangeCommand(NotebookCommand):
                             "error": result.result if not result.ok else None,
                         }
 
-                        # Log result
-                        status_str = "✓" if result.ok else "✗"
+                        # Log result based on result type
                         if result.ok and result.result:
-                            # Extract diff from TestCodeResult for formatting
-                            log(f"[{status_str}] Cell {idx}: {format_diff_as_markdown(result.result.diff)}")
+                            if isinstance(result.result, TestCodeSuccess):
+                                # Both codes succeeded - show diff
+                                status_str = "✓" if not result.result.diff.differences else "✗"
+                                log(f"[{status_str}] Cell {idx}: {format_diff_as_markdown(result.result.diff)}")
+                            elif isinstance(result.result, TestCodeOriginalCrash):
+                                # Original code crashed
+                                error = result.result.error
+                                log(f"[✗] Cell {idx}: Original code crashed - {error.error_type}: {error.error_message}")
+                            elif isinstance(result.result, TestCodeModifiedCrash):
+                                # Modified code crashed
+                                error = result.result.error
+                                log(f"[✗] Cell {idx}: Modified code crashed - {error.error_type}: {error.error_message}")
+                            else:
+                                log(f"[?] Cell {idx}: Unknown result type")
                         else:
-                            log(f"[{status_str}] Cell {idx}: {result.result}")
+                            log(f"[✗] Cell {idx}: {result.result}")
 
                         total_processed += 1
 
                     except Exception as e:
-                        log(f"[✗] Cell {idx}: Error - {str(e)}")
-                        log(traceback.format_exc())
+                        error_details = f"{type(e).__name__}: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+                        log(f"[✗] Cell {idx}: Error - {type(e).__name__}: {str(e)}")
+                        log(f"Traceback:\n{traceback.format_exc()}")
                         results[cell_id] = {
                             "ok": False,
                             "result": None,
-                            "error": str(e),
+                            "error": error_details,
                         }
 
         # Return metadata with per-cell results

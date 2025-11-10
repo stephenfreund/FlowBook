@@ -109,6 +109,38 @@ class Diff:
 
         return False
 
+    def _get_type_category(self, val: Any) -> str:
+        """
+        Get the type category for immutable atomic values.
+
+        This groups semantically equivalent types together:
+        - All integer types (int, np.int8, np.int16, np.int32, np.int64) → "integer"
+        - All float types (float, np.float16, np.float32, np.float64) → "float"
+        - All complex types (complex, np.complex64, np.complex128) → "complex"
+
+        This allows numpy scalar type variants to be compared as the same type category,
+        so that np.int64(5) == np.int32(5) or int(5) == np.int64(5).
+
+        Returns:
+            String representing the type category
+        """
+        if val is None:
+            return "none"
+        # Check bool before int (bool is subclass of int in Python)
+        if isinstance(val, bool):
+            return "bool"
+        if isinstance(val, (int, np.integer)):
+            return "integer"
+        if isinstance(val, (float, np.floating)):
+            return "float"
+        if isinstance(val, (complex, np.complexfloating)):
+            return "complex"
+        if isinstance(val, str):
+            return "str"
+        if isinstance(val, bytes):
+            return "bytes"
+        return "other"
+
     def diff(self, a: Dict[str, Any], b: Dict[str, Any], keys_to_include: Set[str] | None = None) -> DiffResult:
         """
         Compare two user namespaces.
@@ -218,42 +250,77 @@ class Diff:
             registered_ids = True  # Mark that we registered these IDs
 
         # Type checking
-        if type(val_a) != type(val_b):
-            # In non-strict mode, check if types are compatible
-            if not self.strict:
-                is_compatible, compat_type = self._types_compatible(val_a, val_b)
-                if is_compatible:
-                    # Use flexible comparison for compatible types
-                    if compat_type == "numeric":
-                        result = self._compare_numeric_flexible(val_a, val_b, path)
-                    elif compat_type in ("list_array", "tuple_array"):
-                        result = self._compare_list_array_flexible(val_a, val_b, path)
-                    else:
-                        # Should not happen, but handle gracefully
-                        result = ValueComparison(
-                            status="different",
-                            value1=val_a,
-                            value2=val_b,
-                            message=f"Type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}"
-                        )
+        # For immutable atomics, use category-based type checking
+        # This allows np.int64 to match np.int32, int to match np.int64, etc.
+        if both_immutable_atomic:
+            type_a_category = self._get_type_category(val_a)
+            type_b_category = self._get_type_category(val_b)
 
-                    # If comparison found a difference, unregister these objects
-                    if result is not None and registered_ids:
-                        del self.id_map_a[id_a]
-                        del self.id_map_b[id_b]
+            if type_a_category != type_b_category:
+                # Different type categories (e.g., int vs str, int vs float)
+                # In non-strict mode, check if types are compatible (e.g., int vs float)
+                if not self.strict:
+                    is_compatible, compat_type = self._types_compatible(val_a, val_b)
+                    if is_compatible:
+                        # Use flexible comparison for compatible types
+                        if compat_type == "numeric":
+                            result = self._compare_numeric_flexible(val_a, val_b, path)
+                        else:
+                            # Should not happen for atomics, but handle gracefully
+                            result = ValueComparison(
+                                status="different",
+                                value1=val_a,
+                                value2=val_b,
+                                message=f"Type category mismatch at {path}: {type_a_category} vs {type_b_category} ({type(val_a).__name__} vs {type(val_b).__name__})"
+                            )
+                        return result
 
-                    return result
+                # Strict mode or incompatible types
+                return ValueComparison(
+                    status="different",
+                    value1=val_a,
+                    value2=val_b,
+                    message=f"Type category mismatch at {path}: {type_a_category} vs {type_b_category} ({type(val_a).__name__} vs {type(val_b).__name__})"
+                )
+            # Same type category - continue to value comparison below
+        else:
+            # For non-atomic types (containers), use exact type matching
+            if type(val_a) != type(val_b):
+                # In non-strict mode, check if types are compatible
+                if not self.strict:
+                    is_compatible, compat_type = self._types_compatible(val_a, val_b)
+                    if is_compatible:
+                        # Use flexible comparison for compatible types
+                        if compat_type == "numeric":
+                            result = self._compare_numeric_flexible(val_a, val_b, path)
+                        elif compat_type in ("list_array", "tuple_array"):
+                            result = self._compare_list_array_flexible(val_a, val_b, path)
+                        else:
+                            # Should not happen, but handle gracefully
+                            result = ValueComparison(
+                                status="different",
+                                value1=val_a,
+                                value2=val_b,
+                                message=f"Type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}"
+                            )
 
-            # Strict mode or incompatible types - unregister and return type mismatch
-            if registered_ids:
-                del self.id_map_a[id_a]
-                del self.id_map_b[id_b]
-            return ValueComparison(
-                status="different",
-                value1=val_a,
-                value2=val_b,
-                message=f"Type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}"
-            )
+                        # If comparison found a difference, unregister these objects
+                        if result is not None and registered_ids:
+                            del self.id_map_a[id_a]
+                            del self.id_map_b[id_b]
+
+                        return result
+
+                # Strict mode or incompatible types - unregister and return type mismatch
+                if registered_ids:
+                    del self.id_map_a[id_a]
+                    del self.id_map_b[id_b]
+                return ValueComparison(
+                    status="different",
+                    value1=val_a,
+                    value2=val_b,
+                    message=f"Type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}"
+                )
         
         # Dispatch to type-specific methods
         result: Optional[DiffNode] = None
