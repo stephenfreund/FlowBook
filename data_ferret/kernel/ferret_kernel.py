@@ -21,6 +21,12 @@ from data_ferret.kernel.types import (
     TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
     DiffResult, ExecutionError
 )
+from data_ferret.kernel.kernel_commands import (
+    KernelCommandRequest,
+    ProgressMessage,
+    FinalMessage,
+)
+from data_ferret.kernel.kernel_command_handlers import KernelCommandHandlers
 import io
 import sys
 import time
@@ -172,18 +178,35 @@ class FerretKernel(IPythonKernel, Magics):
 
     @line_cell_magic
     def enable_scalene(self, line: str, cell: str = "") -> None:
-        self._use_scalene = True
-        self.display_icon_and_text("🔍", "Scalene enabled")
+        """Enable Scalene profiling using shared handler."""
+        from data_ferret.kernel.kernel_commands import EnableScaleneRequest
+
+        req = EnableScaleneRequest()
+        response = self.command_handlers.handle_enable_scalene(req)
+        self.display_icon_and_text("🔍", response.message)
 
     @line_cell_magic
     def disable_scalene(self, line: str, cell: str = "") -> None:
-        self._use_scalene = False
-        self.display_icon_and_text("🔍", "Scalene disabled")
+        """Disable Scalene profiling using shared handler."""
+        from data_ferret.kernel.kernel_commands import DisableScaleneRequest
+
+        req = DisableScaleneRequest()
+        response = self.command_handlers.handle_disable_scalene(req)
+        self.display_icon_and_text("🔍", response.message)
 
     @line_cell_magic
     def force_checkpoints(self, line: str, cell: str = "") -> None:
-        self._force_checkpoints = True
-        self.display_icon_and_text("✅", "Force checkpoints enabled")
+        """Enable force checkpoints mode using shared handler."""
+        from data_ferret.kernel.kernel_commands import ForceCheckpointsRequest
+
+        # Parse line for enable/disable (default: enable)
+        enabled = True
+        if line.strip().lower() in ["false", "0", "disable", "off"]:
+            enabled = False
+
+        req = ForceCheckpointsRequest(enabled=enabled)
+        response = self.command_handlers.handle_force_checkpoints(req)
+        self.display_icon_and_text("✅", response.message)
 
     def diff_checkpoints(self, old: Checkpoint, new: Checkpoint) -> None:
         diffs = checkpoint_diff(old, new)
@@ -197,103 +220,146 @@ class FerretKernel(IPythonKernel, Magics):
 
     @line_cell_magic
     def checkpoint(self, line: str, cell: str = "") -> None:
+        """
+        Checkpoint cell magic.
+
+        Uses shared handler implementations for consistent behavior
+        between cell magics and comm channel.
+
+        Usage:
+            %checkpoint save <name>
+            %checkpoint restore <name>
+            %checkpoint delete <name>
+            %checkpoint list
+            %checkpoint compare <name1> <name2>
+            %checkpoint clear
+        """
+        from data_ferret.kernel.kernel_commands import (
+            CheckpointSaveRequest,
+            CheckpointRestoreRequest,
+            CheckpointDeleteRequest,
+            CheckpointListRequest,
+            CheckpointCompareRequest,
+            CheckpointClearRequest,
+        )
+
         assert self.shell is not None, "shell is not set"
         args = line.split()
 
-        if args[0] == "save":
-            if len(args) != 2:
-                self.display_icon_and_text("Usage: checkpoint save <name>")
-                return
+        if not args:
+            self.display_icon_and_text("❌", "Usage: checkpoint <command> [args]")
+            return
 
-            start_time = time.time()
-            saved, removed = self._checkpoint.save(args[1], self.shell.user_ns)
-            end_time = time.time()
-            duration = end_time - start_time
+        try:
+            if args[0] == "save":
+                if len(args) != 2:
+                    self.display_icon_and_text("❌", "Usage: checkpoint save <name>")
+                    return
 
-            for k in removed:
-                del self.shell.user_ns[k]
+                req = CheckpointSaveRequest(name=args[1])
+                response = self.command_handlers.handle_checkpoint_save(req)
 
-            added_text = "\n".join([f"* {k}: {v}" for k, v in saved.items()])
-            removed_text = "\n".join([f"* {k}: {v}" for k, v in removed.items()])
-            metadata = {
-                "ferret": {
-                    "added": added_text,
-                    "removed": removed_text,
-                    "duration": duration,
+                # Format saved/removed variables for display
+                added_text = "\n".join([f"* {k}: {v}" for k, v in response.saved.items()])
+                removed_text = "\n".join([f"* {k}: {v}" for k, v in response.removed.items()])
+                metadata = {
+                    "ferret": {
+                        "added": added_text,
+                        "removed": removed_text,
+                        "duration": response.duration,
+                    }
                 }
-            }
 
-            if removed:
+                if response.removed:
+                    self.display_icon_and_text(
+                        "✅",
+                        f"{response.duration:.2f}s [removed: {', '.join(sorted(response.removed.keys()))}]",
+                        contents=added_text,
+                        metadata=metadata,
+                    )
+                else:
+                    self.display_icon_and_text(
+                        "✅",
+                        f"{response.duration:.2f}s",
+                        contents=added_text,
+                        metadata=metadata,
+                    )
+
+            elif args[0] == "restore":
+                if len(args) != 2:
+                    self.display_icon_and_text("❌", "Usage: checkpoint restore <name>")
+                    return
+
+                req = CheckpointRestoreRequest(name=args[1])
+                response = self.command_handlers.handle_checkpoint_restore(req)
+                self.display_icon_and_text("✅", response.message)
+
+            elif args[0] == "delete":
+                if len(args) != 2:
+                    self.display_icon_and_text("❌", "Usage: checkpoint delete <name>")
+                    return
+
+                req = CheckpointDeleteRequest(name=args[1])
+                response = self.command_handlers.handle_checkpoint_delete(req)
+                self.display_icon_and_text("✅", response.message)
+
+            elif args[0] == "list":
+                req = CheckpointListRequest()
+                response = self.command_handlers.handle_checkpoint_list(req)
                 self.display_icon_and_text(
                     "✅",
-                    f"{duration:0.2f}s [removed: {', '.join(sorted(removed.keys()))}]",
-                    contents=added_text,
-                    metadata=metadata,
+                    f"Checkpoints: {', '.join(sorted(response.checkpoints))}",
                 )
-            else:
-                self.display_icon_and_text(
-                    "✅",
-                    f"{duration:0.2f}s",
-                    contents=added_text,
-                    metadata=metadata,
-                )
-        elif args[0] == "restore":
-            if len(args) != 2:
-                self.display_icon_and_text("❌", "Usage: checkpoint restore <name>")
-                return
 
-            try:
-                self._checkpoint.restore(args[1], self.shell.user_ns)
-            except Exception as e:
-                self.display_icon_and_text("❌", f"Error restoring checkpoint: {e}")
-                return
-        elif args[0] == "delete":
-            if len(args) != 2:
-                self.display_icon_and_text("❌", "Usage: checkpoint delete <name>")
-                return
+            elif args[0] == "compare":
+                if len(args) != 3:
+                    self.display_icon_and_text(
+                        "❌", "Usage: checkpoint compare <name1> <name2>"
+                    )
+                    return
 
-            try:
-                self._checkpoint.delete(args[1])
-            except Exception as e:
-                self.display_icon_and_text("❌", f"Error deleting checkpoint: {e}")
-                return
-        elif args[0] == "list":
-            self.display_icon_and_text(
-                "✅",
-                f"Checkpoints: {', '.join(sorted(self._checkpoint.list()))}",
-                metadata=metadata,
-            )
-        elif args[0] == "compare":
-            if len(args) != 3:
-                self.display_icon_and_text(
-                    "❌", "Usage: checkpoint compare <name1> <name2>"
-                )
-                return
+                req = CheckpointCompareRequest(name1=args[1], name2=args[2])
+                response = self.command_handlers.handle_checkpoint_compare(req)
 
-            try:
+                # Use existing diff display logic
                 old = self._checkpoint.get(args[1])
                 new = self._checkpoint.get(args[2])
                 self.diff_checkpoints(old, new)
-            except Exception as e:
-                self.display_icon_and_text("❌", f"Error comparing checkpoints: {e}")
-                return
-        elif args[0] == "clear":
-            self._checkpoint.clear()
-        else:
-            self.display_icon_and_text("❌", f"Unknown checkpoint command: {line}")
+
+            elif args[0] == "clear":
+                req = CheckpointClearRequest()
+                response = self.command_handlers.handle_checkpoint_clear(req)
+                self.display_icon_and_text("✅", response.message)
+
+            else:
+                self.display_icon_and_text("❌", f"Unknown checkpoint command: {args[0]}")
+
+        except Exception as e:
+            self.display_icon_and_text("❌", f"Error: {e}")
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # any exception → our handler
         assert self.shell is not None, "shell is not set"
         self.shell.register_magics(self)
-        # register our new RPC target
+
+        # Initialize command handlers
+        self.command_handlers = KernelCommandHandlers(self)
+
+        # Register comm targets
+        # Debug commands - separate channel for debugger operations
         self.comm_manager.register_target(
             "debug_command", self._debug_command_comm_open
         )
+        # Test code - legacy comm, kept for backward compatibility
         self.comm_manager.register_target(
             "test_code", self._test_code_comm_open
         )
+        # Kernel commands - new unified command channel
+        self.comm_manager.register_target(
+            "kernel_command", self._kernel_command_comm_open
+        )
+
         self.pdb = FerretPdb()
         self._default_cell_timeout = 30 * 60
         self._cell_timeout = self._default_cell_timeout
@@ -537,6 +603,84 @@ class FerretKernel(IPythonKernel, Magics):
             # not code execution errors (those are handled in test_code)
             error_msg = f"{type(e).__name__}: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             comm.send({"type": "final", "ok": False, "error": error_msg})
+
+    def _kernel_command_comm_open(self, comm, open_msg):
+        """
+        Handle kernel_command comm requests.
+
+        Routes commands to appropriate handlers based on the 'command' field.
+        Supports progress messages for long-running operations.
+        """
+        try:
+            data = open_msg["content"]["data"]
+            command = data.get("command")
+
+            if not command:
+                raise ValueError("Missing 'command' field in request")
+
+            # Get the appropriate handler
+            handler = self.command_handlers.get_handler(command)
+
+            # Create progress callback for operations that support it
+            def send_progress(message: str):
+                progress_msg = ProgressMessage(message=message)
+                comm.send(progress_msg.model_dump())
+
+            # Special handling for test_code which uses progress callback
+            if command == "test_code":
+                # Parse request
+                from data_ferret.kernel.kernel_commands import TestCodeRequest
+                request = TestCodeRequest(**data)
+
+                # Execute with progress callback
+                response = self.command_handlers.handle_test_code(
+                    request,
+                    progress_callback=send_progress,
+                )
+
+                # Make result JSON-safe before sending
+                response_dict = response.model_dump()
+                if "result" in response_dict:
+                    response_dict["result"] = self._make_json_safe(response_dict["result"])
+
+                # Send final response
+                final_msg = FinalMessage(
+                    ok=True,
+                    response=response_dict,
+                )
+                comm.send(final_msg.model_dump())
+
+            else:
+                # For other commands, just execute handler
+                # Dynamically import the appropriate request model
+                from data_ferret.kernel import kernel_commands as cmd_module
+
+                # Build request class name (e.g., "CheckpointSaveRequest")
+                parts = command.split("_")
+                request_class_name = "".join(p.capitalize() for p in parts) + "Request"
+                request_class = getattr(cmd_module, request_class_name)
+
+                # Parse and validate request
+                request = request_class(**data)
+
+                # Execute handler
+                response = handler(request)
+
+                # Send final response
+                final_msg = FinalMessage(
+                    ok=True,
+                    response=response.model_dump(),
+                )
+                comm.send(final_msg.model_dump())
+
+        except Exception as e:
+            # Send error response
+            error_msg = f"{type(e).__name__}: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+            final_msg = FinalMessage(
+                ok=False,
+                error=error_msg,
+            )
+            comm.send(final_msg.model_dump())
 
     async def do_execute(
         self,
