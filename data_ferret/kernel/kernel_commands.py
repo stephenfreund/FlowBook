@@ -129,33 +129,6 @@ class CheckpointClearResponse(KernelCommandResponse):
 
 
 # ============================================================================
-# Test Code Command
-# ============================================================================
-
-class TestCodeRequest(KernelCommandRequest):
-    """Request to test original vs modified code."""
-    command: Literal["test_code"] = "test_code"
-    original_code: str = Field(..., description="Original code to execute")
-    modified_code: str = Field(..., description="Modified code to execute")
-    output_variables: Optional[Set[str]] = Field(
-        None,
-        description="Variables to compare (None = all variables)"
-    )
-
-
-class TestCodeResponse(KernelCommandResponse):
-    """
-    Response from test code execution.
-
-    The result field contains a discriminated union (TestCodeResult) that can be:
-    - TestCodeSuccess: Both codes executed successfully with diff
-    - TestCodeOriginalCrash: Original code crashed
-    - TestCodeModifiedCrash: Modified code crashed (original succeeded)
-    """
-    result: TestCodeResult = Field(..., description="Test execution result")
-
-
-# ============================================================================
 # Feature Toggle Commands
 # ============================================================================
 
@@ -202,7 +175,6 @@ KernelCommandRequestUnion = Union[
     CheckpointListRequest,
     CheckpointCompareRequest,
     CheckpointClearRequest,
-    TestCodeRequest,
     EnableScaleneRequest,
     DisableScaleneRequest,
     ForceCheckpointsRequest,
@@ -216,7 +188,6 @@ KernelCommandResponseUnion = Union[
     CheckpointListResponse,
     CheckpointCompareResponse,
     CheckpointClearResponse,
-    TestCodeResponse,
     EnableScaleneResponse,
     DisableScaleneResponse,
     ForceCheckpointsResponse,

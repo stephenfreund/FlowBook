@@ -2,20 +2,10 @@
 Kernel connection manager for the Jupyter server extension.
 """
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 from jupyter_client.blocking.client import BlockingKernelClient
 from jupyter_client.manager import KernelManager
 from jupyter_server.serverapp import ServerApp
-
-from data_ferret.kernel.types import DiffResult, TestCodeResult
-
-
-@dataclass
-class TestCodeData:
-    """Data class for test_code comm results."""
-    ok: bool
-    result: Union[TestCodeResult, str]  # TestCodeResult when ok=True, error string when ok=False
 
 
 class FerretKernelClient(BlockingKernelClient):

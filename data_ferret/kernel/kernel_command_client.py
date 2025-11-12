@@ -17,6 +17,7 @@ Example usage:
 """
 
 import time
+import uuid
 from typing import Callable, List, Optional, Set
 from jupyter_client import BlockingKernelClient
 
@@ -33,8 +34,6 @@ from data_ferret.kernel.kernel_commands import (
     CheckpointCompareResponse,
     CheckpointClearRequest,
     CheckpointClearResponse,
-    TestCodeRequest,
-    TestCodeResponse,
     EnableScaleneRequest,
     EnableScaleneResponse,
     DisableScaleneRequest,
@@ -97,26 +96,30 @@ class KernelCommandClient:
         timeout = timeout or self.timeout
 
         # Open comm with kernel
-        comm_id = None
+        comm_id = str(uuid.uuid4())
         try:
             # Send comm_open message
             msg = self.kernel_client.session.msg('comm_open', {
+                'comm_id': comm_id,
                 'target_name': 'kernel_command',
+                'target_module': '',
                 'data': request,
             })
             self.kernel_client.shell_channel.send(msg)
 
-            # Wait for comm_open reply and subsequent messages
+            # Wait for comm_msg responses with our comm_id
             start_time = time.time()
             while time.time() - start_time < timeout:
                 try:
                     msg = self.kernel_client.iopub_channel.get_msg(timeout=1.0)
 
-                    if msg['msg_type'] == 'comm_open':
-                        comm_id = msg['content']['comm_id']
-                        continue
-
+                    # Only process comm_msg messages with our comm_id
                     if msg['msg_type'] == 'comm_msg':
+                        msg_comm_id = msg['content'].get('comm_id')
+                        if msg_comm_id != comm_id:
+                            # Not our message, skip it
+                            continue
+
                         data = msg['content']['data']
 
                         # Check message type
@@ -141,6 +144,9 @@ class KernelCommandClient:
 
                 except TimeoutError:
                     # No message yet, continue waiting
+                    continue
+                except Exception:
+                    # Ignore other exceptions (e.g., Empty queue)
                     continue
 
             raise KernelCommandError(f"Command timed out after {timeout}s")
@@ -289,46 +295,6 @@ class KernelCommandClient:
         request = CheckpointClearRequest()
         response_dict = self._send_command(request.model_dump(), timeout=timeout)
         return CheckpointClearResponse(**response_dict)
-
-    # ========================================================================
-    # Test Code Command
-    # ========================================================================
-
-    def test_code(
-        self,
-        original_code: str,
-        modified_code: str,
-        output_variables: Optional[Set[str]] = None,
-        progress_callback: Optional[Callable[[str], None]] = None,
-        timeout: Optional[float] = None,
-    ) -> TestCodeResponse:
-        """
-        Test original vs modified code.
-
-        Args:
-            original_code: Original code to execute
-            modified_code: Modified code to execute
-            output_variables: Variables to compare (None = all)
-            progress_callback: Callback for progress messages
-            timeout: Optional timeout override
-
-        Returns:
-            Response with test results
-
-        Raises:
-            KernelCommandError: If command fails
-        """
-        request = TestCodeRequest(
-            original_code=original_code,
-            modified_code=modified_code,
-            output_variables=output_variables,
-        )
-        response_dict = self._send_command(
-            request.model_dump(),
-            progress_callback=progress_callback,
-            timeout=timeout,
-        )
-        return TestCodeResponse(**response_dict)
 
     # ========================================================================
     # Feature Toggle Commands

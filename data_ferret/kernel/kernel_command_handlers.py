@@ -30,8 +30,6 @@ from data_ferret.kernel.kernel_commands import (
     CheckpointCompareResponse,
     CheckpointClearRequest,
     CheckpointClearResponse,
-    TestCodeRequest,
-    TestCodeResponse,
     EnableScaleneRequest,
     EnableScaleneResponse,
     DisableScaleneRequest,
@@ -41,12 +39,6 @@ from data_ferret.kernel.kernel_commands import (
     KernelCommandRequest,
     KernelCommandResponse,
     ProgressMessage,
-)
-from data_ferret.kernel.types import (
-    TestCodeSuccess,
-    TestCodeOriginalCrash,
-    TestCodeModifiedCrash,
-    ExecutionError,
 )
 
 if TYPE_CHECKING:
@@ -83,7 +75,6 @@ class KernelCommandHandlers:
             "checkpoint_list": self.handle_checkpoint_list,
             "checkpoint_compare": self.handle_checkpoint_compare,
             "checkpoint_clear": self.handle_checkpoint_clear,
-            "test_code": self.handle_test_code,
             "enable_scalene": self.handle_enable_scalene,
             "disable_scalene": self.handle_disable_scalene,
             "force_checkpoints": self.handle_force_checkpoints,
@@ -240,149 +231,6 @@ class KernelCommandHandlers:
         return CheckpointClearResponse(
             status="ok",
             message="All checkpoints cleared",
-        )
-
-    # ========================================================================
-    # Test Code Handler
-    # ========================================================================
-
-    def handle_test_code(
-        self,
-        req: TestCodeRequest,
-        progress_callback: Optional[Callable[[str], None]] = None,
-    ) -> TestCodeResponse:
-        """
-        Test original vs modified code.
-
-        This is the core implementation of the test_code functionality,
-        extracted from the kernel for reusability.
-
-        Args:
-            req: Test code request
-            progress_callback: Optional callback for progress messages
-
-        Returns:
-            Response with test results (success or crash info)
-
-        Raises:
-            AssertionError: If shell is not set
-        """
-        assert self.kernel.shell is not None, "shell is not set"
-
-        def send_progress(message: str):
-            """Helper to send progress if callback provided."""
-            if progress_callback:
-                progress_callback(message)
-
-        # Save original environment
-        send_progress("Saving original environment")
-        saved, _ = self.kernel._checkpoint.save("original_environment", self.kernel.shell.user_ns)
-
-        # Execute original code with crash handling
-        send_progress("Executing original code")
-        start_time = time.time()
-        try:
-            result = self.kernel.shell.run_cell(req.original_code)
-            original_duration = time.time() - start_time
-
-            # Check if execution had an error
-            if result.error_in_exec is not None:
-                raise result.error_in_exec
-
-        except Exception as e:
-            original_duration = time.time() - start_time
-            send_progress(f"Original code crashed: {type(e).__name__}")
-
-            # Original code crashed - return error result
-            crash_result = TestCodeOriginalCrash(
-                error=ExecutionError(
-                    error_type=type(e).__name__,
-                    error_message=str(e),
-                    traceback=traceback.format_exc(),
-                    code_snippet=req.original_code,
-                ),
-                original_duration=original_duration,
-            )
-
-            return TestCodeResponse(
-                status="ok",
-                message="Original code crashed",
-                result=crash_result,
-            )
-
-        # Save result after original execution
-        send_progress("Saving original result")
-        self.kernel._checkpoint.save("original_result", self.kernel.shell.user_ns)
-
-        # Restore original environment
-        send_progress("Restoring original environment")
-        self.kernel._checkpoint.restore("original_environment", self.kernel.shell.user_ns)
-
-        # Execute modified code with crash handling
-        send_progress("Executing modified code")
-        start_time = time.time()
-        try:
-            result = self.kernel.shell.run_cell(req.modified_code)
-            modified_duration = time.time() - start_time
-
-            # Check if execution had an error
-            if result.error_in_exec is not None:
-                raise result.error_in_exec
-
-        except Exception as e:
-            modified_duration = time.time() - start_time
-            send_progress(f"Modified code crashed: {type(e).__name__}")
-
-            # Modified code crashed (original succeeded) - return error result
-            crash_result = TestCodeModifiedCrash(
-                error=ExecutionError(
-                    error_type=type(e).__name__,
-                    error_message=str(e),
-                    traceback=traceback.format_exc(),
-                    code_snippet=req.modified_code,
-                ),
-                original_duration=original_duration,
-                modified_duration=modified_duration,
-            )
-
-            return TestCodeResponse(
-                status="ok",
-                message="Modified code crashed",
-                result=crash_result,
-            )
-
-        # Save result after modified execution
-        send_progress("Saving modified result")
-        self.kernel._checkpoint.save("modified_result", self.kernel.shell.user_ns)
-
-        # Both codes succeeded - perform diff
-        send_progress("Diffing original and modified environments")
-        diff_result = checkpoint_diff(
-            self.kernel._checkpoint.get("original_result"),
-            self.kernel._checkpoint.get("modified_result"),
-            keys_to_include=req.output_variables,
-        )
-
-        # Calculate speedup (avoid division by zero)
-        speedup = original_duration / modified_duration if modified_duration > 0 else 0.0
-
-        send_progress(
-            f"Speedup: {speedup:.2f}x "
-            f"(Original: {original_duration:.2f}s, Modified: {modified_duration:.2f}s)"
-        )
-
-        # Create success result
-        success_result = TestCodeSuccess(
-            diff=diff_result,
-            original_duration=original_duration,
-            modified_duration=modified_duration,
-            speedup=speedup,
-        )
-
-        return TestCodeResponse(
-            status="ok",
-            message=f"Test completed with {speedup:.2f}x speedup",
-            result=success_result,
         )
 
     # ========================================================================

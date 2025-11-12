@@ -6,36 +6,25 @@ using the current cell's output variables.
 """
 
 import pprint
+import time
 import traceback
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel, Field
 
 from data_ferret.kernel.checkpoint import is_valid_variable_name
+from data_ferret.kernel.kernel_command_client import KernelCommandClient
 from data_ferret.kernel.types import (
     DiffResult, TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
-    format_diff_as_markdown
+    ExecutionError, format_diff_as_markdown
 )
 from data_ferret.server.base import NotebookCommand
-from data_ferret.server.kernel_manager import FerretKernelClient, TestCodeData
+from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.dependencies import analyze_notebook, CellDependencies
 from data_ferret.util.output import log, timer
 
 
-class TestCodeRequest(BaseModel):
-    """Request model for test_code comm message."""
-    original_code: str = Field(..., description="The original cell's code")
-    modified_code: str = Field(..., description="The modified cell's code")
-    output_variables: List[str] = Field(..., description="List of variable names to compare")
-
-
-class TestCodeResponse(BaseModel):
-    """Response model for test_code comm message."""
-    ok: bool = Field(..., description="Whether the test succeeded")
-    result: Optional[TestCodeResult] = Field(None, description="The test code result with timing info if successful")
-    error: Optional[str] = Field(None, description="Error message if failed")
-
-    class Config:
-        arbitrary_types_allowed = True
+# Import CodeExecutionOrchestrator from optimize.py
+from data_ferret.server.commands.optimize import CodeExecutionOrchestrator
 
 
 class ValidateChangeCommand(NotebookCommand):
@@ -60,47 +49,6 @@ class ValidateChangeCommand(NotebookCommand):
     @property
     def requires_kernel(self) -> bool:
         return True
-
-    def _send_test_code_comm(
-        self,
-        kernel_client: FerretKernelClient,
-        original_code: str,
-        modified_code: str,
-        output_variables: List[str]
-    ) -> TestCodeData:
-        """
-        Send test_code comm message to kernel and return response.
-
-        Uses the base class _send_comm_message method with type-safe
-        Pydantic models for request and response.
-
-        Args:
-            kernel_client: The kernel client to send the message to
-            original_code: The original cell's code
-            modified_code: The modified (next) cell's code
-            output_variables: List of variable names to compare
-
-        Returns:
-            TestCodeData with ok and result/error fields
-        """
-        # Create type-safe request model
-        request = TestCodeRequest(
-            original_code=original_code,
-            modified_code=modified_code,
-            output_variables=output_variables
-        )
-
-        # Send comm and receive validated response
-        response: TestCodeResponse = self._send_comm_message(
-            kernel_client,
-            target_name="test_code",
-            request=request,
-            response_type=TestCodeResponse
-        )
-
-        # Extract result from validated response (with full IDE autocomplete!)
-        result = response.result if response.ok else response.error
-        return TestCodeData(ok=response.ok, result=result)
 
     def _get_next_cell_source(
         self,
@@ -247,39 +195,36 @@ class ValidateChangeCommand(NotebookCommand):
                     )
 
                     try:
-                        # Send test_code comm message
-                        result = self._send_test_code_comm(
-                            kernel_client,
+                        # Create orchestrator and run test
+                        orchestrator = CodeExecutionOrchestrator(kernel_client)
+                        result = orchestrator.test_code(
                             original_code=source,
                             modified_code=next_source,
-                            output_variables=output_variables
+                            output_variables=set(output_variables)
                         )
 
                         # Store result
                         results[cell_id] = {
-                            "ok": result.ok,
-                            "result": result.result.model_dump() if result.ok and result.result else None,
-                            "error": result.result if not result.ok else None,
+                            "ok": True,  # Always true - result type discriminates success/failure
+                            "result": result.model_dump(),
+                            "error": None,
                         }
 
                         # Log result based on result type
-                        if result.ok and result.result:
-                            if isinstance(result.result, TestCodeSuccess):
-                                # Both codes succeeded - show diff
-                                status_str = "✓" if not result.result.diff.differences else "✗"
-                                log(f"[{status_str}] Cell {idx}: {format_diff_as_markdown(result.result.diff)}")
-                            elif isinstance(result.result, TestCodeOriginalCrash):
-                                # Original code crashed
-                                error = result.result.error
-                                log(f"[✗] Cell {idx}: Original code crashed - {error.error_type}: {error.error_message}")
-                            elif isinstance(result.result, TestCodeModifiedCrash):
-                                # Modified code crashed
-                                error = result.result.error
-                                log(f"[✗] Cell {idx}: Modified code crashed - {error.error_type}: {error.error_message}")
-                            else:
-                                log(f"[?] Cell {idx}: Unknown result type")
+                        if isinstance(result, TestCodeSuccess):
+                            # Both codes succeeded - show diff
+                            status_str = "✓" if not result.diff.differences else "✗"
+                            log(f"[{status_str}] Cell {idx}: {format_diff_as_markdown(result.diff)}")
+                        elif isinstance(result, TestCodeOriginalCrash):
+                            # Original code crashed
+                            error = result.error
+                            log(f"[✗] Cell {idx}: Original code crashed - {error.error_type}: {error.error_message}")
+                        elif isinstance(result, TestCodeModifiedCrash):
+                            # Modified code crashed
+                            error = result.error
+                            log(f"[✗] Cell {idx}: Modified code crashed - {error.error_type}: {error.error_message}")
                         else:
-                            log(f"[✗] Cell {idx}: {result.result}")
+                            log(f"[?] Cell {idx}: Unknown result type")
 
                         total_processed += 1
 

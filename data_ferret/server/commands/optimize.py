@@ -4,12 +4,15 @@ Optimize cells command implementation.
 
 import asyncio
 import copy
+import time
+import traceback
 from typing import Any, Dict, Optional, List, Tuple, Set
 
 from data_ferret.kernel.checkpoint import is_valid_variable_name
+from data_ferret.kernel.kernel_command_client import KernelCommandClient
 from data_ferret.server.base import NotebookCommand
 from data_ferret.util.notebook_tools import NotebookTools
-from data_ferret.server.kernel_manager import FerretKernelClient, TestCodeData
+from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.ferret_metadata import (
     FerretMetadata,
     OptimizationPotential,
@@ -26,7 +29,7 @@ from data_ferret.util.prompts import get_prompt
 from data_ferret.util.dependencies import analyze_notebook, CellDependencies
 from data_ferret.kernel.types import (
     DiffResult, TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
-    format_diff_as_markdown
+    ExecutionError, format_diff_as_markdown
 )
 from data_ferret.util.output import log, error, timer
 
@@ -122,6 +125,192 @@ class ASTHelper:
         return "\n".join(new_lines)
 
 
+class CodeExecutionOrchestrator:
+    """
+    Orchestrates code execution testing using kernel commands.
+
+    Replaces the monolithic test_code command with composable operations.
+    """
+
+    def __init__(self, kernel_client: FerretKernelClient):
+        self.kernel_client = kernel_client
+        self.cmd_client = KernelCommandClient(kernel_client)
+
+    def test_code(
+        self,
+        original_code: str,
+        modified_code: str,
+        output_variables: Set[str],
+    ) -> TestCodeResult:
+        """
+        Test original vs modified code by orchestrating kernel operations.
+
+        Args:
+            original_code: The original code to execute
+            modified_code: The modified code to execute
+            output_variables: Set of variable names to compare
+
+        Returns:
+            TestCodeSuccess, TestCodeOriginalCrash, or TestCodeModifiedCrash
+        """
+        # Step 1: Save original environment
+        self.cmd_client.checkpoint_save("original_environment")
+
+        # Step 2: Execute original code with crash handling
+        original_duration, original_error = self._execute_code_safely(original_code)
+
+        if original_error:
+            # Original crashed - return error
+            return TestCodeOriginalCrash(
+                error=original_error,
+                original_duration=original_duration
+            )
+
+        # Step 3: Save original result
+        self.cmd_client.checkpoint_save("original_result")
+
+        # Step 4: Restore original environment
+        self.cmd_client.checkpoint_restore("original_environment")
+
+        # Step 5: Execute modified code with crash handling
+        modified_duration, modified_error = self._execute_code_safely(modified_code)
+
+        if modified_error:
+            # Modified crashed (original worked) - return error
+            return TestCodeModifiedCrash(
+                error=modified_error,
+                original_duration=original_duration,
+                modified_duration=modified_duration
+            )
+
+        # Step 6: Save modified result
+        self.cmd_client.checkpoint_save("modified_result")
+
+        # Step 7: Compare checkpoints
+        compare_response = self.cmd_client.checkpoint_compare(
+            "original_result",
+            "modified_result"
+        )
+
+        # Filter diff by output_variables
+        diff_result = self._filter_diff(compare_response.diff, output_variables)
+
+        # Step 8: Calculate speedup
+        speedup = original_duration / modified_duration if modified_duration > 0 else 0.0
+
+        # Step 9: Return success result
+        return TestCodeSuccess(
+            diff=diff_result,
+            original_duration=original_duration,
+            modified_duration=modified_duration,
+            speedup=speedup
+        )
+
+    def _execute_code_safely(
+        self,
+        code: str
+    ) -> Tuple[float, Optional[ExecutionError]]:
+        """
+        Execute code and capture any errors.
+
+        Args:
+            code: The code to execute
+
+        Returns:
+            (duration, error) - error is None if execution succeeded
+        """
+        start_time = time.time()
+
+        try:
+            # Execute code in kernel
+            msg_id = self.kernel_client.execute(code, store_history=False)
+
+            # Wait for execution to complete and check for errors
+            error = self._wait_for_execution(msg_id, code)
+            duration = time.time() - start_time
+
+            return duration, error
+
+        except Exception as e:
+            duration = time.time() - start_time
+            error = ExecutionError(
+                error_type=type(e).__name__,
+                error_message=str(e),
+                traceback=traceback.format_exc(),
+                code_snippet=code
+            )
+            return duration, error
+
+    def _wait_for_execution(self, msg_id: str, code: str) -> Optional[ExecutionError]:
+        """
+        Wait for execution to complete and check for errors.
+
+        Args:
+            msg_id: The message ID of the execution request
+            code: The code that was executed (for error reporting)
+
+        Returns:
+            ExecutionError if execution failed, None if succeeded
+        """
+        error_occurred = None
+
+        while True:
+            try:
+                msg = self.kernel_client.get_iopub_msg(timeout=60.0)
+
+                # Check if this message is for our execution
+                if msg['parent_header'].get('msg_id') != msg_id:
+                    continue
+
+                msg_type = msg['header']['msg_type']
+
+                if msg_type == 'error':
+                    # Execution error - save it but keep waiting for status: idle
+                    content = msg['content']
+                    error_occurred = ExecutionError(
+                        error_type=content.get('ename', 'UnknownError'),
+                        error_message=content.get('evalue', ''),
+                        traceback='\n'.join(content.get('traceback', [])),
+                        code_snippet=code
+                    )
+
+                elif msg_type == 'status':
+                    # Check if execution is done
+                    execution_state = msg['content']['execution_state']
+                    if execution_state == 'idle':
+                        # Execution completed - return error if one occurred
+                        return error_occurred
+
+            except Exception:
+                # Timeout or other error - continue waiting
+                continue
+
+    def _filter_diff(
+        self,
+        diff: Dict[str, Any],
+        output_variables: Set[str]
+    ) -> DiffResult:
+        """
+        Filter diff result to only include specified output variables.
+
+        Args:
+            diff: Complete diff from checkpoint comparison
+            output_variables: Variables to include
+
+        Returns:
+            Filtered DiffResult containing only the specified variables
+        """
+        # The checkpoint_compare returns a diff dictionary
+        # We need to filter it to only include variables in output_variables
+        if not output_variables:
+            # If no output variables specified, return the full diff
+            return DiffResult(differences=diff)
+
+        # Filter to only include specified variables
+        filtered_diff = {k: v for k, v in diff.items() if k in output_variables}
+        return DiffResult(differences=filtered_diff)
+
+
 class OptimizationResultAndStats(BaseModel):
     original_code: List[CodeSnippet] = Field(
         description="Original code snippets that will be replaced"
@@ -149,29 +338,6 @@ class RepairedOptimizationResponse(BaseModel):
     explanation: str = Field(
         description="Explanation of the repair process and the changes made"
     )
-
-
-class TestCodeRequest(BaseModel):
-    """Request model for test_code comm message."""
-
-    original_code: str = Field(..., description="The original cell's code")
-    modified_code: str = Field(..., description="The modified cell's code")
-    output_variables: List[str] = Field(
-        ..., description="List of variable names to compare"
-    )
-
-
-class TestCodeResponse(BaseModel):
-    """Response model for test_code comm message."""
-
-    ok: bool = Field(..., description="Whether the test succeeded")
-    result: Optional[TestCodeResult] = Field(
-        None, description="The test code result with timing info if successful"
-    )
-    error: Optional[str] = Field(None, description="Error message if failed")
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class ValidationHelper:
@@ -247,7 +413,7 @@ class ValidationHelper:
         original_code: str,
         optimized_code: str,
         modified_globals: Set[str],
-        test_code_func,
+        kernel_client: FerretKernelClient,
     ) -> Tuple[bool, Optional[str], Optional[TestCodeResult]]:
         """
         Validate that optimization preserves semantics.
@@ -256,7 +422,7 @@ class ValidationHelper:
             original_code: The original code
             optimized_code: The optimized code
             modified_globals: Set of global variables to check
-            test_code_func: Function to call for testing code (takes original, modified, variables)
+            kernel_client: FerretKernelClient for executing operations
 
         Returns:
             (True, None, test_code_result) if validation passes
@@ -267,65 +433,58 @@ class ValidationHelper:
             return (True, None, None)
 
         try:
-            result = test_code_func(
+            # Create orchestrator
+            orchestrator = CodeExecutionOrchestrator(kernel_client)
+
+            # Run test
+            result = orchestrator.test_code(
                 original_code=original_code,
                 modified_code=optimized_code,
-                output_variables=sorted(list(modified_globals)),
+                output_variables=modified_globals
             )
 
             # Handle the three possible result types
-            if result.ok:
-                # Check which type of result we got (discriminated union)
-                if isinstance(result.result, TestCodeSuccess):
-                    # Both codes succeeded - check if outputs match
-                    diff_result = result.result.diff
-                    print(diff_result)
+            if isinstance(result, TestCodeSuccess):
+                # Both codes succeeded - check if outputs match
+                diff_result = result.diff
+                print(diff_result)
 
-                    if not diff_result.differences:
-                        # All variables match - validation passed
-                        return (True, None, result.result)
-                    else:
-                        # Variables differ - validation failed
-                        diff_vars = list(diff_result.differences.keys())
-                        error_msg = f"Variables changed: {', '.join(diff_vars)}"
-                        error_msg += f"\n\n{format_diff_as_markdown(diff_result)}"
-                        return (False, error_msg, None)
-
-                elif isinstance(result.result, TestCodeOriginalCrash):
-                    # Original code crashed - cannot optimize broken code
-                    error = result.result.error
-                    error_msg = "Original code crashes - cannot optimize broken code:\n\n"
-                    error_msg += f"**{error.error_type}**: {error.error_message}\n\n"
-                    error_msg += "**Traceback:**\n```\n"
-                    error_msg += error.traceback
-                    error_msg += "\n```"
-                    return (False, error_msg, None)
-
-                elif isinstance(result.result, TestCodeModifiedCrash):
-                    # Optimized code crashed - optimization introduced a bug
-                    error = result.result.error
-                    error_msg = "Optimized code crashes (original works) - optimization introduced a bug:\n\n"
-                    error_msg += f"**{error.error_type}**: {error.error_message}\n\n"
-                    error_msg += "**Traceback:**\n```\n"
-                    error_msg += error.traceback
-                    error_msg += "\n```"
-                    return (False, error_msg, None)
-
+                if not diff_result.differences:
+                    # All variables match - validation passed
+                    return (True, None, result)
                 else:
-                    # Unknown result type
-                    error_msg = f"Unknown test result type: {type(result.result)}"
+                    # Variables differ - validation failed
+                    diff_vars = list(diff_result.differences.keys())
+                    error_msg = f"Variables changed: {', '.join(diff_vars)}"
+                    error_msg += f"\n\n{format_diff_as_markdown(diff_result)}"
                     return (False, error_msg, None)
+
+            elif isinstance(result, TestCodeOriginalCrash):
+                # Original code crashed - cannot optimize broken code
+                error = result.error
+                error_msg = "Original code crashes - cannot optimize broken code:\n\n"
+                error_msg += f"**{error.error_type}**: {error.error_message}\n\n"
+                error_msg += "**Traceback:**\n```\n"
+                error_msg += error.traceback
+                error_msg += "\n```"
+                return (False, error_msg, None)
+
+            elif isinstance(result, TestCodeModifiedCrash):
+                # Optimized code crashed - optimization introduced a bug
+                error = result.error
+                error_msg = "Optimized code crashes (original works) - optimization introduced a bug:\n\n"
+                error_msg += f"**{error.error_type}**: {error.error_message}\n\n"
+                error_msg += "**Traceback:**\n```\n"
+                error_msg += error.traceback
+                error_msg += "\n```"
+                return (False, error_msg, None)
+
             else:
-                # Communication error (not a code crash)
-                error_msg = (
-                    str(result.result)
-                    if isinstance(result.result, str)
-                    else "Unknown communication error"
-                )
+                # Unknown result type
+                error_msg = f"Unknown test result type: {type(result)}"
                 return (False, error_msg, None)
 
         except Exception as e:
-            import traceback
             error_msg = f"Validation exception: {type(e).__name__}: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
             return (False, error_msg, None)
 
@@ -561,55 +720,6 @@ class OptimizeCommand(NotebookCommand):
     def requires_kernel(self) -> bool:
         return True
 
-    def _send_test_code_comm(
-        self,
-        kernel_client: FerretKernelClient,
-        original_code: str,
-        modified_code: str,
-        output_variables: List[str],
-    ) -> TestCodeData:
-        """
-        Send test_code comm message to kernel and return response.
-
-        Uses the base class _send_comm_message method with type-safe
-        Pydantic models for request and response.
-
-        Args:
-            kernel_client: The kernel client to send the message to
-            original_code: The original cell's code
-            modified_code: The modified (next) cell's code
-            output_variables: List of variable names to compare
-
-        Returns:
-            TestCodeData with ok and result/error fields
-        """
-        # Create type-safe request model
-        request = TestCodeRequest(
-            original_code=original_code,
-            modified_code=modified_code,
-            output_variables=output_variables,
-        )
-
-        # Send comm and receive validated response
-        response: TestCodeResponse = self._send_comm_message(
-            kernel_client,
-            target_name="test_code",
-            request=request,
-            response_type=TestCodeResponse,
-        )
-
-        # Validate response state
-        if response.ok:
-            if response.result is None:
-                raise RuntimeError("test_code succeeded but returned no result")
-            result = response.result
-        else:
-            if response.error is None:
-                raise RuntimeError("test_code failed but returned no error message")
-            result = response.error
-
-        return TestCodeData(ok=response.ok, result=result)
-
     def _format_snippets_for_repair(self, snippets: List[CodeSnippet]) -> str:
         """Format snippets for the repair prompt."""
         formatted = []
@@ -772,7 +882,7 @@ class OptimizeCommand(NotebookCommand):
                 original_code,
                 optimized_code,
                 modified_globals,
-                lambda **kwargs: self._send_test_code_comm(kernel_client, **kwargs),
+                kernel_client,
             )
 
             if is_valid:
