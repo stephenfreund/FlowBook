@@ -38,6 +38,23 @@ from pydantic import BaseModel, Field
 import ast
 
 
+class PrePostEnvironments(BaseModel):
+    """Optional pre-existing checkpoint names to skip original code execution."""
+
+    original_environment: Optional[str] = Field(
+        None,
+        description="Name of checkpoint containing the pre-execution environment"
+    )
+    original_result: Optional[str] = Field(
+        None,
+        description="Name of checkpoint containing the post-execution environment"
+    )
+    original_duration: Optional[float] = Field(
+        None,
+        description="Duration of original code execution (from profile metadata)"
+    )
+
+
 class ASTHelper:
     """Helper class for AST-based code manipulation."""
 
@@ -141,6 +158,7 @@ class CodeExecutionOrchestrator:
         original_code: str,
         modified_code: str,
         output_variables: Set[str],
+        pre_post_envs: Optional[PrePostEnvironments] = None,
     ) -> TestCodeResult:
         """
         Test original vs modified code by orchestrating kernel operations.
@@ -149,28 +167,48 @@ class CodeExecutionOrchestrator:
             original_code: The original code to execute
             modified_code: The modified code to execute
             output_variables: Set of variable names to compare
+            pre_post_envs: Optional pre-existing checkpoints to skip original execution
 
         Returns:
             TestCodeSuccess, TestCodeOriginalCrash, or TestCodeModifiedCrash
         """
-        # Step 1: Save original environment
-        self.cmd_client.checkpoint_save("original_environment")
+        # Check if we should use pre-existing checkpoints
+        use_existing_checkpoints = (
+            pre_post_envs is not None
+            and pre_post_envs.original_environment is not None
+            and pre_post_envs.original_result is not None
+        )
 
-        # Step 2: Execute original code with crash handling
-        original_duration, original_error = self._execute_code_safely(original_code)
+        if use_existing_checkpoints:
+            # Skip steps 1-3: Use existing checkpoints
+            # Use provided duration from profile, or 0.0 if not available
+            original_duration = pre_post_envs.original_duration or 0.0
+            log(f"Using existing checkpoints: {pre_post_envs.original_environment} and {pre_post_envs.original_result}")
+            log(f"Using profile duration: {original_duration:.2f}s")
+            env_checkpoint_name = pre_post_envs.original_environment
+            result_checkpoint_name = pre_post_envs.original_result
+        else:
+            # Step 1: Save original environment
+            self.cmd_client.checkpoint_save("original_environment")
 
-        if original_error:
-            # Original crashed - return error
-            return TestCodeOriginalCrash(
-                error=original_error,
-                original_duration=original_duration
-            )
+            # Step 2: Execute original code with crash handling
+            original_duration, original_error = self._execute_code_safely(original_code)
 
-        # Step 3: Save original result
-        self.cmd_client.checkpoint_save("original_result")
+            if original_error:
+                # Original crashed - return error
+                return TestCodeOriginalCrash(
+                    error=original_error,
+                    original_duration=original_duration
+                )
+
+            # Step 3: Save original result
+            self.cmd_client.checkpoint_save("original_result")
+
+            env_checkpoint_name = "original_environment"
+            result_checkpoint_name = "original_result"
 
         # Step 4: Restore original environment
-        self.cmd_client.checkpoint_restore("original_environment")
+        self.cmd_client.checkpoint_restore(env_checkpoint_name)
 
         # Step 5: Execute modified code with crash handling
         modified_duration, modified_error = self._execute_code_safely(modified_code)
@@ -188,7 +226,7 @@ class CodeExecutionOrchestrator:
 
         # Step 7: Compare checkpoints
         compare_response = self.cmd_client.checkpoint_compare(
-            "original_result",
+            result_checkpoint_name,
             "modified_result"
         )
 
@@ -414,6 +452,7 @@ class ValidationHelper:
         optimized_code: str,
         modified_globals: Set[str],
         kernel_client: FerretKernelClient,
+        pre_post_envs: Optional[PrePostEnvironments] = None,
     ) -> Tuple[bool, Optional[str], Optional[TestCodeResult]]:
         """
         Validate that optimization preserves semantics.
@@ -423,6 +462,7 @@ class ValidationHelper:
             optimized_code: The optimized code
             modified_globals: Set of global variables to check
             kernel_client: FerretKernelClient for executing operations
+            pre_post_envs: Optional pre-existing checkpoints to skip original execution
 
         Returns:
             (True, None, test_code_result) if validation passes
@@ -440,7 +480,8 @@ class ValidationHelper:
             result = orchestrator.test_code(
                 original_code=original_code,
                 modified_code=optimized_code,
-                output_variables=modified_globals
+                output_variables=modified_globals,
+                pre_post_envs=pre_post_envs
             )
 
             # Handle the three possible result types
@@ -826,6 +867,7 @@ class OptimizeCommand(NotebookCommand):
         kernel_client: FerretKernelClient,
         dependencies_dict: Dict[str, CellDependencies],
         stats_aggregator: StatsAggregator,
+        pre_post_envs: Optional[PrePostEnvironments] = None,
     ) -> Tuple[bool, List[CodeSnippet], Optional[Dict[str, float]]]:
         """
         Validate optimization with retry logic.
@@ -840,6 +882,7 @@ class OptimizeCommand(NotebookCommand):
             kernel_client: Kernel client for validation
             dependencies_dict: Cell dependencies
             stats_aggregator: Stats aggregator
+            pre_post_envs: Optional pre-existing checkpoints to skip original execution
 
         Returns:
             Tuple of (success, validated_snippets, timing_data)
@@ -883,6 +926,7 @@ class OptimizeCommand(NotebookCommand):
                 optimized_code,
                 modified_globals,
                 kernel_client,
+                pre_post_envs,
             )
 
             if is_valid:
@@ -1237,6 +1281,7 @@ class OptimizeCommand(NotebookCommand):
         model: Any,
         kernel_client: Optional[FerretKernelClient] = None,
         dependencies_dict: Optional[Dict[str, CellDependencies]] = None,
+        pre_post_envs: Optional[PrePostEnvironments] = None,
     ) -> Tuple[str, OptimizationResultAndStats]:
         """Optimize a single cell based on its optimization plan.
 
@@ -1250,6 +1295,7 @@ class OptimizeCommand(NotebookCommand):
             model: The LLM model to use for optimization
             kernel_client: Optional kernel client for validation
             dependencies_dict: Optional pre-computed dependencies for validation
+            pre_post_envs: Optional pre-existing checkpoints to skip original execution
 
         Returns:
             Tuple of (cell_id, OptimizationResultAndStats)
@@ -1304,6 +1350,7 @@ class OptimizeCommand(NotebookCommand):
                             kernel_client,
                             dependencies_dict,
                             stats_aggregator,
+                            pre_post_envs,
                         )
                     )
 
@@ -1357,6 +1404,7 @@ class OptimizeCommand(NotebookCommand):
         model: Any,
         kernel_client: Optional[FerretKernelClient],
         dependencies_dict: Optional[Dict[str, CellDependencies]],
+        pre_post_envs: Optional[PrePostEnvironments] = None,
     ) -> List[Tuple[str, OptimizationResultAndStats]]:
         """
         Process all cells sequentially.
@@ -1367,6 +1415,7 @@ class OptimizeCommand(NotebookCommand):
             model: LLM model to use
             kernel_client: Optional kernel client
             dependencies_dict: Optional dependencies dict
+            pre_post_envs: Optional pre-existing checkpoints to skip original execution
 
         Returns:
             List of (cell_id, result) tuples
@@ -1374,7 +1423,7 @@ class OptimizeCommand(NotebookCommand):
         all_results = []
         for index in cells_to_process:
             cell_id, result = await self.optimize_cell(
-                index, nb, model, kernel_client, dependencies_dict
+                index, nb, model, kernel_client, dependencies_dict, pre_post_envs
             )
             all_results.append((cell_id, result))
         return all_results
@@ -1420,6 +1469,7 @@ class OptimizeCommand(NotebookCommand):
         model: Any,
         cell_ids: Optional[List[str]] = None,
         kernel_client: Optional[FerretKernelClient] = None,
+        pre_post_envs: Optional[PrePostEnvironments] = None,
     ) -> Tuple[nbformat.NotebookNode, float, Dict[str, Dict[str, float]]]:
         """Optimize cells in the notebook.
 
@@ -1428,6 +1478,7 @@ class OptimizeCommand(NotebookCommand):
             model: The LLM model to use
             cell_ids: Optional list of specific cell IDs to optimize
             kernel_client: Optional kernel client for validation
+            pre_post_envs: Optional pre-existing checkpoints to skip original execution
 
         Returns:
             Tuple of (modified_notebook, total_cost, cell_timing)
@@ -1474,7 +1525,7 @@ class OptimizeCommand(NotebookCommand):
                 key="process_all_cells", message="Processing all optimization steps"
             ):
                 all_results = await self._process_cells_sequentially(
-                    cells_to_process, new_nb, model, kernel_client, dependencies_dict
+                    cells_to_process, new_nb, model, kernel_client, dependencies_dict, pre_post_envs
                 )
 
             log("")
@@ -1493,11 +1544,12 @@ class OptimizeCommand(NotebookCommand):
         kernel_client: Optional[FerretKernelClient] = None,
         selected_cell_ids: Optional[List[str]] = None,
         config: Optional[Any] = None,
+        pre_post_envs: Optional[PrePostEnvironments] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """Optimize cells in the notebook based on their optimization plans."""
         new_nb, total_cost, cell_timing = await self.optimize_cells(
-            notebook_content, config.model, selected_cell_ids, kernel_client
+            notebook_content, config.model, selected_cell_ids, kernel_client, pre_post_envs
         )
 
         metadata = {

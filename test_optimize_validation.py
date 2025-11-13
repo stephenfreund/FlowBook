@@ -25,28 +25,28 @@ def test_get_modified_globals_for_cell():
     dependencies_dict = analyze_notebook(nb)
 
     # Test the helper function
-    cmd = OptimizeCommand()
+    from data_ferret.server.commands.optimize import ValidationHelper
 
     # Cell 1 should write x, y, result
-    globals_cell1 = cmd._get_modified_globals_for_cell("cell-1", dependencies_dict)
+    globals_cell1 = ValidationHelper.get_modified_globals_for_cell("cell-1", dependencies_dict)
     assert "x" in globals_cell1
     assert "y" in globals_cell1
     assert "result" in globals_cell1
 
     # Cell 2 should write z
-    globals_cell2 = cmd._get_modified_globals_for_cell("cell-2", dependencies_dict)
+    globals_cell2 = ValidationHelper.get_modified_globals_for_cell("cell-2", dependencies_dict)
     assert "z" in globals_cell2
 
     # System variables should be filtered out
     assert "_" not in globals_cell1
     assert "get_ipython" not in globals_cell1
 
-    print("✓ _get_modified_globals_for_cell works correctly")
+    print("✓ get_modified_globals_for_cell works correctly")
 
 
 def test_build_optimized_code_for_validation():
     """Test building optimized code for validation."""
-    cmd = OptimizeCommand()
+    from data_ferret.server.commands.optimize import ValidationHelper
 
     # Create snippets
     original_snippets = [
@@ -75,7 +75,7 @@ def test_build_optimized_code_for_validation():
     }
 
     # Build optimized code
-    optimized_code = cmd._build_optimized_code_for_validation(
+    optimized_code = ValidationHelper.build_optimized_code_for_validation(
         original_snippets,
         optimized_snippets,
         cell_map,
@@ -87,14 +87,14 @@ def test_build_optimized_code_for_validation():
     assert "return sum(arr)" in optimized_code
     assert "# Optimized cell cell-1" in optimized_code
 
-    print("✓ _build_optimized_code_for_validation works correctly")
+    print("✓ build_optimized_code_for_validation works correctly")
     print("\nGenerated code:")
     print(optimized_code)
 
 
 def test_build_optimized_code_with_dependencies():
     """Test building optimized code when dependencies are modified."""
-    cmd = OptimizeCommand()
+    from data_ferret.server.commands.optimize import ValidationHelper
 
     # Scenario: Cell 2 calls a function from Cell 1
     # Optimization modifies the function in Cell 1 and uses it in Cell 2
@@ -133,7 +133,7 @@ def test_build_optimized_code_with_dependencies():
     }
 
     # Build code for validating cell-2
-    optimized_code = cmd._build_optimized_code_for_validation(
+    optimized_code = ValidationHelper.build_optimized_code_for_validation(
         original_snippets,
         optimized_snippets,
         cell_map,
@@ -148,7 +148,7 @@ def test_build_optimized_code_with_dependencies():
     assert "Modified from cell cell-1" in optimized_code
     assert "Optimized cell cell-2" in optimized_code
 
-    print("✓ _build_optimized_code_for_validation handles dependencies correctly")
+    print("✓ build_optimized_code_for_validation handles dependencies correctly")
     print("\nGenerated code with dependencies:")
     print(optimized_code)
 

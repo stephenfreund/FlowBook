@@ -124,6 +124,15 @@ async def optimize_cell(
 
     # Step 1: Profile
     print(f"\n[1/3] Profiling cell {cell_index}...")
+
+    # Save environment BEFORE profiling
+    from data_ferret.kernel.kernel_command_client import KernelCommandClient
+    cmd_client = KernelCommandClient(kernel_client)
+
+    checkpoint_name_before = f"cell_{cell_id}_before_profile"
+    cmd_client.checkpoint_save(checkpoint_name_before)
+    log(f"Saved checkpoint before profile: {checkpoint_name_before}")
+
     with timer(key=f"profile_cell_{cell_index}", message=f"Profile cell {cell_index}"):
         try:
             profile_cmd = registry.get_command("profile")
@@ -139,6 +148,28 @@ async def optimize_cell(
         except Exception as e:
             error(f"Profile failed for cell {cell_index}: {e}")
             results['profile'] = {'error': str(e)}
+
+    # Save environment AFTER profiling
+    checkpoint_name_after = f"cell_{cell_id}_after_profile"
+    cmd_client.checkpoint_save(checkpoint_name_after)
+    log(f"Saved checkpoint after profile: {checkpoint_name_after}")
+
+    # Extract duration from profile metadata
+    profile_duration = None
+    for c in notebook_content.get('cells', []):
+        if c.get('id') == cell_id:
+            from data_ferret.util.ferret_metadata import FerretMetadata
+            ferret_metadata = FerretMetadata.from_cell(c)
+            profile_data = ferret_metadata.get_profile()
+            if profile_data:
+                profile_duration = profile_data.duration
+                log(f"Extracted profile duration: {profile_duration:.2f}s")
+            break
+
+    # Store checkpoint names and duration for later use
+    results['checkpoint_before'] = checkpoint_name_before
+    results['checkpoint_after'] = checkpoint_name_after
+    results['profile_duration'] = profile_duration
 
     # Step 2: Inspect
     print(f"\n[2/3] Inspecting cell {cell_index}...")
@@ -211,12 +242,23 @@ async def optimize_cell(
         print(f"\n[3/3] Optimizing cell {cell_index}...")
         with timer(key=f"optimize_cell_{cell_index}", message=f"Optimize cell {cell_index}"):
             try:
+                # Import PrePostEnvironments model
+                from data_ferret.server.commands.optimize import PrePostEnvironments
+
+                # Create pre_post_envs using the checkpoints and duration from profile
+                pre_post_envs = PrePostEnvironments(
+                    original_environment=results.get('checkpoint_before'),
+                    original_result=results.get('checkpoint_after'),
+                    original_duration=results.get('profile_duration')
+                )
+
                 optimize_cmd = registry.get_command("optimize")
                 optimize_result = await optimize_cmd.process(
                     notebook_content,
                     kernel_client=kernel_client,
                     selected_cell_ids=[cell_id],
                     config=config,
+                    pre_post_envs=pre_post_envs  # Pass the checkpoints!
                 )
                 notebook_content = optimize_result["notebook"]
                 results['optimize'] = optimize_result.get("metadata", {})
