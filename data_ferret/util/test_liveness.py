@@ -694,3 +694,47 @@ def test_reuse_dependencies():
 
     assert "c1" in liveness
     assert "x" in liveness["c1"].live_out
+
+
+def test_comprehension_local_vars_not_in_gen():
+    """Test that comprehension loop variables are not in gen set.
+
+    Regression test for bug where variables defined in comprehensions
+    (both as loop vars and assigned results) were incorrectly appearing
+    in gen/live_in sets.
+    """
+    from data_ferret.util.dependencies import analyze_notebook
+
+    notebook = {
+        "cells": [
+            {
+                "id": "c1",
+                "cell_type": "code",
+                "source": """days = [day for day in holidays.CountryHoliday(country)]
+for day in days:
+    df.loc[(df.country == country), 'near_holiday'] = 1"""
+            }
+        ]
+    }
+
+    deps = analyze_notebook(notebook)
+    liveness = analyze_notebook_liveness(notebook, deps)
+
+    # 'day' and 'days' are written before being read, so should not be in gen
+    assert "day" not in deps["c1"].globals_read, "day should not be read (written first in comprehension)"
+    assert "days" not in deps["c1"].globals_read, "days should not be read (written first)"
+
+    # They should not be in gen or live_in
+    assert "day" not in liveness["c1"].gen, "day should not be in gen"
+    assert "days" not in liveness["c1"].gen, "days should not be in gen"
+    assert "day" not in liveness["c1"].live_in, "day should not be in live_in"
+    assert "days" not in liveness["c1"].live_in, "days should not be in live_in"
+
+    # They should be in kill (written by cell)
+    assert "day" in liveness["c1"].kill
+    assert "days" in liveness["c1"].kill
+
+    # But the variables used FROM globals should be tracked
+    # Note: 'country' is tracked as a function call, not a read
+    # 'df' is tracked through subscript operations
+    assert "country" in deps["c1"].functions_called or "country" in deps["c1"].globals_read

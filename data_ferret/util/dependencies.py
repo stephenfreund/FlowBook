@@ -222,6 +222,7 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         self.function_defs: Dict[str, FunctionInfo] = {}  # Function definitions found
         self.written_at_module_level: Set[str] = set()  # Track module-level writes in order
         self.in_conditional: int = 0  # Track if we're inside conditional/loop (conservative)
+        self.conditional_write_depth: Dict[str, int] = {}  # Track at what depth each var was written
         self.functions_defined: Set[str] = set()  # Function names defined at module level
         self.classes_defined: Set[str] = set()  # Class names defined at module level
         self.methods_called: Set[str] = set()  # Method names called (from obj.method())
@@ -481,6 +482,8 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
             if self._is_at_module_level() or is_declared_global:
                 # Write to global scope
                 self.globals_written.add(name)
+                # Track the conditional depth at which this variable was written
+                self.conditional_write_depth[name] = self.in_conditional
                 # Only add to written_at_module_level if not in conditional
                 # (conservative: conditional writes might not execute)
                 if self.in_conditional == 0 and self._is_at_module_level():
@@ -506,7 +509,23 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
             if name not in common_builtins:
                 # Flow-sensitive: only add to globals_read if not already written at module level
                 if self._is_at_module_level():
-                    if name not in self.written_at_module_level:
+                    # Check if variable was written unconditionally
+                    if name in self.written_at_module_level:
+                        # Written unconditionally, don't add to globals_read
+                        pass
+                    elif name in self.conditional_write_depth:
+                        # Written conditionally - check if we're at same or deeper nesting
+                        write_depth = self.conditional_write_depth[name]
+                        if self.in_conditional >= write_depth:
+                            # We're at the same or deeper nesting level as the write,
+                            # so the write dominates this read within this block
+                            pass
+                        else:
+                            # We're at a shallower nesting level, so the write might
+                            # not have executed (e.g., write in loop, read after loop)
+                            self.globals_read.add(name)
+                    else:
+                        # Not written at all, add to globals_read
                         self.globals_read.add(name)
                 elif is_declared_global:
                     # Declared global in nested scope - add to globals_read
@@ -540,7 +559,29 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
             func_name = node.func.id
             if not self._is_local(func_name):
                 self.functions_called.add(func_name)
-                self.globals_read.add(func_name)
+                # Flow-sensitive: only add to globals_read if not already written at module level
+                if self._is_at_module_level():
+                    # Check if function was written unconditionally
+                    if func_name in self.written_at_module_level:
+                        # Written unconditionally, don't add to globals_read
+                        pass
+                    elif func_name in self.conditional_write_depth:
+                        # Written conditionally - check if we're at same or deeper nesting
+                        write_depth = self.conditional_write_depth[func_name]
+                        if self.in_conditional >= write_depth:
+                            # We're at the same or deeper nesting level as the write,
+                            # so the write dominates this read within this block
+                            pass
+                        else:
+                            # We're at a shallower nesting level, so the write might
+                            # not have executed (e.g., write in loop, read after loop)
+                            self.globals_read.add(func_name)
+                    else:
+                        # Not written at all, add to globals_read
+                        self.globals_read.add(func_name)
+                else:
+                    # In nested scope, add to globals_read
+                    self.globals_read.add(func_name)
         elif isinstance(node.func, ast.Attribute):
             # For method calls like obj.method(), track obj and the method name
             self.visit(node.func.value)
@@ -618,6 +659,63 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
                 self.visit(child)
         finally:
             self.in_conditional -= 1
+
+    def _visit_comprehension(self, node, elt=None, key=None, value=None):
+        """Helper to visit comprehensions (list, set, dict, generator).
+
+        Comprehensions have their own scope - loop variables are local to the
+        comprehension and should not be treated as global reads/writes.
+        """
+        # Collect all loop variables from all generators (these are local to comprehension)
+        local_vars = set()
+
+        # First, visit all iterators (these may read globals) and collect local vars
+        for generator in node.generators:
+            # Visit the iterator first (may read globals)
+            self.visit(generator.iter)
+
+            # Collect target variables (loop vars) - these are local
+            if isinstance(generator.target, ast.Name):
+                local_vars.add(generator.target.id)
+            elif isinstance(generator.target, (ast.Tuple, ast.List)):
+                for elt_node in ast.walk(generator.target):
+                    if isinstance(elt_node, ast.Name):
+                        local_vars.add(elt_node.id)
+
+        # Save state AFTER visiting iterators
+        state_after_iters_reads = self.globals_read.copy()
+        state_after_iters_writes = self.globals_written.copy()
+
+        # Now visit the element/key/value expressions and filters
+        # Track what they read/write, but exclude local vars
+        for generator in node.generators:
+            for if_clause in generator.ifs:
+                self.visit(if_clause)
+
+        # Visit the element/key/value expressions
+        for expr in [elt, key, value]:
+            if expr is not None:
+                self.visit(expr)
+
+        # Remove local variable references from reads/writes
+        self.globals_read -= local_vars
+        self.globals_written -= local_vars
+
+    def visit_ListComp(self, node: ast.ListComp):
+        """Visit list comprehension - loop variables are local."""
+        self._visit_comprehension(node, elt=node.elt)
+
+    def visit_SetComp(self, node: ast.SetComp):
+        """Visit set comprehension - loop variables are local."""
+        self._visit_comprehension(node, elt=node.elt)
+
+    def visit_DictComp(self, node: ast.DictComp):
+        """Visit dict comprehension - loop variables are local."""
+        self._visit_comprehension(node, key=node.key, value=node.value)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp):
+        """Visit generator expression - loop variables are local."""
+        self._visit_comprehension(node, elt=node.elt)
 
     def _extract_assignment_targets(self, node):
         """Extract names from assignment targets and add to appropriate scope."""
