@@ -656,10 +656,12 @@ class CodeExtractor:
     def format_environment_section(env_data: Optional[Dict[str, str]]) -> str:
         """Format environment information from profile metadata."""
         if env_data:
-            env_lines = [f"  {var}: {type_}" for var, type_ in env_data.items()]
+            env_lines = [f"- {var}: {type_}" for var, type_ in env_data.items()]
             return (
-                "Available variables in the environment (from profiling):\n"
+                "Available variables in the environment:\n"
+                + "```\n"
                 + "\n".join(env_lines)
+                + "\n```\n"
             )
         return ""
 
@@ -687,14 +689,16 @@ class CodeExtractor:
             var_lines = []
             for var in sorted_vars:
                 type_info = env_data.get(var, "unknown")
-                var_lines.append(f"  {var}: {type_info}")
+                var_lines.append(f"- {var}: {type_info}")
         else:
-            var_lines = [f"  {var}" for var in sorted_vars]
+            var_lines = [f"- {var}" for var in sorted_vars]
 
         return (
             "CRITICAL: The following variables MUST have the exact same values after optimization:\n"
+            + "```\n"
             + "\n".join(var_lines)
-            + "\n\nThese variables are used by subsequent cells and cannot be modified or removed."
+            + "\n```\n"
+            + "These variables are used by subsequent cells and cannot be modified or removed."
         )
 
 

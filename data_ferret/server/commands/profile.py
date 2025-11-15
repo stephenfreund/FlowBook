@@ -61,7 +61,8 @@ class ProfileCommand(NotebookCommand):
         execution_results = []
         total_executed = 0
 
-        kernel_client.execute("%enable_scalene")
+        with timer(key="enable_scalene", message="Enabling scalene"):
+            kernel_client.execute("%enable_scalene")
 
         with timer(key="profile", message="Profiling cells"):
             for idx, cell in enumerate(cells):
@@ -90,6 +91,8 @@ class ProfileCommand(NotebookCommand):
 
                                 cell["execution_count"] = result["execution_count"]
                                 cell["outputs"] = result["outputs"]
+
+                                log(cell['outputs'])
 
                                 for output in result["outputs"]:
                                     if 'metadata' in output:

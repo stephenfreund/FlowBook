@@ -773,10 +773,11 @@ class FerretKernel(IPythonKernel, Magics):
             }
             return result, None
         finally:
-            if os.path.exists(args.outfile):
-                os.remove(args.outfile)
-            if os.path.exists(filename):
-                os.remove(filename)
+            pass
+            # if os.path.exists(args.outfile):
+            #     os.remove(args.outfile)
+            # if os.path.exists(filename):
+            #     os.remove(filename)
 
     def replace_filenames_with_cell_ids(self, text: str) -> str:
         # This pattern matches any path ending in _ipython-input-<N>-profile

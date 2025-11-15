@@ -71,13 +71,18 @@ class InspectCommand(NotebookCommand):
             )
 
             profile_data = FerretMetadata.from_cell(cell).profile
+            profile_duration = "Total duration: {profile_data.duration:.2f} seconds" if profile_data is not None else ''
+            profile_trace = profile_data.profile if profile_data is not None else ''
+            profile_env = '\n'.join([f"- {key}: {value}" for key, value in profile_data.env.items()]) if profile_data is not None else ''
 
             input_text = get_prompt(
                 "cell_inspection_input",
                 cell_id=cell["id"],
                 prefix=prefix,
                 cell_source=cell["source"],
-                profile_data=profile_data,
+                profile_duration=profile_duration,
+                profile_trace=profile_trace,
+                profile_env=profile_env,
             )
 
             final_output, stats = await agent.run(input_text)

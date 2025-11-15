@@ -25,9 +25,16 @@ cell_inspection_input: |
   {cell_source}
   ```
 
+  {profile_duration}
+  
   Here is some profile data for the cell, if available:
   ```
-  {profile_data}
+  {profile_trace}
+  ```
+
+  These are the variables in the environment:
+  ```
+  {profile_env}
   ```
 
   Remember:
@@ -59,11 +66,6 @@ optimization_instructions: |
   - Each optimization in the list should be a clear, concise description
 
 optimization_input: |
-  Here is the code before the cell (for context):
-  ```python
-  {prefix}
-  ```
-
   Here is the {kind} to optimize:
   ```python
   {cell_source}
@@ -189,8 +191,6 @@ optimization_repair_input: |
   ```
 
   {env_section}
-
-  {live_vars_section}
 
   ORIGINAL CODE SNIPPETS (correct behavior):
   {original_snippets}
