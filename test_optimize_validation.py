@@ -6,10 +6,11 @@ import nbformat
 from data_ferret.server.commands.optimize import OptimizeCommand
 from data_ferret.util.ferret_metadata import CodeSnippet
 from data_ferret.util.dependencies import analyze_notebook, CellDependencies
+from data_ferret.util.notebook_analysis import NotebookAnalysis
 
 
 def test_get_modified_globals_for_cell():
-    """Test extracting modified globals from dependencies."""
+    """Test extracting live variables for validation from NotebookAnalysis."""
     # Create a simple notebook
     nb = nbformat.v4.new_notebook()
 
@@ -21,27 +22,33 @@ def test_get_modified_globals_for_cell():
 
     nb["cells"] = [cell1, cell2]
 
-    # Analyze dependencies
-    dependencies_dict = analyze_notebook(nb)
+    # Analyze notebook with NotebookAnalysis
+    analysis = NotebookAnalysis(nb)
 
     # Test the helper function
     from data_ferret.server.commands.optimize import ValidationHelper
 
-    # Cell 1 should write x, y, result
-    globals_cell1 = ValidationHelper.get_modified_globals_for_cell("cell-1", dependencies_dict)
-    assert "x" in globals_cell1
-    assert "y" in globals_cell1
-    assert "result" in globals_cell1
+    # Cell 1: Validation vars = live_out after cell1
+    # live_out includes: result (used by cell2), x (used by cell1->result), y (used by cell1->result)
+    # Actually, let me check what's actually live...
+    # Cell 1 writes: {x, y, result}
+    # Cell 2 reads: {result}
+    # So after cell 1, live_out = {result} (only result is used later)
 
-    # Cell 2 should write z
-    globals_cell2 = ValidationHelper.get_modified_globals_for_cell("cell-2", dependencies_dict)
-    assert "z" in globals_cell2
+    globals_cell1 = ValidationHelper.get_modified_globals_for_cell("cell-1", analysis)
+    assert "result" in globals_cell1
+    # x and y are dead after cell1 (not used by cell2), so they should NOT be in validation
+    # This is correct - we only validate variables that will be used later
+
+    # Cell 2 is the last cell, so live_out = {} (nothing live after last cell)
+    globals_cell2 = ValidationHelper.get_modified_globals_for_cell("cell-2", analysis)
+    assert len(globals_cell2) == 0  # Nothing live after last cell
 
     # System variables should be filtered out
     assert "_" not in globals_cell1
     assert "get_ipython" not in globals_cell1
 
-    print("✓ get_modified_globals_for_cell works correctly")
+    print("✓ get_modified_globals_for_cell works correctly (returns live_out variables)")
 
 
 def test_build_optimized_code_for_validation():

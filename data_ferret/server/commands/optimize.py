@@ -27,6 +27,7 @@ from data_ferret.util.ferret_metadata import (
 from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.util.prompts import get_prompt
 from data_ferret.util.dependencies import analyze_notebook, CellDependencies
+from data_ferret.util.notebook_analysis import NotebookAnalysis
 from data_ferret.kernel.types import (
     DiffResult, TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
     ExecutionError, format_diff_as_markdown
@@ -224,14 +225,15 @@ class CodeExecutionOrchestrator:
         # Step 6: Save modified result
         self.cmd_client.checkpoint_save("modified_result")
 
-        # Step 7: Compare checkpoints
+        # Step 7: Compare checkpoints (only check specified output variables)
         compare_response = self.cmd_client.checkpoint_compare(
             result_checkpoint_name,
-            "modified_result"
+            "modified_result",
+            keys_to_include=output_variables
         )
 
-        # Filter diff by output_variables
-        diff_result = self._filter_diff(compare_response.diff, output_variables)
+        # The diff is already filtered by keys_to_include, no need to filter again
+        diff_result = compare_response.diff
 
         # Step 8: Calculate speedup
         speedup = original_duration / modified_duration if modified_duration > 0 else 0.0
@@ -383,18 +385,33 @@ class ValidationHelper:
 
     @classmethod
     def get_modified_globals_for_cell(
-        cls, cell_id: str, dependencies_dict: Dict[str, CellDependencies]
+        cls, cell_id: str, analysis: Optional[NotebookAnalysis]
     ) -> Set[str]:
-        """Extract global variables written by a cell, filtered for validation."""
-        if cell_id not in dependencies_dict:
+        """
+        Extract live global variables written by a cell for validation.
+
+        This returns only variables that are:
+        1. Written by this cell
+        2. Live after this cell (will be used by subsequent cells)
+        3. Valid variable names (not private/system variables)
+
+        Args:
+            cell_id: ID of the cell to analyze
+            analysis: NotebookAnalysis instance (None if validation disabled)
+
+        Returns:
+            Set of variable names that need validation
+        """
+        if analysis is None or not analysis.has_cell(cell_id):
             return set()
 
-        deps = dependencies_dict[cell_id]
+        # Get validation variables (written AND live)
+        validation_vars = analysis.get_validation_variables(cell_id)
 
         # Filter out private and system variables
-        globals_written = {var for var in deps.globals_written if is_valid_variable_name(var)}
+        filtered_vars = {var for var in validation_vars if is_valid_variable_name(var)}
 
-        return globals_written
+        return filtered_vars
 
     @staticmethod
     def build_optimized_code_for_validation(
@@ -646,6 +663,40 @@ class CodeExtractor:
             )
         return ""
 
+    @staticmethod
+    def format_live_variables_section(
+        live_vars: Set[str], env_data: Optional[Dict[str, str]] = None
+    ) -> str:
+        """Format live variables that must be preserved during optimization.
+
+        Args:
+            live_vars: Set of variable names that are live (will be used by subsequent cells)
+            env_data: Optional environment data with type information
+
+        Returns:
+            Formatted string describing live variables that must be preserved
+        """
+        if not live_vars:
+            return ""
+
+        # Sort for consistent output
+        sorted_vars = sorted(live_vars)
+
+        # Add type information if available
+        if env_data:
+            var_lines = []
+            for var in sorted_vars:
+                type_info = env_data.get(var, "unknown")
+                var_lines.append(f"  {var}: {type_info}")
+        else:
+            var_lines = [f"  {var}" for var in sorted_vars]
+
+        return (
+            "CRITICAL: The following variables MUST have the exact same values after optimization:\n"
+            + "\n".join(var_lines)
+            + "\n\nThese variables are used by subsequent cells and cannot be modified or removed."
+        )
+
 
 class MetadataManager:
     """Helper class for managing optimization metadata."""
@@ -784,6 +835,7 @@ class OptimizeCommand(NotebookCommand):
         validation_error: str,
         model: Any,
         tools: NotebookTools,
+        analysis: Optional[NotebookAnalysis],
         stats_aggregator: StatsAggregator,
     ) -> Optional[List[CodeSnippet]]:
         """
@@ -797,6 +849,7 @@ class OptimizeCommand(NotebookCommand):
             validation_error: The validation error message
             model: The LLM model to use
             tools: NotebookTools instance
+            analysis: NotebookAnalysis instance for filtering env to dependencies
             stats_aggregator: Stats aggregator for tracking costs
 
         Returns:
@@ -809,7 +862,10 @@ class OptimizeCommand(NotebookCommand):
             # Get profile metadata for environment information
             target_ferret_metadata = FerretMetadata.from_cell(cell)
             target_profile = target_ferret_metadata.get_profile()
-            env_data = target_profile.env if target_profile else None
+            full_env = target_profile.env if target_profile else {}
+
+            # Filter env to only dependencies of this cell
+            env_data = analysis.filter_env_to_dependencies(cell["id"], full_env) if analysis else full_env
 
             # Build context prefix (code before this cell)
             cell_index = next(i for i, c in enumerate(cells) if c["id"] == cell["id"])
@@ -819,6 +875,14 @@ class OptimizeCommand(NotebookCommand):
             original_snippets_text = self._format_snippets_for_repair(original_snippets)
             optimized_snippets_text = self._format_snippets_for_repair(failed_snippets)
             env_section = CodeExtractor.format_environment_section(env_data)
+
+            # Get live variables that must be preserved
+            live_vars_section = ""
+            if analysis:
+                live_vars = analysis.get_validation_variables(cell["id"])
+                live_vars_section = CodeExtractor.format_live_variables_section(
+                    live_vars, env_data
+                )
 
             # Create repair agent
             agent = FerretAgent[RepairedOptimizationResponse](
@@ -836,6 +900,7 @@ class OptimizeCommand(NotebookCommand):
                 original_snippets=original_snippets_text,
                 optimized_snippets=optimized_snippets_text,
                 env_section=env_section,
+                live_vars_section=live_vars_section,
                 validation_error=validation_error,
             )
 
@@ -865,7 +930,7 @@ class OptimizeCommand(NotebookCommand):
         model: Any,
         tools: NotebookTools,
         kernel_client: FerretKernelClient,
-        dependencies_dict: Dict[str, CellDependencies],
+        analysis: Optional[NotebookAnalysis],
         stats_aggregator: StatsAggregator,
         pre_post_envs: Optional[PrePostEnvironments] = None,
     ) -> Tuple[bool, List[CodeSnippet], Optional[Dict[str, float]]]:
@@ -880,7 +945,7 @@ class OptimizeCommand(NotebookCommand):
             model: LLM model to use for repairs
             tools: NotebookTools instance
             kernel_client: Kernel client for validation
-            dependencies_dict: Cell dependencies
+            analysis: NotebookAnalysis instance for dependency/liveness info
             stats_aggregator: Stats aggregator
             pre_post_envs: Optional pre-existing checkpoints to skip original execution
 
@@ -899,10 +964,13 @@ class OptimizeCommand(NotebookCommand):
             else:
                 log(f"Retry attempt {attempt}/{MAX_RETRIES} for cell {cell['id']}")
 
-            # Get modified globals for validation
+            # Get modified globals for validation (only live variables)
             modified_globals = ValidationHelper.get_modified_globals_for_cell(
-                cell["id"], dependencies_dict
+                cell["id"], analysis
             )
+
+            log(f"Modified globals: {modified_globals}")
+            log(f"Analysis: {analysis}")
 
             if not modified_globals:
                 log("No globals to validate, skipping validation")
@@ -968,6 +1036,7 @@ class OptimizeCommand(NotebookCommand):
                 error_msg,
                 model,
                 tools,
+                analysis,
                 stats_aggregator,
             )
 
@@ -1034,7 +1103,8 @@ class OptimizeCommand(NotebookCommand):
         target_index: int,
         step: OptimizationStep,
         env_data: Optional[Dict[str, str]],
-    ) -> Tuple[str, str, str, str, str]:
+        analysis: Optional[NotebookAnalysis] = None,
+    ) -> Tuple[str, str, str, str, str, str]:
         """
         Build context and extract code for optimization.
 
@@ -1044,10 +1114,11 @@ class OptimizeCommand(NotebookCommand):
             target_index: Index of target cell
             step: The optimization step
             env_data: Environment data from profile
+            analysis: Optional NotebookAnalysis for dependency/liveness info
 
         Returns:
             Tuple of (prefix, original_function_code, optimization_context,
-                     optimization_descriptions, env_section)
+                     optimization_descriptions, env_section, live_vars_section)
         """
         # Build context prefix
         prefix = CodeExtractor.build_context_prefix(cells, target_index)
@@ -1063,12 +1134,21 @@ class OptimizeCommand(NotebookCommand):
         )
         env_section = CodeExtractor.format_environment_section(env_data)
 
+        # Get live variables that must be preserved
+        live_vars_section = ""
+        if analysis:
+            live_vars = analysis.get_validation_variables(step.target_cell_id)
+            live_vars_section = CodeExtractor.format_live_variables_section(
+                live_vars, env_data
+            )
+
         return (
             prefix,
             original_function_code,
             optimization_context,
             optimization_descriptions,
             env_section,
+            live_vars_section,
         )
 
     async def _run_llm_optimization(
@@ -1078,6 +1158,7 @@ class OptimizeCommand(NotebookCommand):
         cell_source: str,
         optimization_descriptions: str,
         env_section: str,
+        live_vars_section: str,
         model: Any,
         tools: NotebookTools,
         stats_aggregator: StatsAggregator,
@@ -1091,6 +1172,7 @@ class OptimizeCommand(NotebookCommand):
             cell_source: The source code to optimize
             optimization_descriptions: Formatted optimization descriptions
             env_section: Formatted environment section
+            live_vars_section: Formatted live variables section
             model: LLM model to use
             tools: NotebookTools instance
             stats_aggregator: Stats aggregator
@@ -1112,6 +1194,7 @@ class OptimizeCommand(NotebookCommand):
             kind="cell" if step.function_name is None else "function",
             cell_source=cell_source,
             env_section=env_section,
+            live_vars_section=live_vars_section,
             optimization_descriptions=optimization_descriptions,
         )
 
@@ -1128,8 +1211,18 @@ class OptimizeCommand(NotebookCommand):
         model: Any,
         tools: NotebookTools,
         stats_aggregator: StatsAggregator,
+        analysis: Optional[NotebookAnalysis] = None,
     ) -> Tuple[CodeSnippet, CodeSnippet]:
         """Process a single optimization step.
+
+        Args:
+            step: The optimization step
+            cells: All notebook cells
+            index: Index of the cell being optimized
+            model: LLM model to use
+            tools: NotebookTools instance
+            stats_aggregator: Stats aggregator
+            analysis: Optional NotebookAnalysis for dependency/liveness info
 
         Returns:
             Tuple of (original_snippet, optimized_snippet)
@@ -1154,8 +1247,9 @@ class OptimizeCommand(NotebookCommand):
                     _,
                     optimization_descriptions,
                     env_section,
+                    live_vars_section,
                 ) = self._build_optimization_context(
-                    cells, target_cell, target_index, step, env_data
+                    cells, target_cell, target_index, step, env_data, analysis
                 )
 
             # Store original code snippet
@@ -1178,6 +1272,7 @@ class OptimizeCommand(NotebookCommand):
                     cell_source,
                     optimization_descriptions,
                     env_section,
+                    live_vars_section,
                     model,
                     tools,
                     stats_aggregator,
@@ -1211,6 +1306,7 @@ class OptimizeCommand(NotebookCommand):
         model: Any,
         tools: NotebookTools,
         stats_aggregator: StatsAggregator,
+        analysis: Optional[NotebookAnalysis] = None,
     ) -> Tuple[List[CodeSnippet], List[CodeSnippet]]:
         """
         Process all optimization steps for a cell.
@@ -1222,6 +1318,7 @@ class OptimizeCommand(NotebookCommand):
             model: LLM model to use
             tools: NotebookTools instance
             stats_aggregator: Stats aggregator
+            analysis: Optional NotebookAnalysis for dependency/liveness info
 
         Returns:
             Tuple of (original_snippets, optimized_snippets)
@@ -1233,7 +1330,7 @@ class OptimizeCommand(NotebookCommand):
             try:
                 original_snippet, optimized_snippet = (
                     await self._process_optimization_step(
-                        step, cells, index, model, tools, stats_aggregator
+                        step, cells, index, model, tools, stats_aggregator, analysis
                     )
                 )
                 original_snippets.append(original_snippet)
@@ -1280,7 +1377,7 @@ class OptimizeCommand(NotebookCommand):
         nb: nbformat.NotebookNode,
         model: Any,
         kernel_client: Optional[FerretKernelClient] = None,
-        dependencies_dict: Optional[Dict[str, CellDependencies]] = None,
+        analysis: Optional[NotebookAnalysis] = None,
         pre_post_envs: Optional[PrePostEnvironments] = None,
     ) -> Tuple[str, OptimizationResultAndStats]:
         """Optimize a single cell based on its optimization plan.
@@ -1294,7 +1391,7 @@ class OptimizeCommand(NotebookCommand):
             nb: The notebook containing the cell
             model: The LLM model to use for optimization
             kernel_client: Optional kernel client for validation
-            dependencies_dict: Optional pre-computed dependencies for validation
+            analysis: Optional NotebookAnalysis for dependency/liveness info
             pre_post_envs: Optional pre-existing checkpoints to skip original execution
 
         Returns:
@@ -1324,17 +1421,18 @@ class OptimizeCommand(NotebookCommand):
                     model,
                     tools,
                     stats_aggregator,
+                    analysis,
                 )
             )
 
         log(f"Kernel client available: {kernel_client is not None}")
-        log(f"Dependencies dict available: {dependencies_dict is not None}")
+        log(f"Analysis available: {analysis is not None}")
 
         # Initialize timing data
         timing_data = None
 
         # VALIDATION WITH RETRY: Check if optimization preserves semantics
-        if kernel_client and dependencies_dict and optimized_snippets:
+        if kernel_client and analysis and optimized_snippets:
             with timer(
                 key="validation", message="Validating optimization with retry support"
             ):
@@ -1348,7 +1446,7 @@ class OptimizeCommand(NotebookCommand):
                             model,
                             tools,
                             kernel_client,
-                            dependencies_dict,
+                            analysis,
                             stats_aggregator,
                             pre_post_envs,
                         )
@@ -1403,7 +1501,7 @@ class OptimizeCommand(NotebookCommand):
         nb: nbformat.NotebookNode,
         model: Any,
         kernel_client: Optional[FerretKernelClient],
-        dependencies_dict: Optional[Dict[str, CellDependencies]],
+        analysis: Optional[NotebookAnalysis],
         pre_post_envs: Optional[PrePostEnvironments] = None,
     ) -> List[Tuple[str, OptimizationResultAndStats]]:
         """
@@ -1414,7 +1512,7 @@ class OptimizeCommand(NotebookCommand):
             nb: The notebook
             model: LLM model to use
             kernel_client: Optional kernel client
-            dependencies_dict: Optional dependencies dict
+            analysis: Optional NotebookAnalysis instance
             pre_post_envs: Optional pre-existing checkpoints to skip original execution
 
         Returns:
@@ -1423,7 +1521,7 @@ class OptimizeCommand(NotebookCommand):
         all_results = []
         for index in cells_to_process:
             cell_id, result = await self.optimize_cell(
-                index, nb, model, kernel_client, dependencies_dict, pre_post_envs
+                index, nb, model, kernel_client, analysis, pre_post_envs
             )
             all_results.append((cell_id, result))
         return all_results
@@ -1488,14 +1586,15 @@ class OptimizeCommand(NotebookCommand):
             log("# Optimizing Cells")
             log("=" * 60)
 
-            # Analyze notebook dependencies once for all validations
-            dependencies_dict = None
+            # Analyze notebook dependencies and liveness once for all validations
+            analysis = None
             if kernel_client:
                 with timer(
                     key="analyze_dependencies",
-                    message="Analyzing notebook dependencies",
+                    message="Analyzing notebook dependencies and liveness",
                 ):
-                    dependencies_dict = analyze_notebook(nb)
+                    analysis = NotebookAnalysis(nb)
+                    log(f"Analyzed {len(analysis.get_all_cell_ids())} cells")
 
             new_nb: nbformat.NotebookNode = copy.deepcopy(nb)
 
@@ -1525,7 +1624,7 @@ class OptimizeCommand(NotebookCommand):
                 key="process_all_cells", message="Processing all optimization steps"
             ):
                 all_results = await self._process_cells_sequentially(
-                    cells_to_process, new_nb, model, kernel_client, dependencies_dict, pre_post_envs
+                    cells_to_process, new_nb, model, kernel_client, analysis, pre_post_envs
                 )
 
             log("")

@@ -71,6 +71,8 @@ optimization_input: |
 
   {env_section}
 
+  {live_vars_section}
+
   {optimization_descriptions}
 
   Provide the optimized code and a list of specific optimizations you applied.
@@ -187,6 +189,8 @@ optimization_repair_input: |
   ```
 
   {env_section}
+
+  {live_vars_section}
 
   ORIGINAL CODE SNIPPETS (correct behavior):
   {original_snippets}

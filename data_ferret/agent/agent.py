@@ -87,6 +87,7 @@ class FerretAgent(Agent, Generic[T], RunHooks[FerretContext]):
                 timeout=120,
             ),
         )
+        self.instructions = instructions
         self.log_dir = log_dir
         os.makedirs(self.log_dir, exist_ok=True)
 
@@ -179,11 +180,21 @@ class FerretAgent(Agent, Generic[T], RunHooks[FerretContext]):
         assert context.time is not None, "Execution time must be set"
         assert context.usage is not None, "Usage must be set"
 
-        full_text = self.session_log(await session.get_items())
+        session_text = self.session_log(await session.get_items())
+
+        # Create header with instruction prompt
+        header = []
+        header.append("INSTRUCTIONS")
+        header.append("=" * len("INSTRUCTIONS"))
+        header.extend(textwrap.indent(self.instructions, "  ").splitlines())
+        header.append("")
+        header.append("")
+
+        full_text = "\n".join(header) + session_text
 
         log_path = f"{self.log_dir}/{key}.txt"
         os.makedirs(self.log_dir, exist_ok=True)
-        
+
         with open(log_path, "w") as f:
             f.write(full_text)
 

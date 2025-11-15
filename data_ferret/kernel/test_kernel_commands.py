@@ -126,6 +126,45 @@ class TestCheckpointCommands:
         assert response.diff is not None
         # In real test, would verify diff contains expected changes
 
+    def test_checkpoint_compare_with_keys_to_include(self, command_client):
+        """Test comparing checkpoints with keys_to_include parameter."""
+        # Save first checkpoint
+        command_client.checkpoint_save("compare_keys1")
+
+        # Modify state
+        # (In real test, would execute code to change multiple variables)
+
+        # Save second checkpoint
+        command_client.checkpoint_save("compare_keys2")
+
+        # Compare checkpoints with specific keys
+        response = command_client.checkpoint_compare(
+            "compare_keys1",
+            "compare_keys2",
+            keys_to_include={'x', 'y'}
+        )
+
+        assert response.status == "ok"
+        assert response.diff is not None
+        # In real test, would verify diff only contains x and y
+
+    def test_checkpoint_compare_with_empty_keys_to_include(self, command_client):
+        """Test comparing checkpoints with empty keys_to_include set."""
+        # Save checkpoints
+        command_client.checkpoint_save("empty_keys1")
+        command_client.checkpoint_save("empty_keys2")
+
+        # Compare with empty set (should result in no differences)
+        response = command_client.checkpoint_compare(
+            "empty_keys1",
+            "empty_keys2",
+            keys_to_include=set()
+        )
+
+        assert response.status == "ok"
+        assert response.diff is not None
+        # Empty keys_to_include means nothing is compared
+
     def test_checkpoint_clear(self, command_client):
         """Test clearing all checkpoints."""
         # Save some checkpoints

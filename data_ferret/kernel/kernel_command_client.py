@@ -256,6 +256,7 @@ class KernelCommandClient:
         self,
         name1: str,
         name2: str,
+        keys_to_include: Optional[Set[str]] = None,
         timeout: Optional[float] = None,
     ) -> CheckpointCompareResponse:
         """
@@ -264,6 +265,7 @@ class KernelCommandClient:
         Args:
             name1: First checkpoint name
             name2: Second checkpoint name
+            keys_to_include: Optional set of variable names to include in comparison
             timeout: Optional timeout override
 
         Returns:
@@ -272,7 +274,7 @@ class KernelCommandClient:
         Raises:
             KernelCommandError: If command fails or checkpoints don't exist
         """
-        request = CheckpointCompareRequest(name1=name1, name2=name2)
+        request = CheckpointCompareRequest(name1=name1, name2=name2, keys_to_include=keys_to_include)
         response_dict = self._send_command(request.model_dump(), timeout=timeout)
         return CheckpointCompareResponse(**response_dict)
 

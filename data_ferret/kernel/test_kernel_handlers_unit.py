@@ -110,6 +110,53 @@ class TestCheckpointHandlers:
         assert response.status == "ok"
         assert isinstance(response.diff, DiffResult)
 
+    def test_handle_checkpoint_compare_with_keys_to_include(self, handlers, mock_kernel):
+        """Test checkpoint compare handler with keys_to_include parameter."""
+        from data_ferret.kernel.checkpoint import Checkpoint
+        from data_ferret.kernel.types import DiffResult
+
+        # Create checkpoints with multiple variables, some different
+        cp1 = Checkpoint("cp1", {'x': 1, 'y': 2, 'z': 3}, {})
+        cp2 = Checkpoint("cp2", {'x': 999, 'y': 2, 'z': 3}, {})
+        mock_kernel._checkpoint.get.side_effect = [cp1, cp2]
+
+        # Compare only 'y' and 'z' (which are the same)
+        req = CheckpointCompareRequest(
+            name1="cp1",
+            name2="cp2",
+            keys_to_include={'y', 'z'}
+        )
+        response = handlers.handle_checkpoint_compare(req)
+
+        assert response.status == "ok"
+        assert isinstance(response.diff, DiffResult)
+        # Should have no differences since y and z are the same
+        assert len(response.diff.differences) == 0
+
+    def test_handle_checkpoint_compare_with_keys_showing_difference(self, handlers, mock_kernel):
+        """Test that keys_to_include properly filters to show only requested differences."""
+        from data_ferret.kernel.checkpoint import Checkpoint
+        from data_ferret.kernel.types import DiffResult
+
+        # Create checkpoints with multiple variables, some different
+        cp1 = Checkpoint("cp1", {'x': 1, 'y': 2, 'z': 3}, {})
+        cp2 = Checkpoint("cp2", {'x': 999, 'y': 999, 'z': 3}, {})
+        mock_kernel._checkpoint.get.side_effect = [cp1, cp2]
+
+        # Compare only 'x' (which is different)
+        req = CheckpointCompareRequest(
+            name1="cp1",
+            name2="cp2",
+            keys_to_include={'x'}
+        )
+        response = handlers.handle_checkpoint_compare(req)
+
+        assert response.status == "ok"
+        assert isinstance(response.diff, DiffResult)
+        # Should have difference in 'x', but not 'y' (even though it's different)
+        assert 'x' in response.diff.differences
+        assert 'y' not in response.diff.differences
+
     def test_handle_checkpoint_clear(self, handlers, mock_kernel):
         """Test checkpoint clear handler."""
         req = CheckpointClearRequest()

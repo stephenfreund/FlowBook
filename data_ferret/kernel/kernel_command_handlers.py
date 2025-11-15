@@ -198,7 +198,7 @@ class KernelCommandHandlers:
         Compare two checkpoints.
 
         Args:
-            req: Compare request with two checkpoint names
+            req: Compare request with two checkpoint names and optional keys filter
 
         Returns:
             Response with diff result
@@ -208,7 +208,7 @@ class KernelCommandHandlers:
         """
         old = self.kernel._checkpoint.get(req.name1)
         new = self.kernel._checkpoint.get(req.name2)
-        diff = checkpoint_diff(old, new)
+        diff = checkpoint_diff(old, new, keys_to_include=req.keys_to_include)
 
         return CheckpointCompareResponse(
             status="ok",

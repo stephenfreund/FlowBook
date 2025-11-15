@@ -111,6 +111,10 @@ class CheckpointCompareRequest(KernelCommandRequest):
     command: Literal["checkpoint_compare"] = "checkpoint_compare"
     name1: str = Field(..., description="Name of first checkpoint")
     name2: str = Field(..., description="Name of second checkpoint")
+    keys_to_include: Optional[Set[str]] = Field(
+        None,
+        description="Optional set of variable names to include in comparison. If None, all variables are compared."
+    )
 
 
 class CheckpointCompareResponse(KernelCommandResponse):
