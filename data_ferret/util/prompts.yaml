@@ -186,11 +186,6 @@ optimization_repair_instructions: |
   - Return snippets in the SAME ORDER as you received them
 
 optimization_repair_input: |
-  Here is the code before the cell (for context):
-  ```python
-  {prefix}
-  ```
-
   {env_section}
 
   ORIGINAL CODE SNIPPETS (correct behavior):

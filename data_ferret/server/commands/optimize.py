@@ -878,9 +878,11 @@ class OptimizeCommand(NotebookCommand):
             target_ferret_metadata = FerretMetadata.from_cell(cell)
             target_profile = target_ferret_metadata.get_profile()
             full_env = target_profile.env if target_profile else {}
+            full_env_after = target_profile.env_after if target_profile else {}
 
             # Filter env to only dependencies of this cell
             env_data = analysis.filter_env_to_dependencies(cell["id"], full_env) if analysis else full_env
+            env_data_after = analysis.filter_env_to_dependencies(cell["id"], full_env_after) if analysis else full_env_after
 
             # Build context prefix (code before this cell)
             cell_index = next(i for i, c in enumerate(cells) if c["id"] == cell["id"])
@@ -896,7 +898,7 @@ class OptimizeCommand(NotebookCommand):
             if analysis:
                 live_vars = analysis.get_validation_variables(cell["id"])
                 live_vars_section = CodeExtractor.format_live_variables_section(
-                    live_vars, env_data
+                    live_vars, env_data_after
                 )
 
             # Create repair agent

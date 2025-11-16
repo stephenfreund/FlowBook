@@ -54,6 +54,33 @@ def user_ns_diff(
                 pass
         return False
 
+    def are_compatible_dtypes(dtype1, dtype2) -> bool:
+        """
+        Check if two numpy dtypes are compatible for equality comparison.
+        Returns True if:
+        - Both are integer types (int8, int16, int32, int64, uint8, uint16, uint32, uint64)
+        - Both are floating types (float16, float32, float64)
+        - Both are the exact same type
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            return dtype1 == dtype2
+
+        # Same dtype - always compatible
+        if dtype1 == dtype2:
+            return True
+
+        # Both are integer types (signed or unsigned)
+        if np.issubdtype(dtype1, np.integer) and np.issubdtype(dtype2, np.integer):
+            return True
+
+        # Both are floating types
+        if np.issubdtype(dtype1, np.floating) and np.issubdtype(dtype2, np.floating):
+            return True
+
+        return False
+
     def try_numpy_eq(x: Any, y: Any, path: str) -> Tuple[bool, str] | None:
         try:
             import numpy as np
@@ -64,21 +91,47 @@ def user_ns_diff(
             map_ba[id(y)] = x
             if x.shape != y.shape:
                 return False, f"NumPy shape mismatch at {path}: {x.shape} vs {y.shape}"
+
+            # Check dtype compatibility
+            if not are_compatible_dtypes(x.dtype, y.dtype):
+                return False, f"NumPy dtype mismatch at {path}: {x.dtype} vs {y.dtype}"
+
+            # For compatible but different dtypes, cast to common type for comparison
+            if x.dtype != y.dtype:
+                # Find common type that can hold both
+                common_dtype = np.promote_types(x.dtype, y.dtype)
+                x_cmp = x.astype(common_dtype)
+                y_cmp = y.astype(common_dtype)
+            else:
+                x_cmp = x
+                y_cmp = y
+
             # Treat NaNs as equal
             try:
-                if np.array_equal(x, y, equal_nan=True):
+                if np.array_equal(x_cmp, y_cmp, equal_nan=True):
                     return True, ""
                 # find first mismatch index for message
-                eq = np.equal(x, y) | (np.isnan(x) & np.isnan(y))
+                eq = np.equal(x_cmp, y_cmp) | (np.isnan(x_cmp) & np.isnan(y_cmp))
             except TypeError:
                 # Fallback for dtypes not supporting isnan
-                eq = np.equal(x, y)
+                eq = np.equal(x_cmp, y_cmp)
             if eq.all():
                 return True, ""
             idx = tuple(dim[0] for dim in np.where(~eq))
             return (
                 False,
                 f"NumPy arrays differ at {path}{idx}: {x[idx]!r} != {y[idx]!r}",
+            )
+        # NumPy integer scalars - allow different integer types
+        if (
+            hasattr(np, "integer")
+            and isinstance(x, np.integer)
+            and isinstance(y, np.integer)
+        ):
+            return (
+                (True, "")
+                if x == y
+                else (False, f"Value mismatch at {path}: {x!r} != {y!r}")
             )
         # NumPy scalar vs scalar: treat NaN == NaN
         if (
@@ -126,15 +179,36 @@ def user_ns_diff(
                         False,
                         f"DataFrame index differ at {path}: {list(x.index)} vs {list(y.index)}",
                     )
+
+                # Check dtype compatibility for each column
+                for col in x.columns:
+                    if not are_compatible_dtypes(x[col].dtype, y[col].dtype):
+                        return False, f"DataFrame column '{col}' dtype mismatch at {path}: {x[col].dtype} vs {y[col].dtype}"
+
+                # If any columns have compatible but different dtypes, need to cast
+                needs_cast = any(x[col].dtype != y[col].dtype for col in x.columns)
+                if needs_cast:
+                    # Cast each column to common type
+                    x_cmp = x.copy()
+                    y_cmp = y.copy()
+                    for col in x.columns:
+                        if x[col].dtype != y[col].dtype:
+                            common_dtype = np.promote_types(x[col].dtype, y[col].dtype)
+                            x_cmp[col] = x[col].astype(common_dtype)
+                            y_cmp[col] = y[col].astype(common_dtype)
+                else:
+                    x_cmp = x
+                    y_cmp = y
+
                 # .equals treats NaN==NaN
-                if x.equals(y):
+                if x_cmp.equals(y_cmp):
                     return True, ""
                 # Build a mismatch mask that treats NaN==NaN as equal
-                comp = x.eq(y) | (x.isna() & y.isna())
+                comp = x_cmp.eq(y_cmp) | (x_cmp.isna() & y_cmp.isna())
                 mismatch = ~comp.values
                 i, j = np.where(mismatch)[0][0], np.where(mismatch)[1][0]
-                col = x.columns[j]
-                idx = x.index[i]
+                col = x_cmp.columns[j]
+                idx = x_cmp.index[i]
                 return False, (
                     f"DataFrame differ at {path}[{idx!r}, '{col}']: "
                     f"{x.iat[i, j]!r} != {y.iat[i, j]!r}"
@@ -156,11 +230,25 @@ def user_ns_diff(
                             False,
                             f"Series index differ at {path}: {repr(x.index)} vs {repr(y.index)}",
                         )
-                if x.equals(y):  # treats NaN==NaN
+
+                # Check dtype compatibility for Series
+                if not are_compatible_dtypes(x.dtype, y.dtype):
+                    return False, f"Series dtype mismatch at {path}: {x.dtype} vs {y.dtype}"
+
+                # If dtypes compatible but different, cast to common type
+                if x.dtype != y.dtype:
+                    common_dtype = np.promote_types(x.dtype, y.dtype)
+                    x_cmp = x.astype(common_dtype)
+                    y_cmp = y.astype(common_dtype)
+                else:
+                    x_cmp = x
+                    y_cmp = y
+
+                if x_cmp.equals(y_cmp):  # treats NaN==NaN
                     return True, ""
-                comp = x.eq(y) | (x.isna() & y.isna())
+                comp = x_cmp.eq(y_cmp) | (x_cmp.isna() & y_cmp.isna())
                 diff_pos = (~comp).to_numpy().nonzero()[0][0]
-                diff_idx = x.index[diff_pos]
+                diff_idx = x_cmp.index[diff_pos]
                 return (
                     False,
                     f"Series differ at {path}[{diff_idx!r}]: {x.loc[diff_idx]!r} != {y.loc[diff_idx]!r}",
@@ -336,3 +424,62 @@ if __name__ == "__main__":
     a = {"idx": df1.index}
     b = {"idx": df1b.index.copy()}
     assert user_ns_diff(a, b) == {}
+
+    # Test integer dtype compatibility
+    # NumPy arrays with different integer dtypes should be equal
+    arr_int32 = np.array([1, 2, 3], dtype=np.int32)
+    arr_int64 = np.array([1, 2, 3], dtype=np.int64)
+    a = {"arr": arr_int32}
+    b = {"arr": arr_int64}
+    assert user_ns_diff(a, b) == {}, "int32 and int64 arrays should be equal"
+
+    # NumPy arrays with different unsigned integer dtypes should be equal
+    arr_uint16 = np.array([1, 2, 3], dtype=np.uint16)
+    arr_uint32 = np.array([1, 2, 3], dtype=np.uint32)
+    a = {"arr": arr_uint16}
+    b = {"arr": arr_uint32}
+    assert user_ns_diff(a, b) == {}, "uint16 and uint32 arrays should be equal"
+
+    # NumPy arrays with different values should differ
+    arr1 = np.array([1, 2, 3], dtype=np.int32)
+    arr2 = np.array([1, 2, 4], dtype=np.int64)
+    a = {"arr": arr1}
+    b = {"arr": arr2}
+    assert user_ns_diff(a, b) != {}, "Arrays with different values should differ"
+
+    # Integer and float arrays should NOT be equal (incompatible dtypes)
+    arr_int = np.array([1, 2, 3], dtype=np.int32)
+    arr_float = np.array([1, 2, 3], dtype=np.float32)
+    a = {"arr": arr_int}
+    b = {"arr": arr_float}
+    assert user_ns_diff(a, b) != {}, "int and float arrays should not be equal"
+
+    # Pandas Series with different integer dtypes should be equal
+    s_int32 = pd.Series([1, 2, 3], dtype=np.int32)
+    s_int64 = pd.Series([1, 2, 3], dtype=np.int64)
+    a = {"s": s_int32}
+    b = {"s": s_int64}
+    assert user_ns_diff(a, b) == {}, "int32 and int64 Series should be equal"
+
+    # Pandas DataFrame with different integer dtypes should be equal
+    df_int32 = pd.DataFrame({"a": [1, 2], "b": [3, 4]}, dtype=np.int32)
+    df_int64 = pd.DataFrame({"a": [1, 2], "b": [3, 4]}, dtype=np.int64)
+    a = {"df": df_int32}
+    b = {"df": df_int64}
+    assert user_ns_diff(a, b) == {}, "int32 and int64 DataFrames should be equal"
+
+    # NumPy scalars with different integer types should be equal
+    scalar_int16 = np.int16(42)
+    scalar_int64 = np.int64(42)
+    a = {"val": scalar_int16}
+    b = {"val": scalar_int64}
+    assert user_ns_diff(a, b) == {}, "int16 and int64 scalars should be equal"
+
+    # Float dtypes should also be compatible
+    arr_float32 = np.array([1.5, 2.5, 3.5], dtype=np.float32)
+    arr_float64 = np.array([1.5, 2.5, 3.5], dtype=np.float64)
+    a = {"arr": arr_float32}
+    b = {"arr": arr_float64}
+    assert user_ns_diff(a, b) == {}, "float32 and float64 arrays should be equal"
+
+    print("All integer dtype compatibility tests passed!")

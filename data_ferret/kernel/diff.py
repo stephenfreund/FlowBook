@@ -20,7 +20,29 @@ from data_ferret.kernel.types import (
     DataFrameLocation,
 )
 
-    
+
+def are_compatible_dtypes(dtype1, dtype2) -> bool:
+    """
+    Check if two numpy/pandas dtypes are compatible for equality comparison.
+
+    Returns True if:
+    - Both are integer types (int8, int16, int32, int64, uint8, uint16, uint32, uint64)
+    - Both are floating types (float16, float32, float64)
+    - Both are the exact same type
+    """
+    # Same dtype - always compatible
+    if dtype1 == dtype2:
+        return True
+
+    # Both are integer types (signed or unsigned)
+    if np.issubdtype(dtype1, np.integer) and np.issubdtype(dtype2, np.integer):
+        return True
+
+    # Both are floating types
+    if np.issubdtype(dtype1, np.floating) and np.issubdtype(dtype2, np.floating):
+        return True
+
+    return False
 
 
 class Diff:
@@ -668,42 +690,57 @@ class Diff:
         # Check shape
         if val_a.shape != val_b.shape:
             return f"Array shape mismatch at {path}: {val_a.shape} vs {val_b.shape}"
-        
-        # Check dtype
-        if val_a.dtype != val_b.dtype:
+
+        # Check dtype compatibility
+        if not are_compatible_dtypes(val_a.dtype, val_b.dtype):
             return f"Array dtype mismatch at {path}: {val_a.dtype} vs {val_b.dtype}"
-        
+
+        # Cast to common type if dtypes are compatible but different
+        if val_a.dtype != val_b.dtype:
+            common_dtype = np.promote_types(val_a.dtype, val_b.dtype)
+            val_a_cmp = val_a.astype(common_dtype)
+            val_b_cmp = val_b.astype(common_dtype)
+        else:
+            val_a_cmp = val_a
+            val_b_cmp = val_b
+
         # Compare values
         try:
-            if np.issubdtype(val_a.dtype, np.floating) or np.issubdtype(val_a.dtype, np.complexfloating):
+            if np.issubdtype(val_a_cmp.dtype, np.floating) or np.issubdtype(val_a_cmp.dtype, np.complexfloating):
                 # Use allclose for floating point, treating NaN as equal
-                if not np.allclose(val_a, val_b, rtol=self.rtol, atol=self.atol, equal_nan=True):
+                if not np.allclose(val_a_cmp, val_b_cmp, rtol=self.rtol, atol=self.atol, equal_nan=True):
                     # Find first mismatch
-                    flat_a = val_a.ravel()
-                    flat_b = val_b.ravel()
+                    flat_a = val_a_cmp.ravel()
+                    flat_b = val_b_cmp.ravel()
+                    # Use original arrays for error messages
+                    flat_a_orig = val_a.ravel()
+                    flat_b_orig = val_b.ravel()
                     for i in range(len(flat_a)):
                         a_val, b_val = flat_a[i], flat_b[i]
                         both_nan = np.isnan(a_val) and np.isnan(b_val)
                         if not both_nan and not np.allclose([a_val], [b_val], rtol=self.rtol, atol=self.atol, equal_nan=True):
                             idx = np.unravel_index(i, val_a.shape)
                             idx_tuple = tuple(int(x) for x in idx)
-                            return f"Array values mismatch at {path}[{idx_tuple}]: {a_val} vs {b_val}"
+                            return f"Array values mismatch at {path}[{idx_tuple}]: {flat_a_orig[i]} vs {flat_b_orig[i]}"
                     return f"Array values mismatch at {path}"
             else:
                 # For other types, use array_equal
-                if not np.array_equal(val_a, val_b):
+                if not np.array_equal(val_a_cmp, val_b_cmp):
                     # Find first mismatch
-                    flat_a = val_a.ravel()
-                    flat_b = val_b.ravel()
+                    flat_a = val_a_cmp.ravel()
+                    flat_b = val_b_cmp.ravel()
+                    # Use original arrays for error messages
+                    flat_a_orig = val_a.ravel()
+                    flat_b_orig = val_b.ravel()
                     for i in range(len(flat_a)):
                         if flat_a[i] != flat_b[i]:
                             idx = np.unravel_index(i, val_a.shape)
                             idx_tuple = tuple(int(x) for x in idx)
-                            return f"Array values mismatch at {path}[{idx_tuple}]: {flat_a[i]} vs {flat_b[i]}"
+                            return f"Array values mismatch at {path}[{idx_tuple}]: {flat_a_orig[i]} vs {flat_b_orig[i]}"
                     return f"Array values mismatch at {path}"
         except Exception as e:
             return f"Array comparison error at {path}: {str(e)}"
-        
+
         return ""
     
     def _compare_series(self, val_a: pd.Series, val_b: pd.Series, path: str) -> Optional[ValueComparison]:
@@ -717,47 +754,56 @@ class Diff:
         # Check index
         if not val_a.index.equals(val_b.index):
             return f"Series index mismatch at {path}"
-        
+
         # Check name
         if val_a.name != val_b.name:
             return f"Series name mismatch at {path}: {val_a.name} vs {val_b.name}"
-        
-        # Check dtype
-        if val_a.dtype != val_b.dtype:
+
+        # Check dtype compatibility
+        if not are_compatible_dtypes(val_a.dtype, val_b.dtype):
             return f"Series dtype mismatch at {path}: {val_a.dtype} vs {val_b.dtype}"
-        
+
+        # Cast to common type if dtypes are compatible but different
+        if val_a.dtype != val_b.dtype:
+            common_dtype = np.promote_types(val_a.dtype, val_b.dtype)
+            val_a_cmp = val_a.astype(common_dtype)
+            val_b_cmp = val_b.astype(common_dtype)
+        else:
+            val_a_cmp = val_a
+            val_b_cmp = val_b
+
         # Compare values
         try:
-            if pd.api.types.is_float_dtype(val_a.dtype):
+            if pd.api.types.is_float_dtype(val_a_cmp.dtype):
                 # For float dtypes, use allclose with NaN handling
-                mask_nan_a = pd.isna(val_a)
-                mask_nan_b = pd.isna(val_b)
+                mask_nan_a = pd.isna(val_a_cmp)
+                mask_nan_b = pd.isna(val_b_cmp)
                 if not mask_nan_a.equals(mask_nan_b):
                     # Find first NaN position mismatch
-                    for idx in val_a.index:
+                    for idx in val_a_cmp.index:
                         if mask_nan_a[idx] != mask_nan_b[idx]:
                             return f"Series NaN positions mismatch at {path}[{repr(idx)}]: is_nan={mask_nan_a[idx]} vs is_nan={mask_nan_b[idx]}"
                     return f"Series NaN positions mismatch at {path}"
-                
-                non_nan_a = val_a[~mask_nan_a]
-                non_nan_b = val_b[~mask_nan_b]
+
+                non_nan_a = val_a_cmp[~mask_nan_a]
+                non_nan_b = val_b_cmp[~mask_nan_b]
                 if len(non_nan_a) > 0:
                     if not np.allclose(non_nan_a, non_nan_b, rtol=self.rtol, atol=self.atol):
-                        # Find first value mismatch
+                        # Find first value mismatch - use original values for error messages
                         for idx in non_nan_a.index:
                             if not np.allclose([non_nan_a[idx]], [non_nan_b[idx]], rtol=self.rtol, atol=self.atol):
-                                return f"Series values mismatch at {path}[{repr(idx)}]: {non_nan_a[idx]} vs {non_nan_b[idx]}"
+                                return f"Series values mismatch at {path}[{repr(idx)}]: {val_a[idx]} vs {val_b[idx]}"
                         return f"Series values mismatch at {path}"
             else:
-                if not val_a.equals(val_b):
-                    # Find first value mismatch
-                    for idx in val_a.index:
-                        if val_a[idx] != val_b[idx]:
+                if not val_a_cmp.equals(val_b_cmp):
+                    # Find first value mismatch - use original values for error messages
+                    for idx in val_a_cmp.index:
+                        if val_a_cmp[idx] != val_b_cmp[idx]:
                             return f"Series values mismatch at {path}[{repr(idx)}]: {val_a[idx]} vs {val_b[idx]}"
                     return f"Series values mismatch at {path}"
         except Exception as e:
             return f"Series comparison error at {path}: {str(e)}"
-        
+
         return ""
     
     def _compare_dataframe(self, val_a: pd.DataFrame, val_b: pd.DataFrame, path: str) -> Optional[ValueComparison]:
@@ -773,17 +819,36 @@ class Diff:
             return f"DataFrame shape mismatch at {path}: {val_a.shape} vs {val_b.shape}"
 
         # Check columns
-        # TO DO : THIS EQUALS is sketchy 
-        if not val_a.columns.equals(val_b.columns):  
+        # TO DO : THIS EQUALS is sketchy
+        if not val_a.columns.equals(val_b.columns):
             return f"DataFrame columns mismatch at {path}: {val_a.columns} vs {val_b.columns}"
 
         # Check index
         if not val_a.index.equals(val_b.index):
             return f"DataFrame index mismatch at {path}"
 
-        # Compare each column
+        # Check dtype compatibility for each column
         for col in val_a.columns:
-            col_diff = self._compare_series(val_a[col], val_b[col], f"{path}['{col}']")
+            if not are_compatible_dtypes(val_a[col].dtype, val_b[col].dtype):
+                return f"DataFrame column '{col}' dtype mismatch at {path}: {val_a[col].dtype} vs {val_b[col].dtype}"
+
+        # Cast columns with compatible but different dtypes to common type
+        needs_cast = any(val_a[col].dtype != val_b[col].dtype for col in val_a.columns)
+        if needs_cast:
+            val_a_cmp = val_a.copy()
+            val_b_cmp = val_b.copy()
+            for col in val_a.columns:
+                if val_a[col].dtype != val_b[col].dtype:
+                    common_dtype = np.promote_types(val_a[col].dtype, val_b[col].dtype)
+                    val_a_cmp[col] = val_a[col].astype(common_dtype)
+                    val_b_cmp[col] = val_b[col].astype(common_dtype)
+        else:
+            val_a_cmp = val_a
+            val_b_cmp = val_b
+
+        # Compare each column
+        for col in val_a_cmp.columns:
+            col_diff = self._compare_series(val_a_cmp[col], val_b_cmp[col], f"{path}['{col}']")
             if col_diff:
                 # _compare_series returns ValueComparison now, extract message for legacy
                 if isinstance(col_diff, ValueComparison):
