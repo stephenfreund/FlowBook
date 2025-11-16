@@ -58,6 +58,17 @@ class OptimizedCodeResponse(BaseModel):
     )
 
 
+class BatchOptimizedCodeResponse(BaseModel):
+    """Response from LLM when optimizing multiple code snippets at once."""
+    explanation: str = Field(
+        description="Detailed explanation of the optimization strategy, including a correctness argument and reasoning about the changes made"
+    )
+
+    optimized_snippets: List[CodeSnippet] = Field(
+        description="Complete list of optimized code snippets, one for each input snippet in the same order"
+    )
+
+
 class GeneratedCodeMetadata(BaseModel):
     """Metadata for AI-generated code from string specifications."""
 

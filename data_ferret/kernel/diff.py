@@ -773,8 +773,9 @@ class Diff:
             return f"DataFrame shape mismatch at {path}: {val_a.shape} vs {val_b.shape}"
 
         # Check columns
-        if not val_a.columns.equals(val_b.columns):
-            return f"DataFrame columns mismatch at {path}"
+        # TO DO : THIS EQUALS is sketchy 
+        if not val_a.columns.equals(val_b.columns):  
+            return f"DataFrame columns mismatch at {path}: {val_a.columns} vs {val_b.columns}"
 
         # Check index
         if not val_a.index.equals(val_b.index):

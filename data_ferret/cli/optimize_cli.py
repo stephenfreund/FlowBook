@@ -16,7 +16,7 @@ from typing import Optional, List, Dict, Any
 
 from data_ferret.server.registry import CommandRegistry
 from data_ferret.server.config import FerretConfig
-from data_ferret.util.output import error, log, timer, quiet
+from data_ferret.util.output import error, log, timer, quiet, print
 from data_ferret.util.ferret_metadata import FerretMetadata, OptimizationPotential
 
 from .helpers import (

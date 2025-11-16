@@ -17,6 +17,7 @@ from data_ferret.util.ferret_metadata import (
     set_optimization_potential_ferret_metadata,
 )
 from data_ferret.agent.agent import FerretAgent, FerretStats
+from data_ferret.util.output import log, timer
 from data_ferret.util.prompts import get_prompt
 
 from typing import List, Tuple, Dict, Any, Optional
@@ -110,9 +111,10 @@ class InspectCommand(NotebookCommand):
             final_output.optimization_plan = new_optimization_plan
 
 
-        print(
-            f"| {index:<9}| {final_output.potential:<9}| {stats.usage.total_tokens:<9}| {stats.time:<9.1f}| {stats.cost:<9.4f}|"
-        )
+        # print(
+        #     f"| {index:<9}| {final_output.potential:<9}| {stats.usage.total_tokens:<9}| {stats.time:<9.1f}| {stats.cost:<9.4f}|"
+        # )
+        log(f"Cell {index+1} Potential/Tokens/Time/Cost: {final_output.potential}/{stats.usage.total_tokens}/{stats.time}/{stats.cost}")
 
         return cell["id"], InspectionResultAndStats(
             inspection_metadata=final_output, stats=stats
@@ -124,9 +126,9 @@ class InspectCommand(NotebookCommand):
         model: Any,
         cell_ids: Optional[List[str]] = None,
     ) -> Tuple[nbformat.NotebookNode, float]:
-        print()
-        print("# Inspecting Cells for Optimization Potential")
-        print()
+        # print()
+        # print("# Inspecting Cells for Optimization Potential")
+        # print()
 
         tasks = []
         for index, cell in enumerate(nb["cells"]):
@@ -145,14 +147,14 @@ class InspectCommand(NotebookCommand):
                         cell, OptimizationPotential(potential=0, optimization_plan=[])
                     )
 
-        print(
-            "|{:<10}|{:<10}|{:<10}|{:<10}|{:<10}|".format(
-                "Index", "Potential", "Tokens", "Time (s)", "Cost ($)"
-            )
-        )
-        print("|{:-^10}|{:-^10}|{:-^10}|{:-^10}|{:-^10}|".format("", "", "", "", ""))
+        # print(
+        #     "|{:<10}|{:<10}|{:<10}|{:<10}|{:<10}|".format(
+        #         "Index", "Potential", "Tokens", "Time (s)", "Cost ($)"
+        #     )
+        # )
+        # print("|{:-^10}|{:-^10}|{:-^10}|{:-^10}|{:-^10}|".format("", "", "", "", ""))
         results = await asyncio.gather(*tasks)
-        print()
+        # print()
         new_nb: nbformat.NotebookNode = nb.copy()  # type: ignore
 
         # Update each cell with its inspection results

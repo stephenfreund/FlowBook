@@ -92,8 +92,6 @@ class ProfileCommand(NotebookCommand):
                                 cell["execution_count"] = result["execution_count"]
                                 cell["outputs"] = result["outputs"]
 
-                                log(cell['outputs'])
-
                                 for output in result["outputs"]:
                                     if 'metadata' in output:
                                         output_metadata = output['metadata']

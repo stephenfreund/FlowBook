@@ -19,6 +19,7 @@ from data_ferret.util.ferret_metadata import (
     OptimizationStep,
     CodeSnippet,
     OptimizedCodeResponse,
+    BatchOptimizedCodeResponse,
     OptimizedCodeMetadata,
     OptimizationAppliedMetadata,
     set_optimized_ferret_metadata,
@@ -370,14 +371,14 @@ class OptimizationResultAndStats(BaseModel):
 
 class RepairedOptimizationResponse(BaseModel):
     """Response from LLM when repairing failed optimizations."""
+    explanation: str = Field(
+        description="Explanation of the repair process and the changes made"
+    )
 
     repaired_snippets: List[CodeSnippet] = Field(
         description="Complete list of repaired code snippets, one for each optimization step"
     )
 
-    explanation: str = Field(
-        description="Explanation of the repair process and the changes made"
-    )
 
 
 class ValidationHelper:
@@ -505,7 +506,6 @@ class ValidationHelper:
             if isinstance(result, TestCodeSuccess):
                 # Both codes succeeded - check if outputs match
                 diff_result = result.diff
-                print(diff_result)
 
                 if not diff_result.differences:
                     # All variables match - validation passed
@@ -913,9 +913,10 @@ class OptimizeCommand(NotebookCommand):
                 stats_aggregator.add_stats(stats)
 
                 log(f"Repair attempt completed with {len(repair_response.repaired_snippets)} snippets")
-                for snippet in repair_response.repaired_snippets:
-                    if snippet.optimizations_applied:
-                        log(f"  {snippet.cell_id}/{snippet.function_name or 'whole'}: {', '.join(snippet.optimizations_applied)}")
+                log(f"Repair explanation: {repair_response.explanation}")
+                # for snippet in repair_response.repaired_snippets:
+                #     if snippet.optimizations_applied:
+                #         log(f"  {snippet.cell_id}/{snippet.function_name or 'whole'}: {', '.join(snippet.optimizations_applied)}")
 
                 return repair_response.repaired_snippets
 
@@ -974,7 +975,6 @@ class OptimizeCommand(NotebookCommand):
             )
 
             log(f"Modified globals: {modified_globals}")
-            log(f"Analysis: {analysis}")
 
             if not modified_globals:
                 log("No globals to validate, skipping validation")
@@ -989,8 +989,10 @@ class OptimizeCommand(NotebookCommand):
                 original_snippets, current_snippets, cell_map, cell["id"]
             )
 
-            log(f"Original code length: {len(original_code)} chars")
-            log(f"Optimized code length: {len(optimized_code)} chars")
+            with timer(key="original_code", message="Original code"):
+                log(original_code)
+            with timer(key="optimized_code", message="Optimized code"):
+                log(optimized_code)
 
             # Validate
             is_valid, error_msg, test_result = ValidationHelper.validate_optimization(
@@ -1207,6 +1209,234 @@ class OptimizeCommand(NotebookCommand):
 
         return optimization_response, stats
 
+    def _format_snippets_for_batch(
+        self,
+        snippets: List[CodeSnippet]
+    ) -> str:
+        """
+        Format multiple code snippets into a single string with headers.
+
+        Format:
+        ### Cell ABC123 / Function process_data
+
+        def process_data(df):
+            ...
+
+        ### Cell XYZ789
+
+        for i in range(n):
+            ...
+
+        Args:
+            snippets: List of CodeSnippet objects
+
+        Returns:
+            Formatted string with all snippets
+        """
+        formatted_parts = []
+
+        for snippet in snippets:
+            # Create header
+            if snippet.function_name:
+                header = f"### Cell {snippet.cell_id} / Function {snippet.function_name}"
+            else:
+                header = f"### Cell {snippet.cell_id}"
+
+            formatted_parts.append(header)
+            formatted_parts.append("")  # blank line
+            formatted_parts.append(snippet.source)
+            formatted_parts.append("")  # blank line between snippets
+
+        return "\n".join(formatted_parts)
+
+    def _format_optimization_descriptions_batch(
+        self,
+        optimization_plan: List[OptimizationStep]
+    ) -> str:
+        """
+        Format all optimization descriptions from the plan into a numbered list.
+
+        Format:
+        1. [Cell ABC123 / Function process_data] Use vectorized operations instead of loops
+        2. [Cell ABC123 / Function process_data] Cache expensive computations
+        3. [Cell XYZ789] Replace list concatenation with list comprehension
+
+        Args:
+            optimization_plan: List of OptimizationStep objects
+
+        Returns:
+            Formatted string with numbered optimizations
+        """
+        optimization_lines = []
+        counter = 1
+
+        for step in optimization_plan:
+            # Create location identifier
+            if step.function_name:
+                location = f"Cell {step.target_cell_id} / Function {step.function_name}"
+            else:
+                location = f"Cell {step.target_cell_id}"
+
+            # Add each description
+            for desc in step.description:
+                optimization_lines.append(f"{counter}. [{location}] {desc}")
+                counter += 1
+
+        return "\n".join(optimization_lines)
+
+    async def _extract_original_snippets_from_plan(
+        self,
+        optimization_plan: List[OptimizationStep],
+        cells: List[Any]
+    ) -> List[CodeSnippet]:
+        """
+        Extract all original code snippets from the optimization plan.
+
+        This is similar to the current loop in _process_all_optimization_steps,
+        but only extracts the original code without calling the LLM.
+
+        Args:
+            optimization_plan: List of optimization steps
+            cells: All notebook cells
+
+        Returns:
+            List of original CodeSnippet objects
+
+        Raises:
+            ValueError: If a target cell is not found
+        """
+        original_snippets = []
+
+        for step in optimization_plan:
+            # Find target cell
+            result = self._find_target_cell(cells, step.target_cell_id)
+            if result is None:
+                raise ValueError(f"Target cell {step.target_cell_id} not found")
+
+            target_cell, _ = result
+
+            # Extract the code to optimize
+            _, original_code, _ = CodeExtractor.extract_optimization_target(
+                target_cell, step
+            )
+
+            # Create snippet
+            snippet = CodeSnippet(
+                cell_id=step.target_cell_id,
+                function_name=step.function_name,
+                source=original_code
+            )
+
+            original_snippets.append(snippet)
+
+        return original_snippets
+
+    def _build_batch_optimization_context(
+        self,
+        cells: List[Any],
+        optimization_plan: List[OptimizationStep],
+        analysis: Optional[NotebookAnalysis] = None
+    ) -> Tuple[str, str, str]:
+        """
+        Build context for batch optimization (prefix, env_section, live_vars_section).
+
+        Uses the context from the first cell in the optimization plan, or builds
+        a comprehensive context if multiple cells are involved.
+
+        Args:
+            cells: All notebook cells
+            optimization_plan: List of optimization steps
+            analysis: Optional NotebookAnalysis for dependency/liveness info
+
+        Returns:
+            Tuple of (prefix, env_section, live_vars_section)
+        """
+        if not optimization_plan:
+            return "", "", ""
+
+        # Use the first step to determine context
+        first_step = optimization_plan[0]
+
+        # Extract target cell and metadata
+        target_cell, target_index, env_data = self._extract_target_cell_and_metadata(
+            cells, first_step
+        )
+
+        # Filter env to dependencies if analysis available
+        if analysis:
+            full_env = env_data or {}
+            env_data = analysis.filter_env_to_dependencies(
+                first_step.target_cell_id, full_env
+            )
+
+        # Build context prefix (code before the first target cell)
+        prefix = CodeExtractor.build_context_prefix(cells, target_index)
+
+        # Build environment section
+        env_section = CodeExtractor.format_environment_section(env_data)
+
+        # Collect all live variables from all affected cells
+        all_live_vars = set()
+        if analysis:
+            for step in optimization_plan:
+                live_vars = analysis.get_validation_variables(step.target_cell_id)
+                all_live_vars.update(live_vars)
+
+        live_vars_section = CodeExtractor.format_live_variables_section(
+            all_live_vars, env_data
+        )
+
+        return prefix, env_section, live_vars_section
+
+    async def _run_batch_llm_optimization(
+        self,
+        formatted_snippets: str,
+        optimization_descriptions: str,
+        prefix: str,
+        env_section: str,
+        live_vars_section: str,
+        model: Any,
+        tools: NotebookTools,
+        stats_aggregator: StatsAggregator
+    ) -> Tuple[BatchOptimizedCodeResponse, FerretStats]:
+        """
+        Run batch LLM optimization on multiple snippets.
+
+        Args:
+            formatted_snippets: All snippets formatted with headers
+            optimization_descriptions: Numbered list of all optimizations
+            prefix: Context prefix
+            env_section: Environment section
+            live_vars_section: Live variables section
+            model: LLM model to use
+            tools: NotebookTools instance
+            stats_aggregator: Stats aggregator
+
+        Returns:
+            Tuple of (batch_response, stats)
+        """
+        agent = FerretAgent[BatchOptimizedCodeResponse](
+            key="batch_cell_optimization",
+            model=model,
+            instructions=get_prompt("batch_optimization_instructions"),
+            output_type=BatchOptimizedCodeResponse,
+            tools=tools.tools(include_profile=True),
+        )
+
+        input_text = get_prompt(
+            "batch_optimization_input",
+            prefix=prefix,
+            formatted_snippets=formatted_snippets,
+            optimization_descriptions=optimization_descriptions,
+            env_section=env_section,
+            live_vars_section=live_vars_section,
+        )
+
+        batch_response, stats = await agent.run(input_text)
+        stats_aggregator.add_stats(stats)
+
+        return batch_response, stats
+
     async def _process_optimization_step(
         self,
         step: OptimizationStep,
@@ -1313,12 +1543,19 @@ class OptimizeCommand(NotebookCommand):
         analysis: Optional[NotebookAnalysis] = None,
     ) -> Tuple[List[CodeSnippet], List[CodeSnippet]]:
         """
-        Process all optimization steps for a cell.
+        Process all optimization steps for a cell using batch optimization.
+
+        NEW APPROACH: Instead of calling the LLM once per step, we:
+        1. Extract all original snippets from the plan
+        2. Format them into a single string with headers
+        3. Create a list of all optimizations to apply
+        4. Call the LLM once to optimize all snippets together
+        5. Extract optimized snippets from response
 
         Args:
             optimization_plan: List of optimization steps
             cells: All notebook cells
-            index: Index of the cell being optimized
+            index: Index of the cell being optimized (for logging)
             model: LLM model to use
             tools: NotebookTools instance
             stats_aggregator: Stats aggregator
@@ -1327,23 +1564,88 @@ class OptimizeCommand(NotebookCommand):
         Returns:
             Tuple of (original_snippets, optimized_snippets)
         """
-        original_snippets = []
-        optimized_snippets = []
+        if not optimization_plan:
+            return [], []
 
-        for step in optimization_plan:
-            try:
-                original_snippet, optimized_snippet = (
-                    await self._process_optimization_step(
-                        step, cells, index, model, tools, stats_aggregator, analysis
+        with timer(
+            key="process_all_optimization_steps_batch",
+            message=f"Processing {len(optimization_plan)} optimization steps in batch"
+        ):
+            # Step 1: Extract all original snippets
+            with timer(key="extract_snippets", message="Extracting original snippets"):
+                try:
+                    original_snippets = await self._extract_original_snippets_from_plan(
+                        optimization_plan, cells
                     )
-                )
-                original_snippets.append(original_snippet)
-                optimized_snippets.append(optimized_snippet)
-            except ValueError:
-                # Target cell not found, skip this step
-                continue
+                except ValueError as e:
+                    error(f"Failed to extract snippets: {e}")
+                    return [], []
 
-        return original_snippets, optimized_snippets
+            if not original_snippets:
+                return [], []
+
+            # Step 2: Format all snippets into batch format
+            formatted_snippets = self._format_snippets_for_batch(original_snippets)
+
+            # Step 3: Create list of optimization descriptions
+            optimization_descriptions = self._format_optimization_descriptions_batch(
+                optimization_plan
+            )
+
+            # Step 4: Build context (prefix, env, live vars)
+            prefix, env_section, live_vars_section = self._build_batch_optimization_context(
+                cells, optimization_plan, analysis
+            )
+
+            # Step 5: Call LLM with batch optimization
+            with timer(key="batch_llm_call", message="Running batch LLM optimization"):
+                try:
+                    batch_response, stats = await self._run_batch_llm_optimization(
+                        formatted_snippets,
+                        optimization_descriptions,
+                        prefix,
+                        env_section,
+                        live_vars_section,
+                        model,
+                        tools,
+                        stats_aggregator
+                    )
+                except Exception as e:
+                    error(f"Batch LLM optimization failed: {type(e).__name__}: {str(e)}")
+                    import traceback
+                    error(f"Traceback:\n{traceback.format_exc()}")
+                    return [], []
+
+            # Step 6: Extract optimized snippets from response
+            # The response has optimized_snippets list with optimizations_applied already set
+            optimized_snippets = batch_response.optimized_snippets
+
+            # Verify we got the right number of snippets
+            if len(optimized_snippets) != len(original_snippets):
+                error(
+                    f"LLM returned {len(optimized_snippets)} snippets, "
+                    f"expected {len(original_snippets)}"
+                )
+                return [], []
+
+            # Log the results
+            log(f"Batch optimization completed:")
+            log(f"  Snippets processed: {len(optimized_snippets)}")
+            log(f"  Total tokens: {stats.usage.total_tokens if stats.usage else 0}")
+            log(f"  Time: {stats.time:.1f}s")
+            log(f"  Cost: ${stats.cost:.4f}")
+
+            for i, (orig, opt) in enumerate(zip(original_snippets, optimized_snippets)):
+                target_desc = opt.function_name or "whole cell"
+                log(
+                    f"| {index:<9}| {opt.cell_id:<15}| {target_desc:<20}| "
+                    f"{'-':<9}| {'-':<9}| {'-':<9}|"
+                )
+                if opt.optimizations_applied:
+                    for opt_desc in opt.optimizations_applied:
+                        log(f"    - {opt_desc}")
+
+            return original_snippets, optimized_snippets
 
     def _build_optimization_result(
         self,

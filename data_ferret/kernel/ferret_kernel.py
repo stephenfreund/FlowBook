@@ -366,7 +366,10 @@ class FerretKernel(IPythonKernel, Magics):
         self._checkpoint = Checkpoints()
         self._force_checkpoints = False
 
-        self.shell.set_custom_exc((Exception,), self._custom_exc_handler)
+        # For now, we don't want to use the custom exception handler because it's causing issues with the kernel client because
+        # the error message is not being sent to the kernel client.
+        
+        # self.shell.set_custom_exc((Exception,), self._custom_exc_handler)
 
     def _custom_exc_handler(self, *args, **kwargs):
         try:
@@ -740,6 +743,7 @@ class FerretKernel(IPythonKernel, Magics):
             args.html = False
             args.web = False
             args.no_browser = True
+            args.column_width = 132 * 4
 
             # Capture stderr
             stderr_buffer = io.StringIO()
@@ -774,6 +778,7 @@ class FerretKernel(IPythonKernel, Magics):
             return result, None
         finally:
             pass
+            # Had issues deleting the files -- profile data disappeared from metadata??? ---  so commented out for now
             # if os.path.exists(args.outfile):
             #     os.remove(args.outfile)
             # if os.path.exists(filename):
