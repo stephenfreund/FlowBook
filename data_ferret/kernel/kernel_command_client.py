@@ -185,9 +185,15 @@ class KernelCommandClient:
         Raises:
             KernelCommandError: If command fails
         """
-        request = CheckpointSaveRequest(name=name)
-        response_dict = self._send_command(request.model_dump(), timeout=timeout)
-        return CheckpointSaveResponse(**response_dict)
+        for _ in range(3):
+            try:
+                request = CheckpointSaveRequest(name=name)
+                response_dict = self._send_command(request.model_dump(), timeout=timeout)
+                return CheckpointSaveResponse(**response_dict)
+            except Exception as e:
+                error(f"Failed to save checkpoint: {e}")
+                time.sleep(1)
+        raise KernelCommandError(f"Failed to save checkpoint after 3 attempts")
 
     def checkpoint_restore(
         self,

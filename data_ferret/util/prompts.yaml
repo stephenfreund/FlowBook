@@ -200,7 +200,12 @@ optimization_repair_input: |
   ```
 
   Please repair ALL snippets so they work correctly together and produce the exact same outputs
-  as the original code. Return a complete list of repaired snippets in the same order.
+  as the original code.  
+  
+  If the code is not easily modified, explore the possibility of rewriting the code completely 
+  to be more efficient and readable, but make sure to preserve the functionality and produce the exact same outputs as the original code.
+  
+  Return a complete list of repaired snippets in the same order.
 
 batch_optimization_instructions: |
   You are an expert at optimizing Jupyter notebook code.

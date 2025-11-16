@@ -9,7 +9,7 @@ from data_ferret.kernel.extended_types import TypeModel, get_type_model
 import pandas as pd
 import numpy as np
 
-pd.options.mode.copy_on_write = True
+# pd.options.mode.copy_on_write = True
 
 
 # System variables to filter out from user namespace

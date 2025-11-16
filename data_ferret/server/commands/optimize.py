@@ -837,7 +837,9 @@ class OptimizeCommand(NotebookCommand):
             formatted.append(snippet.source)
             formatted.append(f"```")
             if snippet.optimizations_applied:
-                formatted.append(f"Optimizations applied: {', '.join(snippet.optimizations_applied)}")
+                formatted.append("Optimizations applied:")
+                for opt in snippet.optimizations_applied:
+                    formatted.append(f"  - {opt}")
             formatted.append("")
         return "\n".join(formatted)
 
@@ -1089,7 +1091,7 @@ class OptimizeCommand(NotebookCommand):
 
     def _extract_target_cell_and_metadata(
         self, cells: List[Any], step: OptimizationStep
-    ) -> Tuple[Any, int, Optional[Dict[str, str]]]:
+    ) -> Tuple[Any, int, Optional[Dict[str, str]], Optional[Dict[str, str]]]:
         """
         Extract target cell and its metadata.
 
@@ -1098,7 +1100,7 @@ class OptimizeCommand(NotebookCommand):
             step: The optimization step
 
         Returns:
-            Tuple of (target_cell, target_index, env_data)
+            Tuple of (target_cell, target_index, env_data, env_data_after)
 
         Raises:
             ValueError: If target cell not found
@@ -1114,8 +1116,9 @@ class OptimizeCommand(NotebookCommand):
         target_ferret_metadata = FerretMetadata.from_cell(target_cell)
         target_profile = target_ferret_metadata.get_profile()
         env_data = target_profile.env if target_profile else None
+        env_data_after = target_profile.env_after if target_profile else None
 
-        return target_cell, target_index, env_data
+        return target_cell, target_index, env_data, env_data_after
 
     def _build_optimization_context(
         self,
@@ -1124,6 +1127,7 @@ class OptimizeCommand(NotebookCommand):
         target_index: int,
         step: OptimizationStep,
         env_data: Optional[Dict[str, str]],
+        env_data_after: Optional[Dict[str, str]],
         analysis: Optional[NotebookAnalysis] = None,
     ) -> Tuple[str, str, str, str, str, str]:
         """
@@ -1134,7 +1138,8 @@ class OptimizeCommand(NotebookCommand):
             target_cell: The target cell
             target_index: Index of target cell
             step: The optimization step
-            env_data: Environment data from profile
+            env_data: Environment data from profile (before execution)
+            env_data_after: Environment data from profile (after execution)
             analysis: Optional NotebookAnalysis for dependency/liveness info
 
         Returns:
@@ -1155,12 +1160,12 @@ class OptimizeCommand(NotebookCommand):
         )
         env_section = CodeExtractor.format_environment_section(env_data)
 
-        # Get live variables that must be preserved
+        # Get live variables that must be preserved (use env_after for types)
         live_vars_section = ""
         if analysis:
             live_vars = analysis.get_validation_variables(step.target_cell_id)
             live_vars_section = CodeExtractor.format_live_variables_section(
-                live_vars, env_data
+                live_vars, env_data_after
             )
 
         return (
@@ -1373,7 +1378,7 @@ class OptimizeCommand(NotebookCommand):
         first_step = optimization_plan[0]
 
         # Extract target cell and metadata
-        target_cell, target_index, env_data = self._extract_target_cell_and_metadata(
+        target_cell, target_index, env_data, env_data_after = self._extract_target_cell_and_metadata(
             cells, first_step
         )
 
@@ -1382,6 +1387,10 @@ class OptimizeCommand(NotebookCommand):
             full_env = env_data or {}
             env_data = analysis.filter_env_to_dependencies(
                 first_step.target_cell_id, full_env
+            )
+            full_env_after = env_data_after or {}
+            env_data_after = analysis.filter_env_to_dependencies(
+                first_step.target_cell_id, full_env_after
             )
 
         # Build context prefix (code before the first target cell)
@@ -1398,7 +1407,7 @@ class OptimizeCommand(NotebookCommand):
                 all_live_vars.update(live_vars)
 
         live_vars_section = CodeExtractor.format_live_variables_section(
-            all_live_vars, env_data
+            all_live_vars, env_data_after
         )
 
         return prefix, env_section, live_vars_section
@@ -1482,7 +1491,7 @@ class OptimizeCommand(NotebookCommand):
             message=f"Processing optimization for {step.target_cell_id} ({target_desc})",
         ):
             # Extract target cell and metadata
-            target_cell, target_index, env_data = self._extract_target_cell_and_metadata(
+            target_cell, target_index, env_data, env_data_after = self._extract_target_cell_and_metadata(
                 cells, step
             )
 
@@ -1498,7 +1507,7 @@ class OptimizeCommand(NotebookCommand):
                     env_section,
                     live_vars_section,
                 ) = self._build_optimization_context(
-                    cells, target_cell, target_index, step, env_data, analysis
+                    cells, target_cell, target_index, step, env_data, env_data_after, analysis
                 )
 
             # Store original code snippet
