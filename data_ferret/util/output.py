@@ -97,22 +97,24 @@ class Output:
                     self.outer.print_exit(message, start=self.start, end=self.end)
 
     class IndentedOutputContext:
-        def __init__(self, outer, message: str, color="cyan"):
+        def __init__(self, outer, message: str, color="cyan", start="[", end="]"):
             self.outer = outer
             self.message = message
             self.color = color
-
+            self.start = start
+            self.end = end
         def __enter__(self):
             with self.outer.lock:
-                message = termcolor.colored("[" +self.message, self.color)
+                message = termcolor.colored(self.start + self.message, self.color)
                 self.outer.print_enter(message)
                 self.outer.contexts.append(self)
 
         def __exit__(self, exc_type, exc_value, traceback):
             with self.outer.lock:
                 self.outer.contexts.pop()
-                message = termcolor.colored("]", self.color)
-                self.outer.print_exit(message)
+                if self.end is not None:
+                    message = termcolor.colored(self.end, self.color)
+                    self.outer.print_exit(message)
             
         def write(self, message):
             self.outer.write(message)
@@ -269,7 +271,7 @@ class Output:
 
     def print(self, *args):
         with self.lock:
-            self._print("yellow", args)
+            self._print("light_yellow", args)
 
     def log(self, *args):
         with self.lock:
@@ -279,7 +281,7 @@ class Output:
 
     def error(self, *args):
         with self.lock:
-            self._print("red", args, start="[", end="]")
+            self._print("red", args)
 
 
 output = Output()
@@ -309,7 +311,7 @@ def timer(*, key: str | None = None, message: str | None = None):
     return output.timing_context(key=key, message=message)
 
 def indent(*, message: str):
-    return output.IndentedOutputContext(output, message)
+    return output.IndentedOutputContext(output, message, color="light_yellow", start="", end=None)
 
 def quiet():
     """

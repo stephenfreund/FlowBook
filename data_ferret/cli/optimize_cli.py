@@ -16,8 +16,9 @@ from typing import Optional, List, Dict, Any
 
 from data_ferret.server.registry import CommandRegistry
 from data_ferret.server.config import FerretConfig
-from data_ferret.util.output import error, log, timer, quiet, print
+from data_ferret.util.output import error, indent, log, timer, quiet, print
 from data_ferret.util.ferret_metadata import FerretMetadata, OptimizationPotential
+from data_ferret.util.text import wrap_markdown
 
 from .helpers import (
     load_notebook,
@@ -35,31 +36,19 @@ def print_inspection_report(optimization_potential: OptimizationPotential, cell_
         optimization_potential: The optimization potential metadata
         cell_index: 1-based index for display
     """
-    print(f"\n{'─'*70}")
-    print(f"📊 INSPECTION REPORT - Cell {cell_index}")
-    print(f"{'─'*70}")
-
     # Print potential score
     potential_bar = "█" * optimization_potential.potential + "░" * (5 - optimization_potential.potential)
-    print(f"\n🎯 Optimization Potential: {optimization_potential.potential}/5 [{potential_bar}]")
+    print(f"- Optimization Potential: {optimization_potential.potential}/5 [{potential_bar}]")
 
     # Print optimization plan
     if optimization_potential.optimization_plan:
-        print(f"\n📋 Optimization Plan ({len(optimization_potential.optimization_plan)} step(s)):")
-        for i, step in enumerate(optimization_potential.optimization_plan, 1):
-            target_desc = f"function '{step.function_name}'" if step.function_name else "whole cell"
-            print(f"\n   Step {i}: {step.target_cell_id} ({target_desc})")
-
-            # Handle description as either string or list
-            if isinstance(step.description, list):
-                for desc in step.description:
-                    print(f"      • {desc}")
-            else:
-                print(f"      • {step.description}")
+        with indent(message="- Optimization Plan"):
+            for i, step in enumerate(optimization_potential.optimization_plan, 1):
+                target_desc = f"function '{step.function_name}'" if step.function_name else "whole cell"
+                with indent(message=f"{i}. {step.target_cell_id} ({target_desc})"):
+                    print(wrap_markdown("\n".join(step.description), width=100))
     else:
-        print(f"\n📋 Optimization Plan: None")
-
-    print(f"\n{'─'*70}")
+        print(f"- Optimization Plan: None")
 
 
 def get_code_cell_ids(notebook_content: Dict[str, Any]) -> List[str]:
@@ -110,83 +99,105 @@ async def optimize_cell(
     Returns:
         Dictionary with results from each step
     """
-    if not quiet:
-        print(f"\n{'='*70}")
-        print(f"Processing cell {cell_index}/{total_cells}: {cell_id}")
-        print(f"{'='*70}")
+    with indent(message=f"[{cell_index}/{total_cells}] Processing cell {cell_id}"):
+        results = {
+            'cell_id': cell_id,
+            'profile': None,
+            'inspect': None,
+            'optimize': None,
+        }
 
-    results = {
-        'cell_id': cell_id,
-        'profile': None,
-        'inspect': None,
-        'optimize': None,
-    }
+        # Step 1: Profile
+        with indent(message=f"* Profiling..."):
 
-    # Step 1: Profile
-    print(f"\n[1/3] Profiling cell {cell_index}...")
+            # Save environment BEFORE profiling
+            from data_ferret.kernel.kernel_command_client import KernelCommandClient
+            cmd_client = KernelCommandClient(kernel_client)
 
-    # Save environment BEFORE profiling
-    from data_ferret.kernel.kernel_command_client import KernelCommandClient
-    cmd_client = KernelCommandClient(kernel_client)
+            checkpoint_name_before = f"cell_{cell_id}_before_profile"
+            cmd_client.checkpoint_save(checkpoint_name_before)
+            log(f"Saved checkpoint before profile: {checkpoint_name_before}")
 
-    checkpoint_name_before = f"cell_{cell_id}_before_profile"
-    cmd_client.checkpoint_save(checkpoint_name_before)
-    log(f"Saved checkpoint before profile: {checkpoint_name_before}")
+            with timer(key=f"profile_cell_{cell_index}", message=f"Profile cell {cell_index}"):
+                try:
+                    profile_cmd = registry.get_command("profile")
+                    profile_result = await profile_cmd.process(
+                        notebook_content,
+                        kernel_client=kernel_client,
+                        selected_cell_ids=[cell_id],
+                        config=config,
+                    )
+                    notebook_content = profile_result["notebook"]
+                    results['profile'] = profile_result.get("metadata", {})
+                    log(f"Profile completed for cell {cell_index}")
+                except Exception as e:
+                    error(f"Profile failed for cell {cell_index}: {e}")
+                    results['profile'] = {'error': str(e)}
 
-    with timer(key=f"profile_cell_{cell_index}", message=f"Profile cell {cell_index}"):
-        try:
-            profile_cmd = registry.get_command("profile")
-            profile_result = await profile_cmd.process(
-                notebook_content,
-                kernel_client=kernel_client,
-                selected_cell_ids=[cell_id],
-                config=config,
-            )
-            notebook_content = profile_result["notebook"]
-            results['profile'] = profile_result.get("metadata", {})
-            log(f"Profile completed for cell {cell_index}")
-        except Exception as e:
-            error(f"Profile failed for cell {cell_index}: {e}")
-            results['profile'] = {'error': str(e)}
+            # Save environment AFTER profiling
+            checkpoint_name_after = f"cell_{cell_id}_after_profile"
+            cmd_client.checkpoint_save(checkpoint_name_after)
+            log(f"Saved checkpoint after profile: {checkpoint_name_after}")
 
-    # Save environment AFTER profiling
-    checkpoint_name_after = f"cell_{cell_id}_after_profile"
-    cmd_client.checkpoint_save(checkpoint_name_after)
-    log(f"Saved checkpoint after profile: {checkpoint_name_after}")
+            # Extract duration from profile metadata
+            profile_duration = None
+            for c in notebook_content.get('cells', []):
+                if c.get('id') == cell_id:
+                    from data_ferret.util.ferret_metadata import FerretMetadata
+                    ferret_metadata = FerretMetadata.from_cell(c)
+                    profile_data = ferret_metadata.get_profile()
+                    if profile_data:
+                        profile_duration = profile_data.duration
+                        log(f"Extracted profile duration: {profile_duration:.2f}s")
+                    break
 
-    # Extract duration from profile metadata
-    profile_duration = None
-    for c in notebook_content.get('cells', []):
-        if c.get('id') == cell_id:
-            from data_ferret.util.ferret_metadata import FerretMetadata
-            ferret_metadata = FerretMetadata.from_cell(c)
-            profile_data = ferret_metadata.get_profile()
-            if profile_data:
-                profile_duration = profile_data.duration
-                log(f"Extracted profile duration: {profile_duration:.2f}s")
-            break
+            # Store checkpoint names and duration for later use
+            results['checkpoint_before'] = checkpoint_name_before
+            results['checkpoint_after'] = checkpoint_name_after
+            results['profile_duration'] = profile_duration
 
-    # Store checkpoint names and duration for later use
-    results['checkpoint_before'] = checkpoint_name_before
-    results['checkpoint_after'] = checkpoint_name_after
-    results['profile_duration'] = profile_duration
+            if profile_duration is not None:
+                print(f"- Duration: {profile_duration:.2f}s")
+            else:
+                print(f"- Duration: No profile data found")
 
-    # Step 2: Inspect
-    print(f"\n[2/3] Inspecting cell {cell_index}...")
-    with timer(key=f"inspect_cell_{cell_index}", message=f"Inspect cell {cell_index}"):
-        try:
-            inspect_cmd = registry.get_command("inspect")
-            inspect_result = await inspect_cmd.process(
-                notebook_content,
-                kernel_client=kernel_client,
-                selected_cell_ids=[cell_id],
-                config=config,
-            )
-            notebook_content = inspect_result["notebook"]
-            results['inspect'] = inspect_result.get("metadata", {})
-            log(f"Inspection completed for cell {cell_index}")
+        # Step 2: Inspect
+        with indent(message=f"* Inspecting..."):
+            with timer(key=f"inspect_cell_{cell_index}", message=f"Inspect cell {cell_index}"):
+                try:
+                    inspect_cmd = registry.get_command("inspect")
+                    inspect_result = await inspect_cmd.process(
+                        notebook_content,
+                        kernel_client=kernel_client,
+                        selected_cell_ids=[cell_id],
+                        config=config,
+                    )
+                    notebook_content = inspect_result["notebook"]
+                    results['inspect'] = inspect_result.get("metadata", {})
+                    log(f"Inspection completed for cell {cell_index}")
 
-            # Print the full inspection report
+                    # Print the full inspection report
+                    cell = None
+                    for c in notebook_content.get('cells', []):
+                        if c.get('id') == cell_id:
+                            cell = c
+                            break
+
+                    if cell:
+                        ferret_metadata = FerretMetadata.from_cell(cell)
+                        optimization_potential = ferret_metadata.get_optimization_potential()
+                        if optimization_potential:
+                            print_inspection_report(optimization_potential, cell_index)
+
+                except Exception as e:
+                    error(f"Inspection failed for cell {cell_index}: {e}")
+                    results['inspect'] = {'error': str(e)}
+
+            # Check if cell meets optimization criteria
+            should_optimize = False
+            skip_reason = None
+
+            # Find the cell in notebook
             cell = None
             for c in notebook_content.get('cells', []):
                 if c.get('id') == cell_id:
@@ -194,85 +205,63 @@ async def optimize_cell(
                     break
 
             if cell:
+                # Get metadata from cell
                 ferret_metadata = FerretMetadata.from_cell(cell)
+                profile_data = ferret_metadata.get_profile()
                 optimization_potential = ferret_metadata.get_optimization_potential()
-                if optimization_potential:
-                    print_inspection_report(optimization_potential, cell_index)
 
-        except Exception as e:
-            error(f"Inspection failed for cell {cell_index}: {e}")
-            results['inspect'] = {'error': str(e)}
+                # Check criteria: potential >= 4 and duration > 3.0 seconds
+                if profile_data and optimization_potential:
+                    duration = profile_data.duration
+                    potential = optimization_potential.potential
 
-    # Check if cell meets optimization criteria
-    should_optimize = False
-    skip_reason = None
-
-    # Find the cell in notebook
-    cell = None
-    for c in notebook_content.get('cells', []):
-        if c.get('id') == cell_id:
-            cell = c
-            break
-
-    if cell:
-        # Get metadata from cell
-        ferret_metadata = FerretMetadata.from_cell(cell)
-        profile_data = ferret_metadata.get_profile()
-        optimization_potential = ferret_metadata.get_optimization_potential()
-
-        # Check criteria: potential >= 4 and duration > 3.0 seconds
-        if profile_data and optimization_potential:
-            duration = profile_data.duration
-            potential = optimization_potential.potential
-
-            if potential < 4:
-                skip_reason = f"potential too low ({potential} < 4)"
-            elif duration <= 3.0:
-                skip_reason = f"duration too short ({duration:.2f}s <= 3.0s)"
+                    if potential < 4:
+                        skip_reason = f"potential too low ({potential} < 4)"
+                    elif duration <= 3.0:
+                        skip_reason = f"duration too short ({duration:.2f}s <= 3.0s)"
+                    else:
+                        should_optimize = True
+                        log(f"Cell meets optimization criteria: potential={potential}, duration={duration:.2f}s")
+                else:
+                    skip_reason = "missing profile or optimization metadata"
             else:
-                should_optimize = True
-                log(f"Cell meets optimization criteria: potential={potential}, duration={duration:.2f}s")
+                skip_reason = "cell not found in notebook"
+
+        # Step 3: Optimize (only if criteria met)
+        if should_optimize:
+            with indent(message=f"* Optimizing..."):
+                with timer(key=f"optimize_cell_{cell_index}", message=f"Optimize cell {cell_index}"):
+                    try:
+                        # Import PrePostEnvironments model
+                        from data_ferret.server.commands.optimize import PrePostEnvironments
+
+                        # Create pre_post_envs using the checkpoints and duration from profile
+                        pre_post_envs = PrePostEnvironments(
+                            original_environment=results.get('checkpoint_before'),
+                            original_result=results.get('checkpoint_after'),
+                            original_duration=results.get('profile_duration')
+                        )
+
+                        optimize_cmd = registry.get_command("optimize")
+                        optimize_result = await optimize_cmd.process(
+                            notebook_content,
+                            kernel_client=kernel_client,
+                            selected_cell_ids=[cell_id],
+                            config=config,
+                            pre_post_envs=pre_post_envs  # Pass the checkpoints!
+                        )
+                        notebook_content = optimize_result["notebook"]
+                        results['optimize'] = optimize_result.get("metadata", {})
+                        log(f"Optimization completed for cell {cell_index}")
+                    except Exception as e:
+                        error(f"Optimization failed for cell {cell_index}: {e}")
+                        results['optimize'] = {'error': str(e)}
         else:
-            skip_reason = "missing profile or optimization metadata"
-    else:
-        skip_reason = "cell not found in notebook"
+            with indent(message=f"* Skipping optimization: {skip_reason}"):
+                results['optimize'] = {'skipped': True, 'reason': skip_reason}
+                log(f"Optimization skipped for cell {cell_index}: {skip_reason}")
 
-    # Step 3: Optimize (only if criteria met)
-    if should_optimize:
-        print(f"\n[3/3] Optimizing cell {cell_index}...")
-        with timer(key=f"optimize_cell_{cell_index}", message=f"Optimize cell {cell_index}"):
-            try:
-                # Import PrePostEnvironments model
-                from data_ferret.server.commands.optimize import PrePostEnvironments
-
-                # Create pre_post_envs using the checkpoints and duration from profile
-                pre_post_envs = PrePostEnvironments(
-                    original_environment=results.get('checkpoint_before'),
-                    original_result=results.get('checkpoint_after'),
-                    original_duration=results.get('profile_duration')
-                )
-
-                optimize_cmd = registry.get_command("optimize")
-                optimize_result = await optimize_cmd.process(
-                    notebook_content,
-                    kernel_client=kernel_client,
-                    selected_cell_ids=[cell_id],
-                    config=config,
-                    pre_post_envs=pre_post_envs  # Pass the checkpoints!
-                )
-                notebook_content = optimize_result["notebook"]
-                results['optimize'] = optimize_result.get("metadata", {})
-                log(f"Optimization completed for cell {cell_index}")
-            except Exception as e:
-                error(f"Optimization failed for cell {cell_index}: {e}")
-                results['optimize'] = {'error': str(e)}
-    else:
-        print(f"\n[3/3] Skipping optimization for cell {cell_index}: {skip_reason}")
-        results['optimize'] = {'skipped': True, 'reason': skip_reason}
-        log(f"Optimization skipped for cell {cell_index}: {skip_reason}")
-
-    print(f"\nCell {cell_index} pipeline complete")
-    return results
+        return results
 
 
 async def run_optimization_pipeline(
@@ -397,19 +386,17 @@ def optimize_cli_main():
             )
 
             # Run optimization pipeline
-            print(f"\n{'='*70}")
-            print("Starting Optimization Pipeline")
-            print(f"{'='*70}")
+            with indent(message="Running Optimization Pipeline"):
 
-            result = asyncio.run(
-                run_optimization_pipeline(
-                    notebook_content,
-                    kernel_client=kernel_client,
-                    selected_cell_ids=None,  # Always process all code cells
-                    config=config,
-                    registry=registry
+                result = asyncio.run(
+                    run_optimization_pipeline(
+                        notebook_content,
+                        kernel_client=kernel_client,
+                        selected_cell_ids=None,  # Always process all code cells
+                        config=config,
+                        registry=registry
+                    )
                 )
-            )
 
             # Determine output path
             if args.output:
@@ -444,53 +431,64 @@ def optimize_cli_main():
                         cell = c
                         break
 
-                # Get profile duration from cell's ferret metadata
+                # Get profile duration and optimization potential from cell's ferret metadata
                 profile_duration = 0.0
+                potential = None
                 if cell:
                     ferret_metadata = FerretMetadata.from_cell(cell)
                     profile_data = ferret_metadata.get_profile()
                     if profile_data:
                         profile_duration = profile_data.duration
+                    optimization_potential = ferret_metadata.get_optimization_potential()
+                    if optimization_potential:
+                        potential = optimization_potential.potential
 
-                # Get optimization timing data
+                # Get optimization timing data and status
                 optimize_meta = cell_result.get('optimize', {})
 
-                # Check if cell was actually optimized (not skipped)
-                was_optimized = False
-                if optimize_meta and not optimize_meta.get('skipped') and not optimize_meta.get('error'):
+                # Default values
+                status = 'no improvement'
+                initial_time = profile_duration
+                final_time = profile_duration
+                speedup = 1.0
+
+                # Check if optimization was skipped
+                if optimize_meta and optimize_meta.get('skipped'):
+                    status = 'not attempted'
+                elif optimize_meta and not optimize_meta.get('error'):
                     # Get timing data from optimize command metadata
                     opt_metadata = optimize_meta if isinstance(optimize_meta, dict) else {}
                     cell_timing = opt_metadata.get('cell_timing', {})
 
-                    # Get timing for this cell
+                    # Get timing and status for this cell
                     if cell_id in cell_timing:
                         timing_info = cell_timing[cell_id]
-                        timing_summary.append({
-                            'cell_id': cell_id,
-                            'initial_time': timing_info.get('original_duration', profile_duration),
-                            'final_time': timing_info.get('modified_duration', profile_duration),
-                            'speedup': timing_info.get('speedup', 1.0),
-                            'optimized': True
-                        })
-                        was_optimized = True
+                        status = timing_info.get('status', 'no improvement')
+                        initial_time = timing_info.get('original_duration', profile_duration)
+                        final_time = timing_info.get('modified_duration', profile_duration)
+                        speedup = timing_info.get('speedup', 1.0)
 
-                # If not optimized, use profile duration for both initial and final
-                if not was_optimized:
-                    timing_summary.append({
-                        'cell_id': cell_id,
-                        'initial_time': profile_duration,
-                        'final_time': profile_duration,
-                        'speedup': 1.0,
-                        'optimized': False
-                    })
+                        # If optimization wasn't applied, final time = initial time
+                        if status in ('no improvement', 'error'):
+                            final_time = initial_time
+                            speedup = 1.0
+
+                timing_summary.append({
+                    'cell_id': cell_id,
+                    'potential': potential,
+                    'initial_time': initial_time,
+                    'final_time': final_time,
+                    'speedup': speedup,
+                    'status': status
+                })
 
             # Display timing summary table for all cells
             if timing_summary:
-                print(f"\n{'='*88}")
-                print("## Optimization Timing Results\n")
-                # Column widths: Cell ID=19, Initial=13, Optimized=15, Speedup=9, Status=16
-                print("| Cell ID             | Initial (s) | Optimized (s) | Speedup | Status           |")
-                print("|---------------------|-------------|---------------|---------|------------------|")
+                print(f"\n{'='*100}")
+                print("## Optimization Results\n")
+                # Column widths: Cell ID=19, Initial=13, Potential=11, Optimized=15, Speedup=9, Status=16
+                print("| Cell ID             | Initial (s) | Potential | Optimized (s) | Speedup | Status           |")
+                print("|---------------------|-------------|-----------|---------------|---------|------------------|")
 
                 total_initial = 0
                 total_final = 0
@@ -498,12 +496,24 @@ def optimize_cli_main():
                 for timing in timing_summary:
                     # Truncate cell ID to 17 chars + '..' if needed
                     cell_id = timing['cell_id'][:17] + '..' if len(timing['cell_id']) > 19 else timing['cell_id']
+                    potential = timing['potential']
                     initial = timing['initial_time']
                     final = timing['final_time']
                     speedup = timing['speedup']
-                    status = "✓ Optimized" if timing['optimized'] else "- Not optimized"
 
-                    print(f"| {cell_id:<19} | {initial:>11.2f} | {final:>13.2f} | {speedup:>6.2f}x | {status:<16} |")
+                    # Format potential as "X/5" or "-"
+                    potential_str = f"{potential}/5" if potential is not None else "-"
+
+                    # Map status to display string
+                    status_map = {
+                        'optimized': '✓ Optimized',
+                        'error': '✗ Error',
+                        'no improvement': '✗ No improvement',
+                        'not attempted': '- Not optimized'
+                    }
+                    status = status_map.get(timing['status'], '- Unknown')
+
+                    print(f"| {cell_id:<19} | {initial:>11.2f} | {potential_str:>9} | {final:>13.2f} | {speedup:>6.2f}x | {status:<16} |")
                     total_initial += initial
                     total_final += final
 
@@ -511,30 +521,11 @@ def optimize_cli_main():
                 overall_speedup = total_initial / total_final if total_final > 0 else 1.0
                 time_saved = total_initial - total_final
 
-                print("|---------------------|-------------|---------------|---------|------------------|")
-                print(f"| {'TOTAL':<19} | {total_initial:>11.2f} | {total_final:>13.2f} | {overall_speedup:>6.2f}x | {'':<16} |")
+                print("|---------------------|-------------|-----------|---------------|---------|------------------|")
+                print(f"| {'TOTAL':<19} | {total_initial:>11.2f} | {'':<9} | {total_final:>13.2f} | {overall_speedup:>6.2f}x | {'':<16} |")
 
                 print(f"\n**Time saved:** {time_saved:.2f}s ({(time_saved/total_initial*100 if total_initial > 0 else 0):.1f}%)")
-                print(f"{'='*88}")
-
-            # Show brief summary for each cell
-            print(f"\n{'='*70}")
-            print("Cell Processing Summary")
-            print(f"{'='*70}")
-            for cell_result in metadata['cell_results']:
-                cell_id = cell_result['cell_id']
-                print(f"\nCell {cell_id}:")
-                for step in ['profile', 'inspect', 'optimize']:
-                    if cell_result.get(step):
-                        if 'error' in cell_result[step]:
-                            print(f"  {step}: ERROR - {cell_result[step]['error']}")
-                        elif 'skipped' in cell_result[step]:
-                            reason = cell_result[step].get('reason', 'unknown reason')
-                            print(f"  {step}: SKIPPED - {reason}")
-                        else:
-                            print(f"  {step}: OK")
-                    else:
-                        print(f"  {step}: SKIPPED")
+                print(f"{'='*100}")
 
             # Save full metadata to JSON file
             metadata_path = output_path.rsplit(".", 1)[0] + "_metadata.json"

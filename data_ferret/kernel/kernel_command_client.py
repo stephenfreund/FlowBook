@@ -43,6 +43,7 @@ from data_ferret.kernel.kernel_commands import (
     ProgressMessage,
     FinalMessage,
 )
+from data_ferret.util.output import error
 
 
 class KernelCommandError(Exception):
@@ -206,9 +207,15 @@ class KernelCommandClient:
         Raises:
             KernelCommandError: If command fails or checkpoint doesn't exist
         """
-        request = CheckpointRestoreRequest(name=name)
-        response_dict = self._send_command(request.model_dump(), timeout=timeout)
-        return CheckpointRestoreResponse(**response_dict)
+        for _ in range(3):
+            request = CheckpointRestoreRequest(name=name)
+            response_dict = self._send_command(request.model_dump(), timeout=timeout)
+            if response_dict['status'] == 'ok':
+                return CheckpointRestoreResponse(**response_dict)
+            else:
+                error(f"Failed to restore checkpoint: {response_dict['message']}")
+                time.sleep(1)
+        raise KernelCommandError(f"Failed to restore checkpoint after 3 attempts")
 
     def checkpoint_delete(
         self,

@@ -114,23 +114,32 @@ class KernelCommandHandlers:
         Raises:
             AssertionError: If shell is not set
         """
-        assert self.kernel.shell is not None, "shell is not set"
+        try:
+            assert self.kernel.shell is not None, "shell is not set"
 
-        start_time = time.time()
-        saved, removed = self.kernel._checkpoint.save(req.name, self.kernel.shell.user_ns)
-        duration = time.time() - start_time
+            start_time = time.time()
+            saved, removed = self.kernel._checkpoint.save(req.name, self.kernel.shell.user_ns)
+            duration = time.time() - start_time
 
-        # Remove variables that couldn't be saved from the namespace
-        for k in removed:
-            del self.kernel.shell.user_ns[k]
+            # Remove variables that couldn't be saved from the namespace
+            for k in removed and k in self.kernel.shell.user_ns:
+                del self.kernel.shell.user_ns[k]
 
-        return CheckpointSaveResponse(
-            status="ok",
-            message=f"Checkpoint '{req.name}' saved in {duration:.2f}s",
-            saved=saved,
-            removed=removed,
-            duration=duration,
-        )
+            return CheckpointSaveResponse(
+                status="ok",
+                message=f"Checkpoint '{req.name}' saved in {duration:.2f}s",
+                saved=saved,
+                removed=removed,
+                duration=duration,
+            )
+        except Exception as e:
+            return CheckpointSaveResponse(
+                status="error",
+                message=f"Failed to save checkpoint: {e}",
+                saved={},
+                removed={},
+                duration=0,
+            )
 
     def handle_checkpoint_restore(self, req: CheckpointRestoreRequest) -> CheckpointRestoreResponse:
         """

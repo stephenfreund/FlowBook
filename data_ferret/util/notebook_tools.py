@@ -253,9 +253,9 @@ class NotebookTools(LspSession):
         # line, col = last_position_of_symbol(self.notebook, cell_uri, symbol)
 
         source = self.get_source(cell_id)
-        log(f"get_source({cell_id}) -> ")
-        for line, code in enumerate(source.code.split("\n")):
-            error(f"{line:03d}: {code}")
+        log(f"get_source({cell_id}) -> ...")
+        # for line, code in enumerate(source.code.split("\n")):
+        #     error(f"{line:03d}: {code}")
 
         if source is None:
             return None

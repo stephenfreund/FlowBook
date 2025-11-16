@@ -114,7 +114,7 @@ class InspectCommand(NotebookCommand):
         # print(
         #     f"| {index:<9}| {final_output.potential:<9}| {stats.usage.total_tokens:<9}| {stats.time:<9.1f}| {stats.cost:<9.4f}|"
         # )
-        log(f"Cell {index+1} Potential/Tokens/Time/Cost: {final_output.potential}/{stats.usage.total_tokens}/{stats.time}/{stats.cost}")
+        log(f"Cell {index} Potential:{final_output.potential} Tokens:{stats.usage.total_tokens} Time:{stats.time:.2f} Cost:{stats.cost:.4f}")
 
         return cell["id"], InspectionResultAndStats(
             inspection_metadata=final_output, stats=stats

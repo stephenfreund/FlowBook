@@ -6,7 +6,7 @@ import asyncio
 import copy
 import time
 import traceback
-from typing import Any, Dict, Optional, List, Tuple, Set
+from typing import Any, Dict, Optional, List, Tuple, Set, Literal
 
 from data_ferret.kernel.checkpoint import is_valid_variable_name
 from data_ferret.kernel.kernel_command_client import KernelCommandClient
@@ -33,11 +33,17 @@ from data_ferret.kernel.types import (
     DiffResult, TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
     ExecutionError, format_diff_as_markdown
 )
-from data_ferret.util.output import log, error, timer
+from data_ferret.util.output import log, error, timer, indent, print
+from data_ferret.util.text import wrap_markdown
 
 import nbformat
 from pydantic import BaseModel, Field
 import ast
+
+
+class OptimizationLLMError(Exception):
+    """Exception raised when LLM optimization fails or returns invalid results."""
+    pass
 
 
 class PrePostEnvironments(BaseModel):
@@ -213,7 +219,8 @@ class CodeExecutionOrchestrator:
         self.cmd_client.checkpoint_restore(env_checkpoint_name)
 
         # Step 5: Execute modified code with crash handling
-        modified_duration, modified_error = self._execute_code_safely(modified_code)
+        with timer(key="execute_modified_code", message="Execute modified code"):
+            modified_duration, modified_error = self._execute_code_safely(modified_code)
 
         if modified_error:
             # Modified crashed (original worked) - return error
@@ -366,6 +373,10 @@ class OptimizationResultAndStats(BaseModel):
     )
     speedup: Optional[float] = Field(
         None, description="Speedup ratio (original / modified)"
+    )
+    status: Literal["optimized", "error", "no improvement"] = Field(
+        description="Optimization status: 'optimized' if successful with speedup > 1, "
+                    "'error' if validation failed, 'no improvement' if speedup <= 1"
     )
 
 
@@ -913,7 +924,8 @@ class OptimizeCommand(NotebookCommand):
                 stats_aggregator.add_stats(stats)
 
                 log(f"Repair attempt completed with {len(repair_response.repaired_snippets)} snippets")
-                log(f"Repair explanation: {repair_response.explanation}")
+                log("Repair explanation:")
+                log(wrap_markdown(repair_response.explanation, width=100))
                 # for snippet in repair_response.repaired_snippets:
                 #     if snippet.optimizations_applied:
                 #         log(f"  {snippet.cell_id}/{snippet.function_name or 'whole'}: {', '.join(snippet.optimizations_applied)}")
@@ -965,96 +977,97 @@ class OptimizeCommand(NotebookCommand):
 
         for attempt in range(MAX_RETRIES + 1):  # 0 = initial, 1-3 = retries
             if attempt == 0:
-                log(f"Validating optimization for cell {cell['id']}")
+                message = f"Validating optimization for cell {cell['id']}"
             else:
-                log(f"Retry attempt {attempt}/{MAX_RETRIES} for cell {cell['id']}")
+                message = f"Validation retry attempt {attempt}/{MAX_RETRIES} for cell {cell['id']}"
 
-            # Get modified globals for validation (only live variables)
-            modified_globals = ValidationHelper.get_modified_globals_for_cell(
-                cell["id"], analysis
-            )
+            with indent(message=message):
 
-            log(f"Modified globals: {modified_globals}")
-
-            if not modified_globals:
-                log("No globals to validate, skipping validation")
-                return (True, current_snippets, None)
-
-            log(f"Modified globals to validate: {modified_globals}")
-
-            # Build code for validation
-            original_code = cell["source"]
-            cell_map = {c["id"]: c for c in cells}
-            optimized_code = ValidationHelper.build_optimized_code_for_validation(
-                original_snippets, current_snippets, cell_map, cell["id"]
-            )
-
-            with timer(key="original_code", message="Original code"):
-                log(original_code)
-            with timer(key="optimized_code", message="Optimized code"):
-                log(optimized_code)
-
-            # Validate
-            is_valid, error_msg, test_result = ValidationHelper.validate_optimization(
-                original_code,
-                optimized_code,
-                modified_globals,
-                kernel_client,
-                pre_post_envs,
-            )
-
-            if is_valid:
-                log("✓ Validation passed")
-                # Extract timing data
-                timing_data = None
-                if test_result:
-                    timing_data = {
-                        "original_duration": test_result.original_duration,
-                        "modified_duration": test_result.modified_duration,
-                        "speedup": test_result.speedup,
-                    }
-                    log(
-                        f"Timing: {test_result.original_duration:.2f}s → "
-                        f"{test_result.modified_duration:.2f}s "
-                        f"(speedup: {test_result.speedup:.2f}x)"
-                    )
-                return (True, current_snippets, timing_data)
-
-            # Validation failed
-            error(f"Validation failed (attempt {attempt + 1}/{MAX_RETRIES + 1}): {error_msg}")
-
-            # If this was the last attempt, give up
-            if attempt >= MAX_RETRIES:
-                error(
-                    f"Validation failed after {MAX_RETRIES} retries, "
-                    f"reverting to original code"
+                # Get modified globals for validation (only live variables)
+                modified_globals = ValidationHelper.get_modified_globals_for_cell(
+                    cell["id"], analysis
                 )
-                return (False, [], None)
+
+                log(f"Modified globals: {modified_globals}")
+
+                if not modified_globals:
+                    log("No globals to validate, skipping validation")
+                    return (True, current_snippets, None)
+
+                log(f"Modified globals to validate: {modified_globals}")
+
+                # Build code for validation
+                original_code = cell["source"]
+                cell_map = {c["id"]: c for c in cells}
+                optimized_code = ValidationHelper.build_optimized_code_for_validation(
+                    original_snippets, current_snippets, cell_map, cell["id"]
+                )
+
+                with timer(key="original_code", message="Original code"):
+                    log(original_code)
+                with timer(key="optimized_code", message="Optimized code"):
+                    log(optimized_code)
+
+                # Validate
+                is_valid, error_msg, test_result = ValidationHelper.validate_optimization(
+                    original_code,
+                    optimized_code,
+                    modified_globals,
+                    kernel_client,
+                    pre_post_envs,
+                )
+
+                if is_valid:
+                    print("Validation passed")
+                    log("✓ Validation passed")
+                    # Extract timing data
+                    timing_data = None
+                    if test_result:
+                        timing_data = {
+                            "original_duration": test_result.original_duration,
+                            "modified_duration": test_result.modified_duration,
+                            "speedup": test_result.speedup,
+                        }
+                        log(
+                            f"Timing: {test_result.original_duration:.2f}s → "
+                            f"{test_result.modified_duration:.2f}s "
+                            f"(speedup: {test_result.speedup:.2f}x)"
+                        )
+                    return (True, current_snippets, timing_data)
+
+                # Validation failed
+                error(f"Validation failed (attempt {attempt + 1}/{MAX_RETRIES + 1}): {error_msg}")
+
+                # If this was the last attempt, give up
+                if attempt >= MAX_RETRIES:
+                    error(
+                        f"Validation failed after {MAX_RETRIES} retries, "
+                        f"reverting to original code"
+                    )
+                    return (False, [], None)
 
             # Try to repair ALL snippets at once
-            log(f"Attempting to repair all snippets (retry {attempt + 1}/{MAX_RETRIES})")
+            with indent(message=f"Repairing snippets"):
 
-            repaired_snippets = await self._repair_optimization(
-                cells,
-                cell,
-                original_snippets,
-                current_snippets,
-                error_msg,
-                model,
-                tools,
-                analysis,
-                stats_aggregator,
-            )
+                repaired_snippets = await self._repair_optimization(
+                    cells,
+                    cell,
+                    original_snippets,
+                    current_snippets,
+                    error_msg,
+                    model,
+                    tools,
+                    analysis,
+                    stats_aggregator,
+                )
 
-            if not repaired_snippets:
-                error("Repair failed, giving up")
-                return (False, [], None)
+                if not repaired_snippets:
+                    error("Repair failed, giving up")
+                    return (False, [], None)
 
-            # Replace all snippets with repaired versions
-            current_snippets = repaired_snippets
-            log(f"✓ Replaced all snippets with repaired versions")
-
-            # Loop back to validate the repaired code
+                # Replace all snippets with repaired versions
+                current_snippets = repaired_snippets
+                log(f"✓ Replaced all snippets with repaired versions")
 
         # Should not reach here, but just in case
         return (False, [], None)
@@ -1579,7 +1592,7 @@ class OptimizeCommand(NotebookCommand):
                     )
                 except ValueError as e:
                     error(f"Failed to extract snippets: {e}")
-                    return [], []
+                    raise OptimizationLLMError(f"Failed to extract snippets: {e}") from e
 
             if not original_snippets:
                 return [], []
@@ -1614,7 +1627,7 @@ class OptimizeCommand(NotebookCommand):
                     error(f"Batch LLM optimization failed: {type(e).__name__}: {str(e)}")
                     import traceback
                     error(f"Traceback:\n{traceback.format_exc()}")
-                    return [], []
+                    raise OptimizationLLMError(f"Batch LLM optimization failed: {type(e).__name__}: {str(e)}") from e
 
             # Step 6: Extract optimized snippets from response
             # The response has optimized_snippets list with optimizations_applied already set
@@ -1622,11 +1635,12 @@ class OptimizeCommand(NotebookCommand):
 
             # Verify we got the right number of snippets
             if len(optimized_snippets) != len(original_snippets):
-                error(
+                error_msg = (
                     f"LLM returned {len(optimized_snippets)} snippets, "
                     f"expected {len(original_snippets)}"
                 )
-                return [], []
+                error(error_msg)
+                raise OptimizationLLMError(error_msg)
 
             # Log the results
             log(f"Batch optimization completed:")
@@ -1634,6 +1648,9 @@ class OptimizeCommand(NotebookCommand):
             log(f"  Total tokens: {stats.usage.total_tokens if stats.usage else 0}")
             log(f"  Time: {stats.time:.1f}s")
             log(f"  Cost: ${stats.cost:.4f}")
+            log("")
+            log("Optimization explanation:")
+            log(wrap_markdown(batch_response.explanation, width=100))
 
             for i, (orig, opt) in enumerate(zip(original_snippets, optimized_snippets)):
                 target_desc = opt.function_name or "whole cell"
@@ -1653,6 +1670,7 @@ class OptimizeCommand(NotebookCommand):
         original_snippets: List[CodeSnippet],
         optimized_snippets: List[CodeSnippet],
         stats_aggregator: StatsAggregator,
+        status: Literal["optimized", "error", "no improvement"],
         timing_data: Optional[Dict[str, float]] = None,
     ) -> OptimizationResultAndStats:
         """
@@ -1663,11 +1681,13 @@ class OptimizeCommand(NotebookCommand):
             original_snippets: Original code snippets
             optimized_snippets: Optimized code snippets
             stats_aggregator: Stats aggregator
+            status: Optimization status
             timing_data: Optional timing data from validation
 
         Returns:
             OptimizationResultAndStats
         """
+
         return OptimizationResultAndStats(
             original_code=original_snippets,
             optimized_code=optimized_snippets,
@@ -1675,6 +1695,7 @@ class OptimizeCommand(NotebookCommand):
             original_duration=timing_data["original_duration"] if timing_data else None,
             modified_duration=timing_data["modified_duration"] if timing_data else None,
             speedup=timing_data["speedup"] if timing_data else None,
+            status=status,
         )
 
     async def optimize_cell(
@@ -1706,71 +1727,100 @@ class OptimizeCommand(NotebookCommand):
         cells = nb["cells"]
         cell = cells[index]
 
-        # Get optimization plan from cell metadata
-        ferret_metadata = FerretMetadata.from_cell(cell)
-        optimization_potential = ferret_metadata.get_optimization_potential()
+        with indent(message=f"Optimizing cell {index} ({cell['id']})"):
 
-        stats_aggregator = StatsAggregator(model)
+            # Get optimization plan from cell metadata
+            ferret_metadata = FerretMetadata.from_cell(cell)
+            optimization_potential = ferret_metadata.get_optimization_potential()
 
-        if not optimization_potential or not optimization_potential.optimization_plan:
-            return cell["id"], self._build_optimization_result(
-                cell["id"], [], [], stats_aggregator
-            )
+            stats_aggregator = StatsAggregator(model)
 
-        # Process all optimization steps
-        with NotebookTools(nb) as tools:
-            original_snippets, optimized_snippets = (
-                await self._process_all_optimization_steps(
-                    optimization_potential.optimization_plan,
-                    cells,
-                    index,
-                    model,
-                    tools,
-                    stats_aggregator,
-                    analysis,
+            if not optimization_potential or not optimization_potential.optimization_plan:
+                return cell["id"], self._build_optimization_result(
+                    cell["id"], [], [], stats_aggregator, "no improvement"
                 )
-            )
 
-        log(f"Kernel client available: {kernel_client is not None}")
-        log(f"Analysis available: {analysis is not None}")
+            with indent(message="* Generating optimized code with LLM"):
+                # Retry logic for LLM optimization
+                MAX_RETRIES = 3
+                original_snippets = []
+                optimized_snippets = []
 
-        # Initialize timing data
-        timing_data = None
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        with NotebookTools(nb) as tools:
+                            original_snippets, optimized_snippets = (
+                                await self._process_all_optimization_steps(
+                                    optimization_potential.optimization_plan,
+                                    cells,
+                                    index,
+                                    model,
+                                    tools,
+                                    stats_aggregator,
+                                    analysis,
+                                )
+                            )
+                        # Success - break out of retry loop
+                        break
+                    except OptimizationLLMError as e:
+                        error(f"LLM optimization attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
+                        if attempt == MAX_RETRIES - 1:
+                            # Final attempt failed - return error status
+                            error(f"All {MAX_RETRIES} optimization attempts failed for cell {index}")
+                            return cell["id"], self._build_optimization_result(
+                                cell["id"], [], [], stats_aggregator, "error"
+                            )
+                        # Otherwise, retry
+                        log(f"Retrying optimization (attempt {attempt + 2}/{MAX_RETRIES})...")
 
-        # VALIDATION WITH RETRY: Check if optimization preserves semantics
-        if kernel_client and analysis and optimized_snippets:
-            with timer(
-                key="validation", message="Validating optimization with retry support"
-            ):
-                with NotebookTools(nb) as tools:
-                    is_valid, validated_snippets, timing_data = (
-                        await self._validate_optimization_with_retry(
-                            cell,
-                            cells,
-                            original_snippets,
-                            optimized_snippets,
-                            model,
-                            tools,
-                            kernel_client,
-                            analysis,
-                            stats_aggregator,
-                            pre_post_envs,
-                        )
-                    )
+            log(f"Kernel client available: {kernel_client is not None}")
+            log(f"Analysis available: {analysis is not None}")
 
-                if not is_valid:
-                    # Validation failed after retries, return empty result
-                    log(f"Skipping optimization for cell {index} after validation failures")
-                    return cell["id"], self._build_optimization_result(
-                        cell["id"], [], [], stats_aggregator
-                    )
+            # Initialize timing data
+            timing_data = None
 
-                # Use validated snippets (may have been repaired)
-                optimized_snippets = validated_snippets
+            with indent(message="* Validating optimization"):
 
-        return cell["id"], self._build_optimization_result(
-            cell["id"], original_snippets, optimized_snippets, stats_aggregator, timing_data
-        )
+                # VALIDATION WITH RETRY: Check if optimization preserves semantics
+                if kernel_client and analysis and optimized_snippets:
+                    with timer(
+                        key="validation", message="Validating optimization with retry support"
+                    ):
+                        with NotebookTools(nb) as tools:
+                            is_valid, validated_snippets, timing_data = (
+                                await self._validate_optimization_with_retry(
+                                    cell,
+                                    cells,
+                                    original_snippets,
+                                    optimized_snippets,
+                                    model,
+                                    tools,
+                                    kernel_client,
+                                    analysis,
+                                    stats_aggregator,
+                                    pre_post_envs,
+                                )
+                            )
+
+                        if not is_valid:
+                            # Validation failed after retries, return empty result
+                            log(f"Skipping optimization for cell {index} after validation failures")
+                            return cell["id"], self._build_optimization_result(
+                                cell["id"], [], [], stats_aggregator, "error"
+                            )
+
+                        # Use validated snippets (may have been repaired)
+                        optimized_snippets = validated_snippets
+
+            if timing_data and timing_data["speedup"] < 1:
+                log(f"Skipping optimization for cell {index} because speedup < 1")
+                return cell["id"], self._build_optimization_result(
+                    cell["id"], [], [], stats_aggregator, "no improvement", timing_data
+                )
+            else:
+                return cell["id"], self._build_optimization_result(
+                    cell["id"], original_snippets, optimized_snippets, stats_aggregator, "optimized", timing_data
+                )
 
     def _identify_cells_to_optimize(
         self,
@@ -1847,15 +1897,17 @@ class OptimizeCommand(NotebookCommand):
         Returns:
             Tuple of (total_cost, cell_timing)
         """
-        # Apply optimization results to the notebook
+        # Apply optimization results to the notebook (only successful optimizations)
         cell_map = {cell["id"]: cell for cell in nb["cells"]}
-        MetadataManager.apply_optimizations_to_notebook(cell_map, all_results)
+        optimized_results = [(cell_id, result) for cell_id, result in all_results if result.status == "optimized"]
+        log(f"Applying {len(optimized_results)} successful optimizations out of {len(all_results)} total results")
+        MetadataManager.apply_optimizations_to_notebook(cell_map, optimized_results)
 
         # Calculate total cost
         total_cost = sum([result.stats.cost for _, result in all_results])
         log(f"Total optimization cost: ${total_cost:.4f}")
 
-        # Collect timing data for cells that were optimized
+        # Collect timing data and status for all cells
         cell_timing = {}
         for cell_id, result in all_results:
             if result.original_duration is not None and result.modified_duration is not None:
@@ -1863,6 +1915,12 @@ class OptimizeCommand(NotebookCommand):
                     "original_duration": result.original_duration,
                     "modified_duration": result.modified_duration,
                     "speedup": result.speedup,
+                    "status": result.status,
+                }
+            else:
+                # Even if no timing data, include the status
+                cell_timing[cell_id] = {
+                    "status": result.status,
                 }
 
         return total_cost, cell_timing
@@ -1913,17 +1971,6 @@ class OptimizeCommand(NotebookCommand):
                 return new_nb, 0.0, {}
 
             log(f"Found {len(cells_to_process)} cell(s) to optimize")
-            log("")
-            log(
-                "|{:<10}|{:<16}|{:<21}|{:<10}|{:<10}|{:<10}|".format(
-                    "Index", "Target Cell", "Function", "Tokens", "Time (s)", "Cost ($)"
-                )
-            )
-            log(
-                "|{:-^10}|{:-^16}|{:-^21}|{:-^10}|{:-^10}|{:-^10}|".format(
-                    "", "", "", "", "", ""
-                )
-            )
 
             # Process cells sequentially
             with timer(
