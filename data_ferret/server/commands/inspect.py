@@ -7,6 +7,8 @@ import json
 import random
 from typing import Any, Dict, Optional
 
+from agents import Usage
+
 from data_ferret.server.base import NotebookCommand
 from data_ferret.util.notebook_tools import NotebookTools
 from data_ferret.server.kernel_manager import FerretKernelClient
@@ -57,64 +59,85 @@ class InspectCommand(NotebookCommand):
         cells = nb["cells"]
         cell = cells[index]
 
-        with NotebookTools(nb) as tools:
-
-            agent = FerretAgent[OptimizationPotential](
-                key="cell_inspection",
-                model=model,
-                instructions=get_prompt("cell_inspection_instructions"),
-                output_type=OptimizationPotential,
-                tools=tools.tools(include_profile=True),
+        profile_data = FerretMetadata.from_cell(cell).profile
+        if profile_data is not None and profile_data.duration < 3.0:
+            final_output = OptimizationPotential(potential=0, optimization_plan=[])
+            stats = FerretStats(
+                model=model, usage=Usage(total_tokens=0), time=0, log_path=""
             )
 
-            prefix = "\n".join(
-                [f'Cell {cell["id"]}:\n{cell["source"]}' for cell in cells[:index]]
-            )
+        else:
+            with NotebookTools(nb) as tools:
 
-            profile_data = FerretMetadata.from_cell(cell).profile
-            profile_duration = "Total duration: {profile_data.duration:.2f} seconds" if profile_data is not None else ''
-            profile_trace = profile_data.profile if profile_data is not None else ''
-            profile_env = '\n'.join([f"- {key}: {value}" for key, value in profile_data.env.items()]) if profile_data is not None else ''
-
-            input_text = get_prompt(
-                "cell_inspection_input",
-                cell_id=cell["id"],
-                prefix=prefix,
-                cell_source=cell["source"],
-                profile_duration=profile_duration,
-                profile_trace=profile_trace,
-                profile_env=profile_env,
-            )
-
-            final_output, stats = await agent.run(input_text)
-
-            # Merge optimization steps with the same target_cell_id and function_name into a single string,
-            # with each description separated by a newline, in Markdown list format.
-            merged_steps: Dict[Tuple[str, Optional[str]], List[str]] = {}
-            for step in final_output.optimization_plan:
-                key = (step.target_cell_id, step.function_name)
-                if key not in merged_steps:
-                    merged_steps[key] = []
-                merged_steps[key].extend(step.description)
-
-            # Create new optimization plan with merged descriptions
-            new_optimization_plan = []
-            for (target_cell_id, function_name), descriptions in merged_steps.items():
-                new_optimization_plan.append(
-                    OptimizationStep(
-                        target_cell_id=target_cell_id,
-                        function_name=function_name,
-                        description=descriptions
-                    )
+                agent = FerretAgent[OptimizationPotential](
+                    key="cell_inspection",
+                    model=model,
+                    instructions=get_prompt("cell_inspection_instructions"),
+                    output_type=OptimizationPotential,
+                    tools=tools.tools(include_profile=True),
                 )
 
-            final_output.optimization_plan = new_optimization_plan
+                prefix = "\n".join(
+                    [f'Cell {cell["id"]}:\n{cell["source"]}' for cell in cells[:index]]
+                )
 
+                profile_duration = (
+                    "Total duration: {profile_data.duration:.2f} seconds"
+                    if profile_data is not None
+                    else ""
+                )
+                profile_trace = profile_data.profile if profile_data is not None else ""
+                profile_env = (
+                    "\n".join(
+                        [f"- {key}: {value}" for key, value in profile_data.env.items()]
+                    )
+                    if profile_data is not None
+                    else ""
+                )
+
+                input_text = get_prompt(
+                    "cell_inspection_input",
+                    cell_id=cell["id"],
+                    prefix=prefix,
+                    cell_source=cell["source"],
+                    profile_duration=profile_duration,
+                    profile_trace=profile_trace,
+                    profile_env=profile_env,
+                )
+
+                final_output, stats = await agent.run(input_text)
+
+                # Merge optimization steps with the same target_cell_id and function_name into a single string,
+                # with each description separated by a newline, in Markdown list format.
+                merged_steps: Dict[Tuple[str, Optional[str]], List[str]] = {}
+                for step in final_output.optimization_plan:
+                    key = (step.target_cell_id, step.function_name)
+                    if key not in merged_steps:
+                        merged_steps[key] = []
+                    merged_steps[key].extend(step.description)
+
+                # Create new optimization plan with merged descriptions
+                new_optimization_plan = []
+                for (
+                    target_cell_id,
+                    function_name,
+                ), descriptions in merged_steps.items():
+                    new_optimization_plan.append(
+                        OptimizationStep(
+                            target_cell_id=target_cell_id,
+                            function_name=function_name,
+                            description=descriptions,
+                        )
+                    )
+
+                final_output.optimization_plan = new_optimization_plan
 
         # print(
         #     f"| {index:<9}| {final_output.potential:<9}| {stats.usage.total_tokens:<9}| {stats.time:<9.1f}| {stats.cost:<9.4f}|"
         # )
-        log(f"Cell {index} Potential:{final_output.potential} Tokens:{stats.usage.total_tokens} Time:{stats.time:.2f} Cost:{stats.cost:.4f}")
+        log(
+            f"Cell {index} Potential:{final_output.potential} Tokens:{stats.usage.total_tokens} Time:{stats.time:.2f} Cost:{stats.cost:.4f}"
+        )
 
         return cell["id"], InspectionResultAndStats(
             inspection_metadata=final_output, stats=stats

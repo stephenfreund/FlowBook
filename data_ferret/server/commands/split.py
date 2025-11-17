@@ -34,22 +34,21 @@ from data_ferret.util.prompts import get_prompt
 class SplitCellInfo(BaseModel):
     """Information about a single split cell."""
 
-    source: str = Field(description="The source code or markdown for this cell")
     description: str = Field(description="Brief description of what this cell does")
-    cell_type: str = Field(description="Cell type: 'code' or 'markdown'")
+    source: str = Field(description="The source code for this cell")
 
 
 class SplitCellResponse(BaseModel):
     """Response from LLM for splitting a single cell."""
 
-    split_cells: List[SplitCellInfo] = Field(
-        description="List of cells to replace the original cell with"
-    )
     explanation: str = Field(
         description="Explanation of how the cell was split and why"
     )
     should_split: bool = Field(
         description="Whether the cell should actually be split (False if already well-structured)"
+    )
+    split_cells: List[SplitCellInfo] = Field(
+        description="List of cells to replace the original cell with"
     )
 
 
@@ -97,7 +96,7 @@ class ContextBuilder:
     """Builds context from previous cells for LLM."""
 
     MAX_CONTEXT_CELLS = 3  # Maximum number of previous cells to include
-    MAX_CELL_LINES = 10  # Maximum lines per cell in context
+    MAX_CELL_LINES = 100  # Maximum lines per cell in context
 
     @staticmethod
     def build_context(cells: List[Dict[str, Any]], current_index: int) -> str:
@@ -120,16 +119,15 @@ class ContextBuilder:
 
         for i in range(start_index, current_index):
             cell = cells[i]
-            if cell.get("cell_type") == "code":
-                source = "".join(cell.get("source", []))
-                # Truncate long cells
-                lines = source.split("\n")
-                if len(lines) > ContextBuilder.MAX_CELL_LINES:
-                    source = (
-                        "\n".join(lines[: ContextBuilder.MAX_CELL_LINES])
-                        + "\n... (truncated)"
-                    )
-                prev_cells.append(f"Cell {i}:\n{source}")
+            source = "".join(cell.get("source", []))
+            # Truncate long cells
+            lines = source.split("\n")
+            if len(lines) > ContextBuilder.MAX_CELL_LINES:
+                source = (
+                    "\n".join(lines[: ContextBuilder.MAX_CELL_LINES])
+                    + "\n... (truncated)"
+                )
+            prev_cells.append(f"Cell {i}:\n{source}")
 
         if not prev_cells:
             return "No previous code cells."
@@ -200,11 +198,7 @@ class SplitCommand(NotebookCommand):
             log("Starting cell splitting process")
 
             # Get configuration
-            model = (
-                config.model
-                if config and hasattr(config, 'model')
-                else "claude-3-5-sonnet-20241022"
-            )
+            model = config.model
             log(f"Using model: {model}")
 
             # Initialize stats aggregator
@@ -275,46 +269,37 @@ class SplitCommand(NotebookCommand):
         Returns:
             SplitCellResult with response and stats
         """
-        with timer(
-            key=f"split_cell_{cell_index}", message=f"Analyzing cell {cell_index}"
-        ):
-            cell_id = cell.get("id", f"cell_{cell_index}")
-            cell_source = "".join(cell.get("source", []))
+        cell_id = cell.get("id", f"cell_{cell_index}")
+        cell_source = "".join(cell.get("source", []))
 
-            # Build context from previous cells
-            context = ContextBuilder.build_context(cells, cell_index)
+        # Build context from previous cells
+        context = ContextBuilder.build_context(cells, cell_index)
 
-            # Create agent for this cell
-            agent = FerretAgent[SplitCellResponse](
-                key="cell_splitting",
-                model=model,
-                instructions=get_prompt("split_instructions"),
-                output_type=SplitCellResponse,
-            )
+        # Create agent for this cell
+        agent = FerretAgent[SplitCellResponse](
+            key="cell_splitting",
+            model=model,
+            instructions=get_prompt("split_instructions"),
+            output_type=SplitCellResponse,
+        )
 
-            # Build input for LLM
-            input_text = get_prompt(
-                "split_input",
-                cell_index=cell_index,
-                cell_id=cell_id,
-                cell_source=cell_source,
-                context=context,
-            )
+        # Build input for LLM
+        input_text = get_prompt(
+            "split_input",
+            cell_index=cell_index,
+            cell_id=cell_id,
+            cell_source=cell_source,
+            context=context,
+        )
 
-            # Call LLM
-            log(f"  Analyzing cell {cell_index} ({len(cell_source)} chars)")
-            response, stats = await agent.run(input_text)
+        response, stats = await agent.run(input_text)
 
-            log(f"  → Should split: {response.should_split}")
-            if response.should_split:
-                log(f"  → Splitting into {len(response.split_cells)} cells")
-
-            return SplitCellResult(
-                cell_id=cell_id,
-                cell_index=cell_index,
-                response=response,
-                stats=stats,
-            )
+        return SplitCellResult(
+            cell_id=cell_id,
+            cell_index=cell_index,
+            response=response,
+            stats=stats,
+        )
 
     async def _split_cells(
         self,
@@ -340,7 +325,6 @@ class SplitCommand(NotebookCommand):
 
         # Collect tasks for cells to process
         tasks = []
-        cells_to_process = []
 
         with indent(message="Processing cells"):
             for i, cell in enumerate(cells):
@@ -355,9 +339,8 @@ class SplitCommand(NotebookCommand):
 
                 # Add task for this cell
                 tasks.append(self.split_cell(cell, i, cells, model))
-                cells_to_process.append((i, cell))
 
-            # Run all tasks concurrently using gather
+            # Run all tasks concurrently, processing results as they complete
             if not tasks:
                 return new_notebook, {
                     "cells_analyzed": 0,
@@ -365,19 +348,33 @@ class SplitCommand(NotebookCommand):
                     "total_new_cells": 0,
                 }
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Process results and build new cell list
-            cells_analyzed = len(results)
+            # Initialize tracking variables
+            cells_analyzed = 0
             cells_split = 0
             total_new_cells = 0
-
-            # Create a map of cell_id -> split result
             split_results_map = {}
-            for result in results:
-                if isinstance(result, Exception):
-                    error(f"  Error splitting cell: {result}")
+
+            # Process results as they come in
+            for coro in asyncio.as_completed(tasks):
+                try:
+                    result = await coro
+                except Exception as e:
+                    error(f"  Error splitting cell: {e}")
+                    cells_analyzed += 1
                     continue
+
+                with timer(
+                    key=f"split_cell_{result.cell_index}",
+                    message=f"Analyzing cell {result.cell_index}",
+                ):
+                    log(f"  → Should split: {result.response.should_split}")
+                    if result.response.should_split:
+                        log(
+                            f"  → Splitting into {len(result.response.split_cells)} cells"
+                        )
+
+                # Process result immediately
+                cells_analyzed += 1
 
                 # Add stats
                 stats_agg.add_stats(result.stats)
@@ -446,7 +443,7 @@ class SplitCommand(NotebookCommand):
 
         new_cell = {
             "id": cell_id,
-            "cell_type": split_cell_info.cell_type,
+            "cell_type": "code",
             "metadata": {
                 "split_from": original_cell_id,
                 "split_description": split_cell_info.description,
@@ -454,9 +451,7 @@ class SplitCommand(NotebookCommand):
             "source": split_cell_info.source,
         }
 
-        # Add execution_count and outputs for code cells
-        if split_cell_info.cell_type == "code":
-            new_cell["execution_count"] = None
-            new_cell["outputs"] = []
+        new_cell["execution_count"] = None
+        new_cell["outputs"] = []
 
         return new_cell

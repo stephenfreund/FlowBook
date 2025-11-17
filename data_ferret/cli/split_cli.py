@@ -149,6 +149,7 @@ Examples:
         "-m",
         "--model",
         type=str,
+        default="gpt-4o",
         help="LLM model to use for splitting (default: gpt-4o)",
     )
 
