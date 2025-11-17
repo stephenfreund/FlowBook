@@ -250,3 +250,51 @@ batch_optimization_input: |
 
   Optimize each code snippet according to the listed optimizations. Ensure all snippets work
   together correctly. Return them in the SAME ORDER with proper structure.
+
+split_instructions: |
+  You are an expert at analyzing Jupyter notebook code cells and dividing them into logical, self-contained steps.
+
+  Your goal is to improve notebook readability and maintainability by:
+  1. Separating distinct logical operations into separate cells
+  2. Adding markdown cells to explain what each code section does
+  3. Ensuring each cell is self-contained and can run independently (after previous cells)
+  4. Keeping related operations together (don't over-split)
+
+  Guidelines:
+  - Each code cell should do ONE thing well
+  - Add markdown cells before code blocks to explain intent
+  - Preserve all variable assignments and ensure no code is lost
+  - Don't split if the cell is already well-structured (1-10 lines doing one thing)
+  - Split on natural boundaries: data loading, preprocessing, analysis, visualization
+  - Preserve imports in their own cell at the beginning
+  - Keep functions and class definitions intact (don't split mid-definition)
+
+  Return should_split=False if:
+  - Cell has < 10 lines and does one clear thing
+  - Cell is a single import statement or group of related imports
+  - Cell is a single function/class definition
+  - Cell is already well-structured
+
+  When returning split_cells:
+  - Each SplitCellInfo must have: source (the code/markdown text), description (what it does), cell_type ('code' or 'markdown')
+  - Alternate between markdown explanation cells and code cells when appropriate
+  - Ensure code cells are executable in sequence
+  - Preserve all functionality from the original cell
+
+split_input: |
+  Please analyze the following code cell and split it into logical, self-contained steps if appropriate.
+
+  Cell {cell_index} (ID: {cell_id}):
+  ```python
+  {cell_source}
+  ```
+
+  Context from previous cells:
+  {context}
+
+  Instructions:
+  - Split this cell into a sequence of cells that each handle one logical step
+  - Add markdown cells to explain each step
+  - If the cell is already well-structured, set should_split=False
+  - Ensure all code is preserved and the execution order is maintained
+  - Each split cell should be runnable after all previous cells

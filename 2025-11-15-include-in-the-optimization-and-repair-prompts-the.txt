@@ -1,0 +1,591 @@
+
+▗ ▗   ▖ ▖  Claude Code v2.0.42
+           Sonnet 4.5 · Claude Pro
+  ▘▘ ▝▝    /Users/freund/other/DataFerret
+
+> include in the optimization and repair prompts the list of variables that 
+must have the same values -- those are the live variables for the cell exit.
+  make plan. 
+
+⏺ I'll help you create a plan to include live variables in the optimization
+  and repair prompts. Let me first explore the codebase to understand the
+  current implementation.
+
+⏺ Explore(Explore optimization and repair prompts)
+  ⎿  Done (20 tool uses · 60.3k tokens · 1m 20s)                           
+
+⏺ Based on the codebase exploration, I'll create a plan to include live
+  variables in the optimization and repair prompts.
+
+⏺ Plan: Include Live Variables in Optimization and Repair Prompts
+
+  I've analyzed the codebase and created a plan to include live variable
+  information in the optimization and repair prompts. Here's what I found:
+
+  Current State
+
+  The Problem:
+  - Optimization and repair prompts don't tell the LLM which variables must 
+  maintain the same values
+  - Validation already checks live variables (via
+  get_validation_variables()), but this critical constraint isn't
+  communicated to the LLM during optimization
+  - This can cause the LLM to accidentally modify or remove variables that
+  are needed by subsequent cells
+
+  Key Files:
+  - data_ferret/util/prompts.yaml - Prompt templates (lines 42-204)
+  - data_ferret/server/commands/optimize.py - Optimization logic
+  - data_ferret/util/liveness.py - Live variable analysis
+  - data_ferret/util/notebook_analysis.py - Wrapper with
+  get_validation_variables()
+
+  The Plan
+
+  1. Update Prompt Templates (prompts.yaml)
+  - Add a new {live_vars_section} placeholder to both optimization_input and
+   optimization_repair_input templates
+  - Clearly indicate these variables must have identical values after
+  optimization
+
+  2. Add Helper Method (optimize.py)
+  - Create CodeExtractor.format_live_variables_section() to format live
+  variables for the prompt
+  - Format: List variable names with types (if available), emphasizing they
+  must remain unchanged
+
+  3. Modify Optimization Prompt Building
+  (optimize.py:_build_optimization_context())
+  - Get live variables using analysis.get_validation_variables(cell_id)
+  - Generate live variables section
+  - Pass to prompt template
+
+  4. Modify Repair Prompt Building (optimize.py:_build_repair_context())
+  - Get live variables for the cell being repaired
+  - Generate live variables section
+  - Pass to prompt template
+
+  5. Test Changes
+  - Use an example notebook with cells that depend on each other
+  - Verify the prompts include live variable information
+  - Ensure optimizations preserve live variables
+
+  Benefits
+
+  - Clearer Constraints: LLM knows exactly which variables must be preserved
+  - Fewer Validation Failures: Reduces cases where optimization breaks
+  subsequent cells
+  - Better Repairs: Repair agent knows which variables are essential vs.
+  optional
+  - Consistency: Aligns what we validate with what we tell the LLM
+
+  Would you like me to proceed with implementing this plan?
+
+> do it 
+
+⏺ I'll implement the plan to include live variables in the optimization and
+  repair prompts.
+
+⏺ Read(data_ferret/util/prompts.yaml)
+  ⎿  Read 204 lines
+
+⏺ Update(data_ferret/util/prompts.yaml)
+  ⎿  Updated data_ferret/util/prompts.yaml with 2 additions      
+       71    
+       72      {env_section}
+       73    
+       74 +    {live_vars_section}
+       75 +  
+       76      {optimization_descriptions}
+       77    
+       78      Provide the optimized code and a list of specific 
+            optimizations you applied.
+
+⏺ Update(data_ferret/util/prompts.yaml)
+  ⎿  Updated data_ferret/util/prompts.yaml with 2 additions
+       190    
+       191      {env_section}
+       192    
+       193 +    {live_vars_section}
+       194 +  
+       195      ORIGINAL CODE SNIPPETS (correct behavior):
+       196      {original_snippets}
+       197    
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 50 lines
+
+⏺ Update(data_ferret/server/commands/optimize.py)
+  ⎿  Updated data_ferret/server/commands/optimize.py with 34 additions   
+       663                )
+       664            return ""
+       665    
+       666 +      @staticmethod
+       667 +      def format_live_variables_section(
+       668 +          live_vars: Set[str], env_data: Optional[Dict[str, 
+           + str]] = None
+       669 +      ) -> str:
+       670 +          """Format live variables that must be preserved 
+           + during optimization.
+       671    
+       672 +          Args:
+       673 +              live_vars: Set of variable names that are live 
+           + (will be used by subsequent cells)
+       674 +              env_data: Optional environment data with type 
+           + information
+       675 +  
+       676 +          Returns:
+       677 +              Formatted string describing live variables that
+           +  must be preserved
+       678 +          """
+       679 +          if not live_vars:
+       680 +              return ""
+       681 +  
+       682 +          # Sort for consistent output
+       683 +          sorted_vars = sorted(live_vars)
+       684 +  
+       685 +          # Add type information if available
+       686 +          if env_data:
+       687 +              var_lines = []
+       688 +              for var in sorted_vars:
+       689 +                  type_info = env_data.get(var, "unknown")
+       690 +                  var_lines.append(f"  {var}: {type_info}")
+       691 +          else:
+       692 +              var_lines = [f"  {var}" for var in sorted_vars]
+       693 +  
+       694 +          return (
+       695 +              "CRITICAL: The following variables MUST have 
+           + the exact same values after optimization:\n"
+       696 +              + "\n".join(var_lines)
+       697 +              + "\n\nThese variables are used by subsequent 
+           + cells and cannot be modified or removed."
+       698 +          )
+       699 +  
+       700 +  
+       701    class MetadataManager:
+       702        """Helper class for managing optimization metadata."""
+       703    
+
+⏺ Search(pattern: "def _build_optimization_context", path:
+        "data_ferret/server/commands/optimize.py", output_mode: "content")
+  ⎿  Found 1 line (ctrl+o to expand)
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 60 lines
+
+⏺ Search(pattern: "_build_optimization_context\(", path:
+        "data_ferret/server/commands/optimize.py", output_mode: "content")
+  ⎿  Found 2 lines (ctrl+o to expand)
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 50 lines
+
+⏺ Search(pattern: "self\.analysis", path:
+        "data_ferret/server/commands/optimize.py", output_mode: "content")
+  ⎿  Found 0 lines 
+
+⏺ Search(pattern: "NotebookAnalysis", path:
+        "data_ferret/server/commands/optimize.py", output_mode: "content")
+  ⎿  Found 12 lines (ctrl+o to expand)
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 50 lines
+
+⏺ Search(pattern: "def _process_cells_sequentially", path:
+        "data_ferret/server/commands/optimize.py", output_mode: "content")
+  ⎿  Found 1 line (ctrl+o to expand)
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 80 lines
+
+⏺ Search(pattern: "async def optimize_cell", path:
+        "data_ferret/server/commands/optimize.py", output_mode: "content")
+  ⎿  Found 2 lines (ctrl+o to expand)
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 100 lines
+
+⏺ Search(pattern: "def _process_all_optimization_steps", path:
+        "data_ferret/server/commands/optimize.py", output_mode: "content")
+  ⎿  Found 1 line (ctrl+o to expand)
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 80 lines
+
+⏺ Search(pattern: "def _process_optimization_step", path:
+        "data_ferret/server/commands/optimize.py", output_mode: "content")
+  ⎿  Found 1 line (ctrl+o to expand)
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 90 lines
+
+⏺ Update(data_ferret/server/commands/optimize.py)
+  ⎿  Updated data_ferret/server/commands/optimize.py with 13 additions and 
+      removals
+       1094            target_index: int,
+       1095            step: OptimizationStep,
+       1096            env_data: Optional[Dict[str, str]],
+       1097 -      ) -> Tuple[str, str, str, str, str]:
+       1097 +          analysis: Optional[NotebookAnalysis] = None,
+       1098 +      ) -> Tuple[str, str, str, str, str, str]:
+       1099            """
+       1100            Build context and extract code for optimization.
+       1101    
+     ...
+       1104                target_index: Index of target cell
+       1105                step: The optimization step
+       1106                env_data: Environment data from profile
+       1107 +              analysis: Optional NotebookAnalysis for 
+            + dependency/liveness info
+       1108    
+       1109            Returns:
+       1110                Tuple of (prefix, original_function_code, 
+              optimization_context,
+       1111 -                       optimization_descriptions, 
+            -  env_section)
+       1111 +                       optimization_descriptions, 
+            +  env_section, live_vars_section)
+       1112            """
+       1113            # Build context prefix
+       1114            prefix = CodeExtractor.build_context_prefix(cells,
+               target_index)
+     ...
+       1123            )
+       1124            env_section = 
+              CodeExtractor.format_environment_section(env_data)
+       1125    
+       1126 +          # Get live variables that must be preserved
+       1127 +          live_vars_section = ""
+       1128 +          if analysis:
+       1129 +              live_vars = 
+            + analysis.get_validation_variables(step.target_cell_id)
+       1130 +              live_vars_section = 
+            + CodeExtractor.format_live_variables_section(
+       1131 +                  live_vars, env_data
+       1132 +              )
+       1133 +  
+       1134            return (
+       1135                prefix,
+       1136                original_function_code,
+       1137                optimization_context,
+       1138                optimization_descriptions,
+       1139                env_section,
+       1140 +              live_vars_section,
+       1141            )
+       1142    
+       1143        async def _run_llm_optimization(
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 50 lines
+
+⏺ Update(data_ferret/server/commands/optimize.py)
+  ⎿  Updated data_ferret/server/commands/optimize.py with 3 additions    
+       1149            cell_source: str,
+       1150            optimization_descriptions: str,
+       1151            env_section: str,
+       1152 +          live_vars_section: str,
+       1153            model: Any,
+       1154            tools: NotebookTools,
+       1155            stats_aggregator: StatsAggregator,
+     ...
+       1162                cell_source: The source code to optimize
+       1163                optimization_descriptions: Formatted 
+              optimization descriptions
+       1164                env_section: Formatted environment section
+       1165 +              live_vars_section: Formatted live variables 
+            + section
+       1166                model: LLM model to use
+       1167                tools: NotebookTools instance
+       1168                stats_aggregator: Stats aggregator
+     ...
+       1183                kind="cell" if step.function_name is None else
+               "function",
+       1184                cell_source=cell_source,
+       1185                env_section=env_section,
+       1186 +              live_vars_section=live_vars_section,
+       1187                
+              optimization_descriptions=optimization_descriptions,
+       1188            )
+       1189    
+
+⏺ Update(data_ferret/server/commands/optimize.py)
+  ⎿  Updated data_ferret/server/commands/optimize.py with 13 additions and 
+      removal
+       1202            model: Any,
+       1203            tools: NotebookTools,
+       1204            stats_aggregator: StatsAggregator,
+       1205 +          analysis: Optional[NotebookAnalysis] = None,
+       1206        ) -> Tuple[CodeSnippet, CodeSnippet]:
+       1207            """Process a single optimization step.
+       1208    
+       1209 +          Args:
+       1210 +              step: The optimization step
+       1211 +              cells: All notebook cells
+       1212 +              index: Index of the cell being optimized
+       1213 +              model: LLM model to use
+       1214 +              tools: NotebookTools instance
+       1215 +              stats_aggregator: Stats aggregator
+       1216 +              analysis: Optional NotebookAnalysis for 
+            + dependency/liveness info
+       1217 +  
+       1218            Returns:
+       1219                Tuple of (original_snippet, optimized_snippet)
+       1220            """
+     ...
+       1228                        _,
+       1229                        optimization_descriptions,
+       1230                        env_section,
+       1231 +                      live_vars_section,
+       1232                    ) = self._build_optimization_context(
+       1233 -                      cells, target_cell, target_index, 
+            -  step, env_data
+       1233 +                      cells, target_cell, target_index, 
+            +  step, env_data, analysis
+       1234                    )
+       1235    
+       1236                # Store original code snippet
+     ...
+       1252                        cell_source,
+       1253                        optimization_descriptions,
+       1254                        env_section,
+       1255 +                      live_vars_section,
+       1256                        model,
+       1257                        tools,
+       1258                        stats_aggregator,
+
+⏺ Update(data_ferret/server/commands/optimize.py)
+  ⎿  Updated data_ferret/server/commands/optimize.py with 3 additions and 1
+     removal
+
+       1297            model: Any,
+       1298            tools: NotebookTools,
+       1299            stats_aggregator: StatsAggregator,
+       1300 +          analysis: Optional[NotebookAnalysis] = None,
+       1301        ) -> Tuple[List[CodeSnippet], List[CodeSnippet]]:
+       1302            """
+       1303            Process all optimization steps for a cell.
+     ...
+       1308                model: LLM model to use
+       1309                tools: NotebookTools instance
+       1310                stats_aggregator: Stats aggregator
+       1311 +              analysis: Optional NotebookAnalysis for 
+            + dependency/liveness info
+       1312    
+       1313            Returns:
+       1314                Tuple of (original_snippets, 
+              optimized_snippets)
+     ...
+       1319                try:
+       1320                    original_snippet, optimized_snippet = (
+       1321                        await self._process_optimization_step(
+       1322 -                          step, cells, index, model, tools, 
+            -  stats_aggregator
+       1322 +                          step, cells, index, model, tools, 
+            +  stats_aggregator, analysis
+       1323                        )
+       1324                    )
+       1325                    original_snippets.append(original_snippet)
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 20 lines
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 20 lines
+
+⏺ Update(data_ferret/server/commands/optimize.py)
+  ⎿  Updated data_ferret/server/commands/optimize.py with 1 addition
+       1412                        model,
+       1413                        tools,
+       1414                        stats_aggregator,
+       1415 +                      analysis,
+       1416                    )
+       1417                )
+       1418    
+
+⏺ Search(pattern: "def _build_repair_context", path:
+        "data_ferret/server/commands/optimize.py", output_mode: "content")
+  ⎿  Found 0 lines 
+
+⏺ Search(pattern: "optimization_repair_input", path:
+        "data_ferret/server/commands/optimize.py", output_mode: "content")
+  ⎿  Found 1 line (ctrl+o to expand)
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 100 lines
+
+⏺ Update(data_ferret/server/commands/optimize.py)
+  ⎿  Updated data_ferret/server/commands/optimize.py with 9 additions    
+       876                optimized_snippets_text = 
+             self._format_snippets_for_repair(failed_snippets)
+       877                env_section = 
+             CodeExtractor.format_environment_section(env_data)
+       878    
+       879 +              # Get live variables that must be preserved
+       880 +              live_vars_section = ""
+       881 +              if analysis:
+       882 +                  live_vars = 
+           + analysis.get_validation_variables(cell["id"])
+       883 +                  live_vars_section = 
+           + CodeExtractor.format_live_variables_section(
+       884 +                      live_vars, env_data
+       885 +                  )
+       886 +  
+       887                # Create repair agent
+       888                agent = 
+             FerretAgent[RepairedOptimizationResponse](
+       889                    key="optimization_repair",
+     ...
+       892                    original_snippets=original_snippets_text,
+       893                    optimized_snippets=optimized_snippets_text,
+       894                    env_section=env_section,
+       895 +                  live_vars_section=live_vars_section,
+       896                    validation_error=validation_error,
+       897                )
+       898    
+
+⏺ Read(data_ferret/server/commands/optimize.py)
+  ⎿  Read 40 lines
+
+⏺ Let me test the changes to make sure everything works correctly. First,
+  let me run the relevant tests:
+
+⏺ Bash(python -m pytest
+      data_ferret/server/commands/test_optimize_keys_to_include.py -v)
+  ⎿ ============================= test session starts =====================
+    =========
+    platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users
+    … +116 lines (ctrl+o to expand)
+
+
+
+⏺ Write(test_live_vars_formatting.py)
+  ⎿  Wrote 51 lines to test_live_vars_formatting.py                        
+     #!/usr/bin/env python3
+     """
+     Test script to verify live variables formatting in optimization 
+     prompts.
+     """
+     import sys
+     sys.path.insert(0, '/Users/freund/other/DataFerret')
+     from data_ferret.server.commands.optimize import CodeExtractor
+     … +41 lines (ctrl+o to expand)
+
+⏺ Bash(python test_live_vars_formatting.py)
+  ⎿ Test 1: Format live variables without env data                         
+    ============================================================
+    CRITICAL: The following variables MUST have the exact same values after
+    … +36 lines (ctrl+o to expand)
+
+
+⏺ Write(test_live_vars_integration.py)
+  ⎿  Wrote 55 lines to test_live_vars_integration.py                       
+     #!/usr/bin/env python3
+     """
+     Integration test to verify live variables are included in optimization 
+     prompts.
+     """
+     import sys
+     sys.path.insert(0, '/Users/freund/other/DataFerret')
+     import nbformat
+     from data_ferret.util.notebook_analysis import NotebookAnalysis
+
+     … +45 lines (ctrl+o to expand)
+
+⏺ Bash(python test_live_vars_integration.py)
+  ⎿  Analyzing notebook...         
+
+     Live variables for each cell:
+     … +36 lines (ctrl+o to expand)
+
+⏺ Perfect! Let me run the main optimization tests to ensure nothing broke:
+
+⏺ Bash(python -m pytest data_ferret/kernel/test_checkpoint_keys_to_include.py
+      -v)
+  ⎿ ============================= test session starts =====================
+    =========
+    platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users
+    … +126 lines (ctrl+o to expand)
+
+
+
+⏺ Bash(python -m pytest data_ferret/util/test_notebook_analysis.py -v)
+  ⎿ ============================= test session starts =====================
+    =========
+    platform darwin -- Python 3.12.12, pytest-8.4.2, pluggy-1.6.0 -- /Users
+    … +57 lines (ctrl+o to expand)
+
+
+
+⏺ Bash(rm test_live_vars_formatting.py test_live_vars_integration.py)
+  ⎿  (No content)
+
+⏺ Implementation Complete!
+
+  I've successfully implemented live variables in the optimization and
+  repair prompts. Here's what was done:
+
+  Changes Made:
+
+  1. Updated Prompt Templates (data_ferret/util/prompts.yaml)
+  - Added {live_vars_section} placeholder to optimization_input template
+  (line 74)
+  - Added {live_vars_section} placeholder to optimization_repair_input
+  template (line 193)
+
+  2. Added Helper Method (data_ferret/server/commands/optimize.py:666-698)
+  - Created CodeExtractor.format_live_variables_section() to format live
+  variables
+  - Shows variables with type information (if available)
+  - Clearly marks them as CRITICAL and states they must have exact same
+  values
+  - Returns empty string when no live variables exist
+
+  3. Modified Optimization Flow (optimize.py)
+  - Updated _build_optimization_context() to accept analysis parameter and
+  return live_vars_section
+  - Updated _run_llm_optimization() to accept and pass live_vars_section to
+  prompt
+  - Updated _process_optimization_step() to accept analysis and thread it
+  through
+  - Updated _process_all_optimization_steps() to accept and pass analysis
+  - Updated optimize_cell() to pass analysis to processing methods
+
+  4. Modified Repair Flow (optimize.py:879-885)
+  - Added live variables extraction in _repair_optimization()
+  - Formatted and included live_vars_section in repair prompt
+
+  How It Works:
+
+  When optimizing or repairing a cell, the system now:
+  1. Uses NotebookAnalysis.get_validation_variables(cell_id) to get live
+  variables
+  2. Formats them with type information: "CRITICAL: The following variables
+  MUST have the exact same values..."
+  3. Includes this in the prompt sent to the LLM
+
+  Example Output:
+
+  For a cell that defines x, y, and result where only result is used by
+  subsequent cells:
+
+  CRITICAL: The following variables MUST have the exact same values after
+  optimization:
+    result: pd.DataFrame
+
+  These variables are used by subsequent cells and cannot be modified or
+  removed.
+
+  Testing Results:
+
+  ✅ All existing tests pass (18 tests across checkpoint and optimize
+  modules)
+  ✅ Live variables correctly identified for each cell
+  ✅ Formatting works with and without type information
+  ✅ Empty live variables (last cell) handled correctly
+
+  The LLM now has clear guidance about which variables are "live" and must
+  be preserved during optimization, reducing validation failures and
+  unnecessary repairs!
+
+
+
