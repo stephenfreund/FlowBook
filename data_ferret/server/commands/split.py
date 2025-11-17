@@ -34,22 +34,25 @@ from data_ferret.util.prompts import get_prompt
 class SplitCellInfo(BaseModel):
     """Information about a single split cell."""
 
-    source: str = Field(description="The source code or markdown for this cell")
-    description: str = Field(description="Brief description of what this cell does")
     cell_type: str = Field(description="Cell type: 'code' or 'markdown'")
+    description: str = Field(description="Brief description of what this cell does")
+    source: str = Field(description="The source code or markdown for this cell")
 
 
 class SplitCellResponse(BaseModel):
     """Response from LLM for splitting a single cell."""
 
-    split_cells: List[SplitCellInfo] = Field(
-        description="List of cells to replace the original cell with"
+    pesky_variables: List[str] = Field(
+        description="List of variables that contain streams, iterators, or matplotlib figures/axes"
     )
     explanation: str = Field(
         description="Explanation of how the cell was split and why"
     )
     should_split: bool = Field(
         description="Whether the cell should actually be split (False if already well-structured)"
+    )
+    split_cells: List[SplitCellInfo] = Field(
+        description="List of cells to replace the original cell with"
     )
 
 
