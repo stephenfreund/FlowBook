@@ -182,7 +182,7 @@ class Checkpoints:
 
         return saved, removed
 
-    def type_models(self, user_ns: Dict[str, Any]) -> Dict[str, TypeModel]:
+    def type_models(self, user_ns: Dict[str, Any]) -> None:
         return {k: get_type_model(v) for k, v in self.checkpointable_vars(user_ns).items()}
 
     def restore(self, name, user_ns: Dict[str, Any]):
@@ -192,7 +192,7 @@ class Checkpoints:
         for k in checkpointable_vars.keys():
             del user_ns[k]
 
-        user_ns.update(cp.user_ns)
+        user_ns.update(cp.user_ns.deepcopy())
 
     def delete(self, name):
         del self.saved[name]
