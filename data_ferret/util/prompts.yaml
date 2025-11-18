@@ -208,6 +208,8 @@ optimization_repair_input: |
       exact same outputs as the original code.
     * Rewrite the optimized code, but make sure to preserve the behavior 
       and produce the exact same outputs as the original code.
+    * Try new optimization approaches that may be more effective if the 
+      previous approaches are not working.
   - Return a complete list of repaired snippets in the same order.
 
 batch_optimization_instructions: |

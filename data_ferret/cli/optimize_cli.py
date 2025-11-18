@@ -266,14 +266,12 @@ async def optimize_cell(
         if results.get('checkpoint_before'):
             try:
                 cmd_client.checkpoint_delete(results['checkpoint_before'])
-                log(f"Deleted checkpoint: {results['checkpoint_before']}")
             except Exception as e:
                 error(f"Failed to delete checkpoint {results['checkpoint_before']}: {e}")
 
         if results.get('checkpoint_after'):
             try:
                 cmd_client.checkpoint_delete(results['checkpoint_after'])
-                log(f"Deleted checkpoint: {results['checkpoint_after']}")
             except Exception as e:
                 error(f"Failed to delete checkpoint {results['checkpoint_after']}: {e}")
 
