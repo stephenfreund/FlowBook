@@ -187,72 +187,97 @@ class CodeExecutionOrchestrator:
             and pre_post_envs.original_result is not None
         )
 
-        if use_existing_checkpoints:
-            # Skip steps 1-3: Use existing checkpoints
-            # Use provided duration from profile, or 0.0 if not available
-            original_duration = pre_post_envs.original_duration or 0.0
-            log(f"Using existing checkpoints: {pre_post_envs.original_environment} and {pre_post_envs.original_result}")
-            log(f"Using profile duration: {original_duration:.2f}s")
-            env_checkpoint_name = pre_post_envs.original_environment
-            result_checkpoint_name = pre_post_envs.original_result
-        else:
-            # Step 1: Save original environment
-            self.cmd_client.checkpoint_save("original_environment")
+        try:
+            if use_existing_checkpoints:
+                # Skip steps 1-3: Use existing checkpoints
+                # Use provided duration from profile, or 0.0 if not available
+                original_duration = pre_post_envs.original_duration or 0.0
+                log(f"Using existing checkpoints: {pre_post_envs.original_environment} and {pre_post_envs.original_result}")
+                log(f"Using profile duration: {original_duration:.2f}s")
+                env_checkpoint_name = pre_post_envs.original_environment
+                result_checkpoint_name = pre_post_envs.original_result
+            else:
+                # Step 1: Save original environment
+                self.cmd_client.checkpoint_save("original_environment")
 
-            # Step 2: Execute original code with crash handling
-            original_duration, original_error = self._execute_code_safely(original_code)
+                # Step 2: Execute original code with crash handling
+                original_duration, original_error = self._execute_code_safely(original_code)
 
-            if original_error:
-                # Original crashed - return error
-                return TestCodeOriginalCrash(
-                    error=original_error,
-                    original_duration=original_duration
+                if original_error:
+                    # Original crashed - return error
+                    return TestCodeOriginalCrash(
+                        error=original_error,
+                        original_duration=original_duration
+                    )
+
+                # Step 3: Save original result
+                self.cmd_client.checkpoint_save("original_result")
+
+                env_checkpoint_name = "original_environment"
+                result_checkpoint_name = "original_result"
+
+            # Step 4: Restore original environment
+            self.cmd_client.checkpoint_restore(env_checkpoint_name)
+
+            # Step 5: Execute modified code with crash handling
+            with timer(key="execute_modified_code", message="Execute modified code"):
+                modified_duration, modified_error = self._execute_code_safely(modified_code)
+
+            if modified_error:
+                # Modified crashed (original worked) - return error
+                return TestCodeModifiedCrash(
+                    error=modified_error,
+                    original_duration=original_duration,
+                    modified_duration=modified_duration
                 )
 
-            # Step 3: Save original result
-            self.cmd_client.checkpoint_save("original_result")
+            # Step 6: Save modified result
+            self.cmd_client.checkpoint_save("modified_result")
 
-            env_checkpoint_name = "original_environment"
-            result_checkpoint_name = "original_result"
-
-        # Step 4: Restore original environment
-        self.cmd_client.checkpoint_restore(env_checkpoint_name)
-
-        # Step 5: Execute modified code with crash handling
-        with timer(key="execute_modified_code", message="Execute modified code"):
-            modified_duration, modified_error = self._execute_code_safely(modified_code)
-
-        if modified_error:
-            # Modified crashed (original worked) - return error
-            return TestCodeModifiedCrash(
-                error=modified_error,
-                original_duration=original_duration,
-                modified_duration=modified_duration
+            # Step 7: Compare checkpoints (only check specified output variables)
+            compare_response = self.cmd_client.checkpoint_compare(
+                result_checkpoint_name,
+                "modified_result",
+                keys_to_include=output_variables
             )
 
-        # Step 6: Save modified result
-        self.cmd_client.checkpoint_save("modified_result")
+            # The diff is already filtered by keys_to_include, no need to filter again
+            diff_result = compare_response.diff
 
-        # Step 7: Compare checkpoints (only check specified output variables)
-        compare_response = self.cmd_client.checkpoint_compare(
-            result_checkpoint_name,
-            "modified_result",
-            keys_to_include=output_variables
-        )
+            # Step 8: Calculate speedup
+            speedup = original_duration / modified_duration if modified_duration > 0 else 0.0
 
-        # The diff is already filtered by keys_to_include, no need to filter again
-        diff_result = compare_response.diff
+            # Step 9: Return success result
+            return TestCodeSuccess(
+                diff=diff_result,
+                original_duration=original_duration,
+                modified_duration=modified_duration,
+                speedup=speedup
+            )
 
-        # Step 8: Calculate speedup
-        speedup = original_duration / modified_duration if modified_duration > 0 else 0.0
+        finally:
+            # Clean up temporary checkpoints
+            # Always delete modified_result (we always create it)
+            try:
+                self.cmd_client.checkpoint_delete("modified_result")
+                log("Deleted checkpoint: modified_result")
+            except Exception as e:
+                # Ignore errors during cleanup
+                log(f"Note: Could not delete checkpoint 'modified_result': {e}")
 
-        # Step 9: Return success result
-        return TestCodeSuccess(
-            diff=diff_result,
-            original_duration=original_duration,
-            modified_duration=modified_duration,
-            speedup=speedup
-        )
+            # Only delete original checkpoints if we created them
+            if not use_existing_checkpoints:
+                try:
+                    self.cmd_client.checkpoint_delete("original_environment")
+                    log("Deleted checkpoint: original_environment")
+                except Exception as e:
+                    log(f"Note: Could not delete checkpoint 'original_environment': {e}")
+
+                try:
+                    self.cmd_client.checkpoint_delete("original_result")
+                    log("Deleted checkpoint: original_result")
+                except Exception as e:
+                    log(f"Note: Could not delete checkpoint 'original_result': {e}")
 
     def _execute_code_safely(
         self,

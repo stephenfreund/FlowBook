@@ -122,6 +122,64 @@ class Checkpoints:
         self.sanity_check = sanity_check
         self.saved = {}
 
+    def _deep_copy_user_ns(self, variables: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[int, Any], Dict[str, Exception]]:
+        """
+        Deep copy a dictionary of variables, with special handling for pandas objects.
+
+        Ensures that mutable objects inside pandas DataFrames and Series are fully
+        deep copied to prevent shared references. For pandas objects with object dtype,
+        this method ensures that mutable objects stored in cells (like lists, dicts,
+        custom objects) are properly deep copied rather than creating shallow references.
+
+        Args:
+            variables: Dictionary of variables to copy
+
+        Returns:
+            Tuple of (copied dictionary, memo dictionary for tracking copied objects,
+                     dictionary of failed variables with their exceptions)
+        """
+        copied = {}
+        memo = {}
+        failed = {}
+
+        for k, v in variables.items():
+            try:
+                if isinstance(v, pd.DataFrame):
+                    # For DataFrames, we need special handling for object dtype columns
+                    # because copy.deepcopy doesn't properly deep copy mutable objects in cells
+                    df_copy = v.copy()
+
+                    # Deep copy each object dtype column's values
+                    for col in df_copy.columns:
+                        if df_copy[col].dtype == object:
+                            # Deep copy each cell value in object columns
+                            df_copy[col] = df_copy[col].apply(lambda x: copy.deepcopy(x, memo=memo))
+
+                    # Store the memo reference for the DataFrame itself
+                    memo[id(v)] = df_copy
+                    copied[k] = df_copy
+
+                elif isinstance(v, pd.Series):
+                    # For Series with object dtype, deep copy each value
+                    if v.dtype == object:
+                        series_copy = v.copy()
+                        series_copy = series_copy.apply(lambda x: copy.deepcopy(x, memo=memo))
+                        memo[id(v)] = series_copy
+                        copied[k] = series_copy
+                    else:
+                        # For non-object dtype, regular copy is sufficient
+                        series_copy = v.copy()
+                        memo[id(v)] = series_copy
+                        copied[k] = series_copy
+                else:
+                    # For all other types, use standard deepcopy with memo tracking
+                    copied[k] = copy.deepcopy(v, memo=memo)
+            except Exception as e:
+                # Track variables that failed to copy
+                failed[k] = e
+
+        return copied, memo, failed
+
     def checkpointable_value(self, v: Any) -> bool:
         # Skip modules
         if isinstance(v, types.ModuleType):
@@ -155,8 +213,6 @@ class Checkpoints:
     def save(
         self, name, user_ns: Dict[str, Any]
     ) -> tuple[Dict[str, Any], Dict[str, Any]]:
-        cp = {}
-        memo = {}
         saved = {}
         removed = {}
         checkpointable_vars = self.checkpointable_vars(user_ns)
@@ -165,12 +221,16 @@ class Checkpoints:
         for k in checkpointable_vars.keys() - checkpointable_values.keys():
             removed[k] = get_type_model(user_ns[k])
 
-        for k, v in checkpointable_values.items():
-            try:
-                cp[k] = copy.deepcopy(v, memo=memo)
-                saved[k] = get_type_model(v)
-            except Exception as e:
-                removed[k] = get_type_model(v)
+        # Use helper to deep copy all variables with pandas awareness
+        cp, memo, failed = self._deep_copy_user_ns(checkpointable_values)
+
+        # Track successfully copied variables
+        for k in cp:
+            saved[k] = get_type_model(checkpointable_values[k])
+
+        # Track variables that failed to copy
+        for k in failed:
+            removed[k] = get_type_model(checkpointable_values[k])
 
         if self.sanity_check:
             original = {k: v for k, v in checkpointable_values.items() if k in saved}
@@ -182,17 +242,20 @@ class Checkpoints:
 
         return saved, removed
 
-    def type_models(self, user_ns: Dict[str, Any]) -> None:
-        return {k: get_type_model(v) for k, v in self.checkpointable_vars(user_ns).items()}
-
     def restore(self, name, user_ns: Dict[str, Any]):
-        cp = self.saved[name] 
+        cp = self.saved[name]
         checkpointable_vars = self.checkpointable_vars(user_ns)
 
         for k in checkpointable_vars.keys():
             del user_ns[k]
 
-        user_ns.update(cp.user_ns.deepcopy())
+        # Deep copy the checkpoint before restoring to keep the checkpoint pristine
+        # This ensures that modifications to restored variables don't affect the checkpoint
+        restored_vars, _, _ = self._deep_copy_user_ns(cp.user_ns)
+        user_ns.update(restored_vars)
+
+    def type_models(self, user_ns: Dict[str, Any]) -> None:
+        return {k: get_type_model(v) for k, v in self.checkpointable_vars(user_ns).items()}
 
     def delete(self, name):
         del self.saved[name]
