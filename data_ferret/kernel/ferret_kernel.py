@@ -360,10 +360,11 @@ class FerretKernel(IPythonKernel, Magics):
         self._default_cell_timeout = 30 * 60
         self._cell_timeout = self._default_cell_timeout
         self._use_scalene = True
+        self._skip_immutable_copy = True  # Optimize checkpoint copying by skipping immutable objects
 
         self._cell_id = None
         self._executed_cell_ids = {}
-        self._checkpoint = Checkpoints()
+        self._checkpoint = Checkpoints(skip_immutable_copy=self._skip_immutable_copy)
         self._force_checkpoints = False
 
         # For now, we don't want to use the custom exception handler because it's causing issues with the kernel client because

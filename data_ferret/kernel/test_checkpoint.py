@@ -741,5 +741,137 @@ class TestEdgeCases:
         assert user_ns['df'].iloc[99, 0] == [99, 100, 101]
 
 
+class TestImmutableOptimization:
+    """Test the skip_immutable_copy optimization."""
+
+    def test_immutable_string_column_optimization(self):
+        """Test that string columns are recognized as immutable and not deep copied."""
+        cp_optimized = Checkpoints(skip_immutable_copy=True)
+        cp_normal = Checkpoints(skip_immutable_copy=False)
+
+        # Create DataFrame with string column (immutable)
+        df = pd.DataFrame({'strings': ['a', 'b', 'c']})
+        user_ns = {'df': df}
+
+        # Both should work correctly
+        cp_optimized.save('test', user_ns.copy())
+        cp_normal.save('test', user_ns.copy())
+
+        # Verify both produced valid checkpoints
+        assert 'df' in cp_optimized.get('test').user_ns
+        assert 'df' in cp_normal.get('test').user_ns
+
+    def test_immutable_numeric_column_optimization(self):
+        """Test that numeric columns are recognized as immutable."""
+        cp = Checkpoints(skip_immutable_copy=True)
+
+        # Create DataFrame with numeric columns
+        df = pd.DataFrame({
+            'ints': [1, 2, 3],
+            'floats': [1.1, 2.2, 3.3],
+            'bools': [True, False, True]
+        })
+        user_ns = {'df': df}
+
+        cp.save('test', user_ns)
+        restored_df = cp.get('test').user_ns['df']
+
+        # Verify data integrity
+        pd.testing.assert_frame_equal(df, restored_df)
+
+    def test_immutable_timestamp_column_optimization(self):
+        """Test that pandas Timestamp columns are recognized as immutable."""
+        cp = Checkpoints(skip_immutable_copy=True)
+
+        # Create DataFrame with Timestamp column in object dtype
+        timestamps = [pd.Timestamp('2024-01-01'), pd.Timestamp('2024-01-02'), pd.Timestamp('2024-01-03')]
+        df = pd.DataFrame({'timestamps': timestamps})
+
+        user_ns = {'df': df}
+        cp.save('test', user_ns)
+        restored_df = cp.get('test').user_ns['df']
+
+        # Verify data integrity
+        pd.testing.assert_frame_equal(df, restored_df)
+
+    def test_mutable_objects_still_deep_copied_with_optimization(self):
+        """Test that mutable objects are still properly deep copied even with optimization enabled."""
+        cp = Checkpoints(skip_immutable_copy=True)
+
+        # Create DataFrame with mutable lists
+        df = pd.DataFrame({
+            'lists': [[1, 2], [3, 4], [5, 6]]
+        })
+        user_ns = {'df': df}
+
+        cp.save('test', user_ns)
+
+        # Modify the original
+        user_ns['df'].iloc[0, 0].append(999)
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # Verify the modification didn't affect the checkpoint
+        assert user_ns['df'].iloc[0, 0] == [1, 2]
+
+    def test_mixed_column_types_with_optimization(self):
+        """Test DataFrame with both immutable and mutable columns."""
+        cp = Checkpoints(skip_immutable_copy=True)
+
+        # Create DataFrame with mixed column types
+        df = pd.DataFrame({
+            'strings': ['a', 'b', 'c'],  # immutable
+            'lists': [[1], [2], [3]],     # mutable
+            'ints': [1, 2, 3]             # immutable (non-object dtype)
+        })
+        user_ns = {'df': df}
+
+        cp.save('test', user_ns)
+
+        # Modify mutable column
+        user_ns['df'].iloc[0, 1].append(999)
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # Verify restoration
+        assert user_ns['df'].iloc[0, 1] == [1]  # mutable restored
+        assert user_ns['df'].iloc[0, 0] == 'a'  # immutable preserved
+
+    def test_series_with_immutable_optimization(self):
+        """Test that Series with immutable objects are optimized."""
+        cp = Checkpoints(skip_immutable_copy=True)
+
+        # Create Series with strings
+        s = pd.Series(['a', 'b', 'c'], name='strings')
+        user_ns = {'s': s}
+
+        cp.save('test', user_ns)
+        restored_s = cp.get('test').user_ns['s']
+
+        # Verify data integrity
+        pd.testing.assert_series_equal(s, restored_s)
+
+    def test_flag_disabled_behaves_like_original(self):
+        """Test that skip_immutable_copy=False behaves like the original implementation."""
+        cp_off = Checkpoints(skip_immutable_copy=False)
+        cp_default = Checkpoints()  # Default is False
+
+        # Create DataFrame with strings
+        df = pd.DataFrame({'strings': ['a', 'b', 'c']})
+        user_ns_off = {'df': df.copy()}
+        user_ns_default = {'df': df.copy()}
+
+        cp_off.save('test', user_ns_off)
+        cp_default.save('test', user_ns_default)
+
+        # Both should produce identical results
+        pd.testing.assert_frame_equal(
+            cp_off.get('test').user_ns['df'],
+            cp_default.get('test').user_ns['df']
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

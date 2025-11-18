@@ -1,4 +1,6 @@
 import copy
+import datetime
+import decimal
 import types
 from typing import Any, Dict, Set
 
@@ -85,6 +87,81 @@ def filter_user_namespace(user_ns: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in user_ns.items() if is_valid_variable(k, v)}
 
 
+def is_immutable_type(obj: Any) -> bool:
+    """
+    Check if an object is of an immutable type that's safe to skip copying.
+
+    Returns True for basic immutable types commonly found in data science code,
+    including Python primitives, NumPy scalars, and pandas temporal types.
+
+    Args:
+        obj: Object to check
+
+    Returns:
+        True if the object is immutable and safe to skip deep copying
+    """
+    if obj is None or obj is pd.NA:
+        return True
+
+    # Basic immutable types
+    if isinstance(obj, (int, float, str, bool, bytes, complex, frozenset, range)):
+        return True
+
+    # NumPy scalar types (all are immutable)
+    if isinstance(obj, np.generic):
+        return True
+
+    # Date/time types
+    if isinstance(obj, (datetime.date, datetime.time, datetime.timedelta)):
+        return True
+
+    # Pandas temporal types
+    if isinstance(obj, (pd.Timestamp, pd.Timedelta, pd.Period)):
+        return True
+
+    # Decimal
+    if isinstance(obj, decimal.Decimal):
+        return True
+
+    return False
+
+
+def is_column_all_immutable(series: pd.Series) -> bool:
+    """
+    Check if all non-null values in a Series are immutable types.
+
+    This function assumes homogeneous columns (all values of the same type),
+    which is common in data science workflows. It performs a quick type check
+    on the first non-null value, then verifies all other values are the same type.
+
+    Args:
+        series: pandas Series to check
+
+    Returns:
+        True if all non-null values are immutable types
+    """
+    if len(series) == 0:
+        return True
+
+    # Get non-null values
+    non_null = series.dropna()
+    if len(non_null) == 0:
+        return True
+
+    # Check if first value is immutable
+    first_val = non_null.iloc[0]
+    if not is_immutable_type(first_val):
+        return False
+
+    # Fast path: check if all values are same type
+    first_type = type(first_val)
+    if all(type(x) is first_type for x in non_null.iloc[1:]):
+        return True
+
+    # Fallback: check each value individually (for heterogeneous columns)
+    return all(is_immutable_type(x) for x in non_null.iloc[1:])
+
+
 class Checkpoint:
     def __init__(self, name: str, user_ns: Dict[str, Any], memo: Dict[int, Any]):
         self.name = name
@@ -119,8 +196,9 @@ def checkpoint_diff(a: Checkpoint, b: Checkpoint, keys_to_include: Set[str] | No
 
 class Checkpoints:
 
-    def __init__(self, sanity_check: bool = False):
+    def __init__(self, sanity_check: bool = False, skip_immutable_copy: bool = False):
         self.sanity_check = sanity_check
+        self.skip_immutable_copy = skip_immutable_copy
         self.saved = {}
 
     def _deep_copy_user_ns(self, variables: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[int, Any], Dict[str, Exception]]:
@@ -158,6 +236,9 @@ class Checkpoints:
                         # in cells are truly independent
                         for col in df_copy.columns:
                             if df_copy[col].dtype == object:
+                                # Skip deepcopy if optimization enabled and column contains only immutable objects
+                                if self.skip_immutable_copy and is_column_all_immutable(df_copy[col]):
+                                    continue  # No need to deepcopy immutables
                                 df_copy[col] = df_copy[col].apply(lambda x: copy.deepcopy(x, memo=memo))
 
                     memo[id(v)] = df_copy
@@ -167,7 +248,9 @@ class Checkpoints:
                     series_copy = v.copy(deep=True)
                     if v.dtype == object:
                         # For object dtype Series, use pandas deep copy + manual deepcopy for cells
-                        series_copy = series_copy.apply(lambda x: copy.deepcopy(x, memo=memo))
+                        # Skip deepcopy if optimization enabled and series contains only immutable objects
+                        if not (self.skip_immutable_copy and is_column_all_immutable(series_copy)):
+                            series_copy = series_copy.apply(lambda x: copy.deepcopy(x, memo=memo))
                     memo[id(v)] = series_copy
                     copied[k] = series_copy
                 else:
