@@ -63,7 +63,7 @@ class KernelCommandClient:
         timeout: Default timeout for command responses (seconds)
     """
 
-    def __init__(self, kernel_client: BlockingKernelClient, timeout: float = 30.0):
+    def __init__(self, kernel_client: BlockingKernelClient, timeout: float = 5.0, retries: int = 1):
         """
         Initialize the kernel command client.
 
@@ -73,6 +73,7 @@ class KernelCommandClient:
         """
         self.kernel_client = kernel_client
         self.timeout = timeout
+        self.retries = retries
 
     def _send_command(
         self,
@@ -186,7 +187,7 @@ class KernelCommandClient:
             KernelCommandError: If command fails
         """
         with timer(key="checkpoint_save", message=f"KernelCommandClient: Save checkpoint {name}"):
-            for _ in range(3):
+            for _ in range(self.retries):
                 try:
                     request = CheckpointSaveRequest(name=name)
                     response_dict = self._send_command(request.model_dump(), timeout=timeout)
@@ -194,7 +195,7 @@ class KernelCommandClient:
                 except Exception as e:
                     error(f"Failed to save checkpoint: {e}")
                     time.sleep(1)
-        raise KernelCommandError(f"Failed to save checkpoint after 3 attempts")
+        raise KernelCommandError(f"Failed to save checkpoint after {self.retries} attempts")
 
     def checkpoint_restore(
         self,
@@ -215,7 +216,7 @@ class KernelCommandClient:
             KernelCommandError: If command fails or checkpoint doesn't exist
         """
         with timer(key="checkpoint_restore", message=f"KernelCommandClient: Restore checkpoint {name}"):
-            for _ in range(3):
+            for _ in range(self.retries):
                 try:
                     request = CheckpointRestoreRequest(name=name)
                     response_dict = self._send_command(request.model_dump(), timeout=timeout)
@@ -223,7 +224,7 @@ class KernelCommandClient:
                 except Exception as e:
                     error(f"Failed to restore checkpoint: {e}")
                     time.sleep(1)
-        raise KernelCommandError(f"Failed to restore checkpoint after 3 attempts")
+        raise KernelCommandError(f"Failed to restore checkpoint after {self.retries} attempts")
 
     def checkpoint_delete(
         self,
@@ -244,7 +245,7 @@ class KernelCommandClient:
             KernelCommandError: If command fails or checkpoint doesn't exist
         """
         with timer(key="checkpoint_delete", message=f"KernelCommandClient: Delete checkpoint {name}"):
-            for _ in range(3):
+            for _ in range(self.retries):
                 try:
                     request = CheckpointDeleteRequest(name=name)
                     response_dict = self._send_command(request.model_dump(), timeout=timeout)
@@ -252,7 +253,7 @@ class KernelCommandClient:
                 except Exception as e:
                     error(f"Failed to delete checkpoint: {e}")
                     time.sleep(1)
-        raise KernelCommandError(f"Failed to delete checkpoint after 3 attempts")
+        raise KernelCommandError(f"Failed to delete checkpoint after {self.retries} attempts")
 
     def checkpoint_list(
         self,
@@ -271,7 +272,7 @@ class KernelCommandClient:
             KernelCommandError: If command fails
         """
         with timer(key="checkpoint_list", message="KernelCommandClient: List checkpoints"):
-            for _ in range(3):
+            for _ in range(self.retries):
                 try:
                     request = CheckpointListRequest()
                     response_dict = self._send_command(request.model_dump(), timeout=timeout)
@@ -279,7 +280,7 @@ class KernelCommandClient:
                 except Exception as e:
                     error(f"Failed to list checkpoints: {e}")
                     time.sleep(1)
-        raise KernelCommandError(f"Failed to list checkpoints after 3 attempts")
+        raise KernelCommandError(f"Failed to list checkpoints after {self.retries} attempts")
 
     def checkpoint_compare(
         self,
@@ -304,7 +305,7 @@ class KernelCommandClient:
             KernelCommandError: If command fails or checkpoints don't exist
         """
         with timer(key="checkpoint_compare", message=f"KernelCommandClient: Compare checkpoints {name1} and {name2}"):
-            for _ in range(3):
+            for _ in range(self.retries):
                 try:
                     request = CheckpointCompareRequest(name1=name1, name2=name2, keys_to_include=keys_to_include)
                     response_dict = self._send_command(request.model_dump(), timeout=timeout)
@@ -312,7 +313,7 @@ class KernelCommandClient:
                 except Exception as e:
                     error(f"Failed to compare checkpoints: {e}")
                     time.sleep(1)
-        raise KernelCommandError(f"Failed to compare checkpoints after 3 attempts")
+        raise KernelCommandError(f"Failed to compare checkpoints after {self.retries} attempts")
 
     def checkpoint_clear(
         self,
@@ -331,7 +332,7 @@ class KernelCommandClient:
             KernelCommandError: If command fails
         """
         with timer(key="checkpoint_clear", message="KernelCommandClient: Clear checkpoints"):
-            for _ in range(3):
+            for _ in range(self.retries):
                 try:
                     request = CheckpointClearRequest()
                     response_dict = self._send_command(request.model_dump(), timeout=timeout)
@@ -339,7 +340,7 @@ class KernelCommandClient:
                 except Exception as e:
                     error(f"Failed to clear checkpoints: {e}")
                     time.sleep(1)
-        raise KernelCommandError(f"Failed to clear checkpoints after 3 attempts")
+            raise KernelCommandError(f"Failed to clear checkpoints after {self.retries} attempts")
 
     # ========================================================================
     # Feature Toggle Commands

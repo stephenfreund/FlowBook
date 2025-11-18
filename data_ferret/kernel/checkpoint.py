@@ -9,7 +9,8 @@ from data_ferret.kernel.extended_types import TypeModel, get_type_model
 import pandas as pd
 import numpy as np
 
-# pd.options.mode.copy_on_write = True
+# Enable copy-on-write mode for better performance with DataFrame copies
+pd.options.mode.copy_on_write = True
 
 
 # System variables to filter out from user namespace
@@ -145,32 +146,30 @@ class Checkpoints:
         for k, v in variables.items():
             try:
                 if isinstance(v, pd.DataFrame):
-                    # For DataFrames, we need special handling for object dtype columns
-                    # because copy.deepcopy doesn't properly deep copy mutable objects in cells
-                    df_copy = v.copy()
+                    # Check if DataFrame has any object dtype columns
+                    has_object_columns = any(v[col].dtype == object for col in v.columns)
+                    df_copy = v.copy(deep=True)
 
-                    # Deep copy each object dtype column's values
-                    for col in df_copy.columns:
-                        if df_copy[col].dtype == object:
-                            # Deep copy each cell value in object columns
-                            df_copy[col] = df_copy[col].apply(lambda x: copy.deepcopy(x, memo=memo))
+                    if has_object_columns:
+                        # For DataFrames with object columns, use pandas deep copy
+                        # which is faster than manual apply + deepcopy
 
-                    # Store the memo reference for the DataFrame itself
+                        # Additional deep copy for object columns to ensure mutable objects
+                        # in cells are truly independent
+                        for col in df_copy.columns:
+                            if df_copy[col].dtype == object:
+                                df_copy[col] = df_copy[col].apply(lambda x: copy.deepcopy(x, memo=memo))
+
                     memo[id(v)] = df_copy
                     copied[k] = df_copy
 
                 elif isinstance(v, pd.Series):
-                    # For Series with object dtype, deep copy each value
+                    series_copy = v.copy(deep=True)
                     if v.dtype == object:
-                        series_copy = v.copy()
+                        # For object dtype Series, use pandas deep copy + manual deepcopy for cells
                         series_copy = series_copy.apply(lambda x: copy.deepcopy(x, memo=memo))
-                        memo[id(v)] = series_copy
-                        copied[k] = series_copy
-                    else:
-                        # For non-object dtype, regular copy is sufficient
-                        series_copy = v.copy()
-                        memo[id(v)] = series_copy
-                        copied[k] = series_copy
+                    memo[id(v)] = series_copy
+                    copied[k] = series_copy
                 else:
                     # For all other types, use standard deepcopy with memo tracking
                     copied[k] = copy.deepcopy(v, memo=memo)
