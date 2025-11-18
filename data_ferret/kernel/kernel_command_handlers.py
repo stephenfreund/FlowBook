@@ -68,7 +68,9 @@ class KernelCommandHandlers:
         self.kernel = kernel
 
         # Map command names to handler methods
-        self._handlers: Dict[str, Callable[[KernelCommandRequest], KernelCommandResponse]] = {
+        self._handlers: Dict[
+            str, Callable[[KernelCommandRequest], KernelCommandResponse]
+        ] = {
             "checkpoint_save": self.handle_checkpoint_save,
             "checkpoint_restore": self.handle_checkpoint_restore,
             "checkpoint_delete": self.handle_checkpoint_delete,
@@ -80,7 +82,9 @@ class KernelCommandHandlers:
             "force_checkpoints": self.handle_force_checkpoints,
         }
 
-    def get_handler(self, command: str) -> Callable[[KernelCommandRequest], KernelCommandResponse]:
+    def get_handler(
+        self, command: str
+    ) -> Callable[[KernelCommandRequest], KernelCommandResponse]:
         """
         Get handler function for a command.
 
@@ -101,7 +105,9 @@ class KernelCommandHandlers:
     # Checkpoint Handlers
     # ========================================================================
 
-    def handle_checkpoint_save(self, req: CheckpointSaveRequest) -> CheckpointSaveResponse:
+    def handle_checkpoint_save(
+        self, req: CheckpointSaveRequest
+    ) -> CheckpointSaveResponse:
         """
         Save a checkpoint of the current kernel state.
 
@@ -118,7 +124,9 @@ class KernelCommandHandlers:
             assert self.kernel.shell is not None, "shell is not set"
 
             start_time = time.time()
-            saved, removed = self.kernel._checkpoint.save(req.name, self.kernel.shell.user_ns)
+            saved, removed = self.kernel._checkpoint.save(
+                req.name, self.kernel.shell.user_ns
+            )
             duration = time.time() - start_time
 
             # Remove variables that couldn't be saved from the namespace
@@ -141,7 +149,9 @@ class KernelCommandHandlers:
                 duration=0,
             )
 
-    def handle_checkpoint_restore(self, req: CheckpointRestoreRequest) -> CheckpointRestoreResponse:
+    def handle_checkpoint_restore(
+        self, req: CheckpointRestoreRequest
+    ) -> CheckpointRestoreResponse:
         """
         Restore a previously saved checkpoint.
 
@@ -164,7 +174,9 @@ class KernelCommandHandlers:
             message=f"Checkpoint '{req.name}' restored",
         )
 
-    def handle_checkpoint_delete(self, req: CheckpointDeleteRequest) -> CheckpointDeleteResponse:
+    def handle_checkpoint_delete(
+        self, req: CheckpointDeleteRequest
+    ) -> CheckpointDeleteResponse:
         """
         Delete a checkpoint.
 
@@ -177,14 +189,23 @@ class KernelCommandHandlers:
         Raises:
             KeyError: If checkpoint doesn't exist
         """
-        self.kernel._checkpoint.delete(req.name)
+        try:
+            self.kernel._checkpoint.delete(req.name)
 
-        return CheckpointDeleteResponse(
-            status="ok",
-            message=f"Checkpoint '{req.name}' deleted",
-        )
+            return CheckpointDeleteResponse(
+                status="ok",
+                message=f"Checkpoint '{req.name}' deleted",
+            )
 
-    def handle_checkpoint_list(self, req: CheckpointListRequest) -> CheckpointListResponse:
+        except KeyError:
+            return CheckpointDeleteResponse(
+                status="error",
+                message=f"Checkpoint '{req.name}' not found",
+            )
+
+    def handle_checkpoint_list(
+        self, req: CheckpointListRequest
+    ) -> CheckpointListResponse:
         """
         List all available checkpoints.
 
@@ -202,7 +223,9 @@ class KernelCommandHandlers:
             checkpoints=checkpoints,
         )
 
-    def handle_checkpoint_compare(self, req: CheckpointCompareRequest) -> CheckpointCompareResponse:
+    def handle_checkpoint_compare(
+        self, req: CheckpointCompareRequest
+    ) -> CheckpointCompareResponse:
         """
         Compare two checkpoints.
 
@@ -225,7 +248,9 @@ class KernelCommandHandlers:
             diff=diff,
         )
 
-    def handle_checkpoint_clear(self, req: CheckpointClearRequest) -> CheckpointClearResponse:
+    def handle_checkpoint_clear(
+        self, req: CheckpointClearRequest
+    ) -> CheckpointClearResponse:
         """
         Clear all checkpoints.
 
@@ -263,7 +288,9 @@ class KernelCommandHandlers:
             message="Scalene profiling enabled",
         )
 
-    def handle_disable_scalene(self, req: DisableScaleneRequest) -> DisableScaleneResponse:
+    def handle_disable_scalene(
+        self, req: DisableScaleneRequest
+    ) -> DisableScaleneResponse:
         """
         Disable Scalene profiling.
 
@@ -280,7 +307,9 @@ class KernelCommandHandlers:
             message="Scalene profiling disabled",
         )
 
-    def handle_force_checkpoints(self, req: ForceCheckpointsRequest) -> ForceCheckpointsResponse:
+    def handle_force_checkpoints(
+        self, req: ForceCheckpointsRequest
+    ) -> ForceCheckpointsResponse:
         """
         Enable or disable force checkpoints mode.
 

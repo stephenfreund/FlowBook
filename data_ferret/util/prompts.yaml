@@ -77,9 +77,11 @@ optimization_input: |
 
   {optimization_descriptions}
 
-  Provide the optimized code and a list of specific optimizations you applied.
-  Use tool calls to understand the environment and the live variables.
-
+  INSTRUCTIONS:
+  - Carefully review the optimization descriptions to understand what optimizations to apply.
+  - Make a list of up to 3 specific optimizations to apply.
+  - Return the optimized code and the list of optimizations you applied.
+  
 cleanup_instructions: |
   You are an expert at improving Jupyter notebook code.
   Your task is to analyze the given code cell and provide:
@@ -199,13 +201,16 @@ optimization_repair_input: |
   {validation_error}
   ```
 
-  Please repair ALL snippets so they work correctly together and produce the exact same outputs
-  as the original code.  
-  
-  If the code is not easily modified, explore the possibility of rewriting the code completely 
-  to be more efficient and readable, but make sure to preserve the functionality and produce the exact same outputs as the original code.
-  
-  Return a complete list of repaired snippets in the same order.
+  INSTRUCTIONS:
+  - Carefully review the validation error to understand what went wrong.
+  - Do the easier of the following:
+    * Repair the snippets so they work correctly together and produce the 
+      exact same outputs as the original code.
+    * Rewrite the optimized code, but make sure to preserve the behavior 
+      and produce the exact same outputs as the original code.
+    * Try new optimization approaches that may be more effective if the 
+      previous approaches are not working.
+  - Return a complete list of repaired snippets in the same order.
 
 batch_optimization_instructions: |
   You are an expert at optimizing Jupyter notebook code.
@@ -263,6 +268,7 @@ split_instructions: |
   - Each code cell should do ONE thing well
   - Preserve all variable assignments and ensure no code is lost
   - Don't split if the cell is already well-structured (1-10 lines doing one thing)
+  - Don't split if the cell contains a non-deepcopy-able variables that contain a stream, iterator, or matplotlib figure/axes
   - Split on natural boundaries: data loading, preprocessing, analysis, visualization
   - Preserve imports in their own cell at the beginning
   - Keep functions and class definitions intact (don't split mid-definition)
@@ -290,7 +296,10 @@ split_input: |
   {context}
 
   Instructions:
-  - Split this cell into a sequence of cells that each handle one logical step
-  - If the cell is already well-structured, set should_split=False
-  - Ensure all code is preserved and the execution order is maintained
-  - Each split cell should be runnable after all previous cells
+  - Identify variables that are assigned to a stream, iterator, or matplotlib Figure, Axes, or array of Axes.
+  - If any such variables are assigned, set should_split=False.
+  - Split this cell into a sequence of cells that each handle one logical step.
+  - If the cell is already well-structured, set should_split=False.
+  - Ensure all code is preserved and the execution order is maintained.
+  - Each split cell should be runnable after all previous cells.
+  

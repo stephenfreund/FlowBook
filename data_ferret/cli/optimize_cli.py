@@ -261,6 +261,20 @@ async def optimize_cell(
                 results['optimize'] = {'skipped': True, 'reason': skip_reason}
                 log(f"Optimization skipped for cell {cell_index}: {skip_reason}")
 
+        # Clean up checkpoints created during profiling
+        # These are no longer needed after optimization completes
+        if results.get('checkpoint_before'):
+            try:
+                cmd_client.checkpoint_delete(results['checkpoint_before'])
+            except Exception as e:
+                error(f"Failed to delete checkpoint {results['checkpoint_before']}: {e}")
+
+        if results.get('checkpoint_after'):
+            try:
+                cmd_client.checkpoint_delete(results['checkpoint_after'])
+            except Exception as e:
+                error(f"Failed to delete checkpoint {results['checkpoint_after']}: {e}")
+
         return results
 
 

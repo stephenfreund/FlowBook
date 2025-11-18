@@ -50,11 +50,11 @@ class CodeSnippet(BaseModel):
 
 
 class OptimizedCodeResponse(BaseModel):
-    optimized_code: str = Field(
-        description="The optimized Python code, ready to run with no additional text"
-    )
     optimizations_applied: List[str] = Field(
         description="A bullet list of optimizations that were applied"
+    )
+    optimized_code: str = Field(
+        description="The optimized Python code, ready to run with no additional text"
     )
 
 
