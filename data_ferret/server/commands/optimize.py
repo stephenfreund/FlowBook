@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, List, Tuple, Set, Literal
 
 from data_ferret.kernel.checkpoint import is_valid_variable_name
 from data_ferret.kernel.kernel_command_client import KernelCommandClient
-from data_ferret.server.base import NotebookCommand
+from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.util.notebook_tools import NotebookTools
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.ferret_metadata import (
@@ -2094,17 +2094,25 @@ class OptimizeCommand(NotebookCommand):
         config: Optional[Any] = None,
         pre_post_envs: Optional[PrePostEnvironments] = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> ProcessingResult:
         """Optimize cells in the notebook based on their optimization plans."""
-        new_nb, total_cost, cell_timing = await self.optimize_cells(
-            notebook_content, config.model, selected_cell_ids, kernel_client, pre_post_envs
+        with self.timing_context() as get_elapsed:
+            new_nb, total_cost, cell_timing = await self.optimize_cells(
+                notebook_content, config.model, selected_cell_ids, kernel_client, pre_post_envs
+            )
+
+            metadata = {
+                "status": "success",
+                "command": self.command_name,
+                "total_cost": total_cost,
+                "cell_timing": cell_timing,
+            }
+
+            total_time = get_elapsed()
+
+        return ProcessingResult(
+            notebook=new_nb,
+            metadata=metadata,
+            total_cost=total_cost,
+            total_time=total_time
         )
-
-        metadata = {
-            "status": "success",
-            "command": self.command_name,
-            "total_cost": total_cost,
-            "cell_timing": cell_timing,
-        }
-
-        return {"notebook": new_nb, "metadata": metadata}

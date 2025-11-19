@@ -111,6 +111,8 @@ export const FERRET_COMMANDS: CommandInfo[] = [
 export interface CommandResult {
   notebook: any;
   metadata: any;
+  total_cost: number;
+  total_time: number;
 }
 
 /**

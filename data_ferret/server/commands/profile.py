@@ -6,7 +6,7 @@ import copy
 import traceback
 from typing import Any, Dict, Optional
 
-from data_ferret.server.base import NotebookCommand
+from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.util.ferret_metadata import FerretMetadata, ProfileData, set_profile_ferret_metadata
 from data_ferret.server.kernel_helper import KernelHelper
 from data_ferret.server.kernel_manager import FerretKernelClient
@@ -43,96 +43,107 @@ class ProfileCommand(NotebookCommand):
         selected_cell_ids: Optional[list] = None,
         config: Optional[Any] = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> ProcessingResult:
         """Profile code cells."""
-        if kernel_client is None:
-            return {
-                "notebook": notebook_content,
-                "metadata": {
-                    "status": "error",
-                    "command": self.command_name,
-                    "error": "Kernel client required but not provided",
+        with self.timing_context() as get_elapsed:
+            if kernel_client is None:
+                total_time = get_elapsed()
+                return ProcessingResult(
+                    notebook=notebook_content,
+                    metadata={
+                        "status": "error",
+                        "command": self.command_name,
+                        "error": "Kernel client required but not provided",
+                    },
+                    total_cost=0.0,
+                    total_time=total_time
+                )
+
+            new_notebook = copy.deepcopy(notebook_content)
+            cells = new_notebook.get("cells", [])
+
+            execution_results = []
+            total_executed = 0
+
+            with timer(key="enable_scalene", message="Enabling scalene"):
+                kernel_client.execute("%enable_scalene")
+
+            with timer(key="profile", message="Profiling cells"):
+                for idx, cell in enumerate(cells):
+                    if cell.get("cell_type") == "code":
+                        if selected_cell_ids and cell.get("id") not in selected_cell_ids:
+                            continue
+
+                        with timer(key="profile_cell", message=f"Profiling cell {idx}:{cell.get('id')}"):
+                            source = cell.get("source", "")
+                            if isinstance(source, list):
+                                source = "".join(source)
+
+                            metadata = cell.get("metadata", {}).copy()
+                            metadata['cell_id'] = cell.get("id")
+
+                            if source.strip():
+                                try:
+                                    # Use a longer timeout for profiling (30 minutes to match kernel timeout)
+                                    result = KernelHelper.execute_code(
+                                        kernel_client,
+                                        source,
+                                        timeout=30 * 60,  # 30 minutes
+                                        cell_id=cell.get("id"),
+                                        cell_metadata=metadata,
+                                    )
+
+                                    cell["execution_count"] = result["execution_count"]
+                                    cell["outputs"] = result["outputs"]
+
+                                    for output in result["outputs"]:
+                                        if 'metadata' in output:
+                                            output_metadata = output['metadata']
+                                            if 'profile' in output_metadata:
+                                                profile_metadata = ProfileData.model_validate(output_metadata['profile'])
+                                                set_profile_ferret_metadata(cell, profile_metadata)
+
+                                    execution_results.append(
+                                        {
+                                            "cell_index": idx,
+                                            "status": result["status"],
+                                            "execution_count": result["execution_count"],
+                                        }
+                                    )
+                                    log(f"[{result['execution_count']}]")
+
+                                    total_executed += 1
+                                except Exception as e:
+                                    cell["outputs"] = [
+                                        {
+                                            "output_type": "error",
+                                            "ename": e.__class__.__name__,
+                                            "evalue": str(e),
+                                            "traceback": traceback.format_exception(type(e), e, e.__traceback__),
+                                        }
+                                    ]
+
+                                    execution_results.append(
+                                        {
+                                            "cell_index": idx,
+                                            "status": "error"
+                                        }
+                                    )
+
+            metadata = {
+                "status": "success",
+                "command": self.command_name,
+                "execution": {
+                    "total_executed": total_executed,
+                    "results": execution_results,
                 },
             }
 
-        new_notebook = copy.deepcopy(notebook_content)
-        cells = new_notebook.get("cells", [])
+            total_time = get_elapsed()
 
-        execution_results = []
-        total_executed = 0
-
-        with timer(key="enable_scalene", message="Enabling scalene"):
-            kernel_client.execute("%enable_scalene")
-
-        with timer(key="profile", message="Profiling cells"):
-            for idx, cell in enumerate(cells):
-                if cell.get("cell_type") == "code":
-                    if selected_cell_ids and cell.get("id") not in selected_cell_ids:
-                        continue
-
-                    with timer(key="profile_cell", message=f"Profiling cell {idx}:{cell.get('id')}"):
-                        source = cell.get("source", "")
-                        if isinstance(source, list):
-                            source = "".join(source)
-
-                        metadata = cell.get("metadata", {}).copy()
-                        metadata['cell_id'] = cell.get("id")
-
-                        if source.strip():
-                            try:
-                                # Use a longer timeout for profiling (30 minutes to match kernel timeout)
-                                result = KernelHelper.execute_code(
-                                    kernel_client,
-                                    source,
-                                    timeout=30 * 60,  # 30 minutes
-                                    cell_id=cell.get("id"),
-                                    cell_metadata=metadata,
-                                )
-
-                                cell["execution_count"] = result["execution_count"]
-                                cell["outputs"] = result["outputs"]
-
-                                for output in result["outputs"]:
-                                    if 'metadata' in output:
-                                        output_metadata = output['metadata']
-                                        if 'profile' in output_metadata:
-                                            profile_metadata = ProfileData.model_validate(output_metadata['profile'])
-                                            set_profile_ferret_metadata(cell, profile_metadata)
-
-                                execution_results.append(
-                                    {
-                                        "cell_index": idx,
-                                        "status": result["status"],
-                                        "execution_count": result["execution_count"],
-                                    }
-                                )
-                                log(f"[{result['execution_count']}]")
-
-                                total_executed += 1
-                            except Exception as e:
-                                cell["outputs"] = [
-                                    {
-                                        "output_type": "error",
-                                        "ename": e.__class__.__name__,
-                                        "evalue": str(e),
-                                        "traceback": traceback.format_exception(type(e), e, e.__traceback__),
-                                    }
-                                ]
-
-                                execution_results.append(
-                                    {
-                                        "cell_index": idx,
-                                        "status": "error"
-                                    }
-                                )
-
-        metadata = {
-            "status": "success",
-            "command": self.command_name,
-            "execution": {
-                "total_executed": total_executed,
-                "results": execution_results,
-            },
-        }
-
-        return {"notebook": new_notebook, "metadata": metadata}
+        return ProcessingResult(
+            notebook=new_notebook,
+            metadata=metadata,
+            total_cost=0.0,
+            total_time=total_time
+        )

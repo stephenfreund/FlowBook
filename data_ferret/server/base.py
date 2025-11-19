@@ -4,6 +4,8 @@ Abstract base class for notebook processing commands.
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
+from contextlib import contextmanager
+import time
 
 from agents import Usage
 from pydantic import BaseModel, Field
@@ -16,8 +18,8 @@ class ProcessingResult(BaseModel):
     """Result of a notebook processing command."""
     notebook: Dict[str, Any] = Field(description="The new/modified notebook")
     metadata: Dict[str, Any] = Field(description="JSON metadata object with processing results")
-    total_cost: float = Field(description="Total cost of the command")
-    total_time: float = Field(description="Total time taken to execute the command")
+    total_cost: float = Field(default=0.0, description="Total cost of the command")
+    total_time: float = Field(default=0.0, description="Total time taken to execute the command")
 
 
 class NotebookCommand(ABC):
@@ -31,9 +33,9 @@ class NotebookCommand(ABC):
         selected_cell_ids: Optional[List[str]] = None,
         config: Optional[FerretConfig] = None,
         **kwargs
-    ) -> Dict[str, Any]:
+    ) -> ProcessingResult:
         """
-        Process the notebook content and return a new notebook with metadata.
+        Process the notebook content and return a ProcessingResult.
 
         Args:
             notebook_content: The parsed JSON content of a Jupyter notebook
@@ -43,11 +45,49 @@ class NotebookCommand(ABC):
             **kwargs: Additional parameters specific to the command
 
         Returns:
-            Dictionary containing:
+            ProcessingResult containing:
                 - notebook: The new/modified notebook
                 - metadata: JSON metadata object with processing results
+                - total_cost: Total cost in USD
+                - total_time: Total time in seconds
         """
         pass
+
+    @staticmethod
+    def extract_cost_from_stats(stats: Optional[FerretStats]) -> float:
+        """
+        Extract cost from FerretStats object.
+
+        Args:
+            stats: Optional FerretStats object from agent execution
+
+        Returns:
+            Cost in USD, or 0.0 if stats is None
+        """
+        if stats is None:
+            return 0.0
+        return stats.cost
+
+    @staticmethod
+    @contextmanager
+    def timing_context():
+        """
+        Context manager for timing command execution.
+
+        Yields:
+            A callable that returns elapsed time in seconds
+
+        Example:
+            with self.timing_context() as get_elapsed:
+                # do work
+                elapsed = get_elapsed()
+        """
+        start_time = time.time()
+
+        def get_elapsed():
+            return time.time() - start_time
+
+        yield get_elapsed
 
     @property
     @abstractmethod

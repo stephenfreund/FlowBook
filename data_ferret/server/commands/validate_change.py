@@ -17,7 +17,7 @@ from data_ferret.kernel.types import (
     DiffResult, TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
     ExecutionError, format_diff_as_markdown
 )
-from data_ferret.server.base import NotebookCommand
+from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.dependencies import analyze_notebook, CellDependencies
 from data_ferret.util.output import log, timer
@@ -122,7 +122,7 @@ class ValidateChangeCommand(NotebookCommand):
         kernel_client: Optional[FerretKernelClient] = None,
         selected_cell_ids: Optional[List[str]] = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> ProcessingResult:
         """
         Validate selected cells with next cell comparison.
 
@@ -132,120 +132,134 @@ class ValidateChangeCommand(NotebookCommand):
             selected_cell_ids: List of selected cell IDs (required)
 
         Returns:
-            Dictionary with notebook and metadata containing per-cell results
+            ProcessingResult with notebook and metadata containing per-cell results
         """
-        if kernel_client is None:
-            return {
-                "notebook": notebook_content,
-                "metadata": {
-                    "status": "error",
-                    "command": self.command_name,
-                    "error": "Kernel client required but not provided",
-                },
-            }
+        with self.timing_context() as get_elapsed:
+            if kernel_client is None:
+                total_time = get_elapsed()
+                return ProcessingResult(
+                    notebook=notebook_content,
+                    metadata={
+                        "status": "error",
+                        "command": self.command_name,
+                        "error": "Kernel client required but not provided",
+                    },
+                    total_cost=0.0,
+                    total_time=total_time
+                )
 
-        # If no cells selected, do no work
-        if not selected_cell_ids:
-            log("[No cells selected - no work to do]")
-            return {
-                "notebook": notebook_content,
-                "metadata": {
-                    "status": "success",
-                    "command": self.command_name,
-                    "results": {},
-                    "total_processed": 0,
-                },
-            }
+            # If no cells selected, do no work
+            if not selected_cell_ids:
+                log("[No cells selected - no work to do]")
+                total_time = get_elapsed()
+                return ProcessingResult(
+                    notebook=notebook_content,
+                    metadata={
+                        "status": "success",
+                        "command": self.command_name,
+                        "results": {},
+                        "total_processed": 0,
+                    },
+                    total_cost=0.0,
+                    total_time=total_time
+                )
 
-        cells = notebook_content.get("cells", [])
-        results = {}
-        total_processed = 0
+            cells = notebook_content.get("cells", [])
+            results = {}
+            total_processed = 0
 
-        # Analyze dependencies for the entire notebook once
-        with timer(key="analyze_dependencies", message="Analyzing notebook dependencies"):
-            dependencies_dict = analyze_notebook(notebook_content)
+            # Analyze dependencies for the entire notebook once
+            with timer(key="analyze_dependencies", message="Analyzing notebook dependencies"):
+                dependencies_dict = analyze_notebook(notebook_content)
 
-        log(f"Validating {len(selected_cell_ids)} selected cell(s)...")
+            log(f"Validating {len(selected_cell_ids)} selected cell(s)...")
 
-        # Process each cell
-        with timer(key="validate_cells", message="Validating cells"):
-            for idx, cell in enumerate(cells):
-                cell_id = cell.get("id")
+            # Process each cell
+            with timer(key="validate_cells", message="Validating cells"):
+                for idx, cell in enumerate(cells):
+                    cell_id = cell.get("id")
 
-                # Skip if not a code cell
-                if cell.get("cell_type") != "code":
-                    continue
+                    # Skip if not a code cell
+                    if cell.get("cell_type") != "code":
+                        continue
 
-                # Skip if not in selected cells
-                if cell_id not in selected_cell_ids:
-                    continue
+                    # Skip if not in selected cells
+                    if cell_id not in selected_cell_ids:
+                        continue
 
-                with timer(key=f"validate_cell_{idx}", message=f"Validating cell {idx}:{cell_id}"):
-                    # Get current cell source
-                    source = cell.get("source", "")
-                    if isinstance(source, list):
-                        source = "".join(source)
+                    with timer(key=f"validate_cell_{idx}", message=f"Validating cell {idx}:{cell_id}"):
+                        # Get current cell source
+                        source = cell.get("source", "")
+                        if isinstance(source, list):
+                            source = "".join(source)
 
-                    # Get next cell source
-                    next_source = self._get_next_cell_source(cells, cell_id)
+                        # Get next cell source
+                        next_source = self._get_next_cell_source(cells, cell_id)
 
-                    # Get output variables from dependencies
-                    output_variables = self._get_cell_output_variables(
-                        dependencies_dict, cell_id
-                    )
-
-                    try:
-                        # Create orchestrator and run test
-                        orchestrator = CodeExecutionOrchestrator(kernel_client)
-                        result = orchestrator.test_code(
-                            original_code=source,
-                            modified_code=next_source,
-                            output_variables=set(output_variables)
+                        # Get output variables from dependencies
+                        output_variables = self._get_cell_output_variables(
+                            dependencies_dict, cell_id
                         )
 
-                        # Store result
-                        results[cell_id] = {
-                            "ok": True,  # Always true - result type discriminates success/failure
-                            "result": result.model_dump(),
-                            "error": None,
-                        }
+                        try:
+                            # Create orchestrator and run test
+                            orchestrator = CodeExecutionOrchestrator(kernel_client)
+                            result = orchestrator.test_code(
+                                original_code=source,
+                                modified_code=next_source,
+                                output_variables=set(output_variables)
+                            )
 
-                        # Log result based on result type
-                        if isinstance(result, TestCodeSuccess):
-                            # Both codes succeeded - show diff
-                            status_str = "✓" if not result.diff.differences else "✗"
-                            log(f"[{status_str}] Cell {idx}: {format_diff_as_markdown(result.diff)}")
-                        elif isinstance(result, TestCodeOriginalCrash):
-                            # Original code crashed
-                            error = result.error
-                            log(f"[✗] Cell {idx}: Original code crashed - {error.error_type}: {error.error_message}")
-                        elif isinstance(result, TestCodeModifiedCrash):
-                            # Modified code crashed
-                            error = result.error
-                            log(f"[✗] Cell {idx}: Modified code crashed - {error.error_type}: {error.error_message}")
-                        else:
-                            log(f"[?] Cell {idx}: Unknown result type")
+                            # Store result
+                            results[cell_id] = {
+                                "ok": True,  # Always true - result type discriminates success/failure
+                                "result": result.model_dump(),
+                                "error": None,
+                            }
 
-                        total_processed += 1
+                            # Log result based on result type
+                            if isinstance(result, TestCodeSuccess):
+                                # Both codes succeeded - show diff
+                                status_str = "✓" if not result.diff.differences else "✗"
+                                log(f"[{status_str}] Cell {idx}: {format_diff_as_markdown(result.diff)}")
+                            elif isinstance(result, TestCodeOriginalCrash):
+                                # Original code crashed
+                                error = result.error
+                                log(f"[✗] Cell {idx}: Original code crashed - {error.error_type}: {error.error_message}")
+                            elif isinstance(result, TestCodeModifiedCrash):
+                                # Modified code crashed
+                                error = result.error
+                                log(f"[✗] Cell {idx}: Modified code crashed - {error.error_type}: {error.error_message}")
+                            else:
+                                log(f"[?] Cell {idx}: Unknown result type")
 
-                    except Exception as e:
-                        error_details = f"{type(e).__name__}: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-                        log(f"[✗] Cell {idx}: Error - {type(e).__name__}: {str(e)}")
-                        log(f"Traceback:\n{traceback.format_exc()}")
-                        results[cell_id] = {
-                            "ok": False,
-                            "result": None,
-                            "error": error_details,
-                        }
+                            total_processed += 1
 
-        # Return metadata with per-cell results
-        metadata = {
-            "status": "success",
-            "command": self.command_name,
-            "results": results,
-            "total_processed": total_processed,
-        }
+                        except Exception as e:
+                            error_details = f"{type(e).__name__}: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+                            log(f"[✗] Cell {idx}: Error - {type(e).__name__}: {str(e)}")
+                            log(f"Traceback:\n{traceback.format_exc()}")
+                            results[cell_id] = {
+                                "ok": False,
+                                "result": None,
+                                "error": error_details,
+                            }
 
-        log(f"[Completed: {total_processed} cell(s) validated]")
+            # Return metadata with per-cell results
+            metadata = {
+                "status": "success",
+                "command": self.command_name,
+                "results": results,
+                "total_processed": total_processed,
+            }
 
-        return {"notebook": notebook_content, "metadata": metadata}
+            log(f"[Completed: {total_processed} cell(s) validated]")
+
+            total_time = get_elapsed()
+
+        return ProcessingResult(
+            notebook=notebook_content,
+            metadata=metadata,
+            total_cost=0.0,
+            total_time=total_time
+        )

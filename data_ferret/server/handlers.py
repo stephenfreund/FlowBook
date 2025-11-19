@@ -110,7 +110,10 @@ class FerretCommandHandler(APIHandler):
             result = await asyncio.get_event_loop().run_in_executor(executor, run_command)
             executor.shutdown(wait=False)
 
-            self.finish(json.dumps(result))
+            # Serialize ProcessingResult to JSON
+            # Use model_dump() to convert Pydantic model to dict, then json.dumps
+            result_dict = result.model_dump() if hasattr(result, 'model_dump') else result
+            self.finish(json.dumps(result_dict))
 
         except ValueError as e:
             tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))

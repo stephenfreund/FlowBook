@@ -10,7 +10,7 @@ import asyncio
 import nbformat
 from pydantic import BaseModel, Field
 
-from data_ferret.server.base import NotebookCommand
+from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.util.prompts import get_prompt
@@ -147,16 +147,24 @@ class CleanupCommand(NotebookCommand):
         selected_cell_ids: Optional[List[str]] = None,
         config: Optional[Any] = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> ProcessingResult:
         """Process the cleanup command."""
-        new_nb, total_cost = await self.cleanup_cells(
-            notebook_content, config.model, selected_cell_ids
+        with self.timing_context() as get_elapsed:
+            new_nb, total_cost = await self.cleanup_cells(
+                notebook_content, config.model, selected_cell_ids
+            )
+
+            metadata = {
+                "status": "success",
+                "command": self.command_name,
+                "total_cost": total_cost,
+            }
+
+            total_time = get_elapsed()
+
+        return ProcessingResult(
+            notebook=new_nb,
+            metadata=metadata,
+            total_cost=total_cost,
+            total_time=total_time
         )
-
-        metadata = {
-            "status": "success",
-            "command": self.command_name,
-            "total_cost": total_cost,
-        }
-
-        return {"notebook": new_nb, "metadata": metadata}

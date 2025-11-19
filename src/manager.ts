@@ -140,8 +140,11 @@ export class FerretCommandsManager {
         notebook.content.model?.fromJSON(result.notebook);
 
         console.log('Command metadata:', result.metadata);
+        console.log(`Command cost: $${result.total_cost.toFixed(4)}, time: ${result.total_time.toFixed(2)}s`);
 
-        Notification.success(`${commandInfo?.label || 'Command'} Complete: Command executed successfully.`, { autoClose: 3000 });
+        // Format cost and time for display
+        const costStr = result.total_cost > 0 ? ` (Cost: $${result.total_cost.toFixed(4)}, Time: ${result.total_time.toFixed(1)}s)` : '';
+        Notification.success(`${commandInfo?.label || 'Command'} Complete${costStr}`, { autoClose: 3000 });
 
       }
 

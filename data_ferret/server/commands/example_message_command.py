@@ -6,7 +6,7 @@ to the client's message panel during command execution.
 """
 
 import time
-from data_ferret.server.base import NotebookCommand
+from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.server.message_broadcaster import get_broadcaster
 
 
@@ -36,7 +36,7 @@ class ExampleMessageCommand(NotebookCommand):
     def requires_kernel(self) -> bool:
         return False
 
-    async def process(self, notebook_content: dict, kernel_client=None, selected_cell_ids=None, config=None, **kwargs) -> dict:
+    async def process(self, notebook_content: dict, kernel_client=None, selected_cell_ids=None, config=None, **kwargs) -> ProcessingResult:
         """
         Process the notebook and send example messages.
 
@@ -46,34 +46,41 @@ class ExampleMessageCommand(NotebookCommand):
             **kwargs: Additional parameters
 
         Returns:
-            Result dict with notebook and metadata
+            ProcessingResult with notebook and metadata
         """
-        broadcaster = get_broadcaster()
+        with self.timing_context() as get_elapsed:
+            broadcaster = get_broadcaster()
 
-        # Send a greeting
-        broadcaster.append("Starting example command...")
-        broadcaster.newline()
-
-        # Simulate some processing with progress updates
-        for i in range(5):
-            broadcaster.append(f"Processing step {i+1}/5... ")
-            # In a real command, you'd do actual work here
-            # For demo purposes, we'll just show the progress
-            broadcaster.append("done")
+            # Send a greeting
+            broadcaster.append("Starting example command...")
             broadcaster.newline()
 
-        # Send completion message
-        broadcaster.newline()
-        broadcaster.append("Example command completed successfully!")
-        broadcaster.end()
+            # Simulate some processing with progress updates
+            for i in range(5):
+                broadcaster.append(f"Processing step {i+1}/5... ")
+                # In a real command, you'd do actual work here
+                # For demo purposes, we'll just show the progress
+                broadcaster.append("done")
+                broadcaster.newline()
 
-        return {
-            "notebook": notebook_content,
-            "metadata": {
+            # Send completion message
+            broadcaster.newline()
+            broadcaster.append("Example command completed successfully!")
+            broadcaster.end()
+
+            metadata = {
                 "status": "success",
                 "message": "Example messages sent to panel"
             }
-        }
+
+            total_time = get_elapsed()
+
+        return ProcessingResult(
+            notebook=notebook_content,
+            metadata=metadata,
+            total_cost=0.0,
+            total_time=total_time
+        )
 
 
 # Example usage in other commands:

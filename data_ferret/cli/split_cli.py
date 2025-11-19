@@ -73,9 +73,11 @@ async def split_notebook(
             error(f"Error executing split command: {e}")
             sys.exit(1)
 
-        # Extract results
-        split_notebook_content = result["notebook"]
-        metadata = result["metadata"]
+        # Extract results from ProcessingResult
+        split_notebook_content = result.notebook
+        metadata = result.metadata
+        total_cost = result.total_cost
+        total_time = result.total_time
 
         # Check for errors
         if metadata.get("status") == "error":
@@ -108,10 +110,12 @@ async def split_notebook(
         log("LLM Usage:")
         llm_stats = metadata["llm_stats"]
         log(f"  Model:         {llm_stats['model']}")
-        log(f"  Cost:          ${llm_stats['cost']:.4f}")
-        log(f"  Time:          {llm_stats['time']:.2f}s")
         log(f"  Input tokens:  {llm_stats['input_tokens']:,}")
         log(f"  Output tokens: {llm_stats['output_tokens']:,}")
+        log("")
+        log("Total Cost & Time:")
+        log(f"  Total Cost:    ${total_cost:.4f}")
+        log(f"  Total Time:    {total_time:.2f}s")
         log("=" * 60)
         log("")
         log(f"Split notebook saved to: {output_path}")

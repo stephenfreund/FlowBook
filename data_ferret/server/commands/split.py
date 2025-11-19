@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.agent.llm_cost import Usage
-from data_ferret.server.base import NotebookCommand
+from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.output import error, indent, log, timer
 from data_ferret.util.prompts import get_prompt
@@ -44,11 +44,13 @@ class SplitCellResponse(BaseModel):
     explanation: str = Field(
         description="Explanation of how the cell was split and why"
     )
+    
     should_split: bool = Field(
         description="Whether the cell should actually be split (False if already well-structured)"
     )
     split_cells: List[SplitCellInfo] = Field(
-        description="List of cells to replace the original cell with"
+        description="List of cells to replace the original cell with",
+        default_factory=list
     )
 
 
@@ -180,7 +182,7 @@ class SplitCommand(NotebookCommand):
         selected_cell_ids: Optional[List[str]] = None,
         config: Optional[Any] = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> ProcessingResult:
         """
         Main entry point for splitting cells.
 
@@ -192,63 +194,74 @@ class SplitCommand(NotebookCommand):
             **kwargs: Additional arguments
 
         Returns:
-            Dictionary with 'notebook' (modified notebook) and 'metadata' (results)
+            ProcessingResult with modified notebook and metadata
         """
-        with timer(key="split_cells_total", message="Splitting cells"):
-            log("Starting cell splitting process")
+        with self.timing_context() as get_elapsed:
+            with timer(key="split_cells_total", message="Splitting cells"):
+                log("Starting cell splitting process")
 
-            # Get configuration
-            model = config.model
-            log(f"Using model: {model}")
+                # Get configuration
+                model = config.model
+                log(f"Using model: {model}")
 
-            # Initialize stats aggregator
-            stats_agg = StatsAggregator()
+                # Initialize stats aggregator
+                stats_agg = StatsAggregator()
 
-            # Process cells
-            try:
-                new_notebook, split_results = await self._split_cells(
-                    notebook_content=notebook_content,
-                    selected_cell_ids=selected_cell_ids,
-                    model=model,
-                    stats_agg=stats_agg,
-                )
-            except Exception as e:
-                error(f"Error during cell splitting: {e}")
-                return {
-                    "notebook": notebook_content,
-                    "metadata": {
-                        "status": "error",
-                        "command": self.command_name,
-                        "error": str(e),
+                # Process cells
+                try:
+                    new_notebook, split_results = await self._split_cells(
+                        notebook_content=notebook_content,
+                        selected_cell_ids=selected_cell_ids,
+                        model=model,
+                        stats_agg=stats_agg,
+                    )
+                except Exception as e:
+                    error(f"Error during cell splitting: {e}")
+                    total_time = get_elapsed()
+                    return ProcessingResult(
+                        notebook=notebook_content,
+                        metadata={
+                            "status": "error",
+                            "command": self.command_name,
+                            "error": str(e),
+                        },
+                        total_cost=0.0,
+                        total_time=total_time
+                    )
+
+                # Aggregate final stats
+                total_stats = stats_agg.get_aggregated_stats()
+
+                log("\nSplit complete:")
+                log(f"  - Cells analyzed: {split_results['cells_analyzed']}")
+                log(f"  - Cells split: {split_results['cells_split']}")
+                log(f"  - Total new cells: {split_results['total_new_cells']}")
+                log(f"  - LLM cost: ${total_stats.cost:.4f}")
+                log(f"  - Total time: {total_stats.time:.2f}s")
+
+                metadata = {
+                    "status": "success",
+                    "command": self.command_name,
+                    "cells_analyzed": split_results["cells_analyzed"],
+                    "cells_split": split_results["cells_split"],
+                    "total_new_cells": split_results["total_new_cells"],
+                    "llm_stats": {
+                        "model": total_stats.model,
+                        "cost": total_stats.cost,
+                        "time": total_stats.time,
+                        "input_tokens": total_stats.usage.input_tokens,
+                        "output_tokens": total_stats.usage.output_tokens,
                     },
                 }
 
-            # Aggregate final stats
-            total_stats = stats_agg.get_aggregated_stats()
+                total_time = get_elapsed()
 
-            log("\nSplit complete:")
-            log(f"  - Cells analyzed: {split_results['cells_analyzed']}")
-            log(f"  - Cells split: {split_results['cells_split']}")
-            log(f"  - Total new cells: {split_results['total_new_cells']}")
-            log(f"  - LLM cost: ${total_stats.cost:.4f}")
-            log(f"  - Total time: {total_stats.time:.2f}s")
-
-            metadata = {
-                "status": "success",
-                "command": self.command_name,
-                "cells_analyzed": split_results["cells_analyzed"],
-                "cells_split": split_results["cells_split"],
-                "total_new_cells": split_results["total_new_cells"],
-                "llm_stats": {
-                    "model": total_stats.model,
-                    "cost": total_stats.cost,
-                    "time": total_stats.time,
-                    "input_tokens": total_stats.usage.input_tokens,
-                    "output_tokens": total_stats.usage.output_tokens,
-                },
-            }
-
-            return {"notebook": new_notebook, "metadata": metadata}
+        return ProcessingResult(
+            notebook=new_notebook,
+            metadata=metadata,
+            total_cost=total_stats.cost,
+            total_time=total_time
+        )
 
     async def split_cell(
         self,

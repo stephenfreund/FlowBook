@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.kernel.checkpoint import is_valid_variable_name
-from data_ferret.server.base import NotebookCommand
+from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.dependencies import analyze_notebook
 from data_ferret.util.ferret_metadata import FerretMetadata
@@ -356,20 +356,28 @@ class DocumentCommand(NotebookCommand):
         selected_cell_ids: Optional[List[str]] = None,
         config: Optional[Any] = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> ProcessingResult:
         """Add documentation to code cells as comments."""
-        # Analyze dependencies for the entire notebook
-        dependencies_dict = analyze_notebook(notebook_content)
+        with self.timing_context() as get_elapsed:
+            # Analyze dependencies for the entire notebook
+            dependencies_dict = analyze_notebook(notebook_content)
 
-        # Document cells concurrently
-        new_nb, total_cost = await self.document_cells(
-            notebook_content, dependencies_dict, config.model, selected_cell_ids
+            # Document cells concurrently
+            new_nb, total_cost = await self.document_cells(
+                notebook_content, dependencies_dict, config.model, selected_cell_ids
+            )
+
+            metadata = {
+                "status": "success",
+                "command": self.command_name,
+                "total_cost": total_cost,
+            }
+
+            total_time = get_elapsed()
+
+        return ProcessingResult(
+            notebook=new_nb,
+            metadata=metadata,
+            total_cost=total_cost,
+            total_time=total_time
         )
-
-        metadata = {
-            "status": "success",
-            "command": self.command_name,
-            "total_cost": total_cost,
-        }
-
-        return {"notebook": new_nb, "metadata": metadata}

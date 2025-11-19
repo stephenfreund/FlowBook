@@ -12,6 +12,7 @@ import json
 import sys
 import asyncio
 from contextlib import nullcontext
+import traceback
 from typing import Optional, List, Dict, Any
 
 from data_ferret.server.registry import CommandRegistry
@@ -62,7 +63,7 @@ def get_code_cell_ids(notebook_content: Dict[str, Any]) -> List[str]:
         List of code cell IDs
     """
     code_cell_ids = []
-    for cell in notebook_content.get('cells', []):
+    for cell in notebook_content['cells']:
         if cell.get('cell_type') == 'code':
             code_cell_ids.append(cell.get('id'))
     return code_cell_ids
@@ -105,6 +106,8 @@ async def optimize_cell(
             'profile': None,
             'inspect': None,
             'optimize': None,
+            'total_cost': 0.0,
+            'total_time': 0.0,
         }
 
         # Step 1: Profile
@@ -127,9 +130,12 @@ async def optimize_cell(
                         selected_cell_ids=[cell_id],
                         config=config,
                     )
-                    notebook_content = profile_result["notebook"]
-                    results['profile'] = profile_result.get("metadata", {})
-                    log(f"Profile completed for cell {cell_index}")
+                    # Extract cost and time from ProcessingResult
+                    notebook_content = profile_result.notebook
+                    results['profile'] = profile_result.metadata
+                    results['total_cost'] += profile_result.total_cost
+                    results['total_time'] += profile_result.total_time
+                    log(f"Profile completed for cell {cell_index} (cost: ${profile_result.total_cost:.4f}, time: {profile_result.total_time:.2f}s)")
                 except Exception as e:
                     error(f"Profile failed for cell {cell_index}: {e}")
                     results['profile'] = {'error': str(e)}
@@ -172,13 +178,16 @@ async def optimize_cell(
                         selected_cell_ids=[cell_id],
                         config=config,
                     )
-                    notebook_content = inspect_result["notebook"]
-                    results['inspect'] = inspect_result.get("metadata", {})
-                    log(f"Inspection completed for cell {cell_index}")
+                    # Extract cost and time from ProcessingResult
+                    notebook_content = inspect_result.notebook
+                    results['inspect'] = inspect_result.metadata
+                    results['total_cost'] += inspect_result.total_cost
+                    results['total_time'] += inspect_result.total_time
+                    log(f"Inspection completed for cell {cell_index} (cost: ${inspect_result.total_cost:.4f}, time: {inspect_result.total_time:.2f}s)")
 
                     # Print the full inspection report
                     cell = None
-                    for c in notebook_content.get('cells', []):
+                    for c in notebook_content['cells']:
                         if c.get('id') == cell_id:
                             cell = c
                             break
@@ -191,6 +200,7 @@ async def optimize_cell(
 
                 except Exception as e:
                     error(f"Inspection failed for cell {cell_index}: {e}")
+                    traceback.print_exc()
                     results['inspect'] = {'error': str(e)}
 
             # Check if cell meets optimization criteria
@@ -199,7 +209,7 @@ async def optimize_cell(
 
             # Find the cell in notebook
             cell = None
-            for c in notebook_content.get('cells', []):
+            for c in notebook_content['cells']:
                 if c.get('id') == cell_id:
                     cell = c
                     break
@@ -250,9 +260,12 @@ async def optimize_cell(
                             config=config,
                             pre_post_envs=pre_post_envs  # Pass the checkpoints!
                         )
-                        notebook_content = optimize_result["notebook"]
-                        results['optimize'] = optimize_result.get("metadata", {})
-                        log(f"Optimization completed for cell {cell_index}")
+                        # Extract cost and time from ProcessingResult
+                        notebook_content = optimize_result.notebook
+                        results['optimize'] = optimize_result.metadata
+                        results['total_cost'] += optimize_result.total_cost
+                        results['total_time'] += optimize_result.total_time
+                        log(f"Optimization completed for cell {cell_index} (cost: ${optimize_result.total_cost:.4f}, time: {optimize_result.total_time:.2f}s)")
                     except Exception as e:
                         error(f"Optimization failed for cell {cell_index}: {e}")
                         results['optimize'] = {'error': str(e)}
@@ -322,10 +335,15 @@ async def run_optimization_pipeline(
         )
         all_results.append(cell_results)
 
-    # Compile metadata
+    # Compile metadata and aggregate costs
+    total_cost = sum(result.get('total_cost', 0.0) for result in all_results)
+    total_time = sum(result.get('total_time', 0.0) for result in all_results)
+
     metadata = {
         'total_cells_processed': total_cells,
         'cell_results': all_results,
+        'total_cost': total_cost,
+        'total_time': total_time,
     }
 
     return {
@@ -440,7 +458,7 @@ def optimize_cli_main():
 
                 # Find the actual cell in the notebook to get its ferret metadata
                 cell = None
-                for c in notebook_content.get('cells', []):
+                for c in notebook_content['cells']:
                     if c.get('id') == cell_id:
                         cell = c
                         break
@@ -540,6 +558,16 @@ def optimize_cli_main():
 
                 print(f"\n**Time saved:** {time_saved:.2f}s ({(time_saved/total_initial*100 if total_initial > 0 else 0):.1f}%)")
                 print(f"{'='*100}")
+
+            # Display total cost summary
+            print(f"\n{'='*70}")
+            print("## LLM Cost Summary")
+            print(f"{'='*70}")
+            total_cost = metadata.get('total_cost', 0.0)
+            total_time = metadata.get('total_time', 0.0)
+            print(f"Total Cost:  ${total_cost:.4f}")
+            print(f"Total Time:  {total_time:.2f}s")
+            print(f"{'='*70}")
 
             # Save full metadata to JSON file
             metadata_path = output_path.rsplit(".", 1)[0] + "_metadata.json"

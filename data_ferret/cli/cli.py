@@ -157,16 +157,31 @@ def cli_main():
         )
 
         # Save processed notebook
+        # Handle both dict and ProcessingResult (Pydantic model)
+        notebook_data = result.get("notebook") if isinstance(result, dict) else result.notebook
+        metadata_data = result.get("metadata") if isinstance(result, dict) else result.metadata
+        total_cost = result.get("total_cost", 0.0) if isinstance(result, dict) else result.total_cost
+        total_time = result.get("total_time", 0.0) if isinstance(result, dict) else result.total_time
+
         output_path = save_notebook(
-            result["notebook"],
+            notebook_data,
             output_path=args.output,
             input_path=notebook_path
         )
         print(f"Processed notebook written to {output_path}")
 
+        # Display execution summary
+        print("\n" + "=" * 60)
+        print("COMMAND EXECUTION SUMMARY")
+        print("=" * 60)
+        print(f"Command:     {args.command}")
+        print(f"Total Cost:  ${total_cost:.4f}")
+        print(f"Total Time:  {total_time:.2f}s")
+        print("=" * 60)
+
         # Display metadata
-        metadata_output = json.dumps(result["metadata"], indent=2)
-        print("\nMetadata:")
+        metadata_output = json.dumps(metadata_data, indent=2)
+        print("\nDetailed Metadata:")
         print(metadata_output)
 
         return 0
