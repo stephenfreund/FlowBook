@@ -4,9 +4,20 @@ Abstract base class for notebook processing commands.
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
+
+from agents import Usage
+from pydantic import BaseModel, Field
+from data_ferret.agent.agent import FerretStats
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.server.config import FerretConfig
 from jupyter_server.serverapp import ServerApp
+
+class ProcessingResult(BaseModel):
+    """Result of a notebook processing command."""
+    notebook: Dict[str, Any] = Field(description="The new/modified notebook")
+    metadata: Dict[str, Any] = Field(description="JSON metadata object with processing results")
+    total_cost: float = Field(description="Total cost of the command")
+    total_time: float = Field(description="Total time taken to execute the command")
 
 
 class NotebookCommand(ABC):
