@@ -37,7 +37,8 @@ cell_inspection_input: |
   {profile_env}
   ```
 
-  Remember:
+  INSTRUCTIONS:
+  - Make a list of up to 3 specific optimizations to apply.
   - Use the cell ID "{cell_id}" as the target_cell_id for optimizations to this cell.
   - If optimizations require changes to functions defined in other cells, use those cell IDs instead.
   - Set function_name to the name of the specific function to optimize, or None for top-level code.
@@ -253,8 +254,10 @@ batch_optimization_input: |
   OPTIMIZATIONS TO APPLY:
   {optimization_descriptions}
 
-  Optimize each code snippet according to the listed optimizations. Ensure all snippets work
-  together correctly. Return them in the SAME ORDER with proper structure.
+  INSTRUCTIONS:
+  - Carefully review the optimizations to apply to each snippet.
+  - Make a list of up to 3 specific optimizations to apply to each snippet.
+  - Return the optimized code and the list of optimizations you applied.
 
 split_instructions: |
   You are an expert at analyzing Jupyter notebook code cells and dividing them into logical, self-contained steps.
@@ -278,6 +281,7 @@ split_instructions: |
   - Cell is a single import statement or group of related imports
   - Cell is a single function/class definition
   - Cell is already well-structured
+  - Cell contains a variable storing a stream, iterator, matplotlib Figure/Axes, array of Axes, or any other non-deepcopy-able object.
 
   When returning split_cells:
   - Each SplitCellInfo must have: source code and description (what it does)
@@ -295,11 +299,11 @@ split_input: |
   Context from previous cells:
   {context}
 
-  Instructions:
-  - Identify variables that are assigned to a stream, iterator, or matplotlib Figure, Axes, or array of Axes.
-  - If any such variables are assigned, set should_split=False.
-  - Split this cell into a sequence of cells that each handle one logical step.
+  INSTRUCTIONS:
   - If the cell is already well-structured, set should_split=False.
+  - Identify variables to which a stream, iterator, matplotlib Figure, Axes, array of Axes, or any other non-deepcopy-able object are assigned.
+  - If any such variables are assigned, set should_split=False.
+  - Otherwise, split this cell into a sequence of cells that each handle one logical step.
   - Ensure all code is preserved and the execution order is maintained.
   - Each split cell should be runnable after all previous cells.
   
