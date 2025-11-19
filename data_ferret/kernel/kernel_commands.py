@@ -43,6 +43,7 @@ class KernelCommandResponse(BaseModel):
     """
     status: Literal["ok", "error"] = Field(..., description="Response status")
     message: str = Field(default="", description="Human-readable message")
+    traceback: Optional[str] = Field(None, description="Stack trace for errors")
 
     class Config:
         arbitrary_types_allowed = True

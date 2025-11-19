@@ -130,8 +130,9 @@ class KernelCommandHandlers:
             duration = time.time() - start_time
 
             # Remove variables that couldn't be saved from the namespace
-            for k in removed and k in self.kernel.shell.user_ns:
-                del self.kernel.shell.user_ns[k]
+            for k in removed:
+                if k in self.kernel.shell.user_ns:
+                    del self.kernel.shell.user_ns[k]
 
             return CheckpointSaveResponse(
                 status="ok",
@@ -141,9 +142,11 @@ class KernelCommandHandlers:
                 duration=duration,
             )
         except Exception as e:
+            tb_str = traceback.format_exc()
             return CheckpointSaveResponse(
                 status="error",
                 message=f"Failed to save checkpoint: {e}",
+                traceback=tb_str,
                 saved={},
                 removed={},
                 duration=0,
@@ -160,19 +163,23 @@ class KernelCommandHandlers:
 
         Returns:
             Response indicating success
-
-        Raises:
-            KeyError: If checkpoint doesn't exist
-            AssertionError: If shell is not set
         """
-        assert self.kernel.shell is not None, "shell is not set"
+        try:
+            assert self.kernel.shell is not None, "shell is not set"
 
-        self.kernel._checkpoint.restore(req.name, self.kernel.shell.user_ns)
+            self.kernel._checkpoint.restore(req.name, self.kernel.shell.user_ns)
 
-        return CheckpointRestoreResponse(
-            status="ok",
-            message=f"Checkpoint '{req.name}' restored",
-        )
+            return CheckpointRestoreResponse(
+                status="ok",
+                message=f"Checkpoint '{req.name}' restored",
+            )
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            return CheckpointRestoreResponse(
+                status="error",
+                message=f"Failed to restore checkpoint '{req.name}': {e}",
+                traceback=tb_str,
+            )
 
     def handle_checkpoint_delete(
         self, req: CheckpointDeleteRequest
@@ -197,10 +204,12 @@ class KernelCommandHandlers:
                 message=f"Checkpoint '{req.name}' deleted",
             )
 
-        except KeyError:
+        except KeyError as e:
+            tb_str = traceback.format_exc()
             return CheckpointDeleteResponse(
                 status="error",
                 message=f"Checkpoint '{req.name}' not found",
+                traceback=tb_str,
             )
 
     def handle_checkpoint_list(
@@ -215,13 +224,22 @@ class KernelCommandHandlers:
         Returns:
             Response with list of checkpoint names
         """
-        checkpoints = self.kernel._checkpoint.list()
+        try:
+            checkpoints = self.kernel._checkpoint.list()
 
-        return CheckpointListResponse(
-            status="ok",
-            message=f"Found {len(checkpoints)} checkpoint(s)",
-            checkpoints=checkpoints,
-        )
+            return CheckpointListResponse(
+                status="ok",
+                message=f"Found {len(checkpoints)} checkpoint(s)",
+                checkpoints=checkpoints,
+            )
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            return CheckpointListResponse(
+                status="error",
+                message=f"Failed to list checkpoints: {e}",
+                traceback=tb_str,
+                checkpoints=[],
+            )
 
     def handle_checkpoint_compare(
         self, req: CheckpointCompareRequest
@@ -234,19 +252,28 @@ class KernelCommandHandlers:
 
         Returns:
             Response with diff result
-
-        Raises:
-            KeyError: If either checkpoint doesn't exist
         """
-        old = self.kernel._checkpoint.get(req.name1)
-        new = self.kernel._checkpoint.get(req.name2)
-        diff = checkpoint_diff(old, new, keys_to_include=req.keys_to_include)
+        try:
+            old = self.kernel._checkpoint.get(req.name1)
+            new = self.kernel._checkpoint.get(req.name2)
+            diff = checkpoint_diff(old, new, keys_to_include=req.keys_to_include)
 
-        return CheckpointCompareResponse(
-            status="ok",
-            message=f"Compared '{req.name1}' and '{req.name2}'",
-            diff=diff,
-        )
+            return CheckpointCompareResponse(
+                status="ok",
+                message=f"Compared '{req.name1}' and '{req.name2}'",
+                diff=diff,
+            )
+        except Exception as e:
+            from data_ferret.kernel.types import DiffResult
+            tb_str = traceback.format_exc()
+            # Return empty diff on error
+            empty_diff = DiffResult(added={}, removed={}, modified={})
+            return CheckpointCompareResponse(
+                status="error",
+                message=f"Failed to compare checkpoints '{req.name1}' and '{req.name2}': {e}",
+                traceback=tb_str,
+                diff=empty_diff,
+            )
 
     def handle_checkpoint_clear(
         self, req: CheckpointClearRequest
@@ -260,12 +287,20 @@ class KernelCommandHandlers:
         Returns:
             Response indicating success
         """
-        self.kernel._checkpoint.clear()
+        try:
+            self.kernel._checkpoint.clear()
 
-        return CheckpointClearResponse(
-            status="ok",
-            message="All checkpoints cleared",
-        )
+            return CheckpointClearResponse(
+                status="ok",
+                message="All checkpoints cleared",
+            )
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            return CheckpointClearResponse(
+                status="error",
+                message=f"Failed to clear checkpoints: {e}",
+                traceback=tb_str,
+            )
 
     # ========================================================================
     # Feature Toggle Handlers
@@ -281,12 +316,20 @@ class KernelCommandHandlers:
         Returns:
             Response indicating success
         """
-        self.kernel._use_scalene = True
+        try:
+            self.kernel._use_scalene = True
 
-        return EnableScaleneResponse(
-            status="ok",
-            message="Scalene profiling enabled",
-        )
+            return EnableScaleneResponse(
+                status="ok",
+                message="Scalene profiling enabled",
+            )
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            return EnableScaleneResponse(
+                status="error",
+                message=f"Failed to enable Scalene profiling: {e}",
+                traceback=tb_str,
+            )
 
     def handle_disable_scalene(
         self, req: DisableScaleneRequest
@@ -300,12 +343,20 @@ class KernelCommandHandlers:
         Returns:
             Response indicating success
         """
-        self.kernel._use_scalene = False
+        try:
+            self.kernel._use_scalene = False
 
-        return DisableScaleneResponse(
-            status="ok",
-            message="Scalene profiling disabled",
-        )
+            return DisableScaleneResponse(
+                status="ok",
+                message="Scalene profiling disabled",
+            )
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            return DisableScaleneResponse(
+                status="error",
+                message=f"Failed to disable Scalene profiling: {e}",
+                traceback=tb_str,
+            )
 
     def handle_force_checkpoints(
         self, req: ForceCheckpointsRequest

@@ -78,6 +78,18 @@ class KernelCommandClient:
         self.timeout = timeout
         self.retries = retries
 
+    def _log_error_response(self, response, operation: str):
+        """
+        Log error details from a response with status='error'.
+
+        Args:
+            response: Response object with status, message, and optional traceback
+            operation: Description of the operation that failed
+        """
+        error(f"{operation} failed: {response.message}")
+        if hasattr(response, 'traceback') and response.traceback:
+            error(f"Server traceback:\n{response.traceback}")
+
     def _send_command(
         self,
         request: dict,
@@ -205,7 +217,15 @@ class KernelCommandClient:
                     response_dict = self._send_command(
                         request.model_dump(), timeout=timeout
                     )
-                    return CheckpointSaveResponse(**response_dict)
+                    response = CheckpointSaveResponse(**response_dict)
+
+                    # Check if server returned error status
+                    if response.status == "error":
+                        self._log_error_response(response, "Checkpoint save")
+                        time.sleep(1)
+                        continue  # Retry
+
+                    return response
                 except Exception as e:
                     error(f"Failed to save checkpoint: {e}")
                     time.sleep(1)
@@ -241,7 +261,15 @@ class KernelCommandClient:
                     response_dict = self._send_command(
                         request.model_dump(), timeout=timeout
                     )
-                    return CheckpointRestoreResponse(**response_dict)
+                    response = CheckpointRestoreResponse(**response_dict)
+
+                    # Check if server returned error status
+                    if response.status == "error":
+                        self._log_error_response(response, "Checkpoint restore")
+                        time.sleep(1)
+                        continue  # Retry
+
+                    return response
                 except Exception as e:
                     error(f"Failed to restore checkpoint: {e}")
                     time.sleep(1)
@@ -277,7 +305,15 @@ class KernelCommandClient:
                     response_dict = self._send_command(
                         request.model_dump(), timeout=timeout
                     )
-                    return CheckpointDeleteResponse(**response_dict)
+                    response = CheckpointDeleteResponse(**response_dict)
+
+                    # Check if server returned error status
+                    if response.status == "error":
+                        self._log_error_response(response, "Checkpoint delete")
+                        time.sleep(1)
+                        continue  # Retry
+
+                    return response
                 except Exception as e:
                     error(f"Failed to delete checkpoint: {e}")
                     time.sleep(1)
@@ -310,7 +346,15 @@ class KernelCommandClient:
                     response_dict = self._send_command(
                         request.model_dump(), timeout=timeout
                     )
-                    return CheckpointListResponse(**response_dict)
+                    response = CheckpointListResponse(**response_dict)
+
+                    # Check if server returned error status
+                    if response.status == "error":
+                        self._log_error_response(response, "Checkpoint list")
+                        time.sleep(1)
+                        continue  # Retry
+
+                    return response
                 except Exception as e:
                     error(f"Failed to list checkpoints: {e}")
                     time.sleep(1)
@@ -352,7 +396,15 @@ class KernelCommandClient:
                     response_dict = self._send_command(
                         request.model_dump(), timeout=timeout
                     )
-                    return CheckpointCompareResponse(**response_dict)
+                    response = CheckpointCompareResponse(**response_dict)
+
+                    # Check if server returned error status
+                    if response.status == "error":
+                        self._log_error_response(response, "Checkpoint compare")
+                        time.sleep(1)
+                        continue  # Retry
+
+                    return response
                 except Exception as e:
                     error(f"Failed to compare checkpoints: {e}")
                     time.sleep(1)
@@ -385,7 +437,15 @@ class KernelCommandClient:
                     response_dict = self._send_command(
                         request.model_dump(), timeout=timeout
                     )
-                    return CheckpointClearResponse(**response_dict)
+                    response = CheckpointClearResponse(**response_dict)
+
+                    # Check if server returned error status
+                    if response.status == "error":
+                        self._log_error_response(response, "Checkpoint clear")
+                        time.sleep(1)
+                        continue  # Retry
+
+                    return response
                 except Exception as e:
                     error(f"Failed to clear checkpoints: {e}")
                     time.sleep(1)
@@ -423,7 +483,15 @@ class KernelCommandClient:
                     response_dict = self._send_command(
                         request.model_dump(), timeout=timeout
                     )
-                    return EnableScaleneResponse(**response_dict)
+                    response = EnableScaleneResponse(**response_dict)
+
+                    # Check if server returned error status
+                    if response.status == "error":
+                        self._log_error_response(response, "Enable Scalene")
+                        time.sleep(1)
+                        continue  # Retry
+
+                    return response
                 except Exception as e:
                     error(f"Failed to enable Scalene profiling: {e}")
                     time.sleep(1)
@@ -455,7 +523,15 @@ class KernelCommandClient:
                     response_dict = self._send_command(
                         request.model_dump(), timeout=timeout
                     )
-                    return DisableScaleneResponse(**response_dict)
+                    response = DisableScaleneResponse(**response_dict)
+
+                    # Check if server returned error status
+                    if response.status == "error":
+                        self._log_error_response(response, "Disable Scalene")
+                        time.sleep(1)
+                        continue  # Retry
+
+                    return response
                 except Exception as e:
                     error(f"Failed to disable Scalene profiling: {e}")
                     time.sleep(1)
@@ -491,7 +567,15 @@ class KernelCommandClient:
                     response_dict = self._send_command(
                         request.model_dump(), timeout=timeout
                     )
-                    return ForceCheckpointsResponse(**response_dict)
+                    response = ForceCheckpointsResponse(**response_dict)
+
+                    # Check if server returned error status
+                    if response.status == "error":
+                        self._log_error_response(response, "Force checkpoints")
+                        time.sleep(1)
+                        continue  # Retry
+
+                    return response
                 except Exception as e:
                     error(f"Failed to force checkpoints: {e}")
                     time.sleep(1)

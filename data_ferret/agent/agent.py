@@ -79,7 +79,7 @@ class FerretAgent(Agent, Generic[T], RunHooks[FerretContext]):
 
         super().__init__(
             name=key,
-            model=LitellmModel(full_model),
+            model=model, # LitellmModel(full_model),
             instructions=instructions,
             output_type=output_type,
             tools=tools,
