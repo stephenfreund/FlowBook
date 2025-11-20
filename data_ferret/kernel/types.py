@@ -90,12 +90,6 @@ class ValueComparison(BaseModel):
     value2: Any = Field(..., description="Second value")
     message: str = Field(..., description="Description of the difference")
 
-    # sprecial initializer to mask out value1 and value2
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.value1 = None
-        self.value2 = None
-
     @property
     def is_close(self) -> bool:
         """Return True if the values are close (within tolerance)."""

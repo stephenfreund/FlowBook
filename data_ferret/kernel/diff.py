@@ -57,9 +57,10 @@ class Diff:
         rtol=1e-5,
         atol=1e-8,
         max_diffs_per_container: int = 1000,
+        max_diffs_per_structure: int = 5,
         sample_large_arrays: bool = True,
         strict: bool = True,
-        report_close: bool = True
+        report_close: bool = True,
     ):
         """
         Initialize the Diff comparator.
@@ -68,6 +69,8 @@ class Diff:
             rtol: Relative tolerance for floating point comparisons (default: 1e-5)
             atol: Absolute tolerance for floating point comparisons (default: 1e-8)
             max_diffs_per_container: Maximum differences to collect per container (default: 1000)
+            max_diffs_per_structure: Maximum differences to collect per structured data
+                                     (arrays, Series, DataFrames) (default: 5)
             sample_large_arrays: Whether to sample large arrays instead of full comparison (default: True)
             strict: If True, require exact type matches. If False, allow compatible types
                     (e.g., int vs float, list vs ndarray) (default: True)
@@ -88,6 +91,7 @@ class Diff:
         self.rtol = rtol
         self.atol = atol
         self.max_diffs_per_container = max_diffs_per_container
+        self.max_diffs_per_structure = max_diffs_per_structure
         self.sample_large_arrays = sample_large_arrays
         self.strict = strict
         self.report_close = report_close
@@ -95,7 +99,7 @@ class Diff:
         self.id_map_a = {}  # Maps id(obj_a) -> canonical_id
         self.id_map_b = {}  # Maps id(obj_b) -> canonical_id
         self.next_canonical_id = 0
-    
+
     def _is_immutable_atomic(self, val: Any) -> bool:
         """
         Check if a value is an immutable atomic type that doesn't need pointer tracking.
@@ -163,7 +167,12 @@ class Diff:
             return "bytes"
         return "other"
 
-    def diff(self, a: Dict[str, Any], b: Dict[str, Any], keys_to_include: Set[str] | None = None) -> DiffResult:
+    def diff(
+        self,
+        a: Dict[str, Any],
+        b: Dict[str, Any],
+        keys_to_include: Set[str] | None = None,
+    ) -> DiffResult:
         """
         Compare two user namespaces.
 
@@ -193,7 +202,7 @@ class Diff:
                 status="different",
                 value1=a[var],
                 value2=None,
-                message="Variable was removed"
+                message="Variable was removed",
             )
 
         # Check for variables only in b
@@ -203,28 +212,32 @@ class Diff:
                 status="different",
                 value1=None,
                 value2=b[var],
-                message="Variable was added"
+                message="Variable was added",
             )
 
         # Compare common variables - only add to differences if not equal
         common_vars = set(a.keys()) & set(b.keys())
-        for var in sorted(common_vars & keys_to_include):  # Sort for deterministic output
+        for var in sorted(
+            common_vars & keys_to_include
+        ):  # Sort for deterministic output
             diff_result = self._compare_values(a[var], b[var], path=var)
             if diff_result:  # Only include if there are differences
                 differences[var] = diff_result
 
         return DiffResult(differences=differences)
-    
-    def _compare_values(self, val_a: Any, val_b: Any, path: str = "") -> Optional[DiffNode]:
+
+    def _compare_values(
+        self, val_a: Any, val_b: Any, path: str = ""
+    ) -> Optional[DiffNode]:
         """
         Compare two values, dispatching to type-specific methods.
         Returns None if equal, otherwise returns DiffNode with differences.
         """
         # Skip pointer tracking for immutable atomic values
         # For these types, only value equality matters, not object identity
-        both_immutable_atomic = (
-            self._is_immutable_atomic(val_a) and self._is_immutable_atomic(val_b)
-        )
+        both_immutable_atomic = self._is_immutable_atomic(
+            val_a
+        ) and self._is_immutable_atomic(val_b)
 
         # Get IDs for all values (needed for error handling even if not tracking)
         id_a, id_b = id(val_a), id(val_b)
@@ -243,14 +256,14 @@ class Diff:
                             status="different",
                             value1=val_a,
                             value2=val_b,
-                            message=f"Pointer structure mismatch at {path}"
+                            message=f"Pointer structure mismatch at {path}",
                         )
                 else:
                     return ValueComparison(
                         status="different",
                         value1=val_a,
                         value2=val_b,
-                        message=f"Pointer structure mismatch at {path} (first namespace has reference to earlier object)"
+                        message=f"Pointer structure mismatch at {path} (first namespace has reference to earlier object)",
                     )
                 return None  # Already compared, and structure matches
 
@@ -260,7 +273,7 @@ class Diff:
                     status="different",
                     value1=val_a,
                     value2=val_b,
-                    message=f"Pointer structure mismatch at {path} (second namespace has reference to earlier object)"
+                    message=f"Pointer structure mismatch at {path} (second namespace has reference to earlier object)",
                 )
 
             # Register these objects with the same canonical ID
@@ -293,7 +306,7 @@ class Diff:
                                 status="different",
                                 value1=val_a,
                                 value2=val_b,
-                                message=f"Type category mismatch at {path}: {type_a_category} vs {type_b_category} ({type(val_a).__name__} vs {type(val_b).__name__})"
+                                message=f"Type category mismatch at {path}: {type_a_category} vs {type_b_category} ({type(val_a).__name__} vs {type(val_b).__name__})",
                             )
                         return result
 
@@ -302,7 +315,7 @@ class Diff:
                     status="different",
                     value1=val_a,
                     value2=val_b,
-                    message=f"Type category mismatch at {path}: {type_a_category} vs {type_b_category} ({type(val_a).__name__} vs {type(val_b).__name__})"
+                    message=f"Type category mismatch at {path}: {type_a_category} vs {type_b_category} ({type(val_a).__name__} vs {type(val_b).__name__})",
                 )
             # Same type category - continue to value comparison below
         else:
@@ -316,14 +329,16 @@ class Diff:
                         if compat_type == "numeric":
                             result = self._compare_numeric_flexible(val_a, val_b, path)
                         elif compat_type in ("list_array", "tuple_array"):
-                            result = self._compare_list_array_flexible(val_a, val_b, path)
+                            result = self._compare_list_array_flexible(
+                                val_a, val_b, path
+                            )
                         else:
                             # Should not happen, but handle gracefully
                             result = ValueComparison(
                                 status="different",
                                 value1=val_a,
                                 value2=val_b,
-                                message=f"Type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}"
+                                message=f"Type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}",
                             )
 
                         # If comparison found a difference, unregister these objects
@@ -341,9 +356,9 @@ class Diff:
                     status="different",
                     value1=val_a,
                     value2=val_b,
-                    message=f"Type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}"
+                    message=f"Type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}",
                 )
-        
+
         # Dispatch to type-specific methods
         result: Optional[DiffNode] = None
         if val_a is None:
@@ -454,7 +469,9 @@ class Diff:
 
         return max_depth
 
-    def _compare_numeric_flexible(self, val_a: Any, val_b: Any, path: str) -> Optional[ValueComparison]:
+    def _compare_numeric_flexible(
+        self, val_a: Any, val_b: Any, path: str
+    ) -> Optional[ValueComparison]:
         """
         Compare int vs float values in non-strict mode.
         Converts int to float and uses float comparison logic.
@@ -465,7 +482,9 @@ class Diff:
 
         return self._compare_float(float_a, float_b, path)
 
-    def _compare_list_array_flexible(self, val_a: Any, val_b: Any, path: str) -> Optional[DiffNode]:
+    def _compare_list_array_flexible(
+        self, val_a: Any, val_b: Any, path: str
+    ) -> Optional[DiffNode]:
         """
         Compare list/tuple vs ndarray in non-strict mode.
         Validates structure matches and compares element-by-element.
@@ -487,7 +506,7 @@ class Diff:
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Structure mismatch at {path}: {'list' if isinstance(lst, list) else 'tuple'} depth {list_depth} vs array ndim {array_ndim}"
+                message=f"Structure mismatch at {path}: {'list' if isinstance(lst, list) else 'tuple'} depth {list_depth} vs array ndim {array_ndim}",
             )
 
         # Convert list/tuple to array for shape comparison
@@ -498,7 +517,7 @@ class Diff:
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Cannot convert {'list' if isinstance(lst, list) else 'tuple'} to array at {path}: {str(e)}"
+                message=f"Cannot convert {'list' if isinstance(lst, list) else 'tuple'} to array at {path}: {str(e)}",
             )
 
         # Check shapes match
@@ -507,7 +526,7 @@ class Diff:
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Shape mismatch at {path}: {'list' if isinstance(lst, list) else 'tuple'} shape {lst_as_array.shape} vs array shape {arr.shape}"
+                message=f"Shape mismatch at {path}: {'list' if isinstance(lst, list) else 'tuple'} shape {lst_as_array.shape} vs array shape {arr.shape}",
             )
 
         # Compare element-by-element
@@ -523,13 +542,6 @@ class Diff:
             elem_diff = self._compare_values(lst_val, arr_val, f"{path}[{i}]")
             if elem_diff:
                 message = elem_diff.message
-                message += f" - {type(lst_val)} vs {type(arr_val)}"
-                message += f" - {self.rtol} - {self.atol}"
-                message += f" - {math.isclose(lst_val, arr_val, rel_tol=self.rtol, abs_tol=self.atol)}"
-                message += f" - {np.isclose(lst_val, arr_val, rtol=self.rtol, atol=self.atol)}"
-                message += f" - {lst_val == arr_val} vs {np.array_equal(lst_val, arr_val)}"
-                message += f" - {lst_val} vs {arr_val}"
-                message += f" - {type(lst_val) == type(arr_val)}"
                 # Return first difference found
                 idx = np.unravel_index(i, arr.shape)
                 idx_tuple = tuple(int(x) for x in idx)
@@ -537,33 +549,40 @@ class Diff:
                     status="different",
                     value1=lst_val,
                     value2=arr_val,
-                    message=f"Element mismatch at {path}[{idx_tuple}]: {lst_val} vs {arr_val} - {type(lst_val)} vs {type(arr_val)}" + message
+                    message=f"Element mismatch at {path}[{idx_tuple}]: {lst_val} vs {arr_val} - {type(lst_val)} vs {type(arr_val)}"
+                    + message,
                 )
 
         # All elements match
         return None
 
-    def _compare_bool(self, val_a: bool, val_b: bool, path: str) -> Optional[ValueComparison]:
+    def _compare_bool(
+        self, val_a: bool, val_b: bool, path: str
+    ) -> Optional[ValueComparison]:
         if val_a != val_b:
             return ValueComparison(
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Bool mismatch at {path}: {val_a} vs {val_b}"
+                message=f"Bool mismatch at {path}: {val_a} vs {val_b}",
             )
         return None
 
-    def _compare_int(self, val_a: int, val_b: int, path: str) -> Optional[ValueComparison]:
+    def _compare_int(
+        self, val_a: int, val_b: int, path: str
+    ) -> Optional[ValueComparison]:
         if val_a != val_b:
             return ValueComparison(
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Integer mismatch at {path}: {val_a} vs {val_b}"
+                message=f"Integer mismatch at {path}: {val_a} vs {val_b}",
             )
         return None
-    
-    def _compare_float(self, val_a: float, val_b: float, path: str) -> Optional[ValueComparison]:
+
+    def _compare_float(
+        self, val_a: float, val_b: float, path: str
+    ) -> Optional[ValueComparison]:
         # Handle NaN
         is_nan_a = math.isnan(val_a) if isinstance(val_a, float) else np.isnan(val_a)
         is_nan_b = math.isnan(val_b) if isinstance(val_b, float) else np.isnan(val_b)
@@ -575,7 +594,7 @@ class Diff:
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Float mismatch at {path}: {val_a} vs {val_b} (one is NaN)"
+                message=f"Float mismatch at {path}: {val_a} vs {val_b} (one is NaN)",
             )
 
         # Check exact equality first
@@ -583,7 +602,11 @@ class Diff:
             return None  # Exactly equal
 
         # Check if close within tolerance
-        is_close = math.isclose(val_a, val_b, rel_tol=self.rtol, abs_tol=self.atol) if isinstance(val_a, float) else np.isclose(val_a, val_b, rel_tol=self.rtol, abs_tol=self.atol)
+        is_close = (
+            math.isclose(val_a, val_b, rel_tol=self.rtol, abs_tol=self.atol)
+            if isinstance(val_a, float)
+            else np.isclose(val_a, val_b, rel_tol=self.rtol, abs_tol=self.atol)
+        )
         if is_close:
             # If report_close is False, treat close values as equal (no difference)
             if not self.report_close:
@@ -592,7 +615,7 @@ class Diff:
                 status="close",
                 value1=val_a,
                 value2=val_b,
-                message=f"Float close at {path}: {val_a} vs {val_b} (within tolerance)"
+                message=f"Float close at {path}: {val_a} vs {val_b} (within tolerance)",
             )
 
         # Not equal and not close
@@ -600,10 +623,12 @@ class Diff:
             status="different",
             value1=val_a,
             value2=val_b,
-            message=f"Float mismatch at {path}: {val_a} vs {val_b}"
+            message=f"Float mismatch at {path}: {val_a} vs {val_b}",
         )
-    
-    def _compare_complex(self, val_a: complex, val_b: complex, path: str) -> Optional[DiffNode]:
+
+    def _compare_complex(
+        self, val_a: complex, val_b: complex, path: str
+    ) -> Optional[DiffNode]:
         diffs = {}
         real_diff = self._compare_float(val_a.real, val_b.real, f"{path}.real")
         if real_diff:
@@ -613,44 +638,54 @@ class Diff:
             diffs[".imag"] = imag_diff
         return diffs if diffs else None
 
-    def _compare_str(self, val_a: str, val_b: str, path: str) -> Optional[ValueComparison]:
+    def _compare_str(
+        self, val_a: str, val_b: str, path: str
+    ) -> Optional[ValueComparison]:
         if val_a != val_b:
             return ValueComparison(
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"String mismatch at {path}: '{val_a}' vs '{val_b}'"
+                message=f"String mismatch at {path}: '{val_a}' vs '{val_b}'",
             )
         return None
 
-    def _compare_bytes(self, val_a: bytes, val_b: bytes, path: str) -> Optional[ValueComparison]:
+    def _compare_bytes(
+        self, val_a: bytes, val_b: bytes, path: str
+    ) -> Optional[ValueComparison]:
         if val_a != val_b:
             return ValueComparison(
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Bytes mismatch at {path}"
+                message=f"Bytes mismatch at {path}",
             )
         return None
-    
-    def _compare_callable(self, val_a: Any, val_b: Any, path: str) -> Optional[DiffNode]:
+
+    def _compare_callable(
+        self, val_a: Any, val_b: Any, path: str
+    ) -> Optional[DiffNode]:
         """
         Compare callables.
         - For functions: use identity (is)
         - For bound methods: compare __func__ and __self__
         """
         # Check if both are bound methods
-        is_method_a = hasattr(val_a, '__self__') and hasattr(val_a, '__func__')
-        is_method_b = hasattr(val_b, '__self__') and hasattr(val_b, '__func__')
+        is_method_a = hasattr(val_a, "__self__") and hasattr(val_a, "__func__")
+        is_method_b = hasattr(val_b, "__self__") and hasattr(val_b, "__func__")
 
         if is_method_a and is_method_b:
             # Both are bound methods - compare the underlying function and instance
             diffs = {}
-            func_diff = self._compare_values(val_a.__func__, val_b.__func__, f"{path}.__func__")
+            func_diff = self._compare_values(
+                val_a.__func__, val_b.__func__, f"{path}.__func__"
+            )
             if func_diff:
                 diffs[".__func__"] = func_diff
 
-            self_diff = self._compare_values(val_a.__self__, val_b.__self__, f"{path}.__self__")
+            self_diff = self._compare_values(
+                val_a.__self__, val_b.__self__, f"{path}.__self__"
+            )
             if self_diff:
                 diffs[".__self__"] = self_diff
 
@@ -661,7 +696,7 @@ class Diff:
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Callable type mismatch at {path}: bound method vs function"
+                message=f"Callable type mismatch at {path}: bound method vs function",
             )
         else:
             # ignore function/callable mismatch
@@ -678,22 +713,28 @@ class Diff:
             #         message=f"Callable mismatch at {path}: {name_a} vs {name_b} (different objects)"
             #     )
             # return None
-    
-    def _compare_ndarray(self, val_a: np.ndarray, val_b: np.ndarray, path: str) -> Optional[ValueComparison]:
-        """Compare numpy arrays (TODO: implement full diff collection with sampling)."""
-        result = self._compare_ndarray_legacy(val_a, val_b, path)
-        if result:
-            return ValueComparison(status="different", value1=val_a, value2=val_b, message=result)
-        return None
 
-    def _compare_ndarray_legacy(self, val_a: np.ndarray, val_b: np.ndarray, path: str) -> str:
+    def _compare_ndarray(
+        self, val_a: np.ndarray, val_b: np.ndarray, path: str
+    ) -> Optional[DiffNode]:
+        """Compare numpy arrays, collecting up to max_diffs_per_structure differences."""
         # Check shape
         if val_a.shape != val_b.shape:
-            return f"Array shape mismatch at {path}: {val_a.shape} vs {val_b.shape}"
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Array shape mismatch at {path}: {val_a.shape} vs {val_b.shape}",
+            )
 
         # Check dtype compatibility
         if not are_compatible_dtypes(val_a.dtype, val_b.dtype):
-            return f"Array dtype mismatch at {path}: {val_a.dtype} vs {val_b.dtype}"
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Array dtype mismatch at {path}: {val_a.dtype} vs {val_b.dtype}",
+            )
 
         # Cast to common type if dtypes are compatible but different
         if val_a.dtype != val_b.dtype:
@@ -704,64 +745,131 @@ class Diff:
             val_a_cmp = val_a
             val_b_cmp = val_b
 
-        # Compare values
+        # Fast path: use vectorized operations to check if arrays are equal
         try:
-            if np.issubdtype(val_a_cmp.dtype, np.floating) or np.issubdtype(val_a_cmp.dtype, np.complexfloating):
-                # Use allclose for floating point, treating NaN as equal
-                if not np.allclose(val_a_cmp, val_b_cmp, rtol=self.rtol, atol=self.atol, equal_nan=True):
-                    # Find first mismatch
-                    flat_a = val_a_cmp.ravel()
-                    flat_b = val_b_cmp.ravel()
-                    # Use original arrays for error messages
-                    flat_a_orig = val_a.ravel()
-                    flat_b_orig = val_b.ravel()
-                    for i in range(len(flat_a)):
-                        a_val, b_val = flat_a[i], flat_b[i]
-                        both_nan = np.isnan(a_val) and np.isnan(b_val)
-                        if not both_nan and not np.allclose([a_val], [b_val], rtol=self.rtol, atol=self.atol, equal_nan=True):
-                            idx = np.unravel_index(i, val_a.shape)
-                            idx_tuple = tuple(int(x) for x in idx)
-                            return f"Array values mismatch at {path}[{idx_tuple}]: {flat_a_orig[i]} vs {flat_b_orig[i]}"
-                    return f"Array values mismatch at {path}"
+            if np.issubdtype(val_a_cmp.dtype, np.floating) or np.issubdtype(
+                val_a_cmp.dtype, np.complexfloating
+            ):
+                # Fast vectorized check for floats
+                if np.allclose(
+                    val_a_cmp, val_b_cmp, rtol=self.rtol, atol=self.atol, equal_nan=True
+                ):
+                    return None  # Arrays are equal
             else:
-                # For other types, use array_equal
-                if not np.array_equal(val_a_cmp, val_b_cmp):
-                    # Find first mismatch
-                    flat_a = val_a_cmp.ravel()
-                    flat_b = val_b_cmp.ravel()
-                    # Use original arrays for error messages
-                    flat_a_orig = val_a.ravel()
-                    flat_b_orig = val_b.ravel()
-                    for i in range(len(flat_a)):
-                        if flat_a[i] != flat_b[i]:
-                            idx = np.unravel_index(i, val_a.shape)
-                            idx_tuple = tuple(int(x) for x in idx)
-                            return f"Array values mismatch at {path}[{idx_tuple}]: {flat_a_orig[i]} vs {flat_b_orig[i]}"
-                    return f"Array values mismatch at {path}"
+                # Fast vectorized check for other types
+                if np.array_equal(val_a_cmp, val_b_cmp):
+                    return None  # Arrays are equal
+        except Exception:
+            pass  # Fall through to element-by-element comparison
+
+        # Arrays are different - collect up to max_diffs_per_structure differences
+        diffs = {}
+        diff_count = 0
+
+        try:
+            if np.issubdtype(val_a_cmp.dtype, np.floating) or np.issubdtype(
+                val_a_cmp.dtype, np.complexfloating
+            ):
+                # Iterate to find specific differences
+                flat_a = val_a_cmp.ravel()
+                flat_b = val_b_cmp.ravel()
+                flat_a_orig = val_a.ravel()
+                flat_b_orig = val_b.ravel()
+
+                for i in range(len(flat_a)):
+                    a_val, b_val = flat_a[i], flat_b[i]
+                    both_nan = np.isnan(a_val) and np.isnan(b_val)
+
+                    if not both_nan and not np.allclose(
+                        [a_val], [b_val], rtol=self.rtol, atol=self.atol, equal_nan=True
+                    ):
+                        idx = np.unravel_index(i, val_a.shape)
+                        idx_tuple = tuple(int(x) for x in idx)
+
+                        diffs[f"[{idx_tuple}]"] = ValueComparison(
+                            status="different",
+                            value1=flat_a_orig[i],
+                            value2=flat_b_orig[i],
+                            message=f"Array values mismatch at {path}[{idx_tuple}]: {flat_a_orig[i]} vs {flat_b_orig[i]}",
+                        )
+
+                        diff_count += 1
+                        if diff_count >= self.max_diffs_per_structure:
+                            diffs["_truncated"] = ValueComparison(
+                                status="different",
+                                value1=None,
+                                value2=None,
+                                message=f"Truncated after {diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
+                            )
+                            break
+            else:
+                # Iterate to find specific differences
+                flat_a = val_a_cmp.ravel()
+                flat_b = val_b_cmp.ravel()
+                flat_a_orig = val_a.ravel()
+                flat_b_orig = val_b.ravel()
+
+                for i in range(len(flat_a)):
+                    if flat_a[i] != flat_b[i]:
+                        idx = np.unravel_index(i, val_a.shape)
+                        idx_tuple = tuple(int(x) for x in idx)
+
+                        diffs[f"[{idx_tuple}]"] = ValueComparison(
+                            status="different",
+                            value1=flat_a_orig[i],
+                            value2=flat_b_orig[i],
+                            message=f"Array values mismatch at {path}[{idx_tuple}]: {flat_a_orig[i]} vs {flat_b_orig[i]}",
+                        )
+
+                        diff_count += 1
+                        if diff_count >= self.max_diffs_per_structure:
+                            diffs["_truncated"] = ValueComparison(
+                                status="different",
+                                value1=None,
+                                value2=None,
+                                message=f"Truncated after {diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
+                            )
+                            break
         except Exception as e:
-            return f"Array comparison error at {path}: {str(e)}"
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Array comparison error at {path}: {str(e)}",
+            )
 
-        return ""
-    
-    def _compare_series(self, val_a: pd.Series, val_b: pd.Series, path: str) -> Optional[ValueComparison]:
-        """Compare pandas Series (TODO: implement full diff collection)."""
-        result = self._compare_series_legacy(val_a, val_b, path)
-        if result:
-            return ValueComparison(status="different", value1=val_a, value2=val_b, message=result)
-        return None
+        return diffs if diffs else None
 
-    def _compare_series_legacy(self, val_a: pd.Series, val_b: pd.Series, path: str) -> str:
+    def _compare_series(
+        self, val_a: pd.Series, val_b: pd.Series, path: str
+    ) -> Optional[DiffNode]:
+        """Compare pandas Series, collecting up to max_diffs_per_structure differences."""
         # Check index
         if not val_a.index.equals(val_b.index):
-            return f"Series index mismatch at {path}"
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Series index mismatch at {path}",
+            )
 
         # Check name
         if val_a.name != val_b.name:
-            return f"Series name mismatch at {path}: {val_a.name} vs {val_b.name}"
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Series name mismatch at {path}: {val_a.name} vs {val_b.name}",
+            )
 
         # Check dtype compatibility
         if not are_compatible_dtypes(val_a.dtype, val_b.dtype):
-            return f"Series dtype mismatch at {path}: {val_a.dtype} vs {val_b.dtype}"
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Series dtype mismatch at {path}: {val_a.dtype} vs {val_b.dtype}",
+            )
 
         # Cast to common type if dtypes are compatible but different
         if val_a.dtype != val_b.dtype:
@@ -772,65 +880,149 @@ class Diff:
             val_a_cmp = val_a
             val_b_cmp = val_b
 
-        # Compare values
+        # Fast path: check if series are equal using vectorized operations
+        try:
+            if pd.api.types.is_float_dtype(val_a_cmp.dtype):
+                # For floats, check NaN positions and values
+                mask_nan_a = pd.isna(val_a_cmp)
+                mask_nan_b = pd.isna(val_b_cmp)
+                if mask_nan_a.equals(mask_nan_b):
+                    non_nan_a = val_a_cmp[~mask_nan_a]
+                    non_nan_b = val_b_cmp[~mask_nan_b]
+                    if len(non_nan_a) == 0 or np.allclose(
+                        non_nan_a, non_nan_b, rtol=self.rtol, atol=self.atol
+                    ):
+                        return None  # Series are equal
+            else:
+                # For non-float types, use equals
+                if val_a_cmp.equals(val_b_cmp):
+                    return None  # Series are equal
+        except Exception:
+            pass  # Fall through to element-by-element comparison
+
+        # Series are different - collect up to max_diffs_per_structure differences
+        diffs = {}
+        diff_count = 0
+
         try:
             if pd.api.types.is_float_dtype(val_a_cmp.dtype):
                 # For float dtypes, use allclose with NaN handling
                 mask_nan_a = pd.isna(val_a_cmp)
                 mask_nan_b = pd.isna(val_b_cmp)
-                if not mask_nan_a.equals(mask_nan_b):
-                    # Find first NaN position mismatch
-                    for idx in val_a_cmp.index:
-                        if mask_nan_a[idx] != mask_nan_b[idx]:
-                            return f"Series NaN positions mismatch at {path}[{repr(idx)}]: is_nan={mask_nan_a[idx]} vs is_nan={mask_nan_b[idx]}"
-                    return f"Series NaN positions mismatch at {path}"
 
+                # Check NaN position mismatches
+                for idx in val_a_cmp.index:
+                    if mask_nan_a[idx] != mask_nan_b[idx]:
+                        diffs[f"[{repr(idx)}]"] = ValueComparison(
+                            status="different",
+                            value1=val_a[idx],
+                            value2=val_b[idx],
+                            message=f"Series NaN positions mismatch at {path}[{repr(idx)}]: is_nan={mask_nan_a[idx]} vs is_nan={mask_nan_b[idx]}",
+                        )
+                        diff_count += 1
+                        if diff_count >= self.max_diffs_per_structure:
+                            diffs["_truncated"] = ValueComparison(
+                                status="different",
+                                value1=None,
+                                value2=None,
+                                message=f"Truncated after {diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
+                            )
+                            return diffs
+
+                # Check value mismatches for non-NaN values
                 non_nan_a = val_a_cmp[~mask_nan_a]
                 non_nan_b = val_b_cmp[~mask_nan_b]
-                if len(non_nan_a) > 0:
-                    if not np.allclose(non_nan_a, non_nan_b, rtol=self.rtol, atol=self.atol):
-                        # Find first value mismatch - use original values for error messages
-                        for idx in non_nan_a.index:
-                            if not np.allclose([non_nan_a[idx]], [non_nan_b[idx]], rtol=self.rtol, atol=self.atol):
-                                return f"Series values mismatch at {path}[{repr(idx)}]: {val_a[idx]} vs {val_b[idx]}"
-                        return f"Series values mismatch at {path}"
+                for idx in non_nan_a.index:
+                    if not np.allclose(
+                        [non_nan_a[idx]],
+                        [non_nan_b[idx]],
+                        rtol=self.rtol,
+                        atol=self.atol,
+                    ):
+                        diffs[f"[{repr(idx)}]"] = ValueComparison(
+                            status="different",
+                            value1=val_a[idx],
+                            value2=val_b[idx],
+                            message=f"Series values mismatch at {path}[{repr(idx)}]: {val_a[idx]} vs {val_b[idx]}",
+                        )
+                        diff_count += 1
+                        if diff_count >= self.max_diffs_per_structure:
+                            diffs["_truncated"] = ValueComparison(
+                                status="different",
+                                value1=None,
+                                value2=None,
+                                message=f"Truncated after {diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
+                            )
+                            break
             else:
-                if not val_a_cmp.equals(val_b_cmp):
-                    # Find first value mismatch - use original values for error messages
-                    for idx in val_a_cmp.index:
-                        if val_a_cmp[idx] != val_b_cmp[idx]:
-                            return f"Series values mismatch at {path}[{repr(idx)}]: {val_a[idx]} vs {val_b[idx]}"
-                    return f"Series values mismatch at {path}"
+                # For non-float dtypes, use direct comparison
+                for idx in val_a_cmp.index:
+                    if val_a_cmp[idx] != val_b_cmp[idx]:
+                        diffs[f"[{repr(idx)}]"] = ValueComparison(
+                            status="different",
+                            value1=val_a[idx],
+                            value2=val_b[idx],
+                            message=f"Series values mismatch at {path}[{repr(idx)}]: {val_a[idx]} vs {val_b[idx]}",
+                        )
+                        diff_count += 1
+                        if diff_count >= self.max_diffs_per_structure:
+                            diffs["_truncated"] = ValueComparison(
+                                status="different",
+                                value1=None,
+                                value2=None,
+                                message=f"Truncated after {diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
+                            )
+                            break
         except Exception as e:
-            return f"Series comparison error at {path}: {str(e)}"
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Series comparison error at {path}: {str(e)}",
+            )
 
-        return ""
-    
-    def _compare_dataframe(self, val_a: pd.DataFrame, val_b: pd.DataFrame, path: str) -> Optional[ValueComparison]:
-        """Compare pandas DataFrames (TODO: implement full diff collection with sampling)."""
-        result = self._compare_dataframe_legacy(val_a, val_b, path)
-        if result:
-            return ValueComparison(status="different", value1=val_a, value2=val_b, message=result)
-        return None
+        return diffs if diffs else None
 
-    def _compare_dataframe_legacy(self, val_a: pd.DataFrame, val_b: pd.DataFrame, path: str) -> str:
+    def _compare_dataframe(
+        self, val_a: pd.DataFrame, val_b: pd.DataFrame, path: str
+    ) -> Optional[DiffNode]:
+        """Compare pandas DataFrames, collecting up to max_diffs_per_structure differences."""
         # Check shape
         if val_a.shape != val_b.shape:
-            return f"DataFrame shape mismatch at {path}: {val_a.shape} vs {val_b.shape}"
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"DataFrame shape mismatch at {path}: {val_a.shape} vs {val_b.shape}",
+            )
 
         # Check columns
-        # TO DO : THIS EQUALS is sketchy
         if not val_a.columns.equals(val_b.columns):
-            return f"DataFrame columns mismatch at {path}: {val_a.columns} vs {val_b.columns}"
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"DataFrame columns mismatch at {path}: {val_a.columns} vs {val_b.columns}",
+            )
 
         # Check index
         if not val_a.index.equals(val_b.index):
-            return f"DataFrame index mismatch at {path}"
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"DataFrame index mismatch at {path}",
+            )
 
         # Check dtype compatibility for each column
         for col in val_a.columns:
             if not are_compatible_dtypes(val_a[col].dtype, val_b[col].dtype):
-                return f"DataFrame column '{col}' dtype mismatch at {path}: {val_a[col].dtype} vs {val_b[col].dtype}"
+                return ValueComparison(
+                    status="different",
+                    value1=val_a,
+                    value2=val_b,
+                    message=f"DataFrame column '{col}' dtype mismatch at {path}: {val_a[col].dtype} vs {val_b[col].dtype}",
+                )
 
         # Cast columns with compatible but different dtypes to common type
         needs_cast = any(val_a[col].dtype != val_b[col].dtype for col in val_a.columns)
@@ -846,22 +1038,48 @@ class Diff:
             val_a_cmp = val_a
             val_b_cmp = val_b
 
-        # Compare each column
-        for col in val_a_cmp.columns:
-            col_diff = self._compare_series(val_a_cmp[col], val_b_cmp[col], f"{path}['{col}']")
-            if col_diff:
-                # _compare_series returns ValueComparison now, extract message for legacy
-                if isinstance(col_diff, ValueComparison):
-                    return col_diff.message
-                return col_diff
+        # Compare each column and collect differences across the entire DataFrame
+        diffs = {}
+        total_diff_count = 0
 
-        return ""
+        for col in val_a_cmp.columns:
+            col_diff = self._compare_series(
+                val_a_cmp[col], val_b_cmp[col], f"{path}['{col}']"
+            )
+            if col_diff:
+                if isinstance(col_diff, ValueComparison):
+                    # Single-level difference (e.g., dtype mismatch)
+                    diffs[f"['{col}']"] = col_diff
+                    total_diff_count += 1
+                elif isinstance(col_diff, dict):
+                    # Nested differences from series comparison
+                    # Flatten them into the dataframe's diff dict with column prefix
+                    for key, value in col_diff.items():
+                        if key == "_truncated":
+                            # Don't count truncation marker
+                            continue
+                        diffs[f"['{col}']{key}"] = value
+                        total_diff_count += 1
+
+                        # Check if we've hit the limit
+                        if total_diff_count >= self.max_diffs_per_structure:
+                            diffs["_truncated"] = ValueComparison(
+                                status="different",
+                                value1=None,
+                                value2=None,
+                                message=f"Truncated after {total_diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
+                            )
+                            return diffs
+
+        return diffs if diffs else None
 
     def _compare_groupby(self, val_a, val_b, path: str) -> Optional[ValueComparison]:
         """Compare pandas GroupBy objects (TODO: implement full diff collection)."""
         result = self._compare_groupby_legacy(val_a, val_b, path)
         if result:
-            return ValueComparison(status="different", value1=val_a, value2=val_b, message=result)
+            return ValueComparison(
+                status="different", value1=val_a, value2=val_b, message=result
+            )
         return None
 
     def _compare_groupby_legacy(self, val_a, val_b, path: str) -> str:
@@ -877,7 +1095,7 @@ class Diff:
         - Selection state
         """
         # Compare the underlying object (DataFrame or Series)
-        if not hasattr(val_a, 'obj') or not hasattr(val_b, 'obj'):
+        if not hasattr(val_a, "obj") or not hasattr(val_b, "obj"):
             return f"GroupBy structure mismatch at {path}: missing obj attribute"
 
         obj_diff = self._compare_values(val_a.obj, val_b.obj, f"{path}.obj")
@@ -891,10 +1109,12 @@ class Diff:
             return obj_diff
 
         # Compare the grouper (excluding cache)
-        if not hasattr(val_a, '_grouper') or not hasattr(val_b, '_grouper'):
+        if not hasattr(val_a, "_grouper") or not hasattr(val_b, "_grouper"):
             return f"GroupBy structure mismatch at {path}: missing _grouper attribute"
 
-        grouper_diff = self._compare_grouper(val_a._grouper, val_b._grouper, f"{path}._grouper")
+        grouper_diff = self._compare_grouper(
+            val_a._grouper, val_b._grouper, f"{path}._grouper"
+        )
         if grouper_diff:
             # _compare_grouper returns ValueComparison now, but we need string for legacy
             if isinstance(grouper_diff, ValueComparison):
@@ -902,20 +1122,26 @@ class Diff:
             return grouper_diff
 
         # Compare selection (which columns are selected)
-        if hasattr(val_a, '_selection') and hasattr(val_b, '_selection'):
+        if hasattr(val_a, "_selection") and hasattr(val_b, "_selection"):
             if val_a._selection != val_b._selection:
                 return f"GroupBy selection mismatch at {path}: {val_a._selection} vs {val_b._selection}"
 
         return ""
 
-    def _compare_grouper(self, val_a: BaseGrouper, val_b: BaseGrouper, path: str) -> Optional[ValueComparison]:
+    def _compare_grouper(
+        self, val_a: BaseGrouper, val_b: BaseGrouper, path: str
+    ) -> Optional[ValueComparison]:
         """Compare pandas BaseGrouper objects (legacy wrapper)."""
         result = self._compare_grouper_legacy(val_a, val_b, path)
         if result:
-            return ValueComparison(status="different", value1=val_a, value2=val_b, message=result)
+            return ValueComparison(
+                status="different", value1=val_a, value2=val_b, message=result
+            )
         return None
 
-    def _compare_grouper_legacy(self, val_a: BaseGrouper, val_b: BaseGrouper, path: str) -> str:
+    def _compare_grouper_legacy(
+        self, val_a: BaseGrouper, val_b: BaseGrouper, path: str
+    ) -> str:
         """
         Compare BaseGrouper objects, excluding their internal cache.
 
@@ -926,31 +1152,35 @@ class Diff:
         - axis
         """
         # Compare axis (typically a pandas Index)
-        if hasattr(val_a, 'axis') and hasattr(val_b, 'axis'):
+        if hasattr(val_a, "axis") and hasattr(val_b, "axis"):
             # Use pandas Index.equals() for proper comparison
             axes_equal = False
             if isinstance(val_a.axis, pd.Index) and isinstance(val_b.axis, pd.Index):
                 axes_equal = val_a.axis.equals(val_b.axis)
-            elif isinstance(val_a.axis, np.ndarray) and isinstance(val_b.axis, np.ndarray):
+            elif isinstance(val_a.axis, np.ndarray) and isinstance(
+                val_b.axis, np.ndarray
+            ):
                 axes_equal = np.array_equal(val_a.axis, val_b.axis)
             else:
-                axes_equal = (val_a.axis == val_b.axis)
+                axes_equal = val_a.axis == val_b.axis
 
             if not axes_equal:
                 return f"Grouper axis mismatch at {path}: {val_a.axis} vs {val_b.axis}"
 
         # Compare sort flag
-        if hasattr(val_a, '_sort') and hasattr(val_b, '_sort'):
+        if hasattr(val_a, "_sort") and hasattr(val_b, "_sort"):
             if val_a._sort != val_b._sort:
-                return f"Grouper sort mismatch at {path}: {val_a._sort} vs {val_b._sort}"
+                return (
+                    f"Grouper sort mismatch at {path}: {val_a._sort} vs {val_b._sort}"
+                )
 
         # Compare dropna flag
-        if hasattr(val_a, 'dropna') and hasattr(val_b, 'dropna'):
+        if hasattr(val_a, "dropna") and hasattr(val_b, "dropna"):
             if val_a.dropna != val_b.dropna:
                 return f"Grouper dropna mismatch at {path}: {val_a.dropna} vs {val_b.dropna}"
 
         # Compare groupings (the actual grouping keys)
-        if hasattr(val_a, '_groupings') and hasattr(val_b, '_groupings'):
+        if hasattr(val_a, "_groupings") and hasattr(val_b, "_groupings"):
             groupings_a = val_a._groupings
             groupings_b = val_b._groupings
 
@@ -959,12 +1189,12 @@ class Diff:
 
             for i, (grp_a, grp_b) in enumerate(zip(groupings_a, groupings_b)):
                 # Compare key/name
-                if hasattr(grp_a, 'name') and hasattr(grp_b, 'name'):
+                if hasattr(grp_a, "name") and hasattr(grp_b, "name"):
                     if grp_a.name != grp_b.name:
                         return f"Grouping name mismatch at {path}._groupings[{i}]: {grp_a.name} vs {grp_b.name}"
 
                 # Compare key object if available
-                if hasattr(grp_a, 'key') and hasattr(grp_b, 'key'):
+                if hasattr(grp_a, "key") and hasattr(grp_b, "key"):
                     if grp_a.key != grp_b.key:
                         return f"Grouping key mismatch at {path}._groupings[{i}]: {grp_a.key} vs {grp_b.key}"
 
@@ -979,7 +1209,7 @@ class Diff:
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"List length mismatch at {path}: {len(val_a)} vs {len(val_b)}"
+                message=f"List length mismatch at {path}: {len(val_a)} vs {len(val_b)}",
             )
 
         # Compare each element, collecting ALL differences
@@ -995,13 +1225,15 @@ class Diff:
                         status="different",
                         value1=None,
                         value2=None,
-                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})"
+                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})",
                     )
                     break
 
         return diffs if diffs else None
-    
-    def _compare_tuple(self, val_a: tuple, val_b: tuple, path: str) -> Optional[DiffNode]:
+
+    def _compare_tuple(
+        self, val_a: tuple, val_b: tuple, path: str
+    ) -> Optional[DiffNode]:
         diffs = {}
 
         # Check length mismatch
@@ -1010,7 +1242,7 @@ class Diff:
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Tuple length mismatch at {path}: {len(val_a)} vs {len(val_b)}"
+                message=f"Tuple length mismatch at {path}: {len(val_a)} vs {len(val_b)}",
             )
 
         # Compare each element, collecting ALL differences
@@ -1026,13 +1258,15 @@ class Diff:
                         status="different",
                         value1=None,
                         value2=None,
-                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})"
+                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})",
                     )
                     break
 
         return diffs if diffs else None
-    
-    def _compare_set(self, val_a: set, val_b: set, path: str) -> Optional[ValueComparison]:
+
+    def _compare_set(
+        self, val_a: set, val_b: set, path: str
+    ) -> Optional[ValueComparison]:
         """
         Compare sets by finding matching elements and comparing them recursively.
         This properly handles pointer structure within sets.
@@ -1042,7 +1276,7 @@ class Diff:
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Set size mismatch at {path}: {len(val_a)} vs {len(val_b)}"
+                message=f"Set size mismatch at {path}: {len(val_a)} vs {len(val_b)}",
             )
 
         # Convert to lists for matching
@@ -1072,19 +1306,21 @@ class Diff:
                     status="different",
                     value1=val_a,
                     value2=val_b,
-                    message=f"Set contents mismatch at {path}: element {repr(item_a)} has no matching element in second set"
+                    message=f"Set contents mismatch at {path}: element {repr(item_a)} has no matching element in second set",
                 )
 
         return None
-    
-    def _compare_frozenset(self, val_a: frozenset, val_b: frozenset, path: str) -> Optional[ValueComparison]:
+
+    def _compare_frozenset(
+        self, val_a: frozenset, val_b: frozenset, path: str
+    ) -> Optional[ValueComparison]:
         """Compare frozensets using the same recursive approach as sets."""
         if len(val_a) != len(val_b):
             return ValueComparison(
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Frozenset size mismatch at {path}: {len(val_a)} vs {len(val_b)}"
+                message=f"Frozenset size mismatch at {path}: {len(val_a)} vs {len(val_b)}",
             )
 
         # Convert to lists for matching
@@ -1114,11 +1350,11 @@ class Diff:
                     status="different",
                     value1=val_a,
                     value2=val_b,
-                    message=f"Frozenset contents mismatch at {path}: element {repr(item_a)} has no matching element in second set"
+                    message=f"Frozenset contents mismatch at {path}: element {repr(item_a)} has no matching element in second set",
                 )
 
         return None
-    
+
     def _compare_dict(self, val_a: dict, val_b: dict, path: str) -> Optional[DiffNode]:
         diffs = {}
         keys_a = set(val_a.keys())
@@ -1133,7 +1369,7 @@ class Diff:
                 status="different",
                 value1=val_a[key],
                 value2=None,
-                message=f"Key {repr(key)} only in first dict"
+                message=f"Key {repr(key)} only in first dict",
             )
 
         for key in only_b:
@@ -1141,7 +1377,7 @@ class Diff:
                 status="different",
                 value1=None,
                 value2=val_b[key],
-                message=f"Key {repr(key)} only in second dict"
+                message=f"Key {repr(key)} only in second dict",
             )
 
         # Compare common keys, collecting ALL differences
@@ -1158,18 +1394,18 @@ class Diff:
                         status="different",
                         value1=None,
                         value2=None,
-                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})"
+                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})",
                     )
                     break
 
         return diffs if diffs else None
-    
+
     def _compare_object(self, val_a: Any, val_b: Any, path: str) -> Optional[DiffNode]:
         """
         Compare user-defined objects by recursively comparing their __dict__.
         """
         # Check if objects have __dict__
-        if not hasattr(val_a, '__dict__'):
+        if not hasattr(val_a, "__dict__"):
             # Try direct equality
             try:
                 if val_a != val_b:
@@ -1177,7 +1413,7 @@ class Diff:
                         status="different",
                         value1=val_a,
                         value2=val_b,
-                        message=f"Object mismatch at {path}: {val_a} != {val_b}"
+                        message=f"Object mismatch at {path}: {val_a} != {val_b}",
                     )
                 return None
             except:
@@ -1185,15 +1421,15 @@ class Diff:
                     status="different",
                     value1=val_a,
                     value2=val_b,
-                    message=f"Object comparison not supported at {path} (type: {type(val_a).__name__})"
+                    message=f"Object comparison not supported at {path} (type: {type(val_a).__name__})",
                 )
 
-        if not hasattr(val_b, '__dict__'):
+        if not hasattr(val_b, "__dict__"):
             return ValueComparison(
                 status="different",
                 value1=val_a,
                 value2=val_b,
-                message=f"Object mismatch at {path}: first has __dict__, second does not"
+                message=f"Object mismatch at {path}: first has __dict__, second does not",
             )
 
         # Recursively compare __dict__ attributes
@@ -1213,7 +1449,7 @@ class Diff:
                 status="different",
                 value1=dict_a[key],
                 value2=None,
-                message=f"Attribute {key} only in first object"
+                message=f"Attribute {key} only in first object",
             )
 
         for key in only_b:
@@ -1221,7 +1457,7 @@ class Diff:
                 status="different",
                 value1=None,
                 value2=dict_b[key],
-                message=f"Attribute {key} only in second object"
+                message=f"Attribute {key} only in second object",
             )
 
         # Compare common attributes, collecting ALL differences
@@ -1238,7 +1474,7 @@ class Diff:
                         status="different",
                         value1=None,
                         value2=None,
-                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})"
+                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})",
                     )
                     break
 
@@ -1250,37 +1486,37 @@ if __name__ == "__main__":
     # Create test namespaces
     import numpy as np
     import pandas as pd
-    
+
     # Namespace A
     a = {}
-    a['x'] = 42
-    a['y'] = 3.14159
-    a['z'] = np.array([1.0, 2.0, np.nan, 4.0])
-    a['df'] = pd.DataFrame({'A': [1, 2, 3], 'B': [4.0, 5.0, np.nan]})
-    a['list_obj'] = [1, 2, 3]
-    a['ref1'] = a['list_obj']  # Create pointer reference
-    
+    a["x"] = 42
+    a["y"] = 3.14159
+    a["z"] = np.array([1.0, 2.0, np.nan, 4.0])
+    a["df"] = pd.DataFrame({"A": [1, 2, 3], "B": [4.0, 5.0, np.nan]})
+    a["list_obj"] = [1, 2, 3]
+    a["ref1"] = a["list_obj"]  # Create pointer reference
+
     # Namespace B (identical)
     b = {}
-    b['x'] = 42
-    b['y'] = 3.14159
-    b['z'] = np.array([1.0, 2.0, np.nan, 4.0])
-    b['df'] = pd.DataFrame({'A': [1, 2, 3], 'B': [4.0, 5.0, np.nan]})
-    b['list_obj'] = [1, 2, 3]
-    b['ref1'] = b['list_obj']  # Maintain pointer structure
-    
+    b["x"] = 42
+    b["y"] = 3.14159
+    b["z"] = np.array([1.0, 2.0, np.nan, 4.0])
+    b["df"] = pd.DataFrame({"A": [1, 2, 3], "B": [4.0, 5.0, np.nan]})
+    b["list_obj"] = [1, 2, 3]
+    b["ref1"] = b["list_obj"]  # Maintain pointer structure
+
     differ = Diff()
     differences = differ.diff(a, b)
-    
+
     if differences:
         print("Differences found:")
         for var, msg in differences.items():
             print(f"  {var}: {msg}")
     else:
         print("Namespaces are equal!")
-    
+
     # Test with differences
-    b['x'] = 43  # Change value
+    b["x"] = 43  # Change value
     differences = differ.diff(a, b)
     print("\nAfter changing b['x']:")
     for var, msg in differences.items():

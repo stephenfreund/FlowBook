@@ -65,10 +65,7 @@ def is_valid_variable(name: str, value: Any) -> bool:
     Returns:
         True if the variable should be included, False otherwise
     """
-    return (
-        is_valid_variable_name(name)
-        and not isinstance(value, types.ModuleType)
-    )
+    return is_valid_variable_name(name) and not isinstance(value, types.ModuleType)
 
 
 def filter_user_namespace(user_ns: Dict[str, Any]) -> Dict[str, Any]:
@@ -166,12 +163,15 @@ class Checkpoint:
     def __init__(self, name: str, user_ns: Dict[str, Any], memo: Dict[int, Any]):
         self.name = name
         self.user_ns = user_ns
-        self.reverse_memo = { id(v): k for k, v in memo.items() }
+        self.reverse_memo = {id(v): k for k, v in memo.items()}
 
     def original(self, id: int) -> int:
         return self.reverse_memo.get(id, id)
 
-def checkpoint_diff(a: Checkpoint, b: Checkpoint, keys_to_include: Set[str] | None = None):
+
+def checkpoint_diff(
+    a: Checkpoint, b: Checkpoint, keys_to_include: Set[str] | None = None
+):
     """
     Compare two checkpoints and return structured diff results.
 
@@ -189,7 +189,7 @@ def checkpoint_diff(a: Checkpoint, b: Checkpoint, keys_to_include: Set[str] | No
 
     # ignore_keys = set(diffs.keys())
     # return user_ns_diff(a.user_ns, b.user_ns, ignore_keys) | diffs
-    
+
     differ = Diff(strict=False, report_close=False, atol=1e-5, rtol=1e-5)
     return differ.diff(a.user_ns, b.user_ns, keys_to_include)
 
@@ -201,7 +201,9 @@ class Checkpoints:
         self.skip_immutable_copy = skip_immutable_copy
         self.saved = {}
 
-    def _deep_copy_user_ns(self, variables: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[int, Any], Dict[str, Exception]]:
+    def _deep_copy_user_ns(
+        self, variables: Dict[str, Any]
+    ) -> tuple[Dict[str, Any], Dict[int, Any], Dict[str, Exception]]:
         """
         Deep copy a dictionary of variables, with special handling for pandas objects.
 
@@ -225,7 +227,9 @@ class Checkpoints:
             try:
                 if isinstance(v, pd.DataFrame):
                     # Check if DataFrame has any object dtype columns
-                    has_object_columns = any(v[col].dtype == object for col in v.columns)
+                    has_object_columns = any(
+                        v[col].dtype == object for col in v.columns
+                    )
                     df_copy = v.copy(deep=True)
 
                     if has_object_columns:
@@ -237,9 +241,14 @@ class Checkpoints:
                         for col in df_copy.columns:
                             if df_copy[col].dtype == object:
                                 # Skip deepcopy if optimization enabled and column contains only immutable objects
-                                if self.skip_immutable_copy and is_column_all_immutable(df_copy[col]):
+                                if (
+                                    self.skip_immutable_copy
+                                    and is_column_all_immutable(df_copy[col])
+                                ):
                                     continue  # No need to deepcopy immutables
-                                df_copy[col] = df_copy[col].apply(lambda x: copy.deepcopy(x, memo=memo))
+                                df_copy[col] = df_copy[col].apply(
+                                    lambda x: copy.deepcopy(x, memo=memo)
+                                )
 
                     memo[id(v)] = df_copy
                     copied[k] = df_copy
@@ -249,8 +258,13 @@ class Checkpoints:
                     if v.dtype == object:
                         # For object dtype Series, use pandas deep copy + manual deepcopy for cells
                         # Skip deepcopy if optimization enabled and series contains only immutable objects
-                        if not (self.skip_immutable_copy and is_column_all_immutable(series_copy)):
-                            series_copy = series_copy.apply(lambda x: copy.deepcopy(x, memo=memo))
+                        if not (
+                            self.skip_immutable_copy
+                            and is_column_all_immutable(series_copy)
+                        ):
+                            series_copy = series_copy.apply(
+                                lambda x: copy.deepcopy(x, memo=memo)
+                            )
                     memo[id(v)] = series_copy
                     copied[k] = series_copy
                 else:
@@ -266,11 +280,11 @@ class Checkpoints:
         # Skip modules
         if isinstance(v, types.ModuleType):
             return False
-        
+
         # Skip matplotlib objects
         if type(v).__module__.startswith("matplotlib"):
             return False
-        
+
         # Skip numpy arrays containing matplotlib objects
         if isinstance(v, np.ndarray):
             if v.dtype == object:
@@ -278,12 +292,14 @@ class Checkpoints:
                 try:
                     # Use flat iterator to avoid issues with multi-dimensional arrays
                     for item in v.flat:
-                        if hasattr(item, '__class__') and item.__class__.__module__.startswith("matplotlib"):
+                        if hasattr(
+                            item, "__class__"
+                        ) and item.__class__.__module__.startswith("matplotlib"):
                             return False
                 except (AttributeError, TypeError):
                     # If we can't iterate or access module, be conservative and skip
                     return False
-        
+
         return True
 
     def checkpointable_vars(self, user_ns: Dict[str, Any]) -> Dict[str, Any]:
@@ -337,10 +353,13 @@ class Checkpoints:
         user_ns.update(restored_vars)
 
     def type_models(self, user_ns: Dict[str, Any]) -> None:
-        return {k: get_type_model(v) for k, v in self.checkpointable_vars(user_ns).items()}
+        return {
+            k: get_type_model(v) for k, v in self.checkpointable_vars(user_ns).items()
+        }
 
     def delete(self, name):
-        del self.saved[name]
+        if name in self.saved:
+            del self.saved[name]
 
     def list(self):
         return list(self.saved.keys())

@@ -69,6 +69,23 @@ def get_comparison(result: DiffResult, var: str) -> ValueComparison:
     return result[var]
 
 
+def get_any_comparison(result: DiffResult, var: str) -> ValueComparison:
+    """Get any ValueComparison from a variable (handles nested diffs)."""
+    assert var in result, f"Variable '{var}' not in result"
+    diff_node = result[var]
+
+    if isinstance(diff_node, ValueComparison):
+        return diff_node
+    elif isinstance(diff_node, dict):
+        # Return first non-truncated ValueComparison found
+        for key, value in diff_node.items():
+            if key != '_truncated' and isinstance(value, ValueComparison):
+                return value
+        raise AssertionError(f"No ValueComparison found in nested diff for '{var}'")
+    else:
+        raise AssertionError(f"Unexpected diff node type: {type(diff_node)}")
+
+
 def assert_status(result: DiffResult, var: str, expected_status: str):
     """Assert that a variable has a specific comparison status."""
     comparison = get_comparison(result, var)
@@ -314,8 +331,9 @@ class TestNumpy:
     
     def test_array_different_dtype(self):
         differ = Diff()
+        # int32 and int64 are compatible, so use int and float for incompatible types
         a = {'arr': np.array([1, 2, 3], dtype=np.int32)}
-        b = {'arr': np.array([1, 2, 3], dtype=np.int64)}
+        b = {'arr': np.array([1, 2, 3], dtype=np.float32)}
         result = differ.diff(a, b)
         assert 'arr' in result
         assert_message_contains(result, 'arr', 'dtype mismatch')
@@ -691,19 +709,19 @@ class TestCallables:
         assert differ.diff(a, b) == {}
     
     def test_different_functions(self):
-        """Different functions should not be equal."""
+        """Different functions are now ignored and considered equal."""
         def foo():
             return 42
-        
+
         def bar():
             return 42
-        
+
         differ = Diff()
         a = {'f': foo}
         b = {'f': bar}
         result = differ.diff(a, b)
-        assert 'f' in result
-        assert_message_contains(result, 'f', 'Callable mismatch')
+        # Functions/callables are now ignored
+        assert 'f' not in result
     
     def test_lambda_same(self):
         """Same lambda should be equal."""
@@ -715,13 +733,13 @@ class TestCallables:
         assert differ.diff(a, b) == {}
     
     def test_lambda_different(self):
-        """Different lambdas should not be equal even if equivalent."""
+        """Different lambdas are now ignored and considered equal."""
         differ = Diff()
         a = {'f': lambda x: x + 1}
         b = {'f': lambda x: x + 1}
         result = differ.diff(a, b)
-        assert 'f' in result
-        assert_message_contains(result, 'f', 'Callable mismatch')
+        # Lambdas/callables are now ignored
+        assert 'f' not in result
     
     def test_method_same(self):
         """Bound methods to same method on same instance should be equal."""
@@ -781,13 +799,13 @@ class TestCallables:
         assert differ.diff(a, b) == {}
     
     def test_builtin_different(self):
-        """Different builtin functions should not be equal."""
+        """Different builtin functions are now ignored and considered equal."""
         differ = Diff()
         a = {'f': len}
         b = {'f': sum}
         result = differ.diff(a, b)
-        assert 'f' in result
-        assert_message_contains(result, 'f', 'Callable mismatch')
+        # Builtin callables are now ignored
+        assert 'f' not in result
     
     def test_callable_reference_structure(self):
         """Pointer structure with callables should be tracked."""
@@ -838,7 +856,7 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 'arr' in result
         # Should show the index
-        comp = get_comparison(result, 'arr')
+        comp = get_any_comparison(result, 'arr')
         assert '[2]' in comp.message or '(2,)' in comp.message
         # Should show the values
         assert '3' in comp.message and '99' in comp.message
@@ -851,7 +869,7 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 'arr' in result
         # Should show 2D index
-        comp = get_comparison(result, 'arr')
+        comp = get_any_comparison(result, 'arr')
         assert '(1, 1)' in comp.message  # 2D index
         assert '4' in comp.message and '99' in comp.message  # Values
     
@@ -863,7 +881,7 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 's' in result
         # With new format, check message contains label and values
-        comp = get_comparison(result, 's')
+        comp = get_any_comparison(result, 's')
         assert 'b' in comp.message  # Index label
         assert '2' in comp.message and '99' in comp.message  # Values
     
@@ -875,7 +893,7 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 's' in result
         # Should show which label has the NaN mismatch
-        comp = get_comparison(result, 's')
+        comp = get_any_comparison(result, 's')
         assert 'b' in comp.message
         assert 'NaN' in comp.message or 'nan' in comp.message.lower()
     
@@ -919,7 +937,7 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 'arr' in result
         # Should show 2D index
-        comp = get_comparison(result, 'arr')
+        comp = get_any_comparison(result, 'arr')
         assert '(1, 1)' in comp.message  # 2D index
         assert '4' in comp.message and '99' in comp.message  # Values
     
@@ -931,7 +949,7 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 's' in result
         # With new format, check message contains label and values
-        comp = get_comparison(result, 's')
+        comp = get_any_comparison(result, 's')
         assert 'b' in comp.message  # Index label
         assert '2' in comp.message and '99' in comp.message  # Values
     
@@ -943,7 +961,7 @@ class TestDetailedErrorMessages:
         result = differ.diff(a, b)
         assert 's' in result
         # Should show which label has the NaN mismatch
-        comp = get_comparison(result, 's')
+        comp = get_any_comparison(result, 's')
         assert 'b' in comp.message
         assert 'NaN' in comp.message or 'nan' in comp.message.lower()
     
@@ -1022,7 +1040,7 @@ class TestGroupBy:
         result = differ.diff(a, b)
         assert 'gb' in result
         comp = get_comparison(result, 'gb')
-        assert 'DataFrame' in comp.message or 'Series' in comp.message
+        assert 'GroupBy' in comp.message or 'DataFrame' in comp.message or 'Series' in comp.message
 
     def test_dataframe_groupby_sort_difference(self):
         """GroupBy objects with different sort flags should be different."""
@@ -2630,3 +2648,170 @@ if __name__ == '__main__':
     # Run pytest with verbose output
     import pytest
     sys.exit(pytest.main([__file__, '-v', '--tb=short']))
+
+class TestMultiDiffSupport:
+    """Test the max_diffs_per_structure parameter."""
+
+    def test_array_multiple_diffs_default(self):
+        """Test that arrays collect up to default max_diffs_per_structure (5) differences."""
+        differ = Diff()  # default max_diffs_per_structure=5
+        a = {'arr': np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])}
+        b = {'arr': np.array([10, 20, 30, 40, 50, 60, 70, 80, 90, 100])}
+        result = differ.diff(a, b)
+
+        assert 'arr' in result
+        assert isinstance(result['arr'], dict)
+        # Should have 5 diffs + truncation marker
+        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
+        assert len(diff_keys) == 5
+        assert '_truncated' in result['arr']
+
+    def test_array_multiple_diffs_custom_limit(self):
+        """Test custom max_diffs_per_structure parameter."""
+        differ = Diff(max_diffs_per_structure=3)
+        a = {'arr': np.array([1, 2, 3, 4, 5, 6, 7, 8])}
+        b = {'arr': np.array([10, 20, 30, 40, 50, 60, 70, 80])}
+        result = differ.diff(a, b)
+
+        assert 'arr' in result
+        assert isinstance(result['arr'], dict)
+        # Should have 3 diffs + truncation marker
+        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
+        assert len(diff_keys) == 3
+        assert '_truncated' in result['arr']
+
+    def test_array_no_truncation_when_below_limit(self):
+        """Test that no truncation occurs when diffs are below limit."""
+        differ = Diff(max_diffs_per_structure=5)
+        a = {'arr': np.array([1, 2, 3, 4, 5])}
+        b = {'arr': np.array([10, 2, 30, 4, 5])}
+        result = differ.diff(a, b)
+
+        assert 'arr' in result
+        assert isinstance(result['arr'], dict)
+        # Should have exactly 2 diffs, no truncation
+        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
+        assert len(diff_keys) == 2
+        assert '_truncated' not in result['arr']
+
+    def test_series_multiple_diffs(self):
+        """Test that Series collect multiple differences."""
+        differ = Diff(max_diffs_per_structure=3)
+        a = {'s': pd.Series([1, 2, 3, 4, 5, 6, 7, 8], index=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])}
+        b = {'s': pd.Series([10, 2, 30, 4, 50, 6, 70, 80], index=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])}
+        result = differ.diff(a, b)
+
+        assert 's' in result
+        assert isinstance(result['s'], dict)
+        # Should have 3 diffs + truncation marker
+        diff_keys = [k for k in result['s'].keys() if k != '_truncated']
+        assert len(diff_keys) == 3
+        assert '_truncated' in result['s']
+
+    def test_dataframe_multiple_diffs_across_columns(self):
+        """Test that DataFrames collect differences across multiple columns."""
+        differ = Diff(max_diffs_per_structure=5)
+        a = {'df': pd.DataFrame({
+            'A': [1, 2, 3, 4, 5],
+            'B': [10, 20, 30, 40, 50],
+            'C': [100, 200, 300, 400, 500]
+        })}
+        b = {'df': pd.DataFrame({
+            'A': [1, 20, 3, 40, 5],  # 2 diffs
+            'B': [10, 200, 30, 400, 50],  # 2 diffs
+            'C': [1000, 200, 3000, 400, 5000]  # 3 diffs
+        })}
+        result = differ.diff(a, b)
+
+        assert 'df' in result
+        assert isinstance(result['df'], dict)
+        # Should have 5 diffs + truncation marker (7 total diffs truncated to 5)
+        diff_keys = [k for k in result['df'].keys() if k != '_truncated']
+        assert len(diff_keys) == 5
+        assert '_truncated' in result['df']
+
+    def test_multidim_array_multiple_diffs(self):
+        """Test that multidimensional arrays report multiple differences."""
+        differ = Diff(max_diffs_per_structure=3)
+        a = {'arr': np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])}
+        b = {'arr': np.array([[10, 2, 30], [4, 50, 6], [70, 8, 90]])}
+        result = differ.diff(a, b)
+
+        assert 'arr' in result
+        assert isinstance(result['arr'], dict)
+        # Should have 3 diffs + truncation marker (5 total diffs truncated to 3)
+        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
+        assert len(diff_keys) == 3
+        assert '_truncated' in result['arr']
+        # Check that indices are properly formatted as tuples
+        for key in diff_keys:
+            assert '(' in key and ')' in key  # Should have (row, col) format
+
+    def test_float_array_multiple_diffs(self):
+        """Test that float arrays with multiple differences work correctly."""
+        differ = Diff(max_diffs_per_structure=4, rtol=1e-5, atol=1e-8)
+        a = {'arr': np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])}
+        b = {'arr': np.array([1.0, 2.5, 3.0, 4.5, 5.0, 6.5])}
+        result = differ.diff(a, b)
+
+        assert 'arr' in result
+        assert isinstance(result['arr'], dict)
+        # Should have 3 actual diffs, no truncation
+        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
+        assert len(diff_keys) == 3
+        assert '_truncated' not in result['arr']
+
+    def test_mixed_structures_independent_limits(self):
+        """Test that different structures have independent diff limits."""
+        differ = Diff(max_diffs_per_structure=2)
+        a = {
+            'arr': np.array([1, 2, 3, 4, 5]),
+            's': pd.Series([1, 2, 3, 4, 5])
+        }
+        b = {
+            'arr': np.array([10, 20, 30, 40, 50]),
+            's': pd.Series([10, 20, 30, 40, 50])
+        }
+        result = differ.diff(a, b)
+
+        # Both should have independent limits
+        assert 'arr' in result
+        assert 's' in result
+
+        arr_diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
+        s_diff_keys = [k for k in result['s'].keys() if k != '_truncated']
+
+        # Each should be truncated at 2
+        assert len(arr_diff_keys) == 2
+        assert len(s_diff_keys) == 2
+        assert '_truncated' in result['arr']
+        assert '_truncated' in result['s']
+
+    def test_zero_max_diffs_per_structure(self):
+        """Test edge case with max_diffs_per_structure=0."""
+        differ = Diff(max_diffs_per_structure=0)
+        a = {'arr': np.array([1, 2, 3])}
+        b = {'arr': np.array([10, 20, 30])}
+        result = differ.diff(a, b)
+
+        # Should still detect differences exist and report at least one + truncation
+        assert 'arr' in result
+        assert isinstance(result['arr'], dict)
+        # Should have 1 diff + truncation marker (reports at least one before truncating)
+        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
+        assert len(diff_keys) >= 1  # Reports at least one diff
+        assert '_truncated' in result['arr']
+
+    def test_large_max_diffs_per_structure(self):
+        """Test with very large max_diffs_per_structure."""
+        differ = Diff(max_diffs_per_structure=1000)
+        a = {'arr': np.arange(100)}
+        b = {'arr': np.arange(100, 200)}
+        result = differ.diff(a, b)
+
+        assert 'arr' in result
+        assert isinstance(result['arr'], dict)
+        # Should have all 100 diffs, no truncation
+        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
+        assert len(diff_keys) == 100
+        assert '_truncated' not in result['arr']
