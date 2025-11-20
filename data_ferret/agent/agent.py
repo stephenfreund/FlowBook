@@ -61,6 +61,7 @@ class FerretStats:
 
 T = TypeVar("T", bound=BaseModel | str)
 
+
 class FerretAgent(Agent, Generic[T], RunHooks[FerretContext]):
 
     counters = {}
@@ -79,7 +80,7 @@ class FerretAgent(Agent, Generic[T], RunHooks[FerretContext]):
 
         super().__init__(
             name=key,
-            model=model, # LitellmModel(full_model),
+            model=LitellmModel(full_model),
             instructions=instructions,
             output_type=output_type,
             tools=tools,
@@ -214,8 +215,6 @@ class FerretAgent(Agent, Generic[T], RunHooks[FerretContext]):
         context.context.time = time.time() - context.context.start
         context.context.usage = context.usage
 
-
-
     @staticmethod
     async def make_and_run_agent(
         key: str,
@@ -230,7 +229,9 @@ class FerretAgent(Agent, Generic[T], RunHooks[FerretContext]):
         i = 0
         while True:
             try:
-                agent = FerretAgent(key, model, instructions, output_type, tools, log_dir)
+                agent = FerretAgent(
+                    key, model, instructions, output_type, tools, log_dir
+                )
                 return await agent.run(input)
             except Exception as e:
                 if i >= max_retries:
@@ -239,6 +240,7 @@ class FerretAgent(Agent, Generic[T], RunHooks[FerretContext]):
                 error(f"Error running agent: {e}")
                 error(traceback.format_exc())
                 time.sleep(2**i)
+
 
 def main():
     agent = FerretAgent(
@@ -257,9 +259,9 @@ def main():
 
     class TestOutput(BaseModel):
         """Test output model for testing."""
+
         joke: str
         punchline: str
-
 
     agent = FerretAgent(
         key="test-agent",
