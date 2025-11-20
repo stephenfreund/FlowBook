@@ -27,6 +27,18 @@ from .helpers import (
     save_notebook,
     cleanup_kernel,
 )
+from .optimization_metadata import (
+    FerretOptimizationMetadata,
+    SplitResultsSummary,
+    OptimizationResultsSummary,
+    CellOptimizationResult,
+    LLMCostSummary,
+)
+from .stats_display import (
+    render_split_results_table,
+    render_optimization_results_table,
+    render_llm_cost_summary_table,
+)
 
 
 def print_inspection_report(optimization_potential: OptimizationPotential, cell_index: int) -> None:
@@ -293,6 +305,67 @@ async def optimize_cell(
         return results
 
 
+async def run_split_preprocessing(
+    notebook_content: Dict[str, Any],
+    config: FerretConfig,
+    registry: CommandRegistry
+) -> Dict[str, Any]:
+    """
+    Run the split command on the notebook before optimization.
+
+    Args:
+        notebook_content: The notebook to split
+        config: Ferret configuration
+        registry: Command registry
+
+    Returns:
+        Dictionary with split notebook and metadata including cost/time
+    """
+    with indent(message="Running Split Preprocessing"):
+        log("Splitting cells before optimization")
+
+        # Get split command from registry
+        split_cmd = registry.get_command("split")
+
+        if not split_cmd:
+            error("Split command not found in registry")
+            raise RuntimeError("Split command not available")
+
+        # Execute split command
+        with timer(key="split_preprocessing", message="Split preprocessing"):
+            split_result = await split_cmd.process(
+                notebook_content=notebook_content,
+                kernel_client=None,  # Split doesn't need kernel
+                selected_cell_ids=None,  # Process all cells
+                config=config,
+            )
+
+        # Extract results
+        split_notebook = split_result.notebook
+        split_metadata = split_result.metadata
+        split_cost = split_result.total_cost
+        split_time = split_result.total_time
+
+        # Log results
+        if split_metadata.get("status") == "success":
+            log(f"Split complete:")
+            log(f"  - Cells analyzed: {split_metadata['cells_analyzed']}")
+            log(f"  - Cells split: {split_metadata['cells_split']}")
+            log(f"  - Total new cells: {split_metadata['total_new_cells']}")
+            log(f"  - LLM cost: ${split_cost:.4f}")
+            log(f"  - Total time: {split_time:.2f}s")
+        else:
+            error(f"Split failed: {split_metadata.get('error', 'Unknown error')}")
+            raise RuntimeError("Split preprocessing failed")
+
+        return {
+            'notebook': split_notebook,
+            'metadata': split_metadata,
+            'total_cost': split_cost,
+            'total_time': split_time,
+        }
+
+
 async def run_optimization_pipeline(
     notebook_content: Dict[str, Any],
     kernel_client,
@@ -395,6 +468,12 @@ def optimize_cli_main():
         help="Suppress log and timer messages (errors and main output still shown)",
     )
 
+    parser.add_argument(
+        "--split",
+        action="store_true",
+        help="Run split command on notebook before optimization pipeline",
+    )
+
     args = parser.parse_args()
 
     # Use quiet context manager if --quiet flag is set
@@ -414,6 +493,21 @@ def optimize_cli_main():
             # Load notebook
             notebook_content = load_notebook(args.notebook_path)
 
+            # Initialize split tracking
+            split_result = None
+
+            # Run split preprocessing if requested
+            if args.split:
+                split_result = asyncio.run(
+                    run_split_preprocessing(
+                        notebook_content=notebook_content,
+                        config=config,
+                        registry=registry
+                    )
+                )
+                # Use the split notebook for optimization
+                notebook_content = split_result['notebook']
+
             # Setup kernel - always start a new kernel for optimization
             kernel_manager, kernel_client = setup_kernel(
                 kernel_name=args.kernel_name
@@ -431,22 +525,6 @@ def optimize_cli_main():
                         registry=registry
                     )
                 )
-
-            # Determine output path
-            if args.output:
-                output_path = args.output
-            else:
-                base_name = args.notebook_path.rsplit(".", 1)[0]
-                output_path = f"{base_name}_optimized.ipynb"
-
-            # Save optimized notebook
-            save_notebook(
-                result["notebook"],
-                output_path=output_path
-            )
-            print(f"\n{'='*70}")
-            print(f"Optimized notebook written to {output_path}")
-            print(f"{'='*70}")
 
             # Display summary metadata
             metadata = result["metadata"]
@@ -516,66 +594,133 @@ def optimize_cli_main():
                     'status': status
                 })
 
-            # Display timing summary table for all cells
-            if timing_summary:
-                print(f"\n{'='*100}")
-                print("## Optimization Results\n")
-                # Column widths: Cell ID=19, Initial=13, Potential=11, Optimized=15, Speedup=9, Status=16
-                print("| Cell ID             | Initial (s) | Potential | Optimized (s) | Speedup | Status           |")
-                print("|---------------------|-------------|-----------|---------------|---------|------------------|")
+            # Build optimization results model
+            total_initial = 0
+            total_final = 0
 
-                total_initial = 0
-                total_final = 0
+            cell_results = []
+            for timing in timing_summary:
+                cell_results.append(
+                    CellOptimizationResult(
+                        cell_id=timing['cell_id'],
+                        potential=timing['potential'],
+                        initial_time=timing['initial_time'],
+                        final_time=timing['final_time'],
+                        speedup=timing['speedup'],
+                        status=timing['status']
+                    )
+                )
+                total_initial += timing['initial_time']
+                total_final += timing['final_time']
 
-                for timing in timing_summary:
-                    # Truncate cell ID to 17 chars + '..' if needed
-                    cell_id = timing['cell_id'][:17] + '..' if len(timing['cell_id']) > 19 else timing['cell_id']
-                    potential = timing['potential']
-                    initial = timing['initial_time']
-                    final = timing['final_time']
-                    speedup = timing['speedup']
+            # Calculate overall stats
+            overall_speedup = total_initial / total_final if total_final > 0 else 1.0
+            time_saved = total_initial - total_final
+            time_saved_percent = (time_saved / total_initial * 100) if total_initial > 0 else 0.0
 
-                    # Format potential as "X/5" or "-"
-                    potential_str = f"{potential}/5" if potential is not None else "-"
+            optimization_results_summary = OptimizationResultsSummary(
+                cells=cell_results,
+                total_initial_time=total_initial,
+                total_final_time=total_final,
+                overall_speedup=overall_speedup,
+                time_saved=time_saved,
+                time_saved_percent=time_saved_percent
+            )
 
-                    # Map status to display string
-                    status_map = {
-                        'optimized': '✓ Optimized',
-                        'error': '✗ Error',
-                        'no improvement': '✗ No improvement',
-                        'not attempted': '- Not optimized'
-                    }
-                    status = status_map.get(timing['status'], '- Unknown')
+            # Build LLM cost summary model
+            optimization_cost = metadata.get('total_cost', 0.0)
+            optimization_time = metadata.get('total_time', 0.0)
 
-                    print(f"| {cell_id:<19} | {initial:>11.2f} | {potential_str:>9} | {final:>13.2f} | {speedup:>6.2f}x | {status:<16} |")
-                    total_initial += initial
-                    total_final += final
+            if split_result:
+                split_cost = split_result['total_cost']
+                split_time = split_result['total_time']
+                total_cost = split_cost + optimization_cost
+                total_time = split_time + optimization_time
 
-                # Calculate overall speedup
-                overall_speedup = total_initial / total_final if total_final > 0 else 1.0
-                time_saved = total_initial - total_final
+                llm_cost_summary = LLMCostSummary(
+                    split_cost=split_cost,
+                    split_time=split_time,
+                    optimization_cost=optimization_cost,
+                    optimization_time=optimization_time,
+                    total_cost=total_cost,
+                    total_time=total_time
+                )
+            else:
+                total_cost = optimization_cost
+                total_time = optimization_time
 
-                print("|---------------------|-------------|-----------|---------------|---------|------------------|")
-                print(f"| {'TOTAL':<19} | {total_initial:>11.2f} | {'':<9} | {total_final:>13.2f} | {overall_speedup:>6.2f}x | {'':<16} |")
+                llm_cost_summary = LLMCostSummary(
+                    optimization_cost=optimization_cost,
+                    optimization_time=optimization_time,
+                    total_cost=total_cost,
+                    total_time=total_time
+                )
 
-                print(f"\n**Time saved:** {time_saved:.2f}s ({(time_saved/total_initial*100 if total_initial > 0 else 0):.1f}%)")
-                print(f"{'='*100}")
+            # Build split results summary if applicable
+            split_results_summary = None
+            if split_result:
+                split_metadata = split_result['metadata']
+                split_results_summary = SplitResultsSummary(
+                    cells_analyzed=split_metadata['cells_analyzed'],
+                    cells_split=split_metadata['cells_split'],
+                    total_new_cells=split_metadata['total_new_cells'],
+                    llm_cost=split_result['total_cost'],
+                    time=split_result['total_time']
+                )
 
-            # Display total cost summary
+            # Build complete optimization metadata
+            ferret_metadata = FerretOptimizationMetadata(
+                split_results=split_results_summary,
+                optimization_results=optimization_results_summary,
+                llm_costs=llm_cost_summary,
+                timestamp=FerretOptimizationMetadata.create_timestamp(),
+                model=config.model,
+                fast_model=config.fast_model
+            )
+
+            # Store metadata in notebook
+            if 'metadata' not in result['notebook']:
+                result['notebook']['metadata'] = {}
+            result['notebook']['metadata']['ferret_optimization'] = ferret_metadata.model_dump()
+
+            # Determine output path
+            if args.output:
+                output_path = args.output
+            else:
+                base_name = args.notebook_path.rsplit(".", 1)[0]
+                if args.split:
+                    output_path = f"{base_name}_split_optimized.ipynb"
+                else:
+                    output_path = f"{base_name}_optimized.ipynb"
+
+            # Save notebook with embedded metadata
+            save_notebook(
+                result["notebook"],
+                output_path=output_path
+            )
             print(f"\n{'='*70}")
-            print("## LLM Cost Summary")
-            print(f"{'='*70}")
-            total_cost = metadata.get('total_cost', 0.0)
-            total_time = metadata.get('total_time', 0.0)
-            print(f"Total Cost:  ${total_cost:.4f}")
-            print(f"Total Time:  {total_time:.2f}s")
+            print(f"Optimized notebook written to {output_path}")
             print(f"{'='*70}")
 
-            # Save full metadata to JSON file
-            metadata_path = output_path.rsplit(".", 1)[0] + "_metadata.json"
-            with open(metadata_path, "w", encoding="utf-8") as f:
-                json.dump(metadata, f, indent=2)
-            print(f"\nFull metadata written to {metadata_path}")
+            # Display results using rendering functions
+            if split_results_summary:
+                render_split_results_table(split_results_summary)
+
+            render_optimization_results_table(optimization_results_summary)
+            render_llm_cost_summary_table(llm_cost_summary)
+
+            # # Save full metadata to JSON file
+            # metadata_path = output_path.rsplit(".", 1)[0] + "_metadata.json"
+            # full_metadata = {
+            #     'optimization': metadata
+            # }
+            # if split_result:
+            #     full_metadata['split'] = split_result['metadata']
+            #     full_metadata['total_cost'] = total_cost
+            #     full_metadata['total_time'] = total_time
+            # with open(metadata_path, "w", encoding="utf-8") as f:
+            #     json.dump(full_metadata, f, indent=2)
+            # print(f"\nFull metadata written to {metadata_path}")
 
             return 0
 
