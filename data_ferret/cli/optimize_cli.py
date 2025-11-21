@@ -354,7 +354,7 @@ async def optimize_cell(
 
                 for iteration in range(optimize_iterations):
                     if optimize_iterations > 1:
-                        log(
+                        print(
                             f"Optimization iteration {iteration + 1}/{optimize_iterations}"
                         )
 
