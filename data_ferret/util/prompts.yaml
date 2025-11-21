@@ -13,7 +13,7 @@ cell_inspection_instructions: |
   Each OptimizationStep must have:
   - target_cell_id: The ID of the cell that needs to be modified (this may be the current cell or another cell with a function definition)
   - function_name: The name of the top-level function to optimize, or None if the optimization applies to top-level code in the cell
-  - description: A clear description of what optimizations to apply (one or more)
+  - description: A clear description of what optimizations to apply (one or more).  Write as a Markdown list.
 
   For cells with potential < 4, leave the optimization_plan empty.
 
@@ -196,6 +196,25 @@ optimization_repair_input: |
 
   OPTIMIZED CODE SNIPPETS that FAILED validation:
   {optimized_snippets}
+
+  VALIDATION ERROR:
+  ```
+  {validation_error}
+  ```
+
+  INSTRUCTIONS:
+  - Carefully review the validation error to understand what went wrong.
+  - Do the easier of the following:
+    * Repair the snippets so they work correctly together and produce the 
+      exact same outputs as the original code.
+    * Rewrite the optimized code, but make sure to preserve the behavior 
+      and produce the exact same outputs as the original code.
+    * Try new optimization approaches that may be more effective if the 
+      previous approaches are not working.
+  - Return a complete list of repaired snippets in the same order.
+
+optimization_repair_input_retry: |
+  The code is still not working correctly.
 
   VALIDATION ERROR:
   ```

@@ -26,6 +26,7 @@ class AtomicType(BaseModel, frozen=True):
         "float32",
         "float64",
         "str96",
+        "timedelta64",
     ]
 
     def __str__(self) -> str:

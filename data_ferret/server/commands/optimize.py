@@ -30,8 +30,13 @@ from data_ferret.util.prompts import get_prompt
 from data_ferret.util.dependencies import analyze_notebook, CellDependencies
 from data_ferret.util.notebook_analysis import NotebookAnalysis
 from data_ferret.kernel.types import (
-    DiffResult, TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
-    ExecutionError, format_diff_as_markdown
+    DiffResult,
+    TestCodeResult,
+    TestCodeSuccess,
+    TestCodeOriginalCrash,
+    TestCodeModifiedCrash,
+    ExecutionError,
+    format_diff_as_markdown,
 )
 from data_ferret.util.output import log, error, timer, indent, print
 from data_ferret.util.text import wrap_markdown
@@ -43,6 +48,7 @@ import ast
 
 class OptimizationLLMError(Exception):
     """Exception raised when LLM optimization fails or returns invalid results."""
+
     pass
 
 
@@ -50,16 +56,13 @@ class PrePostEnvironments(BaseModel):
     """Optional pre-existing checkpoint names to skip original code execution."""
 
     original_environment: Optional[str] = Field(
-        None,
-        description="Name of checkpoint containing the pre-execution environment"
+        None, description="Name of checkpoint containing the pre-execution environment"
     )
     original_result: Optional[str] = Field(
-        None,
-        description="Name of checkpoint containing the post-execution environment"
+        None, description="Name of checkpoint containing the post-execution environment"
     )
     original_duration: Optional[float] = Field(
-        None,
-        description="Duration of original code execution (from profile metadata)"
+        None, description="Duration of original code execution (from profile metadata)"
     )
 
 
@@ -232,7 +235,9 @@ class CodeExecutionOrchestrator:
                 # Skip steps 1-3: Use existing checkpoints
                 # Use provided duration from profile, or 0.0 if not available
                 original_duration = pre_post_envs.original_duration or 0.0
-                log(f"Using existing checkpoints: {pre_post_envs.original_environment} and {pre_post_envs.original_result}")
+                log(
+                    f"Using existing checkpoints: {pre_post_envs.original_environment} and {pre_post_envs.original_result}"
+                )
                 log(f"Using profile duration: {original_duration:.2f}s")
                 env_checkpoint_name = pre_post_envs.original_environment
                 result_checkpoint_name = pre_post_envs.original_result
@@ -241,13 +246,14 @@ class CodeExecutionOrchestrator:
                 self.cmd_client.checkpoint_save("original_environment")
 
                 # Step 2: Execute original code with crash handling
-                original_duration, original_error = self._execute_code_safely(original_code)
+                original_duration, original_error = self._execute_code_safely(
+                    original_code
+                )
 
                 if original_error:
                     # Original crashed - return error
                     return TestCodeOriginalCrash(
-                        error=original_error,
-                        original_duration=original_duration
+                        error=original_error, original_duration=original_duration
                     )
 
                 # Step 3: Save original result
@@ -261,14 +267,16 @@ class CodeExecutionOrchestrator:
 
             # Step 5: Execute modified code with crash handling
             with timer(key="execute_modified_code", message="Execute modified code"):
-                modified_duration, modified_error = self._execute_code_safely(modified_code)
+                modified_duration, modified_error = self._execute_code_safely(
+                    modified_code
+                )
 
             if modified_error:
                 # Modified crashed (original worked) - return error
                 return TestCodeModifiedCrash(
                     error=modified_error,
                     original_duration=original_duration,
-                    modified_duration=modified_duration
+                    modified_duration=modified_duration,
                 )
 
             # Step 6: Save modified result
@@ -278,21 +286,23 @@ class CodeExecutionOrchestrator:
             compare_response = self.cmd_client.checkpoint_compare(
                 result_checkpoint_name,
                 "modified_result",
-                keys_to_include=output_variables
+                keys_to_include=output_variables,
             )
 
             # The diff is already filtered by keys_to_include, no need to filter again
             diff_result = compare_response.diff
 
             # Step 8: Calculate speedup
-            speedup = original_duration / modified_duration if modified_duration > 0 else 0.0
+            speedup = (
+                original_duration / modified_duration if modified_duration > 0 else 0.0
+            )
 
             # Step 9: Return success result
             return TestCodeSuccess(
                 diff=diff_result,
                 original_duration=original_duration,
                 modified_duration=modified_duration,
-                speedup=speedup
+                speedup=speedup,
             )
 
         finally:
@@ -315,10 +325,14 @@ class CodeExecutionOrchestrator:
             # Only delete original checkpoints if we created them
             if not use_existing_checkpoints:
                 try:
-                    self.cmd_client.checkpoint_delete("original_environment", timeout=5.0)
+                    self.cmd_client.checkpoint_delete(
+                        "original_environment", timeout=5.0
+                    )
                     log("Deleted checkpoint: original_environment")
                 except Exception as e:
-                    log(f"Note: Could not delete checkpoint 'original_environment': {e}")
+                    log(
+                        f"Note: Could not delete checkpoint 'original_environment': {e}"
+                    )
 
                 try:
                     self.cmd_client.checkpoint_delete("original_result", timeout=5.0)
@@ -326,10 +340,7 @@ class CodeExecutionOrchestrator:
                 except Exception as e:
                     log(f"Note: Could not delete checkpoint 'original_result': {e}")
 
-    def _execute_code_safely(
-        self,
-        code: str
-    ) -> Tuple[float, Optional[ExecutionError]]:
+    def _execute_code_safely(self, code: str) -> Tuple[float, Optional[ExecutionError]]:
         """
         Execute code and capture any errors.
 
@@ -362,7 +373,7 @@ class CodeExecutionOrchestrator:
                 error_type=type(e).__name__,
                 error_message=str(e),
                 traceback=traceback.format_exc(),
-                code_snippet=code
+                code_snippet=code,
             )
 
             # Flush message queues after exception too
@@ -392,25 +403,25 @@ class CodeExecutionOrchestrator:
                 msg = self.kernel_client.get_iopub_msg(timeout=60.0)
 
                 # Check if this message is for our execution
-                if msg['parent_header'].get('msg_id') != msg_id:
+                if msg["parent_header"].get("msg_id") != msg_id:
                     continue
 
-                msg_type = msg['header']['msg_type']
+                msg_type = msg["header"]["msg_type"]
 
-                if msg_type == 'error':
+                if msg_type == "error":
                     # Execution error - save it but keep waiting for status: idle
-                    content = msg['content']
+                    content = msg["content"]
                     error_occurred = ExecutionError(
-                        error_type=content.get('ename', 'UnknownError'),
-                        error_message=content.get('evalue', ''),
-                        traceback='\n'.join(content.get('traceback', [])),
-                        code_snippet=code
+                        error_type=content.get("ename", "UnknownError"),
+                        error_message=content.get("evalue", ""),
+                        traceback="\n".join(content.get("traceback", [])),
+                        code_snippet=code,
                     )
 
-                elif msg_type == 'status':
+                elif msg_type == "status":
                     # Check if execution is done
-                    execution_state = msg['content']['execution_state']
-                    if execution_state == 'idle':
+                    execution_state = msg["content"]["execution_state"]
+                    if execution_state == "idle":
                         # Execution completed - return error if one occurred
                         return error_occurred
 
@@ -419,9 +430,7 @@ class CodeExecutionOrchestrator:
                 continue
 
     def _filter_diff(
-        self,
-        diff: Dict[str, Any],
-        output_variables: Set[str]
+        self, diff: Dict[str, Any], output_variables: Set[str]
     ) -> DiffResult:
         """
         Filter diff result to only include specified output variables.
@@ -461,12 +470,13 @@ class OptimizationResultAndStats(BaseModel):
     )
     status: Literal["optimized", "error", "no improvement"] = Field(
         description="Optimization status: 'optimized' if successful with speedup > 1, "
-                    "'error' if validation failed, 'no improvement' if speedup <= 1"
+        "'error' if validation failed, 'no improvement' if speedup <= 1"
     )
 
 
 class RepairedOptimizationResponse(BaseModel):
     """Response from LLM when repairing failed optimizations."""
+
     explanation: str = Field(
         description="Explanation of the repair process and the changes made"
     )
@@ -474,7 +484,6 @@ class RepairedOptimizationResponse(BaseModel):
     repaired_snippets: List[CodeSnippet] = Field(
         description="Complete list of repaired code snippets, one for each optimization step"
     )
-
 
 
 class ValidationHelper:
@@ -595,7 +604,7 @@ class ValidationHelper:
                 original_code=original_code,
                 modified_code=optimized_code,
                 output_variables=modified_globals,
-                pre_post_envs=pre_post_envs
+                pre_post_envs=pre_post_envs,
             )
 
             # Handle the three possible result types
@@ -916,7 +925,11 @@ class OptimizeCommand(NotebookCommand):
         """Format snippets for the repair prompt."""
         formatted = []
         for i, snippet in enumerate(snippets, 1):
-            func_desc = f" (function: {snippet.function_name})" if snippet.function_name else " (whole cell)"
+            func_desc = (
+                f" (function: {snippet.function_name})"
+                if snippet.function_name
+                else " (whole cell)"
+            )
             formatted.append(f"## Snippet {i}: Cell {snippet.cell_id}{func_desc}")
             formatted.append(f"```python")
             formatted.append(snippet.source)
@@ -935,8 +948,8 @@ class OptimizeCommand(NotebookCommand):
         original_snippets: List[CodeSnippet],
         failed_snippets: List[CodeSnippet],
         validation_error: str,
-        model: Any,
-        tools: NotebookTools,
+        agent: FerretAgent[RepairedOptimizationResponse],
+        prompt_key: str,
         analysis: Optional[NotebookAnalysis],
         stats_aggregator: StatsAggregator,
     ) -> Optional[List[CodeSnippet]]:
@@ -957,6 +970,7 @@ class OptimizeCommand(NotebookCommand):
         Returns:
             List of repaired CodeSnippets or None if repair failed
         """
+
         with timer(
             key="repair_optimization",
             message=f"Repairing optimization for cell {cell['id']}",
@@ -968,8 +982,16 @@ class OptimizeCommand(NotebookCommand):
             full_env_after = target_profile.env_after if target_profile else {}
 
             # Filter env to only dependencies of this cell
-            env_data = analysis.filter_env_to_dependencies(cell["id"], full_env) if analysis else full_env
-            env_data_after = analysis.filter_env_to_dependencies(cell["id"], full_env_after) if analysis else full_env_after
+            env_data = (
+                analysis.filter_env_to_dependencies(cell["id"], full_env)
+                if analysis
+                else full_env
+            )
+            env_data_after = (
+                analysis.filter_env_to_dependencies(cell["id"], full_env_after)
+                if analysis
+                else full_env_after
+            )
 
             # Build context prefix (code before this cell)
             cell_index = next(i for i, c in enumerate(cells) if c["id"] == cell["id"])
@@ -988,18 +1010,9 @@ class OptimizeCommand(NotebookCommand):
                     live_vars, env_data_after
                 )
 
-            # Create repair agent
-            agent = FerretAgent[RepairedOptimizationResponse](
-                key="optimization_repair",
-                model=model,
-                instructions=get_prompt("optimization_repair_instructions"),
-                output_type=RepairedOptimizationResponse,
-                tools=tools.tools(include_profile=True),
-            )
-
             # Build repair input
             input_text = get_prompt(
-                "optimization_repair_input",
+                prompt_key,
                 prefix=prefix,
                 original_snippets=original_snippets_text,
                 optimized_snippets=optimized_snippets_text,
@@ -1012,7 +1025,9 @@ class OptimizeCommand(NotebookCommand):
                 repair_response, stats = await agent.run(input_text)
                 stats_aggregator.add_stats(stats)
 
-                log(f"Repair attempt completed with {len(repair_response.repaired_snippets)} snippets")
+                log(
+                    f"Repair attempt completed with {len(repair_response.repaired_snippets)} snippets"
+                )
                 log("Repair explanation:")
                 log(wrap_markdown(repair_response.explanation, width=100))
                 # for snippet in repair_response.repaired_snippets:
@@ -1023,6 +1038,7 @@ class OptimizeCommand(NotebookCommand):
 
             except Exception as e:
                 import traceback
+
                 error(f"Repair failed with exception: {type(e).__name__}: {str(e)}")
                 error(f"Traceback:\n{traceback.format_exc()}")
                 return None
@@ -1064,6 +1080,14 @@ class OptimizeCommand(NotebookCommand):
         MAX_RETRIES = 3
         current_snippets = optimized_snippets.copy()
 
+        agent = FerretAgent[RepairedOptimizationResponse](
+            key="optimization_repair",
+            model=model,
+            instructions=get_prompt("optimization_repair_instructions"),
+            output_type=RepairedOptimizationResponse,
+            tools=tools.tools(include_profile=True),
+        )
+
         for attempt in range(MAX_RETRIES + 1):  # 0 = initial, 1-3 = retries
             if attempt == 0:
                 message = f"Validating optimization for cell {cell['id']}"
@@ -1098,12 +1122,14 @@ class OptimizeCommand(NotebookCommand):
                     log(optimized_code)
 
                 # Validate
-                is_valid, error_msg, test_result = ValidationHelper.validate_optimization(
-                    original_code,
-                    optimized_code,
-                    modified_globals,
-                    kernel_client,
-                    pre_post_envs,
+                is_valid, error_msg, test_result = (
+                    ValidationHelper.validate_optimization(
+                        original_code,
+                        optimized_code,
+                        modified_globals,
+                        kernel_client,
+                        pre_post_envs,
+                    )
                 )
 
                 if is_valid:
@@ -1125,7 +1151,9 @@ class OptimizeCommand(NotebookCommand):
                     return (True, current_snippets, timing_data)
 
                 # Validation failed
-                error(f"Validation failed (attempt {attempt + 1}/{MAX_RETRIES + 1}): {error_msg}")
+                error(
+                    f"Validation failed (attempt {attempt + 1}/{MAX_RETRIES + 1}): {error_msg}"
+                )
 
                 # If this was the last attempt, give up
                 if attempt >= MAX_RETRIES:
@@ -1137,15 +1165,19 @@ class OptimizeCommand(NotebookCommand):
 
             # Try to repair ALL snippets at once
             with indent(message=f"Repairing snippets"):
-
+                assert error_msg is not None, "Error message is required"
                 repaired_snippets = await self._repair_optimization(
                     cells,
                     cell,
                     original_snippets,
                     current_snippets,
                     error_msg,
-                    model,
-                    tools,
+                    agent,
+                    (
+                        "optimization_repair_input"
+                        if attempt == 0
+                        else "optimization_repair_input_retry"
+                    ),
                     analysis,
                     stats_aggregator,
                 )
@@ -1314,10 +1346,7 @@ class OptimizeCommand(NotebookCommand):
 
         return optimization_response, stats
 
-    def _format_snippets_for_batch(
-        self,
-        snippets: List[CodeSnippet]
-    ) -> str:
+    def _format_snippets_for_batch(self, snippets: List[CodeSnippet]) -> str:
         """
         Format multiple code snippets into a single string with headers.
 
@@ -1343,7 +1372,9 @@ class OptimizeCommand(NotebookCommand):
         for snippet in snippets:
             # Create header
             if snippet.function_name:
-                header = f"### Cell {snippet.cell_id} / Function {snippet.function_name}"
+                header = (
+                    f"### Cell {snippet.cell_id} / Function {snippet.function_name}"
+                )
             else:
                 header = f"### Cell {snippet.cell_id}"
 
@@ -1355,8 +1386,7 @@ class OptimizeCommand(NotebookCommand):
         return "\n".join(formatted_parts)
 
     def _format_optimization_descriptions_batch(
-        self,
-        optimization_plan: List[OptimizationStep]
+        self, optimization_plan: List[OptimizationStep]
     ) -> str:
         """
         Format all optimization descriptions from the plan into a numbered list.
@@ -1390,9 +1420,7 @@ class OptimizeCommand(NotebookCommand):
         return "\n".join(optimization_lines)
 
     async def _extract_original_snippets_from_plan(
-        self,
-        optimization_plan: List[OptimizationStep],
-        cells: List[Any]
+        self, optimization_plan: List[OptimizationStep], cells: List[Any]
     ) -> List[CodeSnippet]:
         """
         Extract all original code snippets from the optimization plan.
@@ -1429,7 +1457,7 @@ class OptimizeCommand(NotebookCommand):
             snippet = CodeSnippet(
                 cell_id=step.target_cell_id,
                 function_name=step.function_name,
-                source=original_code
+                source=original_code,
             )
 
             original_snippets.append(snippet)
@@ -1440,7 +1468,7 @@ class OptimizeCommand(NotebookCommand):
         self,
         cells: List[Any],
         optimization_plan: List[OptimizationStep],
-        analysis: Optional[NotebookAnalysis] = None
+        analysis: Optional[NotebookAnalysis] = None,
     ) -> Tuple[str, str, str]:
         """
         Build context for batch optimization (prefix, env_section, live_vars_section).
@@ -1463,8 +1491,8 @@ class OptimizeCommand(NotebookCommand):
         first_step = optimization_plan[0]
 
         # Extract target cell and metadata
-        target_cell, target_index, env_data, env_data_after = self._extract_target_cell_and_metadata(
-            cells, first_step
+        target_cell, target_index, env_data, env_data_after = (
+            self._extract_target_cell_and_metadata(cells, first_step)
         )
 
         # Filter env to dependencies if analysis available
@@ -1506,7 +1534,7 @@ class OptimizeCommand(NotebookCommand):
         live_vars_section: str,
         model: Any,
         tools: NotebookTools,
-        stats_aggregator: StatsAggregator
+        stats_aggregator: StatsAggregator,
     ) -> Tuple[BatchOptimizedCodeResponse, FerretStats]:
         """
         Run batch LLM optimization on multiple snippets.
@@ -1576,8 +1604,8 @@ class OptimizeCommand(NotebookCommand):
             message=f"Processing optimization for {step.target_cell_id} ({target_desc})",
         ):
             # Extract target cell and metadata
-            target_cell, target_index, env_data, env_data_after = self._extract_target_cell_and_metadata(
-                cells, step
+            target_cell, target_index, env_data, env_data_after = (
+                self._extract_target_cell_and_metadata(cells, step)
             )
 
             # Build context and extract code
@@ -1592,7 +1620,13 @@ class OptimizeCommand(NotebookCommand):
                     env_section,
                     live_vars_section,
                 ) = self._build_optimization_context(
-                    cells, target_cell, target_index, step, env_data, env_data_after, analysis
+                    cells,
+                    target_cell,
+                    target_index,
+                    step,
+                    env_data,
+                    env_data_after,
+                    analysis,
                 )
 
             # Store original code snippet
@@ -1678,7 +1712,7 @@ class OptimizeCommand(NotebookCommand):
 
         with timer(
             key="process_all_optimization_steps_batch",
-            message=f"Processing {len(optimization_plan)} optimization steps in batch"
+            message=f"Processing {len(optimization_plan)} optimization steps in batch",
         ):
             # Step 1: Extract all original snippets
             with timer(key="extract_snippets", message="Extracting original snippets"):
@@ -1688,7 +1722,9 @@ class OptimizeCommand(NotebookCommand):
                     )
                 except ValueError as e:
                     error(f"Failed to extract snippets: {e}")
-                    raise OptimizationLLMError(f"Failed to extract snippets: {e}") from e
+                    raise OptimizationLLMError(
+                        f"Failed to extract snippets: {e}"
+                    ) from e
 
             if not original_snippets:
                 return [], []
@@ -1702,8 +1738,10 @@ class OptimizeCommand(NotebookCommand):
             )
 
             # Step 4: Build context (prefix, env, live vars)
-            prefix, env_section, live_vars_section = self._build_batch_optimization_context(
-                cells, optimization_plan, analysis
+            prefix, env_section, live_vars_section = (
+                self._build_batch_optimization_context(
+                    cells, optimization_plan, analysis
+                )
             )
 
             # Step 5: Call LLM with batch optimization
@@ -1717,13 +1755,18 @@ class OptimizeCommand(NotebookCommand):
                         live_vars_section,
                         model,
                         tools,
-                        stats_aggregator
+                        stats_aggregator,
                     )
                 except Exception as e:
-                    error(f"Batch LLM optimization failed: {type(e).__name__}: {str(e)}")
+                    error(
+                        f"Batch LLM optimization failed: {type(e).__name__}: {str(e)}"
+                    )
                     import traceback
+
                     error(f"Traceback:\n{traceback.format_exc()}")
-                    raise OptimizationLLMError(f"Batch LLM optimization failed: {type(e).__name__}: {str(e)}") from e
+                    raise OptimizationLLMError(
+                        f"Batch LLM optimization failed: {type(e).__name__}: {str(e)}"
+                    ) from e
 
             # Step 6: Extract optimized snippets from response
             # The response has optimized_snippets list with optimizations_applied already set
@@ -1794,6 +1837,190 @@ class OptimizeCommand(NotebookCommand):
             status=status,
         )
 
+    def _get_optimization_plan(
+        self,
+        cell: Dict[str, Any],
+        cell_id: str,
+    ) -> Optional[OptimizationPotential]:
+        """
+        Extract optimization plan from cell metadata.
+
+        Args:
+            cell: The notebook cell
+            cell_id: Cell identifier
+
+        Returns:
+            OptimizationPotential if found, None otherwise
+        """
+        ferret_metadata = FerretMetadata.from_cell(cell)
+        optimization_potential = ferret_metadata.get_optimization_potential()
+
+        if (
+            not optimization_potential
+            or not optimization_potential.optimization_plan
+        ):
+            return None
+
+        return optimization_potential
+
+    async def _generate_optimized_code(
+        self,
+        optimization_plan: List[OptimizationStep],
+        cells: List[Any],
+        cell_index: int,
+        model: Any,
+        nb: nbformat.NotebookNode,
+        stats_aggregator: StatsAggregator,
+        analysis: Optional[NotebookAnalysis],
+    ) -> Tuple[List[CodeSnippet], List[CodeSnippet]]:
+        """
+        Generate optimized code using LLM.
+
+        Args:
+            optimization_plan: Steps to optimize
+            cells: All notebook cells
+            cell_index: Index of cell being optimized
+            model: LLM model
+            nb: The notebook
+            stats_aggregator: Stats tracking
+            analysis: Optional dependency analysis
+
+        Returns:
+            Tuple of (original_snippets, optimized_snippets)
+
+        Raises:
+            OptimizationLLMError: If all retry attempts fail
+        """
+        MAX_RETRIES = 3
+        original_snippets = []
+        optimized_snippets = []
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                with NotebookTools(nb) as tools:
+                    original_snippets, optimized_snippets = (
+                        await self._process_all_optimization_steps(
+                            optimization_plan,
+                            cells,
+                            cell_index,
+                            model,
+                            tools,
+                            stats_aggregator,
+                            analysis,
+                        )
+                    )
+                # Success - break out of retry loop
+                break
+            except OptimizationLLMError as e:
+                error(
+                    f"LLM optimization attempt {attempt + 1}/{MAX_RETRIES} failed: {e}"
+                )
+                if attempt == MAX_RETRIES - 1:
+                    # Final attempt failed - raise error
+                    error(
+                        f"All {MAX_RETRIES} optimization attempts failed for cell {cell_index}"
+                    )
+                    raise
+                # Otherwise, retry
+                log(
+                    f"Retrying optimization (attempt {attempt + 2}/{MAX_RETRIES})..."
+                )
+
+        return original_snippets, optimized_snippets
+
+    async def _validate_optimized_code(
+        self,
+        cell: Dict[str, Any],
+        cells: List[Any],
+        original_snippets: List[CodeSnippet],
+        optimized_snippets: List[CodeSnippet],
+        model: Any,
+        nb: nbformat.NotebookNode,
+        kernel_client: FerretKernelClient,
+        analysis: NotebookAnalysis,
+        stats_aggregator: StatsAggregator,
+        pre_post_envs: Optional[PrePostEnvironments],
+    ) -> Tuple[bool, List[CodeSnippet], Optional[Dict]]:
+        """
+        Validate that optimization preserves semantics.
+
+        Args:
+            cell: The cell being optimized
+            cells: All notebook cells
+            original_snippets: Original code snippets
+            optimized_snippets: Optimized code snippets
+            model: LLM model
+            nb: The notebook
+            kernel_client: Kernel for validation
+            analysis: Dependency analysis
+            stats_aggregator: Stats tracking
+            pre_post_envs: Optional pre-existing checkpoints
+
+        Returns:
+            Tuple of (is_valid, validated_snippets, timing_data)
+        """
+        timing_data = None
+
+        with timer(
+            key="validation",
+            message="Validating optimization with retry support",
+        ):
+            with NotebookTools(nb) as tools:
+                is_valid, validated_snippets, timing_data = (
+                    await self._validate_optimization_with_retry(
+                        cell,
+                        cells,
+                        original_snippets,
+                        optimized_snippets,
+                        model,
+                        tools,
+                        kernel_client,
+                        analysis,
+                        stats_aggregator,
+                        pre_post_envs,
+                    )
+                )
+
+        return is_valid, validated_snippets, timing_data
+
+    def _check_speedup_and_build_result(
+        self,
+        cell_id: str,
+        original_snippets: List[CodeSnippet],
+        optimized_snippets: List[CodeSnippet],
+        stats_aggregator: StatsAggregator,
+        timing_data: Optional[Dict],
+        cell_index: int,
+    ) -> OptimizationResultAndStats:
+        """
+        Check if optimization provides speedup and build result.
+
+        Args:
+            cell_id: Cell identifier
+            original_snippets: Original code
+            optimized_snippets: Optimized code
+            stats_aggregator: Stats tracking
+            timing_data: Timing info from validation
+            cell_index: Cell index for logging
+
+        Returns:
+            OptimizationResultAndStats with appropriate status
+        """
+        if timing_data and timing_data["speedup"] < 1:
+            log(f"Skipping optimization for cell {cell_index} because speedup < 1")
+            return self._build_optimization_result(
+                cell_id, [], [], stats_aggregator, "no improvement", timing_data
+            )
+        else:
+            return self._build_optimization_result(
+                cell_id,
+                original_snippets,
+                optimized_snippets,
+                stats_aggregator,
+                "optimized",
+                timing_data,
+            )
+
     async def optimize_cell(
         self,
         index: int,
@@ -1822,101 +2049,76 @@ class OptimizeCommand(NotebookCommand):
         """
         cells = nb["cells"]
         cell = cells[index]
+        cell_id = cell["id"]
 
-        with indent(message=f"Optimizing cell {index} ({cell['id']})"):
+        with indent(message=f"Optimizing cell {index} ({cell_id})"):
 
-            # Get optimization plan from cell metadata
-            ferret_metadata = FerretMetadata.from_cell(cell)
-            optimization_potential = ferret_metadata.get_optimization_potential()
-
+            # Step 1: Get optimization plan
+            optimization_potential = self._get_optimization_plan(cell, cell_id)
             stats_aggregator = StatsAggregator(model)
 
-            if not optimization_potential or not optimization_potential.optimization_plan:
-                return cell["id"], self._build_optimization_result(
-                    cell["id"], [], [], stats_aggregator, "no improvement"
+            if not optimization_potential:
+                return cell_id, self._build_optimization_result(
+                    cell_id, [], [], stats_aggregator, "no improvement"
                 )
 
+            # Step 2: Generate optimized code
             with indent(message="* Generating optimized code with LLM"):
-                # Retry logic for LLM optimization
-                MAX_RETRIES = 3
-                original_snippets = []
-                optimized_snippets = []
-
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        with NotebookTools(nb) as tools:
-                            original_snippets, optimized_snippets = (
-                                await self._process_all_optimization_steps(
-                                    optimization_potential.optimization_plan,
-                                    cells,
-                                    index,
-                                    model,
-                                    tools,
-                                    stats_aggregator,
-                                    analysis,
-                                )
-                            )
-                        # Success - break out of retry loop
-                        break
-                    except OptimizationLLMError as e:
-                        error(f"LLM optimization attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
-                        if attempt == MAX_RETRIES - 1:
-                            # Final attempt failed - return error status
-                            error(f"All {MAX_RETRIES} optimization attempts failed for cell {index}")
-                            return cell["id"], self._build_optimization_result(
-                                cell["id"], [], [], stats_aggregator, "error"
-                            )
-                        # Otherwise, retry
-                        log(f"Retrying optimization (attempt {attempt + 2}/{MAX_RETRIES})...")
+                try:
+                    original_snippets, optimized_snippets = await self._generate_optimized_code(
+                        optimization_potential.optimization_plan,
+                        cells,
+                        index,
+                        model,
+                        nb,
+                        stats_aggregator,
+                        analysis,
+                    )
+                except OptimizationLLMError:
+                    return cell_id, self._build_optimization_result(
+                        cell_id, [], [], stats_aggregator, "error"
+                    )
 
             log(f"Kernel client available: {kernel_client is not None}")
             log(f"Analysis available: {analysis is not None}")
 
-            # Initialize timing data
+            # Step 3: Validate optimization
             timing_data = None
+            if kernel_client and analysis and optimized_snippets:
+                with indent(message="* Validating optimization"):
+                    is_valid, validated_snippets, timing_data = await self._validate_optimized_code(
+                        cell,
+                        cells,
+                        original_snippets,
+                        optimized_snippets,
+                        model,
+                        nb,
+                        kernel_client,
+                        analysis,
+                        stats_aggregator,
+                        pre_post_envs,
+                    )
 
-            with indent(message="* Validating optimization"):
+                    if not is_valid:
+                        log(
+                            f"Skipping optimization for cell {index} after validation failures"
+                        )
+                        return cell_id, self._build_optimization_result(
+                            cell_id, [], [], stats_aggregator, "error"
+                        )
 
-                # VALIDATION WITH RETRY: Check if optimization preserves semantics
-                if kernel_client and analysis and optimized_snippets:
-                    with timer(
-                        key="validation", message="Validating optimization with retry support"
-                    ):
-                        with NotebookTools(nb) as tools:
-                            is_valid, validated_snippets, timing_data = (
-                                await self._validate_optimization_with_retry(
-                                    cell,
-                                    cells,
-                                    original_snippets,
-                                    optimized_snippets,
-                                    model,
-                                    tools,
-                                    kernel_client,
-                                    analysis,
-                                    stats_aggregator,
-                                    pre_post_envs,
-                                )
-                            )
+                    # Use validated snippets (may have been repaired)
+                    optimized_snippets = validated_snippets
 
-                        if not is_valid:
-                            # Validation failed after retries, return empty result
-                            log(f"Skipping optimization for cell {index} after validation failures")
-                            return cell["id"], self._build_optimization_result(
-                                cell["id"], [], [], stats_aggregator, "error"
-                            )
-
-                        # Use validated snippets (may have been repaired)
-                        optimized_snippets = validated_snippets
-
-            if timing_data and timing_data["speedup"] < 1:
-                log(f"Skipping optimization for cell {index} because speedup < 1")
-                return cell["id"], self._build_optimization_result(
-                    cell["id"], [], [], stats_aggregator, "no improvement", timing_data
-                )
-            else:
-                return cell["id"], self._build_optimization_result(
-                    cell["id"], original_snippets, optimized_snippets, stats_aggregator, "optimized", timing_data
-                )
+            # Step 4: Check speedup and return result
+            return cell_id, self._check_speedup_and_build_result(
+                cell_id,
+                original_snippets,
+                optimized_snippets,
+                stats_aggregator,
+                timing_data,
+                index,
+            )
 
     def _identify_cells_to_optimize(
         self,
@@ -1995,8 +2197,14 @@ class OptimizeCommand(NotebookCommand):
         """
         # Apply optimization results to the notebook (only successful optimizations)
         cell_map = {cell["id"]: cell for cell in nb["cells"]}
-        optimized_results = [(cell_id, result) for cell_id, result in all_results if result.status == "optimized"]
-        log(f"Applying {len(optimized_results)} successful optimizations out of {len(all_results)} total results")
+        optimized_results = [
+            (cell_id, result)
+            for cell_id, result in all_results
+            if result.status == "optimized"
+        ]
+        log(
+            f"Applying {len(optimized_results)} successful optimizations out of {len(all_results)} total results"
+        )
         MetadataManager.apply_optimizations_to_notebook(cell_map, optimized_results)
 
         # Calculate total cost
@@ -2006,7 +2214,10 @@ class OptimizeCommand(NotebookCommand):
         # Collect timing data and status for all cells
         cell_timing = {}
         for cell_id, result in all_results:
-            if result.original_duration is not None and result.modified_duration is not None:
+            if (
+                result.original_duration is not None
+                and result.modified_duration is not None
+            ):
                 cell_timing[cell_id] = {
                     "original_duration": result.original_duration,
                     "modified_duration": result.modified_duration,
@@ -2073,7 +2284,12 @@ class OptimizeCommand(NotebookCommand):
                 key="process_all_cells", message="Processing all optimization steps"
             ):
                 all_results = await self._process_cells_sequentially(
-                    cells_to_process, new_nb, model, kernel_client, analysis, pre_post_envs
+                    cells_to_process,
+                    new_nb,
+                    model,
+                    kernel_client,
+                    analysis,
+                    pre_post_envs,
                 )
 
             log("")
@@ -2098,7 +2314,11 @@ class OptimizeCommand(NotebookCommand):
         """Optimize cells in the notebook based on their optimization plans."""
         with self.timing_context() as get_elapsed:
             new_nb, total_cost, cell_timing = await self.optimize_cells(
-                notebook_content, config.model, selected_cell_ids, kernel_client, pre_post_envs
+                notebook_content,
+                config.model,
+                selected_cell_ids,
+                kernel_client,
+                pre_post_envs,
             )
 
             metadata = {
@@ -2114,5 +2334,5 @@ class OptimizeCommand(NotebookCommand):
             notebook=new_nb,
             metadata=metadata,
             total_cost=total_cost,
-            total_time=total_time
+            total_time=total_time,
         )

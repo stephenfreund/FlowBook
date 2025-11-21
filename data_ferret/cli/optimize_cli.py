@@ -41,7 +41,9 @@ from .stats_display import (
 )
 
 
-def print_inspection_report(optimization_potential: OptimizationPotential, cell_index: int) -> None:
+def print_inspection_report(
+    optimization_potential: OptimizationPotential, cell_index: int
+) -> None:
     """
     Print a formatted inspection report for a cell.
 
@@ -50,14 +52,22 @@ def print_inspection_report(optimization_potential: OptimizationPotential, cell_
         cell_index: 1-based index for display
     """
     # Print potential score
-    potential_bar = "█" * optimization_potential.potential + "░" * (5 - optimization_potential.potential)
-    print(f"- Optimization Potential: {optimization_potential.potential}/5 [{potential_bar}]")
+    potential_bar = "█" * optimization_potential.potential + "░" * (
+        5 - optimization_potential.potential
+    )
+    print(
+        f"- Optimization Potential: {optimization_potential.potential}/5 [{potential_bar}]"
+    )
 
     # Print optimization plan
     if optimization_potential.optimization_plan:
         with indent(message="- Optimization Plan"):
             for i, step in enumerate(optimization_potential.optimization_plan, 1):
-                target_desc = f"function '{step.function_name}'" if step.function_name else "whole cell"
+                target_desc = (
+                    f"function '{step.function_name}'"
+                    if step.function_name
+                    else "whole cell"
+                )
                 with indent(message=f"{i}. {step.target_cell_id} ({target_desc})"):
                     print(wrap_markdown("\n".join(step.description), width=100))
     else:
@@ -75,10 +85,45 @@ def get_code_cell_ids(notebook_content: Dict[str, Any]) -> List[str]:
         List of code cell IDs
     """
     code_cell_ids = []
-    for cell in notebook_content['cells']:
-        if cell.get('cell_type') == 'code':
-            code_cell_ids.append(cell.get('id'))
+    for cell in notebook_content["cells"]:
+        if cell.get("cell_type") == "code":
+            code_cell_ids.append(cell.get("id"))
     return code_cell_ids
+
+
+async def simplify_cell_code(
+    cell_id: str,
+    notebook_content: Dict[str, Any],
+    config: FerretConfig,
+    registry: CommandRegistry,
+) -> Dict[str, Any]:
+    """
+    Simplify the code in a cell using LLM.
+
+    This is a placeholder implementation. In the future, this could:
+    - Remove unnecessary code
+    - Clean up formatting
+    - Simplify complex expressions
+    - Remove redundant computations
+
+    Args:
+        cell_id: The cell to simplify
+        notebook_content: The notebook (modified in place)
+        config: Ferret configuration
+        registry: Command registry
+
+    Returns:
+        Result dictionary with cost/time info
+    """
+    # TODO: Implement actual simplification using LLM
+    # For now, this is a no-op placeholder
+    log(f"Simplification not yet implemented (placeholder)")
+
+    return {
+        "cost": 0.0,
+        "time": 0.0,
+        "simplified": False,
+    }
 
 
 async def optimize_cell(
@@ -89,12 +134,15 @@ async def optimize_cell(
     kernel_client,
     config: FerretConfig,
     registry: CommandRegistry,
-    quiet: bool = False
+    quiet: bool = False,
+    simplify: bool = False,
+    optimize_iterations: int = 1,
 ) -> Dict[str, Any]:
     """
     Run the optimization pipeline on a single cell.
 
     Pipeline:
+    0. Simplify (optional) - Simplify code before profiling
     1. Profile - Run ProfileCommand
     2. Inspect - Run InspectCommand
     3. Optimize - Run OptimizeCommand
@@ -108,32 +156,57 @@ async def optimize_cell(
         config: Ferret configuration
         registry: Command registry
         quiet: If True, suppress progress messages
+        simplify: If True, simplify code before profiling
+        optimize_iterations: Number of times to run optimization step
 
     Returns:
         Dictionary with results from each step
     """
     with indent(message=f"[{cell_index}/{total_cells}] Processing cell {cell_id}"):
         results = {
-            'cell_id': cell_id,
-            'profile': None,
-            'inspect': None,
-            'optimize': None,
-            'total_cost': 0.0,
-            'total_time': 0.0,
+            "cell_id": cell_id,
+            "simplify": None,
+            "profile": None,
+            "inspect": None,
+            "optimize": None,
+            "total_cost": 0.0,
+            "total_time": 0.0,
         }
+
+        # Step 0: Simplify (optional, NEW - runs BEFORE profile)
+        if simplify:
+            with indent(message=f"* Simplifying..."):
+                with timer(
+                    key=f"simplify_cell_{cell_index}",
+                    message=f"Simplify cell {cell_index}",
+                ):
+                    try:
+                        simplify_result = await simplify_cell_code(
+                            cell_id, notebook_content, config, registry
+                        )
+                        results["simplify"] = simplify_result
+                        results["total_cost"] += simplify_result.get("cost", 0.0)
+                        results["total_time"] += simplify_result.get("time", 0.0)
+                        log(f"Simplification completed for cell {cell_index}")
+                    except Exception as e:
+                        error(f"Simplification failed for cell {cell_index}: {e}")
+                        results["simplify"] = {"error": str(e)}
 
         # Step 1: Profile
         with indent(message=f"* Profiling..."):
 
             # Save environment BEFORE profiling
             from data_ferret.kernel.kernel_command_client import KernelCommandClient
+
             cmd_client = KernelCommandClient(kernel_client)
 
             checkpoint_name_before = f"cell_{cell_id}_before_profile"
             cmd_client.checkpoint_save(checkpoint_name_before)
             log(f"Saved checkpoint before profile: {checkpoint_name_before}")
 
-            with timer(key=f"profile_cell_{cell_index}", message=f"Profile cell {cell_index}"):
+            with timer(
+                key=f"profile_cell_{cell_index}", message=f"Profile cell {cell_index}"
+            ):
                 try:
                     profile_cmd = registry.get_command("profile")
                     profile_result = await profile_cmd.process(
@@ -144,13 +217,15 @@ async def optimize_cell(
                     )
                     # Extract cost and time from ProcessingResult
                     notebook_content = profile_result.notebook
-                    results['profile'] = profile_result.metadata
-                    results['total_cost'] += profile_result.total_cost
-                    results['total_time'] += profile_result.total_time
-                    log(f"Profile completed for cell {cell_index} (cost: ${profile_result.total_cost:.4f}, time: {profile_result.total_time:.2f}s)")
+                    results["profile"] = profile_result.metadata
+                    results["total_cost"] += profile_result.total_cost
+                    results["total_time"] += profile_result.total_time
+                    log(
+                        f"Profile completed for cell {cell_index} (cost: ${profile_result.total_cost:.4f}, time: {profile_result.total_time:.2f}s)"
+                    )
                 except Exception as e:
                     error(f"Profile failed for cell {cell_index}: {e}")
-                    results['profile'] = {'error': str(e)}
+                    results["profile"] = {"error": str(e)}
 
             # Save environment AFTER profiling
             checkpoint_name_after = f"cell_{cell_id}_after_profile"
@@ -159,9 +234,10 @@ async def optimize_cell(
 
             # Extract duration from profile metadata
             profile_duration = None
-            for c in notebook_content.get('cells', []):
-                if c.get('id') == cell_id:
+            for c in notebook_content.get("cells", []):
+                if c.get("id") == cell_id:
                     from data_ferret.util.ferret_metadata import FerretMetadata
+
                     ferret_metadata = FerretMetadata.from_cell(c)
                     profile_data = ferret_metadata.get_profile()
                     if profile_data:
@@ -170,9 +246,9 @@ async def optimize_cell(
                     break
 
             # Store checkpoint names and duration for later use
-            results['checkpoint_before'] = checkpoint_name_before
-            results['checkpoint_after'] = checkpoint_name_after
-            results['profile_duration'] = profile_duration
+            results["checkpoint_before"] = checkpoint_name_before
+            results["checkpoint_after"] = checkpoint_name_after
+            results["profile_duration"] = profile_duration
 
             if profile_duration is not None:
                 print(f"- Duration: {profile_duration:.2f}s")
@@ -181,7 +257,9 @@ async def optimize_cell(
 
         # Step 2: Inspect
         with indent(message=f"* Inspecting..."):
-            with timer(key=f"inspect_cell_{cell_index}", message=f"Inspect cell {cell_index}"):
+            with timer(
+                key=f"inspect_cell_{cell_index}", message=f"Inspect cell {cell_index}"
+            ):
                 try:
                     inspect_cmd = registry.get_command("inspect")
                     inspect_result = await inspect_cmd.process(
@@ -192,28 +270,32 @@ async def optimize_cell(
                     )
                     # Extract cost and time from ProcessingResult
                     notebook_content = inspect_result.notebook
-                    results['inspect'] = inspect_result.metadata
-                    results['total_cost'] += inspect_result.total_cost
-                    results['total_time'] += inspect_result.total_time
-                    log(f"Inspection completed for cell {cell_index} (cost: ${inspect_result.total_cost:.4f}, time: {inspect_result.total_time:.2f}s)")
+                    results["inspect"] = inspect_result.metadata
+                    results["total_cost"] += inspect_result.total_cost
+                    results["total_time"] += inspect_result.total_time
+                    log(
+                        f"Inspection completed for cell {cell_index} (cost: ${inspect_result.total_cost:.4f}, time: {inspect_result.total_time:.2f}s)"
+                    )
 
                     # Print the full inspection report
                     cell = None
-                    for c in notebook_content['cells']:
-                        if c.get('id') == cell_id:
+                    for c in notebook_content["cells"]:
+                        if c.get("id") == cell_id:
                             cell = c
                             break
 
                     if cell:
                         ferret_metadata = FerretMetadata.from_cell(cell)
-                        optimization_potential = ferret_metadata.get_optimization_potential()
+                        optimization_potential = (
+                            ferret_metadata.get_optimization_potential()
+                        )
                         if optimization_potential:
                             print_inspection_report(optimization_potential, cell_index)
 
                 except Exception as e:
                     error(f"Inspection failed for cell {cell_index}: {e}")
                     traceback.print_exc()
-                    results['inspect'] = {'error': str(e)}
+                    results["inspect"] = {"error": str(e)}
 
             # Check if cell meets optimization criteria
             should_optimize = False
@@ -221,8 +303,8 @@ async def optimize_cell(
 
             # Find the cell in notebook
             cell = None
-            for c in notebook_content['cells']:
-                if c.get('id') == cell_id:
+            for c in notebook_content["cells"]:
+                if c.get("id") == cell_id:
                     cell = c
                     break
 
@@ -243,7 +325,9 @@ async def optimize_cell(
                         skip_reason = f"duration too short ({duration:.2f}s <= 3.0s)"
                     else:
                         should_optimize = True
-                        log(f"Cell meets optimization criteria: potential={potential}, duration={duration:.2f}s")
+                        log(
+                            f"Cell meets optimization criteria: potential={potential}, duration={duration:.2f}s"
+                        )
                 else:
                     skip_reason = "missing profile or optimization metadata"
             else:
@@ -252,63 +336,102 @@ async def optimize_cell(
         # Step 3: Optimize (only if criteria met)
         if should_optimize:
             with indent(message=f"* Optimizing..."):
-                with timer(key=f"optimize_cell_{cell_index}", message=f"Optimize cell {cell_index}"):
-                    try:
-                        # Import PrePostEnvironments model
-                        from data_ferret.server.commands.optimize import PrePostEnvironments
+                # Import PrePostEnvironments model
+                from data_ferret.server.commands.optimize import PrePostEnvironments
 
-                        # Create pre_post_envs using the checkpoints and duration from profile
-                        pre_post_envs = PrePostEnvironments(
-                            original_environment=results.get('checkpoint_before'),
-                            original_result=results.get('checkpoint_after'),
-                            original_duration=results.get('profile_duration')
+                # Create pre_post_envs using the checkpoints and duration from profile
+                pre_post_envs = PrePostEnvironments(
+                    original_environment=results.get("checkpoint_before"),
+                    original_result=results.get("checkpoint_after"),
+                    original_duration=results.get("profile_duration"),
+                )
+
+                # Run optimization multiple times if optimize_iterations > 1
+                # Keep track of all iterations and use the last successful one
+                best_result = None
+                total_optimize_cost = 0.0
+                total_optimize_time = 0.0
+
+                for iteration in range(optimize_iterations):
+                    if optimize_iterations > 1:
+                        log(
+                            f"Optimization iteration {iteration + 1}/{optimize_iterations}"
                         )
 
-                        optimize_cmd = registry.get_command("optimize")
-                        optimize_result = await optimize_cmd.process(
-                            notebook_content,
-                            kernel_client=kernel_client,
-                            selected_cell_ids=[cell_id],
-                            config=config,
-                            pre_post_envs=pre_post_envs  # Pass the checkpoints!
+                    with timer(
+                        key=f"optimize_cell_{cell_index}_iter_{iteration+1}",
+                        message=f"Optimize cell {cell_index} iteration {iteration+1}",
+                    ):
+                        try:
+                            optimize_cmd = registry.get_command("optimize")
+                            optimize_result = await optimize_cmd.process(
+                                notebook_content,
+                                kernel_client=kernel_client,
+                                selected_cell_ids=[cell_id],
+                                config=config,
+                                pre_post_envs=pre_post_envs,
+                            )
+                            # TODO: Store best for real
+                            best_result = optimize_result
+                            total_optimize_cost += optimize_result.total_cost
+                            total_optimize_time += optimize_result.total_time
+                            log(
+                                f"Optimization iteration {iteration + 1} completed (cost: ${optimize_result.total_cost:.4f}, time: {optimize_result.total_time:.2f}s)"
+                            )
+                        except Exception as e:
+                            error(
+                                f"Optimization iteration {iteration + 1} failed for cell {cell_index}: {e}"
+                            )
+                            if (
+                                iteration == optimize_iterations - 1
+                                and best_result is None
+                            ):
+                                # All iterations failed
+                                results["optimize"] = {"error": str(e)}
+                                break
+
+                # Store the best (last successful) result
+                if best_result:
+                    results["optimize"] = best_result.metadata
+                    results["total_cost"] += total_optimize_cost
+                    results["total_time"] += total_optimize_time
+                    if optimize_iterations > 1:
+                        log(
+                            f"All {optimize_iterations} optimization iterations completed (total cost: ${total_optimize_cost:.4f}, total time: {total_optimize_time:.2f}s)"
                         )
-                        # Extract cost and time from ProcessingResult
-                        notebook_content = optimize_result.notebook
-                        results['optimize'] = optimize_result.metadata
-                        results['total_cost'] += optimize_result.total_cost
-                        results['total_time'] += optimize_result.total_time
-                        log(f"Optimization completed for cell {cell_index} (cost: ${optimize_result.total_cost:.4f}, time: {optimize_result.total_time:.2f}s)")
-                    except Exception as e:
-                        error(f"Optimization failed for cell {cell_index}: {e}")
-                        results['optimize'] = {'error': str(e)}
+                    else:
+                        log(
+                            f"Optimization completed for cell {cell_index} (cost: ${total_optimize_cost:.4f}, time: {total_optimize_time:.2f}s)"
+                        )
         else:
             with indent(message=f"* Skipping optimization: {skip_reason}"):
-                results['optimize'] = {'skipped': True, 'reason': skip_reason}
+                results["optimize"] = {"skipped": True, "reason": skip_reason}
                 log(f"Optimization skipped for cell {cell_index}: {skip_reason}")
-
 
         with indent(message=f"* Cleaning up..."):
             # Clean up checkpoints created during profiling
             # These are no longer needed after optimization completes
-            if results.get('checkpoint_before'):
+            if results.get("checkpoint_before"):
                 try:
-                    cmd_client.checkpoint_delete(results['checkpoint_before'])
+                    cmd_client.checkpoint_delete(results["checkpoint_before"])
                 except Exception as e:
-                    error(f"Failed to delete checkpoint {results['checkpoint_before']}: {e}")
+                    error(
+                        f"Failed to delete checkpoint {results['checkpoint_before']}: {e}"
+                    )
 
-            if results.get('checkpoint_after'):
+            if results.get("checkpoint_after"):
                 try:
-                    cmd_client.checkpoint_delete(results['checkpoint_after'])
+                    cmd_client.checkpoint_delete(results["checkpoint_after"])
                 except Exception as e:
-                    error(f"Failed to delete checkpoint {results['checkpoint_after']}: {e}")
+                    error(
+                        f"Failed to delete checkpoint {results['checkpoint_after']}: {e}"
+                    )
 
         return results
 
 
 async def run_split_preprocessing(
-    notebook_content: Dict[str, Any],
-    config: FerretConfig,
-    registry: CommandRegistry
+    notebook_content: Dict[str, Any], config: FerretConfig, registry: CommandRegistry
 ) -> Dict[str, Any]:
     """
     Run the split command on the notebook before optimization.
@@ -359,10 +482,10 @@ async def run_split_preprocessing(
             raise RuntimeError("Split preprocessing failed")
 
         return {
-            'notebook': split_notebook,
-            'metadata': split_metadata,
-            'total_cost': split_cost,
-            'total_time': split_time,
+            "notebook": split_notebook,
+            "metadata": split_metadata,
+            "total_cost": split_cost,
+            "total_time": split_time,
         }
 
 
@@ -371,7 +494,9 @@ async def run_optimization_pipeline(
     kernel_client,
     selected_cell_ids: Optional[List[str]],
     config: FerretConfig,
-    registry: CommandRegistry
+    registry: CommandRegistry,
+    simplify: bool = False,
+    optimize_iterations: int = 1,
 ) -> Dict[str, Any]:
     """
     Run the optimization pipeline on selected cells.
@@ -382,6 +507,8 @@ async def run_optimization_pipeline(
         selected_cell_ids: Optional list of cell IDs to process
         config: Ferret configuration
         registry: Command registry
+        simplify: If True, simplify code before profiling
+        optimize_iterations: Number of times to run optimization step
 
     Returns:
         Dictionary with notebook and metadata
@@ -406,24 +533,26 @@ async def run_optimization_pipeline(
             notebook_content=notebook_content,
             kernel_client=kernel_client,
             config=config,
-            registry=registry
+            registry=registry,
+            simplify=simplify,
+            optimize_iterations=optimize_iterations,
         )
         all_results.append(cell_results)
 
     # Compile metadata and aggregate costs
-    total_cost = sum(result.get('total_cost', 0.0) for result in all_results)
-    total_time = sum(result.get('total_time', 0.0) for result in all_results)
+    total_cost = sum(result.get("total_cost", 0.0) for result in all_results)
+    total_time = sum(result.get("total_time", 0.0) for result in all_results)
 
     metadata = {
-        'total_cells_processed': total_cells,
-        'cell_results': all_results,
-        'total_cost': total_cost,
-        'total_time': total_time,
+        "total_cells_processed": total_cells,
+        "cell_results": all_results,
+        "total_cost": total_cost,
+        "total_time": total_time,
     }
 
     return {
-        'notebook': notebook_content,
-        'metadata': metadata,
+        "notebook": notebook_content,
+        "metadata": metadata,
     }
 
 
@@ -433,10 +562,7 @@ def optimize_cli_main():
         description="Run optimization pipeline (profile -> inspect -> optimize) on notebook cells"
     )
 
-    parser.add_argument(
-        "notebook_path",
-        help="Notebook file (.ipynb) to optimize"
-    )
+    parser.add_argument("notebook_path", help="Notebook file (.ipynb) to optimize")
 
     parser.add_argument(
         "--kernel-name",
@@ -474,13 +600,25 @@ def optimize_cli_main():
         help="Run split command on notebook before optimization pipeline",
     )
 
+    parser.add_argument(
+        "--simplify",
+        action="store_true",
+        help="Simplify code before profiling (applies per-cell)",
+    )
+
+    parser.add_argument(
+        "--optimize-iterations",
+        type=int,
+        default=1,
+        help="Number of times to run optimization step per cell (default: 1, for testing)",
+    )
+
     args = parser.parse_args()
 
     # Use quiet context manager if --quiet flag is set
     quiet_context = quiet() if args.quiet else nullcontext()
 
     with quiet_context:
-
 
         # Create config from CLI arguments
         config = FerretConfig(model=args.model, fast_model=args.fast_model)
@@ -502,16 +640,14 @@ def optimize_cli_main():
                     run_split_preprocessing(
                         notebook_content=notebook_content,
                         config=config,
-                        registry=registry
+                        registry=registry,
                     )
                 )
                 # Use the split notebook for optimization
-                notebook_content = split_result['notebook']
+                notebook_content = split_result["notebook"]
 
             # Setup kernel - always start a new kernel for optimization
-            kernel_manager, kernel_client = setup_kernel(
-                kernel_name=args.kernel_name
-            )
+            kernel_manager, kernel_client = setup_kernel(kernel_name=args.kernel_name)
 
             # Run optimization pipeline
             with indent(message="Running Optimization Pipeline"):
@@ -522,7 +658,9 @@ def optimize_cli_main():
                         kernel_client=kernel_client,
                         selected_cell_ids=None,  # Always process all code cells
                         config=config,
-                        registry=registry
+                        registry=registry,
+                        simplify=args.simplify,
+                        optimize_iterations=args.optimize_iterations,
                     )
                 )
 
@@ -533,13 +671,13 @@ def optimize_cli_main():
             # Collect timing data for ALL code cells
             timing_summary = []
 
-            for cell_result in metadata['cell_results']:
-                cell_id = cell_result['cell_id']
+            for cell_result in metadata["cell_results"]:
+                cell_id = cell_result["cell_id"]
 
                 # Find the actual cell in the notebook to get its ferret metadata
                 cell = None
-                for c in notebook_content['cells']:
-                    if c.get('id') == cell_id:
+                for c in notebook_content["cells"]:
+                    if c.get("id") == cell_id:
                         cell = c
                         break
 
@@ -551,48 +689,58 @@ def optimize_cli_main():
                     profile_data = ferret_metadata.get_profile()
                     if profile_data:
                         profile_duration = profile_data.duration
-                    optimization_potential = ferret_metadata.get_optimization_potential()
+                    optimization_potential = (
+                        ferret_metadata.get_optimization_potential()
+                    )
                     if optimization_potential:
                         potential = optimization_potential.potential
 
                 # Get optimization timing data and status
-                optimize_meta = cell_result.get('optimize', {})
+                optimize_meta = cell_result.get("optimize", {})
 
                 # Default values
-                status = 'no improvement'
+                status = "no improvement"
                 initial_time = profile_duration
                 final_time = profile_duration
                 speedup = 1.0
 
                 # Check if optimization was skipped
-                if optimize_meta and optimize_meta.get('skipped'):
-                    status = 'not attempted'
-                elif optimize_meta and not optimize_meta.get('error'):
+                if optimize_meta and optimize_meta.get("skipped"):
+                    status = "not attempted"
+                elif optimize_meta and not optimize_meta.get("error"):
                     # Get timing data from optimize command metadata
-                    opt_metadata = optimize_meta if isinstance(optimize_meta, dict) else {}
-                    cell_timing = opt_metadata.get('cell_timing', {})
+                    opt_metadata = (
+                        optimize_meta if isinstance(optimize_meta, dict) else {}
+                    )
+                    cell_timing = opt_metadata.get("cell_timing", {})
 
                     # Get timing and status for this cell
                     if cell_id in cell_timing:
                         timing_info = cell_timing[cell_id]
-                        status = timing_info.get('status', 'no improvement')
-                        initial_time = timing_info.get('original_duration', profile_duration)
-                        final_time = timing_info.get('modified_duration', profile_duration)
-                        speedup = timing_info.get('speedup', 1.0)
+                        status = timing_info.get("status", "no improvement")
+                        initial_time = timing_info.get(
+                            "original_duration", profile_duration
+                        )
+                        final_time = timing_info.get(
+                            "modified_duration", profile_duration
+                        )
+                        speedup = timing_info.get("speedup", 1.0)
 
                         # If optimization wasn't applied, final time = initial time
-                        if status in ('no improvement', 'error'):
+                        if status in ("no improvement", "error"):
                             final_time = initial_time
                             speedup = 1.0
 
-                timing_summary.append({
-                    'cell_id': cell_id,
-                    'potential': potential,
-                    'initial_time': initial_time,
-                    'final_time': final_time,
-                    'speedup': speedup,
-                    'status': status
-                })
+                timing_summary.append(
+                    {
+                        "cell_id": cell_id,
+                        "potential": potential,
+                        "initial_time": initial_time,
+                        "final_time": final_time,
+                        "speedup": speedup,
+                        "status": status,
+                    }
+                )
 
             # Build optimization results model
             total_initial = 0
@@ -602,21 +750,23 @@ def optimize_cli_main():
             for timing in timing_summary:
                 cell_results.append(
                     CellOptimizationResult(
-                        cell_id=timing['cell_id'],
-                        potential=timing['potential'],
-                        initial_time=timing['initial_time'],
-                        final_time=timing['final_time'],
-                        speedup=timing['speedup'],
-                        status=timing['status']
+                        cell_id=timing["cell_id"],
+                        potential=timing["potential"],
+                        initial_time=timing["initial_time"],
+                        final_time=timing["final_time"],
+                        speedup=timing["speedup"],
+                        status=timing["status"],
                     )
                 )
-                total_initial += timing['initial_time']
-                total_final += timing['final_time']
+                total_initial += timing["initial_time"]
+                total_final += timing["final_time"]
 
             # Calculate overall stats
             overall_speedup = total_initial / total_final if total_final > 0 else 1.0
             time_saved = total_initial - total_final
-            time_saved_percent = (time_saved / total_initial * 100) if total_initial > 0 else 0.0
+            time_saved_percent = (
+                (time_saved / total_initial * 100) if total_initial > 0 else 0.0
+            )
 
             optimization_results_summary = OptimizationResultsSummary(
                 cells=cell_results,
@@ -624,16 +774,16 @@ def optimize_cli_main():
                 total_final_time=total_final,
                 overall_speedup=overall_speedup,
                 time_saved=time_saved,
-                time_saved_percent=time_saved_percent
+                time_saved_percent=time_saved_percent,
             )
 
             # Build LLM cost summary model
-            optimization_cost = metadata.get('total_cost', 0.0)
-            optimization_time = metadata.get('total_time', 0.0)
+            optimization_cost = metadata.get("total_cost", 0.0)
+            optimization_time = metadata.get("total_time", 0.0)
 
             if split_result:
-                split_cost = split_result['total_cost']
-                split_time = split_result['total_time']
+                split_cost = split_result["total_cost"]
+                split_time = split_result["total_time"]
                 total_cost = split_cost + optimization_cost
                 total_time = split_time + optimization_time
 
@@ -643,7 +793,7 @@ def optimize_cli_main():
                     optimization_cost=optimization_cost,
                     optimization_time=optimization_time,
                     total_cost=total_cost,
-                    total_time=total_time
+                    total_time=total_time,
                 )
             else:
                 total_cost = optimization_cost
@@ -653,19 +803,19 @@ def optimize_cli_main():
                     optimization_cost=optimization_cost,
                     optimization_time=optimization_time,
                     total_cost=total_cost,
-                    total_time=total_time
+                    total_time=total_time,
                 )
 
             # Build split results summary if applicable
             split_results_summary = None
             if split_result:
-                split_metadata = split_result['metadata']
+                split_metadata = split_result["metadata"]
                 split_results_summary = SplitResultsSummary(
-                    cells_analyzed=split_metadata['cells_analyzed'],
-                    cells_split=split_metadata['cells_split'],
-                    total_new_cells=split_metadata['total_new_cells'],
-                    llm_cost=split_result['total_cost'],
-                    time=split_result['total_time']
+                    cells_analyzed=split_metadata["cells_analyzed"],
+                    cells_split=split_metadata["cells_split"],
+                    total_new_cells=split_metadata["total_new_cells"],
+                    llm_cost=split_result["total_cost"],
+                    time=split_result["total_time"],
                 )
 
             # Build complete optimization metadata
@@ -675,13 +825,15 @@ def optimize_cli_main():
                 llm_costs=llm_cost_summary,
                 timestamp=FerretOptimizationMetadata.create_timestamp(),
                 model=config.model,
-                fast_model=config.fast_model
+                fast_model=config.fast_model,
             )
 
             # Store metadata in notebook
-            if 'metadata' not in result['notebook']:
-                result['notebook']['metadata'] = {}
-            result['notebook']['metadata']['ferret_optimization'] = ferret_metadata.model_dump()
+            if "metadata" not in result["notebook"]:
+                result["notebook"]["metadata"] = {}
+            result["notebook"]["metadata"][
+                "ferret_optimization"
+            ] = ferret_metadata.model_dump()
 
             # Determine output path
             if args.output:
@@ -694,10 +846,7 @@ def optimize_cli_main():
                     output_path = f"{base_name}_optimized.ipynb"
 
             # Save notebook with embedded metadata
-            save_notebook(
-                result["notebook"],
-                output_path=output_path
-            )
+            save_notebook(result["notebook"], output_path=output_path)
             print(f"\n{'='*70}")
             print(f"Optimized notebook written to {output_path}")
             print(f"{'='*70}")
@@ -733,6 +882,7 @@ def optimize_cli_main():
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             import traceback
+
             traceback.print_exc()
             return 1
         finally:

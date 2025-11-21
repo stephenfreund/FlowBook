@@ -91,6 +91,8 @@ class FerretAgent(Agent, Generic[T], RunHooks[FerretContext]):
         self.instructions = instructions
         self.log_dir = log_dir
         os.makedirs(self.log_dir, exist_ok=True)
+        self.input_list = []
+        self.session = SQLiteSession(key)
 
     @classmethod
     def make_unique(cls, key: str) -> str:
@@ -167,27 +169,26 @@ class FerretAgent(Agent, Generic[T], RunHooks[FerretContext]):
         context = FerretContext()
 
         key = FerretAgent.make_unique(self.name)
-        session = SQLiteSession(key)
 
         result = await Runner.run(
             self,
             input=input,
             context=context,
             hooks=self,
-            session=session,
+            session=self.session,
             max_turns=30,
         )
 
         assert context.time is not None, "Execution time must be set"
         assert context.usage is not None, "Usage must be set"
 
-        session_text = self.session_log(await session.get_items())
+        session_text = self.session_log(await self.session.get_items())
 
         # Create header with instruction prompt
         header = []
         header.append("INSTRUCTIONS")
         header.append("=" * len("INSTRUCTIONS"))
-        header.extend(textwrap.indent(self.instructions, "  ").splitlines())
+        header.extend(textwrap.indent(str(self.instructions), "  ").splitlines())
         header.append("")
         header.append("")
 
@@ -274,6 +275,20 @@ def main():
     print("cost: ", stats.cost)
     print("total tokens: ", stats.usage.total_tokens)
     print()
+
+    ###
+
+    agent = FerretAgent(
+        key="test-agent",
+        model="gpt-4o-mini",
+        instructions="You are a test agent.",
+        output_type=str,
+    )
+    response, stats = asyncio.run(agent.run("Give me a number."))
+    print(response)
+    response2, stats2 = asyncio.run(agent.run("Give me a number."))
+    print(response2)
+    print(asyncio.run(agent.session.get_items()))
 
 
 if __name__ == "__main__":

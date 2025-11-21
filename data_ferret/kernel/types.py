@@ -12,6 +12,8 @@ Key Functions:
 from abc import ABC, abstractmethod
 from typing import Annotated, Any, Dict, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator
+import traceback
+import math
 
 
 class PathComponent(ABC):
@@ -89,6 +91,66 @@ class ValueComparison(BaseModel):
     value1: Any = Field(..., description="First value")
     value2: Any = Field(..., description="Second value")
     message: str = Field(..., description="Description of the difference")
+
+    def model_post_init(self, __context: Any) -> None:
+        """
+        Defensive check: detect if floats are incorrectly marked as different
+        when they're actually within tolerance.
+
+        This helps diagnose bugs where tolerance parameters aren't being
+        properly applied in the comparison logic.
+        """
+        # Only check if status is "different" (not "close")
+        if self.status != "different":
+            return
+
+        # Check if both values are float-like
+        try:
+            import numpy as np
+            is_float1 = isinstance(self.value1, (float, np.floating))
+            is_float2 = isinstance(self.value2, (float, np.floating))
+        except ImportError:
+            is_float1 = isinstance(self.value1, float)
+            is_float2 = isinstance(self.value2, float)
+
+        if not (is_float1 and is_float2):
+            return
+
+        # Skip NaN values (they're correctly marked as different)
+        try:
+            if math.isnan(self.value1) or math.isnan(self.value2):
+                return
+        except (TypeError, ValueError):
+            return
+
+        # Check if values are within defensive tolerance (1e-5 for both atol and rtol)
+        atol = 1e-5
+        rtol = 1e-5
+
+        try:
+            diff = abs(self.value1 - self.value2)
+            threshold = atol + rtol * abs(self.value2)
+
+            if diff <= threshold:
+                # Values are within tolerance but marked as different!
+                # This indicates a bug in the comparison logic
+                stack = traceback.format_stack()
+                stack_str = ''.join(stack)
+
+                # Append stack trace to message for debugging
+                self.message += (
+                    f"\n\n**TOLERANCE BUG DETECTED**\n"
+                    f"Values marked as 'different' but within tolerance:\n"
+                    f"  value1: {self.value1}\n"
+                    f"  value2: {self.value2}\n"
+                    f"  difference: {diff:.2e}\n"
+                    f"  threshold: {threshold:.2e}\n"
+                    f"  atol: {atol}, rtol: {rtol}\n\n"
+                    f"Stack trace:\n{stack_str}"
+                )
+        except Exception as e:
+            # Don't fail if the check itself has an error
+            pass
 
     @property
     def is_close(self) -> bool:

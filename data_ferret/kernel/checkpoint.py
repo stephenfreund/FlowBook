@@ -178,18 +178,6 @@ def checkpoint_diff(
     Returns:
         DiffResult: Structured diff tree with only differences
     """
-    # all_keys = set(a.user_ns.keys()) | set(b.user_ns.keys())
-    # diffs = {}
-    # for k in all_keys:
-    #     if not (k in a.user_ns and k in b.user_ns):
-    #         if k in a.user_ns:
-    #             diffs[k] = f"'removed"
-    #         else:
-    #             diffs[k] = f"'added"
-
-    # ignore_keys = set(diffs.keys())
-    # return user_ns_diff(a.user_ns, b.user_ns, ignore_keys) | diffs
-
     differ = Diff(strict=False, report_close=False, atol=1e-5, rtol=1e-5)
     return differ.diff(a.user_ns, b.user_ns, keys_to_include)
 
