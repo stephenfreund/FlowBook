@@ -100,12 +100,33 @@ class OptimizationAppliedMetadata(BaseModel):
     )
 
 
+class UnitTest(BaseModel):
+    """A single unit test for a cell."""
+
+    description: str = Field(description="English description of what this test validates")
+    setup_code: str = Field(
+        description="Python code to set up the globals used by the cell under test"
+    )
+    assertion_code: str = Field(
+        description="Python code to assert the appropriate properties to ensure the test worked correctly"
+    )
+
+
+class UnitTests(BaseModel):
+    """Collection of unit tests for a cell."""
+
+    tests: List[UnitTest] = Field(
+        default_factory=list, description="List of unit tests for the cell"
+    )
+
+
 class FerretMetadata(BaseModel):
     optimization_potential: Optional[OptimizationPotential] = None
     profile: Optional[ProfileData] = None
     generated: Optional[GeneratedCodeMetadata] = None
     optimized: Optional[OptimizedCodeMetadata] = None
     optimization_applied: Optional[OptimizationAppliedMetadata] = None
+    unit_tests: Optional[UnitTests] = None
 
     def get_optimization_potential(self) -> Optional[OptimizationPotential]:
         return self.optimization_potential
@@ -140,6 +161,12 @@ class FerretMetadata(BaseModel):
         self, metadata: OptimizationAppliedMetadata
     ) -> FerretMetadata:
         return self.model_copy(update={"optimization_applied": metadata})
+
+    def get_unit_tests(self) -> Optional[UnitTests]:
+        return self.unit_tests
+
+    def set_unit_tests(self, metadata: UnitTests) -> FerretMetadata:
+        return self.model_copy(update={"unit_tests": metadata})
 
     @staticmethod
     def from_cell(cell: nbformat.NotebookNode) -> FerretMetadata:
@@ -209,6 +236,19 @@ def set_optimization_applied_ferret_metadata(
     if not isinstance(ferret, dict):
         ferret = FerretMetadata.model_validate(ferret).model_dump()
     ferret["optimization_applied"] = metadata.model_dump()
+    cell["metadata"]["ferret"] = ferret
+
+
+def set_unit_tests_ferret_metadata(
+    cell: nbformat.NotebookNode, metadata: UnitTests
+) -> None:
+    """Set the unit tests metadata for a cell."""
+    if "metadata" not in cell:
+        cell["metadata"] = {}
+    ferret = cell["metadata"].get("ferret", {})
+    if not isinstance(ferret, dict):
+        ferret = FerretMetadata.model_validate(ferret).model_dump()
+    ferret["unit_tests"] = metadata.model_dump()
     cell["metadata"]["ferret"] = ferret
 
 

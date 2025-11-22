@@ -187,6 +187,22 @@ export interface IFerretOptimizationAppliedMetadata {
 }
 
 /**
+ * Unit test structure for a cell
+ */
+export interface IUnitTest {
+  description: string;
+  setup_code: string;
+  assertion_code: string;
+}
+
+/**
+ * Unit tests collection for a cell
+ */
+export interface IUnitTests {
+  tests: IUnitTest[];
+}
+
+/**
  * Ferret cell metadata structure
  */
 export interface IFerretMetadata {
@@ -195,4 +211,5 @@ export interface IFerretMetadata {
   generated?: IFerretGeneratedCodeMetadata;
   optimized?: IFerretOptimizedCodeMetadata;
   optimization_applied?: IFerretOptimizationAppliedMetadata;
+  unit_tests?: IUnitTests;
 }
