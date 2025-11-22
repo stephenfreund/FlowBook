@@ -21,15 +21,49 @@ from data_ferret.kernel.types import (
 )
 
 
-def are_compatible_dtypes(dtype1, dtype2) -> bool:
+def _all_elements_are_floats(arr) -> bool:
     """
-    Check if two numpy/pandas dtypes are compatible for equality comparison.
+    Check if all elements in an object-dtype array/series are floats.
+
+    Args:
+        arr: numpy array or pandas Series with object dtype
+
+    Returns:
+        True if all non-NaN elements are float instances, False otherwise
+    """
+    if isinstance(arr, pd.Series):
+        arr = arr.values
+
+    # Check each element
+    for elem in arr.flat:
+        # Skip NaN values (they're allowed in float arrays)
+        if pd.isna(elem):
+            continue
+        # Check if element is a float (Python float or numpy floating)
+        if not isinstance(elem, (float, np.floating)):
+            return False
+
+    return True
+
+
+def are_compatible_dtypes(arr1, arr2) -> bool:
+    """
+    Check if two numpy arrays or pandas Series have compatible dtypes for equality comparison.
 
     Returns True if:
     - Both are integer types (int8, int16, int32, int64, uint8, uint16, uint32, uint64)
     - Both are floating types (float16, float32, float64)
+    - One is object dtype containing all floats, and the other is a floating type
     - Both are the exact same type
+
+    Args:
+        arr1: First numpy array or pandas Series
+        arr2: Second numpy array or pandas Series
     """
+    # Extract dtypes
+    dtype1 = arr1.dtype
+    dtype2 = arr2.dtype
+
     # Same dtype - always compatible
     if dtype1 == dtype2:
         return True
@@ -41,6 +75,14 @@ def are_compatible_dtypes(dtype1, dtype2) -> bool:
     # Both are floating types
     if np.issubdtype(dtype1, np.floating) and np.issubdtype(dtype2, np.floating):
         return True
+
+    # Check object dtype compatibility with float dtypes
+    # If one is object and the other is floating, check if object contains all floats
+    if dtype1 == np.object_ and np.issubdtype(dtype2, np.floating):
+        return _all_elements_are_floats(arr1)
+
+    if dtype2 == np.object_ and np.issubdtype(dtype1, np.floating):
+        return _all_elements_are_floats(arr2)
 
     return False
 
@@ -728,7 +770,7 @@ class Diff:
             )
 
         # Check dtype compatibility
-        if not are_compatible_dtypes(val_a.dtype, val_b.dtype):
+        if not are_compatible_dtypes(val_a, val_b):
             return ValueComparison(
                 status="different",
                 value1=val_a,
@@ -738,9 +780,17 @@ class Diff:
 
         # Cast to common type if dtypes are compatible but different
         if val_a.dtype != val_b.dtype:
-            common_dtype = np.promote_types(val_a.dtype, val_b.dtype)
-            val_a_cmp = val_a.astype(common_dtype)
-            val_b_cmp = val_b.astype(common_dtype)
+            # Special handling for object dtype with floats
+            if val_a.dtype == np.object_ and np.issubdtype(val_b.dtype, np.floating):
+                val_a_cmp = val_a.astype(np.float64)
+                val_b_cmp = val_b.astype(np.float64)
+            elif val_b.dtype == np.object_ and np.issubdtype(val_a.dtype, np.floating):
+                val_a_cmp = val_a.astype(np.float64)
+                val_b_cmp = val_b.astype(np.float64)
+            else:
+                common_dtype = np.promote_types(val_a.dtype, val_b.dtype)
+                val_a_cmp = val_a.astype(common_dtype)
+                val_b_cmp = val_b.astype(common_dtype)
         else:
             val_a_cmp = val_a
             val_b_cmp = val_b
@@ -860,7 +910,7 @@ class Diff:
             )
 
         # Check dtype compatibility
-        if not are_compatible_dtypes(val_a.dtype, val_b.dtype):
+        if not are_compatible_dtypes(val_a, val_b):
             return ValueComparison(
                 status="different",
                 value1=val_a,
@@ -870,9 +920,17 @@ class Diff:
 
         # Cast to common type if dtypes are compatible but different
         if val_a.dtype != val_b.dtype:
-            common_dtype = np.promote_types(val_a.dtype, val_b.dtype)
-            val_a_cmp = val_a.astype(common_dtype)
-            val_b_cmp = val_b.astype(common_dtype)
+            # Special handling for object dtype with floats
+            if val_a.dtype == np.object_ and np.issubdtype(val_b.dtype, np.floating):
+                val_a_cmp = val_a.astype(np.float64)
+                val_b_cmp = val_b.astype(np.float64)
+            elif val_b.dtype == np.object_ and np.issubdtype(val_a.dtype, np.floating):
+                val_a_cmp = val_a.astype(np.float64)
+                val_b_cmp = val_b.astype(np.float64)
+            else:
+                common_dtype = np.promote_types(val_a.dtype, val_b.dtype)
+                val_a_cmp = val_a.astype(common_dtype)
+                val_b_cmp = val_b.astype(common_dtype)
         else:
             val_a_cmp = val_a
             val_b_cmp = val_b
@@ -1010,7 +1068,7 @@ class Diff:
 
         # Check dtype compatibility for each column
         for col in val_a.columns:
-            if not are_compatible_dtypes(val_a[col].dtype, val_b[col].dtype):
+            if not are_compatible_dtypes(val_a[col], val_b[col]):
                 return ValueComparison(
                     status="different",
                     value1=val_a,
@@ -1025,9 +1083,17 @@ class Diff:
             val_b_cmp = val_b.copy()
             for col in val_a.columns:
                 if val_a[col].dtype != val_b[col].dtype:
-                    common_dtype = np.promote_types(val_a[col].dtype, val_b[col].dtype)
-                    val_a_cmp[col] = val_a[col].astype(common_dtype)
-                    val_b_cmp[col] = val_b[col].astype(common_dtype)
+                    # Special handling for object dtype with floats
+                    if val_a[col].dtype == np.object_ and np.issubdtype(val_b[col].dtype, np.floating):
+                        val_a_cmp[col] = val_a[col].astype(np.float64)
+                        val_b_cmp[col] = val_b[col].astype(np.float64)
+                    elif val_b[col].dtype == np.object_ and np.issubdtype(val_a[col].dtype, np.floating):
+                        val_a_cmp[col] = val_a[col].astype(np.float64)
+                        val_b_cmp[col] = val_b[col].astype(np.float64)
+                    else:
+                        common_dtype = np.promote_types(val_a[col].dtype, val_b[col].dtype)
+                        val_a_cmp[col] = val_a[col].astype(common_dtype)
+                        val_b_cmp[col] = val_b[col].astype(common_dtype)
         else:
             val_a_cmp = val_a
             val_b_cmp = val_b
