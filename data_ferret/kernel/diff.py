@@ -804,22 +804,19 @@ class Diff:
                             break
             else:
                 # Iterate to find specific differences
+                # Use _compare_values() to properly handle floats with tolerance even in object dtype arrays
                 flat_a = val_a_cmp.ravel()
                 flat_b = val_b_cmp.ravel()
                 flat_a_orig = val_a.ravel()
                 flat_b_orig = val_b.ravel()
 
                 for i in range(len(flat_a)):
-                    if flat_a[i] != flat_b[i]:
-                        idx = np.unravel_index(i, val_a.shape)
-                        idx_tuple = tuple(int(x) for x in idx)
+                    idx = np.unravel_index(i, val_a.shape)
+                    idx_tuple = tuple(int(x) for x in idx)
 
-                        diffs[f"[{idx_tuple}]"] = ValueComparison(
-                            status="different",
-                            value1=flat_a_orig[i],
-                            value2=flat_b_orig[i],
-                            message=f"Array values mismatch at {path}[{idx_tuple}]: {flat_a_orig[i]} vs {flat_b_orig[i]}",
-                        )
+                    elem_diff = self._compare_values(flat_a_orig[i], flat_b_orig[i], f"{path}[{idx_tuple}]")
+                    if elem_diff:
+                        diffs[f"[{idx_tuple}]"] = elem_diff
 
                         diff_count += 1
                         if diff_count >= self.max_diffs_per_structure:
@@ -955,15 +952,12 @@ class Diff:
                             )
                             break
             else:
-                # For non-float dtypes, use direct comparison
+                # For non-float dtypes, compare element-by-element
+                # Use _compare_values() to properly handle floats with tolerance even in object dtype Series
                 for idx in val_a_cmp.index:
-                    if val_a_cmp[idx] != val_b_cmp[idx]:
-                        diffs[f"[{repr(idx)}]"] = ValueComparison(
-                            status="different",
-                            value1=val_a[idx],
-                            value2=val_b[idx],
-                            message=f"Series values mismatch at {path}[{repr(idx)}]: {val_a[idx]} vs {val_b[idx]}",
-                        )
+                    elem_diff = self._compare_values(val_a[idx], val_b[idx], f"{path}[{repr(idx)}]")
+                    if elem_diff:
+                        diffs[f"[{repr(idx)}]"] = elem_diff
                         diff_count += 1
                         if diff_count >= self.max_diffs_per_structure:
                             diffs["_truncated"] = ValueComparison(
