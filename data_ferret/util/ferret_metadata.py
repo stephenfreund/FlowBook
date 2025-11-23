@@ -103,6 +103,7 @@ class OptimizationAppliedMetadata(BaseModel):
 class UnitTest(BaseModel):
     """A single unit test for a cell."""
 
+    title: str = Field(description="Short title for the test")
     description: str = Field(description="English description of what this test validates")
     setup_code: str = Field(
         description="Python code to set up the globals used by the cell under test"

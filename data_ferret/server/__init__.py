@@ -33,8 +33,6 @@ from data_ferret.server.handlers import (
     CommandListHandler,
     MessageStreamHandler,
     setup_handlers,
-    # _jupyter_server_extension_points,
-    # _load_jupyter_server_extension
 )
 
 # Export message broadcasting
@@ -66,8 +64,6 @@ __all__ = [
     "CommandListHandler",
     "MessageStreamHandler",
     "setup_handlers",
-    "_jupyter_server_extension_points",
-    "_load_jupyter_server_extension",
     # Message broadcasting
     "MessageBroadcaster",
     "get_broadcaster",

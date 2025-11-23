@@ -14,6 +14,7 @@ from data_ferret.server.commands.example_message_command import ExampleMessageCo
 from data_ferret.server.commands.validate_change import ValidateChangeCommand
 from data_ferret.server.commands.generate import GenerateCodeCommand
 from data_ferret.server.commands.split import SplitCommand
+from data_ferret.server.commands.test import TestCommand
 
 __all__ = [
     "AnalyzeNotebookCommand",
@@ -28,5 +29,6 @@ __all__ = [
     "ValidateChangeCommand",
     "GenerateCodeCommand",
     "SplitCommand",
+    "TestCommand",
 ]
 

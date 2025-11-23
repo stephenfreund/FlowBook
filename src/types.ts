@@ -102,6 +102,13 @@ export const FERRET_COMMANDS: CommandInfo[] = [
     icon: 'ui-components:code',
     tooltip: 'Generate code from string specification',
     requires_kernel: false
+  },
+  {
+    id: 'test',
+    label: 'Test',
+    icon: 'ui-components:check',
+    tooltip: 'Run unit tests for cell(s)',
+    requires_kernel: true
   }
 ];
 
@@ -190,6 +197,7 @@ export interface IFerretOptimizationAppliedMetadata {
  * Unit test structure for a cell
  */
 export interface IUnitTest {
+  title: string;
   description: string;
   setup_code: string;
   assertion_code: string;

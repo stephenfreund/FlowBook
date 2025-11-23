@@ -16,6 +16,8 @@ import { NotebookToolbarExtension } from './toolbar';
 import { CellToolbarExtension } from './celltoolbar';
 import { MessagePanel } from './panel';
 import { FerretMetadataPanel } from './metadatapanel';
+import { UnitTestPanel } from './unittestpanel';
+import { UnitTestPanelTracker } from './unittesttracker';
 import { CellMetadataHighlighter } from './cellhighlighter';
 import { ExecutionHookManager } from './executionhook';
 import { NotebookHistoryManager } from './history';
@@ -79,8 +81,15 @@ const extension: JupyterFrontEndPlugin<void> = {
     const historyPanel = new HistoryPanel(tracker, historyManager);
     app.shell.add(historyPanel, 'right', { rank: 502 });
 
+    // Create and add the unit test panel to the right area
+    const unitTestPanel = new UnitTestPanel();
+    app.shell.add(unitTestPanel, 'right', { rank: 503 });
+
     // Create cell metadata highlighter for visual indicators
     new CellMetadataHighlighter(tracker, metadataPanel);
+
+    // Create unit test panel tracker for monitoring cell selection
+    new UnitTestPanelTracker(tracker, unitTestPanel);
 
     // Create execution hook manager for auto-generating code from string specs
     new ExecutionHookManager(app, tracker, manager);
