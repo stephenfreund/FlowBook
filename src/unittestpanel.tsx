@@ -3,14 +3,19 @@ import { Cell } from '@jupyterlab/cells';
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
 import { IUnitTest, IUnitTests } from './types';
+import { JupyterFrontEnd } from '@jupyterlab/application';
+import { INotebookTracker } from '@jupyterlab/notebook';
 
 interface IUnitTestPanelProps {
   cell: Cell | null;
+  app: JupyterFrontEnd | null;
+  tracker: INotebookTracker | null;
 }
 
-const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell }) => {
+const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) => {
   const [tests, setTests] = React.useState<IUnitTest[]>([]);
   const [cellId, setCellId] = React.useState<string | null>(null);
+  const [isGenerating, setIsGenerating] = React.useState<boolean>(false);
 
   // Load tests from cell metadata when cell changes
   React.useEffect(() => {
@@ -88,6 +93,38 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell }) => {
     setTests(updated);
   };
 
+  const handleGenerateTests = async () => {
+    if (!cell || !app || !tracker) {
+      console.warn('[UnitTestPanel] Cannot generate tests: missing cell, app, or tracker');
+      return;
+    }
+
+    setIsGenerating(true);
+
+    try {
+      // Execute the generate_tests command with the current cell ID
+      await app.commands.execute('data_ferret:generate_tests', {
+        cellId: cell.model.id
+      });
+
+      // After command completes, reload tests from cell metadata
+      // The command will have updated the metadata, so we need to refresh
+      setTimeout(() => {
+        const ferretMetadata = cell.model.getMetadata('ferret') as any;
+        const unitTests = ferretMetadata?.unit_tests as IUnitTests | undefined;
+
+        if (unitTests && unitTests.tests) {
+          setTests([...unitTests.tests]);
+          console.log('[UnitTestPanel] Reloaded tests after generation:', unitTests.tests.length);
+        }
+        setIsGenerating(false);
+      }, 500); // Small delay to ensure metadata is saved
+    } catch (error) {
+      console.error('[UnitTestPanel] Error generating tests:', error);
+      setIsGenerating(false);
+    }
+  };
+
   if (!cell) {
     return (
       <div className="ferret-unittest-empty">
@@ -107,8 +144,12 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell }) => {
         <button onClick={addTest} className="ferret-unittest-btn-add">
           + Add Test
         </button>
-        <button className="ferret-unittest-btn-generate" disabled>
-          ⚡ Auto-generate (Coming Soon)
+        <button
+          className="ferret-unittest-btn-generate"
+          onClick={handleGenerateTests}
+          disabled={isGenerating}
+        >
+          {isGenerating ? '⏳ Generating...' : '⚡ Auto-generate'}
         </button>
       </div>
 
@@ -180,8 +221,10 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell }) => {
 
 export class UnitTestPanel extends Widget {
   private _cell: Cell | null = null;
+  private _app: JupyterFrontEnd | null = null;
+  private _tracker: INotebookTracker | null = null;
 
-  constructor() {
+  constructor(app: JupyterFrontEnd, tracker: INotebookTracker) {
     super();
     this.id = 'ferret-unittest-panel';
     this.addClass('ferret-unittest-panel');
@@ -189,11 +232,17 @@ export class UnitTestPanel extends Widget {
     this.title.closable = true;
     this.title.caption = 'Edit unit tests for the selected cell';
 
+    this._app = app;
+    this._tracker = tracker;
+
     this.render();
   }
 
   private render(): void {
-    ReactDOM.render(<UnitTestEditor cell={this._cell} />, this.node);
+    ReactDOM.render(
+      <UnitTestEditor cell={this._cell} app={this._app} tracker={this._tracker} />,
+      this.node
+    );
   }
 
   public updateCell(cell: Cell | null): void {

@@ -2,6 +2,11 @@
 _ipython*
 *.bak
 
+# Ignore all files in examples except .ipynb notebooks
+examples/**
+!examples/**/*.ipynb
+!examples/**/
+
 *.bundle.*
 lib/
 node_modules/

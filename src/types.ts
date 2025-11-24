@@ -109,6 +109,13 @@ export const FERRET_COMMANDS: CommandInfo[] = [
     icon: 'ui-components:check',
     tooltip: 'Run unit tests for cell(s)',
     requires_kernel: true
+  },
+  {
+    id: 'generate_tests',
+    label: 'Generate Tests',
+    icon: 'ui-components:build',
+    tooltip: 'Auto-generate unit tests for cell(s)',
+    requires_kernel: false
   }
 ];
 

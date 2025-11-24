@@ -82,7 +82,7 @@ const extension: JupyterFrontEndPlugin<void> = {
     app.shell.add(historyPanel, 'right', { rank: 502 });
 
     // Create and add the unit test panel to the right area
-    const unitTestPanel = new UnitTestPanel();
+    const unitTestPanel = new UnitTestPanel(app, tracker);
     app.shell.add(unitTestPanel, 'right', { rank: 503 });
 
     // Create cell metadata highlighter for visual indicators

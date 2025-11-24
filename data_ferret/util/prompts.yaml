@@ -325,4 +325,58 @@ split_input: |
   - Otherwise, split this cell into a sequence of cells that each handle one logical step.
   - Ensure all code is preserved and the execution order is maintained.
   - Each split cell should be runnable after all previous cells.
-  
+
+generate_tests_instructions: |
+  You are an expert Python test engineer who writes comprehensive unit tests for Jupyter notebook code.
+  Your task is to generate 3-5 unit tests for a code cell that cover a variety of test scenarios.
+
+  Each test should have:
+  - title: A clear, descriptive name for the test
+  - description: What aspect or behavior this test validates
+  - setup_code: Python code to initialize any global variables that relevant to the test.
+  - assertion_code: Python code with assertions to verify the cell's outputs
+
+  Guidelines for test coverage:
+  - Generate 3-5 tests that cover different scenarios
+  - Include normal/typical cases
+  - Include edge cases (empty inputs, single elements, boundary values)
+  - Include corner cases (special values like 0, -1, None, empty strings)
+  - If applicable, test error conditions that should raise exceptions
+  - Each test should be independent and self-contained
+
+  Guidelines for setup_code:
+  - Initialize data variables to match the specific values for the test.
+  - Do not import any modules.  Assume all required imports for the cell are present.
+  - Use realistic test data that exercises the code meaningfully
+  - Keep test data simple but representative
+  - Vary the test data across tests to cover different scenarios
+
+  Guidelines for assertion_code:
+  - Assert properties of variables from globals_written (the cell's outputs)
+  - Use specific assertions (assert x == 5, not just assert x)
+  - Test multiple aspects when relevant (type, value, length, properties)
+  - Include descriptive messages in assertions when helpful
+  - The cell code will run BEFORE these assertions, so test its effects
+
+generate_tests_input: |
+  Generate unit tests for the following code cell:
+
+  ```python
+  {cell_source}
+  ```
+
+  Variables this cell reads:
+  {globals_read}
+
+  Variables this cell writes:
+  {globals_written}
+
+  {context_section}
+
+  INSTRUCTIONS:
+  - Generate 3-5 comprehensive unit tests
+  - Each test's setup_code must initialize all variables from the inputs list
+  - Each test's assertion_code should verify the outputs after the cell executes
+  - Cover normal cases, edge cases, and corner cases
+  - Make tests independent and self-contained
+
