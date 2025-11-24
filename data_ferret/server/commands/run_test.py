@@ -7,6 +7,7 @@ import time
 
 from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.server.kernel_manager import FerretKernelClient
+from data_ferret.kernel.kernel_command_client import KernelCommandClient
 
 
 class RunTestCommand(NotebookCommand):
@@ -31,7 +32,7 @@ class RunTestCommand(NotebookCommand):
         notebook_content: Dict[str, Any],
         kernel_client: Optional[FerretKernelClient] = None,
         selected_cell_ids: Optional[List[str]] = None,
-        **kwargs
+        **kwargs,
     ) -> ProcessingResult:
         """Run a test cell with checkpoint/restore semantics."""
 
@@ -73,45 +74,54 @@ class RunTestCommand(NotebookCommand):
         outputs = []
         test_metadata = test_cell.get("metadata", {}).get("ferret_test", {})
 
+        # Create kernel command client and checkpoint name
+        cmd_client = KernelCommandClient(kernel_client)
+        checkpoint_name = f"test_{test_cell_id}_{int(time.time() * 1000)}"
+
+        # Save checkpoint once at the beginning
+        cmd_client.checkpoint_save(checkpoint_name)
+
         try:
             start_time = time.time()
-
-            # Create checkpoint
-            checkpoint_code = """
-import sys
-_ferret_test_checkpoint = {}
-_ferret_test_checkpoint['globals'] = {k: v for k, v in globals().items()
-                                       if not k.startswith('_')}
-"""
-            await kernel_client.execute(
-                checkpoint_code, silent=True, store_history=False
-            )
+            setup_time = 0.0
+            parent_time = 0.0
+            assertion_time = 0.0
 
             # Run setup code if present
             if sections["setup"].strip():
+                setup_start = time.time()
                 setup_result = await kernel_client.execute(
                     sections["setup"], silent=False, store_history=False
                 )
+                setup_time = time.time() - setup_start
                 if setup_result.get("outputs"):
                     outputs.extend(setup_result["outputs"])
 
             # Run parent cell code
+            parent_start = time.time()
             parent_source = self._get_cell_source(parent_cell)
             parent_result = await kernel_client.execute(
                 parent_source, silent=False, store_history=False
             )
+            parent_time = time.time() - parent_start
             if parent_result.get("outputs"):
                 outputs.extend(parent_result["outputs"])
 
             # Add separator
             outputs.append(
-                {"output_type": "display_data", "data": {"text/plain": "# ..."}, "metadata": {}}
+                {
+                    "output_type": "display_data",
+                    "data": {"text/plain": "# ..."},
+                    "metadata": {},
+                }
             )
 
             # Run assertions
+            assertion_start = time.time()
             assertion_result = await kernel_client.execute(
                 sections["assertions"], silent=False, store_history=False
             )
+            assertion_time = time.time() - assertion_start
 
             duration = time.time() - start_time
 
@@ -129,21 +139,8 @@ _ferret_test_checkpoint['globals'] = {k: v for k, v in globals().items()
                     else:
                         error_message = output.get("evalue", "Unknown error")
 
-            # Restore checkpoint
-            restore_code = """
-# Restore globals
-_to_delete = [k for k in globals().keys()
-              if k not in _ferret_test_checkpoint['globals']
-              and not k.startswith('_')]
-for k in _to_delete:
-    del globals()[k]
-
-for k, v in _ferret_test_checkpoint['globals'].items():
-    globals()[k] = v
-
-del _ferret_test_checkpoint
-"""
-            await kernel_client.execute(restore_code, silent=True, store_history=False)
+            # Restore checkpoint after test execution
+            cmd_client.checkpoint_restore(checkpoint_name)
 
             # Update test metadata with results
             test_metadata["last_run"] = {
@@ -153,23 +150,46 @@ del _ferret_test_checkpoint
                 "timestamp": int(time.time() * 1000),
             }
 
-            # Add timing output
+            # Add timing output with detailed breakdown
             status_symbol = "✗" if has_error else "✓"
             status_text = "Failed" if has_error else "Passed"
             status_color = "#f44336" if has_error else "#4caf50"
+
+            # Build timing breakdown
+            timing_parts = []
+            if setup_time > 0:
+                timing_parts.append(f"setup: {setup_time:.3f}s")
+            timing_parts.append(f"parent: {parent_time:.3f}s")
+            timing_parts.append(f"assertions: {assertion_time:.3f}s")
+            timing_breakdown = ", ".join(timing_parts)
+
+            # Debug: Log timing information
+            print(f"[RunTest] Timing - setup: {setup_time:.3f}s, parent: {parent_time:.3f}s, assertions: {assertion_time:.3f}s, total: {duration:.3f}s")
+            print(f"[RunTest] Building timing HTML with breakdown: {timing_breakdown}")
+
+            timing_html = (
+                f'<div style="color: {status_color}; '
+                f'font-size: 12px; margin-top: 8px; font-weight: 600;">'
+                f'{status_symbol} {status_text} ({duration:.3f}s total: {timing_breakdown})</div>'
+            )
             outputs.append(
                 {
                     "output_type": "display_data",
                     "data": {
-                        "text/html": f'<div style="color: {status_color}; '
-                        f'font-size: 12px; margin-top: 8px; font-weight: 600;">'
-                        f'{status_symbol} {status_text} ({duration:.3f}s)</div>'
+                        "text/html": timing_html
                     },
                     "metadata": {},
                 }
             )
+            print(f"[RunTest] Added timing output. Total outputs: {len(outputs)}")
 
         except Exception as e:
+            # Restore checkpoint even on error
+            try:
+                cmd_client.checkpoint_restore(checkpoint_name)
+            except Exception:
+                pass  # Best effort restore
+
             # Handle execution error
             test_metadata["last_run"] = {
                 "status": "error",
@@ -185,6 +205,13 @@ del _ferret_test_checkpoint
                     "traceback": [str(e)],
                 }
             )
+
+        finally:
+            # Clean up checkpoint at the end
+            try:
+                cmd_client.checkpoint_delete(checkpoint_name)
+            except Exception:
+                pass  # Best effort cleanup
 
         # Update test cell in notebook
         test_cell["outputs"] = outputs

@@ -139,6 +139,16 @@ export class FerretCommandsManager {
 
         notebook.content.model?.fromJSON(result.notebook);
 
+        // For commands that update metadata (like generate_tests), trigger a refresh
+        // of the active cell to ensure panels update
+        if (commandId === 'generate_tests' || commandId === 'inspect' || commandId === 'profile') {
+          const activeCell = notebook.content.activeCell;
+          if (activeCell) {
+            // Trigger a metadataChanged event to refresh panels
+            activeCell.model.metadata = { ...activeCell.model.metadata };
+          }
+        }
+
         console.log('Command metadata:', result.metadata);
         console.log(`Command cost: $${result.total_cost.toFixed(4)}, time: ${result.total_time.toFixed(2)}s`);
 

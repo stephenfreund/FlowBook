@@ -345,14 +345,15 @@ generate_tests_instructions: |
   - Each test should be independent and self-contained
 
   Guidelines for setup_code:
-  - Initialize data variables to match the specific values for the test.
-  - Do not import any modules.  Assume all required imports for the cell are present.
+  - The environment variables are available in the setup_code and have the values computed by the previous cells.
+  - Modify any environment variables in the setup_code to match the specific values for the test.
+  - Do not add import statements to the setup_code.
   - Use realistic test data that exercises the code meaningfully
   - Keep test data simple but representative
   - Vary the test data across tests to cover different scenarios
 
   Guidelines for assertion_code:
-  - Assert properties of variables from globals_written (the cell's outputs)
+  - Assert properties of variables written by the cell
   - Use specific assertions (assert x == 5, not just assert x)
   - Test multiple aspects when relevant (type, value, length, properties)
   - Include descriptive messages in assertions when helpful
@@ -365,13 +366,15 @@ generate_tests_input: |
   {cell_source}
   ```
 
-  Variables this cell reads:
-  {globals_read}
+  The following variables are available in the environment with the values computed by the previous cells:
+  ```
+  {env_section}
+  ```
 
-  Variables this cell writes:
-  {globals_written}
-
-  {context_section}
+  The following variables are live at the end of the cell:
+  ```
+  {live_vars_section}
+  ```
 
   INSTRUCTIONS:
   - Generate 3-5 comprehensive unit tests

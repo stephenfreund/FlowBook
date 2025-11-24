@@ -6,7 +6,7 @@ Tests are added to existing tests in cell metadata (non-destructive).
 """
 
 import asyncio
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, Set
 
 from agents import Usage
 import nbformat
@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from data_ferret.agent.agent import FerretAgent, FerretStats
 from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.server.kernel_manager import FerretKernelClient
-from data_ferret.util.dependencies import analyze_notebook, CellDependencies
+from data_ferret.util.notebook_analysis import NotebookAnalysis
 from data_ferret.util.ferret_metadata import (
     FerretMetadata,
     UnitTest,
@@ -66,11 +66,49 @@ class GenerateTestsCommand(NotebookCommand):
     def requires_kernel(self) -> bool:
         return False
 
+    @staticmethod
+    def format_environment_section(env_data: Optional[Dict[str, str]]) -> str:
+        """Format environment information from profile metadata."""
+        if env_data:
+            env_lines = [f"- {var}: {type_}" for var, type_ in env_data.items()]
+            return "".join(env_lines)
+        return ""
+
+    @staticmethod
+    def format_live_variables_section(
+        live_vars: Set[str], env_data: Optional[Dict[str, str]] = None
+    ) -> str:
+        """Format live variables that must be preserved during optimization.
+
+        Args:
+            live_vars: Set of variable names that are live (will be used by subsequent cells)
+            env_data: Optional environment data with type information
+
+        Returns:
+            Formatted string describing live variables that must be preserved
+        """
+        if not live_vars:
+            return ""
+
+        # Sort for consistent output
+        sorted_vars = sorted(live_vars)
+
+        # Add type information if available
+        if env_data:
+            var_lines = []
+            for var in sorted_vars:
+                type_info = env_data.get(var, "unknown")
+                var_lines.append(f"- {var}: {type_info}")
+        else:
+            var_lines = [f"- {var}" for var in sorted_vars]
+
+        return "\n".join(var_lines)
+
     async def _generate_tests_for_cell(
         self,
         cell: nbformat.NotebookNode,
         cell_id: str,
-        dependencies: CellDependencies,
+        analysis: NotebookAnalysis,
         model: str,
         context: str = "",
     ) -> Tuple[List[UnitTest], FerretStats]:
@@ -83,6 +121,16 @@ class GenerateTestsCommand(NotebookCommand):
 
         # Skip empty cells
         if not source.strip():
+            return [], FerretStats(
+                model=model,
+                log_path="",
+                time=0.0,
+                usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0),
+            )
+
+        # Get dependencies from analysis
+        dependencies = analysis.get_dependencies(cell_id)
+        if not dependencies:
             return [], FerretStats(
                 model=model,
                 log_path="",
@@ -106,14 +154,20 @@ class GenerateTestsCommand(NotebookCommand):
 ```
 """
 
+        # Extract env_data from cell metadata (profile data)
+        ferret_meta = FerretMetadata.from_cell(cell)
+        env_data = ferret_meta.profile.env if ferret_meta.profile else None
+
+        # Get live variables from analysis
+        live_vars = analysis.get_live_out_variables(cell_id)
+
         # Get prompts from the prompt manager
         instructions = get_prompt("generate_tests_instructions")
         prompt = get_prompt(
             "generate_tests_input",
             cell_source=source,
-            globals_read=read_vars,
-            globals_written=written_vars,
-            context_section=context_section,
+            env_section=self.format_environment_section(env_data),
+            live_vars_section=self.format_live_variables_section(live_vars, env_data),
         )
 
         # Generate tests using AI agent
@@ -132,7 +186,7 @@ class GenerateTestsCommand(NotebookCommand):
         self,
         index: int,
         nb: nbformat.NotebookNode,
-        dependencies_dict: Dict[str, CellDependencies],
+        analysis: NotebookAnalysis,
         model: str,
     ) -> Tuple[str, GenerateTestsResultAndStats]:
         """Generate tests for a single cell and return the result with stats."""
@@ -140,8 +194,8 @@ class GenerateTestsCommand(NotebookCommand):
         cell = cells[index]
         cell_id = cell["id"]
 
-        # Get dependencies for this cell
-        if cell_id not in dependencies_dict:
+        # Check if cell has dependency info
+        if not analysis.has_cell(cell_id):
             # No dependency info, return empty
             return cell_id, GenerateTestsResultAndStats(
                 tests=[],
@@ -152,8 +206,6 @@ class GenerateTestsCommand(NotebookCommand):
                     usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0),
                 ),
             )
-
-        dependencies = dependencies_dict[cell_id]
 
         # Build context from previous cells (for AI to understand variable definitions)
         context_lines = []
@@ -171,7 +223,7 @@ class GenerateTestsCommand(NotebookCommand):
 
         # Generate tests using AI
         tests, stats = await self._generate_tests_for_cell(
-            cell, cell_id, dependencies, model, context
+            cell, cell_id, analysis, model, context
         )
 
         # Print progress
@@ -188,7 +240,7 @@ class GenerateTestsCommand(NotebookCommand):
     async def generate_tests_for_cells(
         self,
         nb: nbformat.NotebookNode,
-        dependencies_dict: Dict[str, CellDependencies],
+        analysis: NotebookAnalysis,
         model: str,
         cell_ids: Optional[List[str]] = None,
     ) -> Tuple[nbformat.NotebookNode, float]:
@@ -206,7 +258,9 @@ class GenerateTestsCommand(NotebookCommand):
                 # Only process selected cells if specified
                 if source.strip() and (cell_ids is None or cell["id"] in cell_ids):
                     tasks.append(
-                        self.generate_tests_for_cell(index, nb, dependencies_dict, model)
+                        self.generate_tests_for_cell(
+                            index, nb, analysis, model
+                        )
                     )
 
         if not tasks:
@@ -262,13 +316,13 @@ class GenerateTestsCommand(NotebookCommand):
     ) -> ProcessingResult:
         """Generate unit tests for code cells."""
         with self.timing_context() as get_elapsed:
-            # Analyze dependencies for the entire notebook
-            dependencies_dict = analyze_notebook(notebook_content)
+            # Analyze notebook (dependencies + liveness)
+            analysis = NotebookAnalysis(notebook_content)
 
             # Generate tests concurrently
             new_nb, total_cost = await self.generate_tests_for_cells(
                 notebook_content,
-                dependencies_dict,
+                analysis,
                 config.model if config else "gpt-4o",
                 selected_cell_ids,
             )
@@ -276,7 +330,13 @@ class GenerateTestsCommand(NotebookCommand):
             cells_processed = (
                 len(selected_cell_ids)
                 if selected_cell_ids
-                else len([c for c in notebook_content["cells"] if c.get("cell_type") == "code"])
+                else len(
+                    [
+                        c
+                        for c in notebook_content["cells"]
+                        if c.get("cell_type") == "code"
+                    ]
+                )
             )
 
             metadata = {
