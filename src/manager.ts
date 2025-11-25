@@ -144,8 +144,8 @@ export class FerretCommandsManager {
         if (commandId === 'generate_tests' || commandId === 'inspect' || commandId === 'profile') {
           const activeCell = notebook.content.activeCell;
           if (activeCell) {
-            // Trigger a metadataChanged event to refresh panels
-            activeCell.model.metadata = { ...activeCell.model.metadata };
+            // Trigger a cell update to refresh panels
+            activeCell.update();
           }
         }
 

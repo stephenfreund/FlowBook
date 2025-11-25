@@ -123,6 +123,9 @@ class TestCommand(NotebookCommand):
         cell_code = cell.source
         tests = ferret_meta.unit_tests.tests
 
+        # Calculate max title length for alignment
+        max_title_length = max(len(test.title) for test in tests) if tests else 0
+
         # Add header output
         self._add_output(cell, "stream", {
             "name": "stdout",
@@ -135,7 +138,7 @@ class TestCommand(NotebookCommand):
         # Execute each test
         for i, test in enumerate(tests, 1):
             success = self._execute_single_test(
-                cell, test, cell_code, kernel_client, i, len(tests)
+                cell, test, cell_code, kernel_client, i, len(tests), max_title_length
             )
             if success:
                 passed_count += 1
@@ -158,7 +161,8 @@ class TestCommand(NotebookCommand):
         cell_code: str,
         kernel_client: FerretKernelClient,
         test_num: int,
-        total_tests: int
+        total_tests: int,
+        max_title_length: int
     ) -> bool:
         """
         Execute a single test with checkpoint/restore.
@@ -167,6 +171,12 @@ class TestCommand(NotebookCommand):
             True if test passed, False if test failed
         """
         test_checkpoint_name = f"__ferret_test_checkpoint_{cell.id}_{test_num}"
+
+        # Track timing for each phase
+        start_time = time.time()
+        setup_time = 0.0
+        cell_time = 0.0
+        assertion_time = 0.0
 
         try:
             # 1. Create checkpoint
@@ -177,33 +187,43 @@ __ferret_saved, __ferret_removed = __ferret_checkpoints.save('{test_checkpoint_n
 """
             result = KernelHelper.execute_code(kernel_client, checkpoint_code, timeout=30.0)
             if not self._check_execution_success(result):
-                self._add_test_failure(cell, test, "Failed to create checkpoint", result, test_num, total_tests)
+                self._add_test_failure(cell, test, "Failed to create checkpoint", result, test_num, total_tests, 0.0, max_title_length)
                 return False
 
             # 2. Execute setup code
             if test.setup_code and test.setup_code.strip():
+                setup_start = time.time()
                 result = KernelHelper.execute_code(kernel_client, test.setup_code, timeout=30.0)
+                setup_time = time.time() - setup_start
                 if not self._check_execution_success(result):
-                    self._add_test_failure(cell, test, "Setup code failed", result, test_num, total_tests)
+                    total_time = time.time() - start_time
+                    self._add_test_failure(cell, test, "Setup code failed", result, test_num, total_tests, total_time, max_title_length)
                     self._restore_checkpoint(kernel_client, test_checkpoint_name)
                     return False
 
             # 3. Execute cell code
+            cell_start = time.time()
             result = KernelHelper.execute_code(kernel_client, cell_code, timeout=30.0)
+            cell_time = time.time() - cell_start
             if not self._check_execution_success(result):
-                self._add_test_failure(cell, test, "Cell execution failed", result, test_num, total_tests)
+                total_time = time.time() - start_time
+                self._add_test_failure(cell, test, "Cell execution failed", result, test_num, total_tests, total_time, max_title_length)
                 self._restore_checkpoint(kernel_client, test_checkpoint_name)
                 return False
 
             # 4. Execute assertion code
+            assertion_start = time.time()
             result = KernelHelper.execute_code(kernel_client, test.assertion_code, timeout=30.0)
+            assertion_time = time.time() - assertion_start
             if not self._check_execution_success(result):
-                self._add_test_failure(cell, test, "Assertion failed", result, test_num, total_tests)
+                total_time = time.time() - start_time
+                self._add_test_failure(cell, test, "Assertion failed", result, test_num, total_tests, total_time, max_title_length)
                 self._restore_checkpoint(kernel_client, test_checkpoint_name)
                 return False
 
             # 5. Test passed!
-            self._add_test_success(cell, test, test_num, total_tests)
+            total_time = time.time() - start_time
+            self._add_test_success(cell, test, test_num, total_tests, total_time, setup_time, cell_time, assertion_time, max_title_length)
             return True
 
         finally:
@@ -228,12 +248,28 @@ del __ferret_checkpoints, __ferret_saved, __ferret_removed
         cell: nbformat.NotebookNode,
         test: UnitTest,
         test_num: int,
-        total_tests: int
+        total_tests: int,
+        total_time: float,
+        setup_time: float = 0.0,
+        cell_time: float = 0.0,
+        assertion_time: float = 0.0,
+        max_title_length: int = 0
     ):
-        """Add success output to cell."""
+        """Add success output to cell with timing information."""
+        # Build timing breakdown
+        timing_parts = []
+        if setup_time > 0:
+            timing_parts.append(f"setup: {setup_time:.3f}s")
+        timing_parts.append(f"cell: {cell_time:.3f}s")
+        timing_parts.append(f"assertions: {assertion_time:.3f}s")
+        timing_breakdown = ", ".join(timing_parts)
+
+        # Pad title to align timing information
+        padded_title = test.title.ljust(max_title_length)
+
         self._add_output(cell, "stream", {
             "name": "stdout",
-            "text": f"✓ Test {test_num}/{total_tests}: {test.title}\n"
+            "text": f"✓ Test {test_num}/{total_tests}: {padded_title} ({total_time:.3f}s total: {timing_breakdown})\n"
         })
 
     def _add_test_failure(
@@ -243,10 +279,15 @@ del __ferret_checkpoints, __ferret_saved, __ferret_removed
         reason: str,
         result: Dict[str, Any],
         test_num: int,
-        total_tests: int
+        total_tests: int,
+        total_time: float,
+        max_title_length: int = 0
     ):
-        """Add failure output to cell."""
-        error_text = f"✗ Test {test_num}/{total_tests}: {test.title}\n"
+        """Add failure output to cell with timing information."""
+        # Pad title to align timing information
+        padded_title = test.title.ljust(max_title_length)
+
+        error_text = f"✗ Test {test_num}/{total_tests}: {padded_title} ({total_time:.3f}s)\n"
         error_text += f"  Reason: {reason}\n"
 
         # Extract error details from result
