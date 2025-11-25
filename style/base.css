@@ -616,3 +616,24 @@
   outline: none;
   border-color: var(--jp-brand-color1);
 }
+
+/* CodeMirror wrapper for syntax-highlighted code editors */
+.ferret-code-editor-wrapper {
+  border: 1px solid var(--jp-border-color1);
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--jp-layout-color0);
+}
+
+.ferret-code-editor-wrapper .jp-CodeMirrorEditor {
+  font-size: 0.9em;
+}
+
+.ferret-code-editor-wrapper .CodeMirror {
+  height: auto;
+  min-height: 100px;
+}
+
+.ferret-code-editor-wrapper .CodeMirror-scroll {
+  min-height: 100px;
+}
