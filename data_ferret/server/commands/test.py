@@ -11,8 +11,9 @@ import nbformat
 from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.server.kernel_helper import KernelHelper
+from data_ferret.kernel.kernel_command_client import KernelCommandClient
 from data_ferret.util.ferret_metadata import FerretMetadata, UnitTest
-from data_ferret.util.output import log
+from data_ferret.util.output import indent, log, print, timer
 
 
 class TestCommand(NotebookCommand):
@@ -52,9 +53,10 @@ class TestCommand(NotebookCommand):
         If selected_cell_ids is None: test ALL cells with unit tests
         """
 
-        log("BEEEP")
-
         start_time = time.time()
+
+        # Initialize checkpoint client
+        checkpoint_client = KernelCommandClient(kernel_client, timeout=30)
 
         notebook = nbformat.from_dict(notebook_content)
 
@@ -73,7 +75,7 @@ class TestCommand(NotebookCommand):
                     if ferret_meta.unit_tests and ferret_meta.unit_tests.tests:
                         cells_to_test.append(cell)
 
-        log(f"Testing {len(cells_to_test)} cell(s)")
+        print(f"Testing {len(cells_to_test)} cell(s)")
 
         # Clear existing outputs for cells being tested
         for cell in cells_to_test:
@@ -85,10 +87,12 @@ class TestCommand(NotebookCommand):
         failed_tests = 0
 
         for cell in cells_to_test:
-            passed, failed = self._execute_tests_for_cell(cell, kernel_client)
-            total_tests += passed + failed
-            passed_tests += passed
-            failed_tests += failed
+            print(f"Testing cell {cell.id}")
+            with indent(message=f"Testing cell {cell.id}"):
+                passed, failed = self._execute_tests_for_cell(cell, kernel_client, checkpoint_client)
+                total_tests += passed + failed
+                passed_tests += passed
+                failed_tests += failed
 
         total_time = time.time() - start_time
 
@@ -107,7 +111,8 @@ class TestCommand(NotebookCommand):
     def _execute_tests_for_cell(
         self,
         cell: nbformat.NotebookNode,
-        kernel_client: FerretKernelClient
+        kernel_client: FerretKernelClient,
+        checkpoint_client: KernelCommandClient
     ) -> tuple[int, int]:
         """
         Execute all tests for a single cell.
@@ -135,15 +140,33 @@ class TestCommand(NotebookCommand):
         passed_count = 0
         failed_count = 0
 
-        # Execute each test
-        for i, test in enumerate(tests, 1):
-            success = self._execute_single_test(
-                cell, test, cell_code, kernel_client, i, len(tests), max_title_length
-            )
-            if success:
-                passed_count += 1
-            else:
-                failed_count += 1
+        # Generate checkpoint name for this cell (shared by all tests)
+        checkpoint_name = f"__ferret_test_checkpoint_{cell.id}"
+
+        # Save checkpoint once before all tests
+        try:
+            response = checkpoint_client.checkpoint_save(checkpoint_name)
+            if response.status != "ok":
+                log(f"Error: Failed to save checkpoint for cell {cell.id}: {response.message}")
+                return (0, 0)  # Can't test without checkpoint
+        except Exception as e:
+            log(f"Error: Failed to save checkpoint for cell {cell.id}: {e}")
+            return (0, 0)
+
+        try:
+            # Execute each test
+            for i, test in enumerate(tests, 1):
+                success = self._execute_single_test(
+                    cell, test, cell_code, kernel_client, checkpoint_client,
+                    checkpoint_name, i, len(tests), max_title_length
+                )
+                if success:
+                    passed_count += 1
+                else:
+                    failed_count += 1
+        finally:
+            # Delete checkpoint after all tests complete
+            self._delete_checkpoint(checkpoint_client, checkpoint_name)
 
         # Add summary
         summary_text = f"\nTest Results: {passed_count} passed, {failed_count} failed\n"
@@ -160,6 +183,8 @@ class TestCommand(NotebookCommand):
         test: UnitTest,
         cell_code: str,
         kernel_client: FerretKernelClient,
+        checkpoint_client: KernelCommandClient,
+        checkpoint_name: str,
         test_num: int,
         total_tests: int,
         max_title_length: int
@@ -170,7 +195,7 @@ class TestCommand(NotebookCommand):
         Returns:
             True if test passed, False if test failed
         """
-        test_checkpoint_name = f"__ferret_test_checkpoint_{cell.id}_{test_num}"
+        print(f"Running test {test_num}/{total_tests}: {test.title}...")
 
         # Track timing for each phase
         start_time = time.time()
@@ -179,46 +204,35 @@ class TestCommand(NotebookCommand):
         assertion_time = 0.0
 
         try:
-            # 1. Create checkpoint
-            checkpoint_code = f"""
-from data_ferret.kernel.checkpoint import Checkpoints
-__ferret_checkpoints = Checkpoints(skip_immutable_copy=True)
-__ferret_saved, __ferret_removed = __ferret_checkpoints.save('{test_checkpoint_name}', globals())
-"""
-            result = KernelHelper.execute_code(kernel_client, checkpoint_code, timeout=30.0)
-            if not self._check_execution_success(result):
-                self._add_test_failure(cell, test, "Failed to create checkpoint", result, test_num, total_tests, 0.0, max_title_length)
-                return False
-
-            # 2. Execute setup code
+            # Execute setup code
             if test.setup_code and test.setup_code.strip():
                 setup_start = time.time()
-                result = KernelHelper.execute_code(kernel_client, test.setup_code, timeout=30.0)
+                result = KernelHelper.execute_code(kernel_client, test.setup_code, timeout=30.0, store_history=False)
                 setup_time = time.time() - setup_start
                 if not self._check_execution_success(result):
                     total_time = time.time() - start_time
                     self._add_test_failure(cell, test, "Setup code failed", result, test_num, total_tests, total_time, max_title_length)
-                    self._restore_checkpoint(kernel_client, test_checkpoint_name)
+                    self._restore_checkpoint_only(checkpoint_client, checkpoint_name)
                     return False
 
             # 3. Execute cell code
             cell_start = time.time()
-            result = KernelHelper.execute_code(kernel_client, cell_code, timeout=30.0)
+            result = KernelHelper.execute_code(kernel_client, cell_code, timeout=30.0, store_history=False)
             cell_time = time.time() - cell_start
             if not self._check_execution_success(result):
                 total_time = time.time() - start_time
                 self._add_test_failure(cell, test, "Cell execution failed", result, test_num, total_tests, total_time, max_title_length)
-                self._restore_checkpoint(kernel_client, test_checkpoint_name)
+                self._restore_checkpoint_only(checkpoint_client, checkpoint_name)
                 return False
 
             # 4. Execute assertion code
             assertion_start = time.time()
-            result = KernelHelper.execute_code(kernel_client, test.assertion_code, timeout=30.0)
+            result = KernelHelper.execute_code(kernel_client, test.assertion_code, timeout=30.0, store_history=False)
             assertion_time = time.time() - assertion_start
             if not self._check_execution_success(result):
                 total_time = time.time() - start_time
                 self._add_test_failure(cell, test, "Assertion failed", result, test_num, total_tests, total_time, max_title_length)
-                self._restore_checkpoint(kernel_client, test_checkpoint_name)
+                self._restore_checkpoint_only(checkpoint_client, checkpoint_name)
                 return False
 
             # 5. Test passed!
@@ -228,16 +242,25 @@ __ferret_saved, __ferret_removed = __ferret_checkpoints.save('{test_checkpoint_n
 
         finally:
             # 6. Always restore checkpoint
-            self._restore_checkpoint(kernel_client, test_checkpoint_name)
+            self._restore_checkpoint_only(checkpoint_client, checkpoint_name)
 
-    def _restore_checkpoint(self, kernel_client: FerretKernelClient, checkpoint_name: str):
-        """Restore a checkpoint and clean up."""
-        restore_code = f"""
-__ferret_checkpoints.restore('{checkpoint_name}', globals())
-__ferret_checkpoints.delete('{checkpoint_name}')
-del __ferret_checkpoints, __ferret_saved, __ferret_removed
-"""
-        KernelHelper.execute_code(kernel_client, restore_code, timeout=30.0)
+    def _restore_checkpoint_only(self, checkpoint_client: KernelCommandClient, checkpoint_name: str):
+        """Restore a checkpoint without deleting it."""
+        try:
+            response = checkpoint_client.checkpoint_restore(checkpoint_name)
+            if response.status != "ok":
+                log(f"Warning: Failed to restore checkpoint '{checkpoint_name}': {response.message}")
+        except Exception as e:
+            log(f"Warning: Error during checkpoint restore: {e}")
+
+    def _delete_checkpoint(self, checkpoint_client: KernelCommandClient, checkpoint_name: str):
+        """Delete a checkpoint to free memory."""
+        try:
+            response = checkpoint_client.checkpoint_delete(checkpoint_name)
+            if response.status != "ok":
+                log(f"Warning: Failed to delete checkpoint '{checkpoint_name}': {response.message}")
+        except Exception as e:
+            log(f"Warning: Error during checkpoint delete: {e}")
 
     def _check_execution_success(self, result: Dict[str, Any]) -> bool:
         """Check if kernel execution succeeded."""

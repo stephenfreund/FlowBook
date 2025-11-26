@@ -84,8 +84,10 @@ class FerretCommandHandler(APIHandler):
                     )
                     return
 
-            # Execute command with output streaming to clients
+            # Clear previous messages and execute command with output streaming to clients
             # Run in executor to prevent blocking the event loop and allow SSE to flush
+            get_broadcaster().clear()
+
             def run_command():
                 with stream_output(get_broadcast_stream()):
                     log(f"Executing command {command_name}")
@@ -109,6 +111,9 @@ class FerretCommandHandler(APIHandler):
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             result = await asyncio.get_event_loop().run_in_executor(executor, run_command)
             executor.shutdown(wait=False)
+
+            # Send END message to signal command completion
+            get_broadcaster().end()
 
             # Serialize ProcessingResult to JSON
             # Use model_dump() to convert Pydantic model to dict, then json.dumps

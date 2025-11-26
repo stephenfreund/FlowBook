@@ -2,78 +2,12 @@ import { Widget } from '@lumino/widgets';
 import { ServerConnection } from '@jupyterlab/services';
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
-
-/**
- * Message types from the server broadcaster
- */
-enum MessageType {
-  APPEND = 'append',
-  NEWLINE = 'newline',
-  END = 'end',
-  CLEAR = 'clear'
-}
-
-/**
- * Message structure from the server
- */
-interface IMessage {
-  type: MessageType;
-  content: string;
-  metadata?: {
-    color?: string;
-    bold?: boolean;
-  };
-}
-
-/**
- * Message segment with optional styling
- */
-interface IMessageSegment {
-  content: string;
-  color?: string;
-  bold?: boolean;
-}
-
-/**
- * React component for displaying messages
- */
-interface IMessageDisplayProps {
-  segments: IMessageSegment[];
-}
-
-const MessageDisplay: React.FC<IMessageDisplayProps> = ({ segments }) => {
-  const contentRef = React.useRef<HTMLDivElement>(null);
-
-  // Auto-scroll to bottom when new messages arrive
-  React.useEffect(() => {
-    if (contentRef.current) {
-      contentRef.current.scrollTop = contentRef.current.scrollHeight;
-    }
-  }, [segments]);
-
-  return (
-    <div className="ferret-message-display" ref={contentRef}>
-      <pre className="ferret-message-content">
-        {segments.map((segment, index) => {
-          const style: React.CSSProperties = {};
-
-          if (segment.color) {
-            style.color = `var(--ferret-color-${segment.color}, inherit)`;
-          }
-          if (segment.bold) {
-            style.fontWeight = 'bold';
-          }
-
-          return (
-            <span key={index} style={style}>
-              {segment.content}
-            </span>
-          );
-        })}
-      </pre>
-    </div>
-  );
-};
+import {
+  MessageType,
+  IMessage,
+  IMessageSegment,
+  MessageDisplay
+} from './messagecomponents';
 
 /**
  * Panel widget for displaying messages from the server's message broadcaster

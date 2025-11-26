@@ -5,6 +5,7 @@
 import { NotebookPanel } from '@jupyterlab/notebook';
 import { IHistoryEntry, IHistoryState } from './types';
 import { ISignal, Signal } from '@lumino/signaling';
+import { indexToAlpha } from './cellindexutils';
 
 /**
  * Generate a unique ID for history entries
@@ -409,7 +410,7 @@ export class NotebookHistoryManager {
     if (notebook && affectedCells && affectedCells.length > 0) {
       const indices = this.getCellIndices(notebook, affectedCells);
       if (indices.length > 0) {
-        description += ` [${indices.join(', ')}]`;
+        description += ` [${indices.map(i => indexToAlpha(i)).join(', ')}]`;
       }
     }
 
@@ -417,7 +418,7 @@ export class NotebookHistoryManager {
   }
 
   /**
-   * Get 1-based cell indices from cell IDs
+   * Get 0-based cell indices from cell IDs
    */
   private getCellIndices(notebook: any, cellIds: string[]): number[] {
     if (!notebook || !notebook.cells || !cellIds) {
@@ -428,7 +429,7 @@ export class NotebookHistoryManager {
     const cellIdToIndex = new Map<string, number>();
 
     notebook.cells.forEach((cell: any, index: number) => {
-      cellIdToIndex.set(cell.id, index + 1); // 1-based indexing
+      cellIdToIndex.set(cell.id, index); // 0-based indexing
     });
 
     cellIds.forEach(cellId => {
@@ -511,7 +512,7 @@ export class NotebookHistoryManager {
       if (entry.affectedCells && entry.affectedCells.length > 0) {
         const indices = this.getCellIndices(currentNotebook, entry.affectedCells);
         if (indices.length > 0) {
-          const indexStr = indices.map(i => `#${i}`).join(', ');
+          const indexStr = indices.map(i => indexToAlpha(i)).join(', ');
           // Get the base description without any existing cell information
           const baseDesc = entry.description.split(/\[.*?\]|\(.*?\)/)[0].trim();
           return `${baseDesc} ${indexStr}`;
@@ -527,7 +528,7 @@ export class NotebookHistoryManager {
     if (entry.addedCells && entry.addedCells.length > 0) {
       const indices = this.getCellIndices(currentNotebook, entry.addedCells);
       if (indices.length > 0) {
-        const indexStr = indices.map(i => `#${i}`).join(', ');
+        const indexStr = indices.map(i => indexToAlpha(i)).join(', ');
         parts.push(`added ${indexStr}`);
       } else if (entry.editSummary?.cellsAdded) {
         parts.push(`added ${entry.editSummary.cellsAdded} cell${entry.editSummary.cellsAdded > 1 ? 's' : ''}`);
@@ -538,7 +539,7 @@ export class NotebookHistoryManager {
     if (entry.modifiedCells && entry.modifiedCells.length > 0) {
       const indices = this.getCellIndices(currentNotebook, entry.modifiedCells);
       if (indices.length > 0) {
-        const indexStr = indices.map(i => `#${i}`).join(', ');
+        const indexStr = indices.map(i => indexToAlpha(i)).join(', ');
         parts.push(`edited ${indexStr}`);
       } else if (entry.editSummary?.cellsModified) {
         parts.push(`edited ${entry.editSummary.cellsModified} cell${entry.editSummary.cellsModified > 1 ? 's' : ''}`);

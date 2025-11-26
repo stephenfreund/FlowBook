@@ -5,7 +5,6 @@
 import { JupyterFrontEnd } from '@jupyterlab/application';
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
 import { ICommandPalette } from '@jupyterlab/apputils';
-import { showDialog, Dialog } from '@jupyterlab/apputils';
 import { Notification } from '@jupyterlab/apputils';
 
 import { FerretAPI } from './api';
@@ -17,7 +16,7 @@ import {
   FERRET_COMMANDS
 } from './types';
 import { NotebookHistoryManager } from './history';
-import React from 'react';
+import { CommandExecutionDialog } from './executiondialog';
 
 /**
  * Manages Ferret commands, their registration, and execution
@@ -59,32 +58,21 @@ export class FerretCommandsManager {
     const commandInfo = this.commands.find(cmd => cmd.id === commandId);
     const commandLabel = commandInfo?.label || commandId;
 
-    // Create a custom dialog that we can dismiss programmatically
-    // We need at least one button for resolve() to work
-    const dismissButton = Dialog.okButton({ label: '' });
-    const dialog = new Dialog({
-      title: 'Executing Command',
-      body: `Running: ${commandLabel}`,
-      buttons: [dismissButton],
-      hasClose: false // Prevent manual closing
+    // Create and show the execution dialog with real-time message log
+    const dialog = new CommandExecutionDialog({
+      commandLabel: commandLabel
     });
 
-    // Launch the dialog without waiting for it
-    dialog.launch();
+    // Wait for SSE connection to be established before starting command execution
+    await dialog.show();
 
     try {
       const notebookContent = notebook.content.model?.toJSON();
 
       if (!notebookContent) {
         console.error('Could not get notebook content');
-        // Dismiss the execution dialog
-        dialog.resolve(0);
-
-        showDialog({
-          title: 'Error',
-          body: 'Could not get notebook content',
-          buttons: [Dialog.okButton()]
-        });
+        // Show error in dialog and keep it open
+        dialog.setError('Could not get notebook content');
         return null;
       }
 
@@ -125,8 +113,8 @@ export class FerretCommandsManager {
       if (commandInfo?.requires_kernel) {
         const kernelInfo = await KernelUtils.ensureKernel(notebook);
         if (!kernelInfo) {
-          // Dismiss the execution dialog
-          dialog.resolve(0);
+          // Show error in dialog and keep it open
+          dialog.setError('Kernel not available or user cancelled');
           return null;
         }
         request.kernel_id = kernelInfo.kernel_id;
@@ -135,8 +123,7 @@ export class FerretCommandsManager {
       // Execute the command
       const result = await FerretAPI.executeCommand(request);
 
-      // Dismiss the execution dialog
-      dialog.resolve(0);
+      // Dialog will auto-close on success after 500ms delay
 
       // Update the notebook with results
       if (result.notebook) {
@@ -182,9 +169,6 @@ export class FerretCommandsManager {
 
       return result;
     } catch (error) {
-      // Dismiss the execution dialog
-      dialog.resolve(0);
-
       console.error(`Failed to execute command ${commandId}:`, error);
 
       // Extract error message from various error formats
@@ -199,11 +183,8 @@ export class FerretCommandsManager {
         errorMessage = errorObj.error || errorObj.message || errorObj.toString();
       }
 
-      showDialog({
-        title: 'Command Error',
-        buttons: [Dialog.okButton()],
-        body: React.createElement('div', { dangerouslySetInnerHTML: { __html: `<pre style="white-space: pre-wrap; word-break: break-word;">${errorMessage}</pre>` } })
-      });
+      // Show error in dialog and keep it open
+      dialog.setError(errorMessage);
       return null;
     }
   }

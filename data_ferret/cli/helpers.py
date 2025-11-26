@@ -72,55 +72,58 @@ def detect_file_type(filepath: str) -> str:
 
 def convert_cell_indices_to_ids(notebook_content: Dict[str, Any], cell_id_args: List[str]) -> List[str]:
     """
-    Convert cell index notation (#1, #2) to actual cell IDs.
+    Convert cell index notation (@A, @B, @AA) to actual cell IDs.
 
-    Supports #N notation where N is a 1-based index of code cells.
-    For example, #1 refers to the first code cell, #2 to the second, etc.
+    Supports @A notation where indices are 0-based Excel-style for code cells.
+    For example, @A refers to the first code cell, @B to the second, etc.
 
     Args:
         notebook_content: The loaded notebook JSON
-        cell_id_args: List of cell IDs or #-notation strings
+        cell_id_args: List of cell IDs or @-notation strings
 
     Returns:
-        List of actual cell IDs with #-notation converted to UUIDs
+        List of actual cell IDs with @-notation converted to UUIDs
 
     Raises:
-        ValueError: If #-notation is invalid or out of range
+        ValueError: If @-notation is invalid or out of range
     """
-    # Build map of code cell index (1-based) to cell ID
-    code_cell_map = {}
-    code_cell_index = 1
+    from data_ferret.util.cell_index import alpha_to_index, index_to_alpha
+
+    # Build list of code cell IDs (0-based)
+    code_cell_ids = []
 
     for cell in notebook_content.get('cells', []):
         if cell.get('cell_type') == 'code':
-            code_cell_map[code_cell_index] = cell.get('id')
-            code_cell_index += 1
+            code_cell_ids.append(cell.get('id'))
 
     # Convert cell ID arguments
     converted_ids = []
 
     for cell_arg in cell_id_args:
-        if isinstance(cell_arg, str) and cell_arg.startswith('#'):
-            # Extract the number
-            index_str = cell_arg[1:]
-
+        if isinstance(cell_arg, str) and cell_arg.startswith('@'):
+            # Parse the alpha index
             try:
-                index = int(index_str)
-            except ValueError:
-                raise ValueError(f"Invalid cell index format: '{cell_arg}'. Expected #N where N is a number.")
+                index = alpha_to_index(cell_arg)  # Returns 0-based index
+            except ValueError as e:
+                raise ValueError(f"Invalid cell index format: '{cell_arg}'. {str(e)}")
 
-            if index < 1:
-                raise ValueError(f"Invalid cell index: '{cell_arg}'. Index must be >= 1.")
-
-            if index not in code_cell_map:
-                max_index = len(code_cell_map)
-                raise ValueError(
-                    f"Cell index out of range: '{cell_arg}'. "
-                    f"Notebook has {max_index} code cell{'s' if max_index != 1 else ''}."
-                )
+            if index < 0 or index >= len(code_cell_ids):
+                max_index = len(code_cell_ids)
+                if max_index > 0:
+                    max_cell = index_to_alpha(max_index - 1)
+                    raise ValueError(
+                        f"Cell index out of range: '{cell_arg}'. "
+                        f"Notebook has {max_index} code cell{'s' if max_index != 1 else ''} "
+                        f"(valid range: @A to {max_cell})."
+                    )
+                else:
+                    raise ValueError(
+                        f"Cell index out of range: '{cell_arg}'. "
+                        f"Notebook has no code cells."
+                    )
 
             # Convert to actual cell ID
-            cell_id = code_cell_map[index]
+            cell_id = code_cell_ids[index]
             converted_ids.append(cell_id)
             log(f"Converted {cell_arg} -> {cell_id}")
         else:

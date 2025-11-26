@@ -10,7 +10,7 @@ class KernelHelper:
     """Helper class for kernel communication."""
 
     @staticmethod
-    def execute_code(kernel_client: FerretKernelClient, code: str, timeout: float = 30.0, *, cell_id: str = None, cell_metadata: dict = None) -> Dict[str, Any]:
+    def execute_code(kernel_client: FerretKernelClient, code: str, timeout: float = 30.0, *, cell_id: str = None, cell_metadata: dict = None, store_history: bool = True) -> Dict[str, Any]:
         """
         Execute code in the kernel and return results.
 
@@ -20,10 +20,11 @@ class KernelHelper:
             timeout: Timeout in seconds
             cell_id: Cell ID
             cell_metadata: Cell metadata
+            store_history: Whether to store the code in the kernel's history (default: True)
         Returns:
             Dictionary with execution results including outputs and status
         """
-        msg_id = kernel_client.execute(code, cell_id=cell_id, cell_metadata=cell_metadata)
+        msg_id = kernel_client.execute(code, cell_id=cell_id, cell_metadata=cell_metadata, store_history=store_history)
 
         outputs = []
         execution_count = None

@@ -108,7 +108,7 @@ def cli_main():
     parser.add_argument(
         "--cell-ids",
         nargs="+",
-        help="Optional list of cell IDs to process. Can use #N for Nth code cell (1-based), e.g., --cell-ids #1 #3, or mix with actual cell IDs (default: process all cells)",
+        help="Optional list of cell IDs to process. Can use @A notation for 0-based code cell indexing (e.g., --cell-ids @A @C for cells 0 and 2), or mix with actual cell IDs (default: process all cells)",
     )
 
     args = parser.parse_args()
@@ -126,7 +126,7 @@ def cli_main():
         # Load notebook
         notebook_content = load_notebook(notebook_path)
 
-        # Convert cell indices (#1, #2) to actual cell IDs
+        # Convert cell indices (@A, @B) to actual cell IDs
         selected_cell_ids = args.cell_ids
         if selected_cell_ids:
             try:

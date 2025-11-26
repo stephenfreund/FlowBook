@@ -1,9 +1,10 @@
 /**
  * Cell Index Overlay Manager
- * Adds 1-based cell index overlays to code cells
+ * Adds 0-based cell index overlays to code cells using @A notation
  */
 
 import { NotebookPanel } from '@jupyterlab/notebook';
+import { indexToAlpha } from './cellindexutils';
 
 /**
  * Manages cell index overlays for notebooks
@@ -89,7 +90,7 @@ export class CellIndexManager {
     overlays.clear();
 
     // Add overlays to all code cells
-    let codeCellIndex = 1;
+    let codeCellIndex = 0;
     notebook.content.widgets.forEach((cell) => {
       // Only add to code cells
       if (cell.model.type === 'code') {
@@ -115,7 +116,7 @@ export class CellIndexManager {
   private createOverlay(index: number): HTMLElement {
     const overlay = document.createElement('div');
     overlay.className = 'ferret-cell-index-overlay';
-    overlay.textContent = `#${index}`;
+    overlay.textContent = indexToAlpha(index);
     return overlay;
   }
 }
