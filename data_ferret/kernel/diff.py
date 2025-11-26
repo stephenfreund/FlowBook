@@ -417,12 +417,19 @@ class Diff:
             result = self._compare_str(val_a, val_b, path)
         elif isinstance(val_a, bytes):
             result = self._compare_bytes(val_a, val_b, path)
+        # Pandas scalar types (must be before callable check)
+        elif isinstance(val_a, pd.Timestamp):
+            result = self._compare_timestamp(val_a, val_b, path)
+        elif isinstance(val_a, pd.Timedelta):
+            result = self._compare_timedelta(val_a, val_b, path)
         elif callable(val_a):
             result = self._compare_callable(val_a, val_b, path)
         elif isinstance(val_a, np.ndarray):
             result = self._compare_ndarray(val_a, val_b, path)
         elif isinstance(val_a, (DataFrameGroupBy, SeriesGroupBy)):
             result = self._compare_groupby(val_a, val_b, path)
+        elif isinstance(val_a, pd.Index):
+            result = self._compare_index(val_a, val_b, path)
         elif isinstance(val_a, pd.Series):
             result = self._compare_series(val_a, val_b, path)
         elif isinstance(val_a, pd.DataFrame):
@@ -709,9 +716,21 @@ class Diff:
     ) -> Optional[DiffNode]:
         """
         Compare callables.
-        - For functions: use identity (is)
+        - For type objects (classes): compare by identity
+        - For functions: ignore differences (redefinitions are common)
         - For bound methods: compare __func__ and __self__
         """
+        # Check if both are type objects (classes)
+        if isinstance(val_a, type) and isinstance(val_b, type):
+            if val_a is not val_b:
+                return ValueComparison(
+                    status="different",
+                    value1=val_a,
+                    value2=val_b,
+                    message=f"Type mismatch at {path}: {val_a.__name__} vs {val_b.__name__}",
+                )
+            return None
+
         # Check if both are bound methods
         is_method_a = hasattr(val_a, "__self__") and hasattr(val_a, "__func__")
         is_method_b = hasattr(val_b, "__self__") and hasattr(val_b, "__func__")
@@ -743,18 +762,6 @@ class Diff:
         else:
             # ignore function/callable mismatch
             return None
-
-            # # Both are regular functions/callables - use identity
-            # if val_a is not val_b:
-            #     name_a = getattr(val_a, '__name__', repr(val_a))
-            #     name_b = getattr(val_b, '__name__', repr(val_b))
-            #     return ValueComparison(
-            #         status="different",
-            #         value1=val_a,
-            #         value2=val_b,
-            #         message=f"Callable mismatch at {path}: {name_a} vs {name_b} (different objects)"
-            #     )
-            # return None
 
     def _compare_ndarray(
         self, val_a: np.ndarray, val_b: np.ndarray, path: str
@@ -1133,6 +1140,45 @@ class Diff:
 
         return diffs if diffs else None
 
+    def _compare_index(
+        self, val_a: pd.Index, val_b: pd.Index, path: str
+    ) -> Optional[ValueComparison]:
+        """Compare pandas Index objects using .equals() method."""
+        if not val_a.equals(val_b):
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Index mismatch at {path}: {list(val_a)} vs {list(val_b)}",
+            )
+        return None
+
+    def _compare_timestamp(
+        self, val_a: pd.Timestamp, val_b: pd.Timestamp, path: str
+    ) -> Optional[ValueComparison]:
+        """Compare pandas Timestamp objects."""
+        if val_a != val_b:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Timestamp mismatch at {path}: {val_a} vs {val_b}",
+            )
+        return None
+
+    def _compare_timedelta(
+        self, val_a: pd.Timedelta, val_b: pd.Timedelta, path: str
+    ) -> Optional[ValueComparison]:
+        """Compare pandas Timedelta objects."""
+        if val_a != val_b:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Timedelta mismatch at {path}: {val_a} vs {val_b}",
+            )
+        return None
+
     def _compare_groupby(self, val_a, val_b, path: str) -> Optional[ValueComparison]:
         """Compare pandas GroupBy objects (TODO: implement full diff collection)."""
         result = self._compare_groupby_legacy(val_a, val_b, path)
@@ -1462,11 +1508,18 @@ class Diff:
 
     def _compare_object(self, val_a: Any, val_b: Any, path: str) -> Optional[DiffNode]:
         """
-        Compare user-defined objects by recursively comparing their __dict__.
+        Compare user-defined objects by recursively comparing their attributes.
+        Handles both __dict__ and __slots__ based objects.
         """
-        # Check if objects have __dict__
-        if not hasattr(val_a, "__dict__"):
-            # Try direct equality
+        has_dict_a = hasattr(val_a, "__dict__")
+        has_dict_b = hasattr(val_b, "__dict__")
+
+        # Get __slots__ from the class, not the instance
+        slots_a = getattr(type(val_a), "__slots__", None)
+        slots_b = getattr(type(val_b), "__slots__", None)
+
+        # If neither has __dict__ nor __slots__, try direct equality
+        if not has_dict_a and not slots_a:
             try:
                 if val_a != val_b:
                     return ValueComparison(
@@ -1476,7 +1529,7 @@ class Diff:
                         message=f"Object mismatch at {path}: {val_a} != {val_b}",
                     )
                 return None
-            except:
+            except Exception:
                 return ValueComparison(
                     status="different",
                     value1=val_a,
@@ -1484,59 +1537,119 @@ class Diff:
                     message=f"Object comparison not supported at {path} (type: {type(val_a).__name__})",
                 )
 
-        if not hasattr(val_b, "__dict__"):
-            return ValueComparison(
-                status="different",
-                value1=val_a,
-                value2=val_b,
-                message=f"Object mismatch at {path}: first has __dict__, second does not",
-            )
-
-        # Recursively compare __dict__ attributes
         diffs = {}
-        dict_a = val_a.__dict__
-        dict_b = val_b.__dict__
+        diff_count = 0
 
-        keys_a = set(dict_a.keys())
-        keys_b = set(dict_b.keys())
+        # Compare __dict__ attributes if available
+        if has_dict_a and has_dict_b:
+            dict_a = val_a.__dict__
+            dict_b = val_b.__dict__
 
-        # Check for attribute mismatches
-        only_a = keys_a - keys_b
-        only_b = keys_b - keys_a
+            keys_a = set(dict_a.keys())
+            keys_b = set(dict_b.keys())
 
-        for key in only_a:
-            diffs[f".{key}"] = ValueComparison(
-                status="different",
-                value1=dict_a[key],
-                value2=None,
-                message=f"Attribute {key} only in first object",
-            )
+            # Check for attribute mismatches
+            only_a = keys_a - keys_b
+            only_b = keys_b - keys_a
 
-        for key in only_b:
-            diffs[f".{key}"] = ValueComparison(
-                status="different",
-                value1=None,
-                value2=dict_b[key],
-                message=f"Attribute {key} only in second object",
-            )
-
-        # Compare common attributes, collecting ALL differences
-        common_keys = keys_a & keys_b
-        diff_count = len(diffs)
-        for key in sorted(common_keys, key=str):
-            diff = self._compare_values(dict_a[key], dict_b[key], f"{path}.{key}")
-            if diff:
-                diffs[f".{key}"] = diff
+            for key in only_a:
+                diffs[f".{key}"] = ValueComparison(
+                    status="different",
+                    value1=dict_a[key],
+                    value2=None,
+                    message=f"Attribute {key} only in first object",
+                )
                 diff_count += 1
-                # Stop if we hit the limit
+
+            for key in only_b:
+                diffs[f".{key}"] = ValueComparison(
+                    status="different",
+                    value1=None,
+                    value2=dict_b[key],
+                    message=f"Attribute {key} only in second object",
+                )
+                diff_count += 1
+
+            # Compare common attributes
+            common_keys = keys_a & keys_b
+            for key in sorted(common_keys, key=str):
+                diff = self._compare_values(dict_a[key], dict_b[key], f"{path}.{key}")
+                if diff:
+                    diffs[f".{key}"] = diff
+                    diff_count += 1
+                    if diff_count >= self.max_diffs_per_container:
+                        diffs["_truncated"] = ValueComparison(
+                            status="different",
+                            value1=None,
+                            value2=None,
+                            message=f"Truncated after {diff_count} differences",
+                        )
+                        return diffs
+        elif has_dict_a != has_dict_b:
+            # One has __dict__, the other doesn't (and no slots to fall back on)
+            if not slots_a and not slots_b:
+                return ValueComparison(
+                    status="different",
+                    value1=val_a,
+                    value2=val_b,
+                    message=f"Object mismatch at {path}: __dict__ availability differs",
+                )
+
+        # Compare __slots__ attributes
+        if slots_a or slots_b:
+            # Normalize slots to tuples
+            if slots_a is None:
+                slots_a = ()
+            elif isinstance(slots_a, str):
+                slots_a = (slots_a,)
+            else:
+                slots_a = tuple(slots_a)
+
+            if slots_b is None:
+                slots_b = ()
+            elif isinstance(slots_b, str):
+                slots_b = (slots_b,)
+            else:
+                slots_b = tuple(slots_b)
+
+            all_slots = set(slots_a) | set(slots_b)
+
+            for slot in sorted(all_slots):
+                has_a = hasattr(val_a, slot)
+                has_b = hasattr(val_b, slot)
+
+                if has_a and not has_b:
+                    diffs[f".{slot}"] = ValueComparison(
+                        status="different",
+                        value1=getattr(val_a, slot),
+                        value2=None,
+                        message=f"Slot {slot} only in first object",
+                    )
+                    diff_count += 1
+                elif has_b and not has_a:
+                    diffs[f".{slot}"] = ValueComparison(
+                        status="different",
+                        value1=None,
+                        value2=getattr(val_b, slot),
+                        message=f"Slot {slot} only in second object",
+                    )
+                    diff_count += 1
+                elif has_a and has_b:
+                    diff = self._compare_values(
+                        getattr(val_a, slot), getattr(val_b, slot), f"{path}.{slot}"
+                    )
+                    if diff:
+                        diffs[f".{slot}"] = diff
+                        diff_count += 1
+
                 if diff_count >= self.max_diffs_per_container:
                     diffs["_truncated"] = ValueComparison(
                         status="different",
                         value1=None,
                         value2=None,
-                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})",
+                        message=f"Truncated after {diff_count} differences",
                     )
-                    break
+                    return diffs
 
         return diffs if diffs else None
 

@@ -1101,7 +1101,18 @@ class OptimizeCommand(NotebookCommand):
                     cell["id"], analysis
                 )
 
-                log(f"Modified globals: {modified_globals}")
+                # Remove function names that were modified by the optimization
+                # These function objects are expected to be different
+                modified_function_names = {
+                    snippet.function_name
+                    for snippet in current_snippets
+                    if snippet.function_name is not None
+                }
+                if modified_function_names:
+                    log(f"Excluding modified functions from validation: {modified_function_names}")
+                    modified_globals = modified_globals - modified_function_names
+
+                log(f"Modified globals to validate: {modified_globals}")
 
                 if not modified_globals:
                     log("No globals to validate, skipping validation")

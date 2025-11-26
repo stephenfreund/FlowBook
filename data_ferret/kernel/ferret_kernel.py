@@ -14,7 +14,8 @@ from IPython.display import HTML, display, Markdown
 from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
 from comm import create_comm
-from data_ferret.kernel.checkpoint import Checkpoints, checkpoint_diff
+from data_ferret.kernel.checkpoint import Checkpoints, checkpoint_diff, filter_user_namespace
+from data_ferret.kernel.deepcopyable import is_deepcopyable
 from data_ferret.kernel.equality import user_ns_diff
 from data_ferret.kernel.ferret_pdb import FerretPdb
 from data_ferret.kernel.types import (
@@ -594,6 +595,15 @@ class FerretKernel(IPythonKernel, Magics):
             if self._use_scalene and self._cell_id is not None and not has_cell_magics:
                 pre_type_models = { k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items() }
                 result, contents = await self.do_scalene(code, self._cell_id, store_history)
+
+                # Remove all non-deepcopyable objects from the user_ns.  Make a warning message
+                # for each one.
+                non_deepcopyable_objects = [k for k, v in filter_user_namespace(self.shell.user_ns).items() if not is_deepcopyable(v)]
+                for k in non_deepcopyable_objects:
+                    del self.shell.user_ns[k]
+                if non_deepcopyable_objects:
+                    self.display_icon_and_text("⚠️", f"The following objects cannot be passed between cells: {', '.join(non_deepcopyable_objects)}")
+
                 post_type_models = { k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items() }
             else:
                 result = await super().do_execute(
