@@ -232,7 +232,6 @@ class TestHandlerRegistry:
             "checkpoint_list",
             "checkpoint_compare",
             "checkpoint_clear",
-            "test_code",
             "enable_scalene",
             "disable_scalene",
             "force_checkpoints",

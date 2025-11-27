@@ -196,102 +196,6 @@ class TestCheckpointCommands:
 
 
 # ============================================================================
-# Test Code Command Tests
-# ============================================================================
-
-class TestTestCodeCommand:
-    """Test the test_code command."""
-
-    def test_test_code_success(self, command_client):
-        """Test code testing with successful execution."""
-        original_code = """
-x = 1
-y = 2
-result = x + y
-"""
-        modified_code = """
-x = 1
-y = 2
-result = x + y  # Same result, same code
-"""
-
-        progress_messages: List[str] = []
-
-        def progress_callback(msg: str):
-            progress_messages.append(msg)
-
-        response = command_client.test_code(
-            original_code,
-            modified_code,
-            progress_callback=progress_callback,
-        )
-
-        assert response.status == "ok"
-        assert response.result.status == "success"
-        assert response.result.original_duration >= 0
-        assert response.result.modified_duration >= 0
-        assert response.result.speedup > 0
-
-        # Verify we got progress messages
-        assert len(progress_messages) > 0
-
-    def test_test_code_original_crash(self, command_client):
-        """Test code testing when original code crashes."""
-        original_code = """
-x = 1 / 0  # This will crash
-"""
-        modified_code = """
-x = 1 + 1
-"""
-
-        response = command_client.test_code(original_code, modified_code)
-
-        assert response.status == "ok"
-        assert response.result.status == "original_crash"
-        assert response.result.error is not None
-        assert "ZeroDivisionError" in response.result.error.error_type
-
-    def test_test_code_modified_crash(self, command_client):
-        """Test code testing when modified code crashes."""
-        original_code = """
-x = 1 + 1
-"""
-        modified_code = """
-x = 1 / 0  # This will crash
-"""
-
-        response = command_client.test_code(original_code, modified_code)
-
-        assert response.status == "ok"
-        assert response.result.status == "modified_crash"
-        assert response.result.error is not None
-        assert "ZeroDivisionError" in response.result.error.error_type
-
-    def test_test_code_with_output_variables(self, command_client):
-        """Test code testing with specific output variables."""
-        original_code = """
-x = 1
-y = 2
-z = 3
-"""
-        modified_code = """
-x = 1
-y = 2
-z = 4  # Different value
-"""
-
-        response = command_client.test_code(
-            original_code,
-            modified_code,
-            output_variables={"z"},  # Only compare z
-        )
-
-        assert response.status == "ok"
-        assert response.result.status == "success"
-        # In real test, would verify diff only contains 'z'
-
-
-# ============================================================================
 # Feature Toggle Command Tests
 # ============================================================================
 
@@ -394,26 +298,6 @@ class TestIntegration:
         # Clean up
         command_client.checkpoint_delete("initial")
         command_client.checkpoint_delete("modified")
-
-    def test_test_code_with_checkpoints(self, command_client):
-        """Test that test_code properly uses checkpoints internally."""
-        # Clear checkpoints
-        command_client.checkpoint_clear()
-
-        # Run test_code
-        response = command_client.test_code(
-            "x = 1",
-            "x = 2",
-        )
-
-        assert response.status == "ok"
-
-        # Verify internal checkpoints were created and cleaned up
-        # (In real implementation, test_code creates temporary checkpoints)
-        list_response = command_client.checkpoint_list()
-        # Internal checkpoints should be cleaned up
-        assert "original_environment" not in list_response.checkpoints
-        assert "original_result" not in list_response.checkpoints
 
 
 # ============================================================================

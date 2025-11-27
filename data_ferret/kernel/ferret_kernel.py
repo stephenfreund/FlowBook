@@ -1,231 +1,117 @@
-# debug_kernel.py
-import ast
-import copy
-import json
-from pathlib import Path
-import pprint
+"""FerretKernel - Enhanced IPython kernel with profiling and checkpoint support."""
+
 import re
-import threading
-import types
-from typing import Dict, List, Set, Tuple
+import time
 import traceback
-from typing import Any
-from IPython.display import HTML, display, Markdown
+from typing import Any, Dict, Optional, Tuple
+
+from comm import create_comm
+from IPython.core.magic import Magics, line_cell_magic, magics_class
 from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
-from comm import create_comm
-from data_ferret.kernel.checkpoint import Checkpoints, checkpoint_diff, filter_user_namespace
+
+from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints, checkpoint_diff, filter_user_namespace
 from data_ferret.kernel.deepcopyable import is_deepcopyable
-from data_ferret.kernel.equality import user_ns_diff
+from data_ferret.kernel.display_helpers import DisplayHelper
 from data_ferret.kernel.ferret_pdb import FerretPdb
-from data_ferret.kernel.types import (
-    TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
-    DiffResult, ExecutionError
-)
-from data_ferret.kernel.kernel_commands import (
-    KernelCommandRequest,
-    ProgressMessage,
-    FinalMessage,
-)
+from data_ferret.kernel.json_utils import make_json_safe
 from data_ferret.kernel.kernel_command_handlers import KernelCommandHandlers
-import io
-import sys
-import time
-
-# kernel_helpers.py
-import asyncio, os, psutil
-import threading, time, _thread, os, psutil
-from ipykernel.ipkernel import IPythonKernel
-
-from data_ferret.util.output import timer
-from IPython.core.magic import Magics, cell_magic, line_cell_magic, magics_class
-from data_ferret.kernel.extended_types import get_type_model
-from data_ferret.kernel.checkpoint import Checkpoint
-from data_ferret.util.ferret_metadata import FerretMetadata, ProfileData
-
-
-async def stop_loky_and_all_children(timeout=3.0, verbose=False, max_passes=2):
-    """
-    1) Ask loky/joblib to shut down cleanly (cancel futures, wait for exit).
-    2) Force-reset the global reusable executor so the next cell gets a fresh one.
-    3) Kill *all* remaining child processes.
-    """
-    me = psutil.Process(os.getpid())
-
-    async def _shutdown_and_reset_loky():
-        try:
-            # Import the module that holds the singleton
-            from joblib.externals.loky import reusable_executor
-        except Exception:
-            print("Stopping loky and all children: no reusable executor found")
-            return
-
-        def _do():
-            try:
-                ex = reusable_executor.get_reusable_executor()
-                if ex._executor_manager_thread is not None:
-                    print("Killing loky workers")
-                    ex._executor_manager_thread.kill_workers(
-                        "executor shutting down in kernel"
-                    )
-                # cooperative shutdown; cancel queued tasks
-                try:
-                    print("Shutting down loky workers")
-                    ex.shutdown(wait=True, kill_workers=True)
-                except TypeError:
-                    # older loky without cancel_futures
-                    print("Waiting for loky workers to shut down")
-                    ex.shutdown(wait=True)
-                time.sleep(0.2)  # let resource_tracker unregister
-            except Exception:
-                pass
-            # HARD RESET: drop the singleton so next use creates a brand-new executor
-            try:
-                reusable_executor._executor = None
-            except Exception:
-                pass
-            try:
-                # some versions also keep the args; clear them to avoid reuse mismatch
-                reusable_executor._executor_args = None
-            except Exception:
-                pass
-
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _do)
-
-    # 1 & 2: clean shutdown + singleton reset
-    if "joblib" in globals():
-        await _shutdown_and_reset_loky()
-
-    # 3) Reap any leftover children
-    for _ in range(max_passes):
-        try:
-            kids = me.children(recursive=True)
-        except Exception:
-            kids = []
-        if not kids:
-            break
-
-        if verbose:
-            try:
-                print("Terminating:", [(p.pid, p.name()) for p in kids])
-            except Exception:
-                print("Terminating:", [p.pid for p in kids])
-
-        for p in kids:
-            try:
-                p.terminate()
-            except Exception:
-                pass
-
-        _, alive = psutil.wait_procs(kids, timeout=timeout)
-
-        for p in alive:
-            if verbose:
-                try:
-                    print("Killing stubborn:", p.pid, p.name())
-                except Exception:
-                    print("Killing stubborn:", p.pid)
-            try:
-                p.kill()
-            except Exception:
-                pass
-
-        psutil.wait_procs(alive, timeout=timeout)
+from data_ferret.kernel.kernel_commands import FinalMessage
+from data_ferret.kernel.scalene_runner import ScaleneRunner
+from data_ferret.kernel.timeout_handler import CellTimeoutHandler
 
 
 @magics_class
 class FerretKernel(IPythonKernel, Magics):
-    _post_kb_grace = 1.0  # seconds to wait after interrupt before we escalate
-    _verbose = False
-    _passes = 2
-    _kill_timeout = 3.0
+    """Enhanced IPython kernel with profiling, checkpoints, and debugging support."""
 
-    _div_style = "padding-left: 3em; font-size: 0.8em; background-color: #f0f0f8; margin-bottom: 0em;"
+    # Configuration
+    _default_cell_timeout = 30 * 60  # 30 minutes
+    _post_kb_grace = 1.0
+    _kill_timeout = 3.0
+    _verbose = False
+    _max_passes = 2
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        assert self.shell is not None, "shell is not set"
+        self.shell.register_magics(self)
+
+        # Initialize helpers
+        self._display = DisplayHelper()
+        self.command_handlers = KernelCommandHandlers(self)
+        self.pdb = FerretPdb()
+
+        # State
+        self._cell_id: Optional[str] = None
+        self._cell_timeout = self._default_cell_timeout
+        self._executed_cell_ids: Dict[int, str] = {}
+        self._checkpoint = Checkpoints(skip_immutable_copy=True)
+        self._use_scalene = True
+        self._force_checkpoints = False
+
+        # Initialize Scalene runner
+        self._scalene = ScaleneRunner(self.shell, self._executed_cell_ids)
+
+        # Register comm targets
+        self.comm_manager.register_target("debug_command", self._debug_command_comm_open)
+        self.comm_manager.register_target("kernel_command", self._kernel_command_comm_open)
+
+    # =========================================================================
+    # Display Delegation
+    # =========================================================================
 
     def display_cell_id(self) -> None:
-        display(
-            Markdown(
-                f"<div style='{self._div_style}'>"
-                f"<b>Cell {self._cell_id}</b>"
-                f"</div>"
-            )
-        )
+        """Display the current cell ID."""
+        self._display.display_cell_id(self._cell_id)
 
     def display_icon_and_text(
         self,
         icon: str,
         text: str,
-        contents: str | None = None,
-        metadata: dict | None = None,
+        contents: Optional[str] = None,
+        metadata: Optional[dict] = None,
     ) -> None:
-        if contents is None:
-            display(
-                Markdown(f"<div style='{self._div_style}'>" f"{icon} {text}" f"</div>"),
-                metadata=metadata,
-            )
-        else:
-            display(
-                Markdown(
-                    f"<div style='{self._div_style}'>"
-                    f"<details style='display: inline-block; text-align: left;'>"
-                    f"<summary>{icon} {text}</summary>\n\n"
-                    f"<pre style='margin: 0;'><code>{contents}</code></pre>\n\n"
-                    f"</details>"
-                    f"</div>"
-                ),
-                metadata=metadata,
-            )
+        """Display an icon with text, optionally with expandable contents."""
+        self._display.display_icon_and_text(icon, text, contents, metadata)
+
+    def diff_checkpoints(self, old: Checkpoint, new: Checkpoint) -> None:
+        """Display the diff between two checkpoints."""
+        self._display.display_checkpoint_diff(old, new)
+
+    # =========================================================================
+    # Magic Commands
+    # =========================================================================
 
     @line_cell_magic
     def enable_scalene(self, line: str, cell: str = "") -> None:
-        """Enable Scalene profiling using shared handler."""
+        """Enable Scalene profiling."""
         from data_ferret.kernel.kernel_commands import EnableScaleneRequest
-
         req = EnableScaleneRequest()
         response = self.command_handlers.handle_enable_scalene(req)
         self.display_icon_and_text("🔍", response.message)
 
     @line_cell_magic
     def disable_scalene(self, line: str, cell: str = "") -> None:
-        """Disable Scalene profiling using shared handler."""
+        """Disable Scalene profiling."""
         from data_ferret.kernel.kernel_commands import DisableScaleneRequest
-
         req = DisableScaleneRequest()
         response = self.command_handlers.handle_disable_scalene(req)
         self.display_icon_and_text("🔍", response.message)
 
     @line_cell_magic
     def force_checkpoints(self, line: str, cell: str = "") -> None:
-        """Enable force checkpoints mode using shared handler."""
+        """Enable or disable force checkpoints mode."""
         from data_ferret.kernel.kernel_commands import ForceCheckpointsRequest
-
-        # Parse line for enable/disable (default: enable)
-        enabled = True
-        if line.strip().lower() in ["false", "0", "disable", "off"]:
-            enabled = False
-
+        enabled = line.strip().lower() not in ["false", "0", "disable", "off"]
         req = ForceCheckpointsRequest(enabled=enabled)
         response = self.command_handlers.handle_force_checkpoints(req)
         self.display_icon_and_text("✅", response.message)
-
-    def diff_checkpoints(self, old: Checkpoint, new: Checkpoint) -> None:
-        diffs = checkpoint_diff(old, new)
-        contents = pprint.pformat(diffs, indent=2)
-        if diffs:
-            self.display_icon_and_text(
-                "↔️", f"Changed: {', '.join(sorted(diffs.keys()))}", contents=contents
-            )
-        else:
-            self.display_icon_and_text("↔️", "No changes")
 
     @line_cell_magic
     def checkpoint(self, line: str, cell: str = "") -> None:
         """
         Checkpoint cell magic.
-
-        Uses shared handler implementations for consistent behavior
-        between cell magics and comm channel.
 
         Usage:
             %checkpoint save <name>
@@ -236,306 +122,209 @@ class FerretKernel(IPythonKernel, Magics):
             %checkpoint clear
         """
         from data_ferret.kernel.kernel_commands import (
-            CheckpointSaveRequest,
-            CheckpointRestoreRequest,
+            CheckpointClearRequest,
+            CheckpointCompareRequest,
             CheckpointDeleteRequest,
             CheckpointListRequest,
-            CheckpointCompareRequest,
-            CheckpointClearRequest,
+            CheckpointRestoreRequest,
+            CheckpointSaveRequest,
         )
 
-        assert self.shell is not None, "shell is not set"
         args = line.split()
-
         if not args:
             self.display_icon_and_text("❌", "Usage: checkpoint <command> [args]")
             return
 
         try:
-            if args[0] == "save":
-                if len(args) != 2:
-                    self.display_icon_and_text("❌", "Usage: checkpoint save <name>")
-                    return
-
-                req = CheckpointSaveRequest(name=args[1])
-                response = self.command_handlers.handle_checkpoint_save(req)
-
-                # Format saved/removed variables for display
-                added_text = "\n".join([f"* {k}: {v}" for k, v in response.saved.items()])
-                removed_text = "\n".join([f"* {k}: {v}" for k, v in response.removed.items()])
-                metadata = {
-                    "ferret": {
-                        "added": added_text,
-                        "removed": removed_text,
-                        "duration": response.duration,
-                    }
-                }
-
-                if response.removed:
-                    self.display_icon_and_text(
-                        "✅",
-                        f"{response.duration:.2f}s [removed: {', '.join(sorted(response.removed.keys()))}]",
-                        contents=added_text,
-                        metadata=metadata,
-                    )
-                else:
-                    self.display_icon_and_text(
-                        "✅",
-                        f"{response.duration:.2f}s",
-                        contents=added_text,
-                        metadata=metadata,
-                    )
-
-            elif args[0] == "restore":
-                if len(args) != 2:
-                    self.display_icon_and_text("❌", "Usage: checkpoint restore <name>")
-                    return
-
-                req = CheckpointRestoreRequest(name=args[1])
-                response = self.command_handlers.handle_checkpoint_restore(req)
-                self.display_icon_and_text("✅", response.message)
-
-            elif args[0] == "delete":
-                if len(args) != 2:
-                    self.display_icon_and_text("❌", "Usage: checkpoint delete <name>")
-                    return
-
-                req = CheckpointDeleteRequest(name=args[1])
-                response = self.command_handlers.handle_checkpoint_delete(req)
-                self.display_icon_and_text("✅", response.message)
-
-            elif args[0] == "list":
-                req = CheckpointListRequest()
-                response = self.command_handlers.handle_checkpoint_list(req)
-                self.display_icon_and_text(
-                    "✅",
-                    f"Checkpoints: {', '.join(sorted(response.checkpoints))}",
-                )
-
-            elif args[0] == "compare":
-                if len(args) != 3:
-                    self.display_icon_and_text(
-                        "❌", "Usage: checkpoint compare <name1> <name2>"
-                    )
-                    return
-
-                req = CheckpointCompareRequest(name1=args[1], name2=args[2])
-                response = self.command_handlers.handle_checkpoint_compare(req)
-
-                # Use existing diff display logic
-                old = self._checkpoint.get(args[1])
-                new = self._checkpoint.get(args[2])
-                self.diff_checkpoints(old, new)
-
-            elif args[0] == "clear":
-                req = CheckpointClearRequest()
-                response = self.command_handlers.handle_checkpoint_clear(req)
-                self.display_icon_and_text("✅", response.message)
-
-            else:
-                self.display_icon_and_text("❌", f"Unknown checkpoint command: {args[0]}")
-
+            self._handle_checkpoint_command(args)
         except Exception as e:
             self.display_icon_and_text("❌", f"Error: {e}")
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        # any exception → our handler
-        assert self.shell is not None, "shell is not set"
-        self.shell.register_magics(self)
-
-        # Initialize command handlers
-        self.command_handlers = KernelCommandHandlers(self)
-
-        # Register comm targets
-        # Debug commands - separate channel for debugger operations
-        self.comm_manager.register_target(
-            "debug_command", self._debug_command_comm_open
-        )
-        # Kernel commands - unified command channel
-        self.comm_manager.register_target(
-            "kernel_command", self._kernel_command_comm_open
+    def _handle_checkpoint_command(self, args: list) -> None:
+        """Route checkpoint subcommand to appropriate handler."""
+        from data_ferret.kernel.kernel_commands import (
+            CheckpointClearRequest,
+            CheckpointCompareRequest,
+            CheckpointDeleteRequest,
+            CheckpointListRequest,
+            CheckpointRestoreRequest,
+            CheckpointSaveRequest,
         )
 
-        self.pdb = FerretPdb()
-        self._default_cell_timeout = 30 * 60
-        self._cell_timeout = self._default_cell_timeout
-        self._use_scalene = True
-        self._skip_immutable_copy = True  # Optimize checkpoint copying by skipping immutable objects
+        cmd = args[0]
 
-        self._cell_id = None
-        self._executed_cell_ids = {}
-        self._checkpoint = Checkpoints(skip_immutable_copy=self._skip_immutable_copy)
-        self._force_checkpoints = False
+        if cmd == "save":
+            if len(args) != 2:
+                self.display_icon_and_text("❌", "Usage: checkpoint save <name>")
+                return
+            req = CheckpointSaveRequest(name=args[1])
+            response = self.command_handlers.handle_checkpoint_save(req)
+            self._display_checkpoint_save_result(response)
 
-        # For now, we don't want to use the custom exception handler because it's causing issues with the kernel client because
-        # the error message is not being sent to the kernel client.
-        
-        # self.shell.set_custom_exc((Exception,), self._custom_exc_handler)
+        elif cmd == "restore":
+            if len(args) != 2:
+                self.display_icon_and_text("❌", "Usage: checkpoint restore <name>")
+                return
+            req = CheckpointRestoreRequest(name=args[1])
+            response = self.command_handlers.handle_checkpoint_restore(req)
+            self.display_icon_and_text("✅", response.message)
 
-    def _custom_exc_handler(self, *args, **kwargs):
-        try:
-            _, etype, evalue, tb = args[:4]
-            tb_offset = kwargs.get("tb_offset", None)
-        except Exception:
-            # should never happen!
-            return None
+        elif cmd == "delete":
+            if len(args) != 2:
+                self.display_icon_and_text("❌", "Usage: checkpoint delete <name>")
+                return
+            req = CheckpointDeleteRequest(name=args[1])
+            response = self.command_handlers.handle_checkpoint_delete(req)
+            self.display_icon_and_text("✅", response.message)
 
-        self.pdb.reset()
-        frame = tb.tb_frame
-        stack, idx = self.pdb.get_stack(frame, tb)
-        self.pdb.stack = stack
-        self.pdb.curindex = idx
+        elif cmd == "list":
+            req = CheckpointListRequest()
+            response = self.command_handlers.handle_checkpoint_list(req)
+            self.display_icon_and_text(
+                "✅", f"Checkpoints: {', '.join(sorted(response.checkpoints))}"
+            )
 
-        # move to the last user frame -- lame...
-        self._do_cmd("up")
-        self._do_cmd("down")
+        elif cmd == "compare":
+            if len(args) != 3:
+                self.display_icon_and_text("❌", "Usage: checkpoint compare <name1> <name2>")
+                return
+            req = CheckpointCompareRequest(name1=args[1], name2=args[2])
+            self.command_handlers.handle_checkpoint_compare(req)
+            old = self._checkpoint.get(args[1])
+            new = self._checkpoint.get(args[2])
+            self.diff_checkpoints(old, new)
 
-        traceback = self.pdb.enriched_stack_trace()
-        globals = self.pdb.enriched_globals()
+        elif cmd == "clear":
+            req = CheckpointClearRequest()
+            response = self.command_handlers.handle_checkpoint_clear(req)
+            self.display_icon_and_text("✅", response.message)
 
-        # Build our debug payload
-        data = {
-            "etype": etype.__name__,
-            "evalue": str(evalue),
-            "traceback": traceback.rstrip(),
-            "globals": globals.rstrip(),
+        else:
+            self.display_icon_and_text("❌", f"Unknown checkpoint command: {cmd}")
+
+    def _display_checkpoint_save_result(self, response) -> None:
+        """Format and display checkpoint save result."""
+        added_text = "\n".join([f"* {k}: {v}" for k, v in response.saved.items()])
+        removed_text = "\n".join([f"* {k}: {v}" for k, v in response.removed.items()])
+        metadata = {
+            "ferret": {
+                "added": added_text,
+                "removed": removed_text,
+                "duration": response.duration,
+            }
         }
+        if response.removed:
+            self.display_icon_and_text(
+                "✅",
+                f"{response.duration:.2f}s [removed: {', '.join(sorted(response.removed.keys()))}]",
+                contents=added_text,
+                metadata=metadata,
+            )
+        else:
+            self.display_icon_and_text(
+                "✅",
+                f"{response.duration:.2f}s",
+                contents=added_text,
+                metadata=metadata,
+            )
 
-        # Send it over a Comm so the client can pick it up
-        try:
-            comm = create_comm(target_name="debug_event")
-            comm.send(data)
-        except Exception:
-            # Don’t let our debug handler crash the kernel
-            pass
+    # =========================================================================
+    # Comm Handlers
+    # =========================================================================
 
-        assert self.shell is not None, "shell is not set"
-        stb = self.shell.InteractiveTB.structured_traceback(
-            etype, evalue, tb, tb_offset=tb_offset
-        )
-        print("\n".join(stb), file=sys.__stderr__)
-
-        return None
-
-    def _do_cmd(self, cmd):
-        return self.pdb.capture_onecmd(cmd)
-
-    def _debug_command_comm_open(self, comm, open_msg):
+    def _debug_command_comm_open(self, comm, open_msg) -> None:
+        """Handle debug command comm requests."""
         cmd = open_msg["content"]["data"]["cmd"]
         try:
-            result = self._do_cmd(cmd)
+            result = self.pdb.capture_onecmd(cmd)
             comm.send({"type": "final", "ok": True, "result": result})
         except Exception as e:
             comm.send({"type": "final", "ok": False, "error": str(e)})
 
-    def _make_json_safe(self, obj):
-        """Convert an object to a JSON-safe format, handling numpy arrays and NaN values."""
-        import numpy as np
-
-        if isinstance(obj, dict):
-            return {k: self._make_json_safe(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [self._make_json_safe(item) for item in obj]
-        elif isinstance(obj, np.ndarray):
-            # For large arrays, just return a summary instead of the full array
-            if obj.size > 100:
-                return {
-                    "_type": "ndarray",
-                    "shape": obj.shape,
-                    "dtype": str(obj.dtype),
-                    "size": int(obj.size),
-                    "summary": f"Array of shape {obj.shape}"
-                }
-            # For small arrays, try to convert to list with NaN handling
-            try:
-                # Replace NaN with None for JSON compatibility
-                result = obj.tolist()
-                return self._make_json_safe(result)
-            except:
-                return {
-                    "_type": "ndarray",
-                    "shape": obj.shape,
-                    "dtype": str(obj.dtype),
-                    "size": int(obj.size)
-                }
-        elif isinstance(obj, (np.integer, np.floating)):
-            # Convert numpy scalars to Python types
-            if np.isnan(obj):
-                return None
-            elif np.isinf(obj):
-                return "Infinity" if obj > 0 else "-Infinity"
-            else:
-                return obj.item()
-        elif isinstance(obj, float):
-            # Handle Python float NaN and Inf
-            if np.isnan(obj):
-                return None
-            elif np.isinf(obj):
-                return "Infinity" if obj > 0 else "-Infinity"
-            else:
-                return obj
-        else:
-            return obj
-
-    def _kernel_command_comm_open(self, comm, open_msg):
-        """
-        Handle kernel_command comm requests.
-
-        Routes commands to appropriate handlers based on the 'command' field.
-        Supports progress messages for long-running operations.
-        """
+    def _kernel_command_comm_open(self, comm, open_msg) -> None:
+        """Handle kernel command comm requests."""
         try:
             data = open_msg["content"]["data"]
             command = data.get("command")
-
             if not command:
                 raise ValueError("Missing 'command' field in request")
 
-            # Get the appropriate handler
             handler = self.command_handlers.get_handler(command)
 
-            # Dynamically import the appropriate request model
+            # Dynamically build request class name
             from data_ferret.kernel import kernel_commands as cmd_module
-
-            # Build request class name (e.g., "CheckpointSaveRequest")
             parts = command.split("_")
             request_class_name = "".join(p.capitalize() for p in parts) + "Request"
             request_class = getattr(cmd_module, request_class_name)
 
-            # Parse and validate request
             request = request_class(**data)
-
-            # Execute handler
             response = handler(request)
 
-            # Send final response
-            final_msg = FinalMessage(
-                ok=True,
-                response=response.model_dump(),
-            )
+            final_msg = FinalMessage(ok=True, response=response.model_dump())
             comm.send(final_msg.model_dump())
 
         except Exception as e:
-            # Send error response
             error_msg = f"{type(e).__name__}: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
-            final_msg = FinalMessage(
-                ok=False,
-                error=error_msg,
-            )
+            final_msg = FinalMessage(ok=False, error=error_msg)
             comm.send(final_msg.model_dump())
+
+    # =========================================================================
+    # Execution
+    # =========================================================================
 
     async def do_execute(
         self,
-        code,
-        silent,
-        store_history=True,
-        user_expressions=None,
-        allow_stdin=False,
+        code: str,
+        silent: bool,
+        store_history: bool = True,
+        user_expressions: Optional[dict] = None,
+        allow_stdin: bool = False,
         *,
-        cell_meta=None,
-        cell_id=None,
-    ):
+        cell_meta: Optional[dict] = None,
+        cell_id: Optional[str] = None,
+    ) -> dict:
+        """Execute code with optional profiling and checkpointing."""
+        self._extract_cell_id(cell_id, cell_meta)
+        code, timeout = self._parse_timeout_from_code(code)
+        self.display_cell_id()
+
+        if self._force_checkpoints:
+            self.checkpoint(f"save cell_{self._cell_id}")
+
+        timeout_handler = CellTimeoutHandler(
+            timeout=timeout,
+            post_kb_grace=self._post_kb_grace,
+            kill_timeout=self._kill_timeout,
+            verbose=self._verbose,
+            max_passes=self._max_passes,
+        )
+        timeout_handler.start()
+        normal_exit = False
+
+        try:
+            start_time = time.time()
+            result, profile_contents, pre_types, post_types = await self._execute_with_profiling(
+                code, silent, store_history, user_expressions, allow_stdin, cell_meta
+            )
+            normal_exit = True
+            end_time = time.time()
+
+            self._display_execution_result(
+                end_time - start_time, profile_contents, pre_types, post_types, code
+            )
+
+            if self._force_checkpoints:
+                self._show_checkpoint_diff()
+
+            return result
+
+        finally:
+            timeout_handler.cancel()
+            if not normal_exit:
+                await timeout_handler.cleanup_on_error()
+
+    def _extract_cell_id(self, cell_id: Optional[str], cell_meta: Optional[dict]) -> None:
+        """Extract and store the cell ID from execution parameters."""
         if cell_id is not None:
             self._cell_id = cell_id
         elif cell_meta is not None:
@@ -543,277 +332,96 @@ class FerretKernel(IPythonKernel, Magics):
         else:
             self._cell_id = None
 
-        cancel_flag = {"done": False}
-
-        self.display_cell_id()
-
-        # if the first line of code matches "# timeout <seconds>" grab the number of seconds, remove that line, and stash the timout in self._timeout
+    def _parse_timeout_from_code(self, code: str) -> Tuple[str, float]:
+        """Parse timeout directive from code if present."""
         match = re.match(r"# timeout (\d+)\n", code)
         if match:
-            self._cell_timeout = int(match.group(1))
+            timeout = int(match.group(1))
             code = code.replace(match.group(0), "", 1)
         else:
-            self._cell_timeout = self._default_cell_timeout
-        if self._verbose:
-            print(f"Cell timeout: {self._cell_timeout}")
+            timeout = self._default_cell_timeout
+        return code, timeout
 
-        force_checkpoints = self._force_checkpoints
-        if force_checkpoints:
-            self.checkpoint(f"save cell_{self._cell_id}")
+    async def _execute_with_profiling(
+        self,
+        code: str,
+        silent: bool,
+        store_history: bool,
+        user_expressions: Optional[dict],
+        allow_stdin: bool,
+        cell_meta: Optional[dict],
+    ) -> Tuple[dict, Optional[str], Optional[dict], Optional[dict]]:
+        """Execute code with optional Scalene profiling."""
+        has_cell_magics = code.startswith("%") or "\n%" in code
+        should_profile = self._use_scalene and self._cell_id is not None and not has_cell_magics
 
-        def _timeout_handler():
-            # 1) raise KeyboardInterrupt in the main thread
-            _thread.interrupt_main()
+        if should_profile:
+            pre_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
+            result, contents = await self._scalene.run(code, self._cell_id, store_history)
+            self._remove_non_deepcopyable_objects()
+            post_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
+            return result, contents, pre_types, post_types
+        else:
+            result = await super().do_execute(
+                code, silent, store_history, user_expressions, allow_stdin,
+                cell_meta=cell_meta, cell_id=self._cell_id
+            )
+            return result, None, None, None
 
-            # 2) optional: after a short grace, nuke stragglers so finally cleanup sees fewer
-            def _escalate():
-                if cancel_flag["done"]:
-                    return
-                try:
-                    me = psutil.Process(os.getpid())
-                    kids = me.children(recursive=True)
-                    for p in kids:
-                        try:
-                            p.terminate()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+    def _remove_non_deepcopyable_objects(self) -> None:
+        """Remove objects that can't be deep copied from user namespace."""
+        user_ns = filter_user_namespace(self.shell.user_ns)
+        non_copyable = [k for k, v in user_ns.items() if not is_deepcopyable(v)]
+        for k in non_copyable:
+            del self.shell.user_ns[k]
+        if non_copyable:
+            self.display_icon_and_text(
+                "⚠️",
+                f"The following objects cannot be passed between cells: {', '.join(non_copyable)}"
+            )
 
-            # fire escalation after a small grace window
-            threading.Timer(self._post_kb_grace, _escalate).start()
-
-        # Arm the per-cell watchdog
-        t = threading.Timer(self._cell_timeout, _timeout_handler)
-        t.daemon = True
-        t.start()
-
-        normal_exit = False
-        try:
-            has_cell_magics = code.startswith("%") or "\n%" in code
-            start_time = time.time()
-            if self._use_scalene and self._cell_id is not None and not has_cell_magics:
-                pre_type_models = { k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items() }
-                result, contents = await self.do_scalene(code, self._cell_id, store_history)
-
-                # Remove all non-deepcopyable objects from the user_ns.  Make a warning message
-                # for each one.
-                non_deepcopyable_objects = [k for k, v in filter_user_namespace(self.shell.user_ns).items() if not is_deepcopyable(v)]
-                for k in non_deepcopyable_objects:
-                    del self.shell.user_ns[k]
-                if non_deepcopyable_objects:
-                    self.display_icon_and_text("⚠️", f"The following objects cannot be passed between cells: {', '.join(non_deepcopyable_objects)}")
-
-                post_type_models = { k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items() }
-            else:
-                result = await super().do_execute(
-                    code,
-                    silent,
-                    store_history,
-                    user_expressions,
-                    allow_stdin,
-                    cell_meta=cell_meta,
-                    cell_id=self._cell_id,
-                )
-                contents = None
-                pre_type_models = None
-                post_type_models = None
-            normal_exit = True
-            end_time = time.time()
-
-            # Serialize to dict for notebook metadata
-            metadata = {
-                'profile': {
-                    'duration': end_time - start_time,
-                    'profile': contents if contents is not None else "",
-                    'env': pre_type_models if pre_type_models is not None else {},
-                    'env_after': post_type_models if post_type_models is not None else {},
-                }
+    def _display_execution_result(
+        self,
+        duration: float,
+        profile_contents: Optional[str],
+        pre_types: Optional[dict],
+        post_types: Optional[dict],
+        code: str,
+    ) -> None:
+        """Display execution timing and profile results."""
+        metadata = {
+            'profile': {
+                'duration': duration,
+                'profile': profile_contents if profile_contents is not None else "",
+                'env': pre_types if pre_types is not None else {},
+                'env_after': post_types if post_types is not None else {},
             }
+        }
+        has_cell_magics = code.startswith("%") or "\n%" in code
 
-            if contents is not None:
-                self.display_icon_and_text(
-                    "🔍",
-                    f"{end_time - start_time:0.2f}s",
-                    contents=contents,
-                    metadata=metadata,
-                )
-            else:
-                if not has_cell_magics:
-                    self.display_icon_and_text(
-                        "⏱️",
-                        f"{end_time - start_time:0.2f}s",
-                        metadata=metadata,
-                    )
+        if profile_contents is not None:
+            self.display_icon_and_text("🔍", f"{duration:0.2f}s", contents=profile_contents, metadata=metadata)
+        elif not has_cell_magics:
+            self.display_icon_and_text("⏱️", f"{duration:0.2f}s", metadata=metadata)
 
-            if force_checkpoints:
-                assert self.shell is not None, "shell is not set"
-                user_ns = self._checkpoint.checkpointable_vars(self.shell.user_ns)
-                user_ns = self._checkpoint.checkpointable_values(user_ns)
-                dummy_memo = {}
-                old = self._checkpoint.get(f"cell_{self._cell_id}")
-                self.diff_checkpoints(old, Checkpoint(f"_tmp", user_ns, dummy_memo))
+    def _show_checkpoint_diff(self) -> None:
+        """Show diff between checkpoint and current state."""
+        user_ns = self._checkpoint.checkpointable_vars(self.shell.user_ns)
+        user_ns = self._checkpoint.checkpointable_values(user_ns)
+        old = self._checkpoint.get(f"cell_{self._cell_id}")
+        start_time = time.time()
+        new = Checkpoint(f"_tmp", user_ns, {})
+        self.diff_checkpoints(old, new)
+        end_time = time.time()
+        self._display.display_icon_and_text("⏱️", f"checkpoint diff: {end_time - start_time:0.2f}s")
 
-            return result
+    # =========================================================================
+    # JSON Utilities (exposed for compatibility)
+    # =========================================================================
 
-        finally:
-            # Disarm watchdog so it doesn't trip after we’ve finished
-            cancel_flag["done"] = True
-            try:
-                t.cancel()
-            except Exception:
-                pass
-            if not normal_exit:
-                # Kernel-side cleanup: stop loky, reset singleton, kill ALL children
-                try:
-                    await stop_loky_and_all_children(
-                        timeout=self._kill_timeout,
-                        verbose=self._verbose,
-                        max_passes=self._passes,
-                    )
-                except Exception:
-                    pass
-
-    def wrap_last_expr_with_print_repr(self, src: str) -> str:
-        """
-        Given the code for a Jupyter cell as a string, if the final statement
-        is an expression statement, replace it with:
-            _val = <expr>
-            if _val is not None:
-                print(repr(_val))
-        Otherwise, return the code unchanged.
-        """
-        try:
-            tree = ast.parse(src, mode="exec", type_comments=True)
-        except SyntaxError:
-            return src
-
-        if not tree.body:
-            return src
-
-        last = tree.body[-1]
-        if isinstance(last, ast.Expr):
-            # _val = <expr>
-            assign = ast.Assign(
-                targets=[ast.Name(id="_val", ctx=ast.Store())], value=last.value
-            )
-
-            # if _val is not None: print(repr(_val))
-            cond = ast.Compare(
-                left=ast.Name(id="_val", ctx=ast.Load()),
-                ops=[ast.IsNot()],
-                comparators=[ast.Constant(value=None)],
-            )
-            print_call = ast.Expr(
-                value=ast.Call(
-                    func=ast.Name(id="print", ctx=ast.Load()),
-                    args=[
-                        ast.Call(
-                            func=ast.Name(id="repr", ctx=ast.Load()),
-                            args=[ast.Name(id="_val", ctx=ast.Load())],
-                            keywords=[],
-                        )
-                    ],
-                    keywords=[],
-                )
-            )
-            if_stmt = ast.If(test=cond, body=[print_call], orelse=[])
-
-            # Replace the last expression with these two statements
-            tree.body[-1:] = [assign, if_stmt]
-            ast.fix_missing_locations(tree)
-            return ast.unparse(tree)
-
-        return src
-
-    async def do_scalene(
-        self, code: str, cell_id: str, store_history: bool
-    ) -> Tuple[dict[str, Any], str | None]:
-        from scalene import ScaleneArguments, scalene_profiler
-
-        code = self.wrap_last_expr_with_print_repr(code)
-
-        cell_id = cell_id
-        args = {"outfile": f"_ipython-profile-{cell_id}.txt", "memory": False}
-
-        try:
-            n = self.shell.execution_count - 1
-            filename = f"_ipython-input-{n}-profile"
-            with open(filename, "w") as tmpfile:
-                tmpfile.write(code)
-
-            self._executed_cell_ids[self.shell.execution_count - 1] = cell_id
-
-            scalene_profiler.Scalene.set_initialized()
-
-            args = ScaleneArguments()
-            args.outfile = f"_ipython-profile-{cell_id}.txt"
-            args.memory = False
-            args.gpu = False
-            args.json = False
-            args.html = False
-            args.web = False
-            args.no_browser = True
-            args.column_width = 132 * 4
-
-            # Capture stderr
-            stderr_buffer = io.StringIO()
-            old_stderr = sys.stderr
-            sys.stderr = stderr_buffer
-            try:
-                scalene_profiler.Scalene.run_profiler(args, [filename], is_jupyter=True)
-                self.shell.execution_count += 1
-                contents = self.display_contents(args.outfile)
-            finally:
-                sys.stderr = old_stderr
-                scalene_output = stderr_buffer.getvalue()
-                expected_msg = (
-                    "Scalene: The specified code did not run for long enough to profile.\n"
-                    "By default, Scalene only profiles code in the file executed and its subdirectories.\n"
-                    "To track the time spent in all files, use the `--profile-all` option.\n"
-                )
-                if scalene_output and scalene_output != expected_msg:
-                    print(scalene_output, file=sys.stderr)
-
-            result = {"status": "ok", "execution_count": self.shell.execution_count - 1}
-            return result, contents
-
-        except Exception as e:
-            result = {
-                "status": "error",
-                "execution_count": self.shell.execution_count - 1,
-                "traceback": traceback.format_exception(type(e), e, e.__traceback__),
-                "ename": str(type(e).__name__),
-                "evalue": str(e),
-            }
-            return result, None
-        finally:
-            pass
-            # Had issues deleting the files -- profile data disappeared from metadata??? ---  so commented out for now
-            # if os.path.exists(args.outfile):
-            #     os.remove(args.outfile)
-            # if os.path.exists(filename):
-            #     os.remove(filename)
-
-    def replace_filenames_with_cell_ids(self, text: str) -> str:
-        # This pattern matches any path ending in _ipython-input-<N>-profile
-        pattern = r"/[^\s]*?_ipython-input-(\d+)-profile"
-
-        # Replacement function: take the captured N, convert to zero‑based index, and format
-        def repl(m):
-            n = int(m.group(1))
-            return f"Cell {self._executed_cell_ids[n]}"
-
-        return re.sub(pattern, repl, text)
-
-    def display_contents(self, filename: str) -> str | None:
-        try:
-            with open(filename, "r") as f:
-                contents = f.read()
-            contents = self.replace_filenames_with_cell_ids(contents)
-            return contents
-        except FileNotFoundError:
-            return None
+    def _make_json_safe(self, obj: Any) -> Any:
+        """Convert an object to a JSON-safe format."""
+        return make_json_safe(obj)
 
 
 if __name__ == "__main__":

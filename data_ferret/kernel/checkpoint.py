@@ -184,7 +184,7 @@ def checkpoint_diff(
 
 class Checkpoints:
 
-    def __init__(self, sanity_check: bool = False, skip_immutable_copy: bool = False):
+    def __init__(self, sanity_check: bool = False, skip_immutable_copy: bool = True):
         self.sanity_check = sanity_check
         self.skip_immutable_copy = skip_immutable_copy
         self.saved = {}
