@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any
 
-from data_ferret.kernel.checkpoint import Checkpoints, Checkpoint, checkpoint_diff
+from data_ferret.kernel.checkpoint import Checkpoints, Checkpoint
 from data_ferret.kernel.extended_types import TypeModel
 
 
@@ -644,7 +644,7 @@ class TestCheckpointIntegration:
         cp1_obj = cp.get('cp1')
         cp2_obj = cp.get('cp2')
 
-        diff = checkpoint_diff(cp1_obj, cp2_obj)
+        diff = Checkpoint.diff(cp1_obj, cp2_obj)
 
         # Should detect differences
         assert 'x' in diff.differences
@@ -850,8 +850,10 @@ class TestImmutableOptimization:
         cp.save('test', user_ns)
         restored_s = cp.get('test').user_ns['s']
 
-        # Verify data integrity
-        pd.testing.assert_series_equal(s, restored_s)
+        # Verify data integrity (values should match, dtype may be converted to string)
+        pd.testing.assert_series_equal(s, restored_s, check_dtype=False)
+        # With convert_object_to_specialized=True (default), strings are converted to string dtype
+        assert restored_s.dtype == pd.StringDtype()
 
     def test_flag_disabled_behaves_like_original(self):
         """Test that skip_immutable_copy=False behaves like the original implementation."""

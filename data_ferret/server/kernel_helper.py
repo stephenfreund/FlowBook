@@ -77,13 +77,13 @@ class KernelHelper:
 
             elif msg_type == 'error':
                 status = 'error'
-                error_message = '\n'.join(content['traceback'])
                 outputs.append({
                     'output_type': 'error',
                     'ename': content['ename'],
                     'evalue': content['evalue'],
-                    'traceback': content['traceback']
+                    'traceback': [ line.rstrip() for line in content['traceback'] ]
                 })
+                error_message = '\n'.join([ line.rstrip() for line in content['traceback'] ])
 
             elif msg_type == 'status':
                 if content['execution_state'] == 'idle':
@@ -92,9 +92,21 @@ class KernelHelper:
         # Get the execute_reply message
         try:
             reply = kernel_client.get_shell_msg(timeout=1.0)
-            if reply['content']['status'] == 'error' and status == 'ok':
+            reply_status = reply['content']['status']
+            if reply_status == 'error':
                 status = 'error'
-        except:
+                # Extract error details from reply if not already captured
+                if error_message is None:
+                    error_content = reply['content']
+                    if not outputs or outputs[-1].get('output_type') != 'error':
+                        outputs.append({
+                            'output_type': 'error',
+                            'ename': error_content.get('ename', 'UnknownError'),
+                            'evalue': error_content.get('evalue', ''),
+                            'traceback': error_content.get('traceback', [])
+                        })
+                        error_message = '\n'.join([ line.rstrip() for line in error_content['traceback'] ])
+        except Exception:
             pass
 
         return {

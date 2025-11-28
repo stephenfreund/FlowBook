@@ -1,6 +1,7 @@
 """FerretKernel - Enhanced IPython kernel with profiling and checkpoint support."""
 
 import re
+import sys
 import time
 import traceback
 from typing import Any, Dict, Optional, Tuple
@@ -10,7 +11,7 @@ from IPython.core.magic import Magics, line_cell_magic, magics_class
 from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
 
-from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints, checkpoint_diff, filter_user_namespace
+from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints, filter_user_namespace
 from data_ferret.kernel.deepcopyable import is_deepcopyable
 from data_ferret.kernel.display_helpers import DisplayHelper
 from data_ferret.kernel.ferret_pdb import FerretPdb
@@ -223,7 +224,7 @@ class FerretKernel(IPythonKernel, Magics):
         else:
             self.display_icon_and_text(
                 "✅",
-                f"{response.duration:.2f}s",
+                f"Checkpoint saved in {response.duration:.2f}s",
                 contents=added_text,
                 metadata=metadata,
             )
@@ -288,7 +289,9 @@ class FerretKernel(IPythonKernel, Magics):
         code, timeout = self._parse_timeout_from_code(code)
         self.display_cell_id()
 
-        if self._force_checkpoints:
+        force_checkpoints = self._force_checkpoints
+
+        if force_checkpoints:
             self.checkpoint(f"save cell_{self._cell_id}")
 
         timeout_handler = CellTimeoutHandler(
@@ -309,13 +312,16 @@ class FerretKernel(IPythonKernel, Magics):
             normal_exit = True
             end_time = time.time()
 
-            self._display_execution_result(
-                end_time - start_time, profile_contents, pre_types, post_types, code
-            )
+            # Only display execution result if not an error
+            if result.get('status') != 'error':
+                self._display_execution_result(
+                    end_time - start_time, profile_contents, pre_types, post_types, code
+                )
 
-            if self._force_checkpoints:
+            if force_checkpoints:
                 self._show_checkpoint_diff()
 
+            # print(f"[FerretKernel] do_execute returning status: {result.get('status')}", file=sys.__stderr__)
             return result
 
         finally:
@@ -358,6 +364,16 @@ class FerretKernel(IPythonKernel, Magics):
         if should_profile:
             pre_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
             result, contents = await self._scalene.run(code, self._cell_id, store_history)
+            # print(f"[FerretKernel] scalene result status: {result.get('status')}", file=sys.__stderr__)
+
+            # If scalene detected an error, send error message on iopub
+            if result.get('status') == 'error':
+                self.send_response(self.iopub_socket, 'error', {
+                    'ename': result.get('ename', 'UnknownError'),
+                    'evalue': result.get('evalue', ''),
+                    'traceback': result.get('traceback', [])
+                })
+
             self._remove_non_deepcopyable_objects()
             post_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
             return result, contents, pre_types, post_types

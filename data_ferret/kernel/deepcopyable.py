@@ -304,8 +304,9 @@ def is_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> bool:
         return is_deepcopyable(obj.__self__, _seen)
 
     # === 9. Type objects (classes themselves) ===
-    if obj_type is type:
-        # Class objects are copyable (they're singletons)
+    # Use isinstance to catch metaclasses like ABCMeta (used by sklearn, numbers, etc.)
+    if isinstance(obj, type):
+        # Class objects are copyable (deepcopy returns the same singleton)
         return True
 
     # === 10. User-defined types - try deepcopy ===

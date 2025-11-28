@@ -37,12 +37,15 @@ class Output:
         self.timings_file = timings_file
 
     def _print_timings(self):
-        # if os.path.exists(self.timings_file):
-        #     timings: Timings = json.load(open(self.timings_file))
-        #     timings.extend(self.timings)
-        # else:
         timings = self.timings
         if timings:
+            # if os.path.exists(self.timings_file):
+            #     saved_timings: Timings = json.load(open(self.timings_file))
+            #     log(f"Output timer data loaded from {self.timings_file}")
+            #     saved_timings.extend(timings)
+            #     timings = saved_timings
+            #     log(f"Output timer data extended by {len(self.timings)} entries")
+
             json.dump(timings, open(self.timings_file, "w"), indent=2)
             log(f"Output timer data saved to {self.timings_file}")
             

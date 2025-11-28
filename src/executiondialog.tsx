@@ -280,10 +280,10 @@ export class CommandExecutionDialog extends Widget {
 
         this.render();
 
-        // Auto-close after 500ms on success (COMMENTED OUT FOR DEBUGGING)
-        // this._autoCloseTimer = window.setTimeout(() => {
-        //   this.close();
-        // }, 500);
+          // Auto-close after 500ms on success (COMMENTED OUT FOR DEBUGGING)
+          this._autoCloseTimer = window.setTimeout(() => {
+            this.close();
+          }, 500);
         break;
 
       case MessageType.CLEAR:

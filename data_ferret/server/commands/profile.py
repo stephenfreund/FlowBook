@@ -3,6 +3,7 @@ Profile command implementation.
 """
 
 import copy
+import sys
 import traceback
 from typing import Any, Dict, Optional
 
@@ -64,6 +65,7 @@ class ProfileCommand(NotebookCommand):
 
             execution_results = []
             total_executed = 0
+            status = "success"
 
             with timer(key="enable_scalene", message="Enabling scalene"):
                 kernel_client.execute("%enable_scalene")
@@ -95,6 +97,25 @@ class ProfileCommand(NotebookCommand):
 
                                     cell["execution_count"] = result["execution_count"]
                                     cell["outputs"] = result["outputs"]
+
+                                    # print(f"result: {result.status}")
+
+                                    if result["status"] == "error":
+                                        status = "error"
+                                        error_message = result["error_message"]    
+                                        print()
+                                        print(f"--------------------------------")
+                                        print(f"{error_message}")
+                                        print(f"--------------------------------")
+                                        execution_results.append(
+                                            {
+                                                "cell_index": idx,
+                                                "status": "error",
+                                                "execution_count": result["execution_count"],
+                                                "error_message": error_message,
+                                            }
+                                        )
+                                        break
 
                                     for output in result["outputs"]:
                                         if 'metadata' in output:
@@ -131,7 +152,7 @@ class ProfileCommand(NotebookCommand):
                                     )
 
             metadata = {
-                "status": "success",
+                "status": status,
                 "command": self.command_name,
                 "execution": {
                     "total_executed": total_executed,

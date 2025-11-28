@@ -2,7 +2,7 @@
 Unit tests for checkpoint comparison with keys_to_include parameter.
 
 These tests verify that the keys_to_include feature works correctly
-at multiple levels: checkpoint_diff, handler, and client.
+at multiple levels: Checkpoint.diff, handler, and client.
 
 To run these tests:
     pytest data_ferret/kernel/test_checkpoint_keys_to_include.py -v
@@ -11,23 +11,23 @@ To run these tests:
 import pytest
 from unittest.mock import Mock
 
-from data_ferret.kernel.checkpoint import Checkpoint, checkpoint_diff
+from data_ferret.kernel.checkpoint import Checkpoint
 from data_ferret.kernel.kernel_command_handlers import KernelCommandHandlers
 from data_ferret.kernel.kernel_commands import CheckpointCompareRequest
 from data_ferret.kernel.types import DiffResult
 
 
 class TestCheckpointDiffKeysToInclude:
-    """Test checkpoint_diff function with keys_to_include parameter."""
+    """Test Checkpoint.diff method with keys_to_include parameter."""
 
     def test_checkpoint_diff_all_keys_when_none(self):
-        """Test that checkpoint_diff compares all keys when keys_to_include is None."""
+        """Test that Checkpoint.diff compares all keys when keys_to_include is None."""
         # Create two checkpoints with different values
         cp1 = Checkpoint("cp1", {'x': 1, 'y': 2, 'z': 3}, {})
         cp2 = Checkpoint("cp2", {'x': 1, 'y': 999, 'z': 3}, {})
 
         # Compare without keys_to_include (should compare all)
-        result = checkpoint_diff(cp1, cp2, keys_to_include=None)
+        result = Checkpoint.diff(cp1, cp2, keys_to_include=None)
 
         # Should detect difference in 'y'
         assert isinstance(result, DiffResult)
@@ -37,13 +37,13 @@ class TestCheckpointDiffKeysToInclude:
         assert 'z' not in result.differences
 
     def test_checkpoint_diff_specific_keys_only(self):
-        """Test that checkpoint_diff only compares specified keys."""
+        """Test that Checkpoint.diff only compares specified keys."""
         # Create two checkpoints with differences in multiple variables
         cp1 = Checkpoint("cp1", {'x': 1, 'y': 2, 'z': 3}, {})
         cp2 = Checkpoint("cp2", {'x': 999, 'y': 999, 'z': 3}, {})
 
         # Compare only 'z' (which is the same in both)
-        result = checkpoint_diff(cp1, cp2, keys_to_include={'z'})
+        result = Checkpoint.diff(cp1, cp2, keys_to_include={'z'})
 
         # Should have no differences (z is the same)
         assert isinstance(result, DiffResult)
@@ -56,7 +56,7 @@ class TestCheckpointDiffKeysToInclude:
         cp2 = Checkpoint("cp2", {'x': 999, 'y': 999, 'z': 3}, {})
 
         # Compare only 'x' and 'z'
-        result = checkpoint_diff(cp1, cp2, keys_to_include={'x', 'z'})
+        result = Checkpoint.diff(cp1, cp2, keys_to_include={'x', 'z'})
 
         # Should only report difference in 'x', not 'y'
         assert isinstance(result, DiffResult)
@@ -70,7 +70,7 @@ class TestCheckpointDiffKeysToInclude:
         cp2 = Checkpoint("cp2", {'x': 999, 'y': 999}, {})
 
         # Compare with empty set
-        result = checkpoint_diff(cp1, cp2, keys_to_include=set())
+        result = Checkpoint.diff(cp1, cp2, keys_to_include=set())
 
         # Should have no differences (nothing compared)
         assert isinstance(result, DiffResult)
@@ -82,7 +82,7 @@ class TestCheckpointDiffKeysToInclude:
         cp2 = Checkpoint("cp2", {'x': 1, 'y': 2}, {})
 
         # Compare with keys that don't exist
-        result = checkpoint_diff(cp1, cp2, keys_to_include={'nonexistent', 'also_missing'})
+        result = Checkpoint.diff(cp1, cp2, keys_to_include={'nonexistent', 'also_missing'})
 
         # Should have no differences (keys don't exist in either checkpoint)
         assert isinstance(result, DiffResult)
@@ -94,7 +94,7 @@ class TestCheckpointDiffKeysToInclude:
         cp2 = Checkpoint("cp2", {'x': 999, 'y': 2, 'z': 3}, {})
 
         # Compare with mix of existing and nonexistent keys
-        result = checkpoint_diff(cp1, cp2, keys_to_include={'x', 'y', 'nonexistent'})
+        result = Checkpoint.diff(cp1, cp2, keys_to_include={'x', 'y', 'nonexistent'})
 
         # Should report difference in 'x', not 'y', and ignore nonexistent
         assert isinstance(result, DiffResult)
@@ -121,14 +121,14 @@ class TestCheckpointDiffKeysToInclude:
         }, {})
 
         # Compare only 'arr' and 'num' (both the same)
-        result = checkpoint_diff(cp1, cp2, keys_to_include={'arr', 'num'})
+        result = Checkpoint.diff(cp1, cp2, keys_to_include={'arr', 'num'})
 
         # Should have no differences
         assert isinstance(result, DiffResult)
         assert len(result.differences) == 0
 
         # Now compare all to verify df is different
-        result_all = checkpoint_diff(cp1, cp2, keys_to_include=None)
+        result_all = Checkpoint.diff(cp1, cp2, keys_to_include=None)
         assert 'df' in result_all.differences
 
 
@@ -148,7 +148,7 @@ class TestHandlerCheckpointCompareKeysToInclude:
         return KernelCommandHandlers(mock_kernel)
 
     def test_handle_checkpoint_compare_with_keys_to_include(self, handlers, mock_kernel):
-        """Test that handler passes keys_to_include to checkpoint_diff."""
+        """Test that handler passes keys_to_include to Checkpoint.diff."""
         # Setup mocks
         cp1 = Checkpoint("cp1", {'x': 1, 'y': 2, 'z': 3}, {})
         cp2 = Checkpoint("cp2", {'x': 999, 'y': 2, 'z': 3}, {})

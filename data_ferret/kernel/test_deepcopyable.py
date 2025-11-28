@@ -538,6 +538,32 @@ class TestTypeObjects:
     def test_pandas_type(self):
         assert is_deepcopyable(pd.DataFrame) is True
 
+    def test_abcmeta_class(self):
+        """ABCMeta classes should be deepcopyable (they're singletons)."""
+        import numbers
+        from abc import ABCMeta
+
+        # numbers.Integral is an ABCMeta class
+        assert isinstance(numbers.Integral, ABCMeta)
+        assert is_deepcopyable(numbers.Integral) is True
+
+    def test_sklearn_abcmeta_class(self):
+        """sklearn classes with ABCMeta should be deepcopyable."""
+        from sklearn.linear_model import LinearRegression
+        from abc import ABCMeta
+
+        # LinearRegression uses ABCMeta
+        assert isinstance(LinearRegression, ABCMeta)
+        assert is_deepcopyable(LinearRegression) is True
+
+    def test_sklearn_class_with_parameter_constraints(self):
+        """sklearn classes with _parameter_constraints containing ABCMeta refs should be deepcopyable."""
+        from sklearn.linear_model import LinearRegression
+
+        # This dict contains references to ABCMeta classes like numbers.Integral
+        pc = LinearRegression._parameter_constraints
+        assert is_deepcopyable(pc) is True
+
 
 class TestDecimalType:
     """Tests for decimal.Decimal type."""

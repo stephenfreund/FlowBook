@@ -16,7 +16,7 @@ import time
 import traceback
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Set
 
-from data_ferret.kernel.checkpoint import Checkpoint, checkpoint_diff
+from data_ferret.kernel.checkpoint import Checkpoint
 from data_ferret.kernel.kernel_commands import (
     CheckpointSaveRequest,
     CheckpointSaveResponse,
@@ -256,7 +256,7 @@ class KernelCommandHandlers:
         try:
             old = self.kernel._checkpoint.get(req.name1)
             new = self.kernel._checkpoint.get(req.name2)
-            diff = checkpoint_diff(old, new, keys_to_include=req.keys_to_include)
+            diff = Checkpoint.diff(old, new, keys_to_include=req.keys_to_include)
 
             return CheckpointCompareResponse(
                 status="ok",

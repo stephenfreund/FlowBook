@@ -1,0 +1,1925 @@
+
+▗ ▗   ▖ ▖  Claude Code v2.0.54
+           Opus 4.5 · API Usage Billing
+  ▘▘ ▝▝    ~/other/DataFerret
+
+> look at ferret_kernel.py.  Improve the code and clean it up.  Refactor to 
+make useful helpers and to improve the flow.  Make a plan. 
+
+⏺ Read(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Read 821 lines
+
+⏺ Let me also look at the related helper files to understand the current
+  structure better:
+
+⏺ Search(pattern: "data_ferret/kernel/*.py")
+  ⎿  Found 26 files (ctrl+o to expand)
+
+⏺ Read(data_ferret/kernel/magics.py)
+  ⎿  Read 184 lines
+
+⏺ Read(data_ferret/kernel/kernel_command_handlers.py)
+  ⎿  Read 381 lines
+
+⏺ Now I have a good picture of the code structure. Let me create a plan for
+  refactoring this file.
+
+⏺ Write(PLAN.md)
+  ⎿  Wrote 149 lines to PLAN.md                                            
+     # Refactoring Plan: ferret_kernel.py
+     ## Current Issues
+     ### 1. Disorganized and Duplicate Imports
+     - Imports are scattered across the top of the file in multiple blocks
+     - Some imports are duplicated (e.g., `os`, `threading`, `time`, 
+     `psutil`)
+     - Comment `# kernel_helpers.py` suggests merged files
+     ### 2. Large Standalone Function at Module Level
+     … +139 lines (ctrl+o to expand)
+
+⏺ I've analyzed ferret_kernel.py and created a refactoring plan. Here's the
+  summary:
+
+  Key Issues Found
+
+  1. Disorganized imports - Duplicate imports, scattered across file with
+  misleading comments
+  2. Module-level function - stop_loky_and_all_children() (~90 lines) should
+   be in its own module
+  3. Mixed responsibilities - Class handles display, magics, comms,
+  execution, AST manipulation, JSON serialization
+  4. Verbose checkpoint magic - 85 lines of repetitive code
+  5. Complex do_execute - 130 lines with nested timeout/checkpoint/scalene
+  logic
+
+  Proposed Structure
+
+  Extract into focused modules:
+  - process_cleanup.py - Loky/joblib and child process management
+  - display_helpers.py - Markdown display utilities
+  - scalene_runner.py - Scalene profiling wrapper + AST transformation
+  - json_utils.py - JSON serialization for numpy/pandas types
+
+  Result
+
+  Main kernel file goes from ~820 lines → ~300 lines, with each module
+  having a single responsibility and being independently testable.
+
+  The full plan is in PLAN.md. Ready to proceed with implementation?
+
+⏺ Updated plan
+  ⎿  /plan to preview · ~/.claude/plans/binary-growing-candy.md
+                                                                           
+⏺ User approved Claude's plan
+  ⎿  Plan saved to: ~/.claude/plans/binary-growing-candy.md · /plan to edit
+     Refactoring Plan: ferret_kernel.py
+
+     Current Issues
+
+     1. Disorganized and Duplicate Imports
+
+     - Imports are scattered across the top of the file in multiple blocks
+     - Some imports are duplicated (e.g., os, threading, time, psutil)
+     - Comment # kernel_helpers.py suggests merged files
+
+     2. Large Standalone Function at Module Level
+
+     - stop_loky_and_all_children() (~90 lines) handles process cleanup
+     - Should be in a separate module for process management
+
+     3. Mixed Responsibilities in FerretKernel Class
+
+     The class handles too many concerns:
+     - Display utilities: display_cell_id, display_icon_and_text, 
+     diff_checkpoints
+     - Cell magics: enable_scalene, disable_scalene, force_checkpoints, 
+     checkpoint
+     - Comm handlers: _debug_command_comm_open, _kernel_command_comm_open
+     - Exception handling: _custom_exc_handler
+     - Core execution: do_execute, do_scalene
+     - AST manipulation: wrap_last_expr_with_print_repr
+     - Text processing: replace_filenames_with_cell_ids, display_contents
+     - JSON serialization: _make_json_safe
+
+     4. Verbose Checkpoint Magic
+
+     The checkpoint magic method is ~85 lines of repetitive argument parsing
+      and handler calls.
+
+     5. Complex do_execute Method
+
+     The main execution method is ~130 lines with nested logic for:
+     - Cell ID extraction
+     - Timeout parsing
+     - Checkpoint handling
+     - Scalene profiling
+     - Cleanup in finally block
+
+     ---
+     Refactoring Plan
+
+     Step 1: Consolidate and Organize Imports
+
+     - Remove duplicate imports
+     - Group imports by category (stdlib, third-party, local)
+     - Remove the misleading comments (# debug_kernel.py, # 
+     kernel_helpers.py)
+
+     Step 2: Extract Process Management Module
+
+     Create data_ferret/kernel/process_cleanup.py:
+     - Move stop_loky_and_all_children() and related logic
+     - This handles loky/joblib worker shutdown and child process cleanup
+
+     Step 3: Extract Display Helpers
+
+     Create data_ferret/kernel/display_helpers.py:
+     - DisplayHelper class with:
+       - display_cell_id(cell_id)
+       - display_icon_and_text(icon, text, contents, metadata)
+       - diff_checkpoints(old, new)
+     - Include the _div_style constant
+
+     Step 4: Extract Scalene Profiling Logic
+
+     Create data_ferret/kernel/scalene_runner.py:
+     - ScaleneRunner class with:
+       - run_profiled(code, cell_id, shell) - runs code with Scalene
+       - wrap_last_expr_with_print_repr(src) - AST transformation
+       - replace_filenames_with_cell_ids(text, cell_id_map)
+       - display_contents(filename)
+
+     Step 5: Extract JSON Serialization Utility
+
+     Create data_ferret/kernel/json_utils.py:
+     - Move _make_json_safe() function
+     - This handles numpy arrays, NaN values, infinity, etc.
+
+     Step 6: Simplify Checkpoint Magic
+
+     Refactor the checkpoint magic to use a dispatcher pattern:
+     @line_cell_magic
+     def checkpoint(self, line: str, cell: str = "") -> None:
+         args = line.split()
+         if not args:
+             self._display.error("Usage: checkpoint <command> [args]")
+             return
+
+         cmd_handlers = {
+             'save': self._checkpoint_save,
+             'restore': self._checkpoint_restore,
+             'delete': self._checkpoint_delete,
+             'list': self._checkpoint_list,
+             'compare': self._checkpoint_compare,
+             'clear': self._checkpoint_clear,
+         }
+
+         handler = cmd_handlers.get(args[0])
+         if handler:
+             handler(args[1:])
+         else:
+             self._display.error(f"Unknown command: {args[0]}")
+
+     Step 7: Simplify do_execute Method
+
+     Extract helper methods:
+     - _parse_cell_id(cell_meta, cell_id) - Extract cell ID from various 
+     sources
+     - _parse_timeout(code) - Parse and strip timeout comment from code
+     - _create_execution_metadata(duration, profile_contents, type_models) -
+      Build metadata dict
+     - _handle_checkpoint_if_enabled() - Checkpoint save/diff logic
+
+     Step 8: Clean Up FerretKernel Class
+
+     After extractions, the class should:
+     - Initialize dependencies in __init__
+     - Have clear delegation to helper classes
+     - Keep only the essential IPythonKernel overrides
+
+     ---
+     Proposed File Structure
+
+     data_ferret/kernel/
+     ├── ferret_kernel.py       # Main kernel class (simplified)
+     ├── process_cleanup.py     # NEW: loky/joblib cleanup, child process 
+     management
+     ├── display_helpers.py     # NEW: Markdown display utilities
+     ├── scalene_runner.py      # NEW: Scalene profiling wrapper
+     ├── json_utils.py          # NEW: JSON serialization for numpy/pandas
+     ├── kernel_command_handlers.py  # Existing: handler implementations
+     ├── kernel_commands.py     # Existing: request/response models
+     ├── checkpoint.py          # Existing: checkpoint logic
+     └── ... (other existing files)
+
+     ---
+     Implementation Order
+
+     1. Step 1: Organize imports (low risk, immediate cleanup)
+     2. Step 2: Extract process_cleanup.py (isolated, no dependencies)
+     3. Step 5: Extract json_utils.py (small, standalone)
+     4. Step 3: Extract display_helpers.py (used throughout)
+     5. Step 4: Extract scalene_runner.py (complex but isolated)
+     6. Step 6: Simplify checkpoint magic (depends on display helpers)
+     7. Step 7: Simplify do_execute (final integration)
+     8. Step 8: Final cleanup pass
+
+     ---
+     Benefits
+
+     - Testability: Each module can be tested independently
+     - Readability: Each file has a single responsibility
+     - Maintainability: Changes to display/profiling don't require touching 
+     kernel
+     - Reusability: Display helpers, JSON utils can be used elsewhere
+     - Reduced complexity: Main kernel file goes from ~820 lines to ~300 
+     lines
+
+
+⏺ Let me start implementing. First, I'll organize the imports:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 26 additions and 34 
+     removals
+        1 -  # debug_kernel.py
+        1 +  """
+        2 +  FerretKernel: Enhanced IPython kernel with checkpointing, 
+          + profiling, and debugging.
+        3 +  """
+        4 +  # Standard library
+        5 +  import _thread
+        6    import ast
+        7 -  import copy
+        8 -  import json
+        9 -  from pathlib import Path
+        7 +  import asyncio
+        8 +  import io
+        9 +  import os
+       10    import pprint
+       11    import re
+       12 +  import sys
+       13    import threading
+       14 -  import types
+       15 -  from typing import Dict, List, Set, Tuple
+       14 +  import time
+       15    import traceback
+       16 -  from typing import Any
+       17 -  from IPython.display import HTML, display, Markdown
+       16 +  from typing import Any, Dict, Tuple
+       17 +  
+       18 +  # Third-party
+       19 +  import psutil
+       20 +  from comm import create_comm
+       21 +  from IPython.core.magic import Magics, line_cell_magic, 
+          + magics_class
+       22 +  from IPython.display import display, Markdown
+       23    from ipykernel.ipkernel import IPythonKernel
+       24    from ipykernel.kernelapp import IPKernelApp
+       25 -  from comm import create_comm
+       26 -  from data_ferret.kernel.checkpoint import Checkpoints, 
+          - checkpoint_diff, filter_user_namespace
+       25 +  
+       26 +  # Local imports
+       27 +  from data_ferret.kernel.checkpoint import (
+       28 +      Checkpoint,
+       29 +      Checkpoints,
+       30 +      checkpoint_diff,
+       31 +      filter_user_namespace,
+       32 +  )
+       33    from data_ferret.kernel.deepcopyable import is_deepcopyable
+       34 -  from data_ferret.kernel.equality import user_ns_diff
+       34    from data_ferret.kernel.ferret_pdb import FerretPdb
+       35 -  from data_ferret.kernel.types import (
+       36 -      TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, 
+          - TestCodeModifiedCrash,
+       37 -      DiffResult, ExecutionError
+       38 -  )
+       39 -  from data_ferret.kernel.kernel_commands import (
+       40 -      KernelCommandRequest,
+       41 -      ProgressMessage,
+       42 -      FinalMessage,
+       43 -  )
+       35    from data_ferret.kernel.kernel_command_handlers import 
+            KernelCommandHandlers
+       36 -  import io
+       37 -  import sys
+       38 -  import time
+       36 +  from data_ferret.kernel.kernel_commands import FinalMessage
+       37    
+       38 -  # kernel_helpers.py
+       39 -  import asyncio, os, psutil
+       40 -  import threading, time, _thread, os, psutil
+       41 -  from ipykernel.ipkernel import IPythonKernel
+       38    
+       39 -  from data_ferret.util.output import timer
+       40 -  from IPython.core.magic import Magics, cell_magic, 
+          - line_cell_magic, magics_class
+       41 -  from data_ferret.kernel.extended_types import get_type_model
+       42 -  from data_ferret.kernel.checkpoint import Checkpoint
+       43 -  from data_ferret.util.ferret_metadata import FerretMetadata,
+          -  ProfileData
+       44 -  
+       45 -  
+       39    async def stop_loky_and_all_children(timeout=3.0, 
+            verbose=False, max_passes=2):
+       40        """
+       41        1) Ask loky/joblib to shut down cleanly (cancel futures,
+             wait for exit).
+
+⏺ Write(data_ferret/kernel/process_cleanup.py)
+  ⎿  Wrote 123 lines to data_ferret/kernel/process_cleanup.py              
+     """
+     Process cleanup utilities for managing child processes and parallel 
+     execution pools.
+     Handles graceful shutdown of loky/joblib workers and termination of 
+     child processes.
+     """
+     import asyncio
+     import os
+     import time
+     import psutil
+     … +113 lines (ctrl+o to expand)
+
+⏺ Now update ferret_kernel.py to use the new module:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 1 addition and 90    
+     removals
+        34    from data_ferret.kernel.ferret_pdb import FerretPdb
+        35    from data_ferret.kernel.kernel_command_handlers import 
+             KernelCommandHandlers
+        36    from data_ferret.kernel.kernel_commands import FinalMessage
+        37 +  from data_ferret.kernel.process_cleanup import 
+           + stop_loky_and_all_children
+        38    
+        39    
+        40 -  async def stop_loky_and_all_children(timeout=3.0, 
+           - verbose=False, max_passes=2):
+        41 -      """
+        42 -      1) Ask loky/joblib to shut down cleanly (cancel 
+           - futures, wait for exit).
+        43 -      2) Force-reset the global reusable executor so the next
+           -  cell gets a fresh one.
+        44 -      3) Kill *all* remaining child processes.
+        45 -      """
+        46 -      me = psutil.Process(os.getpid())
+        47 -  
+        48 -      async def _shutdown_and_reset_loky():
+        49 -          try:
+        50 -              # Import the module that holds the singleton
+        51 -              from joblib.externals.loky import 
+           - reusable_executor
+        52 -          except Exception:
+        53 -              print("Stopping loky and all children: no 
+           - reusable executor found")
+        54 -              return
+        55 -  
+        56 -          def _do():
+        57 -              try:
+        58 -                  ex = 
+           - reusable_executor.get_reusable_executor()
+        59 -                  if ex._executor_manager_thread is not None:
+        60 -                      print("Killing loky workers")
+        61 -                      
+           - ex._executor_manager_thread.kill_workers(
+        62 -                          "executor shutting down in kernel"
+        63 -                      )
+        64 -                  # cooperative shutdown; cancel queued tasks
+        65 -                  try:
+        66 -                      print("Shutting down loky workers")
+        67 -                      ex.shutdown(wait=True, 
+           - kill_workers=True)
+        68 -                  except TypeError:
+        69 -                      # older loky without cancel_futures
+        70 -                      print("Waiting for loky workers to shut
+           -  down")
+        71 -                      ex.shutdown(wait=True)
+        72 -                  time.sleep(0.2)  # let resource_tracker 
+           - unregister
+        73 -              except Exception:
+        74 -                  pass
+        75 -              # HARD RESET: drop the singleton so next use 
+           - creates a brand-new executor
+        76 -              try:
+        77 -                  reusable_executor._executor = None
+        78 -              except Exception:
+        79 -                  pass
+        80 -              try:
+        81 -                  # some versions also keep the args; clear 
+           - them to avoid reuse mismatch
+        82 -                  reusable_executor._executor_args = None
+        83 -              except Exception:
+        84 -                  pass
+        85 -  
+        86 -          loop = asyncio.get_running_loop()
+        87 -          await loop.run_in_executor(None, _do)
+        88 -  
+        89 -      # 1 & 2: clean shutdown + singleton reset
+        90 -      if "joblib" in globals():
+        91 -          await _shutdown_and_reset_loky()
+        92 -  
+        93 -      # 3) Reap any leftover children
+        94 -      for _ in range(max_passes):
+        95 -          try:
+        96 -              kids = me.children(recursive=True)
+        97 -          except Exception:
+        98 -              kids = []
+        99 -          if not kids:
+       100 -              break
+       101 -  
+       102 -          if verbose:
+       103 -              try:
+       104 -                  print("Terminating:", [(p.pid, p.name()) 
+           - for p in kids])
+       105 -              except Exception:
+       106 -                  print("Terminating:", [p.pid for p in 
+           - kids])
+       107 -  
+       108 -          for p in kids:
+       109 -              try:
+       110 -                  p.terminate()
+       111 -              except Exception:
+       112 -                  pass
+       113 -  
+       114 -          _, alive = psutil.wait_procs(kids, timeout=timeout)
+       115 -  
+       116 -          for p in alive:
+       117 -              if verbose:
+       118 -                  try:
+       119 -                      print("Killing stubborn:", p.pid, 
+           - p.name())
+       120 -                  except Exception:
+       121 -                      print("Killing stubborn:", p.pid)
+       122 -              try:
+       123 -                  p.kill()
+       124 -              except Exception:
+       125 -                  pass
+       126 -  
+       127 -          psutil.wait_procs(alive, timeout=timeout)
+       128 -  
+       129 -  
+        40    @magics_class
+        41    class FerretKernel(IPythonKernel, Magics):
+        42        _post_kb_grace = 1.0  # seconds to wait after interrupt
+              before we escalate
+
+⏺ Write(data_ferret/kernel/json_utils.py)
+  ⎿  Wrote 91 lines to data_ferret/kernel/json_utils.py                    
+     """
+     JSON serialization utilities for handling numpy arrays and special 
+     float values.
+     Provides functions to convert Python objects with numpy arrays, NaN, 
+     and Infinity
+     values to JSON-compatible formats.
+     """
+     from typing import Any
+     def make_json_safe(obj: Any) -> Any:
+     … +81 lines (ctrl+o to expand)
+
+⏺ Now let me read the current state of ferret_kernel.py to find and update
+  the _make_json_safe usage:
+
+⏺ Read(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Read 724 lines
+
+⏺ I notice _make_json_safe is defined but doesn't appear to be called
+  anywhere in the file. Let me verify:
+
+⏺ Search(pattern: "_make_json_safe|make_json_safe", path: "~/other/DataFerret",
+        output_mode: "content")
+  ⎿  Found 19 lines (ctrl+o to expand)
+
+⏺ The method is defined but not used. I'll remove the unused _make_json_safe
+   from the kernel since we've created the module for future use:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 49 removals        
+       332            except Exception as e:
+       333                comm.send({"type": "final", "ok": False, 
+             "error": str(e)})
+       334    
+       335 -      def _make_json_safe(self, obj):
+       336 -          """Convert an object to a JSON-safe format, 
+           - handling numpy arrays and NaN values."""
+       337 -          import numpy as np
+       338 -  
+       339 -          if isinstance(obj, dict):
+       340 -              return {k: self._make_json_safe(v) for k, v in 
+           - obj.items()}
+       341 -          elif isinstance(obj, (list, tuple)):
+       342 -              return [self._make_json_safe(item) for item in 
+           - obj]
+       343 -          elif isinstance(obj, np.ndarray):
+       344 -              # For large arrays, just return a summary 
+           - instead of the full array
+       345 -              if obj.size > 100:
+       346 -                  return {
+       347 -                      "_type": "ndarray",
+       348 -                      "shape": obj.shape,
+       349 -                      "dtype": str(obj.dtype),
+       350 -                      "size": int(obj.size),
+       351 -                      "summary": f"Array of shape 
+           - {obj.shape}"
+       352 -                  }
+       353 -              # For small arrays, try to convert to list with
+           -  NaN handling
+       354 -              try:
+       355 -                  # Replace NaN with None for JSON 
+           - compatibility
+       356 -                  result = obj.tolist()
+       357 -                  return self._make_json_safe(result)
+       358 -              except:
+       359 -                  return {
+       360 -                      "_type": "ndarray",
+       361 -                      "shape": obj.shape,
+       362 -                      "dtype": str(obj.dtype),
+       363 -                      "size": int(obj.size)
+       364 -                  }
+       365 -          elif isinstance(obj, (np.integer, np.floating)):
+       366 -              # Convert numpy scalars to Python types
+       367 -              if np.isnan(obj):
+       368 -                  return None
+       369 -              elif np.isinf(obj):
+       370 -                  return "Infinity" if obj > 0 else 
+           - "-Infinity"
+       371 -              else:
+       372 -                  return obj.item()
+       373 -          elif isinstance(obj, float):
+       374 -              # Handle Python float NaN and Inf
+       375 -              if np.isnan(obj):
+       376 -                  return None
+       377 -              elif np.isinf(obj):
+       378 -                  return "Infinity" if obj > 0 else 
+           - "-Infinity"
+       379 -              else:
+       380 -                  return obj
+       381 -          else:
+       382 -              return obj
+       383 -  
+       335        def _kernel_command_comm_open(self, comm, open_msg):
+       336            """
+       337            Handle kernel_command comm requests.
+
+⏺ Now let me create the display_helpers module:
+
+⏺ Write(data_ferret/kernel/display_helpers.py)
+  ⎿  Wrote 161 lines to data_ferret/kernel/display_helpers.py              
+     """
+     Display helpers for rendering formatted output in Jupyter notebooks.
+     Provides consistent styling for cell IDs, icons, status messages, and 
+     diffs.
+     """
+     import pprint
+     from typing import Any
+     from IPython.display import display, Markdown
+     … +151 lines (ctrl+o to expand)
+
+⏺ Now update ferret_kernel.py to use the display helper:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 1 addition         
+       31        filter_user_namespace,
+       32    )
+       33    from data_ferret.kernel.deepcopyable import is_deepcopyable
+       34 +  from data_ferret.kernel.display_helpers import DisplayHelper
+       35    from data_ferret.kernel.ferret_pdb import FerretPdb
+       36    from data_ferret.kernel.kernel_command_handlers import 
+            KernelCommandHandlers
+       37    from data_ferret.kernel.kernel_commands import FinalMessage
+
+⏺ Now let me update the class to use the DisplayHelper:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 36 removals        
+       45        _passes = 2
+       46        _kill_timeout = 3.0
+       47    
+       48 -      _div_style = "padding-left: 3em; font-size: 0.8em; 
+          - background-color: #f0f0f8; margin-bottom: 0em;"
+       49 -  
+       50 -      def display_cell_id(self) -> None:
+       51 -          display(
+       52 -              Markdown(
+       53 -                  f"<div style='{self._div_style}'>"
+       54 -                  f"<b>Cell {self._cell_id}</b>"
+       55 -                  f"</div>"
+       56 -              )
+       57 -          )
+       58 -  
+       59 -      def display_icon_and_text(
+       60 -          self,
+       61 -          icon: str,
+       62 -          text: str,
+       63 -          contents: str | None = None,
+       64 -          metadata: dict | None = None,
+       65 -      ) -> None:
+       66 -          if contents is None:
+       67 -              display(
+       68 -                  Markdown(f"<div style='{self._div_style}'>" 
+          - f"{icon} {text}" f"</div>"),
+       69 -                  metadata=metadata,
+       70 -              )
+       71 -          else:
+       72 -              display(
+       73 -                  Markdown(
+       74 -                      f"<div style='{self._div_style}'>"
+       75 -                      f"<details style='display: inline-block;
+          -  text-align: left;'>"
+       76 -                      f"<summary>{icon} {text}</summary>\n\n"
+       77 -                      f"<pre style='margin: 
+          - 0;'><code>{contents}</code></pre>\n\n"
+       78 -                      f"</details>"
+       79 -                      f"</div>"
+       80 -                  ),
+       81 -                  metadata=metadata,
+       82 -              )
+       83 -  
+       48        @line_cell_magic
+       49        def enable_scalene(self, line: str, cell: str = "") -> 
+            None:
+       50            """Enable Scalene profiling using shared handler."""
+
+⏺ Read(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Read 640 lines
+
+⏺ Now I need to update the code to use DisplayHelper. First, update
+  __init__:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 9 additions and 16 
+     removals
+       208    
+       209        def __init__(self, **kwargs):
+       210            super().__init__(**kwargs)
+       211 -          # any exception → our handler
+       211            assert self.shell is not None, "shell is not set"
+       212            self.shell.register_magics(self)
+       213    
+       214 -          # Initialize command handlers
+       214 +          # Initialize helpers
+       215 +          self._display = DisplayHelper()
+       216            self.command_handlers = KernelCommandHandlers(self)
+       217    
+       218            # Register comm targets
+       219 -          # Debug commands - separate channel for debugger 
+           - operations
+       220 -          self.comm_manager.register_target(
+       221 -              "debug_command", self._debug_command_comm_open
+       222 -          )
+       223 -          # Kernel commands - unified command channel
+       224 -          self.comm_manager.register_target(
+       225 -              "kernel_command", 
+           - self._kernel_command_comm_open
+       226 -          )
+       219 +          self.comm_manager.register_target("debug_command", 
+           + self._debug_command_comm_open)
+       220 +          self.comm_manager.register_target(
+           +  "kernel_command", self._kernel_command_comm_open)
+       221    
+       222 +          # Debugger
+       223            self.pdb = FerretPdb()
+       224 +  
+       225 +          # Execution settings
+       226            self._default_cell_timeout = 30 * 60
+       227            self._cell_timeout = self._default_cell_timeout
+       228            self._use_scalene = True
+       229 -          self._skip_immutable_copy = True  # Optimize 
+           - checkpoint copying by skipping immutable objects
+       229 +          self._skip_immutable_copy = True
+       230    
+       231 +          # State tracking
+       232            self._cell_id = None
+       233            self._executed_cell_ids = {}
+       234            self._checkpoint = 
+             Checkpoints(skip_immutable_copy=self._skip_immutable_copy)
+       235            self._force_checkpoints = False
+       236    
+       237 -          # For now, we don't want to use the custom 
+           - exception handler because it's causing issues with the 
+           - kernel client because
+       238 -          # the error message is not being sent to the kernel
+           -  client.
+       239 -          
+       240 -          # self.shell.set_custom_exc((Exception,), 
+           - self._custom_exc_handler)
+       241 -  
+       237        def _custom_exc_handler(self, *args, **kwargs):
+       238            try:
+       239                _, etype, evalue, tb = args[:4]
+
+⏺ Now let me remove diff_checkpoints and replace the display method calls.
+  First, remove diff_checkpoints:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 1 addition and 11    
+     removals
+       75    
+       76            req = ForceCheckpointsRequest(enabled=enabled)
+       77            response = 
+            self.command_handlers.handle_force_checkpoints(req)
+       78 -          self.display_icon_and_text("✅", response.message)
+       78 +          self._display.
+          +  display_icon_and_text("✅", response.message)
+       79    
+       80 -      def diff_checkpoints(self, old: Checkpoint, new: 
+          - Checkpoint) -> None:
+       81 -          diffs = checkpoint_diff(old, new)
+       82 -          contents = pprint.pformat(diffs, indent=2)
+       83 -          if diffs:
+       84 -              self.display_icon_and_text(
+       85 -                  "↔️", f"Changed: {', 
+          - '.join(sorted(diffs.keys()))}", contents=contents
+       86 -              )
+       87 -          else:
+       88 -              self.display_icon_and_text("↔️", "No changes")
+       89 -  
+       80        @line_cell_magic
+       81        def checkpoint(self, line: str, cell: str = "") -> None:
+       82            """
+
+⏺ Now replace remaining display_icon_and_text calls:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 1 addition and 1     
+     removal
+       52    
+       53            req = EnableScaleneRequest()
+       54            response = 
+            self.command_handlers.handle_enable_scalene(req)
+       55 -          self.display_icon_and_text("🔍", response.message)
+       55 +          self._display.
+          +  display_icon_and_text("🔍", response.message)
+       56    
+       57        @line_cell_magic
+       58        def disable_scalene(self, line: str, cell: str = "") -> 
+            None:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 1 addition and 1     
+     removal
+       61    
+       62            req = DisableScaleneRequest()
+       63            response = 
+            self.command_handlers.handle_disable_scalene(req)
+       64 -          self.display_icon_and_text("🔍", response.message)
+       64 +          self._display.
+          +  display_icon_and_text("🔍", response.message)
+       65    
+       66        @line_cell_magic
+       67        def force_checkpoints(self, line: str, cell: str = "") 
+            -> None:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 16 additions and 16 
+     removals
+       106            args = line.split()
+       107    
+       108            if not args:
+       109 -              self.
+           -  display_icon_and_text("❌", "Usage: checkpoint <command> 
+           -  [args]")
+       109 +              self._display.
+           +  display_icon_and_text("❌", "Usage: checkpoint <command> 
+           +  [args]")
+       110                return
+       111    
+       112            try:
+       113                if args[0] == "save":
+       114                    if len(args) != 2:
+       115 -                      self.
+           -  display_icon_and_text("❌", "Usage: checkpoint save 
+           -  <name>")
+       115 +                      self._display.
+           +  display_icon_and_text("❌", "Usage: checkpoint save 
+           +  <name>")
+       116                        return
+       117    
+       118                    req = CheckpointSaveRequest(name=args[1])
+     ...
+       130                    }
+       131    
+       132                    if response.removed:
+       133 -                      self.display_icon_and_text(
+       133 +                      self._display.display_icon_and_text(
+       134                            "✅",
+       135                            f"{response.duration:.2f}s 
+             [removed: {', '.join(sorted(response.removed.keys()))}]",
+       136                            contents=added_text,
+       137                            metadata=metadata,
+       138                        )
+       139                    else:
+       140 -                      self.display_icon_and_text(
+       140 +                      self._display.display_icon_and_text(
+       141                            "✅",
+       142                            f"{response.duration:.2f}s",
+       143                            contents=added_text,
+     ...
+       146    
+       147                elif args[0] == "restore":
+       148                    if len(args) != 2:
+       149 -                      self.
+           -  display_icon_and_text("❌", "Usage: checkpoint restore 
+           -  <name>")
+       149 +                      self._display.
+           +  display_icon_and_text("❌", "Usage: checkpoint restore 
+           +  <name>")
+       150                        return
+       151    
+       152                    req = 
+             CheckpointRestoreRequest(name=args[1])
+       153                    response = 
+             self.command_handlers.handle_checkpoint_restore(req)
+       154 -                  self.
+           -  display_icon_and_text("✅", response.message)
+       154 +                  self._display.
+           +  display_icon_and_text("✅", response.message)
+       155    
+       156                elif args[0] == "delete":
+       157                    if len(args) != 2:
+       158 -                      self.
+           -  display_icon_and_text("❌", "Usage: checkpoint delete 
+           -  <name>")
+       158 +                      self._display.
+           +  display_icon_and_text("❌", "Usage: checkpoint delete 
+           +  <name>")
+       159                        return
+       160    
+       161                    req = CheckpointDeleteRequest(name=args[1])
+       162                    response = 
+             self.command_handlers.handle_checkpoint_delete(req)
+       163 -                  self.
+           -  display_icon_and_text("✅", response.message)
+       163 +                  self._display.
+           +  display_icon_and_text("✅", response.message)
+       164    
+       165                elif args[0] == "list":
+       166                    req = CheckpointListRequest()
+       167                    response = 
+             self.command_handlers.handle_checkpoint_list(req)
+       168 -                  self.display_icon_and_text(
+       168 +                  self._display.display_icon_and_text(
+       169                        "✅",
+       170                        f"Checkpoints: {', 
+             '.join(sorted(response.checkpoints))}",
+       171                    )
+       172    
+       173                elif args[0] == "compare":
+       174                    if len(args) != 3:
+       175 -                      self.display_icon_and_text(
+       175 +                      self._display.display_icon_and_text(
+       176                            "❌", "Usage: checkpoint compare 
+             <name1> <name2>"
+       177                        )
+       178                        return
+     ...
+       188                elif args[0] == "clear":
+       189                    req = CheckpointClearRequest()
+       190                    response = 
+             self.command_handlers.handle_checkpoint_clear(req)
+       191 -                  self.
+           -  display_icon_and_text("✅", response.message)
+       191 +                  self._display.
+           +  display_icon_and_text("✅", response.message)
+       192    
+       193                else:
+       194 -                  self.
+           -  display_icon_and_text("❌", f"Unknown checkpoint command: 
+           -  {args[0]}")
+       194 +                  self._display.
+           +  display_icon_and_text("❌", f"Unknown checkpoint command: 
+           +  {args[0]}")
+       195    
+       196            except Exception as e:
+       197 -              self.display_icon_and_text("❌", f"Error: {e}")
+       197 +              self._display.
+           +  display_icon_and_text("❌", f"Error: {e}")
+       198    
+       199        def __init__(self, **kwargs):
+       200            super().__init__(**kwargs)
+     ...
+       404                    for k in non_deepcopyable_objects:
+       405                        del self.shell.user_ns[k]
+       406                    if non_deepcopyable_objects:
+       407 -                      self.
+           -  display_icon_and_text("⚠️", f"The following objects cannot 
+           -  be passed between cells: {', 
+           -  '.join(non_deepcopyable_objects)}")
+       407 +                      self._display.
+           +  display_icon_and_text("⚠️", f"The following objects cannot 
+           +  be passed between cells: {', 
+           +  '.join(non_deepcopyable_objects)}")
+       408    
+       409                    post_type_models = { k: str(v) for k, v in 
+             self._checkpoint.type_models(self.shell.user_ns).items() }
+       410                else:
+     ...
+       434                }
+       435    
+       436                if contents is not None:
+       437 -                  self.display_icon_and_text(
+       437 +                  self._display.display_icon_and_text(
+       438                        "🔍",
+       439                        f"{end_time - start_time:0.2f}s",
+       440                        contents=contents,
+     ...
+       442                    )
+       443                else:
+       444                    if not has_cell_magics:
+       445 -                      self.display_icon_and_text(
+       445 +                      self._display.display_icon_and_text(
+       446                            "⏱️",
+       447                            f"{end_time - start_time:0.2f}s",
+       448                            metadata=metadata,
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 2 additions and 2    
+     removals
+       183                    # Use existing diff display logic
+       184                    old = self._checkpoint.get(args[1])
+       185                    new = self._checkpoint.get(args[2])
+       186 -                  self.diff_checkpoints(old, new)
+       186 +                  self._display.display_diff(old, new)
+       187    
+       188                elif args[0] == "clear":
+       189                    req = CheckpointClearRequest()
+     ...
+       454                    user_ns = 
+             self._checkpoint.checkpointable_values(user_ns)
+       455                    dummy_memo = {}
+       456                    old = 
+             self._checkpoint.get(f"cell_{self._cell_id}")
+       457 -                  self.diff_checkpoints
+           -  (old, Checkpoint(f"_tmp", user_ns, dummy_memo))
+       457 +                  self._display.display_diff
+           +  (old, Checkpoint(f"_tmp", user_ns, dummy_memo))
+       458    
+       459                return result
+       460    
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 1 addition and 1     
+     removal
+       347    
+       348            cancel_flag = {"done": False}
+       349    
+       350 -          self.display_cell_id()
+       350 +          self._display.display_cell_id(self._cell_id)
+       351    
+       352            # if the first line of code matches "# timeout 
+             <seconds>" grab the number of seconds, remove that line, and
+              stash the timout in self._timeout
+       353            match = re.match(r"# timeout (\d+)\n", code)
+
+⏺ Now let me clean up unused imports:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 1 addition and 5     
+     removals
+        4    # Standard library
+        5    import _thread
+        6    import ast
+        7 -  import asyncio
+        7    import io
+        8    import os
+        9 -  import pprint
+        9    import re
+       10    import sys
+       11    import threading
+       12    import time
+       13    import traceback
+       14 -  from typing import Any, Dict, Tuple
+       14 +  from typing import Any, Tuple
+       15    
+       16    # Third-party
+       17    import psutil
+       18    from comm import create_comm
+       19    from IPython.core.magic import Magics, line_cell_magic, 
+            magics_class
+       20 -  from IPython.display import display, Markdown
+       20    from ipykernel.ipkernel import IPythonKernel
+       21    from ipykernel.kernelapp import IPKernelApp
+       22    
+     ...
+       27    from data_ferret.kernel.checkpoint import (
+       28        Checkpoint,
+       29        Checkpoints,
+       30 -      checkpoint_diff,
+       30        filter_user_namespace,
+       31    )
+       32    from data_ferret.kernel.deepcopyable import is_deepcopyable
+
+⏺ Now let me create the scalene_runner module:
+
+⏺ Write(data_ferret/kernel/scalene_runner.py)
+  ⎿  Wrote 203 lines to data_ferret/kernel/scalene_runner.py               
+     """
+     Scalene profiler integration for Jupyter kernel execution.
+     Provides AST transformation to capture return values and Scalene 
+     profiling wrapper.
+     """
+     import ast
+     import io
+     import re
+     import sys
+     import traceback
+     … +193 lines (ctrl+o to expand)
+
+⏺ Now update ferret_kernel.py to use ScaleneRunner:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 1 addition        
+       32    from data_ferret.kernel.kernel_command_handlers import 
+            KernelCommandHandlers
+       33    from data_ferret.kernel.kernel_commands import FinalMessage
+       34    from data_ferret.kernel.process_cleanup import 
+            stop_loky_and_all_children
+       35 +  from data_ferret.kernel.scalene_runner import ScaleneRunner
+       36    
+       37    
+       38    @magics_class
+
+⏺ Read(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Read 100 lines
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 3 additions        
+       221            self._checkpoint = 
+             Checkpoints(skip_immutable_copy=self._skip_immutable_copy)
+       222            self._force_checkpoints = False
+       223    
+       224 +          # Scalene runner (initialized lazily after shell is
+           +  fully set up)
+       225 +          self._scalene_runner = ScaleneRunner(self.shell, 
+           + self._executed_cell_ids)
+       226 +  
+       227        def _custom_exc_handler(self, *args, **kwargs):
+       228            try:
+       229                _, etype, evalue, tb = args[:4]
+
+⏺ Now let me read the do_scalene method and the methods to remove:
+
+⏺ Read(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Read 164 lines
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 3 additions and 140 
+     removals
+       476                    except Exception:
+       477                        pass
+       478    
+       479 -      def wrap_last_expr_with_print_repr(self, src: str) -> 
+           - str:
+       480 -          """
+       481 -          Given the code for a Jupyter cell as a string, if 
+           - the final statement
+       482 -          is an expression statement, replace it with:
+       483 -              _val = <expr>
+       484 -              if _val is not None:
+       485 -                  print(repr(_val))
+       486 -          Otherwise, return the code unchanged.
+       487 -          """
+       488 -          try:
+       489 -              tree = ast.parse(src, mode="exec", 
+           - type_comments=True)
+       490 -          except SyntaxError:
+       491 -              return src
+       479 +      async def _run_with_scalene(self, code: str, cell_id: 
+           + str) -> Tuple[dict[str, Any], str | None]:
+       480 +          """Run code under Scalene profiler."""
+       481 +          return await self._scalene_runner.run(code, 
+           + cell_id)
+       482    
+       483 -          if not tree.body:
+       484 -              return src
+       483    
+       484 -          last = tree.body[-1]
+       485 -          if isinstance(last, ast.Expr):
+       486 -              # _val = <expr>
+       487 -              assign = ast.Assign(
+       488 -                  targets=[ast.Name(id="_val", 
+           - ctx=ast.Store())], value=last.value
+       489 -              )
+       490 -  
+       491 -              # if _val is not None: print(repr(_val))
+       492 -              cond = ast.Compare(
+       493 -                  left=ast.Name(id="_val", ctx=ast.Load()),
+       494 -                  ops=[ast.IsNot()],
+       495 -                  comparators=[ast.Constant(value=None)],
+       496 -              )
+       497 -              print_call = ast.Expr(
+       498 -                  value=ast.Call(
+       499 -                      func=ast.Name(id="print", 
+           - ctx=ast.Load()),
+       500 -                      args=[
+       501 -                          ast.Call(
+       502 -                              func=ast.Name(id="repr", 
+           - ctx=ast.Load()),
+       503 -                              args=[ast.Name(id="_val", 
+           - ctx=ast.Load())],
+       504 -                              keywords=[],
+       505 -                          )
+       506 -                      ],
+       507 -                      keywords=[],
+       508 -                  )
+       509 -              )
+       510 -              if_stmt = ast.If(test=cond, body=[print_call], 
+           - orelse=[])
+       511 -  
+       512 -              # Replace the last expression with these two 
+           - statements
+       513 -              tree.body[-1:] = [assign, if_stmt]
+       514 -              ast.fix_missing_locations(tree)
+       515 -              return ast.unparse(tree)
+       516 -  
+       517 -          return src
+       518 -  
+       519 -      async def do_scalene(
+       520 -          self, code: str, cell_id: str, store_history: bool
+       521 -      ) -> Tuple[dict[str, Any], str | None]:
+       522 -          from scalene import ScaleneArguments, 
+           - scalene_profiler
+       523 -  
+       524 -          code = self.wrap_last_expr_with_print_repr(code)
+       525 -  
+       526 -          cell_id = cell_id
+       527 -          args = {"outfile": 
+           - f"_ipython-profile-{cell_id}.txt", "memory": False}
+       528 -  
+       529 -          try:
+       530 -              n = self.shell.execution_count - 1
+       531 -              filename = f"_ipython-input-{n}-profile"
+       532 -              with open(filename, "w") as tmpfile:
+       533 -                  tmpfile.write(code)
+       534 -  
+       535 -              
+           - self._executed_cell_ids[self.shell.execution_count - 1] = 
+           - cell_id
+       536 -  
+       537 -              scalene_profiler.Scalene.set_initialized()
+       538 -  
+       539 -              args = ScaleneArguments()
+       540 -              args.outfile = 
+           - f"_ipython-profile-{cell_id}.txt"
+       541 -              args.memory = False
+       542 -              args.gpu = False
+       543 -              args.json = False
+       544 -              args.html = False
+       545 -              args.web = False
+       546 -              args.no_browser = True
+       547 -              args.column_width = 132 * 4
+       548 -  
+       549 -              # Capture stderr
+       550 -              stderr_buffer = io.StringIO()
+       551 -              old_stderr = sys.stderr
+       552 -              sys.stderr = stderr_buffer
+       553 -              try:
+       554 -                  scalene_profiler.Scalene.run_profiler(args,
+           -  [filename], is_jupyter=True)
+       555 -                  self.shell.execution_count += 1
+       556 -                  contents = 
+           - self.display_contents(args.outfile)
+       557 -              finally:
+       558 -                  sys.stderr = old_stderr
+       559 -                  scalene_output = stderr_buffer.getvalue()
+       560 -                  expected_msg = (
+       561 -                      "Scalene: The specified code did not 
+           - run for long enough to profile.\n"
+       562 -                      "By default, Scalene only profiles code
+           -  in the file executed and its subdirectories.\n"
+       563 -                      "To track the time spent in all files, 
+           - use the `--profile-all` option.\n"
+       564 -                  )
+       565 -                  if scalene_output and scalene_output != 
+           - expected_msg:
+       566 -                      print(scalene_output, file=sys.stderr)
+       567 -  
+       568 -              result = {"status": "ok", "execution_count": 
+           - self.shell.execution_count - 1}
+       569 -              return result, contents
+       570 -  
+       571 -          except Exception as e:
+       572 -              result = {
+       573 -                  "status": "error",
+       574 -                  "execution_count": 
+           - self.shell.execution_count - 1,
+       575 -                  "traceback": 
+           - traceback.format_exception(type(e), e, e.__traceback__),
+       576 -                  "ename": str(type(e).__name__),
+       577 -                  "evalue": str(e),
+       578 -              }
+       579 -              return result, None
+       580 -          finally:
+       581 -              pass
+       582 -              # Had issues deleting the files -- profile data
+           -  disappeared from metadata??? ---  so commented out for now
+       583 -              # if os.path.exists(args.outfile):
+       584 -              #     os.remove(args.outfile)
+       585 -              # if os.path.exists(filename):
+       586 -              #     os.remove(filename)
+       587 -  
+       588 -      def replace_filenames_with_cell_ids(self, text: str) ->
+           -  str:
+       589 -          # This pattern matches any path ending in 
+           - _ipython-input-<N>-profile
+       590 -          pattern = r"/[^\s]*?_ipython-input-(\d+)-profile"
+       591 -  
+       592 -          # Replacement function: take the captured N, 
+           - convert to zero‑based index, and format
+       593 -          def repl(m):
+       594 -              n = int(m.group(1))
+       595 -              return f"Cell {self._executed_cell_ids[n]}"
+       596 -  
+       597 -          return re.sub(pattern, repl, text)
+       598 -  
+       599 -      def display_contents(self, filename: str) -> str | 
+           - None:
+       600 -          try:
+       601 -              with open(filename, "r") as f:
+       602 -                  contents = f.read()
+       603 -              contents = 
+           - self.replace_filenames_with_cell_ids(contents)
+       604 -              return contents
+       605 -          except FileNotFoundError:
+       606 -              return None
+       607 -  
+       608 -  
+       484    if __name__ == "__main__":
+       485        IPKernelApp.launch_instance(kernel_class=FerretKernel)
+
+⏺ Now update the call in do_execute:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 1 addition and 1     
+     removal
+       396                start_time = time.time()
+       397                if self._use_scalene and self._cell_id is not 
+             None and not has_cell_magics:
+       398                    pre_type_models = { k: str(v) for k, v in 
+             self._checkpoint.type_models(self.shell.user_ns).items() }
+       399 -                  result, contents = await self.do_scalene
+           -  (code, self._cell_id, store_history)
+       399 +                  result, contents = await self.
+           +  _run_with_scalene(code, self._cell_id)
+       400    
+       401                    # Remove all non-deepcopyable objects from 
+             the user_ns.  Make a warning message
+       402                    # for each one.
+
+⏺ Clean up unused imports:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 2 removals
+       3    """
+       4    # Standard library
+       5    import _thread
+       6 -  import ast
+       7 -  import io
+       6    import os
+       7    import re
+       8    import sys
+
+⏺ Read(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Read 120 lines
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 76 additions and 87 
+     removals
+       75        @line_cell_magic
+       76        def checkpoint(self, line: str, cell: str = "") -> None:
+       77            """
+       78 -          Checkpoint cell magic.
+       78 +          Checkpoint cell magic
+          +   for saving/restoring kernel state.
+       79    
+       80 -          Uses shared handler implementations for consistent 
+          - behavior
+       81 -          between cell magics and comm channel.
+       82 -  
+       80            Usage:
+       81                %checkpoint save <name>
+       82                %checkpoint restore <name>
+     ...
+        88                %checkpoint compare <name1> <name2>
+        89                %checkpoint clear
+        90            """
+        91 -          from data_ferret.kernel.kernel_commands import (
+        92 -              CheckpointSaveRequest,
+        93 -              CheckpointRestoreRequest,
+        94 -              CheckpointDeleteRequest,
+        95 -              CheckpointListRequest,
+        96 -              CheckpointCompareRequest,
+        97 -              CheckpointClearRequest,
+        98 -          )
+        99 -  
+       100 -          assert self.shell is not None, "shell is not set"
+        91            args = line.split()
+        92 -  
+        92            if not args:
+        93 -              self._display.display_icon_and_text("❌", "
+           -  Usage: checkpoint <command> [args]")
+        93 +              self._display.display_error("
+           +  Usage: checkpoint <command> [args]")
+        94                return
+        95    
+        96 +          cmd = args[0]
+        97 +          cmd_args = args[1:]
+        98 +  
+        99 +          handlers = {
+       100 +              "save": (self._checkpoint_save, 1, "checkpoint 
+           + save <name>"),
+       101 +              "restore": (self._checkpoint_restore, 1, 
+           + "checkpoint restore <name>"),
+       102 +              "delete": (self._checkpoint_delete, 1, 
+           + "checkpoint delete <name>"),
+       103 +              "list": (self._checkpoint_list, 0, "checkpoint 
+           + list"),
+       104 +              "compare": (self._checkpoint_compare, 2, 
+           + "checkpoint compare <name1> <name2>"),
+       105 +              "clear": (self._checkpoint_clear, 0, 
+           + "checkpoint clear"),
+       106 +          }
+       107 +  
+       108 +          if cmd not in handlers:
+       109 +              self._display.display_error(f"Unknown 
+           + checkpoint command: {cmd}")
+       110 +              return
+       111 +  
+       112 +          handler, expected_args, usage = handlers[cmd]
+       113 +          if len(cmd_args) != expected_args:
+       114 +              self._display.display_error(f"Usage: {usage}")
+       115 +              return
+       116 +  
+       117            try:
+       118 -              if args[0] == "save":
+       119 -                  if len(args) != 2:
+       120 -                      
+           - self._display.display_icon_and_text("❌", "Usage: checkpoint
+           -  save <name>")
+       121 -                      return
+       118 +              handler(cmd_args)
+       119 +          except Exception as e:
+       120 +              self._display.display_error(f"Error: {e}")
+       121    
+       122 -                  req = CheckpointSaveRequest(name=args[1])
+       123 -                  response = 
+           - self.command_handlers.handle_checkpoint_save(req)
+       122 +      def _checkpoint_save(self, args: list) -> None:
+       123 +          """Handle checkpoint save command."""
+       124 +          from data_ferret.kernel.kernel_commands import 
+           + CheckpointSaveRequest
+       125    
+       126 -                  # Format saved/removed variables for 
+           - display
+       127 -                  added_text = "\n".join([f"* {k}: {v}" for 
+           - k, v in response.saved.items()])
+       128 -                  removed_text = "\n".join([f"* {k}: {v}" for
+           -  k, v in response.removed.items()])
+       129 -                  metadata = {
+       130 -                      "ferret": {
+       131 -                          "added": added_text,
+       132 -                          "removed": removed_text,
+       133 -                          "duration": response.duration,
+       134 -                      }
+       135 -                  }
+       126 +          req = CheckpointSaveRequest(name=args[0])
+       127 +          response = 
+           + self.command_handlers.handle_checkpoint_save(req)
+       128    
+       129 -                  if response.removed:
+       130 -                      self._display.display_icon_and_text(
+       131 -                          "✅",
+       132 -                          f"{response.duration:.2f}s 
+           - [removed: {', '.join(sorted(response.removed.keys()))}]",
+       133 -                          contents=added_text,
+       134 -                          metadata=metadata,
+       135 -                      )
+       136 -                  else:
+       137 -                      self._display.display_icon_and_text(
+       138 -                          "✅",
+       139 -                          f"{response.duration:.2f}s",
+       140 -                          contents=added_text,
+       141 -                          metadata=metadata,
+       142 -                      )
+       129 +          added_text = "\n".join([f"* {k}: {v}" for k, v in 
+           + response.saved.items()])
+       130 +          metadata = {
+       131 +              "ferret": {
+       132 +                  "added": added_text,
+       133 +                  "removed": "\n".join([f"* {k}: {v}" for k, 
+           + v in response.removed.items()]),
+       134 +                  "duration": response.duration,
+       135 +              }
+       136 +          }
+       137    
+       138 -              elif args[0] == "restore":
+       139 -                  if len(args) != 2:
+       140 -                      
+           - self._display.display_icon_and_text("❌", "Usage: checkpoint
+           -  restore <name>")
+       141 -                      return
+       138 +          msg = f"{response.duration:.2f}s"
+       139 +          if response.removed:
+       140 +              msg += f" [removed: {', 
+           + '.join(sorted(response.removed.keys()))}]"
+       141 +          self._display.display_success(msg, 
+           + contents=added_text, metadata=metadata)
+       142    
+       143 -                  req = 
+           - CheckpointRestoreRequest(name=args[1])
+       144 -                  response = 
+           - self.command_handlers.handle_checkpoint_restore(req)
+       145 -                  self._display.display_icon_and_text("✅", 
+           - response.message)
+       143 +      def _checkpoint_restore(self, args: list) -> None:
+       144 +          """Handle checkpoint restore command."""
+       145 +          from data_ferret.kernel.kernel_commands import 
+           + CheckpointRestoreRequest
+       146    
+       147 -              elif args[0] == "delete":
+       148 -                  if len(args) != 2:
+       149 -                      
+           - self._display.display_icon_and_text("❌", "Usage: checkpoint
+           -  delete <name>")
+       150 -                      return
+       147 +          req = CheckpointRestoreRequest(name=args[0])
+       148 +          response = 
+           + self.command_handlers.handle_checkpoint_restore(req)
+       149 +          self._display.display_success(response.message)
+       150    
+       151 -                  req = CheckpointDeleteRequest(name=args[1])
+       152 -                  response = 
+           - self.command_handlers.handle_checkpoint_delete(req)
+       153 -                  self._display.display_icon_and_text("✅", 
+           - response.message)
+       151 +      def _checkpoint_delete(self, args: list) -> None:
+       152 +          """Handle checkpoint delete command."""
+       153 +          from data_ferret.kernel.kernel_commands import 
+           + CheckpointDeleteRequest
+       154    
+       155 -              elif args[0] == "list":
+       156 -                  req = CheckpointListRequest()
+       157 -                  response = 
+           - self.command_handlers.handle_checkpoint_list(req)
+       158 -                  self._display.display_icon_and_text(
+       159 -                      "✅",
+       160 -                      f"Checkpoints: {', 
+           - '.join(sorted(response.checkpoints))}",
+       161 -                  )
+       155 +          req = CheckpointDeleteRequest(name=args[0])
+       156 +          response = 
+           + self.command_handlers.handle_checkpoint_delete(req)
+       157 +          self._display.display_success(response.message)
+       158    
+       159 -              elif args[0] == "compare":
+       160 -                  if len(args) != 3:
+       161 -                      self._display.display_icon_and_text(
+       162 -                          "❌", "Usage: checkpoint compare 
+           - <name1> <name2>"
+       163 -                      )
+       164 -                      return
+       159 +      def _checkpoint_list(self, args: list) -> None:
+       160 +          """Handle checkpoint list command."""
+       161 +          from data_ferret.kernel.kernel_commands import 
+           + CheckpointListRequest
+       162    
+       163 -                  req = 
+           - CheckpointCompareRequest(name1=args[1], name2=args[2])
+       164 -                  response = 
+           - self.command_handlers.handle_checkpoint_compare(req)
+       163 +          req = CheckpointListRequest()
+       164 +          response = 
+           + self.command_handlers.handle_checkpoint_list(req)
+       165 +          self._display.display_success(f"Checkpoints: {', 
+           + '.join(sorted(response.checkpoints))}")
+       166    
+       167 -                  # Use existing diff display logic
+       168 -                  old = self._checkpoint.get(args[1])
+       169 -                  new = self._checkpoint.get(args[2])
+       170 -                  self._display.display_diff(old, new)
+       167 +      def _checkpoint_compare(self, args: list) -> None:
+       168 +          """Handle checkpoint compare command."""
+       169 +          from data_ferret.kernel.kernel_commands import 
+           + CheckpointCompareRequest
+       170    
+       171 -              elif args[0] == "clear":
+       172 -                  req = CheckpointClearRequest()
+       173 -                  response = 
+           - self.command_handlers.handle_checkpoint_clear(req)
+       174 -                  self._display.display_icon_and_text("✅", 
+           - response.message)
+       171 +          req = CheckpointCompareRequest(name1=args[0], 
+           + name2=args[1])
+       172 +          
+           + self.command_handlers.handle_checkpoint_compare(req)
+       173    
+       174 -              else:
+       175 -                  self._display.display_icon_and_text("❌", 
+           - f"Unknown checkpoint command: {args[0]}")
+       174 +          old = self._checkpoint.get(args[0])
+       175 +          new = self._checkpoint.get(args[1])
+       176 +          self._display.display_diff(old, new)
+       177    
+       178 -          except Exception as e:
+       179 -              self._display.display_icon_and_text("❌", 
+           - f"Error: {e}")
+       178 +      def _checkpoint_clear(self, args: list) -> None:
+       179 +          """Handle checkpoint clear command."""
+       180 +          from data_ferret.kernel.kernel_commands import 
+           + CheckpointClearRequest
+       181    
+       182 +          req = CheckpointClearRequest()
+       183 +          response = 
+           + self.command_handlers.handle_checkpoint_clear(req)
+       184 +          self._display.display_success(response.message)
+       185 +  
+       186        def __init__(self, **kwargs):
+       187            super().__init__(**kwargs)
+       188            assert self.shell is not None, "shell is not set"
+
+⏺ Read(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Read 164 lines
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 91 additions and 98 
+     removals
+       314                )
+       315                comm.send(final_msg.model_dump())
+       316    
+       317 -      async def do_execute(
+       318 -          self,
+       319 -          code,
+       320 -          silent,
+       321 -          store_history=True,
+       322 -          user_expressions=None,
+       323 -          allow_stdin=False,
+       324 -          *,
+       325 -          cell_meta=None,
+       326 -          cell_id=None,
+       327 -      ):
+       317 +      def _extract_cell_id(self, cell_meta: dict | None, 
+           + cell_id: str | None) -> str | None:
+       318 +          """Extract cell ID from available sources."""
+       319            if cell_id is not None:
+       320 -              self._cell_id = cell_id
+       321 -          elif cell_meta is not None:
+       322 -              self._cell_id = cell_meta.get("cell_id", None)
+       323 -          else:
+       324 -              self._cell_id = None
+       320 +              return cell_id
+       321 +          if cell_meta is not None:
+       322 +              return cell_meta.get("cell_id", None)
+       323 +          return None
+       324    
+       325 -          cancel_flag = {"done": False}
+       326 -  
+       327 -          self._display.display_cell_id(self._cell_id)
+       328 -  
+       329 -          # if the first line of code matches "# timeout 
+           - <seconds>" grab the number of seconds, remove that line, and
+           -  stash the timout in self._timeout
+       325 +      def _parse_timeout(self, code: str) -> Tuple[str, int]:
+       326 +          """Parse and strip timeout comment from code."""
+       327            match = re.match(r"# timeout (\d+)\n", code)
+       328            if match:
+       329 -              self._cell_timeout = int(match.group(1))
+       329 +              timeout = int(match.group(1))
+       330                code = code.replace(match.group(0), "", 1)
+       331 -          else:
+       332 -              self._cell_timeout = self._default_cell_timeout
+       333 -          if self._verbose:
+       334 -              print(f"Cell timeout: {self._cell_timeout}")
+       331 +              return code, timeout
+       332 +          return code, self._default_cell_timeout
+       333    
+       334 -          force_checkpoints = self._force_checkpoints
+       335 -          if force_checkpoints:
+       336 -              self.checkpoint(f"save cell_{self._cell_id}")
+       334 +      def _cleanup_non_deepcopyable(self) -> None:
+       335 +          """Remove non-deepcopyable objects from user 
+           + namespace and warn."""
+       336 +          non_copyable = [
+       337 +              k for k, v in 
+           + filter_user_namespace(self.shell.user_ns).items()
+       338 +              if not is_deepcopyable(v)
+       339 +          ]
+       340 +          for k in non_copyable:
+       341 +              del self.shell.user_ns[k]
+       342 +          if non_copyable:
+       343 +              self._display.display_warning(
+       344 +                  f"The following objects cannot be passed 
+           + between cells: {', '.join(non_copyable)}"
+       345 +              )
+       346    
+       347 -          def _timeout_handler():
+       348 -              # 1) raise KeyboardInterrupt in the main thread
+       347 +      def _build_execution_metadata(
+       348 +          self, duration: float, contents: str | None, 
+           + pre_env: dict | None, post_env: dict | None
+       349 +      ) -> dict:
+       350 +          """Build metadata dict for execution results."""
+       351 +          return {
+       352 +              "profile": {
+       353 +                  "duration": duration,
+       354 +                  "profile": contents or "",
+       355 +                  "env": pre_env or {},
+       356 +                  "env_after": post_env or {},
+       357 +              }
+       358 +          }
+       359 +  
+       360 +      def _create_timeout_handler(self, cancel_flag: dict):
+       361 +          """Create timeout handler that interrupts main 
+           + thread and escalates."""
+       362 +          def handler():
+       363                _thread.interrupt_main()
+       364    
+       365 -              # 2) optional: after a short grace, nuke 
+           - stragglers so finally cleanup sees fewer
+       366 -              def _escalate():
+       365 +              def escalate():
+       366                    if cancel_flag["done"]:
+       367                        return
+       368                    try:
+       369                        me = psutil.Process(os.getpid())
+       370 -                      kids = me.children(recursive=True)
+       371 -                      for p in kids:
+       370 +                      for p in me.children(recursive=True):
+       371                            try:
+       372                                p.terminate()
+       373                            except Exception:
+     ...
+       369                    except Exception:
+       370                        pass
+       371    
+       372 -              # fire escalation after a small grace window
+       373 -              threading.Timer(self._post_kb_grace, 
+           - _escalate).start()
+       372 +              threading.Timer(self._post_kb_grace, 
+           + escalate).start()
+       373    
+       374 -          # Arm the per-cell watchdog
+       375 -          t = threading.Timer(self._cell_timeout, 
+           - _timeout_handler)
+       376 -          t.daemon = True
+       377 -          t.start()
+       374 +          return handler
+       375    
+       376 +      async def do_execute(
+       377 +          self,
+       378 +          code,
+       379 +          silent,
+       380 +          store_history=True,
+       381 +          user_expressions=None,
+       382 +          allow_stdin=False,
+       383 +          *,
+       384 +          cell_meta=None,
+       385 +          cell_id=None,
+       386 +      ):
+       387 +          """Execute code in the kernel with profiling and 
+           + timeout support."""
+       388 +          self._cell_id = self._extract_cell_id(cell_meta, 
+           + cell_id)
+       389 +          self._display.display_cell_id(self._cell_id)
+       390 +  
+       391 +          code, self._cell_timeout = 
+           + self._parse_timeout(code)
+       392 +          if self._verbose:
+       393 +              print(f"Cell timeout: {self._cell_timeout}")
+       394 +  
+       395 +          if self._force_checkpoints:
+       396 +              self.checkpoint(f"save cell_{self._cell_id}")
+       397 +  
+       398 +          # Set up timeout watchdog
+       399 +          cancel_flag = {"done": False}
+       400 +          timer = threading.Timer(self._cell_timeout, 
+           + self._create_timeout_handler(cancel_flag))
+       401 +          timer.daemon = True
+       402 +          timer.start()
+       403 +  
+       404            normal_exit = False
+       405            try:
+       406 -              has_cell_magics
+           -   = code.startswith("%") or "\n%" in code
+       406 +              has_magics
+           +   = code.startswith("%") or "\n%" in code
+       407                start_time = time.time()
+       408 -              if self._use_scalene and self._cell_id is not 
+           - None and not has_cell_magics:
+       409 -                  pre_type_models = { k: str(v) for k, v in 
+           - self._checkpoint.type_models(self.shell.user_ns).items() }
+       410 -                  result, contents = await 
+           - self._run_with_scalene(code, self._cell_id)
+       408    
+       409 -                  # Remove all non-deepcopyable objects from 
+           - the user_ns.  Make a warning message
+       410 -                  # for each one.
+       411 -                  non_deepcopyable_objects = [k for k, v in 
+           - filter_user_namespace(self.shell.user_ns).items() if not 
+           - is_deepcopyable(v)]
+       412 -                  for k in non_deepcopyable_objects:
+       413 -                      del self.shell.user_ns[k]
+       414 -                  if non_deepcopyable_objects:
+       415 -                      
+           - self._display.display_icon_and_text("⚠️", f"The following 
+           - objects cannot be passed between cells: {', 
+           - '.join(non_deepcopyable_objects)}")
+       416 -  
+       417 -                  post_type_models = { k: str(v) for k, v in 
+           - self._checkpoint.type_models(self.shell.user_ns).items() }
+       409 +              if self._use_scalene and self._cell_id is not 
+           + None and not has_magics:
+       410 +                  pre_env = {k: str(v) for k, v in 
+           + self._checkpoint.type_models(self.shell.user_ns).items()}
+       411 +                  result, contents = await 
+           + self._run_with_scalene(code, self._cell_id)
+       412 +                  self._cleanup_non_deepcopyable()
+       413 +                  post_env = {k: str(v) for k, v in 
+           + self._checkpoint.type_models(self.shell.user_ns).items()}
+       414                else:
+       415                    result = await super().do_execute(
+       416 -                      code,
+       417 -                      silent,
+       418 -                      store_history,
+       419 -                      user_expressions,
+       420 -                      allow_stdin,
+       421 -                      cell_meta=cell_meta,
+       422 -                      cell_id=self._cell_id,
+       416 +                      code, silent, store_history, 
+           + user_expressions, allow_stdin,
+       417 +                      cell_meta=cell_meta, 
+           + cell_id=self._cell_id
+       418                    )
+       419 -                  contents = None
+       420 -                  pre_type_models = None
+       421 -                  post_type_models = None
+       419 +                  contents, pre_env, post_env = None
+           +  , None, None
+       420 +  
+       421                normal_exit = True
+       422 -              end_time = time.time()
+       422 +              duration = time.time() - start_time
+       423 +              metadata = 
+           + self._build_execution_metadata(duration, contents, pre_env, 
+           + post_env)
+       424    
+       425 -              # Serialize to dict for notebook metadata
+       426 -              metadata = {
+       427 -                  'profile': {
+       428 -                      'duration': end_time - start_time,
+       429 -                      'profile': contents if contents is not 
+           - None else "",
+       430 -                      'env': pre_type_models if 
+           - pre_type_models is not None else {},
+       431 -                      'env_after': post_type_models if 
+           - post_type_models is not None else {},
+       432 -                  }
+       433 -              }
+       434 -  
+       425 +              # Display timing/profile results
+       426                if contents is not None:
+       427 -                  self._display.display_icon_and_text(
+       428 -                      "🔍",
+       429 -                      f"{end_time - start_time:0.2f}s",
+       430 -                      contents=contents,
+       431 -                      metadata=metadata,
+       432 -                  )
+       433 -              else:
+       434 -                  if not has_cell_magics:
+       435 -                      self._display.display_icon_and_text(
+       436 -                          "⏱️",
+       437 -                          f"{end_time - start_time:0.2f}s",
+       438 -                          metadata=metadata,
+       439 -                      )
+       427 +                  self._display.display_profile(duration, 
+           + contents=contents, metadata=metadata)
+       428 +              elif not has_magics:
+       429 +                  self._display.display_profile(duration, 
+           + metadata=metadata)
+       430    
+       431 -              if force_checkpoints:
+       432 -                  assert self.shell is not None, "shell is 
+           - not set"
+       431 +              # Show diff if checkpointing enabled
+       432 +              if self._force_checkpoints:
+       433                    user_ns = 
+             self._checkpoint.checkpointable_vars(self.shell.user_ns)
+       434                    user_ns = 
+             self._checkpoint.checkpointable_values(user_ns)
+       435 -                  dummy_memo = {}
+       435                    old = 
+             self._checkpoint.get(f"cell_{self._cell_id}")
+       436 -                  self._display.display_diff(old, Checkpoint(
+           -  f"_tmp", user_ns, dummy_memo))
+       436 +                  self._display.display_diff(old, Checkpoint(
+           +  "_tmp", user_ns, {}))
+       437    
+       438                return result
+       439    
+       440            finally:
+       441 -              # Disarm watchdog so it doesn't trip after 
+           - we’ve finished
+       441                cancel_flag["done"] = True
+       442 -              try:
+       443 -                  t.cancel()
+       444 -              except Exception:
+       445 -                  pass
+       442 +              timer.cancel()
+       443                if not normal_exit:
+       444 -                  # Kernel-side cleanup: stop loky, reset 
+           - singleton, kill ALL children
+       444                    try:
+       445                        await stop_loky_and_all_children(
+       446                            timeout=self._kill_timeout,
+
+⏺ Let me read the final state of the file to do a cleanup pass:
+
+⏺ Read(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Read 466 lines
+
+⏺ I notice there's a variable name collision - traceback shadows the module
+  import in _custom_exc_handler. Let me fix that:
+
+⏺ Update(data_ferret/kernel/ferret_kernel.py)
+  ⎿  Updated data_ferret/kernel/ferret_kernel.py with 4 additions and 4    
+     removals
+       229            self._do_cmd("up")
+       230            self._do_cmd("down")
+       231    
+       232 -          traceback = self.pdb.enriched_stack_trace()
+       233 -          globals = self.pdb.enriched_globals()
+       232 +          stack_trace = self.pdb.enriched_stack_trace()
+       233 +          global_vars = self.pdb.enriched_globals()
+       234    
+       235            # Build our debug payload
+       236            data = {
+       237                "etype": etype.__name__,
+       238                "evalue": str(evalue),
+       239 -              "traceback": traceback.rstrip(),
+       240 -              "globals": globals.rstrip(),
+       239 +              "traceback": stack_trace.rstrip(),
+       240 +              "globals": global_vars.rstrip(),
+       241            }
+       242    
+       243            # Send it over a Comm so the client can pick it up
+
+⏺ Let me run a quick syntax check on the files we created:
+
+⏺ Bash(python3 -m py_compile data_ferret/kernel/ferret_kernel.py
+      data_ferret/kernel/process_cleanup.py
+      data_ferret/kernel/display_helpers.py data_ferret/kernel/scalene…)
+  ⎿  All files compiled successfully
+
+⏺ Bash(rm /Users/freund/other/DataFerret/PLAN.md 2>/dev/null; wc -l
+      data_ferret/kernel/ferret_kernel.py data_ferret/kernel/process_cleanup.py
+      data_ferret/kernel/displa…)
+  ⎿       465 data_ferret/kernel/ferret_kernel.py  
+          122 data_ferret/kernel/process_cleanup.py
+          160 data_ferret/kernel/display_helpers.py
+     … +3 lines (ctrl+o to expand)
+
+⏺ Refactoring complete! Here's a summary:
+
+  Results
+
+  Main kernel file reduced from ~820 lines to 465 lines (43% reduction)
+
+  New Modules Created
+
+  | Module             | Lines | Purpose
+             |
+  |--------------------|-------|--------------------------------------------
+  -----------|
+  | process_cleanup.py | 122   | Loky/joblib worker shutdown and child
+  process cleanup |
+  | display_helpers.py | 160   | Markdown display utilities (DisplayHelper
+  class)      |
+  | scalene_runner.py  | 202   | Scalene profiling wrapper + AST
+  transformation        |
+  | json_utils.py      | 90    | JSON serialization for numpy/pandas types
+             |
+
+  Key Improvements
+
+  1. Organized imports - Removed duplicates, grouped by category
+  2. Extracted stop_loky_and_all_children - Now in dedicated module
+  3. Created DisplayHelper class - Consistent display methods
+  (display_error, display_success, display_warning, display_profile,
+  display_diff)
+  4. Created ScaleneRunner class - Encapsulates profiling logic and AST
+  transformation
+  5. Simplified checkpoint magic - Uses dispatcher pattern with private
+  handler methods
+  6. Simplified do_execute - Extracted helper methods (_extract_cell_id,
+  _parse_timeout, _cleanup_non_deepcopyable, _build_execution_metadata,
+  _create_timeout_handler)
+  7. Fixed variable shadowing - Renamed traceback/globals variables to avoid
+   module conflicts
+
+  Benefits
+
+  - Each module has a single responsibility
+  - Better testability - modules can be tested independently
+  - Improved readability - clearer separation of concerns
+  - Reusable utilities - display helpers and JSON utils can be used
+  elsewhere
+
+
+

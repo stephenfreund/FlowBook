@@ -5,7 +5,7 @@ from typing import Optional
 
 from IPython.display import Markdown, display
 
-from data_ferret.kernel.checkpoint import Checkpoint, checkpoint_diff
+from data_ferret.kernel.checkpoint import Checkpoint
 
 
 DEFAULT_DIV_STYLE = "padding-left: 3em; font-size: 0.8em; background-color: #f0f0f8; margin-bottom: 0em;"
@@ -55,7 +55,7 @@ class DisplayHelper:
 
     def display_checkpoint_diff(self, old: Checkpoint, new: Checkpoint) -> None:
         """Display the diff between two checkpoints."""
-        diffs = checkpoint_diff(old, new)
+        diffs = Checkpoint.diff(old, new)
         contents = pprint.pformat(diffs, indent=2)
         if diffs:
             self.display_icon_and_text(
