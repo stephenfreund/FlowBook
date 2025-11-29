@@ -21,6 +21,54 @@ from data_ferret.kernel.types import (
 )
 
 
+def _is_floating_dtype(dtype) -> bool:
+    """
+    Safely check if a dtype is a floating point type.
+
+    Handles both numpy dtypes and pandas extension dtypes.
+
+    Args:
+        dtype: A numpy dtype or pandas extension dtype
+
+    Returns:
+        True if the dtype represents floating point numbers
+    """
+    try:
+        # Try pandas first (works for both numpy and extension dtypes)
+        from pandas.api.types import is_float_dtype
+        return is_float_dtype(dtype)
+    except Exception:
+        # Fallback to numpy (but this will fail for extension dtypes)
+        try:
+            return np.issubdtype(dtype, np.floating)
+        except (TypeError, AttributeError):
+            return False
+
+
+def _is_integer_dtype(dtype) -> bool:
+    """
+    Safely check if a dtype is an integer type.
+
+    Handles both numpy dtypes and pandas extension dtypes.
+
+    Args:
+        dtype: A numpy dtype or pandas extension dtype
+
+    Returns:
+        True if the dtype represents integers
+    """
+    try:
+        # Try pandas first (works for both numpy and extension dtypes)
+        from pandas.api.types import is_integer_dtype
+        return is_integer_dtype(dtype)
+    except Exception:
+        # Fallback to numpy (but this will fail for extension dtypes)
+        try:
+            return np.issubdtype(dtype, np.integer)
+        except (TypeError, AttributeError):
+            return False
+
+
 def _all_elements_are_floats(arr) -> bool:
     """
     Check if all elements in an object-dtype array/series are floats.
@@ -51,8 +99,9 @@ def are_compatible_dtypes(arr1, arr2) -> bool:
     Check if two numpy arrays or pandas Series have compatible dtypes for equality comparison.
 
     Returns True if:
-    - Both are integer types (int8, int16, int32, int64, uint8, uint16, uint32, uint64)
-    - Both are floating types (float16, float32, float64)
+    - Both are integer types (int8, int16, int32, int64, uint8, uint16, uint32, uint64, Int64, etc.)
+    - Both are floating types (float16, float32, float64, Float64, etc.)
+    - Both are string types (object with strings, StringDtype)
     - One is object dtype containing all floats, and the other is a floating type
     - Both are the exact same type
 
@@ -68,20 +117,42 @@ def are_compatible_dtypes(arr1, arr2) -> bool:
     if dtype1 == dtype2:
         return True
 
+    # Handle pandas extension dtypes (StringDtype, Int64Dtype, etc.)
+    # These need special handling before numpy dtype checks
+    from pandas.api.types import is_extension_array_dtype, is_string_dtype, is_integer_dtype, is_float_dtype
+
+    # Both are string types (object with strings or StringDtype)
+    if is_string_dtype(dtype1) and is_string_dtype(dtype2):
+        return True
+
+    # Both are integer types (numpy int or pandas Int64, etc.)
+    if is_integer_dtype(dtype1) and is_integer_dtype(dtype2):
+        return True
+
+    # Both are floating types (numpy float or pandas Float64, etc.)
+    if is_float_dtype(dtype1) and is_float_dtype(dtype2):
+        return True
+
+    # If either is an extension dtype that we haven't handled above,
+    # they're not compatible unless they're exactly the same (already checked)
+    if is_extension_array_dtype(dtype1) or is_extension_array_dtype(dtype2):
+        return False
+
+    # For numpy dtypes only (not extension dtypes):
     # Both are integer types (signed or unsigned)
-    if np.issubdtype(dtype1, np.integer) and np.issubdtype(dtype2, np.integer):
+    if _is_integer_dtype(dtype1) and _is_integer_dtype(dtype2):
         return True
 
     # Both are floating types
-    if np.issubdtype(dtype1, np.floating) and np.issubdtype(dtype2, np.floating):
+    if _is_floating_dtype(dtype1) and _is_floating_dtype(dtype2):
         return True
 
     # Check object dtype compatibility with float dtypes
     # If one is object and the other is floating, check if object contains all floats
-    if dtype1 == np.object_ and np.issubdtype(dtype2, np.floating):
+    if dtype1 == np.object_ and _is_floating_dtype(dtype2):
         return _all_elements_are_floats(arr1)
 
-    if dtype2 == np.object_ and np.issubdtype(dtype1, np.floating):
+    if dtype2 == np.object_ and _is_floating_dtype(dtype1):
         return _all_elements_are_floats(arr2)
 
     return False
@@ -788,23 +859,31 @@ class Diff:
         # Cast to common type if dtypes are compatible but different
         if val_a.dtype != val_b.dtype:
             # Special handling for object dtype with floats
-            if val_a.dtype == np.object_ and np.issubdtype(val_b.dtype, np.floating):
+            if val_a.dtype == np.object_ and _is_floating_dtype(val_b.dtype):
                 val_a_cmp = val_a.astype(np.float64)
                 val_b_cmp = val_b.astype(np.float64)
-            elif val_b.dtype == np.object_ and np.issubdtype(val_a.dtype, np.floating):
+            elif val_b.dtype == np.object_ and _is_floating_dtype(val_a.dtype):
                 val_a_cmp = val_a.astype(np.float64)
                 val_b_cmp = val_b.astype(np.float64)
             else:
-                common_dtype = np.promote_types(val_a.dtype, val_b.dtype)
-                val_a_cmp = val_a.astype(common_dtype)
-                val_b_cmp = val_b.astype(common_dtype)
+                # Check if either is an extension dtype
+                from pandas.api.types import is_extension_array_dtype
+                if is_extension_array_dtype(val_a.dtype) or is_extension_array_dtype(val_b.dtype):
+                    # Extension dtypes can't use np.promote_types, compare as-is
+                    val_a_cmp = val_a
+                    val_b_cmp = val_b
+                else:
+                    # Safe to use np.promote_types for numpy dtypes
+                    common_dtype = np.promote_types(val_a.dtype, val_b.dtype)
+                    val_a_cmp = val_a.astype(common_dtype)
+                    val_b_cmp = val_b.astype(common_dtype)
         else:
             val_a_cmp = val_a
             val_b_cmp = val_b
 
         # Fast path: use vectorized operations to check if arrays are equal
         try:
-            if np.issubdtype(val_a_cmp.dtype, np.floating) or np.issubdtype(
+            if _is_floating_dtype(val_a_cmp.dtype) or np.issubdtype(
                 val_a_cmp.dtype, np.complexfloating
             ):
                 # Fast vectorized check for floats
@@ -824,7 +903,7 @@ class Diff:
         diff_count = 0
 
         try:
-            if np.issubdtype(val_a_cmp.dtype, np.floating) or np.issubdtype(
+            if _is_floating_dtype(val_a_cmp.dtype) or np.issubdtype(
                 val_a_cmp.dtype, np.complexfloating
             ):
                 # Iterate to find specific differences
@@ -928,16 +1007,24 @@ class Diff:
         # Cast to common type if dtypes are compatible but different
         if val_a.dtype != val_b.dtype:
             # Special handling for object dtype with floats
-            if val_a.dtype == np.object_ and np.issubdtype(val_b.dtype, np.floating):
+            if val_a.dtype == np.object_ and _is_floating_dtype(val_b.dtype):
                 val_a_cmp = val_a.astype(np.float64)
                 val_b_cmp = val_b.astype(np.float64)
-            elif val_b.dtype == np.object_ and np.issubdtype(val_a.dtype, np.floating):
+            elif val_b.dtype == np.object_ and _is_floating_dtype(val_a.dtype):
                 val_a_cmp = val_a.astype(np.float64)
                 val_b_cmp = val_b.astype(np.float64)
             else:
-                common_dtype = np.promote_types(val_a.dtype, val_b.dtype)
-                val_a_cmp = val_a.astype(common_dtype)
-                val_b_cmp = val_b.astype(common_dtype)
+                # Check if either is an extension dtype
+                from pandas.api.types import is_extension_array_dtype
+                if is_extension_array_dtype(val_a.dtype) or is_extension_array_dtype(val_b.dtype):
+                    # Extension dtypes can't use np.promote_types, compare as-is
+                    val_a_cmp = val_a
+                    val_b_cmp = val_b
+                else:
+                    # Safe to use np.promote_types for numpy dtypes
+                    common_dtype = np.promote_types(val_a.dtype, val_b.dtype)
+                    val_a_cmp = val_a.astype(common_dtype)
+                    val_b_cmp = val_b.astype(common_dtype)
         else:
             val_a_cmp = val_a
             val_b_cmp = val_b
@@ -1091,16 +1178,23 @@ class Diff:
             for col in val_a.columns:
                 if val_a[col].dtype != val_b[col].dtype:
                     # Special handling for object dtype with floats
-                    if val_a[col].dtype == np.object_ and np.issubdtype(val_b[col].dtype, np.floating):
+                    if val_a[col].dtype == np.object_ and _is_floating_dtype(val_b[col].dtype):
                         val_a_cmp[col] = val_a[col].astype(np.float64)
                         val_b_cmp[col] = val_b[col].astype(np.float64)
-                    elif val_b[col].dtype == np.object_ and np.issubdtype(val_a[col].dtype, np.floating):
+                    elif val_b[col].dtype == np.object_ and _is_floating_dtype(val_a[col].dtype):
                         val_a_cmp[col] = val_a[col].astype(np.float64)
                         val_b_cmp[col] = val_b[col].astype(np.float64)
                     else:
-                        common_dtype = np.promote_types(val_a[col].dtype, val_b[col].dtype)
-                        val_a_cmp[col] = val_a[col].astype(common_dtype)
-                        val_b_cmp[col] = val_b[col].astype(common_dtype)
+                        # Check if either is an extension dtype
+                        from pandas.api.types import is_extension_array_dtype
+                        if is_extension_array_dtype(val_a[col].dtype) or is_extension_array_dtype(val_b[col].dtype):
+                            # Extension dtypes can't use np.promote_types, compare as-is
+                            pass  # Already in val_a_cmp and val_b_cmp from the copy
+                        else:
+                            # Safe to use np.promote_types for numpy dtypes
+                            common_dtype = np.promote_types(val_a[col].dtype, val_b[col].dtype)
+                            val_a_cmp[col] = val_a[col].astype(common_dtype)
+                            val_b_cmp[col] = val_b[col].astype(common_dtype)
         else:
             val_a_cmp = val_a
             val_b_cmp = val_b

@@ -47,7 +47,7 @@ class FerretKernel(IPythonKernel, Magics):
         self._cell_id: Optional[str] = None
         self._cell_timeout = self._default_cell_timeout
         self._executed_cell_ids: Dict[int, str] = {}
-        self._checkpoint = Checkpoints(skip_immutable_copy=True)
+        self._checkpoint = Checkpoints()
         self._use_scalene = True
         self._force_checkpoints = False
 
