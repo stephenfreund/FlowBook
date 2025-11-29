@@ -305,3 +305,114 @@ def cleanup_kernel(
         except Exception as e:
             # Ignore errors during shutdown - kernel may already be stopped
             log(f"Warning: Error shutting down kernel: {e}")
+
+
+def format_metadata(metadata: Dict[str, Any], indent: int = 0) -> str:
+    """
+    Format metadata in a human-readable way.
+
+    Converts nested dictionaries and lists into a formatted string with
+    indentation and bullet points instead of raw JSON.
+
+    Args:
+        metadata: The metadata dictionary to format
+        indent: Current indentation level (internal use)
+
+    Returns:
+        Formatted string representation of metadata
+    """
+    lines = []
+    indent_str = "  " * indent
+
+    # Handle special cases for specific metadata structures
+    if indent == 0:
+        # Top-level formatting
+        status = metadata.get("status", "unknown")
+        command = metadata.get("command", "unknown")
+        message = metadata.get("message", "")
+
+        lines.append(f"Status: {status}")
+        lines.append(f"Command: {command}")
+
+        if message:
+            lines.append(f"Message: {message}")
+            lines.append("")
+
+        # Handle remaining fields
+        for key, value in metadata.items():
+            if key in ["status", "command", "message"]:
+                continue
+
+            lines.append(f"{key.replace('_', ' ').title()}:")
+            lines.append(format_metadata_value(value, indent=1))
+    else:
+        # Nested formatting
+        for key, value in metadata.items():
+            key_formatted = key.replace('_', ' ').title()
+            lines.append(f"{indent_str}{key_formatted}:")
+            lines.append(format_metadata_value(value, indent=indent+1))
+
+    return "\n".join(lines)
+
+
+def format_metadata_value(value: Any, indent: int = 0) -> str:
+    """
+    Format a single metadata value (helper for format_metadata).
+
+    Args:
+        value: The value to format
+        indent: Current indentation level
+
+    Returns:
+        Formatted string representation of the value
+    """
+    indent_str = "  " * indent
+    lines = []
+
+    if isinstance(value, dict):
+        for k, v in value.items():
+            k_formatted = k.replace('_', ' ').title()
+            if isinstance(v, (dict, list)):
+                lines.append(f"{indent_str}{k_formatted}:")
+                lines.append(format_metadata_value(v, indent=indent+1))
+            else:
+                lines.append(f"{indent_str}{k_formatted}: {v}")
+    elif isinstance(value, list):
+        if not value:
+            lines.append(f"{indent_str}(none)")
+        else:
+            for item in value:
+                if isinstance(item, dict):
+                    # YAML-style: first key-value on same line as dash
+                    items_list = list(item.items())
+                    if items_list:
+                        first_key, first_value = items_list[0]
+                        first_key_formatted = first_key.replace('_', ' ').title()
+
+                        # If first value is simple, put it on the same line
+                        if not isinstance(first_value, (dict, list)):
+                            lines.append(f"{indent_str}- {first_key_formatted}: {first_value}")
+                            # Add remaining keys indented
+                            for k, v in items_list[1:]:
+                                k_formatted = k.replace('_', ' ').title()
+                                if isinstance(v, (dict, list)):
+                                    lines.append(f"{indent_str}  {k_formatted}:")
+                                    lines.append(format_metadata_value(v, indent=indent+2))
+                                else:
+                                    lines.append(f"{indent_str}  {k_formatted}: {v}")
+                        else:
+                            # First value is complex, put dash alone then indent everything
+                            lines.append(f"{indent_str}-")
+                            for k, v in items_list:
+                                k_formatted = k.replace('_', ' ').title()
+                                if isinstance(v, (dict, list)):
+                                    lines.append(f"{indent_str}  {k_formatted}:")
+                                    lines.append(format_metadata_value(v, indent=indent+2))
+                                else:
+                                    lines.append(f"{indent_str}  {k_formatted}: {v}")
+                else:
+                    lines.append(f"{indent_str}- {item}")
+    else:
+        lines.append(f"{indent_str}{value}")
+
+    return "\n".join(lines)

@@ -21,6 +21,7 @@ from .helpers import (
     cleanup_kernel,
     detect_file_type,
     convert_cell_indices_to_ids,
+    format_metadata,
 )
 
 
@@ -202,9 +203,11 @@ def cli_main():
         print("=" * 60)
 
         # Display metadata
-        metadata_output = json.dumps(metadata_data, indent=2)
-        print("\nDetailed Metadata:")
-        print(metadata_output)
+        print("\n" + "=" * 60)
+        print("DETAILED METADATA")
+        print("=" * 60)
+        print(format_metadata(metadata_data))
+        print("=" * 60)
 
         return 0
 
