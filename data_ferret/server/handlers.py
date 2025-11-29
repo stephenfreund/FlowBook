@@ -53,6 +53,10 @@ class FerretCommandHandler(APIHandler):
                 self.finish(json.dumps({"error": "Missing 'notebook' field"}))
                 return
 
+            # Normalize notebook (add cell IDs if missing, ensure uniqueness)
+            from data_ferret.util.cell_ids import normalize_notebook
+            notebook_content = normalize_notebook(notebook_content)
+
             command = self.registry.get_command(command_name)
 
             # Create config from server settings

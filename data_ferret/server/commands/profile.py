@@ -131,7 +131,7 @@ class ProfileCommand(NotebookCommand):
                                             "execution_count": result["execution_count"],
                                         }
                                     )
-                                    log(f"[{result['execution_count']}]")
+                                    # log(f"[{result['execution_count']}]")
 
                                     total_executed += 1
                                 except Exception as e:

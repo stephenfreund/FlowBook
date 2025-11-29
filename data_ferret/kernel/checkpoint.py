@@ -11,6 +11,7 @@ import copy
 import datetime
 import decimal
 import random
+import time
 import types
 from typing import Any
 
@@ -321,6 +322,8 @@ def convert_dataframe_object_to_specialized(df: pd.DataFrame) -> pd.DataFrame:
         df2[col] = convert_series_object_to_specialized(df2[col])
         if df2[col].dtype != object:
             log(f"Converted column {col} from object to {df2[col].dtype}")
+        else:
+            log(f"Column {col} still has object dtype")
 
     return df2
 
@@ -441,6 +444,7 @@ class Checkpoints:
         for k, v in variables.items():
             # with timer(key="deep_copy_variable", message=f"Deep copying variable {k}"):
             try:
+                start_time = time.time()
                 if isinstance(v, pd.DataFrame):
                     # Check if DataFrame has any object dtype columns
                     has_object_columns = any(
@@ -487,6 +491,11 @@ class Checkpoints:
                 else:
                     # For all other types, use standard deepcopy with memo tracking
                     copied[k] = copy.deepcopy(v, memo=memo)
+
+                end_time = time.time()
+                duration = end_time - start_time
+                if duration > 0.010:
+                    log(f"Deep copying variable {k} took {duration:.3f} seconds")
             except Exception as e:
                 # Track variables that failed to copy
                 failed[k] = e

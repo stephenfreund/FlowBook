@@ -16,22 +16,6 @@ from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.output import error, log, timer
 
 
-def convert_all_source_to_strings(notebook_content: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convert cell sources from list format to string format.
-
-    Args:
-        notebook_content: The notebook JSON structure
-
-    Returns:
-        The notebook with all sources as strings
-    """
-    for cell in notebook_content["cells"]:
-        if cell["cell_type"] == "code" and isinstance(cell["source"], list):
-            cell["source"] = "".join(cell["source"])
-    return notebook_content
-
-
 def detect_file_type(filepath: str) -> str:
     """
     Detect if a file is a notebook or kernel connection file.
@@ -135,23 +119,34 @@ def convert_cell_indices_to_ids(notebook_content: Dict[str, Any], cell_id_args: 
 
 def load_notebook(notebook_path: str) -> Dict[str, Any]:
     """
-    Load a notebook from disk and prepare it for processing.
+    Load a notebook from disk and normalize it.
+
+    Normalization includes:
+    - Adding unique 4-character IDs to cells without IDs
+    - Replacing non-4-character IDs with new 4-character IDs
+    - Ensuring all cell IDs are unique
+    - Converting cell sources from list to string format
 
     Args:
         notebook_path: Path to the .ipynb file
 
     Returns:
-        Notebook content as a dictionary
+        Normalized notebook content as a dictionary
 
     Raises:
         FileNotFoundError: If notebook doesn't exist
         json.JSONDecodeError: If notebook is invalid JSON
     """
+    from data_ferret.util.cell_ids import normalize_notebook
+
     with timer(key="load_notebook", message=f"Loading notebook: {notebook_path}"):
         with open(notebook_path, "r", encoding="utf-8") as f:
             notebook_content = json.load(f)
 
-    return convert_all_source_to_strings(notebook_content)
+    # Normalize notebook (add IDs, ensure uniqueness, convert sources)
+    notebook_content = normalize_notebook(notebook_content)
+
+    return notebook_content
 
 
 def setup_kernel(

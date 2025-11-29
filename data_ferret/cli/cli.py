@@ -117,6 +117,12 @@ def cli_main():
         help="Output file for timing data (default: ferret-times.json)",
     )
 
+    parser.add_argument(
+        "--force-checkpoints",
+        action="store_true",
+        help="Force checkpointing before every cell execution (stored as pre_{cell_id})",
+    )
+
     args = parser.parse_args()
 
     # Set the timings file for the global output object
@@ -154,6 +160,13 @@ def cli_main():
                 connection_file=connection_file,
                 kernel_name=args.kernel_name
             )
+
+            # Enable force checkpoints if requested
+            if args.force_checkpoints:
+                from data_ferret.kernel.kernel_command_client import KernelCommandClient
+                command_client = KernelCommandClient(kernel_client, timeout=30)
+                command_client.force_checkpoints(enabled=True)
+                log("Force checkpoints enabled")
 
         # Run async command.process() in event loop
         result = asyncio.run(

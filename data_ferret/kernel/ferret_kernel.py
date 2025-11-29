@@ -292,7 +292,7 @@ class FerretKernel(IPythonKernel, Magics):
         force_checkpoints = self._force_checkpoints
 
         if force_checkpoints:
-            self.checkpoint(f"save cell_{self._cell_id}")
+            self.checkpoint(f"save pre_{self._cell_id}")
 
         timeout_handler = CellTimeoutHandler(
             timeout=timeout,
@@ -424,7 +424,7 @@ class FerretKernel(IPythonKernel, Magics):
         """Show diff between checkpoint and current state."""
         user_ns = self._checkpoint.checkpointable_vars(self.shell.user_ns)
         user_ns = self._checkpoint.checkpointable_values(user_ns)
-        old = self._checkpoint.get(f"cell_{self._cell_id}")
+        old = self._checkpoint.get(f"pre_{self._cell_id}")
         start_time = time.time()
         new = Checkpoint(f"_tmp", user_ns, {})
         self.diff_checkpoints(old, new)

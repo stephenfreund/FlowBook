@@ -164,6 +164,27 @@ Register in `data_ferret/server/__init__.py` or `commands.py`.
 - `llm_cost.py` - Tracks API costs for LLM usage
 - Configured with OpenAI API for AI-powered notebook analysis
 
+## Cell ID Normalization
+
+All notebooks entering the system (via CLI or server) are automatically normalized to ensure consistent cell identification:
+
+- **4-character lowercase IDs**: All cells receive unique 4-character lowercase letter IDs (e.g., "abcd", "xyzw")
+- **Automatic ID generation**: Cells without IDs are assigned new unique IDs
+- **ID replacement**: Non-4-character IDs (like UUIDs or custom IDs) are replaced with new 4-character IDs
+- **Duplicate handling**: Duplicate IDs are automatically regenerated to ensure uniqueness
+- **Source normalization**: Cell sources are converted from list to string format
+
+This normalization happens transparently at entry points:
+- **CLI**: `load_notebook()` in `data_ferret/cli/helpers.py`
+- **Server**: `FerretCommandHandler.post()` in `data_ferret/server/handlers.py`
+- **Core function**: `normalize_notebook()` in `data_ferret/util/cell_ids.py`
+
+### Why 4-character IDs?
+
+- **Readability**: Short IDs are easy to read in logs and debugging (26^4 = 456,976 possible IDs)
+- **Consistency**: All notebooks use the same ID format regardless of source
+- **Simplicity**: Easier to reference and track cells in development and testing
+
 ## Code Style
 
 ### TypeScript

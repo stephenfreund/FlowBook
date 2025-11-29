@@ -82,9 +82,15 @@ def colored_diff_string(diff_text: str, prefix="") -> str:
 def main():
     import sys
     import nbformat
+    from data_ferret.util.cell_ids import normalize_notebook
 
     nb_a = nbformat.read(sys.argv[1], as_version=4)
     nb_b = nbformat.read(sys.argv[2], as_version=4)
+
+    # Normalize notebooks to ensure IDs exist for proper diffing
+    nb_a = normalize_notebook(nb_a)
+    nb_b = normalize_notebook(nb_b)
+
     print_colored_diff(notebook_diff(nb_a, nb_b))
 
 
