@@ -12,7 +12,7 @@ from typing import Optional
 
 from data_ferret.server.registry import CommandRegistry
 from data_ferret.server.config import FerretConfig
-from data_ferret.util.output import error, log
+from data_ferret.util.output import error, log, output
 
 from .helpers import (
     load_notebook,
@@ -111,7 +111,16 @@ def cli_main():
         help="Optional list of cell IDs to process. Can use @A notation for 0-based code cell indexing (e.g., --cell-ids @A @C for cells 0 and 2), or mix with actual cell IDs (default: process all cells)",
     )
 
+    parser.add_argument(
+        "--timings-file",
+        default="ferret-times.json",
+        help="Output file for timing data (default: ferret-times.json)",
+    )
+
     args = parser.parse_args()
+
+    # Set the timings file for the global output object
+    output.set_timings_file(args.timings_file)
 
     # Parse file paths
     notebook_path, connection_file = parse_file_paths(args.paths)

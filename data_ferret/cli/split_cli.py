@@ -18,7 +18,7 @@ from typing import Optional
 from data_ferret.cli.helpers import load_notebook, save_notebook
 from data_ferret.server.registry import CommandRegistry
 from data_ferret.server.config import FerretConfig
-from data_ferret.util.output import error, log, timer
+from data_ferret.util.output import error, log, timer, output
 
 
 async def split_notebook(
@@ -156,8 +156,16 @@ Examples:
         default="gpt-4o",
         help="LLM model to use for splitting (default: gpt-4o)",
     )
+    parser.add_argument(
+        "--timings-file",
+        default="ferret-times.json",
+        help="Output file for timing data (default: ferret-times.json)",
+    )
 
     args = parser.parse_args()
+
+    # Set the timings file for the global output object
+    output.set_timings_file(args.timings_file)
 
     # Validate input
     if not args.input.exists():

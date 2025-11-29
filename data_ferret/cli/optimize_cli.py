@@ -17,7 +17,7 @@ from typing import Optional, List, Dict, Any
 
 from data_ferret.server.registry import CommandRegistry
 from data_ferret.server.config import FerretConfig
-from data_ferret.util.output import error, indent, log, timer, quiet, print
+from data_ferret.util.output import error, indent, log, timer, quiet, print, output
 from data_ferret.util.ferret_metadata import FerretMetadata, OptimizationPotential
 from data_ferret.util.text import wrap_markdown
 
@@ -613,7 +613,16 @@ def optimize_cli_main():
         help="Number of times to run optimization step per cell (default: 1, for testing)",
     )
 
+    parser.add_argument(
+        "--timings-file",
+        default="ferret-times.json",
+        help="Output file for timing data (default: ferret-times.json)",
+    )
+
     args = parser.parse_args()
+
+    # Set the timings file for the global output object
+    output.set_timings_file(args.timings_file)
 
     # Use quiet context manager if --quiet flag is set
     quiet_context = quiet() if args.quiet else nullcontext()
