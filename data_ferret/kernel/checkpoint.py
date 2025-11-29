@@ -223,6 +223,52 @@ Optional sanity_check=True mode in Checkpoints:
   - Useful for debugging but expensive (doubles comparison work)
 
 
+5.4 Function Deep Copy (_deep_copy_function)
+--------------------------------------------
+Functions require special handling because standard deepcopy doesn't copy
+closure contents or handle mutable defaults correctly. The _deep_copy_function()
+helper handles three cases:
+
+Case 1: No closure, no mutable defaults
+  - Returns the original function unchanged (optimization)
+
+Case 2: No closure, but has mutable defaults (list, dict, set in defaults)
+  - Deep copies __defaults__ and __kwdefaults__ using the shared memo
+  - Creates new FunctionType with copied defaults
+  - Essential for functions like: def f(x, acc=[]): acc.append(x)
+
+Case 3: Has closure (and optionally mutable defaults)
+  1. For each cell in the closure:
+     - Deep copies cell.cell_contents using the shared memo
+     - Creates a new CellType with the copied contents
+     - Handles empty cells (unbound variables) gracefully
+  2. Deep copies __defaults__ and __kwdefaults__ (can contain mutable objects)
+  3. Creates new FunctionType with:
+     - Same __code__ (immutable bytecode)
+     - Same __globals__ (shared - modules should be same objects)
+     - Copied __defaults__, __kwdefaults__
+     - New closure tuple
+  4. Copies __annotations__, __dict__, __doc__
+  5. Registers in memo for reference tracking
+
+This ensures closures and mutable defaults are properly isolated across
+checkpoints. Examples:
+
+  # Closure example
+  counter = [0]
+  def increment():
+      counter[0] += 1
+      return counter[0]
+
+  # Mutable default example
+  def accumulate(val, acc=[]):
+      acc.append(val)
+      return acc
+
+After checkpoint and restore, both functions will have their own isolated
+copies of `counter` and `acc` respectively.
+
+
 6. ASSUMPTIONS
 --------------
   a) Pandas CoW is enabled globally (we set it in this module)
@@ -341,19 +387,124 @@ In practice, this is rare because:
 
 8.5 Function/Lambda Checkpointing
 ---------------------------------
-Functions ARE checkpointed (not excluded), but:
-  - They reference their original closure via __closure__
-  - deepcopy doesn't copy closure variables by default
-  - Closures reference the same objects as before checkpoint
+Functions are handled specially via _deep_copy_function():
+  - Closure cell contents are deep copied using the shared memo
+  - New cell objects are created with the copied contents
+  - Mutable default arguments ([], {}, set()) are deep copied
+  - A new function object is built with the new closure and defaults
+  - Functions without closures AND without mutable defaults are unchanged
 
-This means restored functions may see modified closure state.
+This ensures that restored functions have isolated closure and default state.
+
+Design notes (NOT problems in normal usage):
+  - __globals__ is shared and points to user_ns. Since restore() modifies
+    user_ns in place, functions automatically see restored global values.
+  - Lambdas are FunctionType objects, handled identically to regular functions.
+  - Bound methods: deepcopy + memo ensures __self__ points to the same
+    copied object as the namespace variable.
+  - Recursive functions: work correctly because __globals__ (user_ns) is
+    modified in place during restore, so recursive calls find the restored
+    function.
+
+EDGE CASE WARNING - Direct checkpoint access:
+  If you access checkpoint.user_ns['func'] directly WITHOUT restoring,
+  the function's __globals__ still points to the LIVE user_ns, not the
+  checkpoint's namespace. Calling such functions will:
+    - Use LIVE global variable values (not checkpoint values)
+    - Make recursive calls to LIVE functions (not checkpoint copies)
+    - Modify LIVE namespace (not checkpoint)
+
+  This is only an issue for unusual usage patterns. Normal usage
+  (restore then use) works correctly.
 
 
-8.6 Class Definitions Not Checkpointed
---------------------------------------
-If user defines a class in a cell, class instances are checkpointed
-but the class definition itself isn't (it's a type, not excluded,
-but not deeply copied meaningfully).
+8.6 Class Definitions Not Properly Checkpointed
+------------------------------------------------
+User-defined classes are NOT properly deep copied. Python's copy.deepcopy()
+returns the same class object for types. This causes several issues:
+
+PROBLEM 1: Mutable class variables are NOT restored
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  class Counter:
+      count = 0  # Mutable class variable
+      instances = []  # Another mutable class variable
+
+  obj = Counter()
+  checkpoint.save('test', user_ns)
+
+  Counter.count = 100
+  Counter.instances.append(obj)
+
+  checkpoint.restore('test', user_ns)
+  # Counter.count is STILL 100, not 0!
+  # Counter.instances is STILL [obj], not []!
+
+PROBLEM 2: Methods added/removed from classes persist
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  class Extensible:
+      def original(self):
+          return "original"
+
+  checkpoint.save('test', user_ns)
+
+  Extensible.new_method = lambda self: "new"
+  del Extensible.original
+
+  checkpoint.restore('test', user_ns)
+  # Extensible.new_method STILL exists!
+  # Extensible.original is STILL deleted!
+
+PROBLEM 3: Class redefinition DOES work (but may confuse)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  class MyClass:
+      value = 1
+
+  checkpoint.save('test', user_ns)
+
+  class MyClass:  # Completely new class object
+      value = 999
+
+  checkpoint.restore('test', user_ns)
+  # MyClass.value is 1 (restored correctly because it's a different object)
+
+WHY THIS HAPPENS:
+  - copy.deepcopy(SomeClass) returns SomeClass (same object)
+  - The checkpoint stores a reference to the live class, not a copy
+  - Modifying the class modifies the checkpoint's reference too
+
+WORKAROUND 1: Use instance attributes instead of class variables
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # BAD - class variable won't be restored
+  class Counter:
+      count = 0
+
+  # GOOD - instance attribute will be restored
+  class Counter:
+      def __init__(self):
+          self.count = 0
+
+WORKAROUND 2: Store mutable state in a separate variable
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # BAD
+  class Config:
+      settings = {'debug': False}
+
+  # GOOD
+  class Config:
+      pass
+  config_settings = {'debug': False}  # Stored separately, will be restored
+
+WORKAROUND 3: Redefine the class entirely after restore
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # If you need to reset a class, redefine it after restore:
+  checkpoint.restore('test', user_ns)
+  class Counter:  # Redefine to get fresh class
+      count = 0
+
+INSTANCES ARE CHECKPOINTED CORRECTLY:
+  - Instance attributes (__dict__) are deep copied
+  - Only class-level state has issues
+  - If your class only uses instance attributes, checkpointing works fine
 
 
 9. PERFORMANCE CONSIDERATIONS
@@ -440,7 +591,6 @@ External:
   - [ ] Checkpoint compression for memory efficiency
   - [ ] Async checkpoint creation (background deep copy)
   - [ ] Checkpoint serialization (save to disk)
-  - [ ] Better handling of closures in functions
   - [ ] Configurable exclusion patterns (not just matplotlib)
   - [ ] Thread safety (at least via locking)
   - [ ] Size estimation before checkpoint (warn on large data)
@@ -459,6 +609,10 @@ Key test scenarios:
   8. Checkpoint deletion and memory cleanup
   9. Error handling for non-copyable objects
   10. Sanity check mode verification
+  11. Function with closure - verify closure isolation after restore
+  12. Function with mutable default arguments
+  13. Lambda with captured variables
+  14. Nested functions with shared closure variables
 
 
 ================================================================================
@@ -486,6 +640,461 @@ from data_ferret.util.output import log, timer
 
 # Enable copy-on-write mode for better performance with DataFrame copies
 pd.options.mode.copy_on_write = True
+
+
+def _has_mutable_defaults(func: types.FunctionType) -> bool:
+    """
+    Check if a function has any mutable default argument values.
+
+    Mutable defaults (like [], {}) are a common source of bugs and need
+    to be deep copied to ensure isolation across checkpoints.
+
+    Args:
+        func: Function to check
+
+    Returns:
+        True if the function has any mutable default arguments
+    """
+    # Check positional defaults
+    if func.__defaults__:
+        for default in func.__defaults__:
+            if isinstance(default, (list, dict, set)):
+                return True
+            # Check for other mutable types
+            if hasattr(default, '__dict__') or hasattr(default, '__setitem__'):
+                if not isinstance(default, (str, bytes, tuple, frozenset, range)):
+                    return True
+
+    # Check keyword-only defaults
+    if func.__kwdefaults__:
+        for default in func.__kwdefaults__.values():
+            if isinstance(default, (list, dict, set)):
+                return True
+            if hasattr(default, '__dict__') or hasattr(default, '__setitem__'):
+                if not isinstance(default, (str, bytes, tuple, frozenset, range)):
+                    return True
+
+    return False
+
+
+def _custom_deepcopy(obj: Any, memo: dict[int, Any], skip_immutable: bool) -> Any:
+    """
+    Custom deepcopy that properly handles DataFrames, Series, and Functions
+    at any nesting level.
+
+    This ensures that:
+    1. DataFrame/Series object columns are always properly deep copied
+    2. Functions with closures/mutable defaults are properly isolated
+    3. Circular references are handled via memo
+    4. Immutable types can be skipped for performance
+
+    Args:
+        obj: Object to deep copy
+        memo: Shared memo dict for tracking copied objects
+        skip_immutable: If True, skip copying immutable objects
+
+    Returns:
+        Deep copy of obj
+    """
+    # Check memo first (handles circular references)
+    obj_id = id(obj)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    # Optimization: Skip copying immutable types
+    if skip_immutable and is_immutable_type(obj):
+        memo[obj_id] = obj
+        return obj
+
+    # Special handling for our types
+    if isinstance(obj, pd.DataFrame):
+        return _deep_copy_dataframe(obj, memo, skip_immutable)
+    elif isinstance(obj, pd.Series):
+        return _deep_copy_series(obj, memo, skip_immutable)
+    elif isinstance(obj, types.FunctionType):
+        return _deep_copy_function(obj, memo, skip_immutable)
+
+    # Handle standard containers recursively
+    elif isinstance(obj, list):
+        result = []
+        memo[obj_id] = result  # Store before recursing (circular refs)
+        for item in obj:
+            result.append(_custom_deepcopy(item, memo, skip_immutable))
+        return result
+
+    elif isinstance(obj, tuple):
+        # Tuples are immutable but may contain mutable objects
+        items = [_custom_deepcopy(item, memo, skip_immutable) for item in obj]
+        result = tuple(items)
+        memo[obj_id] = result
+        return result
+
+    elif isinstance(obj, dict):
+        result = {}
+        memo[obj_id] = result  # Store before recursing
+        for k, v in obj.items():
+            new_k = _custom_deepcopy(k, memo, skip_immutable)
+            new_v = _custom_deepcopy(v, memo, skip_immutable)
+            result[new_k] = new_v
+        return result
+
+    elif isinstance(obj, set):
+        result = set()
+        memo[obj_id] = result
+        for item in obj:
+            result.add(_custom_deepcopy(item, memo, skip_immutable))
+        return result
+
+    elif isinstance(obj, frozenset):
+        # Frozensets are immutable but may contain mutable objects
+        items = [_custom_deepcopy(item, memo, skip_immutable) for item in obj]
+        result = frozenset(items)
+        memo[obj_id] = result
+        return result
+
+    # Handle objects with __dict__ (instances of custom classes)
+    elif hasattr(obj, '__dict__') and not isinstance(obj, type):
+        return _deep_copy_object(obj, memo, skip_immutable)
+
+    # Fall back to standard deepcopy for everything else
+    else:
+        try:
+            result = copy.deepcopy(obj, memo)
+            return result
+        except Exception:
+            # If deepcopy fails, return original and let caller handle
+            memo[obj_id] = obj
+            return obj
+
+
+def _contains_special_types(obj_dict: dict[str, Any]) -> bool:
+    """
+    Quick check if an object's __dict__ contains DataFrames, Series, Functions,
+    or other custom objects (which might recursively contain special types).
+
+    This is used to determine if we need manual attribute-by-attribute copying
+    or can delegate to the faster standard deepcopy.
+
+    Args:
+        obj_dict: The object's __dict__ to check
+
+    Returns:
+        True if the dict might need special handling
+    """
+    for v in obj_dict.values():
+        # Direct special types
+        if isinstance(v, (pd.DataFrame, pd.Series, types.FunctionType)):
+            return True
+
+        # Custom objects (have __dict__) might contain special types
+        # Exception: don't recurse into modules or types
+        if hasattr(v, '__dict__') and not isinstance(v, (types.ModuleType, type)):
+            return True
+
+        # Check shallow containers (lists/tuples/dicts/sets)
+        if isinstance(v, (list, tuple)):
+            for item in v:
+                if isinstance(item, (pd.DataFrame, pd.Series, types.FunctionType)):
+                    return True
+                # Custom object in container
+                if hasattr(item, '__dict__') and not isinstance(item, (types.ModuleType, type)):
+                    return True
+        elif isinstance(v, dict):
+            for item in v.values():
+                if isinstance(item, (pd.DataFrame, pd.Series, types.FunctionType)):
+                    return True
+                if hasattr(item, '__dict__') and not isinstance(item, (types.ModuleType, type)):
+                    return True
+        elif isinstance(v, set):
+            # Sets can't contain mutable objects like DataFrames anyway
+            pass
+
+    return False
+
+
+def _deep_copy_object(obj: Any, memo: dict[int, Any], skip_immutable: bool) -> Any:
+    """
+    Deep copy an object with __dict__ by recursively copying its attributes.
+
+    This ensures that DataFrames, Series, and Functions stored as instance
+    variables get properly deep copied. For objects that don't contain these
+    special types, delegates to standard deepcopy for better performance.
+
+    Args:
+        obj: Object to copy
+        memo: Shared memo dict for tracking copied objects
+        skip_immutable: If True, skip copying immutable objects
+
+    Returns:
+        Deep copy of the object
+    """
+    obj_id = id(obj)
+
+    # Try to use object's __deepcopy__ if it has one (and it's not the default)
+    obj_class = type(obj)
+    if hasattr(obj_class, '__deepcopy__'):
+        # Check if it's a custom __deepcopy__ (not inherited from object)
+        for cls in obj_class.__mro__:
+            if '__deepcopy__' in cls.__dict__:
+                if cls is not object:
+                    # Has custom __deepcopy__, use it
+                    try:
+                        result = obj.__deepcopy__(memo)
+                        memo[obj_id] = result
+                        return result
+                    except Exception:
+                        pass  # Fall through to manual copying
+                break
+
+    # Fast path: If object doesn't contain special types, use standard deepcopy
+    has_dict = hasattr(obj, '__dict__')
+    has_slots = hasattr(obj_class, '__slots__')
+
+    if has_dict and not has_slots:
+        # Quick check if we need custom handling
+        if not _contains_special_types(obj.__dict__):
+            # No special types found - use fast standard deepcopy
+            try:
+                result = copy.deepcopy(obj, memo)
+                return result
+            except Exception:
+                pass  # Fall through to manual copying
+
+    # Slow path: Manual attribute-by-attribute copying for objects with special types
+    try:
+        # Use __new__ to create instance without calling __init__
+        result = obj_class.__new__(obj_class)
+        memo[obj_id] = result  # Store before recursing
+
+        # Copy __dict__ recursively
+        if has_dict:
+            for k, v in obj.__dict__.items():
+                result.__dict__[k] = _custom_deepcopy(v, memo, skip_immutable)
+
+        # Copy __slots__ if present
+        if has_slots:
+            for slot in obj_class.__slots__:
+                if hasattr(obj, slot):
+                    setattr(
+                        result,
+                        slot,
+                        _custom_deepcopy(getattr(obj, slot), memo, skip_immutable)
+                    )
+
+        return result
+
+    except Exception:
+        # If all else fails, fall back to standard deepcopy
+        try:
+            result = copy.deepcopy(obj, memo)
+            return result
+        except Exception:
+            # Last resort: return original
+            memo[obj_id] = obj
+            return obj
+
+
+def _deep_copy_dataframe(
+    df: pd.DataFrame, memo: dict[int, Any], skip_immutable: bool
+) -> pd.DataFrame:
+    """
+    Deep copy a DataFrame with special object column handling.
+
+    Uses shallow copy with copy-on-write for non-object columns, and deep
+    copies object columns to ensure mutable objects in cells are properly
+    isolated.
+
+    Args:
+        df: DataFrame to copy
+        memo: Shared memo dict for tracking copied objects
+        skip_immutable: If True, skip deep copy for columns with only immutable objects
+
+    Returns:
+        Deep copy of the DataFrame
+    """
+    obj_id = id(df)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    # Check if DataFrame has any object dtype columns
+    has_object_columns = any(df[col].dtype == object for col in df.columns)
+
+    # Shallow copy is sufficient: CoW handles non-object columns,
+    # and we replace object columns entirely with apply(deepcopy) below
+    df_copy = df.copy(deep=False)
+
+    if has_object_columns:
+        # Deep copy object columns to ensure mutable objects in cells
+        # are truly independent
+        for col in df_copy.columns:
+            if df_copy[col].dtype == object:
+                # Skip deepcopy if optimization enabled and column contains only immutable objects
+                if skip_immutable and is_column_all_immutable(df_copy[col]):
+                    continue
+                log(f"Deep copying column {col}")
+                # Use custom deepcopy to handle nested DataFrames/Series/Functions
+                df_copy[col] = df_copy[col].apply(
+                    lambda x: _custom_deepcopy(x, memo, skip_immutable)
+                )
+
+    memo[obj_id] = df_copy
+    return df_copy
+
+
+def _deep_copy_series(
+    series: pd.Series, memo: dict[int, Any], skip_immutable: bool
+) -> pd.Series:
+    """
+    Deep copy a Series with special object dtype handling.
+
+    Uses shallow copy with copy-on-write for non-object Series, and deep
+    copies object Series to ensure mutable objects are properly isolated.
+
+    Args:
+        series: Series to copy
+        memo: Shared memo dict for tracking copied objects
+        skip_immutable: If True, skip deep copy if series contains only immutable objects
+
+    Returns:
+        Deep copy of the Series
+    """
+    obj_id = id(series)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    # Shallow copy is sufficient: CoW handles non-object Series,
+    # and we replace object Series entirely with apply(deepcopy) below
+    series_copy = series.copy(deep=False)
+
+    if series.dtype == object:
+        # Skip deepcopy if optimization enabled and series contains only immutable objects
+        if not (skip_immutable and is_column_all_immutable(series_copy)):
+            # Use custom deepcopy to handle nested DataFrames/Series/Functions
+            series_copy = series_copy.apply(
+                lambda x: _custom_deepcopy(x, memo, skip_immutable)
+            )
+
+    memo[obj_id] = series_copy
+    return series_copy
+
+
+def _deep_copy_function(
+    func: types.FunctionType, memo: dict[int, Any], skip_immutable: bool = True
+) -> types.FunctionType:
+    """
+    Deep copy a function, including its closure contents.
+
+    Standard deepcopy doesn't copy closure cell contents, leaving the copied
+    function referencing the same objects as the original. This function
+    creates a true deep copy by:
+    1. Deep copying each cell's contents using the shared memo
+    2. Creating new cell objects with the copied contents
+    3. Building a new function with the new closure
+
+    Args:
+        func: Function to copy
+        memo: Shared memo dict for tracking copied objects
+        skip_immutable: If True, skip copying immutable objects in closure
+
+    Returns:
+        New function with deep-copied closure
+    """
+    # If no closure and no mutable defaults, return the same function
+    if func.__closure__ is None and not _has_mutable_defaults(func):
+        return func
+
+    # If no closure but has mutable defaults, need to copy defaults only
+    if func.__closure__ is None:
+        # Create the function first with shallow copies
+        new_func = types.FunctionType(
+            func.__code__,
+            func.__globals__,
+            func.__name__,
+            func.__defaults__,  # Will deep copy later
+            None,
+        )
+
+        # Register in memo BEFORE any recursive operations
+        memo[id(func)] = new_func
+
+        # Now do the recursive deep copies
+        new_defaults = (
+            tuple(_custom_deepcopy(d, memo, skip_immutable) for d in func.__defaults__)
+            if func.__defaults__
+            else None
+        )
+        new_kwdefaults = (
+            {k: _custom_deepcopy(v, memo, skip_immutable) for k, v in func.__kwdefaults__.items()}
+            if func.__kwdefaults__
+            else None
+        )
+
+        # Update with deep copied values
+        new_func.__defaults__ = new_defaults
+        new_func.__kwdefaults__ = new_kwdefaults
+        new_func.__annotations__ = func.__annotations__.copy() if func.__annotations__ else {}
+        # Deep copy the function's __dict__
+        for k, v in func.__dict__.items():
+            new_func.__dict__[k] = _custom_deepcopy(v, memo, skip_immutable)
+        new_func.__doc__ = func.__doc__
+
+        return new_func
+
+    # Create a temporary function and register it in memo first to handle circular references
+    # We'll create the actual function later with deep-copied closure/defaults
+    temp_func = types.FunctionType(
+        func.__code__,
+        func.__globals__,
+        func.__name__,
+        func.__defaults__,
+        func.__closure__,
+    )
+    # Register BEFORE recursive operations to handle circular references
+    memo[id(func)] = temp_func
+
+    # Now deep copy closure contents using custom deepcopy
+    new_cells = []
+    for cell in func.__closure__:
+        try:
+            copied_contents = _custom_deepcopy(cell.cell_contents, memo, skip_immutable)
+            new_cells.append(types.CellType(copied_contents))
+        except ValueError:
+            # Empty cell (variable referenced but not yet bound)
+            new_cells.append(types.CellType())
+
+    new_closure = tuple(new_cells)
+
+    # Deep copy defaults (may contain mutable objects)
+    new_defaults = (
+        tuple(_custom_deepcopy(d, memo, skip_immutable) for d in func.__defaults__)
+        if func.__defaults__
+        else None
+    )
+    new_kwdefaults = (
+        {k: _custom_deepcopy(v, memo, skip_immutable) for k, v in func.__kwdefaults__.items()}
+        if func.__kwdefaults__
+        else None
+    )
+
+    # Create the actual new function with deep-copied closure and defaults
+    new_func = types.FunctionType(
+        func.__code__,
+        func.__globals__,  # Share globals (modules, builtins, etc.)
+        func.__name__,
+        new_defaults,
+        new_closure,
+    )
+    new_func.__kwdefaults__ = new_kwdefaults
+    new_func.__annotations__ = func.__annotations__.copy()
+    # Deep copy the function's __dict__
+    for k, v in func.__dict__.items():
+        new_func.__dict__[k] = _custom_deepcopy(v, memo, skip_immutable)
+    new_func.__doc__ = func.__doc__
+
+    # Update memo to point to the actual function
+    memo[id(func)] = new_func
+
+    return new_func
 
 
 # System variables to filter out from user namespace
@@ -883,12 +1492,14 @@ class Checkpoints:
         self, variables: dict[str, Any]
     ) -> tuple[dict[str, Any], dict[int, Any], dict[str, Exception]]:
         """
-        Deep copy a dictionary of variables, with special handling for pandas objects.
+        Deep copy a dictionary of variables, with special handling for pandas objects
+        and functions at ANY nesting level.
 
-        Ensures that mutable objects inside pandas DataFrames and Series are fully
-        deep copied to prevent shared references. For pandas objects with object dtype,
-        this method ensures that mutable objects stored in cells (like lists, dicts,
-        custom objects) are properly deep copied rather than creating shallow references.
+        Uses custom deepcopy that ensures:
+        - DataFrames/Series with object columns are properly deep copied at any depth
+        - Functions with closures/mutable defaults are properly isolated at any depth
+        - Circular references are handled correctly via memo
+        - Immutable types can be skipped for performance
 
         Args:
             variables: Dictionary of variables to copy
@@ -902,55 +1513,10 @@ class Checkpoints:
         failed = {}
 
         for k, v in variables.items():
-            # with timer(key="deep_copy_variable", message=f"Deep copying variable {k}"):
             try:
                 start_time = time.time()
-                if isinstance(v, pd.DataFrame):
-                    # Check if DataFrame has any object dtype columns
-                    has_object_columns = any(
-                        v[col].dtype == object for col in v.columns
-                    )
-                    # Shallow copy is sufficient: CoW handles non-object columns,
-                    # and we replace object columns entirely with apply(deepcopy) below
-                    df_copy = v.copy(deep=False)
-
-                    if has_object_columns:
-                        # Deep copy object columns to ensure mutable objects in cells
-                        # are truly independent
-                        for col in df_copy.columns:
-                            if df_copy[col].dtype == object:
-                                # Skip deepcopy if optimization enabled and column contains only immutable objects
-                                if (
-                                    self.skip_immutable_copy
-                                    and is_column_all_immutable(df_copy[col])
-                                ):
-                                    continue
-                                log(f"Deep copying column {col}")
-                                df_copy[col] = df_copy[col].apply(
-                                    lambda x: copy.deepcopy(x, memo=memo)
-                                )
-
-                    memo[id(v)] = df_copy
-                    copied[k] = df_copy
-
-                elif isinstance(v, pd.Series):
-                    # Shallow copy is sufficient: CoW handles non-object Series,
-                    # and we replace object Series entirely with apply(deepcopy) below
-                    series_copy = v.copy(deep=False)
-                    if v.dtype == object:
-                        # Skip deepcopy if optimization enabled and series contains only immutable objects
-                        if not (
-                            self.skip_immutable_copy
-                            and is_column_all_immutable(series_copy)
-                        ):
-                            series_copy = series_copy.apply(
-                                lambda x: copy.deepcopy(x, memo=memo)
-                            )
-                    memo[id(v)] = series_copy
-                    copied[k] = series_copy
-                else:
-                    # For all other types, use standard deepcopy with memo tracking
-                    copied[k] = copy.deepcopy(v, memo=memo)
+                # Use custom deepcopy for everything - it handles all special cases
+                copied[k] = _custom_deepcopy(v, memo, self.skip_immutable_copy)
 
                 end_time = time.time()
                 duration = end_time - start_time
@@ -1081,7 +1647,6 @@ class Checkpoints:
             checkpointable_values = self.checkpointable_values(checkpointable_vars)
             for k in checkpointable_vars.keys() - checkpointable_values.keys():
                 removed[k] = get_type_model(user_ns[k])
-
 
             # Use helper to deep copy all variables with pandas awareness
             cp, memo, failed = self._deep_copy_user_ns(checkpointable_values)
