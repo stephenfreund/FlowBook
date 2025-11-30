@@ -24,7 +24,47 @@ The core challenge is creating true deep copies of complex Python objects
 while maintaining reasonable performance for large data science workloads.
 
 
-2. ARCHITECTURE
+2. CRITICAL LIMITATIONS (READ THIS FIRST!)
+-------------------------------------------
+Before using checkpoints, be aware of these fundamental limitations:
+
+❌ CLASS VARIABLES ARE NOT RESTORED (Section 8.5)
+   - User-defined classes can be checkpointed
+   - BUT mutable class variables (class-level attributes) will NOT be restored
+   - Only instance attributes are properly checkpointed
+   - Workaround: Use instance attributes instead of class variables
+   - Example of what DOESN'T work:
+       class Counter:
+           count = 0  # ← This won't be restored!
+       cp.save('before', user_ns)
+       Counter.count = 100
+       cp.restore('before', user_ns)
+       # Counter.count is STILL 100 (not restored to 0)
+
+⚠️  IN-PLACE DTYPE CONVERSION (Section 8.3)
+   - By default, object dtype columns are converted to specialized types
+   - This modifies your ORIGINAL DataFrames during checkpointing
+   - object → Int64, string, datetime64, etc.
+   - Set convert_dtypes=False to preserve object dtypes
+   - Example:
+       df = pd.DataFrame({'data': pd.Series([1, 2, 3], dtype=object)})
+       cp.save('test', user_ns)  # df['data'].dtype is now Int64!
+
+⚠️  NOT THREAD-SAFE
+   - Concurrent save/restore operations will corrupt data
+   - Use external locking if checkpointing from multiple threads
+
+⚠️  MATPLOTLIB OBJECTS EXCLUDED (Section 8.2)
+   - Matplotlib figures, axes, etc. are automatically filtered out
+   - They cannot be reliably deep copied
+
+⚠️  GENERATORS & ITERATORS MAY FAIL (Section 7.7)
+   - Generators cannot be pickled (maintain execution state)
+   - Iterators may produce unexpected results after restore
+   - These will be tracked in the "removed" dictionary
+
+
+3. ARCHITECTURE
 ---------------
 Key Components:
 
@@ -470,32 +510,153 @@ The current strategy (shallow + selective deep) balances both.
 10. USAGE EXAMPLES
 ------------------
 
-Basic usage:
+Example 1: Basic Save/Restore
     from data_ferret.kernel.checkpoint import Checkpoints
 
-    checkpoints = Checkpoints()
+    cp = Checkpoints()
 
     # Save current state
-    saved, removed = checkpoints.save("before_experiment", user_ns)
+    saved, removed = cp.save("before_experiment", user_ns)
+    print(f"Saved {len(saved)} variables, removed {len(removed)}")
 
     # ... run experiments that modify user_ns ...
 
     # Restore to saved state
-    checkpoints.restore("before_experiment", user_ns)
+    cp.restore("before_experiment", user_ns)
 
-Comparing checkpoints:
+Example 2: Undo/Redo Pattern
+    cp = Checkpoints()
+
+    # Stack of checkpoints for undo
+    undo_stack = []
+
+    def save_checkpoint(name):
+        cp.save(name, user_ns)
+        undo_stack.append(name)
+
+    def undo():
+        if undo_stack:
+            name = undo_stack.pop()
+            cp.restore(name, user_ns)
+
+    # Usage
+    save_checkpoint("state_1")
+    # ... make changes ...
+    save_checkpoint("state_2")
+    # ... make more changes ...
+    undo()  # Back to state_2
+    undo()  # Back to state_1
+
+Example 3: Speculative Execution with Rollback
+    cp = Checkpoints()
+
+    # Save before risky operation
+    cp.save("before_experiment", user_ns)
+
+    try:
+        # Run experimental code that might fail or produce bad results
+        df = complex_data_transformation(df)
+        model = train_model(df)
+
+        if model.score < 0.8:
+            # Results not good enough, rollback
+            cp.restore("before_experiment", user_ns)
+            print("Rolled back due to poor results")
+        else:
+            print("Success! Keeping changes")
+    except Exception as e:
+        # Error occurred, rollback
+        cp.restore("before_experiment", user_ns)
+        print(f"Rolled back due to error: {e}")
+
+Example 4: Debugging with Historical State
+    cp = Checkpoints()
+
+    # Save state at various execution points
+    cp.save("after_data_load", user_ns)
+    # ... process data ...
+    cp.save("after_cleaning", user_ns)
+    # ... train model ...
+    cp.save("after_training", user_ns)
+
+    # Later, inspect historical values
+    cleaning_state = cp.get("after_cleaning")
+    print(f"Data shape after cleaning: {cleaning_state.user_ns['df'].shape}")
+
+    # Restore to investigate specific point
+    cp.restore("after_cleaning", user_ns)
+    # ... debug data cleaning issues ...
+
+Example 5: Optional Features
+    # Disable dtype conversion to preserve object dtypes
+    cp = Checkpoints(convert_dtypes=False)
+
+    # Disable size warnings for large checkpoints
+    cp.save("big_data", user_ns, max_size_mb=None)
+
+    # Enable sanity checking (expensive, for debugging)
+    cp = Checkpoints(sanity_check=True)
+
+    # Disable class warnings if you know what you're doing
+    cp = Checkpoints(warn_classes=False)
+
+Example 6: Comparing Checkpoints
     from data_ferret.kernel.checkpoint import Checkpoint
 
-    cp1 = checkpoints.get("v1")
-    cp2 = checkpoints.get("v2")
+    cp = Checkpoints()
+
+    cp.save("version_1", user_ns)
+    # ... make changes ...
+    cp.save("version_2", user_ns)
+
+    # Compare two versions
+    cp1 = cp.get("version_1")
+    cp2 = cp.get("version_2")
 
     diff_result = Checkpoint.diff(cp1, cp2)
-    # diff_result contains structured tree of changes
+    if diff_result.differences:
+        print("Variables changed:")
+        for diff in diff_result.differences:
+            print(f"  {diff}")
 
-Type inspection:
-    type_models = checkpoints.type_models(user_ns)
-    for name, model in type_models.items():
-        print(f"{name}: {model}")
+Example 7: Managing Multiple Checkpoints
+    cp = Checkpoints()
+
+    # Save multiple states
+    for i in range(5):
+        # ... process iteration ...
+        cp.save(f"iteration_{i}", user_ns)
+
+    # List all checkpoints
+    print(f"Saved checkpoints: {cp.list()}")
+
+    # Check if checkpoint exists
+    if cp.exists("iteration_3"):
+        cp.restore("iteration_3", user_ns)
+
+    # Delete old checkpoints
+    cp.delete("iteration_0")
+    cp.delete("iteration_1")
+
+    # Clear all checkpoints
+    # cp.clear()
+
+Example 8: Performance Tips
+    cp = Checkpoints()
+
+    # For large DataFrames, checkpointing object columns is expensive
+    # Consider converting to specialized dtypes first
+    df['int_col'] = df['int_col'].astype('Int64')  # Not object
+    df['str_col'] = df['str_col'].astype('string')  # Not object
+
+    # Or disable conversion and keep object dtype
+    cp = Checkpoints(convert_dtypes=False)
+
+    # Monitor checkpoint time
+    import time
+    start = time.time()
+    cp.save("big_checkpoint", user_ns)
+    print(f"Checkpoint took {time.time() - start:.2f} seconds")
 
 
 11. DEPENDENCIES
@@ -823,15 +984,69 @@ class Checkpoints:
     def __init__(
         self,
         sanity_check: bool = False,
+        convert_dtypes: bool = True,
+        warn_classes: bool = True,
     ):
         """
         Initialize the checkpoint manager.
 
         Args:
             sanity_check: If True, verify copies match originals after save
+            convert_dtypes: If True, automatically convert object dtype columns to specialized
+                dtypes (Int64, string, datetime64, etc.) during checkpointing. Default True.
+                Set to False to preserve original object dtypes.
+            warn_classes: If True, warn when user-defined classes are checkpointed, since
+                class variables won't be properly restored. Default True.
         """
         self.sanity_check = sanity_check
+        self.convert_dtypes = convert_dtypes
+        self.warn_classes = warn_classes
         self.saved: dict[str, Checkpoint] = {}
+
+        # Ensure copy-on-write is enabled for performance
+        if not pd.options.mode.copy_on_write:
+            log("WARNING: pandas copy_on_write was disabled - re-enabling for checkpoint performance")
+            pd.options.mode.copy_on_write = True
+
+        # Set global dtype conversion flag in deepcopy module
+        import data_ferret.kernel.deepcopy as deepcopy_module
+        deepcopy_module._convert_object_dtypes = convert_dtypes
+
+    def _estimate_size(self, variables: dict[str, Any]) -> int:
+        """
+        Estimate the memory size of variables in bytes.
+
+        This is a rough estimate using sys.getsizeof() which may underestimate
+        for complex nested structures. It's meant for warning purposes only.
+
+        Args:
+            variables: Dictionary of variables to estimate
+
+        Returns:
+            Estimated size in bytes
+        """
+        import sys
+
+        total_size = 0
+        for k, v in variables.items():
+            try:
+                # Get size of the object
+                size = sys.getsizeof(v)
+
+                # For pandas DataFrames/Series, use memory_usage()
+                if isinstance(v, pd.DataFrame):
+                    size = v.memory_usage(deep=True).sum()
+                elif isinstance(v, pd.Series):
+                    size = v.memory_usage(deep=True)
+                elif isinstance(v, np.ndarray):
+                    size = v.nbytes
+
+                total_size += size
+            except Exception:
+                # If we can't estimate, skip this variable
+                pass
+
+        return total_size
 
     def _deep_copy_user_ns(
         self, variables: dict[str, Any]
@@ -851,26 +1066,74 @@ class Checkpoints:
             Tuple of (copied dictionary, memo dictionary for tracking copied objects,
                      dictionary of failed variables with their exceptions)
         """
-        copied = {}
-        memo = {}
-        failed = {}
+        # Temporarily set the dtype conversion flag for this operation
+        import data_ferret.kernel.deepcopy as deepcopy_module
+        old_convert_flag = deepcopy_module._convert_object_dtypes
+        deepcopy_module._convert_object_dtypes = self.convert_dtypes
 
-        for k, v in variables.items():
-            try:
-                start_time = time.time()
-                # Use custom deepcopy which handles pandas and functions specially
-                copied[k] = deepcopy(v, memo)
+        try:
+            copied = {}
+            memo = {}
+            failed = {}
 
-                end_time = time.time()
-                duration = end_time - start_time
-                if duration > 0.010:
-                    log(f"Deep copying variable {k} took {duration:.3f} seconds")
-            except Exception as e:
-                log(f"Failed to deep copy variable {k}: {type(e).__name__}: {e}")
-                # Track variables that failed to copy
-                failed[k] = e
+            for k, v in variables.items():
+                try:
+                    start_time = time.time()
+                    # Use custom deepcopy which handles pandas and functions specially
+                    copied[k] = deepcopy(v, memo)
 
-        return copied, memo, failed
+                    end_time = time.time()
+                    duration = end_time - start_time
+                    if duration > 0.010:
+                        log(f"Deep copying variable {k} took {duration:.3f} seconds")
+                except Exception as e:
+                    error_msg = f"Failed to deep copy variable {k}: {type(e).__name__}: {e}"
+
+                    # Add helpful hints based on the type
+                    if isinstance(v, types.GeneratorType):
+                        error_msg += "\n  Hint: Generators cannot be checkpointed (they maintain execution state)"
+                    elif hasattr(type(v), '__module__') and type(v).__module__.startswith('matplotlib'):
+                        error_msg += "\n  Hint: Matplotlib objects are excluded from checkpoints"
+                    elif isinstance(v, types.ModuleType):
+                        error_msg += "\n  Hint: Modules cannot be checkpointed"
+                    elif hasattr(v, '__iter__') and not isinstance(v, (str, bytes, list, tuple, dict, set, frozenset)):
+                        error_msg += "\n  Hint: Iterator objects may not be checkpointable"
+                    elif 'thread' in str(type(v)).lower() or 'lock' in str(type(v)).lower():
+                        error_msg += "\n  Hint: Thread/lock objects cannot be pickled"
+
+                    log(error_msg)
+                    # Track variables that failed to copy
+                    failed[k] = e
+
+            return copied, memo, failed
+        finally:
+            # Restore the old flag
+            deepcopy_module._convert_object_dtypes = old_convert_flag
+
+    def _is_user_defined_class(self, v: Any) -> bool:
+        """
+        Check if a value is a user-defined class (not an instance).
+
+        Args:
+            v: Value to check
+
+        Returns:
+            True if v is a user-defined class, False otherwise
+        """
+        # Check if it's a type/class
+        if not isinstance(v, type):
+            return False
+
+        # Exclude built-in types
+        if v.__module__ in ('builtins', '__builtin__'):
+            return False
+
+        # Exclude common library classes
+        if v.__module__.startswith(('pandas', 'numpy', 'matplotlib', 'sklearn')):
+            return False
+
+        # It's a user-defined class
+        return True
 
     def checkpointable_value(self, v: Any) -> bool:
         """
@@ -933,7 +1196,7 @@ class Checkpoints:
         return {k: v for k, v in user_ns.items() if self.checkpointable_value(v)}
 
     def save(
-        self, name: str, user_ns: dict[str, Any]
+        self, name: str, user_ns: dict[str, Any], max_size_mb: int | None = 1000
     ) -> tuple[dict[str, TypeModel], dict[str, TypeModel]]:
         """
         Save a checkpoint of the current namespace.
@@ -946,11 +1209,43 @@ class Checkpoints:
         Args:
             name: Identifier for this checkpoint (overwrites if exists)
             user_ns: User namespace dictionary to checkpoint
+            max_size_mb: Warn if estimated checkpoint size exceeds this many MB.
+                Set to None to disable size warnings. Default: 1000 MB.
 
         Returns:
             Tuple of (saved variables with type models, removed variables with type models).
             Removed includes variables that couldn't be checkpointed or failed to copy.
+
+        Raises:
+            ValueError: If checkpoint name is empty or whitespace-only
         """
+        # Validate checkpoint name
+        if not name or not name.strip():
+            raise ValueError("Checkpoint name cannot be empty or whitespace-only")
+
+        # Estimate size and warn if needed
+        if max_size_mb is not None:
+            checkpointable_vars = self.checkpointable_vars(user_ns)
+            checkpointable_values = self.checkpointable_values(checkpointable_vars)
+
+            estimated_bytes = self._estimate_size(checkpointable_values)
+            estimated_mb = estimated_bytes / (1024 * 1024)
+
+            if estimated_mb > max_size_mb:
+                log(f"WARNING: Checkpoint '{name}' estimated at {estimated_mb:.1f} MB (threshold: {max_size_mb} MB)")
+                log(f"         Large checkpoints may consume significant memory and time")
+
+        # Warn about user-defined classes if enabled
+        if self.warn_classes:
+            checkpointable_vars_temp = self.checkpointable_vars(user_ns)
+            checkpointable_values_temp = self.checkpointable_values(checkpointable_vars_temp)
+
+            for var_name, var_value in checkpointable_values_temp.items():
+                if self._is_user_defined_class(var_value):
+                    log(f"WARNING: Variable '{var_name}' is a user-defined class ({var_value.__name__})")
+                    log(f"         Class variables (mutable class attributes) will NOT be properly restored")
+                    log(f"         Only instance attributes will be checkpointed. See documentation section 8.5")
+
         with timer(key="deep_copy_user_ns", message="Deep copying user namespace"):
             saved = {}
             removed = {}
@@ -974,11 +1269,12 @@ class Checkpoints:
             self.saved[name] = Checkpoint(name, cp, memo)
 
         if self.sanity_check:
-            original = {k: v for k, v in checkpointable_values.items() if k in saved}
-            differ = Diff(strict=False, report_close=False, atol=1e-5, rtol=1e-5)
-            diff_result = differ.diff(original, cp)
-            if diff_result.differences:
-                raise ValueError(f"Sanity check failed: {diff_result.differences}")
+            with timer(key="sanity_check", message="Running sanity check"):
+                original = {k: v for k, v in checkpointable_values.items() if k in saved}
+                differ = Diff(strict=False, report_close=False, atol=1e-5, rtol=1e-5)
+                diff_result = differ.diff(original, cp)
+                if diff_result.differences:
+                    raise ValueError(f"Sanity check failed: {diff_result.differences}")
 
         return saved, removed
 
@@ -1058,3 +1354,15 @@ class Checkpoints:
             KeyError: If checkpoint name doesn't exist
         """
         return self.saved[name]
+
+    def exists(self, name: str) -> bool:
+        """
+        Check if a checkpoint with the given name exists.
+
+        Args:
+            name: Name of checkpoint to check
+
+        Returns:
+            True if checkpoint exists, False otherwise
+        """
+        return name in self.saved

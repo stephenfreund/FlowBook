@@ -3,6 +3,7 @@ Execute all cells command implementation.
 """
 
 import copy
+import sys
 import traceback
 from typing import Any, Dict, Optional
 
@@ -63,6 +64,7 @@ class ExecuteAllCommand(NotebookCommand):
 
             execution_results = []
             total_executed = 0
+            status = "success"  # Track actual execution status
 
             kernel_client.execute("%enable_scalene")
 
@@ -81,36 +83,77 @@ class ExecuteAllCommand(NotebookCommand):
                             metadata['cell_id'] = cell.get("id")
 
                             if source.strip():
-                                result = KernelHelper.execute_code(
-                                    kernel_client,
-                                    source,
-                                    cell_id=cell.get("id"),
-                                    cell_metadata=metadata,
-                                )
+                                try:
+                                    # Use 30-minute timeout to match kernel timeout
+                                    result = KernelHelper.execute_code(
+                                        kernel_client,
+                                        source,
+                                        timeout=30 * 60,  # 30 minutes
+                                        cell_id=cell.get("id"),
+                                        cell_metadata=metadata,
+                                    )
 
-                                cell["execution_count"] = result["execution_count"]
-                                cell["outputs"] = result["outputs"]
+                                    cell["execution_count"] = result["execution_count"]
+                                    cell["outputs"] = result["outputs"]
 
-                                for output in result["outputs"]:
-                                    if 'metadata' in output:
-                                        output_metadata = output['metadata']
-                                        if 'profile' in output_metadata:
-                                            profile_metadata = ProfileData.model_validate(output_metadata['profile'])
-                                            set_profile_ferret_metadata(cell, profile_metadata)
+                                    # Check for execution errors
+                                    if result["status"] == "error":
+                                        status = "error"
+                                        error_message = result["error_message"]
+                                        print()
+                                        print(f"--------------------------------")
+                                        print(f"{error_message}")
+                                        print(f"--------------------------------")
+                                        execution_results.append(
+                                            {
+                                                "cell_index": idx,
+                                                "status": "error",
+                                                "execution_count": result["execution_count"],
+                                                "error_message": error_message,
+                                            }
+                                        )
+                                        break  # Stop on first error
 
-                                execution_results.append(
-                                    {
-                                        "cell_index": idx,
-                                        "status": result["status"],
-                                        "execution_count": result["execution_count"],
-                                    }
-                                )
-                                log(f"[{result['execution_count']}]")
+                                    for output in result["outputs"]:
+                                        if 'metadata' in output:
+                                            output_metadata = output['metadata']
+                                            if 'profile' in output_metadata:
+                                                profile_metadata = ProfileData.model_validate(output_metadata['profile'])
+                                                set_profile_ferret_metadata(cell, profile_metadata)
 
-                                total_executed += 1
+                                    execution_results.append(
+                                        {
+                                            "cell_index": idx,
+                                            "status": result["status"],
+                                            "execution_count": result["execution_count"],
+                                        }
+                                    )
+                                    log(f"[{result['execution_count']}]")
+
+                                    total_executed += 1
+
+                                except Exception as e:
+                                    # Catch any Python exceptions during execution
+                                    cell["outputs"] = [
+                                        {
+                                            "output_type": "error",
+                                            "ename": e.__class__.__name__,
+                                            "evalue": str(e),
+                                            "traceback": traceback.format_exception(type(e), e, e.__traceback__),
+                                        }
+                                    ]
+
+                                    execution_results.append(
+                                        {
+                                            "cell_index": idx,
+                                            "status": "error"
+                                        }
+                                    )
+                                    status = "error"
+                                    break  # Stop on exception
 
             metadata = {
-                "status": "success",
+                "status": status,  # Use tracked status instead of hardcoded "success"
                 "command": self.command_name,
                 "execution": {
                     "total_executed": total_executed,

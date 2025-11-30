@@ -324,6 +324,26 @@ class FerretKernel(IPythonKernel, Magics):
             # print(f"[FerretKernel] do_execute returning status: {result.get('status')}", file=sys.__stderr__)
             return result
 
+        except KeyboardInterrupt:
+            # Cell execution timed out
+            timeout_msg = f"Cell execution timed out after {timeout} seconds"
+
+            # Send error to client via iopub socket
+            self.send_response(self.iopub_socket, 'error', {
+                'ename': 'TimeoutError',
+                'evalue': timeout_msg,
+                'traceback': [timeout_msg]
+            })
+
+            # Return error result
+            return {
+                'status': 'error',
+                'execution_count': self.execution_count,
+                'ename': 'TimeoutError',
+                'evalue': timeout_msg,
+                'traceback': [timeout_msg]
+            }
+
         finally:
             timeout_handler.cancel()
             if not normal_exit:

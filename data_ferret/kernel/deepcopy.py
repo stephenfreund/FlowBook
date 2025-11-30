@@ -24,6 +24,9 @@ from data_ferret.util.output import log
 # Sentinel for memo lookups
 _nil = []
 
+# Global flag to control dtype conversion (set by Checkpoints.__init__)
+_convert_object_dtypes = True
+
 
 def deepcopy(x, memo=None):
     """Deep copy operation on arbitrary Python objects.
@@ -387,15 +390,17 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
         return memo[obj_id]
 
     # Convert object columns to specialized dtypes on the original DataFrame first
-    for col in df.columns:
-        if df[col].dtype == object:
-            # Try to convert to specialized dtype first
-            converted = _convert_object_column_dtype(df[col])
-            
-            if converted.dtype != object:
-                # Successfully converted - update original DataFrame
-                log(f"Converted column {col} from object to {converted.dtype}")
-                df[col] = converted
+    # (only if conversion is enabled globally)
+    if _convert_object_dtypes:
+        for col in df.columns:
+            if df[col].dtype == object:
+                # Try to convert to specialized dtype first
+                converted = _convert_object_column_dtype(df[col])
+
+                if converted.dtype != object:
+                    # Successfully converted - update original DataFrame
+                    log(f"Converted column {col} from object to {converted.dtype}")
+                    df[col] = converted
 
     # Shallow copy: CoW handles non-object columns efficiently
     df_copy = df.copy(deep=False)
@@ -404,8 +409,15 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
     for col in df_copy.columns:
         if df_copy[col].dtype == object:
             # Still object dtype - need to deep copy for mutable objects
-            log(f"Deep copying object column {col}")
-            df_copy[col] = df_copy[col].apply(lambda x: deepcopy(x, memo))
+            num_rows = len(df_copy)
+            if num_rows > 10000:
+                log(f"Deep copying large object column {col} with {num_rows:,} rows...")
+            else:
+                log(f"Deep copying object column {col}")
+
+            # Apply deep copy and explicitly preserve object dtype
+            result = df_copy[col].apply(lambda x: deepcopy(x, memo))
+            df_copy[col] = result.astype(object)
 
     memo[obj_id] = df_copy
     return df_copy
@@ -435,10 +447,11 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
         return memo[obj_id]
 
     # Convert object Series to specialized dtype on the original Series first
-    if series.dtype == object:
+    # (only if conversion is enabled globally)
+    if _convert_object_dtypes and series.dtype == object:
         # Try to convert to specialized dtype first
         converted = _convert_object_column_dtype(series)
-        
+
         if converted.dtype != object:
             # Successfully converted - update original Series
             log(f"Converted Series from object to {converted.dtype}")
@@ -450,8 +463,15 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
     # Process if still object dtype: deep copy for mutable objects
     if series_copy.dtype == object:
         # Still object dtype - need to deep copy for mutable objects
-        log(f"Deep copying object Series")
-        series_copy = series_copy.apply(lambda x: deepcopy(x, memo))
+        num_rows = len(series_copy)
+        if num_rows > 10000:
+            log(f"Deep copying large object Series with {num_rows:,} rows...")
+        else:
+            log(f"Deep copying object Series")
+
+        # Apply deep copy and explicitly preserve object dtype
+        result = series_copy.apply(lambda x: deepcopy(x, memo))
+        series_copy = result.astype(object)
 
     memo[obj_id] = series_copy
     return series_copy

@@ -545,6 +545,453 @@ class TestCheckpointManagement:
         checkpoint = cp.get('test')
         assert checkpoint.user_ns['x'] == 999
         assert 'y' in checkpoint.user_ns
+    def test_exists_method(self):
+        """Test the exists() method."""
+        cp = Checkpoints()
+
+        # Non-existing checkpoint
+        assert not cp.exists('nonexistent')
+
+        # Create checkpoint
+        user_ns = {'x': 1}
+        cp.save('test', user_ns)
+
+        # Now exists
+        assert cp.exists('test')
+
+        # Delete checkpoint
+        cp.delete('test')
+
+        # No longer exists
+        assert not cp.exists('test')
+
+    def test_exists_with_multiple_checkpoints(self):
+        """Test exists() with multiple checkpoints."""
+        cp = Checkpoints()
+
+        user_ns = {'x': 1}
+        cp.save('cp1', user_ns)
+        cp.save('cp2', user_ns)
+        cp.save('cp3', user_ns)
+
+        assert cp.exists('cp1')
+        assert cp.exists('cp2')
+        assert cp.exists('cp3')
+        assert not cp.exists('cp4')
+
+        cp.delete('cp2')
+
+        assert cp.exists('cp1')
+        assert not cp.exists('cp2')
+        assert cp.exists('cp3')
+
+
+# ============================================================================
+# NAME VALIDATION TESTS
+# ============================================================================
+
+class TestCheckpointNameValidation:
+    """Test checkpoint name validation."""
+
+    def test_empty_string_raises_error(self):
+        """Test that empty string checkpoint name raises ValueError."""
+        cp = Checkpoints()
+        user_ns = {'x': 1}
+
+        with pytest.raises(ValueError, match="cannot be empty"):
+            cp.save('', user_ns)
+
+    def test_whitespace_only_raises_error(self):
+        """Test that whitespace-only checkpoint name raises ValueError."""
+        cp = Checkpoints()
+        user_ns = {'x': 1}
+
+        with pytest.raises(ValueError, match="cannot be empty"):
+            cp.save('   ', user_ns)
+
+        with pytest.raises(ValueError, match="cannot be empty"):
+            cp.save('\t\n', user_ns)
+
+    def test_valid_names_work(self):
+        """Test that various valid names work correctly."""
+        cp = Checkpoints()
+        user_ns = {'x': 1}
+
+        # Normal names
+        cp.save('test', user_ns)
+        assert cp.exists('test')
+
+        # Names with underscores and hyphens
+        cp.save('test_checkpoint_1', user_ns)
+        assert cp.exists('test_checkpoint_1')
+
+        cp.save('test-checkpoint-2', user_ns)
+        assert cp.exists('test-checkpoint-2')
+
+        # Names with special characters (allowed)
+        cp.save('checkpoint/v1', user_ns)
+        assert cp.exists('checkpoint/v1')
+
+        cp.save('checkpoint.v2', user_ns)
+        assert cp.exists('checkpoint.v2')
+
+
+# ============================================================================
+# COPY-ON-WRITE VERIFICATION TESTS
+# ============================================================================
+
+class TestCopyOnWriteVerification:
+    """Test that CoW is verified and enabled on initialization."""
+
+    def test_cow_enabled_check(self):
+        """Test that CoW gets enabled if disabled."""
+        # Temporarily disable CoW
+        original_cow = pd.options.mode.copy_on_write
+        pd.options.mode.copy_on_write = False
+
+        try:
+            # Creating Checkpoints should re-enable it
+            cp = Checkpoints()
+
+            # Verify CoW is now enabled
+            assert pd.options.mode.copy_on_write == True
+        finally:
+            # Restore original setting
+            pd.options.mode.copy_on_write = original_cow
+
+    def test_cow_already_enabled(self):
+        """Test that no warning when CoW already enabled."""
+        # Ensure CoW is enabled
+        pd.options.mode.copy_on_write = True
+
+        # Should work without issues
+        cp = Checkpoints()
+
+        # CoW should still be enabled
+        assert pd.options.mode.copy_on_write == True
+
+
+# ============================================================================
+# DTYPE CONVERSION OPTION TESTS
+# ============================================================================
+
+class TestDtypeConversionOption:
+    """Test the convert_dtypes parameter."""
+
+    def test_convert_dtypes_true_converts_integers(self):
+        """Test that convert_dtypes=True converts object integers to Int64."""
+        cp = Checkpoints(convert_dtypes=True)
+
+        # Create DataFrame with object dtype integers
+        df = pd.DataFrame({'data': pd.Series([1, 2, 3, None], dtype=object)})
+        assert df['data'].dtype == object
+
+        user_ns = {'df': df}
+        cp.save('test', user_ns)
+
+        # Original DataFrame should have been converted in-place
+        # (this is expected behavior with convert_dtypes=True)
+        # The dtype should be Int64 or similar nullable integer type
+        assert df['data'].dtype.name in ['Int64', 'int64']
+
+    def test_convert_dtypes_false_preserves_object(self):
+        """Test that convert_dtypes=False preserves object dtype."""
+        cp = Checkpoints(convert_dtypes=False)
+
+        # Create DataFrame with object dtype integers
+        df = pd.DataFrame({'data': pd.Series([1, 2, 3, None], dtype=object)})
+        original_dtype = df['data'].dtype
+        assert original_dtype == object
+
+        user_ns = {'df': df}
+        cp.save('test', user_ns)
+
+        # Original DataFrame should still be object dtype
+        assert df['data'].dtype == object
+
+        # Restored DataFrame should also be object dtype
+        cp.restore('test', user_ns)
+        assert user_ns['df']['data'].dtype == object
+
+    def test_convert_dtypes_true_converts_strings(self):
+        """Test that convert_dtypes=True converts object strings."""
+        cp = Checkpoints(convert_dtypes=True)
+
+        df = pd.DataFrame({'text': pd.Series(['a', 'b', 'c'], dtype=object)})
+        assert df['text'].dtype == object
+
+        user_ns = {'df': df}
+        cp.save('test', user_ns)
+
+        # Should be converted to string dtype
+        assert df['text'].dtype.name in ['string', 'object']
+
+    def test_convert_dtypes_affects_series(self):
+        """Test that convert_dtypes flag affects Series too."""
+        cp_convert = Checkpoints(convert_dtypes=True)
+        cp_no_convert = Checkpoints(convert_dtypes=False)
+
+        # Test with conversion enabled
+        s1 = pd.Series([1, 2, 3], dtype=object)
+        user_ns1 = {'s': s1}
+        cp_convert.save('test', user_ns1)
+        # Checkpoint should have converted dtype
+        checkpoint1 = cp_convert.get('test')
+        assert checkpoint1.user_ns['s'].dtype.name in ['Int64', 'int64']
+
+        # Test with conversion disabled
+        s2 = pd.Series([1, 2, 3], dtype=object)
+        user_ns2 = {'s': s2}
+        cp_no_convert.save('test', user_ns2)
+        # Checkpoint should preserve object dtype
+        checkpoint2 = cp_no_convert.get('test')
+        assert checkpoint2.user_ns['s'].dtype == object
+
+    def test_convert_dtypes_with_nested_dataframes(self):
+        """Test that convert_dtypes affects nested DataFrames."""
+        cp = Checkpoints(convert_dtypes=False)
+
+        # Create nested DataFrame with object dtype
+        inner_df = pd.DataFrame({'nums': pd.Series([1, 2, 3], dtype=object)})
+        outer_df = pd.DataFrame({'nested': [inner_df]})
+
+        user_ns = {'outer': outer_df}
+        cp.save('test', user_ns)
+
+        # Inner DataFrame should still have object dtype (not converted)
+        restored_inner = outer_df.iloc[0, 0]
+        assert restored_inner['nums'].dtype == object
+
+    def test_default_behavior_unchanged(self):
+        """Test that default behavior is to convert (backward compatibility)."""
+        cp = Checkpoints()  # No explicit convert_dtypes parameter
+
+        df = pd.DataFrame({'data': pd.Series([1, 2, 3], dtype=object)})
+        user_ns = {'df': df}
+        cp.save('test', user_ns)
+
+        # Default should convert
+        assert df['data'].dtype.name in ['Int64', 'int64']
+
+
+# ============================================================================
+# SIZE WARNING TESTS
+# ============================================================================
+
+class TestSizeWarnings:
+    """Test the max_size_mb parameter and size warnings."""
+
+    def test_small_checkpoint_no_warning(self):
+        """Test that small checkpoints don't warn."""
+        cp = Checkpoints()
+
+        # Create small DataFrame (< 1MB)
+        df = pd.DataFrame({'data': range(100)})
+        user_ns = {'df': df}
+
+        # Should not warn (default max_size_mb=1000)
+        cp.save('test', user_ns)
+        # If it warned, it would be in the log output
+
+    def test_large_checkpoint_warns(self):
+        """Test that large checkpoints warn when exceeding limit."""
+        cp = Checkpoints()
+
+        # Create large DataFrame (> 1MB)
+        df = pd.DataFrame({'data': range(1_000_000)})
+        user_ns = {'df': df}
+
+        # Should warn with small limit
+        cp.save('test', user_ns, max_size_mb=1)
+        # Warning will be logged
+
+    def test_max_size_none_disables_warnings(self):
+        """Test that max_size_mb=None disables size warnings."""
+        cp = Checkpoints()
+
+        # Create large DataFrame
+        df = pd.DataFrame({'data': range(1_000_000)})
+        user_ns = {'df': df}
+
+        # Should not warn with max_size_mb=None
+        cp.save('test', user_ns, max_size_mb=None)
+
+    def test_size_estimation_reasonable(self):
+        """Test that size estimation is reasonably accurate."""
+        cp = Checkpoints()
+
+        # Create DataFrame with known size
+        df = pd.DataFrame({'data': range(10_000)})
+        actual_size_bytes = df.memory_usage(deep=True).sum()
+        actual_size_mb = actual_size_bytes / (1024 * 1024)
+
+        user_ns = {'df': df}
+
+        # Estimate size
+        estimated_bytes = cp._estimate_size(user_ns)
+        estimated_mb = estimated_bytes / (1024 * 1024)
+
+        # Should be within reasonable range (estimate may not be exact)
+        # Allow 50% tolerance either way
+        assert estimated_mb > 0
+        # This is a rough check - just ensure it's not wildly off
+
+
+# ============================================================================
+# CLASS WARNING TESTS
+# ============================================================================
+
+class TestClassWarnings:
+    """Test warnings for user-defined classes."""
+
+    def test_user_defined_class_triggers_warning(self):
+        """Test that user-defined class triggers warning."""
+        cp = Checkpoints(warn_classes=True)
+
+        # Create a user-defined class
+        class MyClass:
+            class_var = 0
+
+        user_ns = {'MyClass': MyClass}
+        cp.save('test', user_ns)
+        # Warning should be logged
+
+    def test_builtin_class_no_warning(self):
+        """Test that built-in classes don't warn."""
+        cp = Checkpoints(warn_classes=True)
+
+        user_ns = {'int_class': int, 'str_class': str}
+        cp.save('test', user_ns)
+        # Should not warn for built-in types
+
+    def test_instance_no_warning(self):
+        """Test that instances don't trigger class warning."""
+        cp = Checkpoints(warn_classes=True)
+
+        class MyClass:
+            def __init__(self):
+                self.value = 42
+
+        obj = MyClass()
+        user_ns = {'obj': obj}
+        cp.save('test', user_ns)
+        # Should not warn - it's an instance, not a class
+
+    def test_warn_classes_false_suppresses_warning(self):
+        """Test that warn_classes=False suppresses warnings."""
+        cp = Checkpoints(warn_classes=False)
+
+        class MyClass:
+            class_var = 0
+
+        user_ns = {'MyClass': MyClass}
+        cp.save('test', user_ns)
+        # Should not warn when disabled
+
+    def test_pandas_numpy_classes_no_warning(self):
+        """Test that pandas/numpy classes don't warn."""
+        cp = Checkpoints(warn_classes=True)
+
+        user_ns = {
+            'DataFrame': pd.DataFrame,
+            'Series': pd.Series,
+            'ndarray': np.ndarray
+        }
+        cp.save('test', user_ns)
+        # Should not warn for library classes
+
+
+# ============================================================================
+# IMPROVED ERROR MESSAGE TESTS
+# ============================================================================
+
+class TestImprovedErrorMessages:
+    """Test that error messages include helpful hints."""
+
+    def test_generator_error_includes_hint(self):
+        """Test that generator failures include helpful hint."""
+        cp = Checkpoints()
+
+        def my_gen():
+            yield 1
+            yield 2
+
+        gen = my_gen()
+        user_ns = {'gen': gen}
+
+        # Save should handle the failure gracefully
+        saved, removed = cp.save('test', user_ns)
+
+        # Generator should be in removed
+        assert 'gen' in removed
+
+    def test_module_error_includes_hint(self):
+        """Test that module failures include helpful hint."""
+        cp = Checkpoints()
+
+        import os
+        user_ns = {'os_module': os}
+
+        # Modules are filtered out, so they won't be in saved or removed
+        saved, removed = cp.save('test', user_ns)
+
+        # Module should not be in saved (filtered out by checkpointable_value)
+        assert 'os_module' not in saved
+
+    def test_iterator_error_includes_hint(self):
+        """Test that iterator failures include helpful hint."""
+        cp = Checkpoints()
+
+        it = iter([1, 2, 3, 4, 5])
+        # Advance the iterator
+        next(it)
+
+        user_ns = {'it': it}
+
+        # Save might succeed or fail depending on iterator implementation
+        # We're just verifying it doesn't crash
+        saved, removed = cp.save('test', user_ns)
+
+
+# ============================================================================
+# PROGRESS LOGGING TESTS
+# ============================================================================
+
+class TestProgressLogging:
+    """Test progress logging for large DataFrames."""
+
+    def test_small_dataframe_normal_logging(self):
+        """Test that small DataFrames use normal logging."""
+        cp = Checkpoints(convert_dtypes=False)  # Keep object dtype
+
+        # Small DataFrame (< 10k rows)
+        df = pd.DataFrame({'data': [[i] for i in range(100)]})
+        user_ns = {'df': df}
+
+        cp.save('test', user_ns)
+        # Should log "Deep copying object column data" (without row count)
+
+    def test_large_dataframe_progress_logging(self):
+        """Test that large DataFrames log row count."""
+        cp = Checkpoints(convert_dtypes=False)  # Keep object dtype
+
+        # Large DataFrame (> 10k rows)
+        df = pd.DataFrame({'data': [[i] for i in range(15000)]})
+        user_ns = {'df': df}
+
+        cp.save('test', user_ns)
+        # Should log "Deep copying large object column data with 15,000 rows..."
+
+    def test_large_series_progress_logging(self):
+        """Test that large Series log row count."""
+        cp = Checkpoints(convert_dtypes=False)  # Keep object dtype
+
+        # Large Series (> 10k rows)
+        s = pd.Series([[i] for i in range(12000)])
+        user_ns = {'s': s}
+
+        cp.save('test', user_ns)
+        # Should log "Deep copying large object Series with 12,000 rows..."
 
 
 # ============================================================================

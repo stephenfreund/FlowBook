@@ -6,6 +6,7 @@ This CLI provides a unified interface for executing any registered notebook comm
 
 import argparse
 import json
+import os
 import sys
 import asyncio
 from typing import Optional
@@ -125,6 +126,19 @@ def cli_main():
     )
 
     args = parser.parse_args()
+
+    # log the args in a nice format (arg and value in columns)
+    print("=" * 60)
+    print("Arguments")
+    print("=" * 60)
+    for arg in args.__dict__:
+        print(f"{arg:<20}: {getattr(args, arg)}")
+    print("=" * 60)
+
+    # Remove old timings file
+    if os.path.exists(args.timings_file):
+        os.remove(args.timings_file)
+        log(f"Removed old timings file: {args.timings_file}")
 
     # Set the timings file for the global output object
     output.set_timings_file(args.timings_file)
