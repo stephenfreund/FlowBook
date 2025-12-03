@@ -51,7 +51,9 @@ def parse_time_limit(time_str: str) -> int:
 
     parts = time_str.split(":")
     if len(parts) != 3:
-        raise ValueError(f"Invalid time format: {time_str}. Expected HH:MM:SS or D-HH:MM:SS")
+        raise ValueError(
+            f"Invalid time format: {time_str}. Expected HH:MM:SS or D-HH:MM:SS"
+        )
 
     hours, minutes, seconds = map(int, parts)
     total_seconds = days * 86400 + hours * 3600 + minutes * 60 + seconds
@@ -69,8 +71,8 @@ def strip_ansi_codes(text: str) -> str:
     Returns:
         String with all ANSI escape sequences removed
     """
-    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    return ansi_escape.sub('', text)
+    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    return ansi_escape.sub("", text)
 
 
 def split_cli_sections(argv: Sequence[str]) -> tuple[List[str], List[str]]:
@@ -242,6 +244,8 @@ def run_local_job(target: Path, args: argparse.Namespace) -> bool:
         source ~/.bashrc || true
         conda activate {shlex.quote(args.env or 'base')} || echo "Warning: Failed to activate conda env {shlex.quote(args.env or 'base')}"
 
+        conda info
+
         # ---- Enable strict error handling after environment setup ----
         set -euo pipefail
 
@@ -256,7 +260,8 @@ def run_local_job(target: Path, args: argparse.Namespace) -> bool:
     print(f"[LOCAL] Running: {command_str}")
     print(f"[LOCAL] Working directory: {work_dir}")
     print(f"[LOCAL] Timeout: {timeout_seconds}s ({args.time_limit})")
-    print(f"[LOCAL] Logs: {stdout_path}, {stderr_path}")
+    print(f"[LOCAL] Stdout:  {stdout_path}")
+    print(f"[LOCAL] Stderr:  {stderr_path}")
 
     try:
         # Capture output to strings for ANSI stripping
