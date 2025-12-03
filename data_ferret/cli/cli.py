@@ -51,7 +51,9 @@ def parse_file_paths(paths: list) -> tuple[Optional[str], Optional[str]]:
             notebook_path = path
         elif file_type == "connection":
             if connection_file:
-                error(f"Multiple connection files provided: {connection_file} and {path}")
+                error(
+                    f"Multiple connection files provided: {connection_file} and {path}"
+                )
                 sys.exit(1)
             connection_file = path
         else:
@@ -79,8 +81,8 @@ def cli_main():
 
     parser.add_argument(
         "paths",
-        nargs='+',
-        help="Notebook file (.ipynb) and/or kernel connection file (kernel-*.json). Provide one or both in any order."
+        nargs="+",
+        help="Notebook file (.ipynb) and/or kernel connection file (kernel-*.json). Provide one or both in any order.",
     )
 
     parser.add_argument(
@@ -140,7 +142,10 @@ def cli_main():
         os.remove(args.timings_file)
         log(f"Removed old timings file: {args.timings_file}")
 
-    # Set the timings file for the global output object
+    # Set environment variable so kernel process inherits the same timings file
+    os.environ['FERRET_TIMINGS_FILE'] = args.timings_file
+
+    # Set the timings file for the global output object in CLI process
     output.set_timings_file(args.timings_file)
 
     # Parse file paths
@@ -160,7 +165,9 @@ def cli_main():
         selected_cell_ids = args.cell_ids
         if selected_cell_ids:
             try:
-                selected_cell_ids = convert_cell_indices_to_ids(notebook_content, selected_cell_ids)
+                selected_cell_ids = convert_cell_indices_to_ids(
+                    notebook_content, selected_cell_ids
+                )
                 log(f"Processing cells: {selected_cell_ids}")
             except ValueError as e:
                 error(str(e))
@@ -172,13 +179,13 @@ def cli_main():
         # Setup kernel if needed
         if command.requires_kernel:
             kernel_manager, kernel_client = setup_kernel(
-                connection_file=connection_file,
-                kernel_name=args.kernel_name
+                connection_file=connection_file, kernel_name=args.kernel_name
             )
 
             # Enable force checkpoints if requested
             if args.force_checkpoints:
                 from data_ferret.kernel.kernel_command_client import KernelCommandClient
+
                 command_client = KernelCommandClient(kernel_client, timeout=30)
                 command_client.force_checkpoints(enabled=True)
                 log("Force checkpoints enabled")
@@ -195,15 +202,25 @@ def cli_main():
 
         # Save processed notebook
         # Handle both dict and ProcessingResult (Pydantic model)
-        notebook_data = result.get("notebook") if isinstance(result, dict) else result.notebook
-        metadata_data = result.get("metadata") if isinstance(result, dict) else result.metadata
-        total_cost = result.get("total_cost", 0.0) if isinstance(result, dict) else result.total_cost
-        total_time = result.get("total_time", 0.0) if isinstance(result, dict) else result.total_time
+        notebook_data = (
+            result.get("notebook") if isinstance(result, dict) else result.notebook
+        )
+        metadata_data = (
+            result.get("metadata") if isinstance(result, dict) else result.metadata
+        )
+        total_cost = (
+            result.get("total_cost", 0.0)
+            if isinstance(result, dict)
+            else result.total_cost
+        )
+        total_time = (
+            result.get("total_time", 0.0)
+            if isinstance(result, dict)
+            else result.total_time
+        )
 
         output_path = save_notebook(
-            notebook_data,
-            output_path=args.output,
-            input_path=notebook_path
+            notebook_data, output_path=args.output, input_path=notebook_path
         )
         print(f"Processed notebook written to {output_path}")
 
@@ -223,6 +240,11 @@ def cli_main():
         print(format_metadata(metadata_data))
         print("=" * 60)
 
+        # if any of the metadata has a status of error, return 1
+
+        if metadata_data is None or metadata_data.get("status") == "error":
+            return 1
+
         return 0
 
     except FileNotFoundError as e:
@@ -234,6 +256,7 @@ def cli_main():
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         return 1
     finally:

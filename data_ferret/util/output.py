@@ -22,7 +22,10 @@ Timings = List[Timing]
 
 
 class Output:
-    def __init__(self, *, timings_file: str = "ferret-times.json"):
+    def __init__(self, *, timings_file: str = None):
+        if timings_file is None:
+            # Check environment variable first, then fall back to default
+            timings_file = os.environ.get('FERRET_TIMINGS_FILE', 'ferret-times.json')
         self.pending = None
         self.contexts = []
         self.output_contexts = []

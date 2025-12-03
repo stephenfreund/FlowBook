@@ -65,6 +65,7 @@ data_ferret_optimize = "data_ferret.cli.optimize_cli:optimize_cli_main"
 data_ferret_split = "data_ferret.cli.split_cli:split_cli_main"
 data_ferret_stats = "data_ferret.cli.stats_cli:stats_cli_main"
 data_ferret_timers = "data_ferret.cli.ferret_timers:main"
+data_ferret_slurm = "data_ferret.slurm.slurm_cli:main"
 
 [tool.hatch.version]
 source = "nodejs"
