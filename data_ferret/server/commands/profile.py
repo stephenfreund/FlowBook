@@ -87,13 +87,14 @@ class ProfileCommand(NotebookCommand):
                             if source.strip():
                                 try:
                                     # Use a longer timeout for profiling (30 minutes to match kernel timeout)
-                                    result = KernelHelper.execute_code(
-                                        kernel_client,
-                                        source,
-                                        timeout=30 * 60,  # 30 minutes
-                                        cell_id=cell.get("id"),
-                                        cell_metadata=metadata,
-                                    )
+                                    with self.timing_context() as cell_get_elapsed:
+                                        result = KernelHelper.execute_code(
+                                            kernel_client,
+                                            source,
+                                            timeout=30 * 60,  # 30 minutes
+                                            cell_id=cell.get("id"),
+                                            cell_metadata=metadata,
+                                        )   
 
                                     cell["execution_count"] = result["execution_count"]
                                     cell["outputs"] = result["outputs"]
@@ -113,6 +114,7 @@ class ProfileCommand(NotebookCommand):
                                                 "status": "error",
                                                 "execution_count": result["execution_count"],
                                                 "error_message": error_message,
+                                                "execution_time": cell_get_elapsed() * 1000,
                                             }
                                         )
                                         break
@@ -129,6 +131,7 @@ class ProfileCommand(NotebookCommand):
                                             "cell_index": idx,
                                             "status": result["status"],
                                             "execution_count": result["execution_count"],
+                                            "execution_time": cell_get_elapsed() * 1000,
                                         }
                                     )
                                     # log(f"[{result['execution_count']}]")
@@ -147,7 +150,8 @@ class ProfileCommand(NotebookCommand):
                                     execution_results.append(
                                         {
                                             "cell_index": idx,
-                                            "status": "error"
+                                            "status": "error",
+                                            "execution_time": cell_get_elapsed() * 1000,
                                         }
                                     )
 

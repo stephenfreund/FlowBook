@@ -85,13 +85,14 @@ class ExecuteAllCommand(NotebookCommand):
                             if source.strip():
                                 try:
                                     # Use 30-minute timeout to match kernel timeout
-                                    result = KernelHelper.execute_code(
-                                        kernel_client,
-                                        source,
-                                        timeout=30 * 60,  # 30 minutes
-                                        cell_id=cell.get("id"),
-                                        cell_metadata=metadata,
-                                    )
+                                    with self.timing_context() as cell_get_elapsed:
+                                        result = KernelHelper.execute_code(
+                                            kernel_client,
+                                            source,
+                                            timeout=30 * 60,  # 30 minutes
+                                            cell_id=cell.get("id"),
+                                            cell_metadata=metadata,
+                                        )   
 
                                     cell["execution_count"] = result["execution_count"]
                                     cell["outputs"] = result["outputs"]
@@ -110,6 +111,7 @@ class ExecuteAllCommand(NotebookCommand):
                                                 "status": "error",
                                                 "execution_count": result["execution_count"],
                                                 "error_message": error_message,
+                                                "execution_time": cell_get_elapsed() * 1000,
                                             }
                                         )
                                         break  # Stop on first error
@@ -126,6 +128,7 @@ class ExecuteAllCommand(NotebookCommand):
                                             "cell_index": idx,
                                             "status": result["status"],
                                             "execution_count": result["execution_count"],
+                                            "execution_time": cell_get_elapsed() * 1000,
                                         }
                                     )
                                     log(f"[{result['execution_count']}]")
@@ -146,7 +149,8 @@ class ExecuteAllCommand(NotebookCommand):
                                     execution_results.append(
                                         {
                                             "cell_index": idx,
-                                            "status": "error"
+                                            "status": "error",
+                                            "execution_time": cell_get_elapsed() * 1000,
                                         }
                                     )
                                     status = "error"
