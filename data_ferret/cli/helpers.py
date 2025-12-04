@@ -416,3 +416,55 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
         lines.append(f"{indent_str}{value}")
 
     return "\n".join(lines)
+
+
+def save_metadata_file(
+    metadata: Dict[str, Any],
+    command: str,
+    total_cost: float,
+    total_time: float,
+    output_path: str = "metadata.json"
+) -> str:
+    """
+    Save command metadata to a JSON file.
+
+    This function creates a comprehensive metadata file that includes:
+    - Command that was executed
+    - Status from the command's metadata
+    - Timing information (total_time)
+    - Cost information (total_cost)
+    - All metadata from the command execution
+    - Timestamp of when the command was executed
+
+    Args:
+        metadata: The metadata dictionary returned by the command
+        command: The name of the command that was executed
+        total_cost: Total cost in USD
+        total_time: Total execution time in seconds
+        output_path: Path where the metadata file should be saved
+
+    Returns:
+        Path where the metadata file was saved
+
+    Raises:
+        IOError: If the metadata file cannot be written
+    """
+    import datetime
+    from data_ferret.util.output import error
+
+    output_metadata = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "command": command,
+        "status": metadata.get("status", "unknown") if metadata else "unknown",
+        "total_cost": total_cost,
+        "total_time": total_time,
+        "command_metadata": metadata or {}
+    }
+
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(output_metadata, f, indent=2)
+        return output_path
+    except IOError as e:
+        error(f"Failed to write metadata file {output_path}: {e}")
+        raise

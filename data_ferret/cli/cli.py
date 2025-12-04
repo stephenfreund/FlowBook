@@ -23,6 +23,7 @@ from .helpers import (
     detect_file_type,
     convert_cell_indices_to_ids,
     format_metadata,
+    save_metadata_file,
 )
 
 
@@ -119,6 +120,12 @@ def cli_main():
         "--timings-file",
         default="ferret-times.json",
         help="Output file for timing data (default: ferret-times.json)",
+    )
+
+    parser.add_argument(
+        "--metadata-file",
+        default="metadata.json",
+        help="Output file for command metadata (default: metadata.json in current directory)",
     )
 
     parser.add_argument(
@@ -239,6 +246,19 @@ def cli_main():
         print("=" * 60)
         print(format_metadata(metadata_data))
         print("=" * 60)
+
+        # Save metadata to file
+        try:
+            metadata_file_path = save_metadata_file(
+                metadata=metadata_data,
+                command=args.command,
+                total_cost=total_cost,
+                total_time=total_time,
+                output_path=args.metadata_file
+            )
+            print(f"\nMetadata written to {metadata_file_path}")
+        except Exception as e:
+            error(f"Warning: Could not save metadata file: {e}")
 
         # if any of the metadata has a status of error, return 1
 
