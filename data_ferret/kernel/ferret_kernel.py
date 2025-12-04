@@ -379,7 +379,8 @@ class FerretKernel(IPythonKernel, Magics):
     ) -> Tuple[dict, Optional[str], Optional[dict], Optional[dict]]:
         """Execute code with optional Scalene profiling."""
         has_cell_magics = code.startswith("%") or "\n%" in code
-        should_profile = self._use_scalene and self._cell_id is not None and not has_cell_magics
+        has_shell_magics = code.startswith("!") or "\n!" in code
+        should_profile = self._use_scalene and self._cell_id is not None and not has_cell_magics and not has_shell_magics
 
         if should_profile:
             pre_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
