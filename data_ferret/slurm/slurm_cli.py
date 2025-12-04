@@ -355,7 +355,8 @@ def submit_single_job(target: Path, args: argparse.Namespace) -> Optional[int]:
         # cd {shlex.quote(str(work_dir))}
 
         # ---- Requested command ----
-        srun --cpu-bind=cores {command_str}
+        # srun --cpu-bind=cores {command_str}
+        srun {command_str}
         """
     ).strip()
 
