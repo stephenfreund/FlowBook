@@ -6,6 +6,7 @@ This script is called during the build process to install the kernel.
 import json
 import sys
 import shutil
+import tempfile
 from pathlib import Path
 from jupyter_client.kernelspec import KernelSpecManager
 from filelock import FileLock, Timeout
@@ -27,6 +28,7 @@ def install_kernel(kernel_name: str, spec_source_dir: Path):
         if not kernel_json_path.exists():
             raise ValueError(f"Warning: kernel.json not found at {kernel_json_path}")
 
+        temp_kernelspec = None
         try:
             with open(kernel_json_path, "r") as f:
                 spec_content = f.read()
@@ -37,9 +39,8 @@ def install_kernel(kernel_name: str, spec_source_dir: Path):
             # Parse the updated content
             spec = json.loads(spec_content)
 
-            # Create a temporary kernelspec directory
-            temp_kernelspec = spec_source_dir.parent / ".tmp_kernelspec"
-            temp_kernelspec.mkdir(exist_ok=True)
+            # Create a unique temporary kernelspec directory (process-safe)
+            temp_kernelspec = Path(tempfile.mkdtemp(prefix="ferret_kernel_"))
 
             # Write the updated kernel.json
             temp_kernel_json = temp_kernelspec / "kernel.json"
@@ -58,7 +59,7 @@ def install_kernel(kernel_name: str, spec_source_dir: Path):
                             fn, temp_kernelspec / fn.name, dirs_exist_ok=True
                         )
 
-    
+
 
             # Install the kernel
             ksm = KernelSpecManager()
@@ -71,8 +72,12 @@ def install_kernel(kernel_name: str, spec_source_dir: Path):
 
             # Clean up temporary directory
             shutil.rmtree(temp_kernelspec)
+            temp_kernelspec = None
 
         except Exception as e:
+            # Clean up temporary directory if it was created
+            if temp_kernelspec and temp_kernelspec.exists():
+                shutil.rmtree(temp_kernelspec, ignore_errors=True)
             raise ValueError(f"Error installing kernel: {e}")
 
 
