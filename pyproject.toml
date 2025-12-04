@@ -46,6 +46,7 @@ dependencies = [
     "hypothesis",
     "libcst>=1.0.0",
     "scalene @ git+https://github.com/plasma-umass/scalene.git@229fe55a900bff360ad4bc0b2e915d20a6916c12",
+    "filelock>=3.0",
 
     # LSP
     "jedi-language-server",

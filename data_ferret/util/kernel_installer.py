@@ -8,6 +8,8 @@ import sys
 import shutil
 from pathlib import Path
 from jupyter_client.kernelspec import KernelSpecManager
+from filelock import FileLock, Timeout
+from jupyter_core.paths import jupyter_data_dir
 
 from data_ferret.util.output import log, timer
 
@@ -86,14 +88,68 @@ def update_kernel(kernel_name: str, spec_source_dir: Path):
     install_kernel(kernel_name, spec_source_dir)
 
 
+def is_kernel_installed_correctly(kernel_name: str) -> bool:
+    """Check if kernel is installed and has correct Python path."""
+    try:
+        ksm = KernelSpecManager()
+        spec = ksm.get_kernel_spec(kernel_name)
+
+        # Read the installed kernel.json
+        kernel_json_path = Path(spec.resource_dir) / "kernel.json"
+        if not kernel_json_path.exists():
+            return False
+
+        with open(kernel_json_path, "r") as f:
+            kernel_data = json.load(f)
+
+        # Check if Python executable matches current environment
+        if not kernel_data.get("argv"):
+            return False
+
+        installed_python = kernel_data["argv"][0]
+        current_python = sys.executable
+
+        # Compare resolved paths (handle symlinks)
+        return Path(installed_python).resolve() == Path(current_python).resolve()
+
+    except Exception:
+        # Catch all exceptions: NoSuchKernel, FileNotFoundError, json.JSONDecodeError, KeyError, etc.
+        return False
+
+
 def install_kernel_spec(kernel_name: str, spec_source_dir: Path):
-    # ksm = KernelSpecManager()
-    # try:
-    #     ksm.get_kernel_spec(kernel_name)
-    #     log("Kernel spec already installed")
-    # except Exception:
-    #     log("Installing kernel spec")
-    install_kernel(kernel_name, spec_source_dir)
+    """Install kernel spec with process-safe idempotent behavior."""
+
+    with timer(message=f"Installing {kernel_name} kernel..."):
+        # Fast path: check if already correctly installed
+        if is_kernel_installed_correctly(kernel_name):
+            log(f"Kernel '{kernel_name}' already correctly installed")
+            return
+
+        # Slow path: acquire lock and install
+        lock_dir = Path(jupyter_data_dir()) / "locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_file = lock_dir / f"{kernel_name}.lock"
+
+        lock = FileLock(lock_file, timeout=30)
+
+        try:
+            with lock:
+                # Double-check: another process may have just installed it
+                if is_kernel_installed_correctly(kernel_name):
+                    log(f"Kernel '{kernel_name}' was installed by another process")
+                    return
+
+                log(f"Installing kernel spec '{kernel_name}'")
+                install_kernel(kernel_name, spec_source_dir)
+                log(f"Kernel '{kernel_name}' installation complete")
+
+        except Timeout:
+            log(
+                f"Warning: Timeout acquiring lock for kernel installation. "
+                f"Another process may be installing. Continuing anyway..."
+            )
+            # Don't fail - the other process will likely complete installation
 
 
 if __name__ == "__main__":
