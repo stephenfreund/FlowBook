@@ -84,6 +84,7 @@ def process_metadata_file(filepath: str) -> Dict[str, Any]:
             "filepath": filepath,
             "status": status,
             "command": metadata.get("command", "unknown"),
+            "notebook": metadata.get("notebook", "unknown"),
             "total_time": metadata.get("total_time", 0.0),
             "total_cost": metadata.get("total_cost", 0.0),
             "timestamp": metadata.get("timestamp", ""),
@@ -187,6 +188,8 @@ def display_report(results: List[Dict[str, Any]]) -> None:
         print(f"   Status: {result['status'].upper()}")
 
         if result["status"] == "success":
+            if result.get('notebook'):
+                print(f"   Notebook: {result['notebook']}")
             print(f"   Command: {result.get('command', 'unknown')}")
             print(f"   Time: {result.get('total_time', 0):.2f}s")
             print(f"   Cost: ${result.get('total_cost', 0):.4f}")
@@ -194,6 +197,8 @@ def display_report(results: List[Dict[str, Any]]) -> None:
                 print(f"   Timestamp: {result['timestamp']}")
         else:
             # Show details for failures
+            if result.get('notebook'):
+                print(f"   Notebook: {result['notebook']}")
             print(f"   Error: {result.get('error', 'Unknown error')}")
 
             # If we have command_metadata with details, show them

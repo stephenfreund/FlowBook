@@ -254,7 +254,8 @@ def cli_main():
                 command=args.command,
                 total_cost=total_cost,
                 total_time=total_time,
-                output_path=args.metadata_file
+                output_path=args.metadata_file,
+                notebook_path=os.path.abspath(notebook_path)
             )
             print(f"\nMetadata written to {metadata_file_path}")
         except Exception as e:

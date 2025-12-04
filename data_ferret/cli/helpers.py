@@ -423,13 +423,15 @@ def save_metadata_file(
     command: str,
     total_cost: float,
     total_time: float,
-    output_path: str = "metadata.json"
+    output_path: str = "metadata.json",
+    notebook_path: Optional[str] = None
 ) -> str:
     """
     Save command metadata to a JSON file.
 
     This function creates a comprehensive metadata file that includes:
     - Command that was executed
+    - Notebook path (full path to the notebook file)
     - Status from the command's metadata
     - Timing information (total_time)
     - Cost information (total_cost)
@@ -442,6 +444,7 @@ def save_metadata_file(
         total_cost: Total cost in USD
         total_time: Total execution time in seconds
         output_path: Path where the metadata file should be saved
+        notebook_path: Full path to the notebook file (optional)
 
     Returns:
         Path where the metadata file was saved
@@ -455,6 +458,7 @@ def save_metadata_file(
     output_metadata = {
         "timestamp": datetime.datetime.now().isoformat(),
         "command": command,
+        "notebook": notebook_path,
         "status": metadata.get("status", "unknown") if metadata else "unknown",
         "total_cost": total_cost,
         "total_time": total_time,
