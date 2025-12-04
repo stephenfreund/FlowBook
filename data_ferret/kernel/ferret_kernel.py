@@ -403,6 +403,11 @@ class FerretKernel(IPythonKernel, Magics):
                 code, silent, store_history, user_expressions, allow_stdin,
                 cell_meta=cell_meta, cell_id=self._cell_id
             )
+            if has_shell_magics and result is None:
+                result = {
+                    'status': 'ok',
+                    'execution_count': self.execution_count,
+                }
             return result, None, None, None
 
     def _remove_non_deepcopyable_objects(self) -> None:
