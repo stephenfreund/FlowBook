@@ -5,19 +5,6 @@ This module provides static analysis tools to track variable, function, and meth
 dependencies in notebook cells, creating a map from cell IDs to the global variables
 they access.
 
-GUARANTEE
-=========
-The analysis provides the following guarantee:
-
-    COMPUTED DEPENDENCIES INCLUDE ALL REAL DEPENDENCIES
-    OR
-    WARNINGS ARE REPORTED FOR CASES WHERE ANALYSIS MAY BE INCOMPLETE
-
-This means:
-- If no warnings are produced, the dependencies are COMPLETE (sound)
-- If warnings are produced, the dependencies MAY be incomplete for the warned patterns
-- Check CellDependencies.warnings for any under-approximation warnings
-
 ANALYSIS FEATURES AND PROPERTIES
 =================================
 
@@ -101,42 +88,26 @@ The analysis CORRECTLY handles `global` and `nonlocal` declarations:
    - Global declarations
    - Nonlocal declarations
 
-Detected Under-Approximations (Warnings)
-----------------------------------------
-The following cases CANNOT be fully tracked, but are DETECTED and produce warnings:
+Missing Cases and Under-Approximations
+---------------------------------------
+The following cases are NOT tracked (under-approximation - may miss dependencies):
 
-1. DYNAMIC CODE EXECUTION (WARNING):
-   - eval(), exec(), compile() → produces warning
-   - importlib.import_module() → produces warning
-   - Example: eval("x + y") → WARNING: "dynamic code execution"
+1. DYNAMIC CODE EXECUTION:
+   - eval(), exec(), compile() with string arguments
+   - importlib.import_module() with dynamic names
+   - Example: eval("x + y") → x, y not tracked
 
-2. REFLECTION AND DYNAMIC ATTRIBUTE ACCESS (WARNING):
-   - getattr(), setattr(), delattr(), hasattr() → produces warning
-   - vars() → produces warning
-   - obj.__dict__ access → produces warning
-   - Example: getattr(obj, "method") → WARNING: "dynamic attribute access"
+2. REFLECTION AND DYNAMIC ATTRIBUTE ACCESS:
+   - getattr(obj, name), setattr(obj, name, value) with dynamic names
+   - __dict__ manipulation
+   - Example: getattr(obj, "method")() → method call not tracked
 
-3. STAR IMPORTS (WARNING):
-   - "from module import *" → produces warning
-   - Example: from numpy import * → WARNING: "star import"
-
-7. INDIRECT CALLS (WARNING):
-   - funcs[0](), handlers['key']() → WARNING: "indirect call via subscript"
-   - get_handler()() → WARNING: "indirect call via function result"
-   - (f1 if cond else f2)() → WARNING: "indirect call via conditional"
-   - f = helper; f() → WARNING: "call to 'f' which is not a function definition"
-   - obj.callback = func; obj.callback() → WARNING: "call to attribute 'callback'"
-
-8. METACLASSES AND CLASS DECORATORS (WARNING):
-   - class Foo(metaclass=...) → WARNING: "uses metaclass"
-   - @decorator class Foo → WARNING: "has decorator(s)"
-
-Undetected Under-Approximations (Silent)
-----------------------------------------
-The following cases are NOT tracked and NOT warned about:
+3. STAR IMPORTS:
+   - "from module import *" → cannot determine which names are imported
+   - These imported names won't be filtered from dependencies
 
 4. ATTRIBUTE ASSIGNMENTS:
-   - obj.attr = value → not tracked as a write to obj
+   - obj.attr = value → not tracked as a write
    - Only tracks module-level variable assignments
 
 5. CONTAINER MODIFICATIONS:
@@ -147,12 +118,16 @@ The following cases are NOT tracked and NOT warned about:
    - self.attr reads/writes inside methods not tracked separately
    - Only method-level global dependencies are captured
 
+7. INDIRECT CALLS:
+   - Calls via function stored in data structures: funcs[0]()
+   - Only direct calls and single-level attribute calls tracked
+
+8. METACLASSES AND DESCRIPTORS:
+   - Custom __getattribute__, __setattr__ behavior not modeled
+   - Class decorators that modify behavior not tracked
+
 Design Decisions
 ----------------
-- GUARANTEE SOUNDNESS OR WARN: If the analysis cannot guarantee complete
-  dependency tracking, it produces a warning. Users can check warnings
-  to know if manual review is needed.
-
 - CONSERVATIVE FOR SAFETY: Prefer false positives (extra dependencies) over
   false negatives (missing dependencies)
 
@@ -165,10 +140,6 @@ Design Decisions
 - METHOD NAME-BASED DISPATCH: Without type information, uses method name
   matching across all classes as a sound over-approximation
 
-- FIELD-NAME BASED ATTRIBUTE TRACKING: For stored function detection (Case 7f),
-  uses field names only (not object types) to conservatively detect when an
-  attribute might contain a stored function
-
 Example Usage
 -------------
     notebook = {"cells": [...]}
@@ -177,8 +148,6 @@ Example Usage
     for cell_id, deps in dependencies.items():
         print(f"Cell {cell_id} reads: {deps.globals_read}")
         print(f"Cell {cell_id} writes: {deps.globals_written}")
-        if deps.warnings:
-            print(f"Cell {cell_id} warnings: {deps.warnings}")
 """
 
 import ast
@@ -200,8 +169,6 @@ class CellDependencies:
     classes_defined: Set[str] = field(default_factory=set)  # Classes defined in this cell
     methods_called: Set[str] = field(default_factory=set)  # Method names called (e.g., from obj.method())
     methods_defined: Dict[str, Set[str]] = field(default_factory=dict)  # class_name -> set of method names
-    attributes_assigned: Set[str] = field(default_factory=set)  # Attribute names assigned (e.g., obj.attr = value)
-    warnings: List[str] = field(default_factory=list)  # Warnings about potential under-approximations
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation."""
@@ -215,9 +182,7 @@ class CellDependencies:
             'functions_defined': sorted(list(self.functions_defined)),
             'classes_defined': sorted(list(self.classes_defined)),
             'methods_called': sorted(list(self.methods_called)),
-            'methods_defined': {cls: sorted(list(methods)) for cls, methods in self.methods_defined.items()},
-            'attributes_assigned': sorted(list(self.attributes_assigned)),
-            'warnings': self.warnings.copy(),
+            'methods_defined': {cls: sorted(list(methods)) for cls, methods in self.methods_defined.items()}
         }
 
 
@@ -231,59 +196,6 @@ class FunctionInfo:
     methods_called: Set[str] = field(default_factory=set)  # Method names called from this function
     defined_in_cell: Optional[str] = None
     class_name: Optional[str] = None  # If this is a method, the class it belongs to
-
-
-# Functions that execute dynamic code - cannot be statically analyzed
-DYNAMIC_CODE_FUNCTIONS = {'eval', 'exec', 'compile'}
-
-# Functions for dynamic attribute access - cannot be statically tracked
-REFLECTION_FUNCTIONS = {'getattr', 'setattr', 'delattr', 'hasattr', 'vars'}
-
-# Common method names to exclude from attribute-stored function warnings
-# These are methods that are commonly called on objects but unlikely to be stored functions
-COMMON_METHOD_NAMES = {
-    # Container methods
-    'append', 'extend', 'insert', 'remove', 'pop', 'clear', 'index', 'count',
-    'sort', 'reverse', 'copy', 'update', 'keys', 'values', 'items', 'get',
-    'setdefault', 'add', 'discard', 'union', 'intersection', 'difference',
-    # String methods
-    'strip', 'lstrip', 'rstrip', 'split', 'rsplit', 'join', 'replace',
-    'find', 'rfind', 'startswith', 'endswith', 'upper', 'lower', 'title',
-    'capitalize', 'format', 'encode', 'decode',
-    # File methods
-    'read', 'readline', 'readlines', 'write', 'writelines', 'close',
-    'seek', 'tell', 'flush', 'truncate',
-    # Iterator/generator methods
-    'next', 'send', 'throw',
-    # Object methods
-    'deepcopy', '__init__', '__str__', '__repr__',
-    # DataFrame/Series common methods (pandas)
-    'head', 'tail', 'describe', 'info', 'mean', 'sum', 'min', 'max', 'std',
-    'var', 'median', 'mode', 'abs', 'round', 'cumsum', 'cumprod',
-    'groupby', 'merge', 'join', 'concat',
-    'apply', 'map', 'transform', 'agg', 'aggregate',
-    'filter', 'query', 'where', 'mask',
-    'sort_values', 'sort_index', 'rank', 'nlargest', 'nsmallest',
-    'drop', 'drop_duplicates', 'duplicated',
-    'fillna', 'dropna', 'isna', 'notna', 'interpolate',
-    'reset_index', 'set_index', 'reindex',
-    'to_csv', 'to_json', 'to_excel', 'to_dict', 'to_list', 'to_numpy',
-    'astype', 'convert_dtypes',
-    'rename', 'clip', 'shift', 'diff', 'pct_change',
-    'rolling', 'expanding', 'ewm', 'resample',
-    'pivot', 'pivot_table', 'melt', 'stack', 'unstack',
-    'sample', 'value_counts', 'unique', 'nunique',
-    # NumPy array methods
-    'reshape', 'flatten', 'ravel', 'transpose', 'squeeze', 'expand_dims',
-    'argmax', 'argmin', 'argsort', 'nonzero', 'all', 'any',
-    'dot', 'matmul', 'trace', 'diagonal',
-    # Plotting
-    'plot', 'hist', 'scatter', 'bar', 'barh', 'pie', 'box', 'area',
-    'show', 'savefig', 'legend', 'xlabel', 'ylabel',
-    # Sklearn/model methods
-    'fit', 'predict', 'fit_transform', 'score',
-    'get_params', 'set_params',
-}
 
 
 class GlobalAccessAnalyzer(ast.NodeVisitor):
@@ -317,8 +229,6 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         self.methods_defined: Dict[str, Set[str]] = {}  # class_name -> set of method names
         self.method_defs: Dict[str, FunctionInfo] = {}  # "ClassName.method_name" -> FunctionInfo
         self.current_class: Optional[str] = None  # Track which class we're currently analyzing
-        self.attributes_assigned: Set[str] = set()  # Attribute names that are assigned (obj.attr = ...)
-        self.warnings: List[str] = []  # Warnings about potential under-approximations
 
     def _current_scope(self) -> Set[str]:
         """Get the current local scope."""
@@ -475,22 +385,6 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef):
         """Handle class definitions."""
-        # Case 8: Warn on metaclass usage
-        for keyword in node.keywords:
-            if keyword.arg == 'metaclass':
-                self.warnings.append(
-                    f"line {node.lineno}: class {node.name} uses metaclass - "
-                    f"class behavior may be modified, dependencies may be incomplete"
-                )
-                break
-
-        # Case 8: Warn on class decorators
-        if node.decorator_list:
-            self.warnings.append(
-                f"line {node.lineno}: class {node.name} has decorator(s) - "
-                f"class behavior may be modified, dependencies may be incomplete"
-            )
-
         # Class name is defined in the enclosing scope
         is_global_class = self._is_at_module_level()
         if is_global_class:
@@ -663,21 +557,6 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         # Track the function being called
         if isinstance(node.func, ast.Name):
             func_name = node.func.id
-
-            # Case 1: Warn on dynamic code execution (eval, exec, compile)
-            if func_name in DYNAMIC_CODE_FUNCTIONS:
-                self.warnings.append(
-                    f"line {node.lineno}: {func_name}() - dynamic code execution, "
-                    f"dependencies may be incomplete"
-                )
-
-            # Case 2: Warn on reflection functions (getattr, setattr, etc.)
-            if func_name in REFLECTION_FUNCTIONS:
-                self.warnings.append(
-                    f"line {node.lineno}: {func_name}() - dynamic attribute access, "
-                    f"dependencies may be incomplete"
-                )
-
             if not self._is_local(func_name):
                 self.functions_called.add(func_name)
                 # Flow-sensitive: only add to globals_read if not already written at module level
@@ -703,57 +582,12 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
                 else:
                     # In nested scope, add to globals_read
                     self.globals_read.add(func_name)
-
         elif isinstance(node.func, ast.Attribute):
             # For method calls like obj.method(), track obj and the method name
             self.visit(node.func.value)
             # Track the method name - it might dispatch to a notebook-defined method
             method_name = node.func.attr
             self.methods_called.add(method_name)
-
-            # Case 1: Warn on importlib.import_module()
-            if method_name == 'import_module':
-                self.warnings.append(
-                    f"line {node.lineno}: import_module() - dynamic import, "
-                    f"dependencies may be incomplete"
-                )
-
-        elif isinstance(node.func, ast.Lambda):
-            # Case 7a: Lambda calls - NO warning needed
-            # The lambda body is analyzed by visit_Lambda, so dependencies are captured
-            self.visit(node.func)  # Visit the lambda to capture its dependencies
-
-        elif isinstance(node.func, ast.Subscript):
-            # Case 7b: Indirect call via subscript - funcs[0](), handlers['key']()
-            self.warnings.append(
-                f"line {node.lineno}: indirect call via subscript - "
-                f"called function unknown, dependencies may be incomplete"
-            )
-            self.visit(node.func)  # Visit to capture dependencies in the subscript
-
-        elif isinstance(node.func, ast.Call):
-            # Case 7c: Indirect call via function result - get_handler()()
-            self.warnings.append(
-                f"line {node.lineno}: indirect call via function result - "
-                f"called function unknown, dependencies may be incomplete"
-            )
-            self.visit(node.func)  # Visit the inner call
-
-        elif isinstance(node.func, ast.IfExp):
-            # Case 7d: Indirect call via conditional - (f1 if cond else f2)()
-            self.warnings.append(
-                f"line {node.lineno}: indirect call via conditional - "
-                f"called function unknown, dependencies may be incomplete"
-            )
-            self.visit(node.func)  # Visit to capture dependencies in the conditional
-
-        else:
-            # Case 7 (other): Any other indirect call pattern
-            self.warnings.append(
-                f"line {node.lineno}: indirect call - "
-                f"called function unknown, dependencies may be incomplete"
-            )
-            self.visit(node.func)  # Visit to capture any dependencies
 
         # Visit arguments - functions/methods passed as arguments are considered called
         for arg in node.args:
@@ -794,12 +628,7 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         for alias in node.names:
             name = alias.asname if alias.asname else alias.name
             if name == '*':
-                # Case 3: Star imports - warn about unknown names
-                module_name = node.module or '<unknown>'
-                self.warnings.append(
-                    f"line {node.lineno}: from {module_name} import * - "
-                    f"star import, dependencies may be incomplete"
-                )
+                # Can't track star imports precisely
                 continue
             if self._is_at_module_level():
                 # Items imported from modules - track separately to exclude from dependencies
@@ -912,27 +741,6 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
         elif isinstance(node, (ast.Subscript, ast.Attribute)):
             self.visit(node)
 
-    def visit_Attribute(self, node: ast.Attribute):
-        """Handle attribute access.
-
-        This method tracks:
-        - __dict__ access for Case 2 (reflection warning)
-        - Attribute assignments for Case 7f (stored function detection)
-        """
-        # Case 2: Warn on __dict__ access
-        if node.attr == '__dict__':
-            self.warnings.append(
-                f"line {node.lineno}: __dict__ access - "
-                f"dynamic attribute access, dependencies may be incomplete"
-            )
-
-        # Case 7f: Track attribute assignments (obj.attr = value)
-        if isinstance(node.ctx, ast.Store):
-            self.attributes_assigned.add(node.attr)
-
-        # Continue visiting the value part (e.g., the 'obj' in obj.attr)
-        self.generic_visit(node)
-
     def visit_Assign(self, node: ast.Assign):
         """Handle assignment statements.
 
@@ -950,7 +758,7 @@ class GlobalAccessAnalyzer(ast.NodeVisitor):
                     self.globals_written.add(name)
                     if self.in_conditional == 0 and self._is_at_module_level():
                         self.written_at_module_level.add(name)
-            # Visit the target for any nested structure (including attribute assignments)
+            # Visit the target for any nested structure
             self.visit(target)
 
     def visit_AugAssign(self, node: ast.AugAssign):
@@ -1080,8 +888,6 @@ def analyze_cell_dependencies(source: str, cell_id: str) -> tuple[CellDependenci
         deps.classes_defined = analyzer.classes_defined.copy()
         deps.methods_called = analyzer.methods_called.copy()
         deps.methods_defined = {cls: methods.copy() for cls, methods in analyzer.methods_defined.items()}
-        deps.attributes_assigned = analyzer.attributes_assigned.copy()
-        deps.warnings = analyzer.warnings.copy()
 
         # Store function definitions with their cell info
         function_defs = analyzer.function_defs.copy()
@@ -1245,52 +1051,6 @@ def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
         # (remove external dependencies - things not defined in the notebook)
         deps.globals_read &= all_notebook_definitions
 
-    # Case 7e: Detect aliased function calls
-    # If a cell calls a name that is:
-    # - Defined in the notebook (in globals_written somewhere)
-    # - NOT a function definition
-    # - NOT a class definition
-    # Then warn that it might be an aliased function
-    all_function_defs = set(function_map.keys())
-    all_class_defs = set()
-    for deps in dependencies.values():
-        all_class_defs.update(deps.classes_defined)
-
-    for cell_id, deps in dependencies.items():
-        for func_name in deps.functions_called:
-            # Skip if it's a known function or class
-            if func_name in all_function_defs:
-                continue
-            if func_name in all_class_defs:
-                continue
-            # Skip if it's not defined in the notebook (external)
-            if func_name not in all_notebook_definitions:
-                continue
-            # This is a notebook-defined variable being called as a function
-            # It might be an aliased function
-            deps.warnings.append(
-                f"call to '{func_name}' which is not a function definition - "
-                f"may be aliased function, dependencies may be incomplete"
-            )
-
-    # Case 7f: Detect attribute-stored function calls
-    # If an attribute name is both assigned and called, warn about potential stored function
-    all_attributes_assigned: Set[str] = set()
-    for deps in dependencies.values():
-        all_attributes_assigned.update(deps.attributes_assigned)
-
-    for cell_id, deps in dependencies.items():
-        for attr_name in deps.methods_called:
-            # Skip common method names to reduce false positives
-            if attr_name in COMMON_METHOD_NAMES:
-                continue
-            # Check if this attribute was assigned anywhere in the notebook
-            if attr_name in all_attributes_assigned:
-                deps.warnings.append(
-                    f"call to attribute '{attr_name}' which is also assigned elsewhere - "
-                    f"may be stored function, dependencies may be incomplete"
-                )
-
     return dependencies
 
 
@@ -1417,12 +1177,6 @@ if __name__ == '__main__':
             else:
                 print("  Calls:  (none)")
 
-        # Show warnings
-        if deps.warnings:
-            print(f"  ⚠ Warnings ({len(deps.warnings)}):")
-            for warning in deps.warnings:
-                print(f"    - {warning}")
-
     # Print summary
     print("\n" + "=" * 80)
     print("Summary")
@@ -1452,16 +1206,5 @@ if __name__ == '__main__':
         print(f"\n⚠ Variables used but not defined in this notebook: {len(undefined)}")
         print(f"  {', '.join(sorted(undefined))}")
         print("  (These may be imported, built-in, or defined in other notebooks)")
-
-    # Summary of warnings
-    all_warnings = []
-    for cell_id, deps in dependencies.items():
-        for warning in deps.warnings:
-            all_warnings.append((cell_id, warning))
-
-    if all_warnings:
-        print(f"\n⚠ Analysis Warnings ({len(all_warnings)} total):")
-        print("  Dependencies may be incomplete due to dynamic code patterns.")
-        print("  See per-cell warnings above for details.")
 
     print()

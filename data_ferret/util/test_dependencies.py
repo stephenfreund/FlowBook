@@ -1354,3 +1354,602 @@ class Counter:
     assert "Counter.make_incrementer" in method_defs
     # count is local to make_incrementer method
     assert "count" not in method_defs["Counter.make_incrementer"].globals_read
+
+
+# =============================================================================
+# TESTS FOR WARNINGS (Under-approximation Detection)
+# =============================================================================
+
+
+class TestCase1DynamicCodeExecution:
+    """Tests for Case 1: Dynamic code execution warnings."""
+
+    def test_warning_eval(self):
+        """Test that eval() triggers a warning."""
+        source = "result = eval(expr)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("eval()" in w for w in deps.warnings)
+        assert any("dynamic code execution" in w for w in deps.warnings)
+
+    def test_warning_exec(self):
+        """Test that exec() triggers a warning."""
+        source = "exec(code_string)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("exec()" in w for w in deps.warnings)
+        assert any("dynamic code execution" in w for w in deps.warnings)
+
+    def test_warning_compile(self):
+        """Test that compile() triggers a warning."""
+        source = "code = compile(source_code, '<string>', 'exec')"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("compile()" in w for w in deps.warnings)
+        assert any("dynamic code execution" in w for w in deps.warnings)
+
+    def test_warning_import_module(self):
+        """Test that importlib.import_module() triggers a warning."""
+        source = "mod = importlib.import_module(module_name)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("import_module()" in w for w in deps.warnings)
+        assert any("dynamic import" in w for w in deps.warnings)
+
+    def test_no_warning_regular_function(self):
+        """Test that regular functions don't trigger dynamic code warnings."""
+        source = "result = my_function(arg)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert not any("dynamic code execution" in w for w in deps.warnings)
+
+
+class TestCase2Reflection:
+    """Tests for Case 2: Reflection & dynamic attribute access warnings."""
+
+    def test_warning_getattr(self):
+        """Test that getattr() triggers a warning."""
+        source = "val = getattr(obj, 'attr')"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("getattr()" in w for w in deps.warnings)
+        assert any("dynamic attribute access" in w for w in deps.warnings)
+
+    def test_warning_setattr(self):
+        """Test that setattr() triggers a warning."""
+        source = "setattr(obj, 'attr', value)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("setattr()" in w for w in deps.warnings)
+        assert any("dynamic attribute access" in w for w in deps.warnings)
+
+    def test_warning_delattr(self):
+        """Test that delattr() triggers a warning."""
+        source = "delattr(obj, 'attr')"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("delattr()" in w for w in deps.warnings)
+        assert any("dynamic attribute access" in w for w in deps.warnings)
+
+    def test_warning_hasattr(self):
+        """Test that hasattr() triggers a warning."""
+        source = "if hasattr(obj, 'attr'): pass"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("hasattr()" in w for w in deps.warnings)
+        assert any("dynamic attribute access" in w for w in deps.warnings)
+
+    def test_warning_vars(self):
+        """Test that vars() triggers a warning."""
+        source = "d = vars(obj)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("vars()" in w for w in deps.warnings)
+        assert any("dynamic attribute access" in w for w in deps.warnings)
+
+    def test_warning_dunder_dict(self):
+        """Test that __dict__ access triggers a warning."""
+        source = "d = obj.__dict__"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("__dict__" in w for w in deps.warnings)
+        assert any("dynamic attribute access" in w for w in deps.warnings)
+
+    def test_warning_dunder_dict_subscript(self):
+        """Test that __dict__[key] access triggers a warning."""
+        source = "val = obj.__dict__['key']"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("__dict__" in w for w in deps.warnings)
+
+
+class TestCase3StarImports:
+    """Tests for Case 3: Star import warnings."""
+
+    def test_warning_star_import(self):
+        """Test that star imports trigger a warning."""
+        source = "from os.path import *"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("import *" in w for w in deps.warnings)
+        assert any("star import" in w for w in deps.warnings)
+
+    def test_warning_star_import_shows_module(self):
+        """Test that star import warning includes module name."""
+        source = "from numpy import *"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("numpy" in w and "import *" in w for w in deps.warnings)
+
+    def test_no_warning_regular_import(self):
+        """Test that regular imports don't trigger star import warning."""
+        source = "from numpy import array, zeros"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert not any("import *" in w for w in deps.warnings)
+
+
+class TestCase7aLambdaCalls:
+    """Tests for Case 7a: Lambda calls (NO warning needed)."""
+
+    def test_no_warning_lambda_call(self):
+        """Lambda calls should NOT warn - the body is analyzed."""
+        source = "result = (lambda x: x + global_var)(5)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert not any("indirect" in w.lower() for w in deps.warnings)
+
+    def test_lambda_body_analyzed(self):
+        """Verify lambda body dependencies are captured."""
+        source = "result = (lambda: external_func(data))()"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        # The lambda body should be analyzed
+        assert "external_func" in deps.functions_called
+        assert "data" in deps.globals_read
+
+    def test_lambda_assigned_no_warning(self):
+        """Lambda assigned to variable - no indirect call warning."""
+        source = "f = lambda: global_var"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert "global_var" in deps.globals_read
+        assert not any("indirect" in w.lower() for w in deps.warnings)
+
+
+class TestCase7bSubscriptCalls:
+    """Tests for Case 7b: Indirect calls via subscript."""
+
+    def test_warning_list_subscript_call(self):
+        """Test that funcs[0]() triggers a warning."""
+        source = "result = funcs[0](arg)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("subscript" in w for w in deps.warnings)
+        assert any("indirect call" in w for w in deps.warnings)
+
+    def test_warning_dict_subscript_call(self):
+        """Test that handlers['key']() triggers a warning."""
+        source = "result = handlers['process'](data)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("subscript" in w for w in deps.warnings)
+
+    def test_warning_nested_subscript_call(self):
+        """Test that obj.callbacks[0]() triggers a warning."""
+        source = "result = obj.callbacks[0]()"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("subscript" in w for w in deps.warnings)
+
+    def test_subscript_deps_captured(self):
+        """Test that dependencies in subscript expression are captured."""
+        source = "result = funcs[idx](arg)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert "funcs" in deps.globals_read
+        assert "idx" in deps.globals_read
+        assert "arg" in deps.globals_read
+
+
+class TestCase7cCallResultCalls:
+    """Tests for Case 7c: Indirect calls via function result."""
+
+    def test_warning_call_result_call(self):
+        """Test that get_handler()() triggers a warning."""
+        source = "result = get_handler()(arg)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("function result" in w for w in deps.warnings)
+        assert any("indirect call" in w for w in deps.warnings)
+
+    def test_warning_method_result_call(self):
+        """Test that factory.create()() triggers a warning."""
+        source = "result = factory.create()(data)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("function result" in w for w in deps.warnings)
+
+    def test_inner_call_deps_captured(self):
+        """Test that dependencies in inner call are captured."""
+        source = "result = get_handler(config)()"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert "get_handler" in deps.functions_called
+        assert "config" in deps.globals_read
+
+
+class TestCase7dConditionalCalls:
+    """Tests for Case 7d: Indirect calls via conditional expression."""
+
+    def test_warning_conditional_call(self):
+        """Test that (f1 if cond else f2)() triggers a warning."""
+        source = "result = (f1 if condition else f2)(arg)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("conditional" in w for w in deps.warnings)
+        assert any("indirect call" in w for w in deps.warnings)
+
+    def test_conditional_deps_captured(self):
+        """Test that all parts of conditional are captured."""
+        source = "result = (func_a if flag else func_b)(x)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert "func_a" in deps.globals_read
+        assert "func_b" in deps.globals_read
+        assert "flag" in deps.globals_read
+        assert "x" in deps.globals_read
+
+
+class TestCase7eAliasedFunctions:
+    """Tests for Case 7e: Aliased function calls."""
+
+    def test_warning_aliased_function(self):
+        """Calling a variable that holds a function should warn."""
+        notebook = {
+            "cells": [
+                {
+                    "id": "cell1",
+                    "cell_type": "code",
+                    "source": "def helper():\n    return data"
+                },
+                {
+                    "id": "cell2",
+                    "cell_type": "code",
+                    "source": "f = helper"
+                },
+                {
+                    "id": "cell3",
+                    "cell_type": "code",
+                    "source": "result = f()"
+                }
+            ]
+        }
+        dependencies = analyze_notebook(notebook)
+        # Cell 3 calls f, which is not a function definition
+        assert any("aliased" in w or "not a function definition" in w
+                   for w in dependencies["cell3"].warnings)
+
+    def test_no_warning_direct_function_call(self):
+        """Calling a function by its definition name should NOT warn."""
+        notebook = {
+            "cells": [
+                {
+                    "id": "cell1",
+                    "cell_type": "code",
+                    "source": "def helper():\n    return 42"
+                },
+                {
+                    "id": "cell2",
+                    "cell_type": "code",
+                    "source": "result = helper()"
+                }
+            ]
+        }
+        dependencies = analyze_notebook(notebook)
+        assert not any("aliased" in w or "not a function definition" in w
+                       for w in dependencies["cell2"].warnings)
+
+    def test_no_warning_class_instantiation(self):
+        """Instantiating a class should NOT warn about aliasing."""
+        notebook = {
+            "cells": [
+                {
+                    "id": "cell1",
+                    "cell_type": "code",
+                    "source": "class MyClass:\n    pass"
+                },
+                {
+                    "id": "cell2",
+                    "cell_type": "code",
+                    "source": "obj = MyClass()"
+                }
+            ]
+        }
+        dependencies = analyze_notebook(notebook)
+        assert not any("aliased" in w or "not a function definition" in w
+                       for w in dependencies["cell2"].warnings)
+
+    def test_no_warning_external_function(self):
+        """Calling an external function should NOT warn about aliasing."""
+        notebook = {
+            "cells": [
+                {
+                    "id": "cell1",
+                    "cell_type": "code",
+                    "source": "result = external_func()"
+                }
+            ]
+        }
+        dependencies = analyze_notebook(notebook)
+        # external_func is not defined in notebook, so no aliasing warning
+        assert not any("aliased" in w or "not a function definition" in w
+                       for w in dependencies["cell1"].warnings)
+
+    def test_warning_aliased_through_reassignment(self):
+        """Test aliasing through multiple reassignments."""
+        notebook = {
+            "cells": [
+                {
+                    "id": "cell1",
+                    "cell_type": "code",
+                    "source": "def original():\n    return value"
+                },
+                {
+                    "id": "cell2",
+                    "cell_type": "code",
+                    "source": "alias1 = original\nalias2 = alias1"
+                },
+                {
+                    "id": "cell3",
+                    "cell_type": "code",
+                    "source": "result = alias2()"
+                }
+            ]
+        }
+        dependencies = analyze_notebook(notebook)
+        # alias2 is not a function definition
+        assert any("alias2" in w for w in dependencies["cell3"].warnings)
+
+
+class TestCase7fAttributeStoredFunctions:
+    """Tests for Case 7f: Attribute-stored function calls."""
+
+    def test_warning_attribute_stored_function(self):
+        """Warn when an attribute is both assigned and called."""
+        notebook = {
+            "cells": [
+                {
+                    "id": "cell1",
+                    "cell_type": "code",
+                    "source": "def my_handler():\n    return data"
+                },
+                {
+                    "id": "cell2",
+                    "cell_type": "code",
+                    "source": "obj.callback = my_handler"
+                },
+                {
+                    "id": "cell3",
+                    "cell_type": "code",
+                    "source": "result = obj.callback()"
+                }
+            ]
+        }
+        dependencies = analyze_notebook(notebook)
+        # Cell 3 calls obj.callback, and callback was assigned in cell 2
+        assert any("callback" in w and "stored function" in w
+                   for w in dependencies["cell3"].warnings)
+
+    def test_warning_attribute_stored_different_objects(self):
+        """Warn even when assignment and call are on different objects."""
+        notebook = {
+            "cells": [
+                {
+                    "id": "cell1",
+                    "cell_type": "code",
+                    "source": "a.handler = some_func"
+                },
+                {
+                    "id": "cell2",
+                    "cell_type": "code",
+                    "source": "result = b.handler()"
+                }
+            ]
+        }
+        dependencies = analyze_notebook(notebook)
+        # handler is assigned to a.handler and called on b.handler
+        # Conservative: warn anyway (field-name based)
+        assert any("handler" in w and "stored function" in w
+                   for w in dependencies["cell2"].warnings)
+
+    def test_no_warning_common_method_names(self):
+        """Common method names like 'append' should NOT warn."""
+        notebook = {
+            "cells": [
+                {
+                    "id": "cell1",
+                    "cell_type": "code",
+                    "source": "obj.items = []"  # assigns to 'items'
+                },
+                {
+                    "id": "cell2",
+                    "cell_type": "code",
+                    "source": "result = d.items()"  # calls 'items' - common dict method
+                }
+            ]
+        }
+        dependencies = analyze_notebook(notebook)
+        # 'items' is a common method name, should not warn
+        assert not any("items" in w and "stored function" in w
+                       for w in dependencies["cell2"].warnings)
+
+    def test_tracks_attribute_assignment(self):
+        """Verify attribute assignments are tracked."""
+        source = "obj.callback = handler"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert "callback" in deps.attributes_assigned
+
+    def test_tracks_multiple_attribute_assignments(self):
+        """Verify multiple attribute assignments are tracked."""
+        source = """
+obj.on_click = handler1
+obj.on_change = handler2
+"""
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert "on_click" in deps.attributes_assigned
+        assert "on_change" in deps.attributes_assigned
+
+
+class TestCase7DirectCalls:
+    """Tests verifying direct calls DON'T trigger indirect call warnings."""
+
+    def test_no_warning_direct_call(self):
+        """Direct function call should NOT warn."""
+        source = "result = func(arg)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert not any("indirect" in w.lower() for w in deps.warnings)
+
+    def test_no_warning_method_call(self):
+        """Method call should NOT warn about indirect calls."""
+        source = "result = obj.method(arg)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert not any("indirect" in w.lower() for w in deps.warnings)
+
+    def test_no_warning_chained_method_call(self):
+        """Chained method calls should NOT warn."""
+        source = "result = obj.method1().method2()"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert not any("indirect" in w.lower() for w in deps.warnings)
+
+
+class TestCase8MetaclassesAndDecorators:
+    """Tests for Case 8: Metaclass and class decorator warnings."""
+
+    def test_warning_metaclass(self):
+        """Test that metaclass usage triggers a warning."""
+        source = """
+class MyClass(metaclass=ABCMeta):
+    pass
+"""
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("metaclass" in w for w in deps.warnings)
+
+    def test_warning_class_decorator(self):
+        """Test that class decorators trigger a warning."""
+        source = """
+@dataclass
+class MyClass:
+    x: int
+"""
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("decorator" in w for w in deps.warnings)
+
+    def test_warning_multiple_class_decorators(self):
+        """Test that multiple decorators still produce just one warning."""
+        source = """
+@decorator1
+@decorator2
+class MyClass:
+    pass
+"""
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        # Should have one decorator warning (not per-decorator)
+        decorator_warnings = [w for w in deps.warnings if "decorator" in w and "class" in w.lower()]
+        assert len(decorator_warnings) == 1
+
+    def test_no_warning_function_decorator(self):
+        """Function decorators should NOT trigger class decorator warning."""
+        source = """
+@decorator
+def func():
+    pass
+"""
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        # Should NOT have class decorator warning
+        assert not any("class" in w.lower() and "decorator" in w for w in deps.warnings)
+
+    def test_no_warning_plain_class(self):
+        """Plain class without metaclass/decorators should NOT warn."""
+        source = """
+class MyClass:
+    def method(self):
+        pass
+"""
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert not any("metaclass" in w or ("decorator" in w and "class" in w.lower()) for w in deps.warnings)
+
+    def test_warning_both_metaclass_and_decorator(self):
+        """Class with both metaclass and decorator should warn about both."""
+        source = """
+@dataclass
+class MyClass(metaclass=ABCMeta):
+    x: int
+"""
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert any("metaclass" in w for w in deps.warnings)
+        assert any("decorator" in w for w in deps.warnings)
+
+
+class TestWarningsInToDictAndNotebook:
+    """Tests for warnings propagation to to_dict and notebook analysis."""
+
+    def test_warnings_in_to_dict(self):
+        """Test that warnings are included in to_dict output."""
+        source = "result = eval(expr)"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        dict_repr = deps.to_dict()
+        assert "warnings" in dict_repr
+        assert len(dict_repr["warnings"]) > 0
+
+    def test_attributes_assigned_in_to_dict(self):
+        """Test that attributes_assigned is included in to_dict output."""
+        source = "obj.callback = handler"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        dict_repr = deps.to_dict()
+        assert "attributes_assigned" in dict_repr
+        assert "callback" in dict_repr["attributes_assigned"]
+
+    def test_warnings_propagate_through_notebook(self):
+        """Test that warnings are preserved through notebook analysis."""
+        notebook = {
+            "cells": [
+                {
+                    "id": "cell1",
+                    "cell_type": "code",
+                    "source": "result = eval(expr)"
+                }
+            ]
+        }
+        dependencies = analyze_notebook(notebook)
+        assert "cell1" in dependencies
+        assert any("eval()" in w for w in dependencies["cell1"].warnings)
+
+
+class TestWarningLineNumbers:
+    """Tests to verify warnings include line numbers."""
+
+    def test_eval_warning_has_line_number(self):
+        """Test that eval warning includes line number."""
+        source = "x = 1\nresult = eval(expr)\ny = 2"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        eval_warnings = [w for w in deps.warnings if "eval()" in w]
+        assert len(eval_warnings) == 1
+        assert "line 2" in eval_warnings[0]
+
+    def test_star_import_warning_has_line_number(self):
+        """Test that star import warning includes line number."""
+        source = "import os\nfrom numpy import *\nx = 1"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        star_warnings = [w for w in deps.warnings if "import *" in w]
+        assert len(star_warnings) == 1
+        assert "line 2" in star_warnings[0]
+
+
+class TestNoFalsePositives:
+    """Tests to verify we don't generate warnings for safe patterns."""
+
+    def test_no_warning_for_safe_code(self):
+        """Test that normal code doesn't generate warnings."""
+        source = """
+import pandas as pd
+
+def process_data(df):
+    result = df.groupby('col').sum()
+    return result
+
+data = pd.DataFrame({'col': [1, 2], 'val': [3, 4]})
+output = process_data(data)
+"""
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        # Should have no warnings for this normal code
+        assert len(deps.warnings) == 0
+
+    def test_no_warning_for_normal_method_call(self):
+        """Normal method calls should not warn."""
+        source = "result = df.groupby('col').agg({'val': 'sum'})"
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert not any("indirect" in w for w in deps.warnings)
+
+    def test_no_warning_for_builtin_methods(self):
+        """Builtin methods like list.append should not warn."""
+        source = """
+items = []
+items.append(1)
+items.extend([2, 3])
+"""
+        deps, _, _ = analyze_cell_dependencies(source, "cell1")
+        assert not any("stored function" in w for w in deps.warnings)
