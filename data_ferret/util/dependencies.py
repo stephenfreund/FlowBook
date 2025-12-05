@@ -147,6 +147,53 @@ The following cases are NOT tracked and NOT warned about:
    - self.attr reads/writes inside methods not tracked separately
    - Only method-level global dependencies are captured
 
+Temporal Scope Assumption (Callbacks)
+--------------------------------------
+The analysis assumes callbacks are invoked DURING the call that receives them,
+not stored for later invocation:
+
+SOUND (Immediate callback - tracked correctly):
+   ```python
+   def handler():
+       return data
+
+   library.process(handler)  # handler called DURING this line
+   # → Dependencies from handler ARE included
+   ```
+
+UNSOUND (Stored callback - NOT tracked across cells):
+   ```python
+   # Cell 1
+   def handler():
+       return data
+
+   # Cell 2
+   library.register(handler)  # handler STORED for later
+
+   # Cell 3
+   data = new_value()
+
+   # Cell 4
+   library.trigger()  # handler invoked HERE
+   # → Cell 4's dependency on data is NOT tracked
+   ```
+
+This limitation applies to:
+- Functions passed to external (library) code
+- Objects with methods passed to external code
+
+The analysis assumes:
+- ✅ Callbacks/methods MAY be invoked during the call that receives them
+- ✅ Dependencies from the callback/method ARE included in that call
+- ❌ Callbacks/methods are NOT stored and invoked from later cells
+- ❌ Dependencies across stored callback invocations are NOT tracked
+
+Implications:
+- Dependencies are sound within the temporal scope of immediate callbacks
+- Dependencies MAY be incomplete for event-driven code with stored callbacks
+- Users working with event systems, observers, or callback registries should
+  manually verify dependencies across callback invocations
+
 Design Decisions
 ----------------
 - GUARANTEE SOUNDNESS OR WARN: If the analysis cannot guarantee complete
