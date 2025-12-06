@@ -12,11 +12,13 @@ Each handler:
 - Raises exceptions for errors (caught by comm/magic layer)
 """
 
+import sys
 import time
 import traceback
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Set
 
 from data_ferret.kernel.checkpoint import Checkpoint
+from data_ferret.kernel.tracking import TrackingDict
 from data_ferret.kernel.kernel_commands import (
     CheckpointSaveRequest,
     CheckpointSaveResponse,
@@ -36,6 +38,10 @@ from data_ferret.kernel.kernel_commands import (
     DisableScaleneResponse,
     ForceCheckpointsRequest,
     ForceCheckpointsResponse,
+    EnableGlobalTrackingRequest,
+    EnableGlobalTrackingResponse,
+    DisableGlobalTrackingRequest,
+    DisableGlobalTrackingResponse,
     KernelCommandRequest,
     KernelCommandResponse,
     ProgressMessage,
@@ -80,6 +86,8 @@ class KernelCommandHandlers:
             "enable_scalene": self.handle_enable_scalene,
             "disable_scalene": self.handle_disable_scalene,
             "force_checkpoints": self.handle_force_checkpoints,
+            "enable_global_tracking": self.handle_enable_global_tracking,
+            "disable_global_tracking": self.handle_disable_global_tracking,
         }
 
     def get_handler(
@@ -378,3 +386,62 @@ class KernelCommandHandlers:
             message=f"Force checkpoints {status_text}",
             enabled=req.enabled,
         )
+
+    def handle_enable_global_tracking(
+        self, req: EnableGlobalTrackingRequest
+    ) -> EnableGlobalTrackingResponse:
+        """
+        Enable global variable tracking.
+
+        Args:
+            req: Enable request
+
+        Returns:
+            Response indicating success
+        """
+        try:
+            if not isinstance(self.kernel.shell.user_ns, TrackingDict):
+                self.kernel.shell.user_ns = TrackingDict(self.kernel.shell.user_ns)
+            self.kernel._use_global_tracking = True
+
+            return EnableGlobalTrackingResponse(
+                status="ok",
+                message="Global variable tracking enabled",
+            )
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            return EnableGlobalTrackingResponse(
+                status="error",
+                message=f"Failed to enable tracking: {e}",
+                traceback=tb_str,
+            )
+
+    def handle_disable_global_tracking(
+        self, req: DisableGlobalTrackingRequest
+    ) -> DisableGlobalTrackingResponse:
+        """
+        Disable global variable tracking and unwrap namespace.
+
+        Args:
+            req: Disable request
+
+        Returns:
+            Response indicating success
+        """
+        try:
+            if isinstance(self.kernel.shell.user_ns, TrackingDict):
+                # Convert back to a plain dict
+                self.kernel.shell.user_ns = dict(self.kernel.shell.user_ns)
+            self.kernel._use_global_tracking = False
+
+            return DisableGlobalTrackingResponse(
+                status="ok",
+                message="Global variable tracking disabled",
+            )
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            return DisableGlobalTrackingResponse(
+                status="error",
+                message=f"Failed to disable tracking: {e}",
+                traceback=tb_str,
+            )

@@ -177,6 +177,14 @@ export interface IFerretProfileData {
 }
 
 /**
+ * Dynamic dependencies metadata structure
+ */
+export interface IDynamicDependencies {
+  reads_before_writes: string[];
+  writes: string[];
+}
+
+/**
  * Ferret generated code metadata structure
  */
 export interface IFerretGeneratedCodeMetadata {
@@ -223,6 +231,7 @@ export interface IUnitTests {
 export interface IFerretMetadata {
   optimization_potential?: IFerretOptimizationPotential;
   profile?: IFerretProfileData;
+  dynamic_dependencies?: IDynamicDependencies;
   generated?: IFerretGeneratedCodeMetadata;
   optimized?: IFerretOptimizedCodeMetadata;
   optimization_applied?: IFerretOptimizationAppliedMetadata;

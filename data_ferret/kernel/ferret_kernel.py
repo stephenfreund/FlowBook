@@ -11,7 +11,7 @@ from IPython.core.magic import Magics, line_cell_magic, magics_class
 from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
 
-from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints, filter_user_namespace
+from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints, filter_user_namespace, is_valid_variable
 from data_ferret.kernel.deepcopyable import is_deepcopyable
 from data_ferret.kernel.display_helpers import DisplayHelper
 from data_ferret.kernel.ferret_pdb import FerretPdb
@@ -20,6 +20,7 @@ from data_ferret.kernel.kernel_command_handlers import KernelCommandHandlers
 from data_ferret.kernel.kernel_commands import FinalMessage
 from data_ferret.kernel.scalene_runner import ScaleneRunner
 from data_ferret.kernel.timeout_handler import CellTimeoutHandler
+from data_ferret.kernel.tracking import TrackingDict
 
 
 @magics_class
@@ -50,6 +51,7 @@ class FerretKernel(IPythonKernel, Magics):
         self._checkpoint = Checkpoints()
         self._use_scalene = True
         self._force_checkpoints = False
+        self._use_global_tracking = False
 
         # Initialize Scalene runner
         self._scalene = ScaleneRunner(self.shell, self._executed_cell_ids)
@@ -108,6 +110,22 @@ class FerretKernel(IPythonKernel, Magics):
         req = ForceCheckpointsRequest(enabled=enabled)
         response = self.command_handlers.handle_force_checkpoints(req)
         self.display_icon_and_text("✅", response.message)
+
+    @line_cell_magic
+    def enable_global_tracking(self, line: str, cell: str = "") -> None:
+        """Enable global variable tracking."""
+        from data_ferret.kernel.kernel_commands import EnableGlobalTrackingRequest
+        req = EnableGlobalTrackingRequest()
+        response = self.command_handlers.handle_enable_global_tracking(req)
+        self.display_icon_and_text("📊", response.message)
+
+    @line_cell_magic
+    def disable_global_tracking(self, line: str, cell: str = "") -> None:
+        """Disable global variable tracking."""
+        from data_ferret.kernel.kernel_commands import DisableGlobalTrackingRequest
+        req = DisableGlobalTrackingRequest()
+        response = self.command_handlers.handle_disable_global_tracking(req)
+        self.display_icon_and_text("📊", response.message)
 
     @line_cell_magic
     def checkpoint(self, line: str, cell: str = "") -> None:
@@ -306,7 +324,7 @@ class FerretKernel(IPythonKernel, Magics):
 
         try:
             start_time = time.time()
-            result, profile_contents, pre_types, post_types = await self._execute_with_profiling(
+            result, profile_contents, pre_types, post_types, tracking = await self._execute_with_profiling(
                 code, silent, store_history, user_expressions, allow_stdin, cell_meta
             )
             normal_exit = True
@@ -315,7 +333,7 @@ class FerretKernel(IPythonKernel, Magics):
             # Only display execution result if not an error
             if result.get('status') != 'error':
                 self._display_execution_result(
-                    end_time - start_time, profile_contents, pre_types, post_types, code
+                    end_time - start_time, profile_contents, pre_types, post_types, tracking, code
                 )
 
             if force_checkpoints:
@@ -376,8 +394,8 @@ class FerretKernel(IPythonKernel, Magics):
         user_expressions: Optional[dict],
         allow_stdin: bool,
         cell_meta: Optional[dict],
-    ) -> Tuple[dict, Optional[str], Optional[dict], Optional[dict]]:
-        """Execute code with optional Scalene profiling."""
+    ) -> Tuple[dict, Optional[str], Optional[dict], Optional[dict], Optional[dict]]:
+        """Execute code with optional Scalene profiling and tracking."""
         has_cell_magics = code.startswith("%") or "\n%" in code
         has_shell_magics = code.startswith("!") or "\n!" in code
         should_profile = self._use_scalene and self._cell_id is not None and not has_cell_magics and not has_shell_magics
@@ -397,7 +415,11 @@ class FerretKernel(IPythonKernel, Magics):
 
             self._remove_non_deepcopyable_objects()
             post_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
-            return result, contents, pre_types, post_types
+
+            # Capture tracking data if enabled
+            tracking_data = self._capture_tracking_data()
+
+            return result, contents, pre_types, post_types, tracking_data
         else:
             result = await super().do_execute(
                 code, silent, store_history, user_expressions, allow_stdin,
@@ -408,7 +430,30 @@ class FerretKernel(IPythonKernel, Magics):
                     'status': 'ok',
                     'execution_count': self.execution_count,
                 }
-            return result, None, None, None
+
+            # Capture tracking data if enabled
+            tracking_data = self._capture_tracking_data()
+
+            return result, None, None, None, tracking_data
+
+    def _capture_tracking_data(self) -> Optional[dict]:
+        """Capture and reset tracking data if tracking is enabled."""
+        if self._use_global_tracking and isinstance(self.shell.user_ns, TrackingDict):
+            user_ns = self.shell.user_ns
+            tracking_data = {
+                "reads_before_writes": sorted([
+                    k for k in user_ns.reads_before_writes
+                    if is_valid_variable(k, user_ns.get(k))
+                ]),
+                "writes": sorted([
+                    k for k in user_ns.writes
+                    if is_valid_variable(k, user_ns.get(k))
+                ])
+            }
+            # Reset for next cell
+            user_ns.reset_tracking()
+            return tracking_data
+        return None
 
     def _remove_non_deepcopyable_objects(self) -> None:
         """Remove objects that can't be deep copied from user namespace."""
@@ -428,6 +473,7 @@ class FerretKernel(IPythonKernel, Magics):
         profile_contents: Optional[str],
         pre_types: Optional[dict],
         post_types: Optional[dict],
+        tracking: Optional[dict],
         code: str,
     ) -> None:
         """Display execution timing and profile results."""
@@ -439,6 +485,9 @@ class FerretKernel(IPythonKernel, Magics):
                 'env_after': post_types if post_types is not None else {},
             }
         }
+        if tracking is not None:
+            metadata['tracking'] = tracking
+
         has_cell_magics = code.startswith("%") or "\n%" in code
 
         if profile_contents is not None:

@@ -24,12 +24,12 @@ def wrap_last_expr_with_print_repr(src: str) -> str:
     if isinstance(last, ast.Expr):
         # _val = <expr>
         assign = ast.Assign(
-            targets=[ast.Name(id="_val", ctx=ast.Store())], value=last.value
+            targets=[ast.Name(id="__val", ctx=ast.Store())], value=last.value
         )
 
         # if _val is not None: print(repr(_val))
         cond = ast.Compare(
-            left=ast.Name(id="_val", ctx=ast.Load()),
+            left=ast.Name(id="__val", ctx=ast.Load()),
             ops=[ast.IsNot()],
             comparators=[ast.Constant(value=None)],
         )
@@ -39,7 +39,7 @@ def wrap_last_expr_with_print_repr(src: str) -> str:
                 args=[
                     ast.Call(
                         func=ast.Name(id="repr", ctx=ast.Load()),
-                        args=[ast.Name(id="_val", ctx=ast.Load())],
+                        args=[ast.Name(id="__val", ctx=ast.Load())],
                         keywords=[],
                     )
                 ],

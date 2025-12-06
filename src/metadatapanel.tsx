@@ -21,7 +21,7 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
 
   console.log('[MetadataDisplay] Rendering with metadata:', metadata);
 
-  if (!metadata || (!metadata.optimization_potential && !metadata.profile && !metadata.generated && !metadata.optimized && !metadata.optimization_applied)) {
+  if (!metadata || (!metadata.optimization_potential && !metadata.profile && !metadata.dynamic_dependencies && !metadata.generated && !metadata.optimized && !metadata.optimization_applied)) {
     console.log('[MetadataDisplay] No metadata, showing empty state');
     return (
       <div className="ferret-metadata-empty">
@@ -150,6 +150,50 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
               </div>
             </>
           )}
+        </>
+      )}
+
+      {/* Dynamic Dependencies Section */}
+      {metadata.dynamic_dependencies && (
+        <>
+          <div className="ferret-metadata-divider" />
+          <div className="ferret-metadata-header">Dynamic Dependencies</div>
+          <div className="ferret-metadata-divider" />
+
+          <div className="ferret-metadata-section">
+            <div className="ferret-metadata-item">
+              <strong>Reads Before Writes:</strong>
+              {metadata.dynamic_dependencies.reads_before_writes.length > 0 ? (
+                <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
+                  {metadata.dynamic_dependencies.reads_before_writes.map((varName, idx) => (
+                    <li key={idx}><code>{varName}</code></li>
+                  ))}
+                </ul>
+              ) : (
+                <span style={{ fontStyle: 'italic', color: '#666', marginLeft: '0.5em' }}>
+                  None
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="ferret-metadata-divider" />
+          <div className="ferret-metadata-section">
+            <div className="ferret-metadata-item">
+              <strong>Variables Written:</strong>
+              {metadata.dynamic_dependencies.writes.length > 0 ? (
+                <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
+                  {metadata.dynamic_dependencies.writes.map((varName, idx) => (
+                    <li key={idx}><code>{varName}</code></li>
+                  ))}
+                </ul>
+              ) : (
+                <span style={{ fontStyle: 'italic', color: '#666', marginLeft: '0.5em' }}>
+                  None
+                </span>
+              )}
+            </div>
+          </div>
         </>
       )}
 

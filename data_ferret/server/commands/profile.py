@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.util.ferret_metadata import FerretMetadata, ProfileData, set_profile_ferret_metadata
+from data_ferret.util.metadata_extractor import extract_and_set_metadata
 from data_ferret.server.kernel_helper import KernelHelper
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.output import log, timer
@@ -103,7 +104,7 @@ class ProfileCommand(NotebookCommand):
 
                                     if result["status"] == "error":
                                         status = "error"
-                                        error_message = result["error_message"]    
+                                        error_message = result["error_message"]
                                         print()
                                         print(f"--------------------------------")
                                         print(f"{error_message}")
@@ -119,12 +120,8 @@ class ProfileCommand(NotebookCommand):
                                         )
                                         break
 
-                                    for output in result["outputs"]:
-                                        if 'metadata' in output:
-                                            output_metadata = output['metadata']
-                                            if 'profile' in output_metadata:
-                                                profile_metadata = ProfileData.model_validate(output_metadata['profile'])
-                                                set_profile_ferret_metadata(cell, profile_metadata)
+                                    # Extract all metadata types using generic extractor
+                                    extract_and_set_metadata(cell, result["outputs"])
 
                                     execution_results.append(
                                         {

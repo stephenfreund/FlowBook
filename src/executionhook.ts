@@ -1,11 +1,14 @@
 /**
  * Execution hook for intercepting cell execution to auto-generate code from string specifications
+ * and extract ferret metadata from kernel outputs
  */
 
 import { JupyterFrontEnd } from '@jupyterlab/application';
-import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
-import { Cell } from '@jupyterlab/cells';
+import { INotebookTracker, NotebookPanel, Notebook, NotebookActions } from '@jupyterlab/notebook';
+import { Cell, ICodeCellModel } from '@jupyterlab/cells';
+import { IOutput } from '@jupyterlab/nbformat';
 import { FerretCommandsManager } from './manager';
+import { IFerretMetadata, IFerretProfileData, IDynamicDependencies } from './types';
 
 /**
  * Manages execution hooks to auto-generate code before execution
@@ -59,6 +62,9 @@ export class ExecutionHookManager {
     this.wrapCommand('notebook:run-all-cells');
     this.wrapCommand('notebook:run-all-above');
     this.wrapCommand('notebook:run-all-below');
+
+    // Listen for cell execution completion to extract ferret metadata
+    NotebookActions.executed.connect(this.onCellExecuted, this);
 
     console.log('ExecutionHookManager: Execution command hooks installed');
   }
@@ -195,5 +201,82 @@ export class ExecutionHookManager {
     } finally {
       this.executingCells.delete(cellId);
     }
+  }
+
+  /**
+   * Extract ferret metadata from cell outputs.
+   * Mirrors the server-side extract_and_set_metadata() function.
+   */
+  private extractFerretMetadata(outputs: IOutput[]): Partial<IFerretMetadata> | null {
+    for (const output of outputs) {
+      if (output.output_type !== 'display_data') {
+        continue;
+      }
+
+      const metadata = (output as any).metadata;
+      if (!metadata) {
+        continue;
+      }
+
+      const ferretMeta: Partial<IFerretMetadata> = {};
+
+      // Extract profile metadata
+      if (metadata.profile) {
+        ferretMeta.profile = metadata.profile as IFerretProfileData;
+      }
+
+      // Extract tracking/dynamic_dependencies metadata
+      if (metadata.tracking) {
+        ferretMeta.dynamic_dependencies = {
+          reads_before_writes: metadata.tracking.reads_before_writes || [],
+          writes: metadata.tracking.writes || []
+        } as IDynamicDependencies;
+      }
+
+      if (Object.keys(ferretMeta).length > 0) {
+        return ferretMeta;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Handle cell execution completion to extract ferret metadata from outputs
+   */
+  private onCellExecuted(
+    _sender: any,
+    args: { notebook: Notebook; cell: Cell }
+  ): void {
+    const { cell } = args;
+
+    // Only process code cells
+    if (cell.model.type !== 'code') {
+      return;
+    }
+
+    // Get outputs from the cell model
+    const codeModel = cell.model as ICodeCellModel;
+    const outputs: IOutput[] = [];
+    for (let i = 0; i < codeModel.outputs.length; i++) {
+      outputs.push(codeModel.outputs.get(i).toJSON() as IOutput);
+    }
+
+    // Extract ferret metadata from outputs
+    const ferretMeta = this.extractFerretMetadata(outputs);
+    if (!ferretMeta) {
+      return;
+    }
+
+    // Merge with existing ferret metadata
+    const existingMeta = (cell.model.getMetadata('ferret') as IFerretMetadata) || {};
+    const mergedMeta = { ...existingMeta, ...ferretMeta };
+
+    // Set the merged metadata on the cell
+    cell.model.setMetadata('ferret', mergedMeta);
+
+    console.log(
+      `ExecutionHook: Extracted ferret metadata for cell ${cell.model.id}:`,
+      ferretMeta
+    );
   }
 }

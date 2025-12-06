@@ -188,6 +188,30 @@ class ForceCheckpointsResponse(KernelCommandResponse):
     enabled: bool = Field(..., description="Current force checkpoints state")
 
 
+class EnableGlobalTrackingRequest(KernelCommandRequest):
+    """Request to enable global variable tracking."""
+
+    command: Literal["enable_global_tracking"] = "enable_global_tracking"
+
+
+class EnableGlobalTrackingResponse(KernelCommandResponse):
+    """Response from enabling global tracking."""
+
+    pass  # Success indicated by status="ok"
+
+
+class DisableGlobalTrackingRequest(KernelCommandRequest):
+    """Request to disable global variable tracking."""
+
+    command: Literal["disable_global_tracking"] = "disable_global_tracking"
+
+
+class DisableGlobalTrackingResponse(KernelCommandResponse):
+    """Response from disabling global tracking."""
+
+    pass  # Success indicated by status="ok"
+
+
 # ============================================================================
 # Command Union Types
 # ============================================================================
@@ -203,6 +227,8 @@ KernelCommandRequestUnion = Union[
     EnableScaleneRequest,
     DisableScaleneRequest,
     ForceCheckpointsRequest,
+    EnableGlobalTrackingRequest,
+    DisableGlobalTrackingRequest,
 ]
 
 # Union of all response types
@@ -216,6 +242,8 @@ KernelCommandResponseUnion = Union[
     EnableScaleneResponse,
     DisableScaleneResponse,
     ForceCheckpointsResponse,
+    EnableGlobalTrackingResponse,
+    DisableGlobalTrackingResponse,
 ]
 
 

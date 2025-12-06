@@ -1,5 +1,6 @@
 """Scalene profiler integration for kernel execution."""
 
+import gc
 import io
 import os
 import re
@@ -8,6 +9,11 @@ import traceback
 from typing import Any, Dict, Optional, Tuple
 
 from data_ferret.kernel.ast_utils import wrap_last_expr_with_print_repr
+
+
+class StopJupyterExecution(Exception):
+    """Signal to stop Jupyter execution (used by Scalene)."""
+    pass
 
 
 class ScaleneRunner:
@@ -30,6 +36,9 @@ class ScaleneRunner:
         """
         Run code with Scalene profiling.
 
+        This is a simplified implementation that directly uses shell.user_ns
+        as the execution namespace, allowing TrackingDict to work properly.
+
         Args:
             code: The code to execute
             cell_id: The cell ID for this execution
@@ -38,7 +47,9 @@ class ScaleneRunner:
         Returns:
             Tuple of (result dict, profile contents or None)
         """
-        from scalene import ScaleneArguments, scalene_profiler
+        from scalene import ScaleneArguments
+        from scalene.scalene_profiler import Scalene
+        from scalene.scalene_statistics import Filename
 
         code = wrap_last_expr_with_print_repr(code)
 
@@ -52,31 +63,71 @@ class ScaleneRunner:
         args.no_browser = True
         args.column_width = 132 * 4
 
+        n = self.shell.execution_count - 1
+        filename = f"_ipython-input-{n}-profile"
+
         try:
-            n = self.shell.execution_count - 1
-            filename = f"_ipython-input-{n}-profile"
+            # Write code to temp file for Scalene
             with open(filename, "w") as tmpfile:
                 tmpfile.write(code)
 
             self.executed_cell_ids[self.shell.execution_count - 1] = cell_id
 
-            scalene_profiler.Scalene.set_initialized()
+            # Compile the code
+            prog_name = os.path.abspath(filename)
+            compiled_code = compile(code, prog_name, "exec")
 
-            # Capture stderr
+            # Use shell.user_ns directly - this is the key change!
+            # This allows TrackingDict to capture variable accesses
+            the_globals = self.shell.user_ns
+            the_locals = self.shell.user_ns
+
+            # Set up __file__ for the execution context
+            old_file = the_globals.get("__file__")
+            the_globals["__file__"] = prog_name
+
+            # Initialize Scalene for Jupyter mode
+            Scalene.set_initialized()
+            Scalene.set_in_jupyter()
+
+            # Clear stats and process args
+            Scalene._Scalene__stats.clear_all()
+            Scalene.process_args(args)
+
+            # Do GC before starting
+            gc.collect()
+
+            # Create profiler and run
+            profiler = Scalene(args, Filename(prog_name))
+
+            # Capture stderr for error detection
             stderr_buffer = io.StringIO()
             old_stderr = sys.stderr
             sys.stderr = stderr_buffer
+
             try:
-                scalene_profiler.Scalene.run_profiler(args, [filename], is_jupyter=True)
+                # profile_code uses the_locals and the_globals we provide
+                exit_status = profiler.profile_code(
+                    compiled_code, the_locals, the_globals, [filename]
+                )
+                self.shell.execution_count += 1
+                contents = self._read_profile(args.outfile)
+            except StopJupyterExecution:
+                # Normal exit for Jupyter
                 self.shell.execution_count += 1
                 contents = self._read_profile(args.outfile)
             finally:
                 sys.stderr = old_stderr
                 scalene_output = stderr_buffer.getvalue()
-                # print(scalene_output, file=sys.__stderr__)
-                # Check if there was an error in the profiled code
+
+                # Restore __file__
+                if old_file is not None:
+                    the_globals["__file__"] = old_file
+                elif "__file__" in the_globals:
+                    del the_globals["__file__"]
+
+                # Check for errors in output
                 parsed_error = self._parse_scalene_error_output(scalene_output)
-                # print(f"parsed_error: {parsed_error}", file=sys.__stderr__)
                 if parsed_error:
                     ename, evalue, traceback_lines = parsed_error
                     result = {
@@ -86,10 +137,9 @@ class ScaleneRunner:
                         "ename": ename,
                         "evalue": evalue,
                     }
-                    # print(f"RETURNING ERROR RESULT: {result}", file=sys.__stderr__)
                     return result, None
 
-                # Otherwise check for expected messages
+                # Log unexpected output
                 expected_msg = (
                     "Scalene: The specified code did not run for long enough to profile.\n"
                     "By default, Scalene only profiles code in the file executed and its subdirectories.\n"

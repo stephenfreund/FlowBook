@@ -17,6 +17,17 @@ class ProfileData(BaseModel):
     )
 
 
+class DynamicDependencies(BaseModel):
+    reads_before_writes: List[str] = Field(
+        default_factory=list,
+        description="Variables read before being written in this cell"
+    )
+    writes: List[str] = Field(
+        default_factory=list,
+        description="Variables written in this cell"
+    )
+
+
 class OptimizationStep(BaseModel):
     target_cell_id: str = Field(description="The ID of the cell to modify")
     function_name: Optional[str] = Field(
@@ -124,6 +135,7 @@ class UnitTests(BaseModel):
 class FerretMetadata(BaseModel):
     optimization_potential: Optional[OptimizationPotential] = None
     profile: Optional[ProfileData] = None
+    dynamic_dependencies: Optional[DynamicDependencies] = None
     generated: Optional[GeneratedCodeMetadata] = None
     optimized: Optional[OptimizedCodeMetadata] = None
     optimization_applied: Optional[OptimizationAppliedMetadata] = None
@@ -142,6 +154,12 @@ class FerretMetadata(BaseModel):
 
     def set_profile(self, metadata: ProfileData) -> FerretMetadata:
         return self.model_copy(update={"profile": metadata})
+
+    def get_dynamic_dependencies(self) -> Optional[DynamicDependencies]:
+        return self.dynamic_dependencies
+
+    def set_dynamic_dependencies(self, metadata: DynamicDependencies) -> FerretMetadata:
+        return self.model_copy(update={"dynamic_dependencies": metadata})
 
     def get_generated(self) -> Optional[GeneratedCodeMetadata]:
         return self.generated
@@ -198,6 +216,19 @@ def set_profile_ferret_metadata(
     if not isinstance(ferret, dict):
         ferret = FerretMetadata.model_validate(ferret).model_dump()
     ferret["profile"] = metadata.model_dump()
+    cell["metadata"]["ferret"] = ferret
+
+
+def set_dynamic_dependencies_ferret_metadata(
+    cell: nbformat.NotebookNode, metadata: DynamicDependencies
+) -> None:
+    """Set the dynamic dependencies metadata for a cell."""
+    if "metadata" not in cell:
+        cell["metadata"] = {}
+    ferret = cell["metadata"].get("ferret", {})
+    if not isinstance(ferret, dict):
+        ferret = FerretMetadata.model_validate(ferret).model_dump()
+    ferret["dynamic_dependencies"] = metadata.model_dump()
     cell["metadata"]["ferret"] = ferret
 
 
