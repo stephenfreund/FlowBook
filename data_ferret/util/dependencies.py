@@ -1253,9 +1253,11 @@ def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
     for deps in dependencies.values():
         all_notebook_definitions.update(deps.globals_written)
 
-    # Remove imported items from notebook definitions - they're external
+    # Remove modules (import math -> math is external)
+    # But keep imported_names (from math import sqrt -> sqrt IS a notebook definition)
+    # Cells can depend on imports from other cells through transitive closure
     all_notebook_definitions -= all_modules
-    all_notebook_definitions -= all_imported_names
+    # Note: imported_names stays in all_notebook_definitions!
 
     # Second pass: compute transitive closure for function and method calls
     # and filter to only include notebook-internal dependencies
@@ -1282,11 +1284,12 @@ def analyze_notebook(notebook: Dict[str, Any]) -> Dict[str, CellDependencies]:
         # Add transitive dependencies to globals_read
         deps.globals_read.update(transitive_deps)
 
-        # Remove all modules and imported names from globals_read and globals_written
+        # Remove modules from reads and writes (import math -> math is external)
+        # But keep imported_names (from math import sqrt -> sqrt IS a notebook definition)
+        # Imported names create bindings in the namespace, affecting cell dependencies
         deps.globals_read -= all_modules
         deps.globals_written -= all_modules
-        deps.globals_read -= all_imported_names
-        deps.globals_written -= all_imported_names
+        # Note: imported_names stays in BOTH globals_read and globals_written!
 
         # KEEP ONLY notebook-defined variables in globals_read
         # (remove external dependencies - things not defined in the notebook)

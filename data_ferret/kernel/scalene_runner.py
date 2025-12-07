@@ -62,6 +62,7 @@ class ScaleneRunner:
         args.web = False
         args.no_browser = True
         args.column_width = 132 * 4
+        args.profile_exclude = "data_ferret/kernel"
 
         n = self.shell.execution_count - 1
         filename = f"_ipython-input-{n}-profile"
@@ -161,10 +162,11 @@ class ScaleneRunner:
             }
             return result, None
         finally:
-            if os.path.exists(args.outfile):
-                os.remove(args.outfile)
-            if os.path.exists(filename):
-                os.remove(filename)
+            pass
+            # if os.path.exists(args.outfile):
+            #     os.remove(args.outfile)
+            # if os.path.exists(filename):
+            #     os.remove(filename)
 
     def _read_profile(self, filename: str) -> Optional[str]:
         """Read and process the profile output file."""

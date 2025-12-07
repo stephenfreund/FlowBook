@@ -655,7 +655,7 @@ def test_function_and_class_across_cells():
 
 
 def test_exclude_from_imports():
-    """Test that names imported via 'from...import' are excluded from dependencies."""
+    """Test that names imported via 'from...import' are included in dependencies."""
     notebook = {
         "cells": [
             {
@@ -675,15 +675,16 @@ def test_exclude_from_imports():
 
     # Cell 1 imports LinearRegression
     assert "LinearRegression" in dependencies["cell1"].imported_names
-    # LinearRegression is removed from globals_written because it's imported
+    # LinearRegression IS in globals_written (imports are writes)
+    assert "LinearRegression" in dependencies["cell1"].globals_written
 
-    # Cell 2 uses LinearRegression, but it should NOT be in globals_read
-    # because it's imported from an external module
-    assert "LinearRegression" not in dependencies["cell2"].globals_read
+    # Cell 2 uses LinearRegression - it SHOULD be in globals_read
+    # because cell 2 depends on cell 1's import
+    assert "LinearRegression" in dependencies["cell2"].globals_read
 
 
 def test_exclude_from_imports_with_alias():
-    """Test that aliased imports are also excluded."""
+    """Test that aliased imports are included in dependencies."""
     notebook = {
         "cells": [
             {
@@ -703,13 +704,15 @@ def test_exclude_from_imports_with_alias():
 
     # Cell 1 imports array as np_array
     assert "np_array" in dependencies["cell1"].imported_names
+    assert "np_array" in dependencies["cell1"].globals_written
 
-    # Cell 2 uses np_array, but it should NOT be in globals_read
-    assert "np_array" not in dependencies["cell2"].globals_read
+    # Cell 2 uses np_array - it SHOULD be in globals_read
+    # because cell 2 depends on cell 1's import
+    assert "np_array" in dependencies["cell2"].globals_read
 
 
 def test_include_notebook_vs_imported():
-    """Test distinction between notebook-defined and imported names."""
+    """Test that transitive closure includes imported names."""
     notebook = {
         "cells": [
             {
@@ -730,8 +733,12 @@ def test_include_notebook_vs_imported():
     # Cell 2 uses my_sqrt (notebook-defined) - should be a dependency
     assert "my_sqrt" in dependencies["cell2"].globals_read
 
-    # Cell 2 transitively uses sqrt (imported) - should NOT be a dependency
-    assert "sqrt" not in dependencies["cell2"].globals_read
+    # Cell 2 transitively uses sqrt (imported in cell1, used by my_sqrt)
+    # This SHOULD be in cell2's globals_read because:
+    # 1. Cell1 imports sqrt (creates notebook-internal binding)
+    # 2. my_sqrt uses sqrt (function has transitive dependency)
+    # 3. Cell2 calls my_sqrt (inherits transitive dependencies)
+    assert "sqrt" in dependencies["cell2"].globals_read
 
 
 def test_method_call_tracking():
