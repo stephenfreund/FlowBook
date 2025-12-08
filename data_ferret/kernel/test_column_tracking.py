@@ -590,3 +590,61 @@ class TestTrackingDictIntegration:
 
         # Should be empty
         assert len(tracking_dict.column_rbw) == 0
+
+
+class TestDeepcopyIntegration:
+    """Tests for deepcopy not triggering column tracking patches."""
+
+    def test_deepcopy_does_not_trigger_column_tracking(self):
+        """Regression test: deepcopy should not record column reads.
+
+        This tests the fix for a bug where _deepcopy_dataframe() used df[col]
+        which triggered the patched __getitem__, causing all columns to be
+        recorded as reads during checkpoint creation.
+        """
+        import numpy as np
+        from data_ferret.kernel import deepcopy as ferret_deepcopy
+
+        # Create DataFrame with multiple columns
+        df = pd.DataFrame()
+        df["a"] = np.array([1, 2, 4])
+        df["b"] = np.array([1, 2, 4])
+
+        tracker = ColumnAccessTracker()
+        tracker.register_df(df, "df")
+        tracker.install()
+
+        try:
+            # Simulate checkpoint: deepcopy while patches are installed
+            _ = ferret_deepcopy.deepcopy(df)
+
+            # No columns should have been tracked during deepcopy
+            result = tracker.resolve_to_paths()
+            assert result == {}, f"Deepcopy triggered tracking: {result}"
+
+        finally:
+            tracker.uninstall()
+
+    def test_deepcopy_with_object_columns_does_not_trigger_tracking(self):
+        """Ensure deepcopy of object-dtype columns doesn't trigger tracking."""
+        from data_ferret.kernel import deepcopy as ferret_deepcopy
+
+        # DataFrame with object columns (requires special handling in deepcopy)
+        df = pd.DataFrame({
+            "obj_col": [{"x": 1}, {"x": 2}],
+            "str_col": ["a", "b"],
+        })
+
+        tracker = ColumnAccessTracker()
+        tracker.register_df(df, "df")
+        tracker.install()
+
+        try:
+            # Deepcopy should iterate columns without triggering patches
+            _ = ferret_deepcopy.deepcopy(df)
+
+            result = tracker.resolve_to_paths()
+            assert result == {}, f"Deepcopy triggered tracking: {result}"
+
+        finally:
+            tracker.uninstall()

@@ -391,23 +391,30 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
 
     # Convert object columns to specialized dtypes on the original DataFrame first
     # (only if conversion is enabled globally)
+    # NOTE: We use df.dtypes[col] and df.iloc[:, idx] instead of df[col] to avoid
+    # triggering the patched __getitem__ during column tracking.
     if _convert_object_dtypes:
-        for col in df.columns:
-            if df[col].dtype == object:
+        dtypes = df.dtypes
+        for idx, col in enumerate(df.columns):
+            if dtypes.iloc[idx] == object:
                 # Try to convert to specialized dtype first
-                converted = _convert_object_column_dtype(df[col])
+                # Use iloc to access column without triggering __getitem__ patch
+                col_data = df.iloc[:, idx]
+                converted = _convert_object_column_dtype(col_data)
 
                 if converted.dtype != object:
                     # Successfully converted - update original DataFrame
                     log(f"Converted column {col} from object to {converted.dtype}")
-                    df[col] = converted
+                    df.iloc[:, idx] = converted
 
     # Shallow copy: CoW handles non-object columns efficiently
     df_copy = df.copy(deep=False)
 
     # Process remaining object columns: deep copy for mutable objects
-    for col in df_copy.columns:
-        if df_copy[col].dtype == object:
+    # Use dtypes property to check dtype without triggering __getitem__ patch
+    copy_dtypes = df_copy.dtypes
+    for idx, col in enumerate(df_copy.columns):
+        if copy_dtypes.iloc[idx] == object:
             # Still object dtype - need to deep copy for mutable objects
             num_rows = len(df_copy)
             if num_rows > 10000:
@@ -416,8 +423,10 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
                 log(f"Deep copying object column {col}")
 
             # Apply deep copy and explicitly preserve object dtype
-            result = df_copy[col].apply(lambda x: deepcopy(x, memo))
-            df_copy[col] = result.astype(object)
+            # Use iloc to access column without triggering __getitem__ patch
+            col_data = df_copy.iloc[:, idx]
+            result = col_data.apply(lambda x: deepcopy(x, memo))
+            df_copy.iloc[:, idx] = result.astype(object)
 
     memo[obj_id] = df_copy
     return df_copy
