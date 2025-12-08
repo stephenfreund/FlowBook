@@ -495,15 +495,24 @@ class FerretKernel(IPythonKernel, Magics):
         has_shell_magics = code.startswith("!") or "\n!" in code
         should_profile = self._use_scalene and self._cell_id is not None and not has_cell_magics and not has_shell_magics
 
+        # Capture pre_types BEFORE starting column tracking to avoid recording
+        # all DataFrame column accesses from type introspection
+        pre_types = None
+        if should_profile:
+            pre_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
+
         # Start column tracking if global tracking is enabled
         if self._use_global_tracking and isinstance(self.shell.user_ns, TrackingDict):
             self.shell.user_ns.start_column_tracking()
 
+        # Initialize result variables
+        result = None
+        contents = None
+        tracking_data = None
+
         try:
             if should_profile:
-                pre_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
                 result, contents = await self._scalene.run(code, self._cell_id, store_history)
-                # print(f"[FerretKernel] scalene result status: {result.get('status')}", file=sys.__stderr__)
 
                 # If scalene detected an error, send error message on iopub
                 if result.get('status') == 'error':
@@ -513,13 +522,8 @@ class FerretKernel(IPythonKernel, Magics):
                         'traceback': result.get('traceback', [])
                     })
 
-                self._remove_non_deepcopyable_objects()
-                post_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
-
-                # Capture tracking data if enabled
+                # Capture tracking data while column tracking is still active
                 tracking_data = self._capture_tracking_data()
-
-                return result, contents, pre_types, post_types, tracking_data
             else:
                 result = await super().do_execute(
                     code, silent, store_history, user_expressions, allow_stdin,
@@ -531,14 +535,25 @@ class FerretKernel(IPythonKernel, Magics):
                         'execution_count': self.execution_count,
                     }
 
-                # Capture tracking data if enabled
+                # Capture tracking data while column tracking is still active
                 tracking_data = self._capture_tracking_data()
-
-                return result, None, None, None, tracking_data
         finally:
             # Stop column tracking (restore original DataFrame methods)
             if self._use_global_tracking and isinstance(self.shell.user_ns, TrackingDict):
                 self.shell.user_ns.stop_column_tracking()
+
+        # These operations access DataFrame columns during introspection, so they
+        # must happen AFTER column tracking is stopped
+        if should_profile:
+            self._remove_non_deepcopyable_objects()
+
+        # Capture post_types AFTER stopping column tracking to avoid recording
+        # all DataFrame column accesses from type introspection
+        post_types = None
+        if should_profile:
+            post_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
+
+        return result, contents, pre_types, post_types, tracking_data
 
     def _capture_tracking_data(self) -> Optional[dict]:
         """Capture and reset tracking data if tracking is enabled."""

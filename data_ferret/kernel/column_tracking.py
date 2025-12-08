@@ -58,6 +58,10 @@ class ColumnAccessTracker:
             # Only record as RBW if not already written
             if col not in self._writes_by_id[df_id]:
                 self._reads_by_id[df_id].add(col)
+                # DEBUG: Uncomment to trace where column reads come from
+                # import traceback
+                # print(f"DEBUG: record_read df_id={df_id} col={col}")
+                # traceback.print_stack(limit=10)
 
     def record_write(self, df_id: int, columns: Iterable[str]) -> None:
         """Record column writes for a DataFrame by ID."""
