@@ -134,6 +134,30 @@ class CheckpointCompareResponse(KernelCommandResponse):
     diff: DiffResult = Field(..., description="Differences between checkpoints")
 
 
+class CheckpointCompareLeqRequest(KernelCommandRequest):
+    """Request to compare two checkpoints using leq semantics.
+
+    Leq mode allows extra keys in the second checkpoint and extra columns
+    in DataFrames. This is useful for checking that read-before-write
+    variables haven't been modified by a cell.
+    """
+
+    command: Literal["checkpoint_compare_leq"] = "checkpoint_compare_leq"
+    name1: str = Field(..., description="Name of first checkpoint (pre-execution state)")
+    name2: str = Field(..., description="Name of second checkpoint (post-execution state)")
+    keys_to_include: Optional[Set[str]] = Field(
+        None,
+        description="Optional set of variable names to include in comparison (typically read-before-write set).",
+    )
+
+
+class CheckpointCompareLeqResponse(KernelCommandResponse):
+    """Response with leq diff between two checkpoints."""
+
+    diff: DiffResult = Field(..., description="Differences between checkpoints")
+    is_leq: bool = Field(..., description="True if pre <= post for the specified keys (no differences found)")
+
+
 class CheckpointClearRequest(KernelCommandRequest):
     """Request to clear all checkpoints."""
 
@@ -223,6 +247,7 @@ KernelCommandRequestUnion = Union[
     CheckpointDeleteRequest,
     CheckpointListRequest,
     CheckpointCompareRequest,
+    CheckpointCompareLeqRequest,
     CheckpointClearRequest,
     EnableScaleneRequest,
     DisableScaleneRequest,
@@ -238,6 +263,7 @@ KernelCommandResponseUnion = Union[
     CheckpointDeleteResponse,
     CheckpointListResponse,
     CheckpointCompareResponse,
+    CheckpointCompareLeqResponse,
     CheckpointClearResponse,
     EnableScaleneResponse,
     DisableScaleneResponse,

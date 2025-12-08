@@ -30,6 +30,8 @@ from data_ferret.kernel.kernel_commands import (
     CheckpointListResponse,
     CheckpointCompareRequest,
     CheckpointCompareResponse,
+    CheckpointCompareLeqRequest,
+    CheckpointCompareLeqResponse,
     CheckpointClearRequest,
     CheckpointClearResponse,
     EnableScaleneRequest,
@@ -82,6 +84,7 @@ class KernelCommandHandlers:
             "checkpoint_delete": self.handle_checkpoint_delete,
             "checkpoint_list": self.handle_checkpoint_list,
             "checkpoint_compare": self.handle_checkpoint_compare,
+            "checkpoint_compare_leq": self.handle_checkpoint_compare_leq,
             "checkpoint_clear": self.handle_checkpoint_clear,
             "enable_scalene": self.handle_enable_scalene,
             "disable_scalene": self.handle_disable_scalene,
@@ -281,6 +284,49 @@ class KernelCommandHandlers:
                 message=f"Failed to compare checkpoints '{req.name1}' and '{req.name2}': {e}",
                 traceback=tb_str,
                 diff=empty_diff,
+            )
+
+    def handle_checkpoint_compare_leq(
+        self, req: CheckpointCompareLeqRequest
+    ) -> CheckpointCompareLeqResponse:
+        """
+        Compare two checkpoints using leq semantics.
+
+        Leq mode allows extra keys in the second checkpoint and extra columns
+        in DataFrames. This is useful for checking that read-before-write
+        variables haven't been modified by a cell.
+
+        Args:
+            req: Compare request with two checkpoint names and optional keys filter
+
+        Returns:
+            Response with diff result and is_leq flag
+        """
+        try:
+            old = self.kernel._checkpoint.get(req.name1)
+            new = self.kernel._checkpoint.get(req.name2)
+            diff = Checkpoint.diff(old, new, keys_to_include=req.keys_to_include, use_leq=True)
+
+            # is_leq is True if there are no differences
+            is_leq = len(diff.differences) == 0
+
+            return CheckpointCompareLeqResponse(
+                status="ok",
+                message=f"Compared '{req.name1}' <= '{req.name2}': {is_leq}",
+                diff=diff,
+                is_leq=is_leq,
+            )
+        except Exception as e:
+            from data_ferret.kernel.types import DiffResult
+            tb_str = traceback.format_exc()
+            # Return empty diff on error
+            empty_diff = DiffResult(differences={})
+            return CheckpointCompareLeqResponse(
+                status="error",
+                message=f"Failed to compare checkpoints '{req.name1}' and '{req.name2}': {e}",
+                traceback=tb_str,
+                diff=empty_diff,
+                is_leq=False,
             )
 
     def handle_checkpoint_clear(

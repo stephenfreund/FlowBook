@@ -90,6 +90,13 @@ export const FERRET_COMMANDS: CommandInfo[] = [
     requires_kernel: true
   },
   {
+    id: 'test_leq',
+    label: 'Test Leq',
+    icon: 'ui-components:check',
+    tooltip: 'Execute cells and verify read-before-write variables aren\'t modified',
+    requires_kernel: true
+  },
+  {
     id: 'validate_change',
     label: 'Validate Change',
     icon: 'ui-components:check',

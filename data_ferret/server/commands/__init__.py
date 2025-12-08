@@ -17,6 +17,7 @@ from data_ferret.server.commands.split import SplitCommand
 from data_ferret.server.commands.test import TestCommand
 from data_ferret.server.commands.generate_tests import GenerateTestsCommand
 from data_ferret.server.commands.prepare_code import PrepareCodeForFerretCommand
+from data_ferret.server.commands.test_leq import TestLeqCommand
 
 __all__ = [
     "AnalyzeNotebookCommand",
@@ -34,5 +35,6 @@ __all__ = [
     "TestCommand",
     "GenerateTestsCommand",
     "PrepareCodeForFerretCommand",
+    "TestLeqCommand",
 ]
 

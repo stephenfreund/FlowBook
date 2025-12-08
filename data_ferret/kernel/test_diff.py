@@ -2815,3 +2815,462 @@ class TestMultiDiffSupport:
         diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
         assert len(diff_keys) == 100
         assert '_truncated' not in result['arr']
+
+
+# ============================================================================
+# USE_LEQ TESTS - Conservative Extension Semantics
+# ============================================================================
+
+class TestUseLeqNamespace:
+    """Tests for use_leq at the namespace (top-level dict) level."""
+
+    def test_extra_keys_allowed_in_b(self):
+        """Extra keys in b should not be reported as differences."""
+        differ = Diff(use_leq=True)
+        a = {'x': 1, 'y': 2}
+        b = {'x': 1, 'y': 2, 'z': 3}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_multiple_extra_keys_allowed(self):
+        """Multiple extra keys in b should all be allowed."""
+        differ = Diff(use_leq=True)
+        a = {'x': 1}
+        b = {'x': 1, 'y': 2, 'z': 3, 'w': 4}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_missing_key_in_b_detected(self):
+        """Keys in a but not in b should still be detected."""
+        differ = Diff(use_leq=True)
+        a = {'x': 1, 'y': 2}
+        b = {'x': 1}  # y is missing
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'y')
+        assert_message_contains(result, 'y', 'removed')
+
+    def test_value_difference_detected(self):
+        """Value differences should still be detected with use_leq."""
+        differ = Diff(use_leq=True)
+        a = {'x': 1, 'y': 2}
+        b = {'x': 1, 'y': 999, 'z': 3}  # y has different value, z is extra
+        result = differ.diff(a, b)
+        assert 'z' not in result  # extra key allowed
+        assert_has_diff(result, 'y')  # value difference detected
+
+    def test_empty_a_always_succeeds(self):
+        """Empty a should always succeed (b can have anything)."""
+        differ = Diff(use_leq=True)
+        a = {}
+        b = {'x': 1, 'y': 2, 'z': 3}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_empty_b_with_nonempty_a_fails(self):
+        """Empty b with non-empty a should fail (missing keys)."""
+        differ = Diff(use_leq=True)
+        a = {'x': 1}
+        b = {}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'x')
+
+    def test_both_empty_succeeds(self):
+        """Both empty namespaces should succeed."""
+        differ = Diff(use_leq=True)
+        a = {}
+        b = {}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_identical_namespaces_succeed(self):
+        """Identical namespaces should succeed with use_leq."""
+        differ = Diff(use_leq=True)
+        a = {'x': 1, 'y': [1, 2, 3], 'z': 'hello'}
+        b = {'x': 1, 'y': [1, 2, 3], 'z': 'hello'}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_strict_mode_still_detects_extra_keys(self):
+        """Default mode (use_leq=False) should still detect extra keys."""
+        differ = Diff(use_leq=False)
+        a = {'x': 1}
+        b = {'x': 1, 'y': 2}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'y')
+        assert_message_contains(result, 'y', 'added')
+
+
+class TestUseLeqDataFrame:
+    """Tests for use_leq with pandas DataFrames."""
+
+    def test_extra_columns_allowed(self):
+        """Extra columns in b's DataFrame should be allowed."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+        df_b = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6], 'C': [7, 8, 9]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_multiple_extra_columns_allowed(self):
+        """Multiple extra columns should all be allowed."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2, 3]})
+        df_b = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6], 'C': [7, 8, 9], 'D': [10, 11, 12]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_missing_column_detected(self):
+        """Missing columns in b should be detected."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+        df_b = pd.DataFrame({'A': [1, 2, 3]})  # B is missing
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+        assert_message_contains(result, 'df', 'missing columns')
+
+    def test_multiple_missing_columns_detected(self):
+        """Multiple missing columns should be reported."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6], 'C': [7, 8, 9]})
+        df_b = pd.DataFrame({'A': [1, 2, 3]})  # B and C are missing
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+        assert_message_contains(result, 'df', 'missing columns')
+
+    def test_column_value_difference_detected(self):
+        """Value differences in columns should still be detected."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+        df_b = pd.DataFrame({'A': [1, 2, 999], 'B': [4, 5, 6], 'C': [7, 8, 9]})  # A[2] differs
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+
+    def test_index_difference_detected(self):
+        """Index differences should still be detected."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2, 3]}, index=[0, 1, 2])
+        df_b = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]}, index=[0, 1, 3])  # index differs
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+        assert_message_contains(result, 'df', 'index')
+
+    def test_row_count_difference_detected(self):
+        """Different row counts should still be detected."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2, 3]})
+        df_b = pd.DataFrame({'A': [1, 2, 3, 4], 'B': [5, 6, 7, 8]})  # extra row
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+
+    def test_column_order_independent(self):
+        """Column order in b shouldn't matter as long as a's columns exist."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+        # b has columns in different order plus extra
+        df_b = pd.DataFrame({'C': [7, 8, 9], 'B': [4, 5, 6], 'A': [1, 2, 3]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_empty_dataframes_both(self):
+        """Both empty DataFrames should succeed."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame()
+        df_b = pd.DataFrame()
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_single_column_dataframe(self):
+        """Single column DataFrame comparison should work."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2, 3]})
+        df_b = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_with_nan_values(self):
+        """NaN values should be handled correctly."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, np.nan, 3], 'B': [4, 5, np.nan]})
+        df_b = pd.DataFrame({'A': [1, np.nan, 3], 'B': [4, 5, np.nan], 'C': [7, 8, 9]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_with_different_dtypes_compatible(self):
+        """Compatible dtypes should work (e.g., int32 vs int64)."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': np.array([1, 2, 3], dtype=np.int32)})
+        df_b = pd.DataFrame({
+            'A': np.array([1, 2, 3], dtype=np.int64),
+            'B': [4, 5, 6]
+        })
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_strict_mode_detects_extra_columns(self):
+        """Default mode (use_leq=False) should detect extra columns."""
+        differ = Diff(use_leq=False)
+        df_a = pd.DataFrame({'A': [1, 2, 3]})
+        df_b = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+
+
+class TestUseLeqCombined:
+    """Tests combining namespace and DataFrame use_leq behavior."""
+
+    def test_extra_key_with_extra_columns(self):
+        """Extra keys AND extra columns should both be allowed."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2, 3]})
+        df_b = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+        a = {'df': df_a, 'x': 1}
+        b = {'df': df_b, 'x': 1, 'y': 2}  # extra key y, extra column B
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_multiple_dataframes(self):
+        """Multiple DataFrames should all allow extra columns."""
+        differ = Diff(use_leq=True)
+        a = {
+            'df1': pd.DataFrame({'A': [1, 2]}),
+            'df2': pd.DataFrame({'X': [3, 4]}),
+        }
+        b = {
+            'df1': pd.DataFrame({'A': [1, 2], 'B': [5, 6]}),
+            'df2': pd.DataFrame({'X': [3, 4], 'Y': [7, 8], 'Z': [9, 10]}),
+            'df3': pd.DataFrame({'P': [1, 2]}),  # extra DataFrame
+        }
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_nested_dict_not_extended(self):
+        """Nested dicts should NOT allow extra keys (only top-level)."""
+        differ = Diff(use_leq=True)
+        a = {'outer': {'inner': 1}}
+        b = {'outer': {'inner': 1, 'extra': 2}}  # extra key in nested dict
+        result = differ.diff(a, b)
+        # Nested dict extra key should be detected
+        assert_has_diff(result, 'outer')
+
+    def test_list_not_extended(self):
+        """Lists should NOT allow extra elements."""
+        differ = Diff(use_leq=True)
+        a = {'lst': [1, 2, 3]}
+        b = {'lst': [1, 2, 3, 4]}  # extra element
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'lst')
+
+    def test_dataframe_in_list(self):
+        """DataFrame inside list - standard behavior (no extension)."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2, 3]})
+        df_b = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+        a = {'lst': [df_a]}
+        b = {'lst': [df_b]}
+        # DataFrame inside list should still use leq for the DataFrame itself
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_mixed_success_and_failure(self):
+        """Some variables pass, some fail."""
+        differ = Diff(use_leq=True)
+        a = {
+            'ok1': 1,
+            'ok2': pd.DataFrame({'A': [1, 2]}),
+            'fail1': 2,
+            'fail2': pd.DataFrame({'X': [1, 2], 'Y': [3, 4]}),
+        }
+        b = {
+            'ok1': 1,
+            'ok2': pd.DataFrame({'A': [1, 2], 'B': [3, 4]}),  # extra col OK
+            'fail1': 999,  # different value
+            'fail2': pd.DataFrame({'X': [1, 2]}),  # missing column Y
+            'extra': 'ignored',  # extra key OK
+        }
+        result = differ.diff(a, b)
+        assert 'ok1' not in result
+        assert 'ok2' not in result
+        assert 'extra' not in result
+        assert_has_diff(result, 'fail1')
+        assert_has_diff(result, 'fail2')
+
+
+class TestUseLeqWithOtherOptions:
+    """Tests for use_leq combined with other Diff options."""
+
+    def test_with_report_close_false(self):
+        """use_leq should work with report_close=False."""
+        differ = Diff(use_leq=True, report_close=False)
+        df_a = pd.DataFrame({'A': [1.0, 2.0, 3.0]})
+        df_b = pd.DataFrame({'A': [1.0000001, 2.0, 3.0], 'B': [4, 5, 6]})  # close value + extra col
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_with_strict_false(self):
+        """use_leq should work with strict=False."""
+        differ = Diff(use_leq=True, strict=False)
+        a = {'x': 1}  # int
+        b = {'x': 1.0, 'y': 2}  # float (compatible in non-strict) + extra key
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_with_custom_tolerance(self):
+        """use_leq should work with custom rtol/atol."""
+        differ = Diff(use_leq=True, rtol=0.1, atol=0.1, report_close=False)
+        df_a = pd.DataFrame({'A': [1.0, 2.0, 3.0]})
+        df_b = pd.DataFrame({'A': [1.05, 2.0, 3.0], 'B': [4, 5, 6]})  # within tolerance
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_with_keys_to_include(self):
+        """use_leq should work with keys_to_include filter."""
+        differ = Diff(use_leq=True)
+        a = {'x': 1, 'y': 2}
+        b = {'x': 1, 'y': 999, 'z': 3}  # y differs, z is extra
+        # Only check x
+        result = differ.diff(a, b, keys_to_include={'x'})
+        assert_no_diff(result)
+        # Check y too
+        result = differ.diff(a, b, keys_to_include={'x', 'y'})
+        assert_has_diff(result, 'y')
+
+
+class TestUseLeqEdgeCases:
+    """Edge cases for use_leq."""
+
+    def test_identical_is_leq(self):
+        """Identical namespaces should satisfy leq."""
+        differ = Diff(use_leq=True)
+        df = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+        a = {'x': 1, 'df': df}
+        b = {'x': 1, 'df': df.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_subset_columns_same_order(self):
+        """a's columns are prefix of b's columns."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'A': [1, 2], 'B': [3, 4]})
+        df_b = pd.DataFrame({'A': [1, 2], 'B': [3, 4], 'C': [5, 6], 'D': [7, 8]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_subset_columns_different_order(self):
+        """a's columns are subset but not prefix of b's columns."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'B': [3, 4], 'D': [7, 8]})
+        df_b = pd.DataFrame({'A': [1, 2], 'B': [3, 4], 'C': [5, 6], 'D': [7, 8]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_with_string_columns(self):
+        """DataFrame with string data should work."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({'name': ['alice', 'bob']})
+        df_b = pd.DataFrame({'name': ['alice', 'bob'], 'age': [30, 25]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_with_mixed_types(self):
+        """DataFrame with mixed column types should work."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({
+            'int_col': [1, 2, 3],
+            'float_col': [1.1, 2.2, 3.3],
+            'str_col': ['a', 'b', 'c'],
+        })
+        df_b = pd.DataFrame({
+            'int_col': [1, 2, 3],
+            'float_col': [1.1, 2.2, 3.3],
+            'str_col': ['a', 'b', 'c'],
+            'extra_col': [True, False, True],
+        })
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_numpy_array_not_extended(self):
+        """numpy arrays should NOT allow extra elements."""
+        differ = Diff(use_leq=True)
+        a = {'arr': np.array([1, 2, 3])}
+        b = {'arr': np.array([1, 2, 3, 4])}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'arr')
+
+    def test_series_not_extended(self):
+        """pandas Series should NOT allow extra elements."""
+        differ = Diff(use_leq=True)
+        a = {'s': pd.Series([1, 2, 3])}
+        b = {'s': pd.Series([1, 2, 3, 4])}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 's')
+
+    def test_dataframe_with_multiindex_columns(self):
+        """DataFrame with MultiIndex columns should work."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame(
+            [[1, 2], [3, 4]],
+            columns=pd.MultiIndex.from_tuples([('A', 'x'), ('A', 'y')])
+        )
+        df_b = pd.DataFrame(
+            [[1, 2, 5], [3, 4, 6]],
+            columns=pd.MultiIndex.from_tuples([('A', 'x'), ('A', 'y'), ('B', 'z')])
+        )
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_datetime_columns(self):
+        """DataFrame with datetime columns should work."""
+        differ = Diff(use_leq=True)
+        df_a = pd.DataFrame({
+            'date': pd.to_datetime(['2023-01-01', '2023-01-02']),
+            'value': [1, 2]
+        })
+        df_b = pd.DataFrame({
+            'date': pd.to_datetime(['2023-01-01', '2023-01-02']),
+            'value': [1, 2],
+            'extra': [3, 4]
+        })
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)

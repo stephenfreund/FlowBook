@@ -12,6 +12,7 @@ from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
 
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints, filter_user_namespace, is_valid_variable
+from data_ferret.util.output import log, timer
 from data_ferret.kernel.deepcopyable import is_deepcopyable
 from data_ferret.kernel.display_helpers import DisplayHelper
 from data_ferret.kernel.ferret_pdb import FerretPdb
@@ -52,6 +53,7 @@ class FerretKernel(IPythonKernel, Magics):
         self._use_scalene = True
         self._force_checkpoints = False
         self._use_global_tracking = False
+        self._enforce_monotone_updates = False
 
         # Initialize Scalene runner
         self._scalene = ScaleneRunner(self.shell, self._executed_cell_ids)
@@ -126,6 +128,23 @@ class FerretKernel(IPythonKernel, Magics):
         req = DisableGlobalTrackingRequest()
         response = self.command_handlers.handle_disable_global_tracking(req)
         self.display_icon_and_text("📊", response.message)
+
+    @line_cell_magic
+    def enable_monotone_updates(self, line: str, cell: str = "") -> None:
+        """Enable monotone updates enforcement."""
+        log("[monotone] Enabling monotone updates enforcement")
+        if not self._use_global_tracking:
+            log("[monotone] Auto-enabling global tracking (required for RBW detection)")
+            self.enable_global_tracking("", "")
+        self._enforce_monotone_updates = True
+        self.display_icon_and_text("✅", "Monotone updates enforcement enabled")
+
+    @line_cell_magic
+    def disable_monotone_updates(self, line: str, cell: str = "") -> None:
+        """Disable monotone updates enforcement."""
+        log("[monotone] Disabling monotone updates enforcement")
+        self._enforce_monotone_updates = False
+        self.display_icon_and_text("✅", "Monotone updates enforcement disabled")
 
     @line_cell_magic
     def checkpoint(self, line: str, cell: str = "") -> None:
@@ -306,11 +325,16 @@ class FerretKernel(IPythonKernel, Magics):
         self._extract_cell_id(cell_id, cell_meta)
         code, timeout = self._parse_timeout_from_code(code)
         self.display_cell_id()
+        self._reset_tracking()
 
         force_checkpoints = self._force_checkpoints
 
         if force_checkpoints:
             self.checkpoint(f"save pre_{self._cell_id}")
+
+        if self._enforce_monotone_updates:
+            with timer(key="monotone_save_checkpoint", message=f"[monotone] Saving pre-checkpoint for cell {self._cell_id}"):
+                self._checkpoint.save("_monotone_pre", self.shell.user_ns)
 
         timeout_handler = CellTimeoutHandler(
             timeout=timeout,
@@ -338,6 +362,41 @@ class FerretKernel(IPythonKernel, Magics):
 
             if force_checkpoints:
                 self._show_checkpoint_diff()
+
+            # Monotonicity check
+            if self._enforce_monotone_updates and result.get('status') != 'error':
+                with timer(key="monotone_check", message=f"[monotone] Checking monotonicity for cell {self._cell_id}"):
+                    rbw_vars = set(tracking.get('reads_before_writes', [])) if tracking else set()
+                    log(f"[monotone] Read-before-write vars: {rbw_vars}")
+                    if rbw_vars:
+                        pre = self._checkpoint.get("_monotone_pre")
+                        with timer(key="monotone_diff", message="[monotone] Computing diff"):
+                            post = Checkpoint("_monotone_post", self.shell.user_ns, {})
+                            diff_result = Checkpoint.diff(pre, post, keys_to_include=rbw_vars, use_leq=True)
+                        log(f"[monotone] Diff result: {list(diff_result.differences.keys()) if diff_result.differences else 'no differences'}")
+                        if diff_result.differences:
+                            log("[monotone] FAILED - reverting state")
+                            with timer(key="monotone_restore", message="[monotone] Restoring checkpoint"):
+                                self._checkpoint.restore("_monotone_pre", self.shell.user_ns)
+                            error_details = self._format_diff_details(diff_result)
+                            error_summary = f"Monotonicity violation: {list(diff_result.differences.keys())}"
+                            self.send_response(self.iopub_socket, 'error', {
+                                'ename': 'MonotonicityError',
+                                'evalue': error_summary,
+                                'traceback': [error_details]
+                            })
+                            result = {
+                                'status': 'error',
+                                'execution_count': self.execution_count,
+                                'ename': 'MonotonicityError',
+                                'evalue': error_summary,
+                                'traceback': [error_details]
+                            }
+                        else:
+                            log("[monotone] PASSED")
+                    else:
+                        log("[monotone] No RBW vars to check, skipping")
+                    self._checkpoint.delete("_monotone_pre")
 
             # print(f"[FerretKernel] do_execute returning status: {result.get('status')}", file=sys.__stderr__)
             return result
@@ -385,6 +444,39 @@ class FerretKernel(IPythonKernel, Magics):
         else:
             timeout = self._default_cell_timeout
         return code, timeout
+
+    def _reset_tracking(self) -> None:
+        """Reset tracking data if user_ns is a TrackingDict."""
+        if isinstance(self.shell.user_ns, TrackingDict):
+            self.shell.user_ns.reset_tracking()
+
+    def _format_diff_details(self, diff_result) -> str:
+        """Format diff result into human-readable error details."""
+        from data_ferret.kernel.types import ValueComparison
+
+        def format_node(var_name: str, node, path: str = "") -> list:
+            lines = []
+            full_path = f"{var_name}{path}" if path else var_name
+            if isinstance(node, ValueComparison):
+                lines.append(f"  {full_path}: {node.message}")
+            elif isinstance(node, dict):
+                for key, child in node.items():
+                    if key == "_truncated":
+                        if isinstance(child, ValueComparison):
+                            lines.append(f"  {full_path}: (truncated) {child.message}")
+                        continue
+                    lines.extend(format_node(var_name, child, f"{path}{key}"))
+            return lines
+
+        all_lines = ["Monotonicity violation - the following read-before-write variables were modified:"]
+        for var_name, node in diff_result.differences.items():
+            all_lines.append(f"\n{var_name}:")
+            detail_lines = format_node(var_name, node)
+            all_lines.extend(detail_lines[:5])
+            if len(detail_lines) > 5:
+                all_lines.append(f"  ... and {len(detail_lines) - 5} more differences")
+
+        return "\n".join(all_lines)
 
     async def _execute_with_profiling(
         self,

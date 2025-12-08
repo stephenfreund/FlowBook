@@ -171,9 +171,10 @@ class Diff:
         atol=1e-8,
         max_diffs_per_container: int = 1000,
         max_diffs_per_structure: int = 5,
-        sample_large_arrays: bool = True,
+        sample_large_arrays: bool = False,
         strict: bool = True,
         report_close: bool = True,
+        use_leq: bool = False,
     ):
         """
         Initialize the Diff comparator.
@@ -184,11 +185,14 @@ class Diff:
             max_diffs_per_container: Maximum differences to collect per container (default: 1000)
             max_diffs_per_structure: Maximum differences to collect per structured data
                                      (arrays, Series, DataFrames) (default: 5)
-            sample_large_arrays: Whether to sample large arrays instead of full comparison (default: True)
+            sample_large_arrays: Whether to sample large arrays instead of full comparison (default: False)
             strict: If True, require exact type matches. If False, allow compatible types
                     (e.g., int vs float, list vs ndarray) (default: True)
             report_close: If True, report floats that are close (within tolerance) with status='close'.
                          If False, treat close values as equal and don't report them (default: True)
+            use_leq: If True, check if b is a conservative extension of a (default: False).
+                     This means: (1) extra keys in b are allowed, (2) DataFrames in b can have
+                     extra columns as long as all columns from a are present and equal.
 
         Example:
             >>> # Default behavior - reports close values
@@ -208,6 +212,7 @@ class Diff:
         self.sample_large_arrays = sample_large_arrays
         self.strict = strict
         self.report_close = report_close
+        self.use_leq = use_leq
         # Track object identities to ensure pointer structure matches
         self.id_map_a = {}  # Maps id(obj_a) -> canonical_id
         self.id_map_b = {}  # Maps id(obj_b) -> canonical_id
@@ -318,15 +323,16 @@ class Diff:
                 message="Variable was removed",
             )
 
-        # Check for variables only in b
-        only_in_b = set(b.keys()) - set(a.keys())
-        for var in only_in_b & keys_to_include:
-            differences[var] = ValueComparison(
-                status="different",
-                value1=None,
-                value2=b[var],
-                message="Variable was added",
-            )
+        # Check for variables only in b (skip if use_leq since extra keys are allowed)
+        if not self.use_leq:
+            only_in_b = set(b.keys()) - set(a.keys())
+            for var in only_in_b & keys_to_include:
+                differences[var] = ValueComparison(
+                    status="different",
+                    value1=None,
+                    value2=b[var],
+                    message="Variable was added",
+                )
 
         # Compare common variables - only add to differences if not equal
         common_vars = set(a.keys()) & set(b.keys())
@@ -1133,23 +1139,37 @@ class Diff:
         self, val_a: pd.DataFrame, val_b: pd.DataFrame, path: str
     ) -> Optional[DiffNode]:
         """Compare pandas DataFrames, collecting up to max_diffs_per_structure differences."""
-        # Check shape
-        if val_a.shape != val_b.shape:
-            return ValueComparison(
-                status="different",
-                value1=val_a,
-                value2=val_b,
-                message=f"DataFrame shape mismatch at {path}: {val_a.shape} vs {val_b.shape}",
-            )
-
         # Check columns
-        if not val_a.columns.equals(val_b.columns):
-            return ValueComparison(
-                status="different",
-                value1=val_a,
-                value2=val_b,
-                message=f"DataFrame columns mismatch at {path}: {val_a.columns} vs {val_b.columns}",
-            )
+        if self.use_leq:
+            # In leq mode, val_a's columns must be a subset of val_b's columns
+            missing_cols = set(val_a.columns) - set(val_b.columns)
+            if missing_cols:
+                return ValueComparison(
+                    status="different",
+                    value1=val_a,
+                    value2=val_b,
+                    message=f"DataFrame missing columns at {path}: {sorted(missing_cols)} not in second DataFrame",
+                )
+            # Use only val_a's columns for comparison
+            cols_to_compare = val_a.columns
+        else:
+            # Standard mode: columns must match exactly
+            if not val_a.columns.equals(val_b.columns):
+                return ValueComparison(
+                    status="different",
+                    value1=val_a,
+                    value2=val_b,
+                    message=f"DataFrame columns mismatch at {path}: {val_a.columns} vs {val_b.columns}",
+                )
+            # Check shape (only in non-leq mode since column count may differ)
+            if val_a.shape != val_b.shape:
+                return ValueComparison(
+                    status="different",
+                    value1=val_a,
+                    value2=val_b,
+                    message=f"DataFrame shape mismatch at {path}: {val_a.shape} vs {val_b.shape}",
+                )
+            cols_to_compare = val_a.columns
 
         # Check index
         if not val_a.index.equals(val_b.index):
@@ -1161,7 +1181,7 @@ class Diff:
             )
 
         # Check dtype compatibility for each column
-        for col in val_a.columns:
+        for col in cols_to_compare:
             if not are_compatible_dtypes(val_a[col], val_b[col]):
                 return ValueComparison(
                     status="different",
@@ -1171,11 +1191,11 @@ class Diff:
                 )
 
         # Cast columns with compatible but different dtypes to common type
-        needs_cast = any(val_a[col].dtype != val_b[col].dtype for col in val_a.columns)
+        needs_cast = any(val_a[col].dtype != val_b[col].dtype for col in cols_to_compare)
         if needs_cast:
             val_a_cmp = val_a.copy()
             val_b_cmp = val_b.copy()
-            for col in val_a.columns:
+            for col in cols_to_compare:
                 if val_a[col].dtype != val_b[col].dtype:
                     # Special handling for object dtype with floats
                     if val_a[col].dtype == np.object_ and _is_floating_dtype(val_b[col].dtype):
@@ -1203,7 +1223,7 @@ class Diff:
         diffs = {}
         total_diff_count = 0
 
-        for col in val_a_cmp.columns:
+        for col in cols_to_compare:
             col_diff = self._compare_series(
                 val_a_cmp[col], val_b_cmp[col], f"{path}['{col}']"
             )

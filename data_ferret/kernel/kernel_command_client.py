@@ -32,6 +32,8 @@ from data_ferret.kernel.kernel_commands import (
     CheckpointListResponse,
     CheckpointCompareRequest,
     CheckpointCompareResponse,
+    CheckpointCompareLeqRequest,
+    CheckpointCompareLeqResponse,
     CheckpointClearRequest,
     CheckpointClearResponse,
     EnableScaleneRequest,
@@ -410,6 +412,60 @@ class KernelCommandClient:
                     time.sleep(1)
         raise KernelCommandError(
             f"Failed to compare checkpoints after {self.retries} attempts"
+        )
+
+    def checkpoint_compare_leq(
+        self,
+        name1: str,
+        name2: str,
+        keys_to_include: Optional[Set[str]] = None,
+        timeout: Optional[float] = None,
+    ) -> CheckpointCompareLeqResponse:
+        """
+        Compare two checkpoints using leq semantics.
+
+        Leq mode allows extra keys in the second checkpoint and extra columns
+        in DataFrames. This is useful for checking that read-before-write
+        variables haven't been modified by a cell.
+
+        Args:
+            name1: First checkpoint name (pre-execution state)
+            name2: Second checkpoint name (post-execution state)
+            keys_to_include: Optional set of variable names to include in comparison
+            timeout: Optional timeout override
+
+        Returns:
+            Response with diff result and is_leq flag
+
+        Raises:
+            KernelCommandError: If command fails or checkpoints don't exist
+        """
+        with timer(
+            key="checkpoint_compare_leq",
+            message=f"KernelCommandClient: Compare checkpoints (leq) {name1} and {name2}",
+        ):
+            for _ in range(self.retries):
+                try:
+                    request = CheckpointCompareLeqRequest(
+                        name1=name1, name2=name2, keys_to_include=keys_to_include
+                    )
+                    response_dict = self._send_command(
+                        request.model_dump(), timeout=timeout
+                    )
+                    response = CheckpointCompareLeqResponse(**response_dict)
+
+                    # Check if server returned error status
+                    if response.status == "error":
+                        self._log_error_response(response, "Checkpoint compare (leq)")
+                        time.sleep(1)
+                        continue  # Retry
+
+                    return response
+                except Exception as e:
+                    error(f"Failed to compare checkpoints (leq): {e}")
+                    time.sleep(1)
+        raise KernelCommandError(
+            f"Failed to compare checkpoints (leq) after {self.retries} attempts"
         )
 
     def checkpoint_clear(

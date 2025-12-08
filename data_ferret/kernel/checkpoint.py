@@ -951,7 +951,8 @@ class Checkpoint:
 
     @staticmethod
     def diff(
-        a: Checkpoint, b: Checkpoint, keys_to_include: set[str] | None = None
+        a: Checkpoint, b: Checkpoint, keys_to_include: set[str] | None = None,
+        use_leq: bool = False
     ):
         """
         Compare two checkpoints and return structured diff results.
@@ -960,11 +961,13 @@ class Checkpoint:
             a: First checkpoint to compare
             b: Second checkpoint to compare
             keys_to_include: Optional set of keys to limit comparison to
+            use_leq: If True, use leq mode where extra keys in b are allowed
+                     and DataFrames in b can have extra columns
 
         Returns:
             DiffResult: Structured diff tree with only differences
         """
-        differ = Diff(strict=False, report_close=False, atol=1e-5, rtol=1e-5)
+        differ = Diff(strict=False, report_close=False, atol=1e-5, rtol=1e-5, use_leq=use_leq)
         return differ.diff(a.user_ns, b.user_ns, keys_to_include)
 
 
