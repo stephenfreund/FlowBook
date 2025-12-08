@@ -22,6 +22,9 @@ from collections import defaultdict
 class ColumnAccessTracker:
     """Tracks DataFrame column access via monkey-patching."""
 
+    # Class-level flag to suspend tracking globally (for deepcopy operations)
+    _suspended = False
+
     def __init__(self):
         self._reads_by_id: Dict[int, Set[str]] = defaultdict(set)
         self._writes_by_id: Dict[int, Set[str]] = defaultdict(set)
@@ -49,6 +52,8 @@ class ColumnAccessTracker:
 
     def record_read(self, df_id: int, columns: Iterable[str]) -> None:
         """Record column reads for a DataFrame by ID."""
+        if ColumnAccessTracker._suspended:
+            return
         for col in columns:
             # Only record as RBW if not already written
             if col not in self._writes_by_id[df_id]:
@@ -56,6 +61,8 @@ class ColumnAccessTracker:
 
     def record_write(self, df_id: int, columns: Iterable[str]) -> None:
         """Record column writes for a DataFrame by ID."""
+        if ColumnAccessTracker._suspended:
+            return
         for col in columns:
             self._writes_by_id[df_id].add(col)
 
@@ -438,6 +445,31 @@ def _extract_columns_from_iloc_key(key, df: pd.DataFrame) -> list:
         pass
 
     return []
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def suspend_column_tracking():
+    """Context manager to temporarily suspend column access tracking.
+
+    Use this when code needs to access DataFrame columns without triggering
+    tracking, such as during deepcopy operations for checkpoints.
+
+    Example:
+        with suspend_column_tracking():
+            df_copy = df.copy()
+            for col in df.columns:
+                # Access columns without recording reads
+                data = df[col]
+    """
+    was_suspended = ColumnAccessTracker._suspended
+    ColumnAccessTracker._suspended = True
+    try:
+        yield
+    finally:
+        ColumnAccessTracker._suspended = was_suspended
 
 
 def walk_dataframes(
