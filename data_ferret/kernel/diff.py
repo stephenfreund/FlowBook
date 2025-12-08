@@ -175,6 +175,7 @@ class Diff:
         strict: bool = True,
         report_close: bool = True,
         use_leq: bool = False,
+        column_rbw: Optional[Dict[str, Set[str]]] = None,
     ):
         """
         Initialize the Diff comparator.
@@ -193,6 +194,10 @@ class Diff:
             use_leq: If True, check if b is a conservative extension of a (default: False).
                      This means: (1) extra keys in b are allowed, (2) DataFrames in b can have
                      extra columns as long as all columns from a are present and equal.
+            column_rbw: Column-level reads-before-writes for DataFrames (default: None).
+                       Maps variable path (e.g., 'df', 'data["train"]') to set of column names
+                       that were read-before-write. When provided with use_leq=True, only these
+                       columns are compared for each DataFrame.
 
         Example:
             >>> # Default behavior - reports close values
@@ -213,6 +218,7 @@ class Diff:
         self.strict = strict
         self.report_close = report_close
         self.use_leq = use_leq
+        self.column_rbw = column_rbw or {}
         # Track object identities to ensure pointer structure matches
         self.id_map_a = {}  # Maps id(obj_a) -> canonical_id
         self.id_map_b = {}  # Maps id(obj_b) -> canonical_id
@@ -1141,17 +1147,49 @@ class Diff:
         """Compare pandas DataFrames, collecting up to max_diffs_per_structure differences."""
         # Check columns
         if self.use_leq:
-            # In leq mode, val_a's columns must be a subset of val_b's columns
-            missing_cols = set(val_a.columns) - set(val_b.columns)
-            if missing_cols:
-                return ValueComparison(
-                    status="different",
-                    value1=val_a,
-                    value2=val_b,
-                    message=f"DataFrame missing columns at {path}: {sorted(missing_cols)} not in second DataFrame",
-                )
-            # Use only val_a's columns for comparison
-            cols_to_compare = val_a.columns
+            # Check if we have column-level RBW info for this variable
+            # The path is the variable name (e.g., "df", "data['train']")
+            if path in self.column_rbw:
+                # Only compare columns that were read-before-write
+                rbw_cols = self.column_rbw[path]
+
+                # If no columns were read-before-write, skip comparison entirely
+                # The cell doesn't depend on any data from this DataFrame
+                if not rbw_cols:
+                    return None
+
+                # Verify RBW columns exist in both DataFrames
+                missing_in_a = rbw_cols - set(val_a.columns)
+                if missing_in_a:
+                    return ValueComparison(
+                        status="different",
+                        value1=val_a,
+                        value2=val_b,
+                        message=f"DataFrame missing RBW columns in pre-state at {path}: {sorted(missing_in_a)}",
+                    )
+                missing_in_b = rbw_cols - set(val_b.columns)
+                if missing_in_b:
+                    return ValueComparison(
+                        status="different",
+                        value1=val_a,
+                        value2=val_b,
+                        message=f"DataFrame RBW columns deleted at {path}: {sorted(missing_in_b)}",
+                    )
+                # Only compare RBW columns
+                cols_to_compare = pd.Index(sorted(rbw_cols))
+            else:
+                # No column-level RBW info - fall back to existing behavior
+                # In leq mode, val_a's columns must be a subset of val_b's columns
+                missing_cols = set(val_a.columns) - set(val_b.columns)
+                if missing_cols:
+                    return ValueComparison(
+                        status="different",
+                        value1=val_a,
+                        value2=val_b,
+                        message=f"DataFrame missing columns at {path}: {sorted(missing_cols)} not in second DataFrame",
+                    )
+                # Use only val_a's columns for comparison
+                cols_to_compare = val_a.columns
         else:
             # Standard mode: columns must match exactly
             if not val_a.columns.equals(val_b.columns):

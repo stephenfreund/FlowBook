@@ -828,7 +828,7 @@ from __future__ import annotations
 
 import time
 import types
-from typing import Any
+from typing import Any, Dict, Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -952,7 +952,8 @@ class Checkpoint:
     @staticmethod
     def diff(
         a: Checkpoint, b: Checkpoint, keys_to_include: set[str] | None = None,
-        use_leq: bool = False
+        use_leq: bool = False,
+        column_rbw: Optional[Dict[str, Set[str]]] = None
     ):
         """
         Compare two checkpoints and return structured diff results.
@@ -963,11 +964,22 @@ class Checkpoint:
             keys_to_include: Optional set of keys to limit comparison to
             use_leq: If True, use leq mode where extra keys in b are allowed
                      and DataFrames in b can have extra columns
+            column_rbw: Optional column-level reads-before-writes mapping.
+                       Maps variable path to set of column names that were RBW.
+                       When provided with use_leq=True, only these columns are
+                       compared for each DataFrame.
 
         Returns:
             DiffResult: Structured diff tree with only differences
         """
-        differ = Diff(strict=False, report_close=False, atol=1e-5, rtol=1e-5, use_leq=use_leq)
+        differ = Diff(
+            strict=False,
+            report_close=False,
+            atol=1e-5,
+            rtol=1e-5,
+            use_leq=use_leq,
+            column_rbw=column_rbw
+        )
         return differ.diff(a.user_ns, b.user_ns, keys_to_include)
 
 

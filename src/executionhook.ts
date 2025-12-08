@@ -226,10 +226,14 @@ export class ExecutionHookManager {
       }
 
       // Extract tracking/dynamic_dependencies metadata
-      if (metadata.tracking) {
+      // Check for both 'dynamic_dependencies' (new) and 'tracking' (legacy) keys
+      const trackingData = metadata.dynamic_dependencies || metadata.tracking;
+      if (trackingData) {
         ferretMeta.dynamic_dependencies = {
-          reads_before_writes: metadata.tracking.reads_before_writes || [],
-          writes: metadata.tracking.writes || []
+          reads_before_writes: trackingData.reads_before_writes || [],
+          writes: trackingData.writes || [],
+          column_reads_before_writes: trackingData.column_reads_before_writes,
+          column_writes: trackingData.column_writes
         } as IDynamicDependencies;
       }
 

@@ -194,6 +194,66 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
               )}
             </div>
           </div>
+
+          {/* Column-level DataFrame reads tracking */}
+          {metadata.dynamic_dependencies.column_reads_before_writes &&
+           Object.entries(metadata.dynamic_dependencies.column_reads_before_writes).some(([, cols]) => cols.length > 0) && (
+            <>
+              <div className="ferret-metadata-divider" />
+              <div className="ferret-metadata-section">
+                <div className="ferret-metadata-item">
+                  <strong>DataFrame Columns Read:</strong>
+                  <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
+                    {Object.entries(metadata.dynamic_dependencies.column_reads_before_writes)
+                      .filter(([, columns]) => columns.length > 0)
+                      .map(([dfName, columns], idx) => (
+                        <li key={idx}>
+                          <code>{dfName}</code>
+                          <ul style={{ paddingLeft: '1.5em', marginTop: '0.25em' }}>
+                            {columns.map((col, colIdx) => (
+                              <li key={colIdx} style={{ listStyleType: 'circle' }}>
+                                <code>{col}</code>
+                              </li>
+                            ))}
+                          </ul>
+                        </li>
+                      )
+                    )}
+                  </ul>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Column-level DataFrame writes tracking */}
+          {metadata.dynamic_dependencies.column_writes &&
+           Object.entries(metadata.dynamic_dependencies.column_writes).some(([, cols]) => cols.length > 0) && (
+            <>
+              <div className="ferret-metadata-divider" />
+              <div className="ferret-metadata-section">
+                <div className="ferret-metadata-item">
+                  <strong>DataFrame Columns Written:</strong>
+                  <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
+                    {Object.entries(metadata.dynamic_dependencies.column_writes)
+                      .filter(([, columns]) => columns.length > 0)
+                      .map(([dfName, columns], idx) => (
+                        <li key={idx}>
+                          <code>{dfName}</code>
+                          <ul style={{ paddingLeft: '1.5em', marginTop: '0.25em' }}>
+                            {columns.map((col, colIdx) => (
+                              <li key={colIdx} style={{ listStyleType: 'circle' }}>
+                                <code>{col}</code>
+                              </li>
+                            ))}
+                          </ul>
+                        </li>
+                      )
+                    )}
+                  </ul>
+                </div>
+              </div>
+            </>
+          )}
         </>
       )}
 

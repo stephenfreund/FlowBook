@@ -18,7 +18,7 @@ Example usage:
 
 import time
 import uuid
-from typing import Callable, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 from jupyter_client import BlockingKernelClient
 
 from data_ferret.kernel.kernel_commands import (
@@ -419,6 +419,7 @@ class KernelCommandClient:
         name1: str,
         name2: str,
         keys_to_include: Optional[Set[str]] = None,
+        column_rbw: Optional[Dict[str, Set[str]]] = None,
         timeout: Optional[float] = None,
     ) -> CheckpointCompareLeqResponse:
         """
@@ -432,6 +433,9 @@ class KernelCommandClient:
             name1: First checkpoint name (pre-execution state)
             name2: Second checkpoint name (post-execution state)
             keys_to_include: Optional set of variable names to include in comparison
+            column_rbw: Optional column-level reads-before-writes mapping.
+                       Maps variable path to set of column names that were RBW.
+                       When provided, only these columns are compared for each DataFrame.
             timeout: Optional timeout override
 
         Returns:
@@ -447,7 +451,10 @@ class KernelCommandClient:
             for _ in range(self.retries):
                 try:
                     request = CheckpointCompareLeqRequest(
-                        name1=name1, name2=name2, keys_to_include=keys_to_include
+                        name1=name1,
+                        name2=name2,
+                        keys_to_include=keys_to_include,
+                        column_rbw=column_rbw
                     )
                     response_dict = self._send_command(
                         request.model_dump(), timeout=timeout

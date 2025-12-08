@@ -370,9 +370,12 @@ class FerretKernel(IPythonKernel, Magics):
                     log(f"[monotone] Read-before-write vars: {rbw_vars}")
                     if rbw_vars:
                         pre = self._checkpoint.get("_monotone_pre")
+                        # Convert column_reads_before_writes from Dict[str, List] to Dict[str, Set]
+                        column_rbw_raw = tracking.get('column_reads_before_writes', {}) if tracking else {}
+                        column_rbw = {k: set(v) for k, v in column_rbw_raw.items()}
                         with timer(key="monotone_diff", message="[monotone] Computing diff"):
                             post = Checkpoint("_monotone_post", self.shell.user_ns, {})
-                            diff_result = Checkpoint.diff(pre, post, keys_to_include=rbw_vars, use_leq=True)
+                            diff_result = Checkpoint.diff(pre, post, keys_to_include=rbw_vars, use_leq=True, column_rbw=column_rbw)
                         log(f"[monotone] Diff result: {list(diff_result.differences.keys()) if diff_result.differences else 'no differences'}")
                         if diff_result.differences:
                             log("[monotone] FAILED - reverting state")
@@ -492,41 +495,50 @@ class FerretKernel(IPythonKernel, Magics):
         has_shell_magics = code.startswith("!") or "\n!" in code
         should_profile = self._use_scalene and self._cell_id is not None and not has_cell_magics and not has_shell_magics
 
-        if should_profile:
-            pre_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
-            result, contents = await self._scalene.run(code, self._cell_id, store_history)
-            # print(f"[FerretKernel] scalene result status: {result.get('status')}", file=sys.__stderr__)
+        # Start column tracking if global tracking is enabled
+        if self._use_global_tracking and isinstance(self.shell.user_ns, TrackingDict):
+            self.shell.user_ns.start_column_tracking()
 
-            # If scalene detected an error, send error message on iopub
-            if result.get('status') == 'error':
-                self.send_response(self.iopub_socket, 'error', {
-                    'ename': result.get('ename', 'UnknownError'),
-                    'evalue': result.get('evalue', ''),
-                    'traceback': result.get('traceback', [])
-                })
+        try:
+            if should_profile:
+                pre_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
+                result, contents = await self._scalene.run(code, self._cell_id, store_history)
+                # print(f"[FerretKernel] scalene result status: {result.get('status')}", file=sys.__stderr__)
 
-            self._remove_non_deepcopyable_objects()
-            post_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
+                # If scalene detected an error, send error message on iopub
+                if result.get('status') == 'error':
+                    self.send_response(self.iopub_socket, 'error', {
+                        'ename': result.get('ename', 'UnknownError'),
+                        'evalue': result.get('evalue', ''),
+                        'traceback': result.get('traceback', [])
+                    })
 
-            # Capture tracking data if enabled
-            tracking_data = self._capture_tracking_data()
+                self._remove_non_deepcopyable_objects()
+                post_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
 
-            return result, contents, pre_types, post_types, tracking_data
-        else:
-            result = await super().do_execute(
-                code, silent, store_history, user_expressions, allow_stdin,
-                cell_meta=cell_meta, cell_id=self._cell_id
-            )
-            if has_shell_magics and result is None:
-                result = {
-                    'status': 'ok',
-                    'execution_count': self.execution_count,
-                }
+                # Capture tracking data if enabled
+                tracking_data = self._capture_tracking_data()
 
-            # Capture tracking data if enabled
-            tracking_data = self._capture_tracking_data()
+                return result, contents, pre_types, post_types, tracking_data
+            else:
+                result = await super().do_execute(
+                    code, silent, store_history, user_expressions, allow_stdin,
+                    cell_meta=cell_meta, cell_id=self._cell_id
+                )
+                if has_shell_magics and result is None:
+                    result = {
+                        'status': 'ok',
+                        'execution_count': self.execution_count,
+                    }
 
-            return result, None, None, None, tracking_data
+                # Capture tracking data if enabled
+                tracking_data = self._capture_tracking_data()
+
+                return result, None, None, None, tracking_data
+        finally:
+            # Stop column tracking (restore original DataFrame methods)
+            if self._use_global_tracking and isinstance(self.shell.user_ns, TrackingDict):
+                self.shell.user_ns.stop_column_tracking()
 
     def _capture_tracking_data(self) -> Optional[dict]:
         """Capture and reset tracking data if tracking is enabled."""
@@ -540,7 +552,16 @@ class FerretKernel(IPythonKernel, Magics):
                 "writes": sorted([
                     k for k in user_ns.writes
                     if is_valid_variable(k, user_ns.get(k))
-                ])
+                ]),
+                # Column-level tracking for DataFrames
+                "column_reads_before_writes": {
+                    k: sorted(list(v))
+                    for k, v in user_ns.column_rbw.items()
+                },
+                "column_writes": {
+                    k: sorted(list(v))
+                    for k, v in user_ns.column_writes.items()
+                }
             }
             # Reset for next cell
             user_ns.reset_tracking()
@@ -578,7 +599,7 @@ class FerretKernel(IPythonKernel, Magics):
             }
         }
         if tracking is not None:
-            metadata['tracking'] = tracking
+            metadata['dynamic_dependencies'] = tracking
 
         has_cell_magics = code.startswith("%") or "\n%" in code
 

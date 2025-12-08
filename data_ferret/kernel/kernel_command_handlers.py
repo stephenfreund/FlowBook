@@ -297,7 +297,8 @@ class KernelCommandHandlers:
         variables haven't been modified by a cell.
 
         Args:
-            req: Compare request with two checkpoint names and optional keys filter
+            req: Compare request with two checkpoint names, optional keys filter,
+                 and optional column-level RBW mapping
 
         Returns:
             Response with diff result and is_leq flag
@@ -305,7 +306,13 @@ class KernelCommandHandlers:
         try:
             old = self.kernel._checkpoint.get(req.name1)
             new = self.kernel._checkpoint.get(req.name2)
-            diff = Checkpoint.diff(old, new, keys_to_include=req.keys_to_include, use_leq=True)
+            diff = Checkpoint.diff(
+                old,
+                new,
+                keys_to_include=req.keys_to_include,
+                use_leq=True,
+                column_rbw=req.column_rbw
+            )
 
             # is_leq is True if there are no differences
             is_leq = len(diff.differences) == 0

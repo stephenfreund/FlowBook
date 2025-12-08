@@ -26,6 +26,16 @@ class DynamicDependencies(BaseModel):
         default_factory=list,
         description="Variables written in this cell"
     )
+    column_reads_before_writes: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="For DataFrame variables, which columns were read before being written. "
+                    "Keys are variable paths (e.g., 'df', 'data[\"train\"]'), values are lists of column names."
+    )
+    column_writes: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="For DataFrame variables, which columns were written. "
+                    "Keys are variable paths, values are lists of column names."
+    )
 
 
 class OptimizationStep(BaseModel):

@@ -149,6 +149,12 @@ class CheckpointCompareLeqRequest(KernelCommandRequest):
         None,
         description="Optional set of variable names to include in comparison (typically read-before-write set).",
     )
+    column_rbw: Optional[Dict[str, Set[str]]] = Field(
+        None,
+        description="Optional column-level reads-before-writes. Maps variable path to set of "
+                    "column names that were read-before-write. When provided, only these columns "
+                    "are compared for each DataFrame.",
+    )
 
 
 class CheckpointCompareLeqResponse(KernelCommandResponse):

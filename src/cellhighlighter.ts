@@ -61,7 +61,7 @@ export class CellMetadataHighlighter {
       const ferretMetadata = metadata?.ferret as IFerretMetadata | undefined;
       const cellId = cell.model.id;
 
-      if (ferretMetadata && (ferretMetadata.optimization_potential || ferretMetadata.profile)) {
+      if (ferretMetadata && (ferretMetadata.optimization_potential || ferretMetadata.profile || ferretMetadata.dynamic_dependencies)) {
         this.panel.updateMetadata(ferretMetadata, cellId);
       } else {
         this.panel.clear();
@@ -135,7 +135,7 @@ export class CellMetadataHighlighter {
 
     // Update panel if this is the active cell
     if (this.tracker.activeCell === cell) {
-      if (ferretMetadata && (ferretMetadata.optimization_potential || ferretMetadata.profile)) {
+      if (ferretMetadata && (ferretMetadata.optimization_potential || ferretMetadata.profile || ferretMetadata.dynamic_dependencies)) {
         this.panel.updateMetadata(ferretMetadata, cellId);
       } else {
         this.panel.clear();

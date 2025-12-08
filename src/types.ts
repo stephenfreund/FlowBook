@@ -189,6 +189,8 @@ export interface IFerretProfileData {
 export interface IDynamicDependencies {
   reads_before_writes: string[];
   writes: string[];
+  column_reads_before_writes?: Record<string, string[]>;
+  column_writes?: Record<string, string[]>;
 }
 
 /**

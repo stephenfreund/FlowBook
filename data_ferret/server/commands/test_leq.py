@@ -364,8 +364,14 @@ class TestLeqCommand(NotebookCommand):
                             ferret_meta = FerretMetadata.from_cell(cell)
                             dynamic_deps = ferret_meta.get_dynamic_dependencies()
                             rbw_set: Set[str] = set()
+                            column_rbw: Dict[str, Set[str]] = {}
                             if dynamic_deps:
                                 rbw_set = set(dynamic_deps.reads_before_writes)
+                                # Extract column-level RBW for DataFrames
+                                if dynamic_deps.column_reads_before_writes:
+                                    column_rbw = {
+                                        k: set(v) for k, v in dynamic_deps.column_reads_before_writes.items()
+                                    }
 
                             # Step 2d: Save post-execution checkpoint
                             post_checkpoint_name = f"post_{cell_id}"
@@ -382,7 +388,8 @@ class TestLeqCommand(NotebookCommand):
                                     compare_response = kernel_command_client.checkpoint_compare_leq(
                                         pre_checkpoint_name,
                                         post_checkpoint_name,
-                                        keys_to_include=rbw_set
+                                        keys_to_include=rbw_set,
+                                        column_rbw=column_rbw if column_rbw else None
                                     )
 
                                 leq_passed = compare_response.is_leq
