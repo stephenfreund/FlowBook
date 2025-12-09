@@ -1,39 +1,132 @@
-"""FerretKernel - Enhanced IPython kernel with profiling and checkpoint support."""
+"""
+FerretKernel - Enhanced IPython kernel with profiling, checkpoints, and tracking.
+
+This module provides the core kernel implementation for DataFerret, extending
+IPython's kernel with advanced features for notebook analysis and optimization.
+
+Architecture Overview:
+    FerretKernel extends IPythonKernel and Magics to provide:
+
+    1. **Execution Profiling**: Integration with Scalene for CPU/memory profiling
+       of cell execution. Profiles are captured and sent to the frontend.
+
+    2. **Checkpointing**: Save and restore kernel state snapshots. Useful for
+       comparing variable values before/after execution or rolling back changes.
+
+    3. **Variable Tracking**: Track which variables are read/written during
+       cell execution using TrackingDict. This enables dynamic dependency analysis.
+
+    4. **Column-Level Tracking**: For pandas DataFrames, track which columns are
+       accessed, enabling fine-grained dependency analysis.
+
+    5. **Monotonicity Enforcement**: Optionally enforce that cells don't modify
+       variables they read before writing (prevents non-deterministic behavior).
+
+    6. **Timeout Handling**: Configurable per-cell timeouts with graceful cleanup.
+
+Key Components:
+    - FerretKernel: Main kernel class (this file)
+    - TrackingDict: Variable access tracking (tracking.py)
+    - MonotonicityEnforcer: Monotonicity constraint checking (monotonicity.py)
+    - Checkpoints: State snapshot management (checkpoint.py)
+    - ScaleneRunner: Profiler integration (scalene_runner.py)
+    - KernelCommandHandlers: Handler implementations (kernel_command_handlers.py)
+
+Communication:
+    The kernel communicates with the frontend via:
+    - Standard Jupyter messaging (execute_request, execute_reply)
+    - Custom comm channels:
+        - "debug_command": Debugger commands
+        - "kernel_command": Checkpoint/toggle commands
+
+Configuration:
+    Key settings (as instance attributes):
+    - _use_scalene: Enable/disable Scalene profiling
+    - _use_global_tracking: Enable/disable variable tracking
+    - _enforce_monotone_updates: Enable/disable monotonicity checking
+    - _force_checkpoints: Auto-checkpoint before each cell
+
+Usage:
+    The kernel is launched via the standard Jupyter kernel mechanism:
+
+        python -m data_ferret.kernel.ferret_kernel
+
+    Or via the installed kernel spec "ferret".
+"""
 
 import re
-import sys
 import time
 import traceback
 from typing import Any, Dict, Optional, Tuple
 
-from comm import create_comm
 from IPython.core.magic import Magics, line_cell_magic, magics_class
 from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
 
-from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints, filter_user_namespace, is_valid_variable
-from data_ferret.util.output import log, timer
+from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.deepcopyable import is_deepcopyable
 from data_ferret.kernel.display_helpers import DisplayHelper
 from data_ferret.kernel.ferret_pdb import FerretPdb
 from data_ferret.kernel.json_utils import make_json_safe
 from data_ferret.kernel.kernel_command_handlers import KernelCommandHandlers
 from data_ferret.kernel.kernel_commands import FinalMessage
+from data_ferret.kernel.models import ExecutionContext, ExecutionMetadata, ExecutionProfile, TrackingData
+from data_ferret.kernel.monotonicity import MonotonicityEnforcer
 from data_ferret.kernel.scalene_runner import ScaleneRunner
 from data_ferret.kernel.timeout_handler import CellTimeoutHandler
 from data_ferret.kernel.tracking import TrackingDict
+from data_ferret.util.output import log
+
+
+# =============================================================================
+# Checkpoint Command Configuration
+# =============================================================================
+
+# Maps checkpoint subcommand -> (arg_count, request_class_name, arg_names)
+CHECKPOINT_COMMANDS = {
+    "save": (1, "CheckpointSaveRequest", ["name"]),
+    "restore": (1, "CheckpointRestoreRequest", ["name"]),
+    "delete": (1, "CheckpointDeleteRequest", ["name"]),
+    "list": (0, "CheckpointListRequest", []),
+    "compare": (2, "CheckpointCompareRequest", ["name1", "name2"]),
+    "clear": (0, "CheckpointClearRequest", []),
+}
 
 
 @magics_class
 class FerretKernel(IPythonKernel, Magics):
-    """Enhanced IPython kernel with profiling, checkpoints, and debugging support."""
+    """
+    Enhanced IPython kernel with profiling, checkpoints, and debugging support.
 
-    # Configuration
+    This kernel extends IPython with features for notebook analysis:
+    - Scalene profiling for CPU/memory analysis
+    - State checkpointing and diffing
+    - Variable access tracking
+    - Monotonicity enforcement
+    - Cell timeout handling
+
+    Attributes:
+        _cell_id: Current cell being executed
+        _checkpoint: Checkpoint manager
+        _use_scalene: Whether Scalene profiling is enabled
+        _use_global_tracking: Whether variable tracking is enabled
+        _enforce_monotone_updates: Whether monotonicity is enforced
+        _force_checkpoints: Whether to auto-checkpoint before each cell
+    """
+
+    # =========================================================================
+    # Configuration Constants
+    # =========================================================================
+
     _default_cell_timeout = 30 * 60  # 30 minutes
-    _post_kb_grace = 1.0
-    _kill_timeout = 3.0
+    _post_kb_grace = 1.0  # Grace period after KeyboardInterrupt
+    _kill_timeout = 3.0  # Time to wait before force kill
     _verbose = False
-    _max_passes = 2
+    _max_passes = 2  # Max timeout handler passes
+
+    # =========================================================================
+    # Initialization
+    # =========================================================================
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -45,17 +138,19 @@ class FerretKernel(IPythonKernel, Magics):
         self.command_handlers = KernelCommandHandlers(self)
         self.pdb = FerretPdb()
 
-        # State
+        # Execution state
         self._cell_id: Optional[str] = None
         self._cell_timeout = self._default_cell_timeout
         self._executed_cell_ids: Dict[int, str] = {}
-        self._checkpoint = Checkpoints()
+
+        # Feature flags
         self._use_scalene = True
         self._force_checkpoints = False
         self._use_global_tracking = False
         self._enforce_monotone_updates = False
 
-        # Initialize Scalene runner
+        # Managers
+        self._checkpoint = Checkpoints()
         self._scalene = ScaleneRunner(self.shell, self._executed_cell_ids)
 
         # Register comm targets
@@ -63,7 +158,7 @@ class FerretKernel(IPythonKernel, Magics):
         self.comm_manager.register_target("kernel_command", self._kernel_command_comm_open)
 
     # =========================================================================
-    # Display Delegation
+    # Display Helpers
     # =========================================================================
 
     def display_cell_id(self) -> None:
@@ -85,49 +180,54 @@ class FerretKernel(IPythonKernel, Magics):
         self._display.display_checkpoint_diff(old, new)
 
     # =========================================================================
-    # Magic Commands
+    # Magic Commands - Feature Toggles
     # =========================================================================
 
     @line_cell_magic
     def enable_scalene(self, line: str, cell: str = "") -> None:
         """Enable Scalene profiling."""
         from data_ferret.kernel.kernel_commands import EnableScaleneRequest
+
         req = EnableScaleneRequest()
         response = self.command_handlers.handle_enable_scalene(req)
-        self.display_icon_and_text("🔍", response.message)
+        self.display_icon_and_text("\U0001F50D", response.message)
 
     @line_cell_magic
     def disable_scalene(self, line: str, cell: str = "") -> None:
         """Disable Scalene profiling."""
         from data_ferret.kernel.kernel_commands import DisableScaleneRequest
+
         req = DisableScaleneRequest()
         response = self.command_handlers.handle_disable_scalene(req)
-        self.display_icon_and_text("🔍", response.message)
+        self.display_icon_and_text("\U0001F50D", response.message)
 
     @line_cell_magic
     def force_checkpoints(self, line: str, cell: str = "") -> None:
         """Enable or disable force checkpoints mode."""
         from data_ferret.kernel.kernel_commands import ForceCheckpointsRequest
+
         enabled = line.strip().lower() not in ["false", "0", "disable", "off"]
         req = ForceCheckpointsRequest(enabled=enabled)
         response = self.command_handlers.handle_force_checkpoints(req)
-        self.display_icon_and_text("✅", response.message)
+        self.display_icon_and_text("\u2705", response.message)
 
     @line_cell_magic
     def enable_global_tracking(self, line: str, cell: str = "") -> None:
         """Enable global variable tracking."""
         from data_ferret.kernel.kernel_commands import EnableGlobalTrackingRequest
+
         req = EnableGlobalTrackingRequest()
         response = self.command_handlers.handle_enable_global_tracking(req)
-        self.display_icon_and_text("📊", response.message)
+        self.display_icon_and_text("\U0001F4CA", response.message)
 
     @line_cell_magic
     def disable_global_tracking(self, line: str, cell: str = "") -> None:
         """Disable global variable tracking."""
         from data_ferret.kernel.kernel_commands import DisableGlobalTrackingRequest
+
         req = DisableGlobalTrackingRequest()
         response = self.command_handlers.handle_disable_global_tracking(req)
-        self.display_icon_and_text("📊", response.message)
+        self.display_icon_and_text("\U0001F4CA", response.message)
 
     @line_cell_magic
     def enable_monotone_updates(self, line: str, cell: str = "") -> None:
@@ -137,108 +237,89 @@ class FerretKernel(IPythonKernel, Magics):
             log("[monotone] Auto-enabling global tracking (required for RBW detection)")
             self.enable_global_tracking("", "")
         self._enforce_monotone_updates = True
-        self.display_icon_and_text("✅", "Monotone updates enforcement enabled")
+        self.display_icon_and_text("\u2705", "Monotone updates enforcement enabled")
 
     @line_cell_magic
     def disable_monotone_updates(self, line: str, cell: str = "") -> None:
         """Disable monotone updates enforcement."""
         log("[monotone] Disabling monotone updates enforcement")
         self._enforce_monotone_updates = False
-        self.display_icon_and_text("✅", "Monotone updates enforcement disabled")
+        self.display_icon_and_text("\u2705", "Monotone updates enforcement disabled")
+
+    # =========================================================================
+    # Magic Commands - Checkpoints
+    # =========================================================================
 
     @line_cell_magic
     def checkpoint(self, line: str, cell: str = "") -> None:
         """
-        Checkpoint cell magic.
+        Checkpoint management magic command.
 
         Usage:
-            %checkpoint save <name>
-            %checkpoint restore <name>
-            %checkpoint delete <name>
-            %checkpoint list
-            %checkpoint compare <name1> <name2>
-            %checkpoint clear
+            %checkpoint save <name>     - Save current state
+            %checkpoint restore <name>  - Restore saved state
+            %checkpoint delete <name>   - Delete a checkpoint
+            %checkpoint list            - List all checkpoints
+            %checkpoint compare <a> <b> - Compare two checkpoints
+            %checkpoint clear           - Delete all checkpoints
         """
-        from data_ferret.kernel.kernel_commands import (
-            CheckpointClearRequest,
-            CheckpointCompareRequest,
-            CheckpointDeleteRequest,
-            CheckpointListRequest,
-            CheckpointRestoreRequest,
-            CheckpointSaveRequest,
-        )
-
         args = line.split()
         if not args:
-            self.display_icon_and_text("❌", "Usage: checkpoint <command> [args]")
+            self.display_icon_and_text("\u274C", "Usage: checkpoint <command> [args]")
             return
 
         try:
             self._handle_checkpoint_command(args)
         except Exception as e:
-            self.display_icon_and_text("❌", f"Error: {e}")
+            self.display_icon_and_text("\u274C", f"Error: {e}")
 
     def _handle_checkpoint_command(self, args: list) -> None:
-        """Route checkpoint subcommand to appropriate handler."""
-        from data_ferret.kernel.kernel_commands import (
-            CheckpointClearRequest,
-            CheckpointCompareRequest,
-            CheckpointDeleteRequest,
-            CheckpointListRequest,
-            CheckpointRestoreRequest,
-            CheckpointSaveRequest,
-        )
+        """
+        Route checkpoint subcommand to appropriate handler.
+
+        Uses CHECKPOINT_COMMANDS table for dispatch, reducing boilerplate.
+        """
+        from data_ferret.kernel import kernel_commands as cmd_module
 
         cmd = args[0]
+        if cmd not in CHECKPOINT_COMMANDS:
+            self.display_icon_and_text("\u274C", f"Unknown checkpoint command: {cmd}")
+            return
 
+        arg_count, request_class_name, arg_names = CHECKPOINT_COMMANDS[cmd]
+
+        # Validate argument count
+        if len(args) - 1 != arg_count:
+            usage = f"checkpoint {cmd} " + " ".join(f"<{n}>" for n in arg_names)
+            self.display_icon_and_text("\u274C", f"Usage: {usage}")
+            return
+
+        # Build request
+        request_class = getattr(cmd_module, request_class_name)
+        kwargs = {name: args[i + 1] for i, name in enumerate(arg_names)}
+        req = request_class(**kwargs)
+
+        # Get and invoke handler
+        handler = self.command_handlers.get_handler(f"checkpoint_{cmd}")
+        response = handler(req)
+
+        # Display result (command-specific formatting)
+        self._display_checkpoint_response(cmd, response, args)
+
+    def _display_checkpoint_response(self, cmd: str, response, args: list) -> None:
+        """Format and display checkpoint command response."""
         if cmd == "save":
-            if len(args) != 2:
-                self.display_icon_and_text("❌", "Usage: checkpoint save <name>")
-                return
-            req = CheckpointSaveRequest(name=args[1])
-            response = self.command_handlers.handle_checkpoint_save(req)
             self._display_checkpoint_save_result(response)
-
-        elif cmd == "restore":
-            if len(args) != 2:
-                self.display_icon_and_text("❌", "Usage: checkpoint restore <name>")
-                return
-            req = CheckpointRestoreRequest(name=args[1])
-            response = self.command_handlers.handle_checkpoint_restore(req)
-            self.display_icon_and_text("✅", response.message)
-
-        elif cmd == "delete":
-            if len(args) != 2:
-                self.display_icon_and_text("❌", "Usage: checkpoint delete <name>")
-                return
-            req = CheckpointDeleteRequest(name=args[1])
-            response = self.command_handlers.handle_checkpoint_delete(req)
-            self.display_icon_and_text("✅", response.message)
-
         elif cmd == "list":
-            req = CheckpointListRequest()
-            response = self.command_handlers.handle_checkpoint_list(req)
             self.display_icon_and_text(
-                "✅", f"Checkpoints: {', '.join(sorted(response.checkpoints))}"
+                "\u2705", f"Checkpoints: {', '.join(sorted(response.checkpoints))}"
             )
-
         elif cmd == "compare":
-            if len(args) != 3:
-                self.display_icon_and_text("❌", "Usage: checkpoint compare <name1> <name2>")
-                return
-            req = CheckpointCompareRequest(name1=args[1], name2=args[2])
-            self.command_handlers.handle_checkpoint_compare(req)
             old = self._checkpoint.get(args[1])
             new = self._checkpoint.get(args[2])
             self.diff_checkpoints(old, new)
-
-        elif cmd == "clear":
-            req = CheckpointClearRequest()
-            response = self.command_handlers.handle_checkpoint_clear(req)
-            self.display_icon_and_text("✅", response.message)
-
         else:
-            self.display_icon_and_text("❌", f"Unknown checkpoint command: {cmd}")
+            self.display_icon_and_text("\u2705", response.message)
 
     def _display_checkpoint_save_result(self, response) -> None:
         """Format and display checkpoint save result."""
@@ -253,14 +334,14 @@ class FerretKernel(IPythonKernel, Magics):
         }
         if response.removed:
             self.display_icon_and_text(
-                "✅",
+                "\u2705",
                 f"{response.duration:.2f}s [removed: {', '.join(sorted(response.removed.keys()))}]",
                 contents=added_text,
                 metadata=metadata,
             )
         else:
             self.display_icon_and_text(
-                "✅",
+                "\u2705",
                 f"Checkpoint saved in {response.duration:.2f}s",
                 contents=added_text,
                 metadata=metadata,
@@ -291,6 +372,7 @@ class FerretKernel(IPythonKernel, Magics):
 
             # Dynamically build request class name
             from data_ferret.kernel import kernel_commands as cmd_module
+
             parts = command.split("_")
             request_class_name = "".join(p.capitalize() for p in parts) + "Request"
             request_class = getattr(cmd_module, request_class_name)
@@ -307,7 +389,7 @@ class FerretKernel(IPythonKernel, Magics):
             comm.send(final_msg.model_dump())
 
     # =========================================================================
-    # Execution
+    # Execution - Main Entry Point
     # =========================================================================
 
     async def do_execute(
@@ -321,23 +403,47 @@ class FerretKernel(IPythonKernel, Magics):
         cell_meta: Optional[dict] = None,
         cell_id: Optional[str] = None,
     ) -> dict:
-        """Execute code with optional profiling and checkpointing."""
-        self._extract_cell_id(cell_id, cell_meta)
-        code, timeout = self._parse_timeout_from_code(code)
+        """
+        Execute code with profiling, tracking, and optional monotonicity enforcement.
+
+        This is the main execution entry point, called for each cell. It orchestrates:
+        1. Context preparation (cell ID, timeout parsing, tracking reset)
+        2. Optional pre-execution checkpoint (force_checkpoints mode)
+        3. Optional monotonicity pre-state save
+        4. Code execution with profiling
+        5. Result display
+        6. Optional monotonicity check and enforcement
+        7. Timeout handling
+
+        Args:
+            code: The code to execute
+            silent: If True, suppress output
+            store_history: If True, store in execution history
+            user_expressions: Expressions to evaluate after execution
+            allow_stdin: If True, allow stdin requests
+            cell_meta: Cell metadata from frontend
+            cell_id: Cell identifier
+
+        Returns:
+            Execution result dict with status, execution_count, etc.
+        """
+        # Prepare execution context
+        context = self._prepare_execution(code, cell_id, cell_meta)
         self.display_cell_id()
-        self._reset_tracking()
 
-        force_checkpoints = self._force_checkpoints
+        # Pre-execution checkpoints
+        if self._force_checkpoints:
+            self.checkpoint(f"save pre_{context.cell_id}")
 
-        if force_checkpoints:
-            self.checkpoint(f"save pre_{self._cell_id}")
-
+        # Setup monotonicity enforcer if enabled
+        monotone: Optional[MonotonicityEnforcer] = None
         if self._enforce_monotone_updates:
-            with timer(key="monotone_save_checkpoint", message=f"[monotone] Saving pre-checkpoint for cell {self._cell_id}"):
-                self._checkpoint.save("_monotone_pre", self.shell.user_ns)
+            monotone = MonotonicityEnforcer(self._checkpoint, self.shell.user_ns)
+            monotone.save_pre_state(context.cell_id)
 
+        # Setup timeout handler
         timeout_handler = CellTimeoutHandler(
-            timeout=timeout,
+            timeout=context.timeout,
             post_kb_grace=self._post_kb_grace,
             kill_timeout=self._kill_timeout,
             verbose=self._verbose,
@@ -348,95 +454,76 @@ class FerretKernel(IPythonKernel, Magics):
 
         try:
             start_time = time.time()
-            result, profile_contents, pre_types, post_types, tracking = await self._execute_with_profiling(
-                code, silent, store_history, user_expressions, allow_stdin, cell_meta
+            result, tracking = await self._execute_with_profiling(
+                context, silent, store_history, user_expressions, allow_stdin, cell_meta
             )
             normal_exit = True
-            end_time = time.time()
+            duration = time.time() - start_time
 
-            # Only display execution result if not an error
-            if result.get('status') != 'error':
-                self._display_execution_result(
-                    end_time - start_time, profile_contents, pre_types, post_types, tracking, code
-                )
+            # Display results (skip on error)
+            if result.get("status") != "error":
+                self._display_execution_result(context, duration, tracking)
 
-            if force_checkpoints:
-                self._show_checkpoint_diff()
+                # Show checkpoint diff if force_checkpoints enabled
+                if self._force_checkpoints:
+                    self._show_checkpoint_diff(context)
 
-            # Monotonicity check
-            if self._enforce_monotone_updates and result.get('status') != 'error':
-                with timer(key="monotone_check", message=f"[monotone] Checking monotonicity for cell {self._cell_id}"):
-                    rbw_vars = set(tracking.get('reads_before_writes', [])) if tracking else set()
-                    log(f"[monotone] Read-before-write vars: {rbw_vars}")
-                    if rbw_vars:
-                        pre = self._checkpoint.get("_monotone_pre")
-                        # Convert column_reads_before_writes from Dict[str, List] to Dict[str, Set]
-                        column_rbw_raw = tracking.get('column_reads_before_writes', {}) if tracking else {}
-                        column_rbw = {k: set(v) for k, v in column_rbw_raw.items()}
-                        with timer(key="monotone_diff", message="[monotone] Computing diff"):
-                            post = Checkpoint("_monotone_post", self.shell.user_ns, {})
-                            diff_result = Checkpoint.diff(pre, post, keys_to_include=rbw_vars, use_leq=True, column_rbw=column_rbw)
-                        log(f"[monotone] Diff result: {list(diff_result.differences.keys()) if diff_result.differences else 'no differences'}")
-                        if diff_result.differences:
-                            log("[monotone] FAILED - reverting state")
-                            with timer(key="monotone_restore", message="[monotone] Restoring checkpoint"):
-                                self._checkpoint.restore("_monotone_pre", self.shell.user_ns)
-                            error_details = self._format_diff_details(diff_result)
-                            error_summary = f"Monotonicity violation: {list(diff_result.differences.keys())}"
-                            self.send_response(self.iopub_socket, 'error', {
-                                'ename': 'MonotonicityError',
-                                'evalue': error_summary,
-                                'traceback': [error_details]
-                            })
-                            result = {
-                                'status': 'error',
-                                'execution_count': self.execution_count,
-                                'ename': 'MonotonicityError',
-                                'evalue': error_summary,
-                                'traceback': [error_details]
-                            }
-                        else:
-                            log("[monotone] PASSED")
-                    else:
-                        log("[monotone] No RBW vars to check, skipping")
-                    self._checkpoint.delete("_monotone_pre")
+                # Check monotonicity if enabled
+                if monotone and tracking:
+                    violation = monotone.check_and_enforce(tracking, context.cell_id)
+                    if violation:
+                        self._send_monotonicity_error(violation)
+                        return violation.to_error_result(self.execution_count)
 
-            # print(f"[FerretKernel] do_execute returning status: {result.get('status')}", file=sys.__stderr__)
             return result
 
         except KeyboardInterrupt:
-            # Cell execution timed out
-            timeout_msg = f"Cell execution timed out after {timeout} seconds"
-
-            # Send error to client via iopub socket
-            self.send_response(self.iopub_socket, 'error', {
-                'ename': 'TimeoutError',
-                'evalue': timeout_msg,
-                'traceback': [timeout_msg]
-            })
-
-            # Return error result
-            return {
-                'status': 'error',
-                'execution_count': self.execution_count,
-                'ename': 'TimeoutError',
-                'evalue': timeout_msg,
-                'traceback': [timeout_msg]
-            }
+            return self._handle_timeout_error(context.timeout)
 
         finally:
             timeout_handler.cancel()
             if not normal_exit:
                 await timeout_handler.cleanup_on_error()
 
-    def _extract_cell_id(self, cell_id: Optional[str], cell_meta: Optional[dict]) -> None:
-        """Extract and store the cell ID from execution parameters."""
+    # =========================================================================
+    # Execution - Helpers
+    # =========================================================================
+
+    def _prepare_execution(
+        self,
+        code: str,
+        cell_id: Optional[str],
+        cell_meta: Optional[dict],
+    ) -> ExecutionContext:
+        """
+        Prepare execution context from request parameters.
+
+        Extracts cell ID, parses timeout directive, resets tracking state.
+
+        Returns:
+            ExecutionContext with parsed parameters
+        """
+        # Extract cell ID
         if cell_id is not None:
             self._cell_id = cell_id
         elif cell_meta is not None:
             self._cell_id = cell_meta.get("cell_id", None)
         else:
             self._cell_id = None
+
+        # Parse timeout from code
+        parsed_code, timeout = self._parse_timeout_from_code(code)
+
+        # Reset tracking for new execution
+        if isinstance(self.shell.user_ns, TrackingDict):
+            self.shell.user_ns.reset_tracking()
+
+        return ExecutionContext(
+            cell_id=self._cell_id,
+            code=parsed_code,
+            timeout=timeout,
+            original_code=code,
+        )
 
     def _parse_timeout_from_code(self, code: str) -> Tuple[str, float]:
         """Parse timeout directive from code if present."""
@@ -448,194 +535,193 @@ class FerretKernel(IPythonKernel, Magics):
             timeout = self._default_cell_timeout
         return code, timeout
 
-    def _reset_tracking(self) -> None:
-        """Reset tracking data if user_ns is a TrackingDict."""
-        if isinstance(self.shell.user_ns, TrackingDict):
-            self.shell.user_ns.reset_tracking()
-
-    def _format_diff_details(self, diff_result) -> str:
-        """Format diff result into human-readable error details."""
-        from data_ferret.kernel.types import ValueComparison
-
-        def format_node(var_name: str, node, path: str = "") -> list:
-            lines = []
-            full_path = f"{var_name}{path}" if path else var_name
-            if isinstance(node, ValueComparison):
-                lines.append(f"  {full_path}: {node.message}")
-            elif isinstance(node, dict):
-                for key, child in node.items():
-                    if key == "_truncated":
-                        if isinstance(child, ValueComparison):
-                            lines.append(f"  {full_path}: (truncated) {child.message}")
-                        continue
-                    lines.extend(format_node(var_name, child, f"{path}{key}"))
-            return lines
-
-        all_lines = ["Monotonicity violation - the following read-before-write variables were modified:"]
-        for var_name, node in diff_result.differences.items():
-            all_lines.append(f"\n{var_name}:")
-            detail_lines = format_node(var_name, node)
-            all_lines.extend(detail_lines[:5])
-            if len(detail_lines) > 5:
-                all_lines.append(f"  ... and {len(detail_lines) - 5} more differences")
-
-        return "\n".join(all_lines)
-
     async def _execute_with_profiling(
         self,
-        code: str,
+        context: ExecutionContext,
         silent: bool,
         store_history: bool,
         user_expressions: Optional[dict],
         allow_stdin: bool,
         cell_meta: Optional[dict],
-    ) -> Tuple[dict, Optional[str], Optional[dict], Optional[dict], Optional[dict]]:
-        """Execute code with optional Scalene profiling and tracking."""
-        has_cell_magics = code.startswith("%") or "\n%" in code
-        has_shell_magics = code.startswith("!") or "\n!" in code
-        should_profile = self._use_scalene and self._cell_id is not None and not has_cell_magics and not has_shell_magics
+    ) -> Tuple[dict, Optional[TrackingData]]:
+        """
+        Execute code with optional Scalene profiling and tracking.
 
-        # Capture pre_types BEFORE starting column tracking to avoid recording
-        # all DataFrame column accesses from type introspection
-        pre_types = None
+        Returns:
+            Tuple of (execution result, tracking data or None)
+        """
+        user_ns = self.shell.user_ns
+        should_profile = self._use_scalene and context.should_profile
+
+        # Capture pre-execution types (before column tracking to avoid pollution)
         if should_profile:
-            pre_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
+            self._pre_types = {
+                k: str(v)
+                for k, v in self._checkpoint.type_models(user_ns).items()
+            }
 
-        # Start column tracking if global tracking is enabled
-        if self._use_global_tracking and isinstance(self.shell.user_ns, TrackingDict):
-            self.shell.user_ns.start_column_tracking()
+        # Execute with tracking if enabled
+        tracking_data: Optional[TrackingData] = None
 
-        # Initialize result variables
-        result = None
-        contents = None
-        tracking_data = None
-
-        try:
-            if should_profile:
-                result, contents = await self._scalene.run(code, self._cell_id, store_history)
-
-                # If scalene detected an error, send error message on iopub
-                if result.get('status') == 'error':
-                    self.send_response(self.iopub_socket, 'error', {
-                        'ename': result.get('ename', 'UnknownError'),
-                        'evalue': result.get('evalue', ''),
-                        'traceback': result.get('traceback', [])
-                    })
-
-                # Capture tracking data while column tracking is still active
-                tracking_data = self._capture_tracking_data()
-            else:
-                result = await super().do_execute(
-                    code, silent, store_history, user_expressions, allow_stdin,
-                    cell_meta=cell_meta, cell_id=self._cell_id
+        if self._use_global_tracking and isinstance(user_ns, TrackingDict):
+            with user_ns.track_execution():
+                result, self._profile_contents = await self._do_execute_code(
+                    context, should_profile, silent, store_history,
+                    user_expressions, allow_stdin, cell_meta
                 )
-                if has_shell_magics and result is None:
-                    result = {
-                        'status': 'ok',
-                        'execution_count': self.execution_count,
-                    }
+            tracking_data = user_ns.get_tracking_data()
+        else:
+            result, self._profile_contents = await self._do_execute_code(
+                context, should_profile, silent, store_history,
+                user_expressions, allow_stdin, cell_meta
+            )
 
-                # Capture tracking data while column tracking is still active
-                tracking_data = self._capture_tracking_data()
-        finally:
-            # Stop column tracking (restore original DataFrame methods)
-            if self._use_global_tracking and isinstance(self.shell.user_ns, TrackingDict):
-                self.shell.user_ns.stop_column_tracking()
-
-        # These operations access DataFrame columns during introspection, so they
-        # must happen AFTER column tracking is stopped
+        # Post-profiling cleanup (after column tracking stopped)
         if should_profile:
             self._remove_non_deepcopyable_objects()
-
-        # Capture post_types AFTER stopping column tracking to avoid recording
-        # all DataFrame column accesses from type introspection
-        post_types = None
-        if should_profile:
-            post_types = {k: str(v) for k, v in self._checkpoint.type_models(self.shell.user_ns).items()}
-
-        return result, contents, pre_types, post_types, tracking_data
-
-    def _capture_tracking_data(self) -> Optional[dict]:
-        """Capture and reset tracking data if tracking is enabled."""
-        if self._use_global_tracking and isinstance(self.shell.user_ns, TrackingDict):
-            user_ns = self.shell.user_ns
-            tracking_data = {
-                "reads_before_writes": sorted([
-                    k for k in user_ns.reads_before_writes
-                    if is_valid_variable(k, user_ns.get(k))
-                ]),
-                "writes": sorted([
-                    k for k in user_ns.writes
-                    if is_valid_variable(k, user_ns.get(k))
-                ]),
-                # Column-level tracking for DataFrames
-                "column_reads_before_writes": {
-                    k: sorted(list(v))
-                    for k, v in user_ns.column_rbw.items()
-                },
-                "column_writes": {
-                    k: sorted(list(v))
-                    for k, v in user_ns.column_writes.items()
-                }
+            self._post_types = {
+                k: str(v)
+                for k, v in self._checkpoint.type_models(user_ns).items()
             }
-            # Reset for next cell
-            user_ns.reset_tracking()
-            return tracking_data
-        return None
+
+        return result, tracking_data
+
+    async def _do_execute_code(
+        self,
+        context: ExecutionContext,
+        should_profile: bool,
+        silent: bool,
+        store_history: bool,
+        user_expressions: Optional[dict],
+        allow_stdin: bool,
+        cell_meta: Optional[dict],
+    ) -> Tuple[dict, Optional[str]]:
+        """
+        Execute code with or without Scalene profiling.
+
+        Returns:
+            Tuple of (execution result, profile contents or None)
+        """
+        if should_profile:
+            result, contents = await self._scalene.run(
+                context.code, context.cell_id, store_history
+            )
+            # Send error to iopub if Scalene detected one
+            if result.get("status") == "error":
+                self.send_response(
+                    self.iopub_socket,
+                    "error",
+                    {
+                        "ename": result.get("ename", "UnknownError"),
+                        "evalue": result.get("evalue", ""),
+                        "traceback": result.get("traceback", []),
+                    },
+                )
+            return result, contents
+        else:
+            result = await super().do_execute(
+                context.code,
+                silent,
+                store_history,
+                user_expressions,
+                allow_stdin,
+                cell_meta=cell_meta,
+                cell_id=context.cell_id,
+            )
+            # Handle shell magic returning None
+            if context.has_shell_magics and result is None:
+                result = {"status": "ok", "execution_count": self.execution_count}
+            return result, None
 
     def _remove_non_deepcopyable_objects(self) -> None:
         """Remove objects that can't be deep copied from user namespace."""
+        from data_ferret.kernel.checkpoint import filter_user_namespace
+
         user_ns = filter_user_namespace(self.shell.user_ns)
         non_copyable = [k for k, v in user_ns.items() if not is_deepcopyable(v)]
         for k in non_copyable:
             del self.shell.user_ns[k]
         if non_copyable:
             self.display_icon_and_text(
-                "⚠️",
-                f"The following objects cannot be passed between cells: {', '.join(non_copyable)}"
+                "\u26A0\uFE0F",
+                f"The following objects cannot be passed between cells: {', '.join(non_copyable)}",
             )
 
     def _display_execution_result(
         self,
+        context: ExecutionContext,
         duration: float,
-        profile_contents: Optional[str],
-        pre_types: Optional[dict],
-        post_types: Optional[dict],
-        tracking: Optional[dict],
-        code: str,
+        tracking: Optional[TrackingData],
     ) -> None:
         """Display execution timing and profile results."""
-        metadata = {
-            'profile': {
-                'duration': duration,
-                'profile': profile_contents if profile_contents is not None else "",
-                'env': pre_types if pre_types is not None else {},
-                'env_after': post_types if post_types is not None else {},
-            }
-        }
-        if tracking is not None:
-            metadata['dynamic_dependencies'] = tracking
+        # Build metadata
+        profile = ExecutionProfile(
+            duration=duration,
+            profile=getattr(self, "_profile_contents", None) or "",
+            env=getattr(self, "_pre_types", {}),
+            env_after=getattr(self, "_post_types", {}),
+        )
+        metadata = ExecutionMetadata(
+            profile=profile,
+            dynamic_dependencies=tracking,
+        )
 
-        has_cell_magics = code.startswith("%") or "\n%" in code
+        # Display appropriate output
+        if self._profile_contents:
+            self.display_icon_and_text(
+                "\U0001F50D",
+                f"{duration:0.2f}s",
+                contents=self._profile_contents,
+                metadata=metadata.to_display_metadata(),
+            )
+        elif not context.has_cell_magics:
+            self.display_icon_and_text(
+                "\u23F1\uFE0F",
+                f"{duration:0.2f}s",
+                metadata=metadata.to_display_metadata(),
+            )
 
-        if profile_contents is not None:
-            self.display_icon_and_text("🔍", f"{duration:0.2f}s", contents=profile_contents, metadata=metadata)
-        elif not has_cell_magics:
-            self.display_icon_and_text("⏱️", f"{duration:0.2f}s", metadata=metadata)
-
-    def _show_checkpoint_diff(self) -> None:
-        """Show diff between checkpoint and current state."""
+    def _show_checkpoint_diff(self, context: ExecutionContext) -> None:
+        """Show diff between pre-checkpoint and current state."""
         user_ns = self._checkpoint.checkpointable_vars(self.shell.user_ns)
         user_ns = self._checkpoint.checkpointable_values(user_ns)
-        old = self._checkpoint.get(f"pre_{self._cell_id}")
+        old = self._checkpoint.get(f"pre_{context.cell_id}")
         start_time = time.time()
-        new = Checkpoint(f"_tmp", user_ns, {})
+        new = Checkpoint("_tmp", user_ns, {})
         self.diff_checkpoints(old, new)
-        end_time = time.time()
-        self._display.display_icon_and_text("⏱️", f"checkpoint diff: {end_time - start_time:0.2f}s")
+        duration = time.time() - start_time
+        self._display.display_icon_and_text("\u23F1\uFE0F", f"checkpoint diff: {duration:0.2f}s")
+
+    def _send_monotonicity_error(self, violation) -> None:
+        """Send monotonicity error via iopub socket."""
+        self.send_response(
+            self.iopub_socket,
+            "error",
+            {
+                "ename": "MonotonicityError",
+                "evalue": violation.error_summary,
+                "traceback": [violation.diff_details],
+            },
+        )
+
+    def _handle_timeout_error(self, timeout: float) -> dict:
+        """Create timeout error result."""
+        timeout_msg = f"Cell execution timed out after {timeout} seconds"
+        self.send_response(
+            self.iopub_socket,
+            "error",
+            {"ename": "TimeoutError", "evalue": timeout_msg, "traceback": [timeout_msg]},
+        )
+        return {
+            "status": "error",
+            "execution_count": self.execution_count,
+            "ename": "TimeoutError",
+            "evalue": timeout_msg,
+            "traceback": [timeout_msg],
+        }
 
     # =========================================================================
-    # JSON Utilities (exposed for compatibility)
+    # JSON Utilities
     # =========================================================================
 
     def _make_json_safe(self, obj: Any) -> Any:

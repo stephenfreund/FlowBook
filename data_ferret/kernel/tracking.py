@@ -1,16 +1,47 @@
 """
-TrackingDict is a dictionary that tracks reads-before-write, new_vars, and writes.
+TrackingDict - Variable access tracking for dynamic dependency analysis.
 
-This implementation uses single storage (the parent dict) to avoid synchronization
-issues that occur with dual storage when IPython's internal methods bypass our
-overridden methods.
+This module provides TrackingDict, a dict subclass that tracks variable access
+patterns during cell execution. It records:
 
-Also supports column-level tracking for DataFrames via ColumnAccessTracker.
+- reads_before_writes: Variables read before being written (input dependencies)
+- writes: All variables written during execution
+- Column-level tracking: Which DataFrame columns are read/written
+
+Architecture:
+    TrackingDict wraps the IPython user namespace and intercepts __getitem__
+    and __setitem__ to track access patterns. Column-level tracking is handled
+    by ColumnAccessTracker, which monkey-patches pandas DataFrame methods.
+
+Usage:
+    The kernel enables tracking by replacing user_ns with a TrackingDict:
+
+        user_ns = TrackingDict(user_ns)
+
+    For each cell execution, use the context manager:
+
+        with user_ns.track_execution():
+            exec(code, user_ns)
+        tracking_data = user_ns.get_tracking_data()
+
+    Or manually:
+
+        user_ns.reset_tracking()
+        user_ns.start_column_tracking()
+        try:
+            exec(code, user_ns)
+        finally:
+            user_ns.stop_column_tracking()
+        tracking_data = user_ns.get_tracking_data()
+
+Note:
+    This implementation uses single storage (the parent dict) to avoid
+    synchronization issues that occur with dual storage when IPython's
+    internal methods bypass our overridden methods.
 """
 
-
-import sys
-from typing import Dict, Set
+from contextlib import contextmanager
+from typing import Dict, Generator, Set
 
 from .column_tracking import ColumnAccessTracker, walk_dataframes
 
@@ -89,6 +120,66 @@ class TrackingDict(dict):
 
     def __delitem__(self, key):
         super().__delitem__(key)
+
+    # =========================================================================
+    # Context Manager API
+    # =========================================================================
+
+    @contextmanager
+    def track_execution(self) -> Generator[None, None, None]:
+        """
+        Context manager for tracking a cell execution.
+
+        Handles the full lifecycle of tracking: reset, start column tracking,
+        execute (yield), and stop column tracking. After the context exits,
+        call get_tracking_data() to retrieve the captured data.
+
+        Usage:
+            with user_ns.track_execution():
+                exec(code, user_ns)
+            data = user_ns.get_tracking_data()
+
+        Yields:
+            None - execute your code inside the with block
+        """
+        self.reset_tracking()
+        self.start_column_tracking()
+        try:
+            yield
+        finally:
+            self.stop_column_tracking()
+
+    def get_tracking_data(self) -> "TrackingData":
+        """
+        Return captured tracking data as a Pydantic model.
+
+        Call this after cell execution (outside the track_execution context)
+        to get the captured variable access patterns.
+
+        Returns:
+            TrackingData model with reads_before_writes, writes, and column data
+        """
+        from .checkpoint import is_valid_variable
+        from .models import TrackingData
+
+        return TrackingData(
+            reads_before_writes=sorted([
+                k for k in self._reads_before_writes
+                if is_valid_variable(k, self.get(k))
+            ]),
+            writes=sorted([
+                k for k in self._writes
+                if is_valid_variable(k, self.get(k))
+            ]),
+            column_reads_before_writes={
+                k: sorted(list(v))
+                for k, v in self.column_rbw.items()
+            },
+            column_writes={
+                k: sorted(list(v))
+                for k, v in self.column_writes.items()
+            },
+        )
 
 
 # from IPython import get_ipython
