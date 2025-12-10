@@ -5,7 +5,7 @@
 import { NotebookPanel } from '@jupyterlab/notebook';
 import { IHistoryEntry, IHistoryState } from './types';
 import { ISignal, Signal } from '@lumino/signaling';
-import { indexToAlpha } from './cellindexutils';
+import { indexToAlpha } from '../cellindexutils';
 
 /**
  * Generate a unique ID for history entries

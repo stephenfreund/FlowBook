@@ -4,7 +4,7 @@
 
 import { NotebookPanel } from '@jupyterlab/notebook';
 import { showDialog, Dialog } from '@jupyterlab/apputils';
-import { KernelInfo } from './types';
+import { KernelInfo } from './ferret/types';
 
 /**
  * Utility functions for working with Jupyter kernels

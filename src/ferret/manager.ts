@@ -7,8 +7,8 @@ import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
 import { ICommandPalette } from '@jupyterlab/apputils';
 import { Notification } from '@jupyterlab/apputils';
 
-import { FerretAPI } from './api';
-import { KernelUtils } from './kernel';
+import { FerretAPI } from '../api';
+import { KernelUtils } from '../kernel';
 import {
   CommandInfo,
   CommandResult,
@@ -16,7 +16,7 @@ import {
   FERRET_COMMANDS
 } from './types';
 import { NotebookHistoryManager } from './history';
-import { CommandExecutionDialog } from './executiondialog';
+import { CommandExecutionDialog } from '../executiondialog';
 
 /**
  * Manages Ferret commands, their registration, and execution

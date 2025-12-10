@@ -25,16 +25,48 @@ class Output:
     def __init__(self, *, timings_file: str = None):
         if timings_file is None:
             # Check environment variable first, then fall back to default
-            timings_file = os.environ.get('FERRET_TIMINGS_FILE', 'ferret-times.json')
+            timings_file = os.environ.get("FERRET_TIMINGS_FILE", "ferret-times.json")
         self.pending = None
         self.contexts = []
         self.output_contexts = []
-        self.file = sys.stdout
+        # Don't store file reference - resolve lazily on each write
+        self.file = None
         self.lock = threading.RLock()
         self.timings: Timings = []
         self.timings_file = timings_file
         self.quiet = 0
         atexit.register(self._print_timings)
+
+    def _is_kernel_context(self):
+        """Detect if running inside a Jupyter/IPython kernel."""
+        if not hasattr(self, '_in_kernel'):
+            self._in_kernel = False
+            try:
+                from IPython import get_ipython
+                ip = get_ipython()
+                self._in_kernel = ip is not None and ip.__class__.__name__ == 'ZMQInteractiveShell'
+            except ImportError:
+                pass
+        return self._in_kernel
+
+    def _get_output_file(self):
+        """
+        Get the output file handle.
+
+        In Jupyter kernel context, writes to jupyter.log file to avoid
+        polluting notebook cell outputs. Otherwise writes to stdout.
+
+        Returns:
+            File handle for output
+        """
+        if self._is_kernel_context():
+            if not hasattr(self, '_log_file') or self._log_file is None:
+                self._log_file = open('jupyter.log', 'a')
+            return self._log_file
+
+        if hasattr(sys, '__stdout__') and sys.__stdout__ is not None:
+            return sys.__stdout__
+        return sys.stdout
 
     def set_timings_file(self, timings_file: str):
         self.timings_file = timings_file
@@ -51,7 +83,6 @@ class Output:
 
             json.dump(timings, open(self.timings_file, "w"), indent=2)
             log(f"Output timer data saved to {self.timings_file}")
-            
 
     def timing_context(self, *, key: str | None = None, message: str | None = None):
         return self.TimedOutputContext(
@@ -85,7 +116,9 @@ class Output:
                 else:
                     self.suppressed = False
                     if self.message is not None:
-                        self.outer.print_enter(self.message, start=self.start, end=self.end)
+                        self.outer.print_enter(
+                            self.message, start=self.start, end=self.end
+                        )
                         self.outer.contexts += [self]
                 self.start_time = time.time()
 
@@ -109,6 +142,7 @@ class Output:
             self.color = color
             self.start = start
             self.end = end
+
         def __enter__(self):
             with self.outer.lock:
                 message = termcolor.colored(self.start + self.message, self.color)
@@ -121,7 +155,7 @@ class Output:
                 if self.end is not None:
                     message = termcolor.colored(self.end, self.color)
                     self.outer.print_exit(message)
-            
+
         def write(self, message):
             self.outer.write(message)
             self.outer.flush()
@@ -162,6 +196,7 @@ class Output:
         that has standard write() and flush() methods. The stream is
         responsible for any text processing (e.g., ANSI code handling).
         """
+
         def __init__(self, outer, stream):
             self.outer = outer
             self.stream = stream
@@ -195,6 +230,7 @@ class Output:
         Can be nested - suppression is active while any QuietOutputContext
         is active.
         """
+
         def __init__(self, outer):
             self.outer = outer
 
@@ -208,23 +244,27 @@ class Output:
                 self.outer.quiet -= 1
 
     def write(self, message):
-        self.file.write(message)
-        self.file.flush()
+        file = self._get_output_file()
+        file.write(message)
+        file.flush()
         for context in self.output_contexts:
             context.write(message)
             context.flush()
 
     def flush(self):
         if self.pending is not None:
-            self.file.write(self.pending)
-            self.file.write("\n")
+            file = self._get_output_file()
+            file.write(self.pending)
+            file.write("\n")
             for context in self.output_contexts:
                 context.write(self.pending)
                 context.write("\n")
             self.pending = None
 
     def get_pad(self):
-        current_time = termcolor.colored(f"[{datetime.datetime.now().strftime('%H:%M:%S')}]", "cyan")
+        current_time = termcolor.colored(
+            f"[{datetime.datetime.now().strftime('%H:%M:%S')}]", "cyan"
+        )
         return f"{current_time}" + " " * (1 + self.pad_depth())
 
     def pad_depth(self):
@@ -316,8 +356,12 @@ class EmptyContextManager:
 def timer(*, key: str | None = None, message: str | None = None):
     return output.timing_context(key=key, message=message)
 
+
 def indent(*, message: str):
-    return output.IndentedOutputContext(output, message, color="light_yellow", start="", end=None)
+    return output.IndentedOutputContext(
+        output, message, color="light_yellow", start="", end=None
+    )
+
 
 def quiet():
     """
@@ -337,8 +381,10 @@ def quiet():
     """
     return output.QuietOutputContext(output)
 
+
 def tee_output(file_path: Path | str):
     return output.FileOutputContext(output, str(file_path))
+
 
 def stream_output(stream):
     """

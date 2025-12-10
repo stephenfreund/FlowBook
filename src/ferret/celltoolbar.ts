@@ -43,6 +43,10 @@ export class CellToolbarExtension {
         'Cell',
         `ferret-${cmdInfo.id}`,
         (cell: Cell) => {
+          // Check if current kernel is ferret_kernel
+          const panel = this.tracker.currentWidget;
+          const kernelName = panel?.sessionContext.session?.kernel?.name;
+
           // Create button for this cell
           const button = new ToolbarButton({
             label: cmdInfo.label,
@@ -63,6 +67,19 @@ export class CellToolbarExtension {
               }
             }
           });
+
+          // Initially hide if not ferret_kernel
+          if (kernelName !== 'ferret_kernel') {
+            button.node.style.display = 'none';
+          }
+
+          // Listen for kernel changes to update visibility
+          if (panel) {
+            panel.sessionContext.kernelChanged.connect(() => {
+              const newKernelName = panel.sessionContext.session?.kernel?.name;
+              button.node.style.display = newKernelName === 'ferret_kernel' ? '' : 'none';
+            });
+          }
 
           return button;
         }

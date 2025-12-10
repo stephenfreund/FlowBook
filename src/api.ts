@@ -3,7 +3,7 @@
  */
 
 import { requestAPI } from './handler';
-import { CommandResult, ExecuteCommandRequest } from './types';
+import { CommandResult, ExecuteCommandRequest } from './ferret/types';
 
 /**
  * Ferret API client for server communication

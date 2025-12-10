@@ -1,133 +1,22 @@
 /**
- * Ferret JupyterLab Frontend Extension
- * Adds toolbar buttons for ferret commands with kernel communication
+ * DataFerret JupyterLab Extension
+ *
+ * Provides two kernel-specific plugins:
+ * - data_ferret:plugin - For ferret_kernel (AI-powered commands)
+ * - data_ferret:sdc - For ferret_sdc_kernel (SDC enforcement)
  */
 
-import {
-  JupyterFrontEnd,
-  JupyterFrontEndPlugin
-} from '@jupyterlab/application';
+import { JupyterFrontEndPlugin } from '@jupyterlab/application';
 
-import { INotebookTracker } from '@jupyterlab/notebook';
-import { ICommandPalette, IToolbarWidgetRegistry } from '@jupyterlab/apputils';
-
-import { FerretCommandsManager } from './manager';
-import { NotebookToolbarExtension } from './toolbar';
-import { CellToolbarExtension } from './celltoolbar';
-import { MessagePanel } from './panel';
-import { FerretMetadataPanel } from './metadatapanel';
-import { UnitTestPanel } from './unittestpanel';
-import { UnitTestPanelTracker } from './unittesttracker';
-import { CellMetadataHighlighter } from './cellhighlighter';
-import { ExecutionHookManager } from './executionhook';
-import { NotebookHistoryManager } from './history';
-import { HistoryPanel } from './historypanel';
-import { CellIndexManager } from './cellindex';
+import { ferretPlugin } from './ferret/plugin';
+import { sdcPlugin } from './sdc/plugin';
 
 /**
- * The main Ferret extension plugin
+ * Export both plugins as an array
  */
-const extension: JupyterFrontEndPlugin<void> = {
-  id: 'data_ferret:plugin',
-  autoStart: true,
-  requires: [INotebookTracker],
-  optional: [ICommandPalette, IToolbarWidgetRegistry],
-  activate: (
-    app: JupyterFrontEnd,
-    tracker: INotebookTracker,
-    palette: ICommandPalette | null,
-    toolbarRegistry: IToolbarWidgetRegistry | null
-  ) => {
-    console.log('JupyterLab extension ferret is activated!');
+const plugins: JupyterFrontEndPlugin<void>[] = [
+  ferretPlugin,
+  sdcPlugin
+];
 
-    // Create the history manager
-    const historyManager = new NotebookHistoryManager();
-
-    // Create the cell index manager
-    const cellIndexManager = new CellIndexManager();
-
-    // Create the command manager
-    const manager = new FerretCommandsManager(app, tracker, historyManager);
-
-    // Register commands with JupyterLab
-    manager.registerCommands();
-
-    // Add to command palette if available
-    if (palette) {
-      manager.addToPalette(palette);
-    }
-
-    // Add to context menu
-    manager.addToContextMenu(tracker);
-
-    // Add toolbar buttons to notebooks
-    const toolbarExtension = new NotebookToolbarExtension(manager);
-    app.docRegistry.addWidgetExtension('Notebook', toolbarExtension);
-
-    // Add cell toolbar buttons
-    if (toolbarRegistry) {
-      new CellToolbarExtension(manager, tracker, toolbarRegistry);
-    }
-
-    // Create and add the message panel to the right area
-    const messagePanel = new MessagePanel();
-    app.shell.add(messagePanel, 'right', { rank: 500 });
-
-    // Create and add the metadata panel to the right area
-    const metadataPanel = new FerretMetadataPanel();
-    app.shell.add(metadataPanel, 'right', { rank: 501 });
-
-    // Create and add the history panel to the right area
-    const historyPanel = new HistoryPanel(tracker, historyManager);
-    app.shell.add(historyPanel, 'right', { rank: 502 });
-
-    // Create and add the unit test panel to the right area
-    const unitTestPanel = new UnitTestPanel(app, tracker);
-    app.shell.add(unitTestPanel, 'right', { rank: 503 });
-
-    // Create cell metadata highlighter for visual indicators
-    new CellMetadataHighlighter(tracker, metadataPanel);
-
-    // Create unit test panel tracker for monitoring cell selection
-    new UnitTestPanelTracker(tracker, unitTestPanel);
-
-    // Create execution hook manager for auto-generating code from string specs
-    new ExecutionHookManager(app, tracker, manager);
-
-    console.log('Ferret toolbar buttons, panels, cell highlighter, and execution hooks added');
-    // Set up history and cell index monitoring for notebooks
-    tracker.widgetAdded.connect((sender: any, widget: any) => {
-      // Wait for the notebook context to be ready before starting monitoring
-      widget.context.ready.then(() => {
-        historyManager.startMonitoring(widget.context.path, widget);
-        cellIndexManager.startMonitoring(widget.context.path, widget);
-      });
-
-      // Set up cleanup when notebook is closed
-      widget.disposed.connect(() => {
-        historyManager.stopMonitoring(widget.context.path);
-        cellIndexManager.stopMonitoring(widget.context.path);
-      });
-    });
-
-    // Start monitoring any already open notebooks
-    tracker.forEach(widget => {
-      // Wait for the notebook context to be ready before starting monitoring
-      widget.context.ready.then(() => {
-        historyManager.startMonitoring(widget.context.path, widget);
-        cellIndexManager.startMonitoring(widget.context.path, widget);
-      });
-
-      // Set up cleanup for already open notebooks
-      widget.disposed.connect(() => {
-        historyManager.stopMonitoring(widget.context.path);
-        cellIndexManager.stopMonitoring(widget.context.path);
-      });
-    });
-
-    console.log('Ferret toolbar buttons, panels, history, and cell highlighter added');
-
-  }
-};
-
-export default extension;
+export default plugins;

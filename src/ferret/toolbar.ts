@@ -8,7 +8,7 @@ import { IDisposable } from '@lumino/disposable';
 import { ToolbarButton, Clipboard, showErrorMessage } from '@jupyterlab/apputils';
 
 import { FerretCommandsManager } from './manager';
-import { FerretAPI } from './api';
+import { FerretAPI } from '../api';
 
 /**
  * Extension that adds Ferret command buttons to the notebook toolbar
@@ -30,21 +30,36 @@ export class NotebookToolbarExtension
     panel: NotebookPanel,
     context: DocumentRegistry.IContext<DocumentRegistry.IModel>
   ): IDisposable {
+    const buttons: ToolbarButton[] = [];
     const commands = this.manager.getCommands();
 
+    // Function to check if current kernel is ferret_kernel
+    const isFerretKernel = () => {
+      const kernelName = panel.sessionContext.session?.kernel?.name;
+      return kernelName === 'ferret_kernel';
+    };
+
+    // Function to update button visibility
+    const updateButtonVisibility = () => {
+      const shouldShow = isFerretKernel();
+      buttons.forEach(btn => {
+        btn.node.style.display = shouldShow ? '' : 'none';
+      });
+    };
+
+    // Create buttons
     commands.forEach(cmdInfo => {
       const button = new ToolbarButton({
         label: cmdInfo.label,
         tooltip: cmdInfo.tooltip,
         // icon: cmdInfo.icon,
         onClick: async () => {
-          // Get selected cell IDs for commands that need them
-          // const selectedCellIds = this.getSelectedCellIds(panel);
           await this.manager.executeCommand(cmdInfo.id, panel, undefined);
         }
       });
 
       panel.toolbar.insertItem(10, `ferret-${cmdInfo.id}-button`, button);
+      buttons.push(button);
     });
 
     // Add Copy Connection File button
@@ -57,11 +72,24 @@ export class NotebookToolbarExtension
     });
 
     panel.toolbar.insertItem(100, 'ferret-copy-connection-button', copyConnectionButton);
+    buttons.push(copyConnectionButton);
+
+    // Initial visibility update
+    panel.sessionContext.ready.then(() => {
+      updateButtonVisibility();
+    });
+
+    // Listen for kernel changes
+    panel.sessionContext.kernelChanged.connect(() => {
+      updateButtonVisibility();
+    });
 
     return {
-      dispose: () => {},
+      dispose: () => {
+        buttons.forEach(btn => btn.dispose());
+      },
       get isDisposed() {
-        return false;
+        return buttons.length === 0;
       }
     };
   }

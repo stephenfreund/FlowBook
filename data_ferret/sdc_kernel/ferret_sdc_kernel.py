@@ -15,6 +15,7 @@ from ipykernel.kernelapp import IPKernelApp
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.display_helpers import DisplayHelper
 from data_ferret.kernel.tracking import TrackingDict
+from data_ferret.util.cell_index import index_to_alpha
 from data_ferret.util.output import log
 
 from .models import SDCMetadata
@@ -249,6 +250,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 post_checkpoint=post_checkpoint,
                 tracking=tracking,
             )
+            log(f"[sdc] Check completed for cell {self._get_cell_alpha()}")
+            if sdc_result and sdc_result.violation:
+                log(f"[sdc] VIOLATION DETECTED: {sdc_result.violation.message}")
 
         # Display results (only if not silent and no error)
         if not silent and result.get("status") != "error":
@@ -256,6 +260,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
         # Handle violation - report as error
         if sdc_result and sdc_result.violation:
+            log(f"[sdc] Restoring checkpoint and sending error")
             # restore to pre-checkpoint
             self._sdc.checkpoints.restore(f"_pre_{self._cell_id}", self.shell.user_ns)
             self._send_violation_error(sdc_result.violation)
@@ -266,6 +271,16 @@ class FerretSDCKernel(IPythonKernel, Magics):
     # =========================================================================
     # Helpers
     # =========================================================================
+
+    def _get_cell_alpha(self) -> str:
+        """Get @A notation for current cell."""
+        if self._cell_id is None:
+            return "unknown"
+        try:
+            index = self._sdc.cell_order.index(self._cell_id)
+            return index_to_alpha(index)
+        except (ValueError, IndexError):
+            return self._cell_id
 
     def _extract_cell_id(
         self, cell_id: Optional[str], cell_meta: Optional[dict]
@@ -377,6 +392,19 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
     def _send_violation_error(self, violation) -> None:
         """Send SDC violation as error via iopub."""
+        # Get @A notation for cells
+        try:
+            mutating_idx = self._sdc.cell_order.index(violation.mutating_cell)
+            mutating_alpha = index_to_alpha(mutating_idx)
+        except (ValueError, IndexError):
+            mutating_alpha = violation.mutating_cell
+
+        try:
+            affected_idx = self._sdc.cell_order.index(violation.affected_cell)
+            affected_alpha = index_to_alpha(affected_idx)
+        except (ValueError, IndexError):
+            affected_alpha = violation.affected_cell
+
         self.send_response(
             self.iopub_socket,
             "error",
@@ -386,8 +414,8 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 "traceback": [
                     "Sequential Dataflow Consistency Violation",
                     "",
-                    f"Cell '{violation.mutating_cell}' modified variables that "
-                    f"cell '{violation.affected_cell}' (earlier in notebook) reads.",
+                    f"Cell {mutating_alpha} modified variables that "
+                    f"cell {affected_alpha} (earlier in notebook) reads.",
                     "",
                     f"Affected variables: {violation.variables}",
                     "",

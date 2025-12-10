@@ -85,18 +85,50 @@ jupyter labextension list
 
 ### Three-Tier Structure
 
-1. **Frontend (TypeScript)**: `src/` - JupyterLab UI components and command palette integration
+1. **Frontend (TypeScript)**: `src/` - JupyterLab UI components with two kernel-specific plugins
 2. **Server Extension (Python)**: `data_ferret/server/` - HTTP handlers and command processing
-3. **Custom Kernel**: `data_ferret/kernel/` - Enhanced IPython kernel with state management
+3. **Custom Kernels**: Two enhanced IPython kernels for different use cases
+   - `data_ferret/kernel/` - Full-featured kernel with AI commands, profiling, checkpointing
+   - `data_ferret/sdc_kernel/` - SDC-focused kernel with always-on dataflow tracking
 
 ### Frontend Components (`src/`)
 
-- `index.ts` - JupyterLab plugin entry point, activates extension
-- `manager.ts` - `FerretCommandsManager` orchestrates command loading and execution
-- `api.ts` - `FerretAPI` handles HTTP communication with `/ferret/*` endpoints
-- `kernel.ts` - `KernelUtils` manages kernel sessions and initialization
-- `toolbar.ts` / `celltoolbar.ts` - Add command buttons to notebook UI
-- `types.ts` - TypeScript interfaces for API contracts
+The frontend exports **two JupyterLab plugins** that activate based on the kernel in use:
+
+```
+src/
+├── index.ts                 # Exports [ferretPlugin, sdcPlugin]
+├── shared/                  # Shared utilities
+│   ├── kerneldetection.ts   # KernelDetector class for kernel type detection
+│   └── types.ts             # Shared type definitions
+├── ferret/                  # Ferret kernel plugin (AI commands)
+│   ├── plugin.ts            # Plugin activation with kernel gating
+│   ├── manager.ts           # FerretCommandsManager orchestrates commands
+│   ├── types.ts             # TypeScript interfaces
+│   ├── toolbar.ts           # Notebook toolbar buttons
+│   ├── celltoolbar.ts       # Cell-level toolbar buttons
+│   ├── metadatapanel.tsx    # Metadata panel (profile, dependencies, etc.)
+│   ├── cellhighlighter.ts   # Visual indicators for optimization potential
+│   ├── executionhook.ts     # Auto-generation and metadata extraction
+│   ├── history.ts           # Undo/redo history manager
+│   ├── historypanel.tsx     # History panel UI
+│   ├── unittestpanel.tsx    # Unit test panel
+│   └── unittesttracker.ts   # Unit test cell tracking
+├── sdc/                     # SDC kernel plugin (staleness tracking)
+│   ├── plugin.ts            # Plugin activation with kernel gating
+│   ├── types.ts             # ISDCMetadata, ISDCViolation interfaces
+│   ├── stalenessmanager.ts  # Tracks stale cells per notebook
+│   ├── metadatapanel.tsx    # SDC metadata panel (reads, writes, stale cells)
+│   ├── cellhighlighter.ts   # Red highlighting for stale cells
+│   └── executionhook.ts     # Extract ferret_sdc metadata from outputs
+├── api.ts                   # Shared FerretAPI for HTTP communication
+├── kernel.ts                # Shared KernelUtils
+└── [other shared files]     # panel.tsx, executiondialog.tsx, etc.
+```
+
+**Plugin Activation**:
+- `data_ferret:plugin` - Activates UI only when kernel is `ferret_kernel`
+- `data_ferret:sdc` - Activates UI only when kernel is `ferret_sdc_kernel`
 
 **Data Flow**: User clicks button → `executeCommand()` → `FerretAPI.executeCommand()` → POST to `/ferret/execute` → Backend processes → Notebook updated
 
@@ -118,20 +150,57 @@ The server uses the modern **ExtensionApp** pattern (not legacy extension points
 - `kernel_manager.py` - `KernelConnectionManager` and `FerretKernelClient` for kernel communication
 - `cli.py` - Command-line interface entry point
 
-### Custom Kernel (`data_ferret/kernel/`)
+### Ferret Kernel (`data_ferret/kernel/`)
 
-Extends IPython kernel with advanced features:
+Full-featured kernel extending IPython with advanced features:
 
-- `ferret_kernel.py` - Main kernel implementation (21 KB)
+- `ferret_kernel.py` - Main kernel implementation
 - `ferret_client.py` - Enhanced `BlockingKernelClient` that includes `cell_id` and `cell_metadata` in execution messages
 - `checkpoint.py` - State snapshots (save/restore kernel state)
 - `diff.py` - Namespace diffing to track variable changes between executions
 - `equality.py` - Deep equality checking for various Python types
-- `extended_types.py` - Type introspection utilities
-- `magics.py` - IPython magic commands
+- `tracking.py` - `TrackingDict` for optional variable access tracking
+- `magics.py` - IPython magic commands (`%enable_scalene`, `%checkpoint`, etc.)
 - `ferret_pdb.py` - Debugger integration
 
-**Key Feature**: `FerretKernelClient.execute()` overrides parent to inject `cell_id` and `cell_metadata` into kernel messages, enabling cell-level tracking.
+**Features** (all optional, toggled via magic commands):
+- Scalene profiling for CPU/memory analysis
+- Checkpointing for save/restore kernel state
+- Variable tracking for read-before-write analysis
+- Monotonicity enforcement
+
+### SDC Kernel (`data_ferret/sdc_kernel/`)
+
+Simplified kernel focused on Sequential Dataflow Consistency (SDC):
+
+- `ferret_sdc_kernel.py` - SDC-focused kernel implementation
+- `ferret_sdc_client.py` - Client with `cell_order` injection for SDC checks
+- `sdc_enforcer.py` - Implements SDC rules (staleness propagation, backward mutation detection)
+- `models.py` - `SDCMetadata`, `SDCViolation`, `SDCResult` data classes
+
+**Features** (always enabled):
+- Variable tracking for all executions
+- Staleness computation (which cells need re-execution)
+- Backward mutation detection (Rule 3 violations)
+- Automatic rollback on SDC violations
+
+**SDC Metadata Format** (sent via `display_data` output):
+```python
+{
+  "ferret_sdc": {
+    "cell_id": str,
+    "execution_seq": int,
+    "reads": List[str],
+    "writes": List[str],
+    "changed_variables": List[str],
+    "stale_cells": List[str],
+    "violation": Optional[dict],
+    "cell_order": List[str]
+  }
+}
+```
+
+**Key Feature**: Both `FerretKernelClient` and `FerretSDCKernelClient` inject `cell_id` and metadata into kernel messages, enabling cell-level tracking.
 
 ### Command Pattern
 
@@ -228,9 +297,18 @@ This normalization happens transparently at entry points:
 
 ### Modifying Kernel Behavior
 
+**Ferret Kernel**:
 - Kernel spec: `data_ferret/kernel/kernelspec/`
 - Main kernel class: `data_ferret/kernel/ferret_kernel.py`
-- Client-side kernel utilities: `src/kernel.ts`
+
+**SDC Kernel**:
+- Kernel spec: `data_ferret/sdc_kernel/kernelspec/`
+- Main kernel class: `data_ferret/sdc_kernel/ferret_sdc_kernel.py`
+- SDC logic: `data_ferret/sdc_kernel/sdc_enforcer.py`
+
+**Frontend**:
+- Shared kernel utilities: `src/kernel.ts`
+- Kernel detection: `src/shared/kerneldetection.ts`
 
 ## Dependencies
 

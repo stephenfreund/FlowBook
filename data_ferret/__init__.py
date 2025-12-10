@@ -70,6 +70,12 @@ def make_kernels():
     from data_ferret.util.kernel_installer import install_kernel_spec
     from pathlib import Path
 
+    # Install standard ferret kernel
     install_kernel_spec(
         "ferret_kernel", Path(__file__).parent / "kernel" / "kernelspec"
+    )
+
+    # Install SDC kernel
+    install_kernel_spec(
+        "ferret_sdc_kernel", Path(__file__).parent / "sdc_kernel" / "kernelspec"
     )

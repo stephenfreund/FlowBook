@@ -13,6 +13,7 @@ from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.diff import Diff
 from data_ferret.kernel.models import TrackingData
 from data_ferret.kernel.tracking import TrackingDict
+from data_ferret.util.cell_index import index_to_alpha
 from data_ferret.util.output import log, timer
 
 from .models import SDCExecutionRecord, SDCResult, SDCViolation
@@ -31,6 +32,7 @@ class SDCEnforcer:
         self.records: Dict[str, SDCExecutionRecord] = {}
         self.seq_counter: int = 0
         self._cell_order: List[str] = []
+        self._stale_cells: Set[str] = set()  # Cache for absolute staleness state
 
     @property
     def cell_order(self) -> List[str]:
@@ -40,6 +42,15 @@ class SDCEnforcer:
         """Update notebook structure. Called via magic or metadata."""
         self._cell_order = order
         self._prune_deleted_cells()
+
+    def _cell_id_to_alpha(self, cell_id: str) -> str:
+        """Convert cell ID to @A notation using cell_order position."""
+        try:
+            index = self._cell_order.index(cell_id)
+            return index_to_alpha(index)
+        except ValueError:
+            # Cell not in order, just return the ID
+            return cell_id
 
     def _prune_deleted_cells(self) -> None:
         """Remove records for cells no longer in notebook."""
@@ -62,11 +73,10 @@ class SDCEnforcer:
             cell_id: ID of the cell that just executed
             pre_checkpoint: Snapshot of namespace before execution
             post_checkpoint: Snapshot of namespace after execution
-            reads: Variables read by the cell (reads_before_writes)
-            writes: Variables written by the cell
+            tracking: TrackingData with reads/writes
 
         Returns:
-            SDCResult with violation info and stale cells
+            SDCResult with violation info, absolute set of stale cells, and changed variables
         """
         self.seq_counter += 1
 
@@ -85,21 +95,30 @@ class SDCEnforcer:
             )
 
         stale = []
-        if not violation:
-            # Compute staleness before updating our record
-            if my_position >= 0:
-                stale = self._compute_stale(cell_id, my_position, post_checkpoint)
+        changed_vars = []
 
+        if not violation:
+            # Update our record for this cell BEFORE computing staleness
+            # (so this cell is considered "fresh" in the computation)
             self.records[cell_id] = SDCExecutionRecord(
                 cell_id=cell_id,
                 tracking=tracking,
                 execution_seq=self.seq_counter,
             )
 
+            # Compute ABSOLUTE staleness - all cells that are currently stale
+            stale = self.compute_all_stale_cells(post_checkpoint)
+
+            # Compute changed variables (what this execution modified)
+            with timer(key="sdc_changed_vars", message="[sdc] Computing changed variables"):
+                diff_result = Checkpoint.diff(pre_checkpoint, post_checkpoint)
+                if diff_result.differences:
+                    changed_vars = list(diff_result.differences.keys())
+
         return SDCResult(
             violation=violation,
-            stale_cells=stale,
-            changed_variables=[],
+            stale_cells=stale,  # ABSOLUTE list of all currently stale cells
+            changed_variables=changed_vars,
         )
 
     def _do_check(
@@ -119,13 +138,17 @@ class SDCEnforcer:
             )
 
         if diff_result.differences:
+            mutating_alpha = self._cell_id_to_alpha(cell_id)
+            affected_alpha = self._cell_id_to_alpha(prior.cell_id)
+            vars_list = sorted(diff_result.differences.keys())
+
             return SDCViolation(
                 mutating_cell=cell_id,
                 affected_cell=prior.cell_id,
                 variables=list(diff_result.differences.keys()),
                 message=(
-                    f"Cell '{cell_id}' modified {sorted(diff_result.differences.keys())} "
-                    f"which cell '{prior.cell_id}' (earlier in notebook) reads. "
+                    f"Cell {mutating_alpha} modified {vars_list} "
+                    f"which cell {affected_alpha} (earlier in notebook) reads. "
                     f"This violates Sequential Dataflow Consistency."
                 ),
             )
@@ -146,6 +169,59 @@ class SDCEnforcer:
             if violation:
                 return violation
         return None
+
+    def compute_all_stale_cells(self, current_checkpoint: Checkpoint) -> List[str]:
+        """
+        Compute the COMPLETE set of all currently stale cells.
+
+        A cell is stale if the values it read when it last executed
+        have changed since then.
+
+        This compares each executed cell's pre-execution checkpoint against
+        the current state to determine staleness.
+
+        Args:
+            current_checkpoint: The current state of the namespace
+
+        Returns:
+            List of cell IDs that are currently stale (in document order)
+        """
+        stale = set()
+
+        log(f"[sdc] compute_all_stale_cells: Checking {len(self.records)} executed cells")
+        log(f"[sdc] Cell order: {[self._cell_id_to_alpha(cid) for cid in self._cell_order]}")
+
+        # Check every cell that has been executed
+        for cell_id, record in self.records.items():
+            cell_alpha = self._cell_id_to_alpha(cell_id)
+
+            # Get the checkpoint from when this cell last ran
+            pre_checkpoint = self.checkpoints.get(f"_pre_{cell_id}")
+            if pre_checkpoint is None:
+                log(f"[sdc] Cell {cell_alpha}: No pre-checkpoint found, skipping")
+                continue
+
+            # Compare what this cell READ THEN vs what those values are NOW
+            with timer(key="sdc_stale_check", message=f"[sdc] Checking staleness for {cell_alpha}"):
+                diff_result = Checkpoint.diff(
+                    pre_checkpoint,
+                    current_checkpoint,
+                    keys_to_include=record.tracking.reads_before_writes,
+                    use_leq=True,
+                    column_rbw=record.tracking.column_reads_before_writes,
+                )
+
+            if diff_result.differences:
+                stale.add(cell_id)
+                log(f"[sdc] Cell {cell_alpha}: STALE (changed: {list(diff_result.differences.keys())})")
+            else:
+                log(f"[sdc] Cell {cell_alpha}: FRESH")
+
+        # Return in document order (for consistency)
+        result = [cid for cid in self._cell_order if cid in stale]
+        result_alpha = [self._cell_id_to_alpha(cid) for cid in result]
+        log(f"[sdc] compute_all_stale_cells: Result = {result_alpha}")
+        return result
 
     def _compute_stale(
         self,

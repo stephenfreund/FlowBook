@@ -1,0 +1,103 @@
+/**
+ * Manages staleness state across a notebook for SDC kernel
+ */
+
+import { NotebookPanel } from '@jupyterlab/notebook';
+import { ISignal, Signal } from '@lumino/signaling';
+import { ISDCMetadata } from './types';
+
+export interface IStalenessChange {
+  added: string[];
+  removed: string[];
+  current: string[];
+}
+
+export class StalenessManager {
+  private _staleCells = new Set<string>();
+  private _stalenessChanged = new Signal<this, IStalenessChange>(this);
+  private _notebook: NotebookPanel;
+
+  constructor(notebook: NotebookPanel) {
+    this._notebook = notebook;
+    this._setupKernelRestartListener();
+  }
+
+  get stalenessChanged(): ISignal<this, IStalenessChange> {
+    return this._stalenessChanged;
+  }
+
+  get staleCells(): ReadonlySet<string> {
+    return this._staleCells;
+  }
+
+  /**
+   * Check if a cell is currently stale
+   */
+  isCellStale(cellId: string): boolean {
+    return this._staleCells.has(cellId);
+  }
+
+  /**
+   * Update staleness from SDC metadata
+   *
+   * The metadata contains the ABSOLUTE set of all currently stale cells
+   * as computed by the kernel. We replace our entire set with this truth.
+   */
+  updateFromMetadata(sdcMetadata: ISDCMetadata): void {
+    console.log('StalenessManager: Before update, stale cells =', [...this._staleCells]);
+    console.log('StalenessManager: Metadata stale_cells =', sdcMetadata.stale_cells);
+
+    // Track previous state for diff
+    const previousStale = new Set(this._staleCells);
+
+    // Replace entire set with kernel's absolute truth
+    this._staleCells = new Set(sdcMetadata.stale_cells);
+
+    // Compute diff for event
+    const currentStale = new Set(sdcMetadata.stale_cells);
+    const added = [...currentStale].filter(id => !previousStale.has(id));
+    const removed = [...previousStale].filter(id => !currentStale.has(id));
+
+    console.log('StalenessManager: After update, stale cells =', [...this._staleCells]);
+    console.log('StalenessManager: Added =', added, ', Removed =', removed);
+
+    if (added.length > 0 || removed.length > 0) {
+      this._stalenessChanged.emit({
+        added,
+        removed,
+        current: [...this._staleCells]
+      });
+    }
+  }
+
+  /**
+   * Clear all staleness state
+   */
+  clear(): void {
+    const removed = [...this._staleCells];
+    this._staleCells.clear();
+
+    if (removed.length > 0) {
+      this._stalenessChanged.emit({
+        added: [],
+        removed,
+        current: []
+      });
+    }
+  }
+
+  /**
+   * Listen for kernel restart to clear staleness
+   */
+  private _setupKernelRestartListener(): void {
+    this._notebook.sessionContext.statusChanged.connect((_, status) => {
+      if (status === 'restarting' || status === 'autorestarting') {
+        this.clear();
+      }
+    });
+  }
+
+  dispose(): void {
+    this._staleCells.clear();
+  }
+}
