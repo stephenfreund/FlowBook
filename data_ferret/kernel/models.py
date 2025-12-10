@@ -41,21 +41,20 @@ class TrackingData(BaseModel):
         ... )
     """
 
-    reads_before_writes: List[str] = Field(
-        default_factory=list,
-        description="Variables read before being written in this cell"
+    reads_before_writes: Set[str] = Field(
+        default_factory=set,
+        description="Variables read before being written in this cell",
     )
-    writes: List[str] = Field(
-        default_factory=list,
-        description="All variables written during cell execution"
+    writes: Set[str] = Field(
+        default_factory=set, description="All variables written during cell execution"
     )
-    column_reads_before_writes: Dict[str, List[str]] = Field(
+    column_reads_before_writes: Dict[str, Set[str]] = Field(
         default_factory=dict,
-        description="DataFrame columns read before written, keyed by variable path"
+        description="DataFrame columns read before written, keyed by variable path",
     )
-    column_writes: Dict[str, List[str]] = Field(
+    column_writes: Dict[str, Set[str]] = Field(
         default_factory=dict,
-        description="DataFrame columns written, keyed by variable path"
+        description="DataFrame columns written, keyed by variable path",
     )
 
     def get_rbw_vars(self) -> Set[str]:
@@ -88,12 +87,10 @@ class ExecutionProfile(BaseModel):
     duration: float = Field(..., description="Execution time in seconds")
     profile: str = Field(default="", description="Scalene profiler output")
     env: Dict[str, str] = Field(
-        default_factory=dict,
-        description="Variable types before execution"
+        default_factory=dict, description="Variable types before execution"
     )
     env_after: Dict[str, str] = Field(
-        default_factory=dict,
-        description="Variable types after execution"
+        default_factory=dict, description="Variable types after execution"
     )
 
 
@@ -112,8 +109,7 @@ class ExecutionMetadata(BaseModel):
 
     profile: ExecutionProfile = Field(..., description="Profiling data")
     dynamic_dependencies: Optional[TrackingData] = Field(
-        None,
-        description="Dynamic dependency tracking data (if enabled)"
+        None, description="Dynamic dependency tracking data (if enabled)"
     )
 
     def to_display_metadata(self) -> dict:
@@ -139,17 +135,12 @@ class MonotonicityViolation(BaseModel):
     """
 
     violated_vars: List[str] = Field(
-        ...,
-        description="Variables that were modified in violation of monotonicity"
+        ..., description="Variables that were modified in violation of monotonicity"
     )
     diff_details: str = Field(
-        ...,
-        description="Human-readable details of the differences found"
+        ..., description="Human-readable details of the differences found"
     )
-    error_summary: str = Field(
-        ...,
-        description="Short summary for error reporting"
-    )
+    error_summary: str = Field(..., description="Short summary for error reporting")
 
     def to_error_result(self, execution_count: int) -> dict:
         """Convert to kernel error result format."""

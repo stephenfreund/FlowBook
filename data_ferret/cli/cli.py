@@ -89,7 +89,7 @@ def cli_main():
     parser.add_argument(
         "--kernel-name",
         default="ferret_kernel",
-        help="Kernel name for new kernel (default: ferret_kernel). Only used if no connection file provided.",
+        help="Kernel name for new kernel (default: varies by command, typically ferret_kernel). Only used if no connection file provided.",
     )
 
     parser.add_argument(
@@ -185,8 +185,17 @@ def cli_main():
 
         # Setup kernel if needed
         if command.requires_kernel:
+            # Use command's preferred kernel if no --kernel-name was explicitly provided
+            # (check if it's the default value)
+            kernel_to_use = args.kernel_name
+            if args.kernel_name == "ferret_kernel":
+                # User didn't override, use command's preference
+                kernel_to_use = command.kernel_name
+
+            log(f"Using kernel: {kernel_to_use}")
+
             kernel_manager, kernel_client = setup_kernel(
-                connection_file=connection_file, kernel_name=args.kernel_name
+                connection_file=connection_file, kernel_name=kernel_to_use
             )
 
             # Enable force checkpoints if requested

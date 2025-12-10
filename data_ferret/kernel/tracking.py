@@ -90,7 +90,7 @@ class TrackingDict(dict):
         self._column_tracker.uninstall()
 
     @property
-    def column_rbw(self) -> Dict[str, Set[str]]:
+    def column_reads_before_writes(self) -> Dict[str, Set[str]]:
         """Get column-level reads-before-writes, keyed by variable path."""
         return self._column_tracker.resolve_to_paths()
 
@@ -163,22 +163,16 @@ class TrackingDict(dict):
         from .models import TrackingData
 
         return TrackingData(
-            reads_before_writes=sorted([
-                k for k in self._reads_before_writes
+            reads_before_writes=set(
+                k
+                for k in self._reads_before_writes
                 if is_valid_variable(k, self.get(k))
-            ]),
-            writes=sorted([
-                k for k in self._writes
-                if is_valid_variable(k, self.get(k))
-            ]),
+            ),
+            writes=set(k for k in self._writes if is_valid_variable(k, self.get(k))),
             column_reads_before_writes={
-                k: sorted(list(v))
-                for k, v in self.column_rbw.items()
+                k: set(v) for k, v in self.column_reads_before_writes.items()
             },
-            column_writes={
-                k: sorted(list(v))
-                for k, v in self.column_writes.items()
-            },
+            column_writes={k: set(v) for k, v in self.column_writes.items()},
         )
 
 

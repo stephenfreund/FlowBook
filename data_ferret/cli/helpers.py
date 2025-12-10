@@ -375,6 +375,11 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
             if isinstance(v, (dict, list)):
                 lines.append(f"{indent_str}{k_formatted}:")
                 lines.append(format_metadata_value(v, indent=indent+1))
+            elif isinstance(v, str) and '\n' in v:
+                # Multi-line string: use YAML literal block scalar (|)
+                lines.append(f"{indent_str}{k_formatted}: |")
+                for line in v.split('\n'):
+                    lines.append(f"{indent_str}  {line}")
             else:
                 lines.append(f"{indent_str}{k_formatted}: {v}")
     elif isinstance(value, list):
@@ -391,13 +396,24 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
 
                         # If first value is simple, put it on the same line
                         if not isinstance(first_value, (dict, list)):
-                            lines.append(f"{indent_str}- {first_key_formatted}: {first_value}")
+                            # Check if first value is multi-line string
+                            if isinstance(first_value, str) and '\n' in first_value:
+                                lines.append(f"{indent_str}- {first_key_formatted}: |")
+                                for line in first_value.split('\n'):
+                                    lines.append(f"{indent_str}    {line}")
+                            else:
+                                lines.append(f"{indent_str}- {first_key_formatted}: {first_value}")
                             # Add remaining keys indented
                             for k, v in items_list[1:]:
                                 k_formatted = k.replace('_', ' ').title()
                                 if isinstance(v, (dict, list)):
                                     lines.append(f"{indent_str}  {k_formatted}:")
                                     lines.append(format_metadata_value(v, indent=indent+2))
+                                elif isinstance(v, str) and '\n' in v:
+                                    # Multi-line string
+                                    lines.append(f"{indent_str}  {k_formatted}: |")
+                                    for line in v.split('\n'):
+                                        lines.append(f"{indent_str}    {line}")
                                 else:
                                     lines.append(f"{indent_str}  {k_formatted}: {v}")
                         else:
@@ -408,6 +424,11 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
                                 if isinstance(v, (dict, list)):
                                     lines.append(f"{indent_str}  {k_formatted}:")
                                     lines.append(format_metadata_value(v, indent=indent+2))
+                                elif isinstance(v, str) and '\n' in v:
+                                    # Multi-line string
+                                    lines.append(f"{indent_str}  {k_formatted}: |")
+                                    for line in v.split('\n'):
+                                        lines.append(f"{indent_str}    {line}")
                                 else:
                                     lines.append(f"{indent_str}  {k_formatted}: {v}")
                 else:

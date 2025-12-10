@@ -160,108 +160,108 @@ class TestColumnAccessTracker:
 
     def test_merge_tracking_on(self):
         """Test that merge tracks 'on' columns from both DataFrames."""
-        df1 = pd.DataFrame({'key': [1, 2], 'a': [10, 20]})
-        df2 = pd.DataFrame({'key': [1, 2], 'b': [100, 200]})
+        df1 = pd.DataFrame({"key": [1, 2], "a": [10, 20]})
+        df2 = pd.DataFrame({"key": [1, 2], "b": [100, 200]})
         tracker = ColumnAccessTracker()
         tracker.register_df(df1, "df1")
         tracker.register_df(df2, "df2")
         tracker.install()
         try:
-            _ = df1.merge(df2, on='key')
+            _ = df1.merge(df2, on="key")
             result = tracker.resolve_to_paths()
-            assert 'key' in result.get('df1', set())
-            assert 'key' in result.get('df2', set())
+            assert "key" in result.get("df1", set())
+            assert "key" in result.get("df2", set())
         finally:
             tracker.uninstall()
 
     def test_merge_tracking_left_right_on(self):
         """Test that merge tracks left_on/right_on columns."""
-        df1 = pd.DataFrame({'left_key': [1, 2], 'a': [10, 20]})
-        df2 = pd.DataFrame({'right_key': [1, 2], 'b': [100, 200]})
+        df1 = pd.DataFrame({"left_key": [1, 2], "a": [10, 20]})
+        df2 = pd.DataFrame({"right_key": [1, 2], "b": [100, 200]})
         tracker = ColumnAccessTracker()
         tracker.register_df(df1, "df1")
         tracker.register_df(df2, "df2")
         tracker.install()
         try:
-            _ = df1.merge(df2, left_on='left_key', right_on='right_key')
+            _ = df1.merge(df2, left_on="left_key", right_on="right_key")
             result = tracker.resolve_to_paths()
-            assert 'left_key' in result.get('df1', set())
-            assert 'right_key' in result.get('df2', set())
+            assert "left_key" in result.get("df1", set())
+            assert "right_key" in result.get("df2", set())
         finally:
             tracker.uninstall()
 
     def test_groupby_column_access(self):
         """Test that groupby column access is tracked."""
-        df = pd.DataFrame({'key': [1, 1, 2], 'value': [10, 20, 30]})
+        df = pd.DataFrame({"key": [1, 1, 2], "value": [10, 20, 30]})
         tracker = ColumnAccessTracker()
         tracker.register_df(df, "df")
         tracker.install()
         try:
-            _ = df.groupby('key')['value'].sum()
+            _ = df.groupby("key")["value"].sum()
             result = tracker.resolve_to_paths()
-            assert 'key' in result.get('df', set())
-            assert 'value' in result.get('df', set())
+            assert "key" in result.get("df", set())
+            assert "value" in result.get("df", set())
         finally:
             tracker.uninstall()
 
     def test_groupby_multi_column_access(self):
         """Test that groupby with multi-column access is tracked."""
-        df = pd.DataFrame({'key': [1, 1, 2], 'a': [10, 20, 30], 'b': [1, 2, 3]})
+        df = pd.DataFrame({"key": [1, 1, 2], "a": [10, 20, 30], "b": [1, 2, 3]})
         tracker = ColumnAccessTracker()
         tracker.register_df(df, "df")
         tracker.install()
         try:
-            _ = df.groupby('key')[['a', 'b']].sum()
+            _ = df.groupby("key")[["a", "b"]].sum()
             result = tracker.resolve_to_paths()
-            assert 'key' in result.get('df', set())
-            assert 'a' in result.get('df', set())
-            assert 'b' in result.get('df', set())
+            assert "key" in result.get("df", set())
+            assert "a" in result.get("df", set())
+            assert "b" in result.get("df", set())
         finally:
             tracker.uninstall()
 
     def test_sort_values_tracking(self):
         """Test that sort_values tracks by columns."""
-        df = pd.DataFrame({'a': [3, 1, 2], 'b': [1, 2, 3]})
+        df = pd.DataFrame({"a": [3, 1, 2], "b": [1, 2, 3]})
         tracker = ColumnAccessTracker()
         tracker.register_df(df, "df")
         tracker.install()
         try:
-            _ = df.sort_values('a')
+            _ = df.sort_values("a")
             result = tracker.resolve_to_paths()
-            assert 'a' in result.get('df', set())
+            assert "a" in result.get("df", set())
         finally:
             tracker.uninstall()
 
     def test_sort_values_multi_column_tracking(self):
         """Test that sort_values tracks multiple by columns."""
-        df = pd.DataFrame({'a': [3, 1, 2], 'b': [1, 2, 3], 'c': [4, 5, 6]})
+        df = pd.DataFrame({"a": [3, 1, 2], "b": [1, 2, 3], "c": [4, 5, 6]})
         tracker = ColumnAccessTracker()
         tracker.register_df(df, "df")
         tracker.install()
         try:
-            _ = df.sort_values(['a', 'b'])
+            _ = df.sort_values(["a", "b"])
             result = tracker.resolve_to_paths()
-            assert 'a' in result.get('df', set())
-            assert 'b' in result.get('df', set())
+            assert "a" in result.get("df", set())
+            assert "b" in result.get("df", set())
         finally:
             tracker.uninstall()
 
     def test_drop_duplicates_tracking(self):
         """Test that drop_duplicates tracks subset columns."""
-        df = pd.DataFrame({'a': [1, 1, 2], 'b': [1, 2, 3]})
+        df = pd.DataFrame({"a": [1, 1, 2], "b": [1, 2, 3]})
         tracker = ColumnAccessTracker()
         tracker.register_df(df, "df")
         tracker.install()
         try:
-            _ = df.drop_duplicates(subset=['a'])
+            _ = df.drop_duplicates(subset=["a"])
             result = tracker.resolve_to_paths()
-            assert 'a' in result.get('df', set())
+            assert "a" in result.get("df", set())
         finally:
             tracker.uninstall()
 
     def test_drop_duplicates_no_subset(self):
         """Test that drop_duplicates without subset doesn't track columns."""
-        df = pd.DataFrame({'a': [1, 1, 2], 'b': [1, 2, 3]})
+        df = pd.DataFrame({"a": [1, 1, 2], "b": [1, 2, 3]})
         tracker = ColumnAccessTracker()
         tracker.register_df(df, "df")
         tracker.install()
@@ -269,7 +269,7 @@ class TestColumnAccessTracker:
             _ = df.drop_duplicates()
             result = tracker.resolve_to_paths()
             # Without subset, no specific columns are tracked
-            assert result.get('df', set()) == set()
+            assert result.get("df", set()) == set()
         finally:
             tracker.uninstall()
 
@@ -356,6 +356,7 @@ class TestWalkDataframes:
     def test_skips_modules(self):
         """Test that module entries are skipped."""
         import numpy as np
+
         df = pd.DataFrame({"a": [1]})
         # Include a module in the namespace - should be skipped
         namespace = {"np": np, "pd": pd, "df": df}
@@ -371,6 +372,7 @@ class TestWalkDataframes:
     def test_skips_modules_in_object_attrs(self):
         """Test that module attributes on objects are skipped."""
         import numpy as np
+
         df = pd.DataFrame({"a": [1]})
 
         class Container:
@@ -565,7 +567,7 @@ class TestTrackingDictIntegration:
         finally:
             tracking_dict.stop_column_tracking()
 
-        result = tracking_dict.column_rbw
+        result = tracking_dict.column_reads_before_writes
         assert "df" in result
         assert "a" in result["df"]
 
@@ -583,13 +585,13 @@ class TestTrackingDictIntegration:
             tracking_dict.stop_column_tracking()
 
         # Should have data
-        assert len(tracking_dict.column_rbw) > 0
+        assert len(tracking_dict.column_reads_before_writes) > 0
 
         # Reset
         tracking_dict.reset_tracking()
 
         # Should be empty
-        assert len(tracking_dict.column_rbw) == 0
+        assert len(tracking_dict.column_reads_before_writes) == 0
 
 
 class TestDeepcopyIntegration:
@@ -630,10 +632,12 @@ class TestDeepcopyIntegration:
         from data_ferret.kernel import deepcopy as ferret_deepcopy
 
         # DataFrame with object columns (requires special handling in deepcopy)
-        df = pd.DataFrame({
-            "obj_col": [{"x": 1}, {"x": 2}],
-            "str_col": ["a", "b"],
-        })
+        df = pd.DataFrame(
+            {
+                "obj_col": [{"x": 1}, {"x": 2}],
+                "str_col": ["a", "b"],
+            }
+        )
 
         tracker = ColumnAccessTracker()
         tracker.register_df(df, "df")

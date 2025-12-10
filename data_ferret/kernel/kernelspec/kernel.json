@@ -2,7 +2,7 @@
     "argv": [
       "{python}",
       "-m",
-      "data_ferret.kernel.ferret_kernel",
+      "data_ferret.kernel",
       "-f",
       "{connection_file}"
     ],

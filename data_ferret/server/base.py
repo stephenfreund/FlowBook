@@ -117,6 +117,16 @@ class NotebookCommand(ABC):
         """Return whether this command requires a kernel connection."""
         return False
 
+    @property
+    def kernel_name(self) -> str:
+        """
+        Return the kernel name to use for this command.
+
+        Override this property to specify a different kernel.
+        Default is 'ferret_kernel'.
+        """
+        return "ferret_kernel"
+
     @staticmethod
     def config_from_serverapp(serverapp: ServerApp) -> FerretConfig:
         """Return the configuration from the serverapp."""

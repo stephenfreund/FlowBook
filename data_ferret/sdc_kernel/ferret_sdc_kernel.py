@@ -1,0 +1,413 @@
+"""
+FerretSDCKernel - IPython kernel with Sequential Dataflow Consistency enforcement.
+
+A simplified kernel focused on SDC. No profiling, no checkpoint magics.
+SDC is always enabled.
+"""
+
+import time
+from typing import Any, Dict, Optional
+
+from IPython.core.magic import Magics, line_magic, magics_class
+from ipykernel.ipkernel import IPythonKernel
+from ipykernel.kernelapp import IPKernelApp
+
+from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
+from data_ferret.kernel.display_helpers import DisplayHelper
+from data_ferret.kernel.tracking import TrackingDict
+from data_ferret.util.output import log
+
+from .models import SDCMetadata
+from .sdc_enforcer import SDCEnforcer
+
+
+@magics_class
+class FerretSDCKernel(IPythonKernel, Magics):
+    """
+    IPython kernel with Sequential Dataflow Consistency enforcement.
+
+    Features:
+    - Variable access tracking (reads/writes per cell)
+    - SDC Rule 3 enforcement (no backward mutations)
+    - Staleness computation and reporting
+    - Cell order management via magic command
+
+    SDC is always enabled. No profiling or checkpoint magics.
+    """
+
+    implementation = "ferret_sdc"
+    implementation_version = "0.1"
+    banner = "Ferret SDC Kernel - Sequential Dataflow Consistency"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        assert self.shell is not None
+        self.shell.register_magics(self)
+
+        # Display helper
+        self._display = DisplayHelper()
+
+        # Current cell being executed
+        self._cell_id: Optional[str] = None
+
+        # Checkpointing (for pre/post comparison)
+        self._checkpoint = Checkpoints(
+            sanity_check=False,
+            convert_dtypes=True,
+            warn_classes=False,
+        )
+
+        # Tracking
+        self._tracking = TrackingDict(self.shell.user_ns)
+
+        # SDC enforcement
+        self._sdc = SDCEnforcer(self._checkpoint)
+
+        # # Flag to track if we've initialized tracking
+        # self._tracking_initialized = False
+
+    # =========================================================================
+    # Magic Commands
+    # =========================================================================
+
+    @line_magic
+    def notebook_structure(self, line: str) -> None:
+        """
+        Set the notebook cell order for SDC enforcement.
+
+        Usage:
+            %notebook_structure cell1 cell2 cell3 ...
+        """
+        cell_order = line.split()
+        self._sdc.set_cell_order(cell_order)
+
+    @line_magic
+    def sdc_status(self, line: str) -> None:
+        """Display current SDC state."""
+        order = self._sdc.cell_order
+        records = self._sdc.records
+
+        status_lines = [
+            f"Cell order: {order}",
+            f"Executed cells: {list(records.keys())}",
+            f"Execution counter: {self._sdc.seq_counter}",
+        ]
+
+        for cell_id, record in records.items():
+            status_lines.append(
+                f"  {cell_id}: reads={sorted(record.reads)}, "
+                f"writes={sorted(record.writes)}, seq={record.execution_seq}"
+            )
+
+        self._display.display_icon_and_text(
+            "info", "SDC Status", "\n".join(status_lines)
+        )
+
+    # =========================================================================
+    # Stub magics for compatibility with FerretKernel notebooks
+    # =========================================================================
+
+    @line_magic
+    def enable_scalene(self, line: str) -> None:
+        """Stub for Scalene profiling (not supported in SDC kernel)."""
+        pass
+
+    @line_magic
+    def disable_scalene(self, line: str) -> None:
+        """Stub for Scalene profiling (not supported in SDC kernel)."""
+        pass
+
+    @line_magic
+    def enable_global_tracking(self, line: str) -> None:
+        """Stub for global tracking (not supported in SDC kernel)."""
+        pass
+
+    @line_magic
+    def disable_global_tracking(self, line: str) -> None:
+        """Stub for global tracking (not supported in SDC kernel)."""
+        pass
+
+    @line_magic
+    def checkpoint(self, line: str) -> None:
+        """Stub for checkpoint magic (not supported in SDC kernel)."""
+        pass
+
+    @line_magic
+    def restore(self, line: str) -> None:
+        """Stub for restore magic (not supported in SDC kernel)."""
+        pass
+
+    @line_magic
+    def list_checkpoints(self, line: str) -> None:
+        """Stub for list checkpoints magic (not supported in SDC kernel)."""
+        pass
+
+    # =========================================================================
+    # Tracking Initialization
+    # =========================================================================
+
+    def _ensure_tracking_initialized(self) -> None:
+        """
+        Initialize variable tracking by replacing user_ns with TrackingDict.
+
+        This is done lazily on first execution rather than in __init__ to ensure
+        the shell is fully initialized. This matches how FerretKernel's
+        enable_global_tracking works.
+
+        IMPORTANT: We must update both user_ns AND user_global_ns. IPython uses
+        user_global_ns as the globals dict when executing code, so if we only
+        update user_ns, functions won't be able to see imported modules.
+        """
+        # if not self._tracking_initialized:
+        if not isinstance(self.shell.user_ns, TrackingDict):
+            tracking_dict = TrackingDict(self.shell.user_ns)
+            self.shell.user_ns = tracking_dict
+        # self._tracking_initialized = True
+
+    # =========================================================================
+    # Execution
+    # =========================================================================
+
+    async def do_execute(
+        self,
+        code: str,
+        silent: bool,
+        store_history: bool = True,
+        user_expressions: Optional[dict] = None,
+        allow_stdin: bool = False,
+        *,
+        cell_meta: Optional[dict] = None,
+        cell_id: Optional[str] = None,
+    ) -> dict:
+        """
+        Execute code with SDC tracking and enforcement.
+        """
+        # Ensure tracking is initialized (done lazily on first execution)
+        self._ensure_tracking_initialized()
+
+        # Extract cell context
+        self._cell_id = self._extract_cell_id(cell_id, cell_meta)
+
+        # Update cell order if provided in metadata
+        if cell_meta and "cell_order" in cell_meta:
+            self._sdc.set_cell_order(cell_meta["cell_order"])
+
+        # Check for notebook_structure magic (parse and remove if present)
+        code = self._process_structure_magic(code)
+
+        # Skip SDC for empty code or pure magic
+        if not code.strip() or self._is_pure_magic(code):
+            return await self._execute_without_sdc(
+                code, silent, store_history, user_expressions, allow_stdin, cell_meta
+            )
+
+        # Take pre-execution snapshot
+        user_ns = self.shell.user_ns
+        pre_checkpoint = self._take_checkpoint(f"_pre_{self._cell_id}")
+
+        # Reset tracking for this execution
+        if isinstance(user_ns, TrackingDict):
+            user_ns.reset_tracking()
+
+        # Execute with tracking
+        start_time = time.time()
+
+        if isinstance(user_ns, TrackingDict):
+            with user_ns.track_execution():
+                result = await super().do_execute(
+                    code,
+                    silent,
+                    store_history,
+                    user_expressions,
+                    allow_stdin,
+                    cell_meta=cell_meta,
+                    cell_id=self._cell_id,
+                )
+            tracking = user_ns.get_tracking_data()
+        else:
+            result = await super().do_execute(
+                code,
+                silent,
+                store_history,
+                user_expressions,
+                allow_stdin,
+                cell_meta=cell_meta,
+                cell_id=self._cell_id,
+            )
+            tracking = None
+
+        duration = time.time() - start_time
+
+        post_checkpoint = self._take_checkpoint(f"_post_{self._cell_id}")
+
+        # Run SDC check if we have tracking data and cell_id
+        sdc_result = None
+        if tracking and self._cell_id:
+            sdc_result = self._sdc.check(
+                cell_id=self._cell_id,
+                pre_checkpoint=pre_checkpoint,
+                post_checkpoint=post_checkpoint,
+                tracking=tracking,
+            )
+
+        # Display results (only if not silent and no error)
+        if not silent and result.get("status") != "error":
+            self._display_execution_result(duration, tracking, sdc_result)
+
+        # Handle violation - report as error
+        if sdc_result and sdc_result.violation:
+            # restore to pre-checkpoint
+            self._sdc.checkpoints.restore(f"_pre_{self._cell_id}", self.shell.user_ns)
+            self._send_violation_error(sdc_result.violation)
+            return self._make_error_result(sdc_result.violation)
+
+        return result
+
+    # =========================================================================
+    # Helpers
+    # =========================================================================
+
+    def _extract_cell_id(
+        self, cell_id: Optional[str], cell_meta: Optional[dict]
+    ) -> Optional[str]:
+        """Extract cell ID from arguments or metadata."""
+        if cell_id is not None:
+            return cell_id
+        if cell_meta is not None:
+            return cell_meta.get("cell_id")
+        return None
+
+    def _process_structure_magic(self, code: str) -> str:
+        """
+        Process %notebook_structure magic if present at start of code.
+        Removes the magic line and updates cell order.
+        Returns remaining code.
+        """
+        lines = code.split("\n")
+        if lines and lines[0].strip().startswith("%notebook_structure"):
+            # Extract cell order from magic line
+            magic_line = lines[0].strip()
+            parts = magic_line.split()[1:]  # Skip the magic name
+            if parts:
+                self._sdc.set_cell_order(parts)
+            return "\n".join(lines[1:])
+        return code
+
+    def _is_pure_magic(self, code: str) -> bool:
+        """Check if code is only magic commands."""
+        lines = [line.strip() for line in code.strip().split("\n") if line.strip()]
+        return all(line.startswith("%") or line.startswith("!") for line in lines)
+
+    def _take_checkpoint(self, checkpoint_name: str) -> Checkpoint:
+        """
+        Take a snapshot of checkpointable variables before execution.
+
+        Uses Checkpoints.save() to properly deep copy the namespace.
+        This is critical for correct operation with TrackingDict.
+        """
+        # Convert TrackingDict to regular dict for checkpointing
+        self._checkpoint.save(
+            checkpoint_name, dict(self.shell.user_ns), max_size_mb=None
+        )
+        return self._checkpoint.saved[checkpoint_name]
+
+    async def _execute_without_sdc(
+        self,
+        code: str,
+        silent: bool,
+        store_history: bool,
+        user_expressions: Optional[dict],
+        allow_stdin: bool,
+        cell_meta: Optional[dict],
+    ) -> dict:
+        """Execute without SDC tracking (for magics, empty code)."""
+        return await super().do_execute(
+            code,
+            silent,
+            store_history,
+            user_expressions,
+            allow_stdin,
+            cell_meta=cell_meta,
+            cell_id=self._cell_id,
+        )
+
+    def _display_execution_result(
+        self,
+        duration: float,
+        tracking,
+        sdc_result,
+    ) -> None:
+        """Display execution timing and SDC metadata."""
+        # Build metadata for display
+        metadata = SDCMetadata(
+            cell_id=self._cell_id or "",
+            execution_seq=self._sdc.seq_counter,
+            reads=tracking.reads_before_writes if tracking else [],
+            writes=tracking.writes if tracking else [],
+            changed_variables=sdc_result.changed_variables if sdc_result else [],
+            stale_cells=sdc_result.stale_cells if sdc_result else [],
+            violation=(
+                sdc_result.violation.to_dict()
+                if (sdc_result and sdc_result.violation)
+                else None
+            ),
+            cell_order=self._sdc.cell_order,
+        )
+
+        # Build display text
+        parts = [f"{duration:.2f}s"]
+        if tracking:
+            if tracking.reads_before_writes:
+                reads_preview = list(tracking.reads_before_writes)[:3]
+                parts.append(f"R:{','.join(reads_preview)}")
+            if tracking.writes:
+                writes_preview = list(tracking.writes)[:3]
+                parts.append(f"W:{','.join(writes_preview)}")
+
+        if sdc_result and sdc_result.stale_cells:
+            parts.append(f"stale:{','.join(sdc_result.stale_cells)}")
+
+        icon = "check" if not (sdc_result and sdc_result.violation) else "error"
+
+        self._display.display_icon_and_text(
+            icon,
+            " | ".join(parts),
+            metadata=metadata.to_display_metadata(),
+        )
+
+    def _send_violation_error(self, violation) -> None:
+        """Send SDC violation as error via iopub."""
+        self.send_response(
+            self.iopub_socket,
+            "error",
+            {
+                "ename": "SDCViolation",
+                "evalue": violation.message,
+                "traceback": [
+                    "Sequential Dataflow Consistency Violation",
+                    "",
+                    f"Cell '{violation.mutating_cell}' modified variables that "
+                    f"cell '{violation.affected_cell}' (earlier in notebook) reads.",
+                    "",
+                    f"Affected variables: {violation.variables}",
+                    "",
+                    "This breaks reproducibility. The earlier cell's behavior "
+                    "depends on this cell having run first.",
+                ],
+            },
+        )
+
+    def _make_error_result(self, violation) -> dict:
+        """Create error result dict for SDC violation."""
+        return {
+            "status": "error",
+            "execution_count": self.execution_count,
+            "ename": "SDCViolation",
+            "evalue": violation.message,
+            "traceback": [violation.message],
+        }
+
+
+# Entry point
+if __name__ == "__main__":
+    IPKernelApp.launch_instance(kernel_class=FerretSDCKernel)

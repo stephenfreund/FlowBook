@@ -262,6 +262,7 @@ class TestGetTrackingData:
     def test_get_tracking_data_filters_modules(self):
         """get_tracking_data filters module objects."""
         import sys
+
         td = TrackingDict({"sys": sys, "x": 1})
         td.reset_tracking()
         # Access both
@@ -410,13 +411,15 @@ class TestTrackingEdgeCases:
 
     def test_mixed_types_in_namespace(self):
         """Tracking works with mixed types."""
-        td = TrackingDict({
-            "int_var": 42,
-            "str_var": "hello",
-            "list_var": [1, 2, 3],
-            "dict_var": {"a": 1},
-            "df_var": pd.DataFrame({"x": [1]}),
-        })
+        td = TrackingDict(
+            {
+                "int_var": 42,
+                "str_var": "hello",
+                "list_var": [1, 2, 3],
+                "dict_var": {"a": 1},
+                "df_var": pd.DataFrame({"x": [1]}),
+            }
+        )
 
         with td.track_execution():
             _ = td["int_var"]
@@ -437,7 +440,7 @@ class TestColumnRBWProperty:
         """column_rbw is empty initially."""
         td = TrackingDict()
         td.reset_tracking()
-        assert td.column_rbw == {}
+        assert td.column_reads_before_writes == {}
 
     def test_column_writes_empty(self):
         """column_writes is empty initially."""
@@ -460,7 +463,7 @@ class TestStartStopColumnTracking:
         td.stop_column_tracking()
 
         # Should have tracked the column access
-        assert "df" in td.column_rbw
+        assert "df" in td.column_reads_before_writes
 
     def test_stop_without_start(self):
         """Stopping without starting doesn't crash."""
