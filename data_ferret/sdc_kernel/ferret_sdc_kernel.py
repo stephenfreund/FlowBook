@@ -254,8 +254,10 @@ class FerretSDCKernel(IPythonKernel, Magics):
             if sdc_result and sdc_result.violation:
                 log(f"[sdc] VIOLATION DETECTED: {sdc_result.violation.message}")
 
-        # Display results (only if not silent and no error)
-        if not silent and result.get("status") != "error":
+        # Display results (only if not silent, no error, and no SDC violation)
+        # Skip display on violation since state will be rolled back
+        has_violation = sdc_result and sdc_result.violation
+        if not silent and result.get("status") != "error" and not has_violation:
             self._display_execution_result(duration, tracking, sdc_result)
 
         # Handle violation - report as error

@@ -10,9 +10,7 @@ Implements the three SDC rules:
 from typing import Dict, List, Optional, Set
 
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
-from data_ferret.kernel.diff import Diff
 from data_ferret.kernel.models import TrackingData
-from data_ferret.kernel.tracking import TrackingDict
 from data_ferret.util.cell_index import index_to_alpha
 from data_ferret.util.output import log, timer
 
@@ -91,7 +89,7 @@ class SDCEnforcer:
         violation = None
         if my_position >= 0:
             violation = self._check_backward_mutation(
-                cell_id, my_position, post_checkpoint, tracking
+                cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
             )
 
         stale = []
@@ -121,53 +119,60 @@ class SDCEnforcer:
             changed_variables=changed_vars,
         )
 
-    def _do_check(
-        self, prior: SDCExecutionRecord, cell_id: str, post_checkpoint: Checkpoint
-    ) -> Optional[SDCViolation]:
-        """Internal implementation of SDC check."""
-
-        # Compare pre and post states
-        with timer(key="sdc_diff", message="[sdc] Computing diff"):
-            prior_checkpoint = self.checkpoints.get(f"_pre_{prior.cell_id}")
-            diff_result = Checkpoint.diff(
-                prior_checkpoint,
-                post_checkpoint,
-                keys_to_include=prior.tracking.reads_before_writes,
-                use_leq=True,
-                column_rbw=prior.tracking.column_reads_before_writes,
-            )
-
-        if diff_result.differences:
-            mutating_alpha = self._cell_id_to_alpha(cell_id)
-            affected_alpha = self._cell_id_to_alpha(prior.cell_id)
-            vars_list = sorted(diff_result.differences.keys())
-
-            return SDCViolation(
-                mutating_cell=cell_id,
-                affected_cell=prior.cell_id,
-                variables=list(diff_result.differences.keys()),
-                message=(
-                    f"Cell {mutating_alpha} modified {vars_list} "
-                    f"which cell {affected_alpha} (earlier in notebook) reads. "
-                    f"This violates Sequential Dataflow Consistency."
-                ),
-            )
-        return None
-
     def _check_backward_mutation(
         self,
         cell_id: str,
         my_position: int,
+        pre_checkpoint: Checkpoint,
         post_checkpoint: Checkpoint,
         tracking: TrackingData,
     ) -> Optional[SDCViolation]:
+        """
+        Check if current cell causes a backward mutation.
+
+        A backward mutation occurs when a cell modifies a variable that an
+        earlier cell (in notebook order) reads. This is Rule 3 of SDC.
+
+        The key insight: we must check what THIS cell actually modified,
+        not just whether values are different from when earlier cells ran.
+        """
+        # First, compute what THIS cell actually modified
+        with timer(key="sdc_current_diff", message="[sdc] Computing current cell diff"):
+            current_diff = Checkpoint.diff(pre_checkpoint, post_checkpoint)
+
+        if not current_diff.differences:
+            # This cell didn't modify anything, no backward mutation possible
+            return None
+
+        modified_vars = set(current_diff.differences.keys())
+        log(f"[sdc] Cell modified variables: {sorted(modified_vars)}")
+
+        # Check if any earlier cell reads something we modified
         for prior_cell_id in self._cell_order[:my_position]:
             prior_record = self.records.get(prior_cell_id)
             if prior_record is None:
                 continue
-            violation = self._do_check(prior_record, cell_id, post_checkpoint)
-            if violation:
-                return violation
+
+            # Check intersection of our modifications with prior cell's reads
+            prior_reads = set(prior_record.tracking.reads_before_writes)
+            overlap = modified_vars & prior_reads
+
+            if overlap:
+                mutating_alpha = self._cell_id_to_alpha(cell_id)
+                affected_alpha = self._cell_id_to_alpha(prior_cell_id)
+                vars_list = sorted(overlap)
+
+                return SDCViolation(
+                    mutating_cell=cell_id,
+                    affected_cell=prior_cell_id,
+                    variables=vars_list,
+                    message=(
+                        f"Cell {mutating_alpha} modified {vars_list} "
+                        f"which cell {affected_alpha} (earlier in notebook) reads. "
+                        f"This violates Sequential Dataflow Consistency."
+                    ),
+                )
+
         return None
 
     def compute_all_stale_cells(self, current_checkpoint: Checkpoint) -> List[str]:
