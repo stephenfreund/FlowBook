@@ -454,7 +454,13 @@ class KernelCommandHandlers:
         """
         try:
             if not isinstance(self.kernel.shell.user_ns, TrackingDict):
-                self.kernel.shell.user_ns = TrackingDict(self.kernel.shell.user_ns)
+                # Pass user_global_ns as shadow_ns so list comprehensions and
+                # functions can look up variables (they use user_global_ns for globals)
+                tracking_dict = TrackingDict(
+                    self.kernel.shell.user_ns,
+                    shadow_ns=self.kernel.shell.user_global_ns
+                )
+                self.kernel.shell.user_ns = tracking_dict
             self.kernel._use_global_tracking = True
 
             return EnableGlobalTrackingResponse(

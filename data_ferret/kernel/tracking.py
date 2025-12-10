@@ -47,10 +47,19 @@ from .column_tracking import ColumnAccessTracker, walk_dataframes
 
 
 class TrackingDict(dict):
-    """A dict subclass that tracks variable access patterns during cell execution."""
+    """A dict subclass that tracks variable access patterns during cell execution.
 
-    def __init__(self, initial_ns=None):
+    When shadow_ns is provided, all writes are also mirrored to that namespace.
+    This is needed because IPython's user_global_ns (used by list comprehensions
+    and functions for global lookups) cannot be replaced - it's always
+    user_module.__dict__. By mirroring writes, variables added to TrackingDict
+    also appear in user_global_ns.
+    """
+
+    def __init__(self, initial_ns=None, shadow_ns=None):
         super().__init__()
+        # Shadow namespace to mirror writes (typically user_global_ns)
+        self._shadow_ns = shadow_ns
         if initial_ns is not None:
             # Copy all contents from the existing namespace
             self.update(initial_ns)
@@ -117,9 +126,15 @@ class TrackingDict(dict):
         # Track writes of non-private variables
         self._writes.add(key)
         dict.__setitem__(self, key, value)
+        # Mirror to shadow namespace (for user_global_ns compatibility)
+        if self._shadow_ns is not None:
+            self._shadow_ns[key] = value
 
     def __delitem__(self, key):
         super().__delitem__(key)
+        # Mirror deletion to shadow namespace
+        if self._shadow_ns is not None and key in self._shadow_ns:
+            del self._shadow_ns[key]
 
     # =========================================================================
     # Context Manager API

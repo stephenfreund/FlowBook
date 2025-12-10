@@ -108,7 +108,9 @@ class SDCEnforcer:
             stale = self.compute_all_stale_cells(post_checkpoint)
 
             # Compute changed variables (what this execution modified)
-            with timer(key="sdc_changed_vars", message="[sdc] Computing changed variables"):
+            with timer(
+                key="sdc_changed_vars", message="[sdc] Computing changed variables"
+            ):
                 diff_result = Checkpoint.diff(pre_checkpoint, post_checkpoint)
                 if diff_result.differences:
                     changed_vars = list(diff_result.differences.keys())
@@ -138,7 +140,12 @@ class SDCEnforcer:
         """
         # First, compute what THIS cell actually modified
         with timer(key="sdc_current_diff", message="[sdc] Computing current cell diff"):
-            current_diff = Checkpoint.diff(pre_checkpoint, post_checkpoint)
+            current_diff = Checkpoint.diff(
+                pre_checkpoint,
+                post_checkpoint,
+                use_leq=True,
+                column_rbw=tracking.column_reads_before_writes,
+            )
 
         if not current_diff.differences:
             # This cell didn't modify anything, no backward mutation possible
@@ -193,8 +200,12 @@ class SDCEnforcer:
         """
         stale = set()
 
-        log(f"[sdc] compute_all_stale_cells: Checking {len(self.records)} executed cells")
-        log(f"[sdc] Cell order: {[self._cell_id_to_alpha(cid) for cid in self._cell_order]}")
+        log(
+            f"[sdc] compute_all_stale_cells: Checking {len(self.records)} executed cells"
+        )
+        log(
+            f"[sdc] Cell order: {[self._cell_id_to_alpha(cid) for cid in self._cell_order]}"
+        )
 
         # Check every cell that has been executed
         for cell_id, record in self.records.items():
@@ -207,7 +218,10 @@ class SDCEnforcer:
                 continue
 
             # Compare what this cell READ THEN vs what those values are NOW
-            with timer(key="sdc_stale_check", message=f"[sdc] Checking staleness for {cell_alpha}"):
+            with timer(
+                key="sdc_stale_check",
+                message=f"[sdc] Checking staleness for {cell_alpha}",
+            ):
                 diff_result = Checkpoint.diff(
                     pre_checkpoint,
                     current_checkpoint,
@@ -218,7 +232,9 @@ class SDCEnforcer:
 
             if diff_result.differences:
                 stale.add(cell_id)
-                log(f"[sdc] Cell {cell_alpha}: STALE (changed: {list(diff_result.differences.keys())})")
+                log(
+                    f"[sdc] Cell {cell_alpha}: STALE (changed: {list(diff_result.differences.keys())})"
+                )
             else:
                 log(f"[sdc] Cell {cell_alpha}: FRESH")
 
@@ -248,7 +264,7 @@ class SDCEnforcer:
         directly_stale = []
 
         # Check cells after us in document order
-        for later_cell_id in self._cell_order[my_position + 1:]:
+        for later_cell_id in self._cell_order[my_position + 1 :]:
             later_record = self.records.get(later_cell_id)
             if later_record is None:
                 continue  # Cell not yet executed

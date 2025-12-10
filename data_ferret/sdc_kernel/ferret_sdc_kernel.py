@@ -155,15 +155,17 @@ class FerretSDCKernel(IPythonKernel, Magics):
         the shell is fully initialized. This matches how FerretKernel's
         enable_global_tracking works.
 
-        IMPORTANT: We must update both user_ns AND user_global_ns. IPython uses
-        user_global_ns as the globals dict when executing code, so if we only
-        update user_ns, functions won't be able to see imported modules.
+        IMPORTANT: We pass user_global_ns as shadow_ns to TrackingDict. IPython's
+        user_global_ns (user_module.__dict__) cannot be replaced, but list
+        comprehensions and functions look up globals there. By mirroring writes
+        to the shadow namespace, variables are visible in both places.
         """
-        # if not self._tracking_initialized:
         if not isinstance(self.shell.user_ns, TrackingDict):
-            tracking_dict = TrackingDict(self.shell.user_ns)
+            tracking_dict = TrackingDict(
+                self.shell.user_ns,
+                shadow_ns=self.shell.user_global_ns
+            )
             self.shell.user_ns = tracking_dict
-        # self._tracking_initialized = True
 
     # =========================================================================
     # Execution
