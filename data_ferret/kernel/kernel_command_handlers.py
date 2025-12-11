@@ -454,13 +454,14 @@ class KernelCommandHandlers:
         """
         try:
             if not isinstance(self.kernel.shell.user_ns, TrackingDict):
-                # Pass user_global_ns as shadow_ns so list comprehensions and
-                # functions can look up variables (they use user_global_ns for globals)
-                tracking_dict = TrackingDict(
-                    self.kernel.shell.user_ns,
-                    shadow_ns=self.kernel.shell.user_global_ns
-                )
+                # Create TrackingDict wrapping user_global_ns
+                tracking_dict = TrackingDict(self.kernel.shell.user_global_ns)
                 self.kernel.shell.user_ns = tracking_dict
+
+                # Patch run_code to use TrackingDict for both globals and locals
+                # This enables tracking of list comprehension and closure reads
+                self.kernel._patch_run_code(tracking_dict)
+
             self.kernel._use_global_tracking = True
 
             return EnableGlobalTrackingResponse(
@@ -489,8 +490,12 @@ class KernelCommandHandlers:
         """
         try:
             if isinstance(self.kernel.shell.user_ns, TrackingDict):
+                # Unpatch run_code first
+                self.kernel._unpatch_run_code()
+
                 # Convert back to a plain dict
                 self.kernel.shell.user_ns = dict(self.kernel.shell.user_ns)
+
             self.kernel._use_global_tracking = False
 
             return DisableGlobalTrackingResponse(

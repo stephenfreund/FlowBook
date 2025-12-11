@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Set
 
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.models import TrackingData
+from data_ferret.server.message_broadcaster import get_broadcaster
 from data_ferret.util.cell_index import index_to_alpha
 from data_ferret.util.output import log, timer
 

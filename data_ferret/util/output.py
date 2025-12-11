@@ -39,12 +39,15 @@ class Output:
 
     def _is_kernel_context(self):
         """Detect if running inside a Jupyter/IPython kernel."""
-        if not hasattr(self, '_in_kernel'):
+        if not hasattr(self, "_in_kernel"):
             self._in_kernel = False
             try:
                 from IPython import get_ipython
+
                 ip = get_ipython()
-                self._in_kernel = ip is not None and ip.__class__.__name__ == 'ZMQInteractiveShell'
+                self._in_kernel = (
+                    ip is not None and ip.__class__.__name__ == "ZMQInteractiveShell"
+                )
             except ImportError:
                 pass
         return self._in_kernel
@@ -60,11 +63,11 @@ class Output:
             File handle for output
         """
         if self._is_kernel_context():
-            if not hasattr(self, '_log_file') or self._log_file is None:
-                self._log_file = open('jupyter.log', 'a')
+            if not hasattr(self, "_log_file") or self._log_file is None:
+                self._log_file = open("jupyter.log", "a")
             return self._log_file
 
-        if hasattr(sys, '__stdout__') and sys.__stdout__ is not None:
+        if hasattr(sys, "__stdout__") and sys.__stdout__ is not None:
             return sys.__stdout__
         return sys.stdout
 
@@ -124,10 +127,10 @@ class Output:
 
         def __exit__(self, exc_type, exc_value, traceback):
             with self.outer.lock:
-                if self.suppressed:
-                    return
                 end_time = time.time()
                 duration = (end_time - self.start_time) * 1000
+                if self.suppressed:
+                    return
                 if self.key is not None:
                     self.outer.timings.append(Timing(key=self.key, duration=duration))
                 if self.message is not None:

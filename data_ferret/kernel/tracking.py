@@ -9,94 +9,175 @@ patterns during cell execution. It records:
 - Column-level tracking: Which DataFrame columns are read/written
 
 Architecture:
-    TrackingDict wraps the IPython user namespace and intercepts __getitem__
-    and __setitem__ to track access patterns. Column-level tracking is handled
-    by ColumnAccessTracker, which monkey-patches pandas DataFrame methods.
+    TrackingDict uses a DELEGATION pattern - it delegates all storage to an
+    underlying namespace (user_global_ns) while intercepting access to track
+    read/write patterns. This ensures:
+
+    1. Single source of truth: All data lives in user_global_ns
+    2. Python scoping works: List comprehensions and functions find variables
+       because they're stored in the real globals namespace
+    3. No synchronization issues: No shadow namespace to keep in sync
+
+    Column-level tracking is handled by ColumnAccessTracker, which monkey-patches
+    pandas DataFrame methods.
 
 Usage:
-    The kernel enables tracking by replacing user_ns with a TrackingDict:
+    The kernel enables tracking by wrapping user_global_ns:
 
-        user_ns = TrackingDict(user_ns)
+        tracking_dict = TrackingDict(shell.user_global_ns)
+        shell.user_ns = tracking_dict
 
     For each cell execution, use the context manager:
 
-        with user_ns.track_execution():
-            exec(code, user_ns)
-        tracking_data = user_ns.get_tracking_data()
-
-    Or manually:
-
-        user_ns.reset_tracking()
-        user_ns.start_column_tracking()
-        try:
-            exec(code, user_ns)
-        finally:
-            user_ns.stop_column_tracking()
-        tracking_data = user_ns.get_tracking_data()
-
-Note:
-    This implementation uses single storage (the parent dict) to avoid
-    synchronization issues that occur with dual storage when IPython's
-    internal methods bypass our overridden methods.
+        with tracking_dict.track_execution():
+            exec(code, tracking_dict)
+        tracking_data = tracking_dict.get_tracking_data()
 """
 
 from contextlib import contextmanager
-from typing import Dict, Generator, Set
+from typing import Dict, Generator, Optional, Set
 
 from .column_tracking import ColumnAccessTracker, walk_dataframes
 
 
 class TrackingDict(dict):
-    """A dict subclass that tracks variable access patterns during cell execution.
+    """
+    A dict that delegates storage to an underlying namespace while tracking access.
 
-    When shadow_ns is provided, all writes are also mirrored to that namespace.
-    This is needed because IPython's user_global_ns (used by list comprehensions
-    and functions for global lookups) cannot be replaced - it's always
-    user_module.__dict__. By mirroring writes, variables added to TrackingDict
-    also appear in user_global_ns.
+    This inherits from dict for isinstance compatibility, but ALL storage is
+    delegated to _real_ns. The dict inheritance is just for type compatibility
+    with IPython internals that check isinstance(user_ns, dict).
+
+    Key design: We don't store data ourselves - we delegate to user_global_ns.
+    This means list comprehensions and functions automatically find variables
+    because they look in user_global_ns, which IS where we store everything.
     """
 
-    def __init__(self, initial_ns=None, shadow_ns=None):
+    # Use __slots__ to prevent attribute access from going through __getattr__
+    # Actually, we can't use __slots__ with dict subclass easily, so we use
+    # a prefix convention and careful attribute access
+
+    def __init__(self, real_ns: Optional[dict] = None):
+        """
+        Initialize TrackingDict as a wrapper around the real namespace.
+
+        Args:
+            real_ns: The real namespace to delegate storage to. This should be
+                     shell.user_global_ns (which is user_module.__dict__).
+                     If None, creates a new empty dict for storage.
+        """
+        # Don't call super().__init__() with data - we delegate storage
         super().__init__()
-        # Shadow namespace to mirror writes (typically user_global_ns)
-        self._shadow_ns = shadow_ns
-        if initial_ns is not None:
-            # Copy all contents from the existing namespace
-            self.update(initial_ns)
-        self._initial_keys = set(self.keys())
-        self._column_tracker = ColumnAccessTracker()
-        self.reset_tracking()
+
+        # Use object.__setattr__ to avoid triggering our __setitem__
+        # If no real_ns provided, create one (for tests and standalone use)
+        object.__setattr__(self, '_real_ns', real_ns if real_ns is not None else {})
+        object.__setattr__(self, '_reads_before_writes', set())
+        object.__setattr__(self, '_writes', set())
+        object.__setattr__(self, '_tracking_enabled', True)  # Track by default
+        object.__setattr__(self, '_column_tracker', ColumnAccessTracker())
+
+    # =========================================================================
+    # Core dict protocol - delegate to _real_ns
+    # =========================================================================
+
+    def __getitem__(self, key):
+        value = self._real_ns[key]
+        if self._tracking_enabled and key not in self._writes:
+            self._reads_before_writes.add(key)
+        return value
+
+    def __setitem__(self, key, value):
+        if self._tracking_enabled:
+            self._writes.add(key)
+        self._real_ns[key] = value
+
+    def __delitem__(self, key):
+        del self._real_ns[key]
+
+    def __contains__(self, key):
+        return key in self._real_ns
+
+    def __iter__(self):
+        return iter(self._real_ns)
+
+    def __len__(self):
+        return len(self._real_ns)
+
+    def __repr__(self):
+        return f"TrackingDict({repr(self._real_ns)})"
+
+    # =========================================================================
+    # Dict methods - all delegate to _real_ns
+    # =========================================================================
+
+    def keys(self):
+        return self._real_ns.keys()
+
+    def values(self):
+        return self._real_ns.values()
+
+    def items(self):
+        return self._real_ns.items()
+
+    def get(self, key, default=None):
+        """Get with default - does NOT track reads (used by IPython internals)."""
+        return self._real_ns.get(key, default)
+
+    def update(self, other=None, **kwargs):
+        """Update the namespace. Uses __setitem__ to ensure tracking."""
+        if other is not None:
+            if hasattr(other, 'items'):
+                for key, value in other.items():
+                    self[key] = value
+            else:
+                for key, value in other:
+                    self[key] = value
+        for key, value in kwargs.items():
+            self[key] = value
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def pop(self, key, *args):
+        try:
+            value = self[key]  # Track the read
+            del self[key]
+            return value
+        except KeyError:
+            if args:
+                return args[0]
+            raise
+
+    def popitem(self):
+        key, value = self._real_ns.popitem()
+        return key, value
+
+    def clear(self):
+        self._real_ns.clear()
+
+    def copy(self):
+        return dict(self._real_ns)
+
+    # =========================================================================
+    # Tracking control
+    # =========================================================================
 
     def reset_tracking(self):
         """Reset tracking state for a new cell execution."""
-        self._reads_before_writes = set()
-        self._writes = set()
+        self._reads_before_writes.clear()
+        self._writes.clear()
         self._column_tracker.reset()
 
-    def start_column_tracking(self) -> None:
-        """Call before cell execution to enable column tracking.
+    @property
+    def reads_before_writes(self) -> Set[str]:
+        return self._reads_before_writes
 
-        This registers all existing DataFrames and installs monkey-patches
-        on DataFrame methods to track column access.
-        """
-        # Ensure clean state before tracking (guards against leaked state from
-        # previous cells if patches remained installed due to exceptions)
-        self._column_tracker.reset()
-        # Register all existing DataFrames with their paths
-        for path, df in walk_dataframes(self):
-            self._column_tracker.register_df(df, path)
-        self._column_tracker.install()
-
-    def stop_column_tracking(self) -> None:
-        """Call after cell execution to finalize column tracking.
-
-        This re-registers DataFrames (to catch newly created ones),
-        resolves tracking data, and restores original DataFrame methods.
-        """
-        # Re-register DataFrames (new DFs may have been created during execution)
-        for path, df in walk_dataframes(self):
-            self._column_tracker.register_df(df, path)
-        self._column_tracker.uninstall()
+    @property
+    def writes(self) -> Set[str]:
+        return self._writes
 
     @property
     def column_reads_before_writes(self) -> Dict[str, Set[str]]:
@@ -108,33 +189,34 @@ class TrackingDict(dict):
         """Get column-level writes, keyed by variable path."""
         return self._column_tracker.resolve_writes_to_paths()
 
-    @property
-    def reads_before_writes(self):
-        return self._reads_before_writes
+    # =========================================================================
+    # Column tracking
+    # =========================================================================
 
-    @property
-    def writes(self):
-        return self._writes
+    def start_column_tracking(self) -> None:
+        """Call before cell execution to enable column tracking.
 
-    def __getitem__(self, key):
-        val = dict.__getitem__(self, key)
-        if key not in self._writes:
-            self._reads_before_writes.add(key)
-        return val
+        This registers all existing DataFrames and installs monkey-patches
+        on DataFrame methods to track column access.
+        """
+        # Ensure clean state before tracking (guards against leaked state from
+        # previous cells if patches remained installed due to exceptions)
+        self._column_tracker.reset()
+        # Register all existing DataFrames with their paths
+        for path, df in walk_dataframes(self._real_ns):
+            self._column_tracker.register_df(df, path)
+        self._column_tracker.install()
 
-    def __setitem__(self, key, value):
-        # Track writes of non-private variables
-        self._writes.add(key)
-        dict.__setitem__(self, key, value)
-        # Mirror to shadow namespace (for user_global_ns compatibility)
-        if self._shadow_ns is not None:
-            self._shadow_ns[key] = value
+    def stop_column_tracking(self) -> None:
+        """Call after cell execution to finalize column tracking.
 
-    def __delitem__(self, key):
-        super().__delitem__(key)
-        # Mirror deletion to shadow namespace
-        if self._shadow_ns is not None and key in self._shadow_ns:
-            del self._shadow_ns[key]
+        This re-registers DataFrames (to catch newly created ones),
+        resolves tracking data, and restores original DataFrame methods.
+        """
+        # Re-register DataFrames (new DFs may have been created during execution)
+        for path, df in walk_dataframes(self._real_ns):
+            self._column_tracker.register_df(df, path)
+        self._column_tracker.uninstall()
 
     # =========================================================================
     # Context Manager API
@@ -145,9 +227,10 @@ class TrackingDict(dict):
         """
         Context manager for tracking a cell execution.
 
-        Handles the full lifecycle of tracking: reset, start column tracking,
-        execute (yield), and stop column tracking. After the context exits,
-        call get_tracking_data() to retrieve the captured data.
+        Handles the full lifecycle of tracking: reset, enable tracking,
+        start column tracking, execute (yield), stop column tracking,
+        disable tracking. After the context exits, call get_tracking_data()
+        to retrieve the captured data.
 
         Usage:
             with user_ns.track_execution():
@@ -158,11 +241,13 @@ class TrackingDict(dict):
             None - execute your code inside the with block
         """
         self.reset_tracking()
+        self._tracking_enabled = True
         self.start_column_tracking()
         try:
             yield
         finally:
             self.stop_column_tracking()
+            self._tracking_enabled = False
 
     def get_tracking_data(self) -> "TrackingData":
         """
@@ -181,46 +266,15 @@ class TrackingDict(dict):
             reads_before_writes=set(
                 k
                 for k in self._reads_before_writes
-                if is_valid_variable(k, self.get(k))
+                if is_valid_variable(k, self._real_ns.get(k))
             ),
-            writes=set(k for k in self._writes if is_valid_variable(k, self.get(k))),
+            writes=set(
+                k
+                for k in self._writes
+                if is_valid_variable(k, self._real_ns.get(k))
+            ),
             column_reads_before_writes={
                 k: set(v) for k, v in self.column_reads_before_writes.items()
             },
             column_writes={k: set(v) for k, v in self.column_writes.items()},
         )
-
-
-# from IPython import get_ipython
-
-
-# def pre_run_cell(info):
-#     ip = get_ipython()
-#     # before each cell, just clear out last cell’s logs
-#     ip.user_ns.reset_tracking()
-
-
-# def post_run_cell(result):
-#     ip = get_ipython()
-#     # after each cell you can inspect:
-#     print("reads-before-writes:", ip.user_ns.reads_before_writes)
-#     print("writes:", ip.user_ns.writes)
-#     print("new_vars:", ip.user_ns.new_vars)
-
-
-# def load_ipython_extension(ipython):
-#     """Load the tracking extension into IPython."""
-#     ipython.user_ns = TrackingDict(ipython.user_ns)
-#     ipython.events.register("pre_run_cell", pre_run_cell)
-#     ipython.events.register("post_run_cell", post_run_cell)
-#     print("✅ tracking_ns loaded: now tracking variable accesses.")
-
-
-# def unload_ipython_extension(ipython):
-#     """Unload the tracking extension from IPython."""
-#     ipython.events.unregister("pre_run_cell", pre_run_cell)
-#     ipython.events.unregister("post_run_cell", post_run_cell)
-#     # Restore a plain dict namespace
-#     plain = dict(ipython.user_ns)
-#     ipython.user_ns = plain
-#     print("🛑 tracking_ns unloaded: namespace restored.")

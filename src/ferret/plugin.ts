@@ -13,7 +13,7 @@ import { KernelDetector } from '../shared/kerneldetection';
 import { FerretCommandsManager } from './manager';
 import { NotebookToolbarExtension } from './toolbar';
 import { CellToolbarExtension } from './celltoolbar';
-import { MessagePanel } from '../panel';
+import { MessagePanel } from '../logpanel';
 import { FerretMetadataPanel } from './metadatapanel';
 import { UnitTestPanel } from './unittestpanel';
 import { UnitTestPanelTracker } from './unittesttracker';

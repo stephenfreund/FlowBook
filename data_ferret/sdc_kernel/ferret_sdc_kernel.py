@@ -16,6 +16,7 @@ from ipykernel.kernelapp import IPKernelApp
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.display_helpers import DisplayHelper
 from data_ferret.kernel.tracking import TrackingDict
+from data_ferret.server.message_broadcaster import get_broadcaster
 from data_ferret.util.cell_index import index_to_alpha
 from data_ferret.util.output import log, timer
 
@@ -150,22 +151,68 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
     def _ensure_tracking_initialized(self) -> None:
         """
-        Initialize variable tracking by replacing user_ns with TrackingDict.
+        Initialize variable tracking with full comprehension support.
 
-        This is done lazily on first execution rather than in __init__ to ensure
-        the shell is fully initialized. This matches how FerretKernel's
-        enable_global_tracking works.
+        This patches the shell's run_code method to use our TrackingDict for
+        BOTH globals and locals. This is necessary because:
 
-        IMPORTANT: We pass user_global_ns as shadow_ns to TrackingDict. IPython's
-        user_global_ns (user_module.__dict__) cannot be replaced, but list
-        comprehensions and functions look up globals there. By mirroring writes
-        to the shadow namespace, variables are visible in both places.
+        1. Python's exec(code, globals, locals) uses globals for LOAD_GLOBAL
+        2. List comprehensions and functions use LOAD_GLOBAL for free variables
+        3. If globals != our TrackingDict, comprehension reads aren't tracked
+
+        By using TrackingDict for both, all variable access is tracked including
+        reads inside list comprehensions and nested functions.
         """
         if not isinstance(self.shell.user_ns, TrackingDict):
-            tracking_dict = TrackingDict(
-                self.shell.user_ns, shadow_ns=self.shell.user_global_ns
-            )
+            # Create TrackingDict wrapping user_global_ns
+            tracking_dict = TrackingDict(self.shell.user_global_ns)
             self.shell.user_ns = tracking_dict
+
+            # Patch run_code to use TrackingDict for both globals and locals
+            self._patch_run_code(tracking_dict)
+
+    def _patch_run_code(self, tracking_dict: TrackingDict) -> None:
+        """
+        Patch shell.run_code to use TrackingDict for both globals and locals.
+
+        This enables tracking of variable reads inside list comprehensions
+        and nested functions, which would otherwise bypass our TrackingDict.
+        """
+        shell = self.shell
+        original_run_code = shell.run_code
+
+        def patched_run_code(code_obj, result=None, *, async_=False):
+            """
+            Execute code using TrackingDict for both globals and locals.
+
+            This ensures all variable access is tracked, including reads
+            inside list comprehensions which use LOAD_GLOBAL.
+            """
+            # Temporarily replace both user_ns and inject tracking_dict
+            # as the globals dict for exec. We do this by temporarily
+            # swapping what user_global_ns returns.
+
+            # Store original
+            old_user_ns = shell.user_ns
+
+            try:
+                # Set both to tracking_dict so exec sees it as globals
+                shell.user_ns = tracking_dict
+                # user_global_ns is a property, but we shadow it in __dict__
+                shell.__dict__['user_global_ns'] = tracking_dict
+
+                # Call original run_code - it will use our tracking_dict
+                return original_run_code(code_obj, result, async_=async_)
+
+            finally:
+                # Restore
+                shell.user_ns = old_user_ns
+                # Remove the shadow
+                if 'user_global_ns' in shell.__dict__:
+                    del shell.__dict__['user_global_ns']
+
+        # Replace the method
+        shell.run_code = patched_run_code
 
     # =========================================================================
     # Execution
@@ -400,8 +447,8 @@ class FerretSDCKernel(IPythonKernel, Magics):
         metadata = SDCMetadata(
             cell_id=self._cell_id or "",
             execution_seq=self._sdc.seq_counter,
-            reads=tracking.reads_before_writes if tracking else [],
-            writes=tracking.writes if tracking else [],
+            reads=list(tracking.reads_before_writes) if tracking else [],
+            writes=list(tracking.writes) if tracking else [],
             changed_variables=sdc_result.changed_variables if sdc_result else [],
             stale_cells=sdc_result.stale_cells if sdc_result else [],
             violation=(

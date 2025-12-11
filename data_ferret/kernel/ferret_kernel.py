@@ -153,6 +153,9 @@ class FerretKernel(IPythonKernel, Magics):
         self._checkpoint = Checkpoints()
         self._scalene = ScaleneRunner(self.shell, self._executed_cell_ids)
 
+        # Tracking state
+        self._original_run_code = None  # Store original for unpatch
+
         # Register comm targets
         self.comm_manager.register_target("debug_command", self._debug_command_comm_open)
         self.comm_manager.register_target("kernel_command", self._kernel_command_comm_open)
@@ -178,6 +181,63 @@ class FerretKernel(IPythonKernel, Magics):
     def diff_checkpoints(self, old: Checkpoint, new: Checkpoint) -> None:
         """Display the diff between two checkpoints."""
         self._display.display_checkpoint_diff(old, new)
+
+    # =========================================================================
+    # Variable Tracking
+    # =========================================================================
+
+    def _patch_run_code(self, tracking_dict: TrackingDict) -> None:
+        """
+        Patch shell.run_code to use TrackingDict for both globals and locals.
+
+        This enables tracking of variable reads inside list comprehensions
+        and nested functions, which would otherwise bypass our TrackingDict.
+        """
+        if self._original_run_code is not None:
+            # Already patched
+            return
+
+        shell = self.shell
+        self._original_run_code = shell.run_code
+
+        def patched_run_code(code_obj, result=None, *, async_=False):
+            """
+            Execute code using TrackingDict for both globals and locals.
+
+            This ensures all variable access is tracked, including reads
+            inside list comprehensions which use LOAD_GLOBAL.
+            """
+            # Temporarily replace both user_ns and inject tracking_dict
+            # as the globals dict for exec. We do this by temporarily
+            # swapping what user_global_ns returns.
+
+            # Store original
+            old_user_ns = shell.user_ns
+
+            try:
+                # Set both to tracking_dict so exec sees it as globals
+                shell.user_ns = tracking_dict
+                # user_global_ns is a property, but we shadow it in __dict__
+                shell.__dict__['user_global_ns'] = tracking_dict
+
+                # Call original run_code - it will use our tracking_dict
+                return self._original_run_code(code_obj, result, async_=async_)
+
+            finally:
+                # Restore
+                shell.user_ns = old_user_ns
+                # Remove the shadow
+                if 'user_global_ns' in shell.__dict__:
+                    del shell.__dict__['user_global_ns']
+
+        # Replace the method
+        shell.run_code = patched_run_code
+
+    def _unpatch_run_code(self) -> None:
+        """Restore original run_code method."""
+        if self._original_run_code is not None:
+            self.shell.run_code = self._original_run_code
+            self._original_run_code = None
 
     # =========================================================================
     # Magic Commands - Feature Toggles

@@ -73,7 +73,7 @@ class SDCMetadata:
     def to_display_metadata(self) -> dict:
         """Format for display in output metadata."""
         return {
-            "ferret_sdc_kernel": {
+            "ferret_sdc": {
                 "cell_id": self.cell_id,
                 "execution_seq": self.execution_seq,
                 "reads": self.reads,

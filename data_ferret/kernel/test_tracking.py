@@ -165,8 +165,8 @@ class TestTrackExecutionContextManager:
 
         # After context, tracking should have been reset
         data = td.get_tracking_data()
-        assert data.reads_before_writes == []
-        assert data.writes == []
+        assert data.reads_before_writes == set()
+        assert data.writes == set()
 
     def test_context_manager_tracks_operations(self):
         """Context manager tracks operations inside it."""
@@ -227,8 +227,8 @@ class TestGetTrackingData:
         data = td.get_tracking_data()
         assert isinstance(data, TrackingData)
 
-    def test_get_tracking_data_sorted(self):
-        """get_tracking_data returns sorted lists."""
+    def test_get_tracking_data_sets(self):
+        """get_tracking_data returns sets of variable names."""
         td = TrackingDict({"c": 1, "a": 2, "b": 3})
         td.reset_tracking()
         _ = td["c"]
@@ -239,8 +239,8 @@ class TestGetTrackingData:
         td["y"] = 30
 
         data = td.get_tracking_data()
-        assert data.reads_before_writes == ["a", "b", "c"]
-        assert data.writes == ["x", "y", "z"]
+        assert data.reads_before_writes == {"a", "b", "c"}
+        assert data.writes == {"x", "y", "z"}
 
     def test_get_tracking_data_filters_private(self):
         """get_tracking_data filters private variables."""

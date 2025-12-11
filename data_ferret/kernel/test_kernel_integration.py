@@ -255,8 +255,8 @@ class TestMetadataCreationFlow:
 
         assert display["profile"]["duration"] == 2.5
         assert "CPU" in display["profile"]["profile"]
-        assert display["dynamic_dependencies"]["reads_before_writes"] == ["x", "df"]
-        assert display["dynamic_dependencies"]["column_reads_before_writes"]["df"] == ["price", "qty"]
+        assert display["dynamic_dependencies"]["reads_before_writes"] == {"x", "df"}
+        assert display["dynamic_dependencies"]["column_reads_before_writes"]["df"] == {"price", "qty"}
 
 
 class TestErrorHandlingFlow:
@@ -396,8 +396,8 @@ class TestEdgeCasesIntegration:
             pass  # Empty execution
 
         data = user_ns.get_tracking_data()
-        assert data.reads_before_writes == []
-        assert data.writes == []
+        assert data.reads_before_writes == set()
+        assert data.writes == set()
 
     def test_readonly_cell(self):
         """Test cell that only reads."""
@@ -409,8 +409,8 @@ class TestEdgeCasesIntegration:
             _ = user_ns["c"]
 
         data = user_ns.get_tracking_data()
-        assert set(data.reads_before_writes) == {"a", "b", "c"}
-        assert data.writes == []
+        assert data.reads_before_writes == {"a", "b", "c"}
+        assert data.writes == set()
 
     def test_writeonly_cell(self):
         """Test cell that only writes."""
@@ -422,8 +422,8 @@ class TestEdgeCasesIntegration:
             user_ns["z"] = 3
 
         data = user_ns.get_tracking_data()
-        assert data.reads_before_writes == []
-        assert set(data.writes) == {"x", "y", "z"}
+        assert data.reads_before_writes == set()
+        assert data.writes == {"x", "y", "z"}
 
     def test_same_var_read_write_cycle(self):
         """Test reading and writing same variable."""
