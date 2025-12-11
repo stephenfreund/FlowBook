@@ -498,12 +498,15 @@ def walk_dataframes(
     Yields:
         Tuples of (path, DataFrame) for each DataFrame found
     """
+    # Local import to avoid circular dependency
+    from data_ferret.kernel.checkpoint import is_valid_variable_name
+
     if visited is None:
         visited = set()
 
     for key, val in namespace.items():
-        # Skip private variables
-        if isinstance(key, str) and key.startswith('_'):
+        # Skip IPython special variables and private variables
+        if not isinstance(key, str) or not is_valid_variable_name(key):
             continue
 
         # Avoid cycles

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import sys
 import os
+import socket
 import textwrap
 import time
 import traceback
@@ -14,15 +15,76 @@ import threading
 import atexit
 import pandas as pd
 import numpy as np
-from typing import List, Tuple, TypedDict
+from typing import List, Optional, Tuple, TypedDict
 
 
 Timing = TypedDict("Timing", {"key": str, "duration": float})
 Timings = List[Timing]
 
 
+class SocketStream:
+    """
+    File-like object that writes to a Unix domain socket.
+
+    Handles connection, reconnection, and buffering for streaming
+    output from kernels to the ferret_lab terminal.
+    """
+
+    def __init__(self, socket_path: str):
+        self.socket_path = socket_path
+        self._socket: Optional[socket.socket] = None
+        self._lock = threading.Lock()
+        self._connected = False
+
+    def _connect(self) -> bool:
+        """Attempt to connect to the output socket."""
+        if self._connected and self._socket:
+            return True
+
+        try:
+            self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._socket.connect(self.socket_path)
+            self._connected = True
+            return True
+        except (OSError, ConnectionRefusedError):
+            self._socket = None
+            self._connected = False
+            return False
+
+    def write(self, text: str) -> int:
+        """Write text to the socket."""
+        with self._lock:
+            if not self._connect():
+                return 0
+
+            try:
+                data = text.encode("utf-8")
+                self._socket.sendall(data)
+                return len(text)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                # Connection lost, mark for reconnection
+                self._connected = False
+                self._socket = None
+                return 0
+
+    def flush(self):
+        """Flush is a no-op for sockets (data is sent immediately)."""
+        pass
+
+    def close(self):
+        """Close the socket connection."""
+        with self._lock:
+            if self._socket:
+                try:
+                    self._socket.close()
+                except OSError:
+                    pass
+                self._socket = None
+                self._connected = False
+
+
 class Output:
-    def __init__(self, *, timings_file: str = None):
+    def __init__(self, *, timings_file: str | None = None):
         if timings_file is None:
             # Check environment variable first, then fall back to default
             timings_file = os.environ.get("FERRET_TIMINGS_FILE", "ferret-times.json")
@@ -56,19 +118,28 @@ class Output:
         """
         Get the output file handle.
 
-        In Jupyter kernel context, writes to jupyter.log file to avoid
-        polluting notebook cell outputs. Otherwise writes to stdout.
+        In Jupyter kernel context with FERRET_OUTPUT_SOCKET set, writes to
+        the Unix socket for streaming to ferret_lab terminal.
+        Otherwise writes to stdout.
 
         Returns:
             File handle for output
         """
         if self._is_kernel_context():
-            if not hasattr(self, "_log_file") or self._log_file is None:
-                self._log_file = open("jupyter.log", "a")
-            return self._log_file
+            # Check for ferret_lab socket
+            socket_path = os.environ.get("FERRET_OUTPUT_SOCKET")
+            if socket_path and os.path.exists(socket_path):
+                # Lazily create socket stream
+                if not hasattr(self, "_socket_stream") or self._socket_stream is None:
+                    self._socket_stream = SocketStream(socket_path)
+                return self._socket_stream
 
-        if hasattr(sys, "__stdout__") and sys.__stdout__ is not None:
-            return sys.__stdout__
+            # Fallback: try /dev/tty (works in some terminal contexts)
+            try:
+                return open("/dev/tty", "w")
+            except OSError:
+                pass
+
         return sys.stdout
 
     def set_timings_file(self, timings_file: str):
@@ -124,11 +195,14 @@ class Output:
                         )
                         self.outer.contexts += [self]
                 self.start_time = time.time()
+                self._duration_ms = None
+            return self
 
         def __exit__(self, exc_type, exc_value, traceback):
             with self.outer.lock:
                 end_time = time.time()
                 duration = (end_time - self.start_time) * 1000
+                self._duration_ms = duration
                 if self.suppressed:
                     return
                 if self.key is not None:
@@ -137,6 +211,20 @@ class Output:
                     self.outer.contexts.pop()
                     message = f"{termcolor.colored(f'{int(duration)} ms', self.color)}"
                     self.outer.print_exit(message, start=self.start, end=self.end)
+
+        def duration(self) -> float:
+            """
+            Return elapsed duration in milliseconds.
+
+            Returns:
+                Duration in milliseconds as a float.
+
+            Raises:
+                ValueError: If called before the context has exited.
+            """
+            if self._duration_ms is None:
+                raise ValueError("Duration not available - context not yet exited")
+            return self._duration_ms
 
     class IndentedOutputContext:
         def __init__(self, outer, message: str, color="cyan", start="[", end="]"):

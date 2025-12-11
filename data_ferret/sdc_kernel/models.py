@@ -52,6 +52,7 @@ class SDCResult:
     violation: Optional[SDCViolation]
     stale_cells: List[str]  # cell IDs that need re-execution (document order)
     changed_variables: List[str]  # variables that changed value
+    column_changed: Dict[str, List[str]] = field(default_factory=dict)  # var -> [changed columns]
 
 
 @dataclass
@@ -69,6 +70,9 @@ class SDCMetadata:
     stale_cells: List[str]
     violation: Optional[Dict[str, Any]]  # SDCViolation as dict, or None
     cell_order: List[str]  # current notebook structure
+    column_reads: Dict[str, List[str]] = field(default_factory=dict)  # var -> [read columns]
+    column_writes: Dict[str, List[str]] = field(default_factory=dict)  # var -> [written columns]
+    column_changed: Dict[str, List[str]] = field(default_factory=dict)  # var -> [changed columns]
 
     def to_display_metadata(self) -> dict:
         """Format for display in output metadata."""
@@ -82,5 +86,8 @@ class SDCMetadata:
                 "stale_cells": self.stale_cells,
                 "violation": self.violation,
                 "cell_order": self.cell_order,
+                "column_reads": self.column_reads,
+                "column_writes": self.column_writes,
+                "column_changed": self.column_changed,
             }
         }

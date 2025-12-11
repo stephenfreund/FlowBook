@@ -7,7 +7,7 @@ SDC is always enabled.
 
 import time
 import traceback
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from IPython.core.magic import Magics, line_magic, magics_class
 from ipykernel.ipkernel import IPythonKernel
@@ -199,7 +199,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 # Set both to tracking_dict so exec sees it as globals
                 shell.user_ns = tracking_dict
                 # user_global_ns is a property, but we shadow it in __dict__
-                shell.__dict__['user_global_ns'] = tracking_dict
+                shell.__dict__["user_global_ns"] = tracking_dict
 
                 # Call original run_code - it will use our tracking_dict
                 return original_run_code(code_obj, result, async_=async_)
@@ -208,8 +208,8 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 # Restore
                 shell.user_ns = old_user_ns
                 # Remove the shadow
-                if 'user_global_ns' in shell.__dict__:
-                    del shell.__dict__['user_global_ns']
+                if "user_global_ns" in shell.__dict__:
+                    del shell.__dict__["user_global_ns"]
 
         # Replace the method
         shell.run_code = patched_run_code
@@ -265,7 +265,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
             with timer(
                 key="sdc_pre_checkpoint",
                 message=f"[sdc] Taking pre-checkpoint for {cell_alpha}",
-            ):
+            ) as pre_checkpoint_duration:
                 pre_checkpoint = self._take_checkpoint(f"_pre_{self._cell_id}")
 
             # Reset tracking for this execution
@@ -273,8 +273,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 user_ns.reset_tracking()
 
             # Execute with tracking
-            with timer(key="sdc_execute", message=f"[sdc] Executing cell {cell_alpha}"):
-                start_time = time.time()
+            with timer(
+                key="sdc_execute", message=f"[sdc] Executing cell {cell_alpha}"
+            ) as run_duration:
                 if isinstance(user_ns, TrackingDict):
                     with user_ns.track_execution():
                         result = await super().do_execute(
@@ -298,7 +299,6 @@ class FerretSDCKernel(IPythonKernel, Magics):
                         cell_id=self._cell_id,
                     )
                     tracking = None
-                duration = time.time() - start_time
 
             # If execution had an error, restore pre-state and skip SDC checks
             if result.get("status") == "error":
@@ -317,15 +317,14 @@ class FerretSDCKernel(IPythonKernel, Magics):
             with timer(
                 key="sdc_post_checkpoint",
                 message=f"[sdc] Taking post-checkpoint for {cell_alpha}",
-            ):
+            ) as post_checkpoint_duration:
                 post_checkpoint = self._take_checkpoint(f"_post_{self._cell_id}")
 
             # Run SDC check if we have tracking data and cell_id
-            sdc_result = None
             if tracking and self._cell_id:
                 with timer(
                     key="sdc_check", message=f"[sdc] Running SDC check for {cell_alpha}"
-                ):
+                ) as sdc_check_duration:
                     sdc_result = self._sdc.check(
                         cell_id=self._cell_id,
                         pre_checkpoint=pre_checkpoint,
@@ -336,21 +335,28 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 if sdc_result and sdc_result.violation:
                     log(f"[sdc] VIOLATION DETECTED: {sdc_result.violation.message}")
 
-            # Display results (only if not silent, no error, and no SDC violation)
-            # Skip display on violation since state will be rolled back
-            has_violation = sdc_result and sdc_result.violation
-            if not silent and result.get("status") != "error" and not has_violation:
-                self._display_execution_result(duration, tracking, sdc_result)
+                # Display results (only if not silent, no error, and no SDC violation)
+                # Skip display on violation since state will be rolled back
+                has_violation = sdc_result and sdc_result.violation
+                if not silent and result.get("status") != "error" and not has_violation:
+                    check_duration = (
+                        pre_checkpoint_duration.duration()
+                        + post_checkpoint_duration.duration()
+                        + sdc_check_duration.duration()
+                    )
+                    self._display_execution_result(
+                        run_duration.duration(), check_duration, tracking, sdc_result
+                    )
 
-            # Handle violation - report as error
-            if sdc_result and sdc_result.violation:
-                log(f"[sdc] Restoring checkpoint and sending error")
-                # restore to pre-checkpoint
-                self._sdc.checkpoints.restore(
-                    f"_pre_{self._cell_id}", self.shell.user_ns
-                )
-                self._send_violation_error(sdc_result.violation)
-                return self._make_error_result(sdc_result.violation)
+                # Handle violation - report as error
+                if sdc_result and sdc_result.violation:
+                    log(f"[sdc] Restoring checkpoint and sending error")
+                    # restore to pre-checkpoint
+                    self._sdc.checkpoints.restore(
+                        f"_pre_{self._cell_id}", self.shell.user_ns
+                    )
+                    self._send_violation_error(sdc_result.violation)
+                    return self._make_error_result(sdc_result.violation)
 
             return result
         except Exception as e:
@@ -436,9 +442,40 @@ class FerretSDCKernel(IPythonKernel, Magics):
             cell_id=self._cell_id,
         )
 
+    def _format_var_with_columns(
+        self,
+        var: str,
+        column_reads: dict,
+        column_writes: dict,
+    ) -> str:
+        """
+        Format variable with inline column info: df[price,qty].
+
+        Args:
+            var: Variable name
+            column_reads: Dict mapping var names to sets/lists of read columns
+            column_writes: Dict mapping var names to sets/lists of written columns
+
+        Returns:
+            Formatted string like "df[price,qty]" or "x" if no columns
+        """
+        # Handle both sets and lists
+        read_cols = column_reads.get(var, [])
+        write_cols = column_writes.get(var, [])
+        all_cols = set(read_cols) | set(write_cols)
+
+        if all_cols:
+            cols_list = sorted(all_cols)[:3]  # Show first 3
+            cols_str = ",".join(cols_list)
+            if len(all_cols) > 3:
+                cols_str += f",+{len(all_cols) - 3}"
+            return f"{var}[{cols_str}]"
+        return var
+
     def _display_execution_result(
         self,
-        duration: float,
+        run_duration: float,
+        check_duration: float,
         tracking,
         sdc_result,
     ) -> None:
@@ -457,22 +494,42 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 else None
             ),
             cell_order=self._sdc.cell_order,
+            column_reads=(
+                {k: list(v) for k, v in tracking.column_reads_before_writes.items()}
+                if tracking
+                else {}
+            ),
+            column_writes=(
+                {k: list(v) for k, v in tracking.column_writes.items()}
+                if tracking
+                else {}
+            ),
+            column_changed=sdc_result.column_changed if sdc_result else {},
         )
 
         # Build display text
-        parts = [f"{duration:.2f}s"]
+        parts = [f"Run: {run_duration:.0f} ms", f"Check: {check_duration:.0f} ms"]
         if tracking:
             if tracking.reads_before_writes:
-                reads_preview = list(tracking.reads_before_writes)[:3]
-                parts.append(f"R:{','.join(reads_preview)}")
-            if tracking.writes:
-                writes_preview = list(tracking.writes)[:3]
-                parts.append(f"W:{','.join(writes_preview)}")
+                reads_preview = [
+                    self._format_var_with_columns(v, metadata.column_reads, {})
+                    for v in list(tracking.reads_before_writes)[:3]
+                ]
+                parts.append(f"Reads: {','.join(reads_preview)}")
+            # Show writes if there are variable-level writes OR column-level writes
+            write_vars = set(tracking.writes) | set(metadata.column_writes.keys())
+            if write_vars:
+                writes_preview = [
+                    self._format_var_with_columns(v, {}, metadata.column_writes)
+                    for v in list(write_vars)[:3]
+                ]
+                parts.append(f"Writes: {','.join(writes_preview)}")
 
         if sdc_result and sdc_result.stale_cells:
-            parts.append(f"stale:{','.join(sdc_result.stale_cells)}")
+            parts.append(f"Stale: {','.join(sdc_result.stale_cells)}")
 
-        icon = "check" if not (sdc_result and sdc_result.violation) else "error"
+        # icon = "check" if not (sdc_result and sdc_result.violation) else "error"
+        icon = ""
 
         self._display.display_icon_and_text(
             icon,

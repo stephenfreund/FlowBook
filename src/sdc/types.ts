@@ -18,6 +18,9 @@ export interface ISDCMetadata {
   stale_cells: string[];
   violation: ISDCViolation | null;
   cell_order: string[];
+  column_reads?: { [key: string]: string[] };
+  column_writes?: { [key: string]: string[] };
+  column_changed?: { [key: string]: string[] };
 }
 
 export interface ISDCCellState {

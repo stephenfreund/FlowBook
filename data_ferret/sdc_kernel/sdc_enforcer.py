@@ -8,9 +8,11 @@ Implements the three SDC rules:
 """
 
 from typing import Dict, List, Optional, Set
+import re
 
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.models import TrackingData
+from data_ferret.kernel.types import DiffResult, DiffNode, ValueComparison
 from data_ferret.server.message_broadcaster import get_broadcaster
 from data_ferret.util.cell_index import index_to_alpha
 from data_ferret.util.output import log, timer
@@ -95,6 +97,7 @@ class SDCEnforcer:
 
         stale = []
         changed_vars = []
+        column_changed = {}
 
         if not violation:
             # Update our record for this cell BEFORE computing staleness
@@ -112,14 +115,23 @@ class SDCEnforcer:
             with timer(
                 key="sdc_changed_vars", message="[sdc] Computing changed variables"
             ):
-                diff_result = Checkpoint.diff(pre_checkpoint, post_checkpoint)
+                diff_result = Checkpoint.diff(
+                    pre_checkpoint,
+                    post_checkpoint,
+                    use_leq=True,
+                    column_rbw=tracking.column_reads_before_writes,
+                )
                 if diff_result.differences:
                     changed_vars = list(diff_result.differences.keys())
+
+                # Extract column-level changes from diff result
+                column_changed = _extract_column_changes(diff_result, tracking)
 
         return SDCResult(
             violation=violation,
             stale_cells=stale,  # ABSOLUTE list of all currently stale cells
             changed_variables=changed_vars,
+            column_changed=column_changed,
         )
 
     def _check_backward_mutation(
@@ -295,3 +307,79 @@ class SDCEnforcer:
         self.records.clear()
         self.seq_counter = 0
         self._cell_order = []
+
+
+def _extract_column_changes(
+    diff_result: DiffResult, tracking: TrackingData
+) -> Dict[str, List[str]]:
+    """
+    Extract which DataFrame columns changed values from diff tree.
+
+    Args:
+        diff_result: The diff result from Checkpoint.diff()
+        tracking: TrackingData with column_reads_before_writes and column_writes
+
+    Returns:
+        Dict mapping variable paths to lists of changed column names
+    """
+    column_changed = {}
+
+    # Only process variables that have column tracking
+    tracked_vars = set(tracking.column_reads_before_writes.keys()) | set(
+        tracking.column_writes.keys()
+    )
+
+    for var_name in tracked_vars:
+        if var_name not in diff_result.differences:
+            # Variable didn't change at all
+            continue
+
+        diff_node = diff_result.differences[var_name]
+        changed_cols = _get_changed_columns_from_diff_node(diff_node)
+
+        if changed_cols:
+            column_changed[var_name] = sorted(changed_cols)
+
+    return column_changed
+
+
+def _get_changed_columns_from_diff_node(node: DiffNode) -> Set[str]:
+    """
+    Parse a DiffNode to extract changed DataFrame column names.
+
+    For DataFrames, the diff structure looks like:
+        {
+            "['column_name'][0]": ValueComparison(...),
+            "['column_name']": ValueComparison(...),
+            ...
+        }
+
+    We extract column names from keys matching the pattern ['column_name'].
+
+    Args:
+        node: DiffNode (either ValueComparison or Dict)
+
+    Returns:
+        Set of column names that changed
+    """
+    changed_cols = set()
+
+    if isinstance(node, ValueComparison):
+        # Leaf node - not a DataFrame structure
+        return changed_cols
+
+    if isinstance(node, dict):
+        # Walk the diff dict and extract column names
+        for key in node.keys():
+            # Skip special markers
+            if key == "_truncated":
+                continue
+
+            # DataFrame column diffs have keys like "['column_name']" or "['column_name'][0]"
+            # Extract the column name using regex
+            match = re.match(r"\['([^']+)'\]", key)
+            if match:
+                column_name = match.group(1)
+                changed_cols.add(column_name)
+
+    return changed_cols

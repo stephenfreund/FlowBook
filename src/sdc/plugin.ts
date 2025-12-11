@@ -9,7 +9,6 @@ import {
 import { INotebookTracker } from '@jupyterlab/notebook';
 
 import { KernelDetector } from '../shared/kerneldetection';
-import { MessagePanel } from '../logpanel';
 import { SDCMetadataPanel } from './metadatapanel';
 import { SDCCellHighlighter } from './cellhighlighter';
 import { SDCExecutionHookManager } from './executionhook';

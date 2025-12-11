@@ -68,6 +68,7 @@ data_ferret_stats = "data_ferret.cli.stats_cli:stats_cli_main"
 data_ferret_timers = "data_ferret.cli.ferret_timers:main"
 data_ferret_metadata = "data_ferret.cli.metadata_cli:metadata_cli_main"
 data_ferret_slurm = "data_ferret.slurm.slurm_cli:main"
+ferret_lab = "data_ferret.cli.lab_cli:lab_main"
 
 [tool.hatch.version]
 source = "nodejs"

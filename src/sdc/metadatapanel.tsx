@@ -12,6 +12,41 @@ interface ISDCMetadataDisplayProps {
   cellId: string | null;
 }
 
+/**
+ * Flatten column tracking to dot notation list.
+ * Converts variable-level tracking with column info into a flat list like:
+ * ["df.price", "df.quantity", "config"]
+ */
+function flattenColumnTracking(
+  varList: string[],
+  columnReads: { [key: string]: string[] } | undefined,
+  columnWrites: { [key: string]: string[] } | undefined
+): string[] {
+  const result: string[] = [];
+
+  // Handle undefined columnReads/columnWrites (backwards compatibility)
+  const safeColumnReads = columnReads || {};
+  const safeColumnWrites = columnWrites || {};
+
+  for (const varName of varList) {
+    const readCols = safeColumnReads[varName] || [];
+    const writeCols = safeColumnWrites[varName] || [];
+    const allCols = new Set([...readCols, ...writeCols]);
+
+    if (allCols.size > 0) {
+      // Add dot notation: "df.price", "df.qty"
+      for (const col of Array.from(allCols).sort()) {
+        result.push(`${varName}.${col}`);
+      }
+    } else {
+      // No column tracking - just add variable
+      result.push(varName);
+    }
+  }
+
+  return result;
+}
+
 const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cellId }) => {
   if (!metadata) {
     return (
@@ -47,13 +82,25 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
       <div className="sdc-metadata-section">
         <div className="sdc-metadata-item">
           <strong>Variables Read:</strong>
-          {metadata.reads.length > 0 ? (
-            <ul className="sdc-variable-list">
-              {metadata.reads.map((v, i) => <li key={i}><code>{v}</code></li>)}
-            </ul>
-          ) : (
-            <span className="sdc-none"> None</span>
-          )}
+          {(() => {
+            // Include variables with either variable-level OR column-level reads
+            const readVars = new Set([
+              ...metadata.reads,
+              ...Object.keys(metadata.column_reads || {})
+            ]);
+            const flatReads = flattenColumnTracking(
+              Array.from(readVars),
+              metadata.column_reads,
+              {}
+            );
+            return flatReads.length > 0 ? (
+              <ul className="sdc-variable-list">
+                {flatReads.map((v, i) => <li key={i}><code>{v}</code></li>)}
+              </ul>
+            ) : (
+              <span className="sdc-none"> None</span>
+            );
+          })()}
         </div>
       </div>
 
@@ -62,30 +109,54 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
       <div className="sdc-metadata-section">
         <div className="sdc-metadata-item">
           <strong>Variables Written:</strong>
-          {metadata.writes.length > 0 ? (
-            <ul className="sdc-variable-list">
-              {metadata.writes.map((v, i) => <li key={i}><code>{v}</code></li>)}
-            </ul>
-          ) : (
-            <span className="sdc-none"> None</span>
-          )}
+          {(() => {
+            // Include variables with either variable-level OR column-level writes
+            const writeVars = new Set([
+              ...metadata.writes,
+              ...Object.keys(metadata.column_writes || {})
+            ]);
+            const flatWrites = flattenColumnTracking(
+              Array.from(writeVars),
+              {},
+              metadata.column_writes
+            );
+            return flatWrites.length > 0 ? (
+              <ul className="sdc-variable-list">
+                {flatWrites.map((v, i) => <li key={i}><code>{v}</code></li>)}
+              </ul>
+            ) : (
+              <span className="sdc-none"> None</span>
+            );
+          })()}
         </div>
       </div>
 
       {/* Changed Variables */}
-      {metadata.changed_variables.length > 0 && (
-        <>
-          <div className="sdc-metadata-divider" />
-          <div className="sdc-metadata-section">
-            <div className="sdc-metadata-item">
-              <strong>Changed:</strong>
-              <ul className="sdc-variable-list sdc-changed">
-                {metadata.changed_variables.map((v, i) => <li key={i}><code>{v}</code></li>)}
-              </ul>
+      {(() => {
+        // Include variables with either variable-level OR column-level changes
+        const changedVars = new Set([
+          ...metadata.changed_variables,
+          ...Object.keys(metadata.column_changed || {})
+        ]);
+        const flatChanged = flattenColumnTracking(
+          Array.from(changedVars),
+          {},
+          metadata.column_changed
+        );
+        return flatChanged.length > 0 && (
+          <>
+            <div className="sdc-metadata-divider" />
+            <div className="sdc-metadata-section">
+              <div className="sdc-metadata-item">
+                <strong>Changed:</strong>
+                <ul className="sdc-variable-list sdc-changed">
+                  {flatChanged.map((v, i) => <li key={i}><code>{v}</code></li>)}
+                </ul>
+              </div>
             </div>
-          </div>
-        </>
-      )}
+          </>
+        );
+      })()}
 
       {/* Stale Cells */}
       {hasStale && (
