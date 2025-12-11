@@ -6,6 +6,7 @@ SDC is always enabled.
 """
 
 import time
+import traceback
 from typing import Any, Dict, Optional
 
 from IPython.core.magic import Magics, line_magic, magics_class
@@ -16,7 +17,7 @@ from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.display_helpers import DisplayHelper
 from data_ferret.kernel.tracking import TrackingDict
 from data_ferret.util.cell_index import index_to_alpha
-from data_ferret.util.output import log
+from data_ferret.util.output import log, timer
 
 from .models import SDCMetadata
 from .sdc_enforcer import SDCEnforcer
@@ -36,7 +37,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
     SDC is always enabled. No profiling or checkpoint magics.
     """
 
-    implementation = "ferret_sdc"
+    implementation = "ferret_sdc_kernel"
     implementation_version = "0.1"
     banner = "Ferret SDC Kernel - Sequential Dataflow Consistency"
 
@@ -162,8 +163,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
         """
         if not isinstance(self.shell.user_ns, TrackingDict):
             tracking_dict = TrackingDict(
-                self.shell.user_ns,
-                shadow_ns=self.shell.user_global_ns
+                self.shell.user_ns, shadow_ns=self.shell.user_global_ns
             )
             self.shell.user_ns = tracking_dict
 
@@ -185,92 +185,131 @@ class FerretSDCKernel(IPythonKernel, Magics):
         """
         Execute code with SDC tracking and enforcement.
         """
-        # Ensure tracking is initialized (done lazily on first execution)
-        self._ensure_tracking_initialized()
+        try:
+            # Ensure tracking is initialized (done lazily on first execution)
+            self._ensure_tracking_initialized()
 
-        # Extract cell context
-        self._cell_id = self._extract_cell_id(cell_id, cell_meta)
+            # Extract cell context
+            self._cell_id = self._extract_cell_id(cell_id, cell_meta)
+            cell_alpha = self._get_cell_alpha()
+            log(f"[sdc] Executing cell {cell_alpha}")
 
-        # Update cell order if provided in metadata
-        if cell_meta and "cell_order" in cell_meta:
-            self._sdc.set_cell_order(cell_meta["cell_order"])
+            # Update cell order if provided in metadata
+            if cell_meta and "cell_order" in cell_meta:
+                self._sdc.set_cell_order(cell_meta["cell_order"])
 
-        # Check for notebook_structure magic (parse and remove if present)
-        code = self._process_structure_magic(code)
+            # Check for notebook_structure magic (parse and remove if present)
+            code = self._process_structure_magic(code)
 
-        # Skip SDC for empty code or pure magic
-        if not code.strip() or self._is_pure_magic(code):
-            return await self._execute_without_sdc(
-                code, silent, store_history, user_expressions, allow_stdin, cell_meta
-            )
-
-        # Take pre-execution snapshot
-        user_ns = self.shell.user_ns
-        pre_checkpoint = self._take_checkpoint(f"_pre_{self._cell_id}")
-
-        # Reset tracking for this execution
-        if isinstance(user_ns, TrackingDict):
-            user_ns.reset_tracking()
-
-        # Execute with tracking
-        start_time = time.time()
-
-        if isinstance(user_ns, TrackingDict):
-            with user_ns.track_execution():
-                result = await super().do_execute(
+            # Skip SDC for empty code or pure magic
+            if not code.strip() or self._is_pure_magic(code):
+                log(f"[sdc] Skipping SDC for empty/magic cell {cell_alpha}")
+                return await self._execute_without_sdc(
                     code,
                     silent,
                     store_history,
                     user_expressions,
                     allow_stdin,
-                    cell_meta=cell_meta,
-                    cell_id=self._cell_id,
+                    cell_meta,
                 )
-            tracking = user_ns.get_tracking_data()
-        else:
-            result = await super().do_execute(
-                code,
-                silent,
-                store_history,
-                user_expressions,
-                allow_stdin,
-                cell_meta=cell_meta,
-                cell_id=self._cell_id,
-            )
-            tracking = None
 
-        duration = time.time() - start_time
+            # Take pre-execution snapshot
+            user_ns = self.shell.user_ns
+            with timer(
+                key="sdc_pre_checkpoint",
+                message=f"[sdc] Taking pre-checkpoint for {cell_alpha}",
+            ):
+                pre_checkpoint = self._take_checkpoint(f"_pre_{self._cell_id}")
 
-        post_checkpoint = self._take_checkpoint(f"_post_{self._cell_id}")
+            # Reset tracking for this execution
+            if isinstance(user_ns, TrackingDict):
+                user_ns.reset_tracking()
 
-        # Run SDC check if we have tracking data and cell_id
-        sdc_result = None
-        if tracking and self._cell_id:
-            sdc_result = self._sdc.check(
-                cell_id=self._cell_id,
-                pre_checkpoint=pre_checkpoint,
-                post_checkpoint=post_checkpoint,
-                tracking=tracking,
-            )
-            log(f"[sdc] Check completed for cell {self._get_cell_alpha()}")
+            # Execute with tracking
+            with timer(key="sdc_execute", message=f"[sdc] Executing cell {cell_alpha}"):
+                start_time = time.time()
+                if isinstance(user_ns, TrackingDict):
+                    with user_ns.track_execution():
+                        result = await super().do_execute(
+                            code,
+                            silent,
+                            store_history,
+                            user_expressions,
+                            allow_stdin,
+                            cell_meta=cell_meta,
+                            cell_id=self._cell_id,
+                        )
+                    tracking = user_ns.get_tracking_data()
+                else:
+                    result = await super().do_execute(
+                        code,
+                        silent,
+                        store_history,
+                        user_expressions,
+                        allow_stdin,
+                        cell_meta=cell_meta,
+                        cell_id=self._cell_id,
+                    )
+                    tracking = None
+                duration = time.time() - start_time
+
+            # If execution had an error, restore pre-state and skip SDC checks
+            if result.get("status") == "error":
+                log(f"[sdc] Cell {cell_alpha} had execution error, restoring pre-state")
+                self._sdc.checkpoints.restore(
+                    f"_pre_{self._cell_id}", self.shell.user_ns
+                )
+                return result
+
+            # Log tracking results
+            if tracking:
+                log(
+                    f"[sdc] Cell {cell_alpha} tracking: reads={sorted(tracking.reads_before_writes)}, writes={sorted(tracking.writes)}"
+                )
+
+            with timer(
+                key="sdc_post_checkpoint",
+                message=f"[sdc] Taking post-checkpoint for {cell_alpha}",
+            ):
+                post_checkpoint = self._take_checkpoint(f"_post_{self._cell_id}")
+
+            # Run SDC check if we have tracking data and cell_id
+            sdc_result = None
+            if tracking and self._cell_id:
+                with timer(
+                    key="sdc_check", message=f"[sdc] Running SDC check for {cell_alpha}"
+                ):
+                    sdc_result = self._sdc.check(
+                        cell_id=self._cell_id,
+                        pre_checkpoint=pre_checkpoint,
+                        post_checkpoint=post_checkpoint,
+                        tracking=tracking,
+                    )
+                log(f"[sdc] Check completed for cell {cell_alpha}")
+                if sdc_result and sdc_result.violation:
+                    log(f"[sdc] VIOLATION DETECTED: {sdc_result.violation.message}")
+
+            # Display results (only if not silent, no error, and no SDC violation)
+            # Skip display on violation since state will be rolled back
+            has_violation = sdc_result and sdc_result.violation
+            if not silent and result.get("status") != "error" and not has_violation:
+                self._display_execution_result(duration, tracking, sdc_result)
+
+            # Handle violation - report as error
             if sdc_result and sdc_result.violation:
-                log(f"[sdc] VIOLATION DETECTED: {sdc_result.violation.message}")
+                log(f"[sdc] Restoring checkpoint and sending error")
+                # restore to pre-checkpoint
+                self._sdc.checkpoints.restore(
+                    f"_pre_{self._cell_id}", self.shell.user_ns
+                )
+                self._send_violation_error(sdc_result.violation)
+                return self._make_error_result(sdc_result.violation)
 
-        # Display results (only if not silent, no error, and no SDC violation)
-        # Skip display on violation since state will be rolled back
-        has_violation = sdc_result and sdc_result.violation
-        if not silent and result.get("status") != "error" and not has_violation:
-            self._display_execution_result(duration, tracking, sdc_result)
-
-        # Handle violation - report as error
-        if sdc_result and sdc_result.violation:
-            log(f"[sdc] Restoring checkpoint and sending error")
-            # restore to pre-checkpoint
-            self._sdc.checkpoints.restore(f"_pre_{self._cell_id}", self.shell.user_ns)
-            self._send_violation_error(sdc_result.violation)
-            return self._make_error_result(sdc_result.violation)
-
-        return result
+            return result
+        except Exception as e:
+            log(f"[sdc] Error executing cell {self._cell_id}: {e}")
+            log(traceback.format_exc())
+            raise e
 
     # =========================================================================
     # Helpers

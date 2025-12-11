@@ -161,13 +161,13 @@ class ColumnAccessTracker:
         pd.DataFrame.__setitem__ = tracked_df_setitem
 
         # ========== DataFrame.assign ==========
+        # Note: assign() returns a NEW DataFrame, it does NOT modify the original.
+        # So we don't record any writes to the original DataFrame.
         self._original_methods['DataFrame.assign'] = pd.DataFrame.assign
         original_assign = self._original_methods['DataFrame.assign']
 
         def tracked_assign(df: pd.DataFrame, **kwargs):
-            # Track all assigned columns as writes
-            if kwargs:
-                tracker.record_write(id(df), list(kwargs.keys()))
+            # assign() returns a new DataFrame - no writes to original
             return original_assign(df, **kwargs)
 
         pd.DataFrame.assign = tracked_assign

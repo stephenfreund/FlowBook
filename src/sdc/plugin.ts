@@ -12,6 +12,7 @@ import { KernelDetector } from '../shared/kerneldetection';
 import { SDCMetadataPanel } from './metadatapanel';
 import { SDCCellHighlighter } from './cellhighlighter';
 import { SDCExecutionHookManager } from './executionhook';
+import { CellIndexManager } from '../cellindex';
 
 /**
  * Track activation state per notebook
@@ -22,12 +23,15 @@ class SDCActivationManager {
   private _kernelDetector: KernelDetector;
   private _panel: SDCMetadataPanel | null = null;
   private _highlighter: SDCCellHighlighter | null = null;
+  private _cellIndexManager: CellIndexManager;
   private _isActive = false;
+  private _activeNotebookPath: string | null = null;
 
   constructor(app: JupyterFrontEnd, tracker: INotebookTracker) {
     this._app = app;
     this._tracker = tracker;
     this._kernelDetector = new KernelDetector(tracker);
+    this._cellIndexManager = new CellIndexManager();
 
     this._setupKernelChangeListener();
     this._checkCurrentNotebook();
@@ -92,6 +96,13 @@ class SDCActivationManager {
       this._highlighter
     );
 
+    // Start cell index overlays for current notebook
+    const widget = this._tracker.currentWidget;
+    if (widget) {
+      this._activeNotebookPath = widget.context.path;
+      this._cellIndexManager.startMonitoring(this._activeNotebookPath, widget);
+    }
+
     this._isActive = true;
     console.log('SDC Plugin: Activated');
   }
@@ -102,6 +113,12 @@ class SDCActivationManager {
     }
 
     console.log('SDC Plugin: Deactivating');
+
+    // Stop cell index overlays
+    if (this._activeNotebookPath) {
+      this._cellIndexManager.stopMonitoring(this._activeNotebookPath);
+      this._activeNotebookPath = null;
+    }
 
     // Remove panel
     if (this._panel) {

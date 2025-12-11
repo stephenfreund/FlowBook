@@ -43,7 +43,7 @@ class ExecuteSDCCommand(NotebookCommand):
 
     @property
     def kernel_name(self) -> str:
-        return "ferret_sdc"
+        return "ferret_sdc_kernel"
 
     async def process(
         self,
@@ -153,7 +153,9 @@ class ExecuteSDCCommand(NotebookCommand):
                             # Check for execution errors
                             if result["status"] == "error":
                                 status = "error"
-                                error_message = result.get("error_message", "Unknown error")
+                                error_message = result.get(
+                                    "error_message", "Unknown error"
+                                )
                                 log(f"Error in cell {cell_id}: {error_message}")
 
                                 execution_results.append(
@@ -232,7 +234,9 @@ class ExecuteSDCCommand(NotebookCommand):
             total_time=total_time,
         )
 
-    def _extract_sdc_metadata(self, outputs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def _extract_sdc_metadata(
+        self, outputs: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
         """
         Extract SDC metadata from cell outputs.
 
@@ -241,6 +245,6 @@ class ExecuteSDCCommand(NotebookCommand):
         for output in outputs:
             if output.get("output_type") == "display_data":
                 output_meta = output.get("metadata", {})
-                if "ferret_sdc" in output_meta:
-                    return output_meta["ferret_sdc"]
+                if "ferret_sdc_kernel" in output_meta:
+                    return output_meta["ferret_sdc_kernel"]
         return None

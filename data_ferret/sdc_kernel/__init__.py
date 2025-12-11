@@ -40,7 +40,7 @@ def install_sdc_kernel() -> str:
     # Install it
     dest = ksm.install_kernel_spec(
         spec_dir,
-        kernel_name="ferret_sdc",
+        kernel_name="ferret_sdc_kernel",
         user=True,
         replace=True,
     )
