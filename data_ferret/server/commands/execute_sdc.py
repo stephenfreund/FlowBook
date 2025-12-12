@@ -10,7 +10,7 @@ from data_ferret.server.base import NotebookCommand, ProcessingResult
 from data_ferret.server.kernel_helper import KernelHelper
 from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.util.metadata_extractor import extract_and_set_metadata
-from data_ferret.util.output import log, timer
+from data_ferret.util.output import error, log, timer
 
 
 class ExecuteSDCCommand(NotebookCommand):
@@ -173,16 +173,22 @@ class ExecuteSDCCommand(NotebookCommand):
                             # Extract all metadata types using generic extractor
                             extract_and_set_metadata(cell, result["outputs"])
 
-                            execution_results.append(
-                                {
-                                    "cell_index": idx,
-                                    "cell_id": cell_id,
-                                    "status": result["status"],
-                                    "execution_count": result["execution_count"],
-                                    "execution_time": cell_get_elapsed() * 1000,
-                                    "sdc": sdc_meta,
-                                }
-                            )
+                            # Build execution result with timing
+                            cell_result = {
+                                "cell_index": idx,
+                                "cell_id": cell_id,
+                                "status": result["status"],
+                                "execution_count": result["execution_count"],
+                                "execution_time": cell_get_elapsed() * 1000,
+                                "sdc": sdc_meta,
+                            }
+                            # Add SDC timing if available
+                            if sdc_meta:
+                                cell_result["run_ms"] = sdc_meta.get("run_duration_ms", 0.0)
+                                cell_result["state_ms"] = sdc_meta.get("state_duration_ms", 0.0)
+                                cell_result["check_ms"] = sdc_meta.get("check_duration_ms", 0.0)
+
+                            execution_results.append(cell_result)
                             log(f"[{result['execution_count']}]")
 
                             total_executed += 1
@@ -245,6 +251,6 @@ class ExecuteSDCCommand(NotebookCommand):
         for output in outputs:
             if output.get("output_type") == "display_data":
                 output_meta = output.get("metadata", {})
-                if "ferret_sdc_kernel" in output_meta:
-                    return output_meta["ferret_sdc_kernel"]
+                if "ferret_sdc" in output_meta:
+                    return output_meta["ferret_sdc"]
         return None

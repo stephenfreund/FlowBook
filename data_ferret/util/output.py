@@ -118,27 +118,21 @@ class Output:
         """
         Get the output file handle.
 
-        In Jupyter kernel context with FERRET_OUTPUT_SOCKET set, writes to
-        the Unix socket for streaming to ferret_lab terminal.
-        Otherwise writes to stdout.
+        Priority:
+        1. FERRET_OUTPUT_SOCKET - Unix socket for streaming to ferret_lab terminal
+        2. /dev/tty - Direct terminal access (works in kernel contexts)
+        3. sys.stdout - Default fallback
 
         Returns:
             File handle for output
         """
-        if self._is_kernel_context():
-            # Check for ferret_lab socket
-            socket_path = os.environ.get("FERRET_OUTPUT_SOCKET")
-            if socket_path and os.path.exists(socket_path):
-                # Lazily create socket stream
-                if not hasattr(self, "_socket_stream") or self._socket_stream is None:
-                    self._socket_stream = SocketStream(socket_path)
-                return self._socket_stream
-
-            # Fallback: try /dev/tty (works in some terminal contexts)
-            try:
-                return open("/dev/tty", "w")
-            except OSError:
-                pass
+        # Check for ferret_lab socket first (works in any context)
+        socket_path = os.environ.get("FERRET_OUTPUT_SOCKET")
+        if socket_path and os.path.exists(socket_path):
+            # Lazily create socket stream
+            if not hasattr(self, "_socket_stream") or self._socket_stream is None:
+                self._socket_stream = SocketStream(socket_path)
+            return self._socket_stream
 
         return sys.stdout
 

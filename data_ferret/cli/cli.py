@@ -2,6 +2,7 @@
 Command-line interface for ferret notebook processing.
 
 This CLI provides a unified interface for executing any registered notebook command.
+Kernel output is streamed to the terminal in real-time via Unix socket.
 """
 
 import argparse
@@ -14,6 +15,7 @@ from typing import Optional
 from data_ferret.server.registry import CommandRegistry
 from data_ferret.server.config import FerretConfig
 from data_ferret.util.output import error, log, output
+from data_ferret.util.socket_receiver import setup_socket_receiver
 
 from .helpers import (
     load_notebook,
@@ -163,6 +165,7 @@ def cli_main():
 
     kernel_manager = None
     kernel_client = None
+    socket_receiver = None
 
     try:
         # Load notebook
@@ -185,6 +188,10 @@ def cli_main():
 
         # Setup kernel if needed
         if command.requires_kernel:
+            # Set up socket receiver for kernel output
+            socket_receiver, socket_path = setup_socket_receiver("ferret_cli")
+            log(f"Kernel output socket: {socket_path}")
+
             # Use command's preferred kernel if no --kernel-name was explicitly provided
             # (check if it's the default value)
             kernel_to_use = args.kernel_name
@@ -291,6 +298,8 @@ def cli_main():
         return 1
     finally:
         cleanup_kernel(kernel_client, kernel_manager, connection_file)
+        if socket_receiver:
+            socket_receiver.stop()
 
 
 if __name__ == "__main__":

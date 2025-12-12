@@ -5,22 +5,8 @@ import pytest
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.models import TrackingData
 
-from .sdc_enforcer import SDCEnforcer
-
-
-def make_tracking(
-    reads: set = None,
-    writes: set = None,
-    column_reads: dict = None,
-    column_writes: dict = None,
-) -> TrackingData:
-    """Helper to create TrackingData with optional column tracking."""
-    return TrackingData(
-        reads_before_writes=reads or set(),
-        writes=writes or set(),
-        column_reads_before_writes=column_reads or {},
-        column_writes=column_writes or {},
-    )
+from .sdc_enforcer import SDCEnforcer, PRE_CHECKPOINT_PREFIX
+from .conftest import make_tracking
 
 
 class TestSDCEnforcer:
@@ -36,7 +22,7 @@ class TestSDCEnforcer:
 
     def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
         """Save a pre-checkpoint for a cell."""
-        self.checkpoints.save(f"_pre_{cell_id}", namespace, max_size_mb=None)
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
     def _make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
         """Create a post-checkpoint."""
@@ -50,7 +36,7 @@ class TestSDCEnforcer:
         post_a = self._make_post_checkpoint("post_a", {"x": 1})
         result_a = self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -61,7 +47,7 @@ class TestSDCEnforcer:
         post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
         result_b = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
@@ -74,7 +60,7 @@ class TestSDCEnforcer:
         post_a = self._make_post_checkpoint("post_a", {"x": 1, "y": 2})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
@@ -84,7 +70,7 @@ class TestSDCEnforcer:
         post_b = self._make_post_checkpoint("post_b", {"x": 999, "y": 2})
         result_b = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -101,7 +87,7 @@ class TestSDCEnforcer:
         post_a = self._make_post_checkpoint("post_a", {"x": 1})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -111,7 +97,7 @@ class TestSDCEnforcer:
         post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
         self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
@@ -121,7 +107,7 @@ class TestSDCEnforcer:
         post_a2 = self._make_post_checkpoint("post_a2", {"x": 100, "y": 2})
         result = self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a2,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -136,7 +122,7 @@ class TestSDCEnforcer:
         post_a = self._make_post_checkpoint("post_a", {"x": 1})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -146,7 +132,7 @@ class TestSDCEnforcer:
         post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
         self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
@@ -157,7 +143,7 @@ class TestSDCEnforcer:
         post_a2 = self._make_post_checkpoint("post_a2", {"x": 1, "y": 2})
         result = self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a2,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -173,7 +159,7 @@ class TestSDCEnforcer:
         post_b = self._make_post_checkpoint("post_b", {"x": 1})
         self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
@@ -184,7 +170,7 @@ class TestSDCEnforcer:
         post_a = self._make_post_checkpoint("post_a", {"x": 2})
         result = self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -199,7 +185,7 @@ class TestSDCEnforcer:
         post_a2 = self._make_post_checkpoint("post_a2", {"x": 3})
         result = self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a2,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -213,7 +199,7 @@ class TestSDCEnforcer:
         post_a = self._make_post_checkpoint("post_a", {"x": 1})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -222,7 +208,7 @@ class TestSDCEnforcer:
         post_b = self._make_post_checkpoint("post_b", {"x": 1})
         self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
@@ -243,7 +229,7 @@ class TestSDCEnforcer:
         post_a = self._make_post_checkpoint("post_a", {"x": 1})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -265,7 +251,7 @@ class TestSDCEnforcer:
         post_a = self._make_post_checkpoint("post_a", {"x": 1})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -274,7 +260,7 @@ class TestSDCEnforcer:
         post_d = self._make_post_checkpoint("post_d", {"x": 1, "w": 4})
         self.sdc.check(
             cell_id="d",
-            pre_checkpoint=self.checkpoints.saved["_pre_d"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
             post_checkpoint=post_d,
             tracking=make_tracking(reads={"x"}, writes={"w"}),
         )
@@ -283,7 +269,7 @@ class TestSDCEnforcer:
         post_b = self._make_post_checkpoint("post_b", {"x": 1, "w": 4, "y": 2})
         self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
@@ -292,7 +278,7 @@ class TestSDCEnforcer:
         post_c = self._make_post_checkpoint("post_c", {"x": 1, "w": 4, "y": 2, "z": 3})
         self.sdc.check(
             cell_id="c",
-            pre_checkpoint=self.checkpoints.saved["_pre_c"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             post_checkpoint=post_c,
             tracking=make_tracking(reads={"x"}, writes={"z"}),
         )
@@ -302,7 +288,7 @@ class TestSDCEnforcer:
         post_a2 = self._make_post_checkpoint("post_a2", {"x": 100, "w": 4, "y": 2, "z": 3})
         result = self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a2,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -320,7 +306,7 @@ class TestSDCEnforcer:
         post_a = self._make_post_checkpoint("post_a", {"var": 1})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads={"var"}, writes=set()),
         )
@@ -330,7 +316,7 @@ class TestSDCEnforcer:
         post_x = self._make_post_checkpoint("post_x", {"var": 999})
         result = self.sdc.check(
             cell_id="x",
-            pre_checkpoint=self.checkpoints.saved["_pre_x"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}x"],
             post_checkpoint=post_x,
             tracking=make_tracking(reads=set(), writes={"var"}),
         )
@@ -353,7 +339,7 @@ class TestColumnAwareBackwardMutation:
 
     def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
         """Save a pre-checkpoint for a cell."""
-        self.checkpoints.save(f"_pre_{cell_id}", namespace, max_size_mb=None)
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
     def _make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
         """Create a post-checkpoint."""
@@ -371,7 +357,7 @@ class TestColumnAwareBackwardMutation:
         post_a = self._make_post_checkpoint("post_a", {"df": df, "y": 30})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(
                 reads={"df"},
@@ -387,7 +373,7 @@ class TestColumnAwareBackwardMutation:
         post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(
                 reads={"df"},
@@ -411,7 +397,7 @@ class TestColumnAwareBackwardMutation:
         post_a = self._make_post_checkpoint("post_a", {"df": df, "y": 30})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(
                 reads={"df"},
@@ -427,7 +413,7 @@ class TestColumnAwareBackwardMutation:
         post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(
                 reads={"df"},
@@ -454,7 +440,7 @@ class TestColumnAwareBackwardMutation:
         post_a = self._make_post_checkpoint("post_a", {"df": df, "y": 30})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(
                 reads={"df"},
@@ -470,7 +456,7 @@ class TestColumnAwareBackwardMutation:
         post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(
                 reads={"df"},
@@ -496,7 +482,7 @@ class TestColumnAwareBackwardMutation:
         post_a = self._make_post_checkpoint("post_a", {"df": df, "y": 30})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(
                 reads={"df"},
@@ -511,7 +497,7 @@ class TestColumnAwareBackwardMutation:
         post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(
                 reads={"df"},
@@ -537,7 +523,7 @@ class TestColumnAwareBackwardMutation:
         post_a = self._make_post_checkpoint("post_a", {"df": df, "config": config, "y": 10})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(
                 reads={"df", "config"},
@@ -554,7 +540,7 @@ class TestColumnAwareBackwardMutation:
         post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "config": config_modified, "y": 10})
         result_b = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(
                 reads={"df", "config"},
@@ -582,7 +568,7 @@ class TestColumnAwareBackwardMutation:
         post_a = self._make_post_checkpoint("post_a", {"df": df, "y": 30})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(
                 reads={"df"},
@@ -599,7 +585,7 @@ class TestColumnAwareBackwardMutation:
         post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(
                 reads={"df"},
@@ -627,7 +613,7 @@ class TestColumnAwareBackwardMutation:
         post_a = self._make_post_checkpoint("post_a", {"df1": df1, "df2": df2, "y": 1})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(
                 reads={"df1", "df2"},
@@ -643,7 +629,7 @@ class TestColumnAwareBackwardMutation:
         post_b = self._make_post_checkpoint("post_b", {"df1": df1_modified, "df2": df2, "y": 1})
         result_b = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(
                 reads={"df1"},
@@ -671,7 +657,7 @@ class TestContinueOnViolation:
 
     def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
         """Save a pre-checkpoint for a cell."""
-        self.checkpoints.save(f"_pre_{cell_id}", namespace, max_size_mb=None)
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
     def _make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
         """Create a post-checkpoint."""
@@ -685,7 +671,7 @@ class TestContinueOnViolation:
         post_a = self._make_post_checkpoint("post_a", {"x": 1, "y": 2})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
@@ -695,7 +681,7 @@ class TestContinueOnViolation:
         post_b = self._make_post_checkpoint("post_b", {"x": 999, "y": 2})
         result = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
             continue_on_violation=False,  # default
@@ -712,7 +698,7 @@ class TestContinueOnViolation:
         post_a = self._make_post_checkpoint("post_a", {"x": 1, "y": 2})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
@@ -722,7 +708,7 @@ class TestContinueOnViolation:
         post_b = self._make_post_checkpoint("post_b", {"x": 999, "y": 2})
         result = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
             continue_on_violation=True,  # Continue despite violation
@@ -743,7 +729,7 @@ class TestContinueOnViolation:
         post_a = self._make_post_checkpoint("post_a", {"x": 1})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
@@ -756,7 +742,7 @@ class TestContinueOnViolation:
         post_b = self._make_post_checkpoint("post_b", {"x": 999})
         result = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
             continue_on_violation=True,
@@ -774,7 +760,7 @@ class TestContinueOnViolation:
         post_a = self._make_post_checkpoint("post_a", {"x": 1})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
@@ -784,7 +770,7 @@ class TestContinueOnViolation:
         post_b = self._make_post_checkpoint("post_b", {"x": 999})
         result = self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
             continue_on_violation=False,
@@ -801,7 +787,7 @@ class TestContinueOnViolation:
         post_a = self._make_post_checkpoint("post_a", {"x": 1})
         self.sdc.check(
             cell_id="a",
-            pre_checkpoint=self.checkpoints.saved["_pre_a"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             post_checkpoint=post_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
@@ -811,7 +797,7 @@ class TestContinueOnViolation:
         post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
         self.sdc.check(
             cell_id="b",
-            pre_checkpoint=self.checkpoints.saved["_pre_b"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
@@ -821,7 +807,7 @@ class TestContinueOnViolation:
         post_c = self._make_post_checkpoint("post_c", {"x": 1, "y": 2, "z": 3})
         self.sdc.check(
             cell_id="c",
-            pre_checkpoint=self.checkpoints.saved["_pre_c"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             post_checkpoint=post_c,
             tracking=make_tracking(reads={"y"}, writes={"z"}),
         )
@@ -831,7 +817,7 @@ class TestContinueOnViolation:
         post_d = self._make_post_checkpoint("post_d", {"x": 999, "y": 2, "z": 3})
         result = self.sdc.check(
             cell_id="d",
-            pre_checkpoint=self.checkpoints.saved["_pre_d"],
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
             post_checkpoint=post_d,
             tracking=make_tracking(reads=set(), writes={"x"}),
             continue_on_violation=True,

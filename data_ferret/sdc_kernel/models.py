@@ -34,7 +34,7 @@ class SDCViolation:
         return {
             "status": "error",
             "execution_count": execution_count,
-            "ename": "MonotonicityError",
+            "ename": "SDCViolation",
             "evalue": self.message,
             "traceback": [self.message],
         }
@@ -77,6 +77,10 @@ class SDCMetadata:
     column_reads: Dict[str, List[str]] = field(default_factory=dict)  # var -> [read columns]
     column_writes: Dict[str, List[str]] = field(default_factory=dict)  # var -> [written columns]
     column_changed: Dict[str, List[str]] = field(default_factory=dict)  # var -> [changed columns]
+    # Timing information (in milliseconds)
+    run_duration_ms: float = 0.0  # Code execution time
+    state_duration_ms: float = 0.0  # Checkpoint time (pre + post)
+    check_duration_ms: float = 0.0  # SDC check time
 
     def to_display_metadata(self) -> dict:
         """Format for display in output metadata."""
@@ -93,5 +97,8 @@ class SDCMetadata:
                 "column_reads": self.column_reads,
                 "column_writes": self.column_writes,
                 "column_changed": self.column_changed,
+                "run_duration_ms": self.run_duration_ms,
+                "state_duration_ms": self.state_duration_ms,
+                "check_duration_ms": self.check_duration_ms,
             }
         }

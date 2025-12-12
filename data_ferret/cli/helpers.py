@@ -370,18 +370,26 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
     lines = []
 
     if isinstance(value, dict):
-        for k, v in value.items():
-            k_formatted = k.replace('_', ' ').title()
-            if isinstance(v, (dict, list)):
-                lines.append(f"{indent_str}{k_formatted}:")
-                lines.append(format_metadata_value(v, indent=indent+1))
-            elif isinstance(v, str) and '\n' in v:
-                # Multi-line string: use YAML literal block scalar (|)
-                lines.append(f"{indent_str}{k_formatted}: |")
-                for line in v.split('\n'):
-                    lines.append(f"{indent_str}  {line}")
-            else:
-                lines.append(f"{indent_str}{k_formatted}: {v}")
+        if not value:
+            lines.append(f"{indent_str}{{}}")
+        else:
+            for k, v in value.items():
+                k_formatted = k.replace('_', ' ').title()
+                # Handle empty collections inline
+                if isinstance(v, dict) and not v:
+                    lines.append(f"{indent_str}{k_formatted}: {{}}")
+                elif isinstance(v, list) and not v:
+                    lines.append(f"{indent_str}{k_formatted}: []")
+                elif isinstance(v, (dict, list)):
+                    lines.append(f"{indent_str}{k_formatted}:")
+                    lines.append(format_metadata_value(v, indent=indent+1))
+                elif isinstance(v, str) and '\n' in v:
+                    # Multi-line string: use YAML literal block scalar (|)
+                    lines.append(f"{indent_str}{k_formatted}: |")
+                    for line in v.split('\n'):
+                        lines.append(f"{indent_str}  {line}")
+                else:
+                    lines.append(f"{indent_str}{k_formatted}: {v}")
     elif isinstance(value, list):
         if not value:
             lines.append(f"{indent_str}(none)")
@@ -406,7 +414,12 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
                             # Add remaining keys indented
                             for k, v in items_list[1:]:
                                 k_formatted = k.replace('_', ' ').title()
-                                if isinstance(v, (dict, list)):
+                                # Handle empty collections inline
+                                if isinstance(v, dict) and not v:
+                                    lines.append(f"{indent_str}  {k_formatted}: {{}}")
+                                elif isinstance(v, list) and not v:
+                                    lines.append(f"{indent_str}  {k_formatted}: []")
+                                elif isinstance(v, (dict, list)):
                                     lines.append(f"{indent_str}  {k_formatted}:")
                                     lines.append(format_metadata_value(v, indent=indent+2))
                                 elif isinstance(v, str) and '\n' in v:
@@ -421,7 +434,12 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
                             lines.append(f"{indent_str}-")
                             for k, v in items_list:
                                 k_formatted = k.replace('_', ' ').title()
-                                if isinstance(v, (dict, list)):
+                                # Handle empty collections inline
+                                if isinstance(v, dict) and not v:
+                                    lines.append(f"{indent_str}  {k_formatted}: {{}}")
+                                elif isinstance(v, list) and not v:
+                                    lines.append(f"{indent_str}  {k_formatted}: []")
+                                elif isinstance(v, (dict, list)):
                                     lines.append(f"{indent_str}  {k_formatted}:")
                                     lines.append(format_metadata_value(v, indent=indent+2))
                                 elif isinstance(v, str) and '\n' in v:

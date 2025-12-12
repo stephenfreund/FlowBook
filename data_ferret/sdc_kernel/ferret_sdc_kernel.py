@@ -1,11 +1,100 @@
 """
 FerretSDCKernel - IPython kernel with Sequential Dataflow Consistency enforcement.
 
-A simplified kernel focused on SDC. No profiling, no checkpoint magics.
-SDC is always enabled.
+================================================================================
+SEQUENTIAL DATAFLOW CONSISTENCY (SDC) - ARCHITECTURE OVERVIEW
+================================================================================
+
+SDC ensures notebook reproducibility by enforcing dataflow rules that prevent
+hidden state dependencies. When SDC is enforced, running cells top-to-bottom
+always produces the same result.
+
+THE THREE SDC RULES
+-------------------
+
+Rule 1: Reproducibility Invariant (Structural)
+    A notebook is reproducible if running all cells in document order from a
+    fresh kernel produces identical results every time. This is the goal.
+
+Rule 2: Staleness Propagation Rule (Computed)
+    A cell becomes "stale" when any variable it reads has changed since it
+    last executed. Stale cells need re-execution to reflect current state.
+
+    Example:
+        Cell A: x = 1
+        Cell B: y = x + 1  # B reads x
+        Cell A: x = 2      # Re-run A -> B is now stale (x changed)
+
+Rule 3: No Backward Mutation Constraint (Enforced)
+    A cell may NOT modify a variable that an earlier cell (in document order)
+    reads. This prevents "hidden" dependencies where earlier cells depend on
+    later cells having run first.
+
+    Example (VIOLATION):
+        Cell A: y = x + 1  # A reads x
+        Cell B: x = 10     # B modifies x -> VIOLATION! A depends on B.
+
+    This is the key rule that makes notebooks reproducible. Without it, the
+    order you run cells affects results in unpredictable ways.
+
+COLUMN-LEVEL TRACKING
+---------------------
+
+For DataFrames, SDC tracks at the column level for precision:
+
+    Cell A: total = df['price'].sum()     # Reads df.price
+    Cell B: df['quantity'] = df['quantity'] * 2  # Modifies df.quantity
+
+This is NOT a violation because different columns are involved. Without
+column tracking, any DataFrame modification would trigger false violations.
+
+DATA FLOW
+---------
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                         FerretSDCKernel                             │
+    │                                                                     │
+    │  1. do_execute() receives code + cell_id + cell_order               │
+    │                         │                                           │
+    │                         ▼                                           │
+    │  2. Take PRE-checkpoint (snapshot namespace before execution)       │
+    │                         │                                           │
+    │                         ▼                                           │
+    │  3. Execute code with TrackingDict (records reads/writes)           │
+    │                         │                                           │
+    │                         ▼                                           │
+    │  4. Take POST-checkpoint (snapshot namespace after execution)       │
+    │                         │                                           │
+    │                         ▼                                           │
+    │  5. SDCEnforcer.check() compares checkpoints + tracking:            │
+    │     - Detect backward mutations (Rule 3 violations)                 │
+    │     - Compute which cells are now stale (Rule 2)                    │
+    │     - Extract column-level changes for DataFrames                   │
+    │                         │                                           │
+    │                         ▼                                           │
+    │  6. On violation: restore PRE-checkpoint (rollback) + error         │
+    │     On success: display metadata (reads, writes, stale cells)       │
+    └─────────────────────────────────────────────────────────────────────┘
+
+KEY COMPONENTS
+--------------
+
+- TrackingDict: Wraps user namespace to record variable reads/writes
+- Checkpoints: Deep-copies namespace for before/after comparison
+- SDCEnforcer: Implements Rule 2 (staleness) and Rule 3 (backward mutation)
+- SDCMetadata: Data sent to frontend for UI display (stale cell highlighting)
+
+MAGIC COMMANDS
+--------------
+
+%notebook_structure cell1 cell2 ...  - Set cell order (usually auto-injected)
+%sdc_status                          - Display current SDC state
+%sdc_stale                           - Show which cells are currently stale
+%continue_after_violation [true|false] - Control violation handling
+
+================================================================================
 """
 
-import time
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -16,12 +105,11 @@ from ipykernel.kernelapp import IPKernelApp
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.display_helpers import DisplayHelper
 from data_ferret.kernel.tracking import TrackingDict
-from data_ferret.server.message_broadcaster import get_broadcaster
 from data_ferret.util.cell_index import index_to_alpha
-from data_ferret.util.output import log, timer
+from data_ferret.util.output import error, timer
 
 from .models import SDCMetadata
-from .sdc_enforcer import SDCEnforcer
+from .sdc_enforcer import SDCEnforcer, PRE_CHECKPOINT_PREFIX, POST_CHECKPOINT_PREFIX
 
 
 @magics_class
@@ -128,6 +216,32 @@ class FerretSDCKernel(IPythonKernel, Magics):
             return
         state = "enabled" if self._continue_after_violation else "disabled"
         self._display.display_icon_and_text("ℹ️", f"Continue after violation: {state}")
+
+    @line_magic
+    def sdc_stale(self, line: str) -> None:
+        """
+        Show which cells are currently stale.
+
+        Usage:
+            %sdc_stale
+        """
+        stale_cells = self._sdc.get_stale_cells()
+        if not stale_cells:
+            self._display.display_icon_and_text("✓", "No stale cells")
+            return
+
+        # Convert to @A notation
+        stale_refs = []
+        for cell_id in stale_cells:
+            try:
+                idx = self._sdc.cell_order.index(cell_id)
+                stale_refs.append(index_to_alpha(idx))
+            except (ValueError, IndexError):
+                stale_refs.append(cell_id)
+
+        self._display.display_icon_and_text(
+            "⚠️", f"Stale cells: {', '.join(stale_refs)}"
+        )
 
     # =========================================================================
     # Stub magics for compatibility with FerretKernel notebooks
@@ -261,8 +375,6 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
             # Extract cell context
             self._cell_id = self._extract_cell_id(cell_id, cell_meta)
-            cell_alpha = self._get_cell_alpha()
-            log(f"[sdc] Executing cell {cell_alpha}")
 
             # Update cell order if provided in metadata
             if cell_meta and "cell_order" in cell_meta:
@@ -273,7 +385,6 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
             # Skip SDC for empty code or pure magic
             if not code.strip() or self._is_pure_magic(code):
-                log(f"[sdc] Skipping SDC for empty/magic cell {cell_alpha}")
                 return await self._execute_without_sdc(
                     code,
                     silent,
@@ -285,20 +396,15 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
             # Take pre-execution snapshot
             user_ns = self.shell.user_ns
-            with timer(
-                key="sdc_pre_checkpoint",
-                message=f"[sdc] Taking pre-checkpoint for {cell_alpha}",
-            ) as pre_checkpoint_duration:
-                pre_checkpoint = self._take_checkpoint(f"_pre_{self._cell_id}")
+            with timer(key="sdc_pre_checkpoint") as pre_timer:
+                pre_checkpoint = self._take_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
 
             # Reset tracking for this execution
             if isinstance(user_ns, TrackingDict):
                 user_ns.reset_tracking()
 
             # Execute with tracking
-            with timer(
-                key="sdc_execute", message=f"[sdc] Executing cell {cell_alpha}"
-            ) as run_duration:
+            with timer(key="sdc_execute") as run_timer:
                 if isinstance(user_ns, TrackingDict):
                     with user_ns.track_execution():
                         result = await super().do_execute(
@@ -325,29 +431,18 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
             # If execution had an error, restore pre-state and skip SDC checks
             if result.get("status") == "error":
-                log(f"[sdc] Cell {cell_alpha} had execution error, restoring pre-state")
                 self._sdc.checkpoints.restore(
-                    f"_pre_{self._cell_id}", self.shell.user_ns
+                    f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
                 )
                 return result
 
-            # Log tracking results
-            if tracking:
-                log(
-                    f"[sdc] Cell {cell_alpha} tracking: reads={sorted(tracking.reads_before_writes)}, writes={sorted(tracking.writes)}"
-                )
-
-            with timer(
-                key="sdc_post_checkpoint",
-                message=f"[sdc] Taking post-checkpoint for {cell_alpha}",
-            ) as post_checkpoint_duration:
-                post_checkpoint = self._take_checkpoint(f"_post_{self._cell_id}")
+            # Take post-execution snapshot
+            with timer(key="sdc_post_checkpoint") as post_timer:
+                post_checkpoint = self._take_checkpoint(f"{POST_CHECKPOINT_PREFIX}{self._cell_id}")
 
             # Run SDC check if we have tracking data and cell_id
             if tracking and self._cell_id:
-                with timer(
-                    key="sdc_check", message=f"[sdc] Running SDC check for {cell_alpha}"
-                ) as sdc_check_duration:
+                with timer(key="sdc_check") as check_timer:
                     sdc_result = self._sdc.check(
                         cell_id=self._cell_id,
                         pre_checkpoint=pre_checkpoint,
@@ -355,26 +450,23 @@ class FerretSDCKernel(IPythonKernel, Magics):
                         tracking=tracking,
                         continue_on_violation=self._continue_after_violation,
                     )
-                log(f"[sdc] Check completed for cell {cell_alpha}")
-                if sdc_result and sdc_result.violation:
-                    log(f"[sdc] VIOLATION DETECTED: {sdc_result.violation.message}")
 
                 # Handle violation
                 has_violation = sdc_result and sdc_result.violation
                 if has_violation:
-                    # Send truncation details to stderr if present
+                    # Log truncation issues to terminal
                     if sdc_result.violation.truncation_details:
+                        error(f"SDC truncation: {sdc_result.violation.message}")
                         self._send_truncation_details(sdc_result.violation.truncation_details)
 
                     if self._continue_after_violation:
-                        # Report violation as warning but continue execution
-                        log(f"[sdc] Violation detected, continuing (continue_after_violation=True)")
+                        error(f"SDC violation (continuing): {sdc_result.violation.message}")
                         self._send_violation_warning(sdc_result.violation)
                     else:
-                        # Default: restore checkpoint and return error
-                        log(f"[sdc] Restoring checkpoint and sending error")
+                        # Log violation to terminal, restore checkpoint, return error
+                        error(f"SDC violation: {sdc_result.violation.message}")
                         self._sdc.checkpoints.restore(
-                            f"_pre_{self._cell_id}", self.shell.user_ns
+                            f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
                         )
                         self._send_violation_error(sdc_result.violation)
                         return self._make_error_result(sdc_result.violation)
@@ -382,23 +474,19 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 # Display results (skip if silent, error, or violation with rollback)
                 skip_display = has_violation and not self._continue_after_violation
                 if not silent and result.get("status") != "error" and not skip_display:
-                    state_duration = (
-                        pre_checkpoint_duration.duration()
-                        + post_checkpoint_duration.duration()
-                    )
+                    state_ms = pre_timer.duration() + post_timer.duration()
                     self._display_execution_result(
-                        run_duration.duration(),
-                        state_duration,
-                        sdc_check_duration.duration(),
+                        run_timer.duration(),
+                        state_ms,
+                        check_timer.duration(),
                         tracking,
                         sdc_result,
                     )
 
             return result
         except Exception as e:
-            log(f"[sdc] Error executing cell {self._cell_id}: {e}")
-            log(traceback.format_exc())
-            raise e
+            error(f"SDC error in cell {self._cell_id}: {e}\n{traceback.format_exc()}")
+            raise
 
     # =========================================================================
     # Helpers
@@ -542,6 +630,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 else {}
             ),
             column_changed=sdc_result.column_changed if sdc_result else {},
+            run_duration_ms=run_duration,
+            state_duration_ms=state_duration,
+            check_duration_ms=check_duration,
         )
 
         # Build display text
@@ -577,7 +668,6 @@ class FerretSDCKernel(IPythonKernel, Magics):
                     stale_refs.append(cell_id)  # Fallback to ID if not in order
             parts.append(f"Stale: {','.join(stale_refs)}")
 
-        # icon = "check" if not (sdc_result and sdc_result.violation) else "error"
         icon = "✓" if not (sdc_result and sdc_result.violation) else "✗"
 
         self._display.display_icon_and_text(
@@ -657,6 +747,17 @@ class FerretSDCKernel(IPythonKernel, Magics):
             "evalue": violation.message,
             "traceback": [violation.message],
         }
+
+    # =========================================================================
+    # Lifecycle
+    # =========================================================================
+
+    def do_shutdown(self, restart: bool) -> dict:
+        """Handle kernel shutdown/restart."""
+        if restart:
+            # Clear SDC state on restart for clean slate
+            self._sdc.reset()
+        return super().do_shutdown(restart)
 
 
 # Entry point

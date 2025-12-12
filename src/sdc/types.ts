@@ -21,6 +21,10 @@ export interface ISDCMetadata {
   column_reads?: { [key: string]: string[] };
   column_writes?: { [key: string]: string[] };
   column_changed?: { [key: string]: string[] };
+  // Timing information (in milliseconds)
+  run_duration_ms?: number;
+  state_duration_ms?: number;
+  check_duration_ms?: number;
 }
 
 export interface ISDCCellState {

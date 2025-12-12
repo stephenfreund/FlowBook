@@ -105,6 +105,31 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
         </div>
       </div>
 
+      {/* Timing Info */}
+      {(metadata.run_duration_ms !== undefined ||
+        metadata.state_duration_ms !== undefined ||
+        metadata.check_duration_ms !== undefined) && (
+        <>
+          <div className="sdc-metadata-divider" />
+          <div className="sdc-metadata-section">
+            <div className="sdc-metadata-item">
+              <strong>Timing:</strong>
+              <ul className="sdc-timing-list">
+                {metadata.run_duration_ms !== undefined && (
+                  <li>Run: <code>{metadata.run_duration_ms.toFixed(0)} ms</code></li>
+                )}
+                {metadata.state_duration_ms !== undefined && (
+                  <li>State: <code>{metadata.state_duration_ms.toFixed(0)} ms</code></li>
+                )}
+                {metadata.check_duration_ms !== undefined && (
+                  <li>Check: <code>{metadata.check_duration_ms.toFixed(0)} ms</code></li>
+                )}
+              </ul>
+            </div>
+          </div>
+        </>
+      )}
+
       {/* Reads */}
       <div className="sdc-metadata-divider" />
       <div className="sdc-metadata-section">

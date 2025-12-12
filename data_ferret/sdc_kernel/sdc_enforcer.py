@@ -2,23 +2,28 @@
 SDC Enforcer - Sequential Dataflow Consistency enforcement.
 
 Implements the three SDC rules:
-1. Reproducibility Invariant (structural)
-2. Staleness Propagation Rule (computed here)
-3. No Backward Mutation Constraint (enforced here)
+1. Reproducibility Invariant (structural) - the goal
+2. Staleness Propagation Rule (computed here) - tracks which cells need re-execution
+3. No Backward Mutation Constraint (enforced here) - prevents hidden dependencies
+
+See ferret_sdc_kernel.py module docstring for detailed architecture documentation.
 """
 
-from typing import Dict, List, Optional, Set, Tuple
 import pprint
 import re
+import time
+from typing import Dict, List, Optional, Set, Tuple
 
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.models import TrackingData
 from data_ferret.kernel.types import DiffResult, DiffNode, ValueComparison, CompoundDiff
-from data_ferret.server.message_broadcaster import get_broadcaster
 from data_ferret.util.cell_index import index_to_alpha
-from data_ferret.util.output import log, timer
 
 from .models import SDCExecutionRecord, SDCResult, SDCViolation
+
+# Checkpoint naming constants
+PRE_CHECKPOINT_PREFIX = "_pre_"
+POST_CHECKPOINT_PREFIX = "_post_"
 
 
 class SDCEnforcer:
@@ -83,13 +88,6 @@ class SDCEnforcer:
         Returns:
             SDCResult with violation info, absolute set of stale cells, and changed variables
         """
-        cell_alpha = self._cell_id_to_alpha(cell_id)
-        log(f"[sdc] check() called for cell {cell_alpha}")
-        log(f"[sdc]   tracking.reads_before_writes: {tracking.reads_before_writes}")
-        log(f"[sdc]   tracking.writes: {tracking.writes}")
-        log(f"[sdc]   pre_checkpoint vars: {list(pre_checkpoint.user_ns.keys())}")
-        log(f"[sdc]   post_checkpoint vars: {list(post_checkpoint.user_ns.keys())}")
-
         self.seq_counter += 1
 
         # Get position in document order
@@ -103,10 +101,9 @@ class SDCEnforcer:
         violation = None
         current_diff = None
         if my_position >= 0:
-            with timer(key="sdc_backward_mutation", message=f"[sdc] Backward mutation check for {cell_alpha}"):
-                violation, current_diff = self._check_backward_mutation(
-                    cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
-                )
+            violation, current_diff = self._check_backward_mutation(
+                cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
+            )
 
         stale = []
         changed_vars = []
@@ -126,24 +123,18 @@ class SDCEnforcer:
 
             # Reuse diff from backward mutation check, or compute if not available
             if current_diff is None:
-                with timer(
-                    key="sdc_changed_vars", message="[sdc] Computing changed variables (no backward check)"
-                ):
-                    current_diff = Checkpoint.diff(
-                        pre_checkpoint,
-                        post_checkpoint,
-                        use_leq=True,
-                        column_rbw=tracking.column_reads_before_writes,
-                    )
+                current_diff = Checkpoint.diff(
+                    pre_checkpoint,
+                    post_checkpoint,
+                    use_leq=True,
+                    column_rbw=tracking.column_reads_before_writes,
+                )
 
             # Check if diff was truncated - if so, return violation
-            with timer(key="sdc_truncation_check", message="[sdc] Truncation check"):
-                truncated_vars = _check_for_truncation(current_diff)
+            truncated_vars = _check_for_truncation(current_diff)
             if truncated_vars:
-                # Only format the diff when truncation is detected (lazy formatting)
                 formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
                 mutating_alpha = self._cell_id_to_alpha(cell_id)
-                log(f"[sdc] TRUNCATION DETECTED in cell {mutating_alpha}:\n{formatted_diff}")
                 return SDCResult(
                     violation=SDCViolation(
                         mutating_cell=cell_id,
@@ -164,19 +155,13 @@ class SDCEnforcer:
                 changed_vars = list(current_diff.differences.keys())
 
             # Extract column-level changes from diff result
-            with timer(key="sdc_extract_columns", message="[sdc] Extract column changes"):
-                column_changed = _extract_column_changes(current_diff, tracking)
-
-            log(f"[sdc]   changed_vars: {changed_vars}")
-            log(f"[sdc]   column_changed: {column_changed}")
+            column_changed = _extract_column_changes(current_diff, tracking)
 
             # Update staleness INCREMENTALLY (only check cells that might have become stale)
-            with timer(key="sdc_staleness_update", message="[sdc] Staleness update"):
-                stale = self._update_staleness_incremental(
-                    post_checkpoint, set(changed_vars), column_changed, cell_id
-                )
+            stale = self._update_staleness_incremental(
+                post_checkpoint, set(changed_vars), column_changed, cell_id
+            )
 
-        log(f"[sdc] check() complete: violation={violation is not None}, stale={[self._cell_id_to_alpha(c) for c in stale]}")
         return SDCResult(
             violation=violation,
             stale_cells=stale,
@@ -193,22 +178,21 @@ class SDCEnforcer:
         tracking: TrackingData,
     ) -> Tuple[Optional[SDCViolation], DiffResult]:
         """
-        Check if current cell causes a backward mutation.
+        Check if current cell causes a backward mutation (Rule 3 violation).
 
         A backward mutation occurs when a cell modifies a variable that an
-        earlier cell (in notebook order) reads. This is Rule 3 of SDC.
+        earlier cell (in notebook order) reads. This prevents hidden dependencies
+        where earlier cells depend on later cells having run first.
 
-        The key insight: we must check what THIS cell actually modified,
-        not just whether values are different from when earlier cells ran.
-
-        This method now includes column-aware conflict detection for DataFrames.
+        Includes column-aware conflict detection for DataFrames: modifying
+        df['price'] doesn't conflict with a cell that only reads df['quantity'].
 
         Returns:
             Tuple of (violation, diff_result) - diff_result is returned for reuse
             by caller to avoid redundant computation.
         """
-        # First, compute what THIS cell actually modified
-        # For diff detection, we need to check all accessed columns (read OR written)
+        # Compute what THIS cell actually modified
+        # For diff detection, check all accessed columns (read OR written)
         all_accessed_columns = {}
         for var, cols in tracking.column_reads_before_writes.items():
             all_accessed_columns[var] = set(cols)
@@ -218,22 +202,18 @@ class SDCEnforcer:
             else:
                 all_accessed_columns[var] = set(cols)
 
-        with timer(key="sdc_current_diff", message="[sdc] Computing current cell diff"):
-            current_diff = Checkpoint.diff(
-                pre_checkpoint,
-                post_checkpoint,
-                use_leq=True,
-                column_rbw=all_accessed_columns,
-            )
-            log(f"[sdc] Current cell diff: {current_diff}")
+        current_diff = Checkpoint.diff(
+            pre_checkpoint,
+            post_checkpoint,
+            use_leq=True,
+            column_rbw=all_accessed_columns,
+        )
 
         # Check if diff was truncated - if so, return violation
         truncated_vars = _check_for_truncation(current_diff)
         if truncated_vars:
-            # Only format the diff when truncation is detected (lazy formatting)
             formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
             mutating_alpha = self._cell_id_to_alpha(cell_id)
-            log(f"[sdc] TRUNCATION DETECTED in cell {mutating_alpha}:\n{formatted_diff}")
             return (
                 SDCViolation(
                     mutating_cell=cell_id,
@@ -250,52 +230,44 @@ class SDCEnforcer:
 
         if not current_diff.differences:
             # This cell didn't modify anything, no backward mutation possible
-            log(f"[sdc] No differences found, skipping backward mutation check")
             return (None, current_diff)
 
         # Variable-level modifications
         modified_vars = set(current_diff.differences.keys())
-        log(f"[sdc] Cell modified variables: {sorted(modified_vars)}")
 
         # Column-level modifications (for DataFrames)
-        with timer(key="sdc_extract_modified_cols", message="[sdc] Extract modified columns"):
-            modified_columns = _extract_column_changes(current_diff, tracking)
-        log(f"[sdc] Cell modified columns: {modified_columns}")
+        modified_columns = _extract_column_changes(current_diff, tracking)
 
         # Check if any earlier cell reads something we modified
-        prior_cells_to_check = self._cell_order[:my_position]
-        log(f"[sdc] Checking {len(prior_cells_to_check)} prior cells for backward mutation")
-        with timer(key="sdc_prior_cell_check", message=f"[sdc] Check {len(prior_cells_to_check)} prior cells"):
-            for prior_cell_id in prior_cells_to_check:
-                prior_record = self.records.get(prior_cell_id)
-                if prior_record is None:
-                    continue
+        for prior_cell_id in self._cell_order[:my_position]:
+            prior_record = self.records.get(prior_cell_id)
+            if prior_record is None:
+                continue
 
-                # Column-aware conflict detection
-                conflicts = _check_read_write_conflict(
-                    modified_vars=modified_vars,
-                    modified_columns=modified_columns,
-                    prior_reads=prior_record.tracking.reads_before_writes,
-                    prior_column_reads=prior_record.tracking.column_reads_before_writes,
-                )
+            # Column-aware conflict detection
+            conflicts = _check_read_write_conflict(
+                modified_vars=modified_vars,
+                modified_columns=modified_columns,
+                prior_reads=prior_record.tracking.reads_before_writes,
+                prior_column_reads=prior_record.tracking.column_reads_before_writes,
+            )
 
-                if conflicts:
-                    mutating_alpha = self._cell_id_to_alpha(cell_id)
-                    affected_alpha = self._cell_id_to_alpha(prior_cell_id)
-
-                    return (
-                        SDCViolation(
-                            mutating_cell=cell_id,
-                            affected_cell=prior_cell_id,
-                            variables=conflicts,
-                            message=(
-                                f"Cell {mutating_alpha} modified {conflicts} "
-                                f"which cell {affected_alpha} (earlier in notebook) reads. "
-                                f"This violates Sequential Dataflow Consistency."
-                            ),
+            if conflicts:
+                mutating_alpha = self._cell_id_to_alpha(cell_id)
+                affected_alpha = self._cell_id_to_alpha(prior_cell_id)
+                return (
+                    SDCViolation(
+                        mutating_cell=cell_id,
+                        affected_cell=prior_cell_id,
+                        variables=conflicts,
+                        message=(
+                            f"Cell {mutating_alpha} modified {conflicts} "
+                            f"which cell {affected_alpha} (earlier in notebook) reads. "
+                            f"This violates Sequential Dataflow Consistency."
                         ),
-                        current_diff,
-                    )
+                    ),
+                    current_diff,
+                )
 
         return (None, current_diff)
 
@@ -307,10 +279,11 @@ class SDCEnforcer:
         just_executed: str,
     ) -> List[str]:
         """
-        Incrementally update staleness cache.
+        Incrementally update staleness cache (Rule 2 computation).
 
-        OPTIMIZATION: Only checks cells that could have become stale from this execution.
-        Skips cells that are already stale or whose reads don't overlap with changed vars.
+        Only checks cells that could have become stale from this execution:
+        - Skips cells already marked stale
+        - Skips cells whose reads don't overlap with changed variables/columns
 
         Args:
             current_checkpoint: The current state of the namespace
@@ -321,84 +294,35 @@ class SDCEnforcer:
         Returns:
             List of all currently stale cell IDs (in document order)
         """
-        log(
-            f"[sdc] _update_staleness_incremental: changed_vars={changed_vars}, "
-            f"already_stale={len(self._stale_cells)}, total_records={len(self.records)}"
-        )
-
-        cells_checked = 0
-        cells_skipped_stale = 0
-        cells_skipped_no_overlap = 0
-        cells_no_checkpoint = 0
-        total_diff_time_ms = 0
-
-        import time
-        loop_start = time.perf_counter()
-
         for cell_id, record in self.records.items():
             if cell_id == just_executed:
                 continue  # This cell just ran, already marked fresh
 
-            cell_alpha = self._cell_id_to_alpha(cell_id)
-
             if cell_id in self._stale_cells:
-                cells_skipped_stale += 1
-                log(f"[sdc]   {cell_alpha}: skipped (already stale)")
                 continue  # Already stale, no need to re-check
 
-            # OPTIMIZATION: Skip cells whose reads don't overlap with changed vars
-            reads = record.tracking.reads_before_writes
+            # Skip cells whose reads don't overlap with changed vars
             if not self._has_relevant_overlap(record, changed_vars, column_changed):
-                cells_skipped_no_overlap += 1
-                log(f"[sdc]   {cell_alpha}: skipped (no overlap) - reads={reads}")
-                continue  # No overlap, can't have become stale from THIS execution
-
-            # Cell MIGHT be stale - do the expensive diff check
-            cells_checked += 1
-            log(f"[sdc]   {cell_alpha}: checking (reads={reads})")
-
-            pre_checkpoint = self.checkpoints.get(f"_pre_{cell_id}")
-            if pre_checkpoint is None:
-                cells_no_checkpoint += 1
-                log(f"[sdc]   {cell_alpha}: No pre-checkpoint found, skipping")
                 continue
 
-            diff_start = time.perf_counter()
-            with timer(
-                key="sdc_stale_check",
-                message=f"[sdc] Diff for staleness {cell_alpha}",
-            ):
-                diff_result = Checkpoint.diff(
-                    pre_checkpoint,
-                    current_checkpoint,
-                    keys_to_include=reads,
-                    use_leq=True,
-                    column_rbw=record.tracking.column_reads_before_writes,
-                )
-            diff_time = (time.perf_counter() - diff_start) * 1000
-            total_diff_time_ms += diff_time
+            # Cell MIGHT be stale - do the expensive diff check
+            pre_checkpoint = self.checkpoints.get(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
+            if pre_checkpoint is None:
+                continue
+
+            diff_result = Checkpoint.diff(
+                pre_checkpoint,
+                current_checkpoint,
+                keys_to_include=record.tracking.reads_before_writes,
+                use_leq=True,
+                column_rbw=record.tracking.column_reads_before_writes,
+            )
 
             if diff_result.differences:
                 self._stale_cells.add(cell_id)
-                log(
-                    f"[sdc]   {cell_alpha}: NOW STALE (changed: {list(diff_result.differences.keys())}) [{diff_time:.1f}ms]"
-                )
-            else:
-                log(f"[sdc]   {cell_alpha}: still fresh [{diff_time:.1f}ms]")
-
-        loop_time = (time.perf_counter() - loop_start) * 1000
-        log(
-            f"[sdc] _update_staleness_incremental complete: "
-            f"checked={cells_checked}, skipped_stale={cells_skipped_stale}, "
-            f"skipped_no_overlap={cells_skipped_no_overlap}, no_checkpoint={cells_no_checkpoint}"
-        )
-        log(f"[sdc]   loop_time={loop_time:.1f}ms, total_diff_time={total_diff_time_ms:.1f}ms")
 
         # Return in document order
-        result = [cid for cid in self._cell_order if cid in self._stale_cells]
-        result_alpha = [self._cell_id_to_alpha(cid) for cid in result]
-        log(f"[sdc] _update_staleness_incremental: Result = {result_alpha}")
-        return result
+        return [cid for cid in self._cell_order if cid in self._stale_cells]
 
     def _has_relevant_overlap(
         self,
@@ -444,15 +368,25 @@ class SDCEnforcer:
         # All overlapping vars have column info and no column overlap
         return False
 
+    def get_stale_cells(self) -> List[str]:
+        """
+        Get the current set of stale cells (in document order).
+
+        Returns the cached staleness state without recomputing. For a full
+        recomputation from scratch, use compute_all_stale_cells().
+
+        Returns:
+            List of cell IDs that are currently stale (in document order)
+        """
+        return [cid for cid in self._cell_order if cid in self._stale_cells]
+
     def compute_all_stale_cells(self, current_checkpoint: Checkpoint) -> List[str]:
         """
-        Compute the COMPLETE set of all currently stale cells.
+        Recompute staleness for ALL cells from scratch.
 
-        A cell is stale if the values it read when it last executed
-        have changed since then.
-
-        This compares each executed cell's pre-execution checkpoint against
-        the current state to determine staleness.
+        Unlike incremental updates, this checks every executed cell against
+        the current namespace state. Use this when you need guaranteed
+        accuracy (e.g., after external namespace modifications).
 
         Args:
             current_checkpoint: The current state of the namespace
@@ -460,96 +394,25 @@ class SDCEnforcer:
         Returns:
             List of cell IDs that are currently stale (in document order)
         """
-        stale = set()
+        self._stale_cells.clear()
 
-        log(
-            f"[sdc] compute_all_stale_cells: Checking {len(self.records)} executed cells"
-        )
-        log(
-            f"[sdc] Cell order: {[self._cell_id_to_alpha(cid) for cid in self._cell_order]}"
-        )
-
-        # Check every cell that has been executed
         for cell_id, record in self.records.items():
-            cell_alpha = self._cell_id_to_alpha(cell_id)
-
-            # Get the checkpoint from when this cell last ran
-            pre_checkpoint = self.checkpoints.get(f"_pre_{cell_id}")
+            pre_checkpoint = self.checkpoints.get(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
             if pre_checkpoint is None:
-                log(f"[sdc] Cell {cell_alpha}: No pre-checkpoint found, skipping")
                 continue
 
-            # Compare what this cell READ THEN vs what those values are NOW
-            with timer(
-                key="sdc_stale_check",
-                message=f"[sdc] Checking staleness for {cell_alpha}",
-            ):
-                diff_result = Checkpoint.diff(
-                    pre_checkpoint,
-                    current_checkpoint,
-                    keys_to_include=record.tracking.reads_before_writes,
-                    use_leq=True,
-                    column_rbw=record.tracking.column_reads_before_writes,
-                )
+            diff_result = Checkpoint.diff(
+                pre_checkpoint,
+                current_checkpoint,
+                keys_to_include=record.tracking.reads_before_writes,
+                use_leq=True,
+                column_rbw=record.tracking.column_reads_before_writes,
+            )
 
             if diff_result.differences:
-                stale.add(cell_id)
-                log(
-                    f"[sdc] Cell {cell_alpha}: STALE (changed: {list(diff_result.differences.keys())})"
-                )
-            else:
-                log(f"[sdc] Cell {cell_alpha}: FRESH")
+                self._stale_cells.add(cell_id)
 
-        # Return in document order (for consistency)
-        result = [cid for cid in self._cell_order if cid in stale]
-        result_alpha = [self._cell_id_to_alpha(cid) for cid in result]
-        log(f"[sdc] compute_all_stale_cells: Result = {result_alpha}")
-        return result
-
-    def _compute_stale(
-        self,
-        cell_id: str,
-        my_position: int,
-        post_checkpoint: Checkpoint,
-    ) -> List[str]:
-        """
-        Compute cells that are now stale because their inputs changed.
-
-        A cell Y (after cell_id in document order) is stale if:
-        - Y has been previously executed (has a record)
-        - The values Y reads have changed since Y last ran
-
-        This mirrors _check_backward_mutation but looks forward instead of backward.
-
-        Returns cell IDs in document order.
-        """
-        directly_stale = []
-
-        # Check cells after us in document order
-        for later_cell_id in self._cell_order[my_position + 1 :]:
-            later_record = self.records.get(later_cell_id)
-            if later_record is None:
-                continue  # Cell not yet executed
-
-            # Get the pre-checkpoint from when this cell last ran
-            later_pre = self.checkpoints.get(f"_pre_{later_cell_id}")
-            if later_pre is None:
-                continue  # No checkpoint available
-
-            # Compare: has what this cell reads changed since it last ran?
-            with timer(key="sdc_stale_diff", message="[sdc] Computing staleness diff"):
-                diff_result = Checkpoint.diff(
-                    later_pre,
-                    post_checkpoint,
-                    keys_to_include=later_record.tracking.reads_before_writes,
-                    use_leq=True,
-                    column_rbw=later_record.tracking.column_reads_before_writes,
-                )
-
-            if diff_result.differences:
-                directly_stale.append(later_cell_id)
-
-        return directly_stale
+        return [cid for cid in self._cell_order if cid in self._stale_cells]
 
     def reset(self) -> None:
         """Clear all state. Called on kernel restart."""
@@ -583,8 +446,6 @@ def _check_read_write_conflict(
         List of conflicting variable/column references (e.g., ["df.price", "config"])
     """
     conflicts = []
-
-    # log(f"[sdc] Checking read-write conflicts: modified_vars={modified_vars}, modified_columns={modified_columns}, prior_reads={prior_reads}, prior_column_reads={prior_column_reads}")
 
     # Check each variable that was modified
     for var in modified_vars:
