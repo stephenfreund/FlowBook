@@ -16,14 +16,18 @@ class SDCViolation:
     affected_cell: str  # earlier cell whose reads were mutated
     variables: List[str]  # variables that were mutated
     message: str  # human-readable description
+    truncation_details: Optional[str] = None  # pretty-printed diff if truncation occurred
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "mutating_cell": self.mutating_cell,
             "affected_cell": self.affected_cell,
             "variables": self.variables,
             "message": self.message,
         }
+        if self.truncation_details:
+            result["truncation_details"] = self.truncation_details
+        return result
 
     def to_error_result(self, execution_count: int) -> dict:
         """Convert to kernel error result format."""

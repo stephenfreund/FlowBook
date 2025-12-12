@@ -7,12 +7,13 @@ Implements the three SDC rules:
 3. No Backward Mutation Constraint (enforced here)
 """
 
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
+import pprint
 import re
 
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.models import TrackingData
-from data_ferret.kernel.types import DiffResult, DiffNode, ValueComparison
+from data_ferret.kernel.types import DiffResult, DiffNode, ValueComparison, CompoundDiff
 from data_ferret.server.message_broadcaster import get_broadcaster
 from data_ferret.util.cell_index import index_to_alpha
 from data_ferret.util.output import log, timer
@@ -59,6 +60,7 @@ class SDCEnforcer:
         deleted = [c for c in self.records if c not in current]
         for c in deleted:
             del self.records[c]
+            self._stale_cells.discard(c)  # Also remove from stale cache
 
     def check(
         self,
@@ -66,6 +68,7 @@ class SDCEnforcer:
         pre_checkpoint: Checkpoint,
         post_checkpoint: Checkpoint,
         tracking: TrackingData,
+        continue_on_violation: bool = False,
     ) -> SDCResult:
         """
         Main entry point. Call after cell execution.
@@ -75,10 +78,18 @@ class SDCEnforcer:
             pre_checkpoint: Snapshot of namespace before execution
             post_checkpoint: Snapshot of namespace after execution
             tracking: TrackingData with reads/writes
+            continue_on_violation: If True, compute staleness even when violation detected
 
         Returns:
             SDCResult with violation info, absolute set of stale cells, and changed variables
         """
+        cell_alpha = self._cell_id_to_alpha(cell_id)
+        log(f"[sdc] check() called for cell {cell_alpha}")
+        log(f"[sdc]   tracking.reads_before_writes: {tracking.reads_before_writes}")
+        log(f"[sdc]   tracking.writes: {tracking.writes}")
+        log(f"[sdc]   pre_checkpoint vars: {list(pre_checkpoint.user_ns.keys())}")
+        log(f"[sdc]   post_checkpoint vars: {list(post_checkpoint.user_ns.keys())}")
+
         self.seq_counter += 1
 
         # Get position in document order
@@ -88,18 +99,20 @@ class SDCEnforcer:
             # Cell not in order list - can't enforce SDC
             my_position = -1
 
-        # Rule 3: Check backward mutation
+        # Rule 3: Check backward mutation (also returns the diff for reuse)
         violation = None
+        current_diff = None
         if my_position >= 0:
-            violation = self._check_backward_mutation(
-                cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
-            )
+            with timer(key="sdc_backward_mutation", message=f"[sdc] Backward mutation check for {cell_alpha}"):
+                violation, current_diff = self._check_backward_mutation(
+                    cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
+                )
 
         stale = []
         changed_vars = []
         column_changed = {}
 
-        if not violation:
+        if not violation or continue_on_violation:
             # Update our record for this cell BEFORE computing staleness
             # (so this cell is considered "fresh" in the computation)
             self.records[cell_id] = SDCExecutionRecord(
@@ -108,28 +121,65 @@ class SDCEnforcer:
                 execution_seq=self.seq_counter,
             )
 
-            # Compute ABSOLUTE staleness - all cells that are currently stale
-            stale = self.compute_all_stale_cells(post_checkpoint)
+            # This cell just executed, so it's now fresh
+            self._stale_cells.discard(cell_id)
 
-            # Compute changed variables (what this execution modified)
-            with timer(
-                key="sdc_changed_vars", message="[sdc] Computing changed variables"
-            ):
-                diff_result = Checkpoint.diff(
-                    pre_checkpoint,
-                    post_checkpoint,
-                    use_leq=True,
-                    column_rbw=tracking.column_reads_before_writes,
+            # Reuse diff from backward mutation check, or compute if not available
+            if current_diff is None:
+                with timer(
+                    key="sdc_changed_vars", message="[sdc] Computing changed variables (no backward check)"
+                ):
+                    current_diff = Checkpoint.diff(
+                        pre_checkpoint,
+                        post_checkpoint,
+                        use_leq=True,
+                        column_rbw=tracking.column_reads_before_writes,
+                    )
+
+            # Check if diff was truncated - if so, return violation
+            with timer(key="sdc_truncation_check", message="[sdc] Truncation check"):
+                truncated_vars = _check_for_truncation(current_diff)
+            if truncated_vars:
+                # Only format the diff when truncation is detected (lazy formatting)
+                formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
+                mutating_alpha = self._cell_id_to_alpha(cell_id)
+                log(f"[sdc] TRUNCATION DETECTED in cell {mutating_alpha}:\n{formatted_diff}")
+                return SDCResult(
+                    violation=SDCViolation(
+                        mutating_cell=cell_id,
+                        affected_cell=cell_id,
+                        variables=truncated_vars,
+                        message=(
+                            f"Cell {mutating_alpha}: SDC diff was truncated for variables: {truncated_vars}. "
+                            "Tracking may be incomplete. Consider increasing max_diffs_per_container."
+                        ),
+                        truncation_details=formatted_diff,
+                    ),
+                    stale_cells=[],
+                    changed_variables=[],
+                    column_changed={},
                 )
-                if diff_result.differences:
-                    changed_vars = list(diff_result.differences.keys())
 
-                # Extract column-level changes from diff result
-                column_changed = _extract_column_changes(diff_result, tracking)
+            if current_diff.differences:
+                changed_vars = list(current_diff.differences.keys())
 
+            # Extract column-level changes from diff result
+            with timer(key="sdc_extract_columns", message="[sdc] Extract column changes"):
+                column_changed = _extract_column_changes(current_diff, tracking)
+
+            log(f"[sdc]   changed_vars: {changed_vars}")
+            log(f"[sdc]   column_changed: {column_changed}")
+
+            # Update staleness INCREMENTALLY (only check cells that might have become stale)
+            with timer(key="sdc_staleness_update", message="[sdc] Staleness update"):
+                stale = self._update_staleness_incremental(
+                    post_checkpoint, set(changed_vars), column_changed, cell_id
+                )
+
+        log(f"[sdc] check() complete: violation={violation is not None}, stale={[self._cell_id_to_alpha(c) for c in stale]}")
         return SDCResult(
             violation=violation,
-            stale_cells=stale,  # ABSOLUTE list of all currently stale cells
+            stale_cells=stale,
             changed_variables=changed_vars,
             column_changed=column_changed,
         )
@@ -141,7 +191,7 @@ class SDCEnforcer:
         pre_checkpoint: Checkpoint,
         post_checkpoint: Checkpoint,
         tracking: TrackingData,
-    ) -> Optional[SDCViolation]:
+    ) -> Tuple[Optional[SDCViolation], DiffResult]:
         """
         Check if current cell causes a backward mutation.
 
@@ -150,50 +200,249 @@ class SDCEnforcer:
 
         The key insight: we must check what THIS cell actually modified,
         not just whether values are different from when earlier cells ran.
+
+        This method now includes column-aware conflict detection for DataFrames.
+
+        Returns:
+            Tuple of (violation, diff_result) - diff_result is returned for reuse
+            by caller to avoid redundant computation.
         """
         # First, compute what THIS cell actually modified
+        # For diff detection, we need to check all accessed columns (read OR written)
+        all_accessed_columns = {}
+        for var, cols in tracking.column_reads_before_writes.items():
+            all_accessed_columns[var] = set(cols)
+        for var, cols in tracking.column_writes.items():
+            if var in all_accessed_columns:
+                all_accessed_columns[var].update(cols)
+            else:
+                all_accessed_columns[var] = set(cols)
+
         with timer(key="sdc_current_diff", message="[sdc] Computing current cell diff"):
             current_diff = Checkpoint.diff(
                 pre_checkpoint,
                 post_checkpoint,
                 use_leq=True,
-                column_rbw=tracking.column_reads_before_writes,
+                column_rbw=all_accessed_columns,
+            )
+            log(f"[sdc] Current cell diff: {current_diff}")
+
+        # Check if diff was truncated - if so, return violation
+        truncated_vars = _check_for_truncation(current_diff)
+        if truncated_vars:
+            # Only format the diff when truncation is detected (lazy formatting)
+            formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
+            mutating_alpha = self._cell_id_to_alpha(cell_id)
+            log(f"[sdc] TRUNCATION DETECTED in cell {mutating_alpha}:\n{formatted_diff}")
+            return (
+                SDCViolation(
+                    mutating_cell=cell_id,
+                    affected_cell=cell_id,
+                    variables=truncated_vars,
+                    message=(
+                        f"⚠️ Cell {mutating_alpha}: SDC diff was truncated for variables: {truncated_vars}. "
+                        "Tracking may be incomplete. Consider increasing max_diffs_per_container."
+                    ),
+                    truncation_details=formatted_diff,
+                ),
+                current_diff,
             )
 
         if not current_diff.differences:
             # This cell didn't modify anything, no backward mutation possible
-            return None
+            log(f"[sdc] No differences found, skipping backward mutation check")
+            return (None, current_diff)
 
+        # Variable-level modifications
         modified_vars = set(current_diff.differences.keys())
         log(f"[sdc] Cell modified variables: {sorted(modified_vars)}")
 
+        # Column-level modifications (for DataFrames)
+        with timer(key="sdc_extract_modified_cols", message="[sdc] Extract modified columns"):
+            modified_columns = _extract_column_changes(current_diff, tracking)
+        log(f"[sdc] Cell modified columns: {modified_columns}")
+
         # Check if any earlier cell reads something we modified
-        for prior_cell_id in self._cell_order[:my_position]:
-            prior_record = self.records.get(prior_cell_id)
-            if prior_record is None:
-                continue
+        prior_cells_to_check = self._cell_order[:my_position]
+        log(f"[sdc] Checking {len(prior_cells_to_check)} prior cells for backward mutation")
+        with timer(key="sdc_prior_cell_check", message=f"[sdc] Check {len(prior_cells_to_check)} prior cells"):
+            for prior_cell_id in prior_cells_to_check:
+                prior_record = self.records.get(prior_cell_id)
+                if prior_record is None:
+                    continue
 
-            # Check intersection of our modifications with prior cell's reads
-            prior_reads = set(prior_record.tracking.reads_before_writes)
-            overlap = modified_vars & prior_reads
-
-            if overlap:
-                mutating_alpha = self._cell_id_to_alpha(cell_id)
-                affected_alpha = self._cell_id_to_alpha(prior_cell_id)
-                vars_list = sorted(overlap)
-
-                return SDCViolation(
-                    mutating_cell=cell_id,
-                    affected_cell=prior_cell_id,
-                    variables=vars_list,
-                    message=(
-                        f"Cell {mutating_alpha} modified {vars_list} "
-                        f"which cell {affected_alpha} (earlier in notebook) reads. "
-                        f"This violates Sequential Dataflow Consistency."
-                    ),
+                # Column-aware conflict detection
+                conflicts = _check_read_write_conflict(
+                    modified_vars=modified_vars,
+                    modified_columns=modified_columns,
+                    prior_reads=prior_record.tracking.reads_before_writes,
+                    prior_column_reads=prior_record.tracking.column_reads_before_writes,
                 )
 
-        return None
+                if conflicts:
+                    mutating_alpha = self._cell_id_to_alpha(cell_id)
+                    affected_alpha = self._cell_id_to_alpha(prior_cell_id)
+
+                    return (
+                        SDCViolation(
+                            mutating_cell=cell_id,
+                            affected_cell=prior_cell_id,
+                            variables=conflicts,
+                            message=(
+                                f"Cell {mutating_alpha} modified {conflicts} "
+                                f"which cell {affected_alpha} (earlier in notebook) reads. "
+                                f"This violates Sequential Dataflow Consistency."
+                            ),
+                        ),
+                        current_diff,
+                    )
+
+        return (None, current_diff)
+
+    def _update_staleness_incremental(
+        self,
+        current_checkpoint: Checkpoint,
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+        just_executed: str,
+    ) -> List[str]:
+        """
+        Incrementally update staleness cache.
+
+        OPTIMIZATION: Only checks cells that could have become stale from this execution.
+        Skips cells that are already stale or whose reads don't overlap with changed vars.
+
+        Args:
+            current_checkpoint: The current state of the namespace
+            changed_vars: Set of variable names that changed in this execution
+            column_changed: Dict mapping var names to lists of changed column names
+            just_executed: The cell_id that just executed (already marked fresh)
+
+        Returns:
+            List of all currently stale cell IDs (in document order)
+        """
+        log(
+            f"[sdc] _update_staleness_incremental: changed_vars={changed_vars}, "
+            f"already_stale={len(self._stale_cells)}, total_records={len(self.records)}"
+        )
+
+        cells_checked = 0
+        cells_skipped_stale = 0
+        cells_skipped_no_overlap = 0
+        cells_no_checkpoint = 0
+        total_diff_time_ms = 0
+
+        import time
+        loop_start = time.perf_counter()
+
+        for cell_id, record in self.records.items():
+            if cell_id == just_executed:
+                continue  # This cell just ran, already marked fresh
+
+            cell_alpha = self._cell_id_to_alpha(cell_id)
+
+            if cell_id in self._stale_cells:
+                cells_skipped_stale += 1
+                log(f"[sdc]   {cell_alpha}: skipped (already stale)")
+                continue  # Already stale, no need to re-check
+
+            # OPTIMIZATION: Skip cells whose reads don't overlap with changed vars
+            reads = record.tracking.reads_before_writes
+            if not self._has_relevant_overlap(record, changed_vars, column_changed):
+                cells_skipped_no_overlap += 1
+                log(f"[sdc]   {cell_alpha}: skipped (no overlap) - reads={reads}")
+                continue  # No overlap, can't have become stale from THIS execution
+
+            # Cell MIGHT be stale - do the expensive diff check
+            cells_checked += 1
+            log(f"[sdc]   {cell_alpha}: checking (reads={reads})")
+
+            pre_checkpoint = self.checkpoints.get(f"_pre_{cell_id}")
+            if pre_checkpoint is None:
+                cells_no_checkpoint += 1
+                log(f"[sdc]   {cell_alpha}: No pre-checkpoint found, skipping")
+                continue
+
+            diff_start = time.perf_counter()
+            with timer(
+                key="sdc_stale_check",
+                message=f"[sdc] Diff for staleness {cell_alpha}",
+            ):
+                diff_result = Checkpoint.diff(
+                    pre_checkpoint,
+                    current_checkpoint,
+                    keys_to_include=reads,
+                    use_leq=True,
+                    column_rbw=record.tracking.column_reads_before_writes,
+                )
+            diff_time = (time.perf_counter() - diff_start) * 1000
+            total_diff_time_ms += diff_time
+
+            if diff_result.differences:
+                self._stale_cells.add(cell_id)
+                log(
+                    f"[sdc]   {cell_alpha}: NOW STALE (changed: {list(diff_result.differences.keys())}) [{diff_time:.1f}ms]"
+                )
+            else:
+                log(f"[sdc]   {cell_alpha}: still fresh [{diff_time:.1f}ms]")
+
+        loop_time = (time.perf_counter() - loop_start) * 1000
+        log(
+            f"[sdc] _update_staleness_incremental complete: "
+            f"checked={cells_checked}, skipped_stale={cells_skipped_stale}, "
+            f"skipped_no_overlap={cells_skipped_no_overlap}, no_checkpoint={cells_no_checkpoint}"
+        )
+        log(f"[sdc]   loop_time={loop_time:.1f}ms, total_diff_time={total_diff_time_ms:.1f}ms")
+
+        # Return in document order
+        result = [cid for cid in self._cell_order if cid in self._stale_cells]
+        result_alpha = [self._cell_id_to_alpha(cid) for cid in result]
+        log(f"[sdc] _update_staleness_incremental: Result = {result_alpha}")
+        return result
+
+    def _has_relevant_overlap(
+        self,
+        record: SDCExecutionRecord,
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+    ) -> bool:
+        """
+        Check if cell's reads overlap with changes at variable or column level.
+
+        Returns True if:
+        - Cell reads a variable that changed AND either:
+          - No column-level info available (conservative: assume overlap)
+          - Column-level info shows actual column overlap
+
+        Args:
+            record: The cell's execution record with tracking info
+            changed_vars: Variables that changed in current execution
+            column_changed: Dict mapping var names to changed column names
+
+        Returns:
+            True if the cell might be affected by the changes
+        """
+        reads = record.tracking.reads_before_writes
+        var_overlap = reads & changed_vars
+
+        if not var_overlap:
+            return False  # No variable-level overlap at all
+
+        # Check column-level overlap for each overlapping variable
+        for var in var_overlap:
+            changed_cols = set(column_changed.get(var, []))
+            read_cols = record.tracking.column_reads_before_writes.get(var, None)
+
+            if not changed_cols or read_cols is None:
+                # No column info on one or both sides - conservative: assume overlap
+                return True
+
+            if changed_cols & read_cols:
+                # Actual column overlap found
+                return True
+
+        # All overlapping vars have column info and no column overlap
+        return False
 
     def compute_all_stale_cells(self, current_checkpoint: Checkpoint) -> List[str]:
         """
@@ -307,6 +556,61 @@ class SDCEnforcer:
         self.records.clear()
         self.seq_counter = 0
         self._cell_order = []
+        self._stale_cells.clear()
+
+
+def _check_read_write_conflict(
+    modified_vars: Set[str],
+    modified_columns: Dict[str, List[str]],
+    prior_reads: Set[str],
+    prior_column_reads: Dict[str, Set[str]],
+) -> List[str]:
+    """
+    Check if modifications conflict with prior reads at variable or column level.
+
+    Implements three-level conflict detection:
+    1. Variable-only conflicts: Prior reads var, no column info on either side
+    2. Mixed conflicts: Column info on one side only (conservative: flag as conflict)
+    3. Column-level conflicts: Both have column info, check column overlap
+
+    Args:
+        modified_vars: Set of variable names modified by current cell
+        modified_columns: Dict of variable -> list of modified columns
+        prior_reads: Set of variables read by prior cell
+        prior_column_reads: Dict of variable -> set of read columns for prior cell
+
+    Returns:
+        List of conflicting variable/column references (e.g., ["df.price", "config"])
+    """
+    conflicts = []
+
+    # log(f"[sdc] Checking read-write conflicts: modified_vars={modified_vars}, modified_columns={modified_columns}, prior_reads={prior_reads}, prior_column_reads={prior_column_reads}")
+
+    # Check each variable that was modified
+    for var in modified_vars:
+        # Does prior cell read this variable?
+        if var not in prior_reads:
+            continue
+
+        # Variable is read by prior cell - check if we have column-level info
+
+        current_cols = set(modified_columns.get(var, []))
+        prior_cols = prior_column_reads.get(var, None)
+
+        if prior_cols is None or not current_cols:
+            # Level 1 or 2: No column info on one or both sides
+            # Conservative: flag as conflict at variable level
+            conflicts.append(var)
+        else:
+            # Level 3: Both have column info - check overlap
+            overlap_cols = current_cols & prior_cols
+            if overlap_cols:
+                # Conflict at column level - report each column
+                for col in sorted(overlap_cols):
+                    conflicts.append(f"{var}.{col}")
+            # else: No overlap, no conflict
+
+    return sorted(conflicts)
 
 
 def _extract_column_changes(
@@ -347,14 +651,11 @@ def _get_changed_columns_from_diff_node(node: DiffNode) -> Set[str]:
     """
     Parse a DiffNode to extract changed DataFrame column names.
 
-    For DataFrames, the diff structure looks like:
-        {
-            "['column_name'][0]": ValueComparison(...),
-            "['column_name']": ValueComparison(...),
-            ...
-        }
+    For DataFrames, the diff structure can be:
+    1. Nested dict with column-level changes: {"['column_name']": ..., "['column_name'][0]": ..., etc.}
+    2. ValueComparison with message about missing/added columns (legacy format)
 
-    We extract column names from keys matching the pattern ['column_name'].
+    We extract column names from both formats.
 
     Args:
         node: DiffNode (either ValueComparison or Dict)
@@ -365,17 +666,56 @@ def _get_changed_columns_from_diff_node(node: DiffNode) -> Set[str]:
     changed_cols = set()
 
     if isinstance(node, ValueComparison):
-        # Leaf node - not a DataFrame structure
+        # Check if this is a DataFrame diff with column information in the message
+        # Legacy format: "DataFrame missing RBW columns in pre-state at var: ['col1', 'col2']"
+        # New format: "DataFrame column 'col' missing in pre-state at var"
+        if hasattr(node, 'message') and node.message:
+            # Try legacy format first
+            missing_match = re.search(r"missing RBW columns in (?:pre|post)-state at \w+: \[([^\]]+)\]", node.message)
+            if missing_match:
+                # Parse the column list
+                cols_str = missing_match.group(1)
+                # Remove quotes and split by comma
+                for col in cols_str.split(','):
+                    col = col.strip().strip("'\"")
+                    if col:
+                        changed_cols.add(col)
+            else:
+                # Try new format: "DataFrame column 'col' missing/deleted ..."
+                col_match = re.search(r"DataFrame column '([^']+)' (?:missing|deleted)", node.message)
+                if col_match:
+                    changed_cols.add(col_match.group(1))
+                # Also try: "Column 'col' only in first/second DataFrame"
+                col_match2 = re.search(r"Column '([^']+)' only in", node.message)
+                if col_match2:
+                    changed_cols.add(col_match2.group(1))
+        return changed_cols
+
+    if isinstance(node, CompoundDiff):
+        # Walk the CompoundDiff children and extract column names
+        for key in node.children.keys():
+            # DataFrame column diffs have keys like:
+            # - "['column_name']" - column-level difference
+            # - "['column_name'][0]" - row-level difference within column
+            # - "['column_name']._dtype" - dtype difference for column
+            # Extract the column name using regex
+            match = re.match(r"\['([^']+)'\]", key)
+            if match:
+                column_name = match.group(1)
+                changed_cols.add(column_name)
         return changed_cols
 
     if isinstance(node, dict):
-        # Walk the diff dict and extract column names
+        # Walk the diff dict and extract column names (legacy format)
         for key in node.keys():
             # Skip special markers
-            if key == "_truncated":
+            if key == "_truncated" or key == "_index":
                 continue
 
-            # DataFrame column diffs have keys like "['column_name']" or "['column_name'][0]"
+            # DataFrame column diffs have keys like:
+            # - "['column_name']" - column-level difference
+            # - "['column_name'][0]" - row-level difference within column
+            # - "['column_name']._dtype" - dtype difference for column
             # Extract the column name using regex
             match = re.match(r"\['([^']+)'\]", key)
             if match:
@@ -383,3 +723,111 @@ def _get_changed_columns_from_diff_node(node: DiffNode) -> Set[str]:
                 changed_cols.add(column_name)
 
     return changed_cols
+
+
+def _check_for_truncation(diff_result: DiffResult) -> List[str]:
+    """
+    Check if truncation might cause us to miss which columns/keys changed.
+
+    We only care about truncation at the variable's top level for certain types:
+    - DataFrame: truncation would mean we might miss columns
+    - dict: truncation would mean we might miss keys
+    - object: truncation would mean we might miss attributes
+
+    We do NOT care about truncation for:
+    - array, list, tuple, series: these are value containers where truncation
+      just means we don't know ALL the changed values (but we know it changed)
+
+    Args:
+        diff_result: The DiffResult to check
+
+    Returns:
+        List of variable names that had truncated diffs (empty if no truncation)
+    """
+    # Types where truncation could cause us to miss keys/columns
+    STRUCTURAL_TYPES = {"dataframe", "dict", "object"}
+
+    truncated_vars = []
+
+    for var_name, diff_node in diff_result.differences.items():
+        if isinstance(diff_node, CompoundDiff):
+            # Only flag truncation for types where we might miss columns/keys
+            if diff_node.truncated and diff_node.source_type in STRUCTURAL_TYPES:
+                truncated_vars.append(var_name)
+
+    return truncated_vars
+
+
+def _format_diff_for_display(
+    diff_result: DiffResult, truncated_vars: List[str], max_width: int = 120
+) -> str:
+    """
+    Format truncated diff for human-readable display.
+
+    Args:
+        diff_result: The DiffResult containing differences
+        truncated_vars: List of variable names that were truncated
+        max_width: Maximum width for pretty printing
+
+    Returns:
+        Formatted string showing the truncated diffs
+    """
+    lines = ["=" * 60, "TRUNCATED DIFF DETAILS", "=" * 60]
+
+    for var_name in truncated_vars:
+        if var_name not in diff_result.differences:
+            continue
+
+        diff_node = diff_result.differences[var_name]
+        lines.append(f"\nVariable: {var_name}")
+        lines.append("-" * 40)
+
+        # Pretty print the diff structure
+        formatted = pprint.pformat(
+            _diff_node_to_dict(diff_node),
+            width=max_width,
+            depth=4,  # Limit depth to avoid overwhelming output
+            compact=True,
+        )
+        lines.append(formatted)
+
+    lines.append("\n" + "=" * 60)
+    return "\n".join(lines)
+
+
+def _diff_node_to_dict(node: DiffNode) -> dict:
+    """
+    Convert a DiffNode to a plain dict for pretty printing.
+
+    Handles ValueComparison objects and CompoundDiff objects.
+    """
+    if isinstance(node, ValueComparison):
+        result = {"status": node.status}
+        if node.message:
+            result["message"] = node.message
+        if node.value1 is not None:
+            result["before"] = _truncate_value(node.value1)
+        if node.value2 is not None:
+            result["after"] = _truncate_value(node.value2)
+        return result
+    elif isinstance(node, CompoundDiff):
+        result = {
+            "_type": node.source_type,
+            "_truncated": node.truncated,
+        }
+        for k, v in node.children.items():
+            result[k] = _diff_node_to_dict(v)
+        return result
+    elif isinstance(node, dict):
+        # Fallback for any plain dicts (shouldn't happen with new structure)
+        return {k: _diff_node_to_dict(v) for k, v in node.items()}
+    else:
+        return _truncate_value(node)
+
+
+def _truncate_value(value, max_len: int = 100) -> str:
+    """Truncate long values for display."""
+    s = repr(value)
+    if len(s) > max_len:
+        return s[: max_len - 3] + "..."
+    return s

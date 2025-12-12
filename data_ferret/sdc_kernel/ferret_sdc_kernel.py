@@ -66,8 +66,8 @@ class FerretSDCKernel(IPythonKernel, Magics):
         # SDC enforcement
         self._sdc = SDCEnforcer(self._checkpoint)
 
-        # # Flag to track if we've initialized tracking
-        # self._tracking_initialized = False
+        # Continue after violation flag (default: stop on violation)
+        self._continue_after_violation: bool = False
 
     # =========================================================================
     # Magic Commands
@@ -103,8 +103,31 @@ class FerretSDCKernel(IPythonKernel, Magics):
             )
 
         self._display.display_icon_and_text(
-            "info", "SDC Status", "\n".join(status_lines)
+            "ℹ️", "SDC Status", "\n".join(status_lines)
         )
+
+    @line_magic
+    def continue_after_violation(self, line: str) -> None:
+        """
+        Control whether execution continues after SDC violations.
+
+        Usage:
+            %continue_after_violation        # Enable (continue after violations)
+            %continue_after_violation true   # Enable
+            %continue_after_violation false  # Disable (default: stop on violation)
+        """
+        arg = line.strip().lower()
+        if arg == "false":
+            self._continue_after_violation = False
+        elif arg == "true" or arg == "":
+            self._continue_after_violation = True
+        else:
+            self._display.display_icon_and_text(
+                "⚠️", f"Invalid argument: '{arg}'. Use 'true' or 'false'."
+            )
+            return
+        state = "enabled" if self._continue_after_violation else "disabled"
+        self._display.display_icon_and_text("ℹ️", f"Continue after violation: {state}")
 
     # =========================================================================
     # Stub magics for compatibility with FerretKernel notebooks
@@ -330,33 +353,46 @@ class FerretSDCKernel(IPythonKernel, Magics):
                         pre_checkpoint=pre_checkpoint,
                         post_checkpoint=post_checkpoint,
                         tracking=tracking,
+                        continue_on_violation=self._continue_after_violation,
                     )
                 log(f"[sdc] Check completed for cell {cell_alpha}")
                 if sdc_result and sdc_result.violation:
                     log(f"[sdc] VIOLATION DETECTED: {sdc_result.violation.message}")
 
-                # Display results (only if not silent, no error, and no SDC violation)
-                # Skip display on violation since state will be rolled back
+                # Handle violation
                 has_violation = sdc_result and sdc_result.violation
-                if not silent and result.get("status") != "error" and not has_violation:
-                    check_duration = (
+                if has_violation:
+                    # Send truncation details to stderr if present
+                    if sdc_result.violation.truncation_details:
+                        self._send_truncation_details(sdc_result.violation.truncation_details)
+
+                    if self._continue_after_violation:
+                        # Report violation as warning but continue execution
+                        log(f"[sdc] Violation detected, continuing (continue_after_violation=True)")
+                        self._send_violation_warning(sdc_result.violation)
+                    else:
+                        # Default: restore checkpoint and return error
+                        log(f"[sdc] Restoring checkpoint and sending error")
+                        self._sdc.checkpoints.restore(
+                            f"_pre_{self._cell_id}", self.shell.user_ns
+                        )
+                        self._send_violation_error(sdc_result.violation)
+                        return self._make_error_result(sdc_result.violation)
+
+                # Display results (skip if silent, error, or violation with rollback)
+                skip_display = has_violation and not self._continue_after_violation
+                if not silent and result.get("status") != "error" and not skip_display:
+                    state_duration = (
                         pre_checkpoint_duration.duration()
                         + post_checkpoint_duration.duration()
-                        + sdc_check_duration.duration()
                     )
                     self._display_execution_result(
-                        run_duration.duration(), check_duration, tracking, sdc_result
+                        run_duration.duration(),
+                        state_duration,
+                        sdc_check_duration.duration(),
+                        tracking,
+                        sdc_result,
                     )
-
-                # Handle violation - report as error
-                if sdc_result and sdc_result.violation:
-                    log(f"[sdc] Restoring checkpoint and sending error")
-                    # restore to pre-checkpoint
-                    self._sdc.checkpoints.restore(
-                        f"_pre_{self._cell_id}", self.shell.user_ns
-                    )
-                    self._send_violation_error(sdc_result.violation)
-                    return self._make_error_result(sdc_result.violation)
 
             return result
         except Exception as e:
@@ -475,6 +511,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
     def _display_execution_result(
         self,
         run_duration: float,
+        state_duration: float,
         check_duration: float,
         tracking,
         sdc_result,
@@ -508,7 +545,11 @@ class FerretSDCKernel(IPythonKernel, Magics):
         )
 
         # Build display text
-        parts = [f"Run: {run_duration:.0f} ms", f"Check: {check_duration:.0f} ms"]
+        parts = [
+            f"Run: {run_duration:.0f} ms",
+            f"State: {state_duration:.0f} ms",
+            f"Check: {check_duration:.0f} ms",
+        ]
         if tracking:
             if tracking.reads_before_writes:
                 reads_preview = [
@@ -526,10 +567,18 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 parts.append(f"Writes: {','.join(writes_preview)}")
 
         if sdc_result and sdc_result.stale_cells:
-            parts.append(f"Stale: {','.join(sdc_result.stale_cells)}")
+            # Convert cell IDs to @A references for display
+            stale_refs = []
+            for cell_id in sdc_result.stale_cells:
+                try:
+                    idx = self._sdc.cell_order.index(cell_id)
+                    stale_refs.append(index_to_alpha(idx))
+                except (ValueError, IndexError):
+                    stale_refs.append(cell_id)  # Fallback to ID if not in order
+            parts.append(f"Stale: {','.join(stale_refs)}")
 
         # icon = "check" if not (sdc_result and sdc_result.violation) else "error"
-        icon = ""
+        icon = "✓" if not (sdc_result and sdc_result.violation) else "✗"
 
         self._display.display_icon_and_text(
             icon,
@@ -539,18 +588,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
     def _send_violation_error(self, violation) -> None:
         """Send SDC violation as error via iopub."""
-        # Get @A notation for cells
-        try:
-            mutating_idx = self._sdc.cell_order.index(violation.mutating_cell)
-            mutating_alpha = index_to_alpha(mutating_idx)
-        except (ValueError, IndexError):
-            mutating_alpha = violation.mutating_cell
-
-        try:
-            affected_idx = self._sdc.cell_order.index(violation.affected_cell)
-            affected_alpha = index_to_alpha(affected_idx)
-        except (ValueError, IndexError):
-            affected_alpha = violation.affected_cell
+        mutating_alpha, affected_alpha = self._get_violation_alphas(violation)
 
         self.send_response(
             self.iopub_socket,
@@ -571,6 +609,44 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 ],
             },
         )
+
+    def _send_violation_warning(self, violation) -> None:
+        """Send SDC violation as warning via iopub (when continue_after_violation is enabled)."""
+        mutating_alpha, affected_alpha = self._get_violation_alphas(violation)
+
+        warning_text = (
+            f"⚠️ SDC Violation (continuing): Cell {mutating_alpha} modified "
+            f"{violation.variables} which cell {affected_alpha} reads.\n"
+        )
+        self.send_response(
+            self.iopub_socket,
+            "stream",
+            {"name": "stderr", "text": warning_text},
+        )
+
+    def _send_truncation_details(self, truncation_details: str) -> None:
+        """Send truncation details to stderr for user visibility."""
+        self.send_response(
+            self.iopub_socket,
+            "stream",
+            {"name": "stderr", "text": f"\n{truncation_details}\n"},
+        )
+
+    def _get_violation_alphas(self, violation) -> tuple:
+        """Get @A notation for violation cells."""
+        try:
+            mutating_idx = self._sdc.cell_order.index(violation.mutating_cell)
+            mutating_alpha = index_to_alpha(mutating_idx)
+        except (ValueError, IndexError):
+            mutating_alpha = violation.mutating_cell
+
+        try:
+            affected_idx = self._sdc.cell_order.index(violation.affected_cell)
+            affected_alpha = index_to_alpha(affected_idx)
+        except (ValueError, IndexError):
+            affected_alpha = violation.affected_cell
+
+        return mutating_alpha, affected_alpha
 
     def _make_error_result(self, violation) -> dict:
         """Create error result dict for SDC violation."""

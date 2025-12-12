@@ -8,7 +8,7 @@ from IPython.display import Markdown, display
 from data_ferret.kernel.checkpoint import Checkpoint
 
 
-DEFAULT_DIV_STYLE = "padding-left: 3em; font-size: 0.8em; background-color: #f0f0f8; margin-bottom: 0em;"
+DEFAULT_DIV_STYLE = "padding-left: 1em; font-size: 0.8em; background-color: #f0f0f8; margin-bottom: 0em;"
 
 
 class DisplayHelper:

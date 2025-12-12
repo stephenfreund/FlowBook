@@ -59,14 +59,36 @@ export class SDCCellHighlighter {
     }
   }
 
+  /**
+   * Get current cell order from notebook (only code cells)
+   */
+  private _getCurrentCellOrder(notebook: NotebookPanel): string[] {
+    const cellOrder: string[] = [];
+    const cells = notebook.content.widgets;
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i];
+      if (cell.model.type === 'code') {
+        cellOrder.push(cell.model.id);
+      }
+    }
+    return cellOrder;
+  }
+
   private _onActiveCellChanged(tracker: INotebookTracker, cell: Cell | null): void {
+    const notebook = tracker.currentWidget;
+    if (!notebook) {
+      this._panel.clear();
+      return;
+    }
+
     if (cell && cell.model.type === 'code') {
       const metadata = cell.model.metadata as any;
       const sdcMetadata = metadata?.ferret_sdc as ISDCMetadata | undefined;
       const cellId = cell.model.id;
+      const currentCellOrder = this._getCurrentCellOrder(notebook);
 
       if (sdcMetadata) {
-        this._panel.updateMetadata(sdcMetadata, cellId);
+        this._panel.updateMetadata(sdcMetadata, cellId, currentCellOrder);
       } else {
         this._panel.clear();
       }
@@ -80,7 +102,28 @@ export class SDCCellHighlighter {
 
     notebook.content.model?.cells.changed.connect(() => {
       this._updateAllCells(notebook);
+      // Update panel with new cell order when cells are added/removed/reordered
+      this._updatePanelWithCurrentCellOrder(notebook);
     });
+  }
+
+  /**
+   * Update the panel with current cell order (if active cell has metadata)
+   */
+  private _updatePanelWithCurrentCellOrder(notebook: NotebookPanel): void {
+    const activeCell = this._tracker.activeCell;
+    if (!activeCell || activeCell.model.type !== 'code') {
+      return;
+    }
+
+    const metadata = activeCell.model.metadata as any;
+    const sdcMetadata = metadata?.ferret_sdc as ISDCMetadata | undefined;
+
+    if (sdcMetadata) {
+      const cellId = activeCell.model.id;
+      const currentCellOrder = this._getCurrentCellOrder(notebook);
+      this._panel.updateMetadata(sdcMetadata, cellId, currentCellOrder);
+    }
   }
 
   private _updateAllCells(notebook: NotebookPanel): void {
@@ -115,9 +158,11 @@ export class SDCCellHighlighter {
     if (this._tracker.activeCell === cell) {
       const metadata = cell.model.metadata as any;
       const sdcMetadata = metadata?.ferret_sdc as ISDCMetadata | undefined;
+      const notebook = this._tracker.currentWidget;
 
-      if (sdcMetadata) {
-        this._panel.updateMetadata(sdcMetadata, cellId);
+      if (sdcMetadata && notebook) {
+        const currentCellOrder = this._getCurrentCellOrder(notebook);
+        this._panel.updateMetadata(sdcMetadata, cellId, currentCellOrder);
       }
     }
   }

@@ -6,10 +6,32 @@ import { Widget } from '@lumino/widgets';
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
 import { ISDCMetadata } from './types';
+import { indexToAlpha } from '../cellindexutils';
 
 interface ISDCMetadataDisplayProps {
   metadata: ISDCMetadata | null;
   cellId: string | null;
+  currentCellOrder: string[];  // Current cell order from notebook (not historical)
+}
+
+/**
+ * Convert cell ID to reference (@A notation) using cell order.
+ * @param cellId - The cell ID to convert
+ * @param cellOrder - Array of cell IDs in notebook order
+ * @returns Cell reference in @A notation, or the original cell ID if not found
+ */
+function cellIdToReference(cellId: string, cellOrder: string[]): string {
+  const index = cellOrder.indexOf(cellId);
+  if (index === -1) {
+    // Cell not in order, return ID as-is
+    return cellId;
+  }
+  try {
+    return indexToAlpha(index);
+  } catch (e) {
+    // Fallback to ID if conversion fails
+    return cellId;
+  }
 }
 
 /**
@@ -47,7 +69,7 @@ function flattenColumnTracking(
   return result;
 }
 
-const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cellId }) => {
+const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cellId, currentCellOrder }) => {
   if (!metadata) {
     return (
       <div className="sdc-metadata-empty">
@@ -65,7 +87,13 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
       {/* Cell ID Header */}
       {cellId && (
         <>
-          <div className="sdc-metadata-header">Cell: {cellId}</div>
+          <div className="sdc-metadata-header">Cell: {cellIdToReference(cellId, currentCellOrder)}</div>
+          <div className="sdc-metadata-section">
+            <div className="sdc-metadata-item">
+              <span style={{ fontSize: '0.85em', color: '#666' }}>Id: </span>
+              <code style={{ fontSize: '0.85em', color: '#666' }}>{cellId}</code>
+            </div>
+          </div>
           <div className="sdc-metadata-divider" />
         </>
       )}
@@ -166,7 +194,9 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
             <div className="sdc-metadata-item">
               <strong>Stale Cells:</strong>
               <ul className="sdc-cell-list sdc-stale">
-                {metadata.stale_cells.map((id, i) => <li key={i}><code>{id}</code></li>)}
+                {metadata.stale_cells.map((id, i) => (
+                  <li key={i}><code>{cellIdToReference(id, currentCellOrder)}</code></li>
+                ))}
               </ul>
             </div>
           </div>
@@ -182,8 +212,8 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
             <div className="sdc-violation-content">
               <p>{metadata.violation.message}</p>
               <div className="sdc-violation-details">
-                <strong>Mutating Cell:</strong> <code>{metadata.violation.mutating_cell}</code><br />
-                <strong>Affected Cell:</strong> <code>{metadata.violation.affected_cell}</code><br />
+                <strong>Mutating Cell:</strong> <code>{cellIdToReference(metadata.violation.mutating_cell, currentCellOrder)}</code><br />
+                <strong>Affected Cell:</strong> <code>{cellIdToReference(metadata.violation.affected_cell, currentCellOrder)}</code><br />
                 <strong>Variables:</strong> {metadata.violation.variables.join(', ')}
               </div>
             </div>
@@ -197,6 +227,7 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
 export class SDCMetadataPanel extends Widget {
   private _metadata: ISDCMetadata | null = null;
   private _cellId: string | null = null;
+  private _currentCellOrder: string[] = [];
 
   constructor() {
     super();
@@ -210,20 +241,26 @@ export class SDCMetadataPanel extends Widget {
 
   private render(): void {
     ReactDOM.render(
-      <SDCMetadataDisplay metadata={this._metadata} cellId={this._cellId} />,
+      <SDCMetadataDisplay
+        metadata={this._metadata}
+        cellId={this._cellId}
+        currentCellOrder={this._currentCellOrder}
+      />,
       this.node
     );
   }
 
-  public updateMetadata(metadata: ISDCMetadata | null, cellId: string | null): void {
+  public updateMetadata(metadata: ISDCMetadata | null, cellId: string | null, currentCellOrder: string[]): void {
     this._metadata = metadata;
     this._cellId = cellId;
+    this._currentCellOrder = currentCellOrder;
     this.render();
   }
 
   public clear(): void {
     this._metadata = null;
     this._cellId = null;
+    this._currentCellOrder = [];
     this.render();
   }
 

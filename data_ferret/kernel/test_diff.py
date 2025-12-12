@@ -15,7 +15,7 @@ import sys
 
 # Import the Diff class
 from data_ferret.kernel.diff import Diff
-from data_ferret.kernel.types import ValueComparison, DiffNode, DiffResult
+from data_ferret.kernel.types import ValueComparison, CompoundDiff, DiffNode, DiffResult
 
 
 # ============================================================================
@@ -42,13 +42,17 @@ def assert_message_contains(result: DiffResult, var: str, expected_text: str):
     if isinstance(diff_node, ValueComparison):
         assert expected_text in diff_node.message, \
             f"Expected '{expected_text}' in message, but got: {diff_node.message}"
-    # If it's a dict (compound diff), look for the text in any nested message
-    elif isinstance(diff_node, dict):
+    # If it's a CompoundDiff or dict, look for the text in any nested message
+    elif isinstance(diff_node, (CompoundDiff, dict)):
         # Recursively search for message containing text
         def find_message(node):
             if isinstance(node, ValueComparison):
                 if expected_text in node.message:
                     return True
+            elif isinstance(node, CompoundDiff):
+                for value in node.children.values():
+                    if find_message(value):
+                        return True
             elif isinstance(node, dict):
                 for value in node.values():
                     if find_message(value):
@@ -76,6 +80,17 @@ def get_any_comparison(result: DiffResult, var: str) -> ValueComparison:
 
     if isinstance(diff_node, ValueComparison):
         return diff_node
+    elif isinstance(diff_node, CompoundDiff):
+        # Return first ValueComparison found in children
+        for value in diff_node.children.values():
+            if isinstance(value, ValueComparison):
+                return value
+            elif isinstance(value, CompoundDiff):
+                # Recursively search nested CompoundDiff
+                for nested_value in value.children.values():
+                    if isinstance(nested_value, ValueComparison):
+                        return nested_value
+        raise AssertionError(f"No ValueComparison found in CompoundDiff for '{var}'")
     elif isinstance(diff_node, dict):
         # Return first non-truncated ValueComparison found
         for key, value in diff_node.items():
@@ -300,8 +315,8 @@ class TestCollections:
         result = differ.diff(a, b)
         assert 'd' in result
         # Now we get a structured diff showing the specific key
-        assert isinstance(result['d'], dict)
-        assert "['y']" in result['d']
+        assert isinstance(result['d'], CompoundDiff)
+        assert "['y']" in result['d'].children
         assert_message_contains(result, 'd', "only in first")
     
     def test_dict_extra_key(self):
@@ -414,15 +429,18 @@ class TestPandas:
         b = {'df': pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})}
         result = differ.diff(a, b)
         assert 'df' in result
-        assert_message_contains(result, 'df', 'shape mismatch')
-    
+        # Now reports index mismatch (different number of rows)
+        assert_message_contains(result, 'df', 'index mismatch')
+
     def test_dataframe_different_columns(self):
         differ = Diff()
         a = {'df': pd.DataFrame({'A': [1, 2], 'B': [3, 4]})}
         b = {'df': pd.DataFrame({'A': [1, 2], 'C': [3, 4]})}
         result = differ.diff(a, b)
         assert 'df' in result
-        assert_message_contains(result, 'df', 'columns mismatch')
+        # Now reports individual column differences
+        assert_message_contains(result, 'df', 'only in first DataFrame')
+        assert_message_contains(result, 'df', 'only in second DataFrame')
     
     def test_dataframe_with_nan(self):
         differ = Diff()
@@ -904,10 +922,13 @@ class TestDetailedErrorMessages:
         b = {'s': {1, 2, 99}}
         result = differ.diff(a, b)
         assert 's' in result
-        # Should mention an element value (either 3 or 99)
-        comp = get_comparison(result, 's')
-        assert ('3' in comp.message or '99' in comp.message)
-    
+        # Should mention an element value (either 3 or 99) - now returns CompoundDiff with unmatched elements
+        diff_node = result['s']
+        assert isinstance(diff_node, CompoundDiff), f"Expected CompoundDiff but got {type(diff_node)}"
+        messages = [v.message for v in diff_node.children.values() if isinstance(v, ValueComparison)]
+        all_messages = ' '.join(messages)
+        assert ('3' in all_messages or '99' in all_messages), f"Expected 3 or 99 in messages: {messages}"
+
     def test_float_array_shows_values(self):
         """Float array with tolerance mismatch should show values."""
         differ = Diff(rtol=1e-9, atol=0)
@@ -923,11 +944,11 @@ class TestDetailedErrorMessages:
         b = {'arr': np.array([1, 2, 99, 4, 5])}
         result = differ.diff(a, b)
         assert 'arr' in result
-        # Should show the index
-        comp = get_comparison(result, 'arr')
-        assert '[2]' in comp.message or '(2,)' in comp.message
+        # Should show the index - now returns dict with element diffs
+        assert_message_contains(result, 'arr', '(2,)')
         # Should show the values
-        assert '3' in comp.message and '99' in comp.message
+        assert_message_contains(result, 'arr', '3')
+        assert_message_contains(result, 'arr', '99')
     
     def test_multidim_array_shows_index(self):
         """Multidimensional array should show full index."""
@@ -964,20 +985,23 @@ class TestDetailedErrorMessages:
         comp = get_any_comparison(result, 's')
         assert 'b' in comp.message
         assert 'NaN' in comp.message or 'nan' in comp.message.lower()
-    
-    def test_set_shows_unmatched_element(self):
-        """Set mismatch should show which element couldn't be matched."""
+
+    def test_set_shows_unmatched_element_v2(self):
+        """Set mismatch should show which element couldn't be matched (v2)."""
         differ = Diff()
         a = {'s': {1, 2, 3}}
         b = {'s': {1, 2, 99}}
         result = differ.diff(a, b)
         assert 's' in result
-        # Should mention an element value (either 3 or 99)
-        comp = get_comparison(result, 's')
-        assert ('3' in comp.message or '99' in comp.message)
-    
-    def test_float_array_shows_values(self):
-        """Float array with tolerance mismatch should show values."""
+        # Should mention an element value (either 3 or 99) - now returns CompoundDiff with unmatched elements
+        diff_node = result['s']
+        assert isinstance(diff_node, CompoundDiff), f"Expected CompoundDiff but got {type(diff_node)}"
+        messages = [v.message for v in diff_node.children.values() if isinstance(v, ValueComparison)]
+        all_messages = ' '.join(messages)
+        assert ('3' in all_messages or '99' in all_messages), f"Expected 3 or 99 in messages: {messages}"
+
+    def test_float_array_shows_values_v2(self):
+        """Float array with tolerance mismatch should show values (v2)."""
         differ = Diff(rtol=1e-9, atol=0)
         a = {'arr': np.array([1.0, 2.0, 3.00001])}
         b = {'arr': np.array([1.0, 2.0, 3.00002])}
@@ -1200,9 +1224,9 @@ class TestFloatCloseStatus:
         differ = Diff(rtol=1e-5)
         result = differ.diff({'z': 1.0 + 2.0j}, {'z': 1.0 + (2.0 + 1e-6) * 1j})
         assert 'z' in result
-        # Complex returns nested dict with .imag key
-        assert isinstance(result['z'], dict)
-        assert '.imag' in result['z']
+        # Complex returns CompoundDiff with .imag key
+        assert isinstance(result['z'], CompoundDiff)
+        assert '.imag' in result['z'].children
 
 
 class TestCollectAllDifferences:
@@ -1216,19 +1240,19 @@ class TestCollectAllDifferences:
         result = differ.diff(a, b)
 
         assert 'lst' in result
-        assert isinstance(result['lst'], dict)
+        assert isinstance(result['lst'], CompoundDiff)
 
         # Should have differences at indices 1, 3, 5, 7, 9
-        assert '[1]' in result['lst']
-        assert '[3]' in result['lst']
-        assert '[5]' in result['lst']
-        assert '[7]' in result['lst']
-        assert '[9]' in result['lst']
+        assert '[1]' in result['lst'].children
+        assert '[3]' in result['lst'].children
+        assert '[5]' in result['lst'].children
+        assert '[7]' in result['lst'].children
+        assert '[9]' in result['lst'].children
 
         # Should NOT have differences at even indices
-        assert '[0]' not in result['lst']
-        assert '[2]' not in result['lst']
-        assert '[4]' not in result['lst']
+        assert '[0]' not in result['lst'].children
+        assert '[2]' not in result['lst'].children
+        assert '[4]' not in result['lst'].children
 
     def test_dict_collects_all_differences(self):
         """Dict comparison should find all differing values."""
@@ -1238,16 +1262,16 @@ class TestCollectAllDifferences:
         result = differ.diff(a, b)
 
         assert 'd' in result
-        assert isinstance(result['d'], dict)
+        assert isinstance(result['d'], CompoundDiff)
 
         # Should have differences at keys 'b' and 'd'
-        assert "['b']" in result['d']
-        assert "['d']" in result['d']
+        assert "['b']" in result['d'].children
+        assert "['d']" in result['d'].children
 
         # Should NOT have differences at keys 'a', 'c', 'e'
-        assert "['a']" not in result['d']
-        assert "['c']" not in result['d']
-        assert "['e']" not in result['d']
+        assert "['a']" not in result['d'].children
+        assert "['c']" not in result['d'].children
+        assert "['e']" not in result['d'].children
 
     def test_object_collects_all_attribute_differences(self):
         """Object comparison should find all differing attributes."""
@@ -1265,15 +1289,15 @@ class TestCollectAllDifferences:
         )
 
         assert 'o' in result
-        assert isinstance(result['o'], dict)
+        assert isinstance(result['o'], CompoundDiff)
 
         # Should have differences at attributes b and d
-        assert '.b' in result['o']
-        assert '.d' in result['o']
+        assert '.b' in result['o'].children
+        assert '.d' in result['o'].children
 
         # Should NOT have differences at attributes a and c
-        assert '.a' not in result['o']
-        assert '.c' not in result['o']
+        assert '.a' not in result['o'].children
+        assert '.c' not in result['o'].children
 
     def test_nested_structure_collects_all_levels(self):
         """Nested structures should collect differences at all levels."""
@@ -1283,13 +1307,14 @@ class TestCollectAllDifferences:
         result = differ.diff(a, b)
 
         assert 'data' in result
-        assert isinstance(result['data'], dict)
-        assert "['users']" in result['data']
+        assert isinstance(result['data'], CompoundDiff)
+        assert "['users']" in result['data'].children
 
         # Should have differences in both list elements
-        users_diff = result['data']["['users']"]
-        assert '[0]' in users_diff  # First user age changed
-        assert '[1]' in users_diff  # Second user name changed
+        users_diff = result['data'].children["['users']"]
+        assert isinstance(users_diff, CompoundDiff)
+        assert '[0]' in users_diff.children  # First user age changed
+        assert '[1]' in users_diff.children  # Second user name changed
 
 
 class TestDiffLimits:
@@ -1304,10 +1329,11 @@ class TestDiffLimits:
         result = differ.diff(a, b)
 
         assert 'lst' in result
-        diff_dict = result['lst']
-        # Should have at most 3 diffs + 1 truncation message
-        assert len(diff_dict) <= 4
-        assert '_truncated' in diff_dict
+        diff_compound = result['lst']
+        assert isinstance(diff_compound, CompoundDiff)
+        # Should have at most 3 diffs and truncated flag set
+        assert len(diff_compound.children) <= 3
+        assert diff_compound.truncated
 
     def test_dict_respects_max_diffs(self):
         """Dict should stop after max_diffs_per_container."""
@@ -1318,22 +1344,23 @@ class TestDiffLimits:
         result = differ.diff(a, b)
 
         assert 'd' in result
-        diff_dict = result['d']
-        # Should have at most 5 diffs + 1 truncation message
-        assert len(diff_dict) <= 6
-        assert '_truncated' in diff_dict
+        diff_compound = result['d']
+        assert isinstance(diff_compound, CompoundDiff)
+        # Should have at most 5 diffs and truncated flag set
+        assert len(diff_compound.children) <= 5
+        assert diff_compound.truncated
 
     def test_truncation_message_explains_limit(self):
-        """Truncation message should explain why stopped."""
+        """Truncation message - now just checks truncated flag is set."""
         differ = Diff(max_diffs_per_container=2)
         a = {'lst': [1, 2, 3, 4, 5]}
         b = {'lst': [11, 12, 13, 14, 15]}
         result = differ.diff(a, b)
 
-        truncation = result['lst']['_truncated']
-        assert isinstance(truncation, ValueComparison)
-        assert 'max_diffs_per_container' in truncation.message
-        assert '2' in truncation.message
+        diff_compound = result['lst']
+        assert isinstance(diff_compound, CompoundDiff)
+        assert diff_compound.truncated
+        # With CompoundDiff, truncation is indicated by the truncated field
 
 
 class TestOnlyDifferences:
@@ -1365,13 +1392,14 @@ class TestOnlyDifferences:
         b = {'lst': [1, 2, 99, 4, 5]}
         result = differ.diff(a, b)
 
-        diff_dict = result['lst']
+        diff_compound = result['lst']
+        assert isinstance(diff_compound, CompoundDiff)
         # Only index 2 should differ
-        assert '[2]' in diff_dict
-        assert '[0]' not in diff_dict
-        assert '[1]' not in diff_dict
-        assert '[3]' not in diff_dict
-        assert '[4]' not in diff_dict
+        assert '[2]' in diff_compound.children
+        assert '[0]' not in diff_compound.children
+        assert '[1]' not in diff_compound.children
+        assert '[3]' not in diff_compound.children
+        assert '[4]' not in diff_compound.children
 
 
 class TestDiffNodeStructure:
@@ -1386,25 +1414,25 @@ class TestDiffNodeStructure:
         assert result['x'].value1 == 1
         assert result['x'].value2 == 2
 
-    def test_compound_diff_returns_dict(self):
-        """Compound structure diff should return dict."""
+    def test_compound_diff_returns_compound_diff(self):
+        """Compound structure diff should return CompoundDiff."""
         differ = Diff()
         result = differ.diff({'lst': [1, 2]}, {'lst': [1, 99]})
-        assert isinstance(result['lst'], dict)
-        assert '[1]' in result['lst']
+        assert isinstance(result['lst'], CompoundDiff)
+        assert '[1]' in result['lst'].children
 
-    def test_nested_diff_has_nested_dicts(self):
-        """Nested structures should have nested dicts."""
+    def test_nested_diff_has_nested_compound_diffs(self):
+        """Nested structures should have nested CompoundDiffs."""
         differ = Diff()
         result = differ.diff(
             {'outer': {'inner': [1, 2, 3]}},
             {'outer': {'inner': [1, 99, 3]}}
         )
 
-        assert isinstance(result['outer'], dict)
-        assert "['inner']" in result['outer']
-        assert isinstance(result['outer']["['inner']"], dict)
-        assert '[1]' in result['outer']["['inner']"]
+        assert isinstance(result['outer'], CompoundDiff)
+        assert "['inner']" in result['outer'].children
+        assert isinstance(result['outer'].children["['inner']"], CompoundDiff)
+        assert '[1]' in result['outer'].children["['inner']"].children
 
     def test_value_comparison_has_expected_fields(self):
         """ValueComparison should have all expected fields."""
@@ -1565,7 +1593,7 @@ class TestMarkdownFormatting:
         )
         markdown = format_diff_as_markdown(result)
 
-        assert "Truncated" in markdown
+        assert "truncated" in markdown
 
 
 class TestStrictMode:
@@ -2023,17 +2051,17 @@ class TestDiffResultFiltering:
 
         # close_result should have data with only a and c
         assert 'data' in close_result
-        assert isinstance(close_result['data'], dict)
-        assert "['a']" in close_result['data']
-        assert "['c']" in close_result['data']
-        assert "['b']" not in close_result['data']
+        assert isinstance(close_result['data'], CompoundDiff)
+        assert "['a']" in close_result['data'].children
+        assert "['c']" in close_result['data'].children
+        assert "['b']" not in close_result['data'].children
 
         # diff_result should have data with only b
         assert 'data' in diff_result
-        assert isinstance(diff_result['data'], dict)
-        assert "['b']" in diff_result['data']
-        assert "['a']" not in diff_result['data']
-        assert "['c']" not in diff_result['data']
+        assert isinstance(diff_result['data'], CompoundDiff)
+        assert "['b']" in diff_result['data'].children
+        assert "['a']" not in diff_result['data'].children
+        assert "['c']" not in diff_result['data'].children
 
     def test_filtering_with_lists(self):
         """Filtering should work with lists containing mixed close/different."""
@@ -2047,15 +2075,17 @@ class TestDiffResultFiltering:
 
         # close_result should have list with indices 0 and 2
         assert 'lst' in close_result
-        assert '[0]' in close_result['lst']
-        assert '[2]' in close_result['lst']
-        assert '[1]' not in close_result['lst']
+        assert isinstance(close_result['lst'], CompoundDiff)
+        assert '[0]' in close_result['lst'].children
+        assert '[2]' in close_result['lst'].children
+        assert '[1]' not in close_result['lst'].children
 
         # diff_result should have list with index 1
         assert 'lst' in diff_result
-        assert '[1]' in diff_result['lst']
-        assert '[0]' not in diff_result['lst']
-        assert '[2]' not in diff_result['lst']
+        assert isinstance(diff_result['lst'], CompoundDiff)
+        assert '[1]' in diff_result['lst'].children
+        assert '[0]' not in diff_result['lst'].children
+        assert '[2]' not in diff_result['lst'].children
 
     def test_filtering_returns_new_diffresult(self):
         """Filtering should return new DiffResult instances."""
@@ -2106,13 +2136,15 @@ class TestDiffResultFiltering:
 
         # close_result should have obj with only .a
         assert 'obj' in close_result
-        assert '.a' in close_result['obj']
-        assert '.b' not in close_result['obj']
+        assert isinstance(close_result['obj'], CompoundDiff)
+        assert '.a' in close_result['obj'].children
+        assert '.b' not in close_result['obj'].children
 
         # diff_result should have obj with only .b
         assert 'obj' in diff_result
-        assert '.b' in diff_result['obj']
-        assert '.a' not in diff_result['obj']
+        assert isinstance(diff_result['obj'], CompoundDiff)
+        assert '.b' in diff_result['obj'].children
+        assert '.a' not in diff_result['obj'].children
 
     def test_filtering_empty_diffresult(self):
         """Filtering an empty DiffResult should return empty DiffResult."""
@@ -2171,14 +2203,24 @@ class TestDiffResultFiltering:
         assert 'level1' in close_result
         assert 'level1' in diff_result
 
-        # Navigate down to check filtering worked
-        close_leaf = close_result['level1']["['level2']"]["['level3']"]
-        assert '[0]' in close_leaf
-        assert '[1]' not in close_leaf
+        # Navigate down to check filtering worked - use .children for CompoundDiff
+        close_level1 = close_result['level1']
+        assert isinstance(close_level1, CompoundDiff)
+        close_level2 = close_level1.children["['level2']"]
+        assert isinstance(close_level2, CompoundDiff)
+        close_leaf = close_level2.children["['level3']"]
+        assert isinstance(close_leaf, CompoundDiff)
+        assert '[0]' in close_leaf.children
+        assert '[1]' not in close_leaf.children
 
-        diff_leaf = diff_result['level1']["['level2']"]["['level3']"]
-        assert '[1]' in diff_leaf
-        assert '[0]' not in diff_leaf
+        diff_level1 = diff_result['level1']
+        assert isinstance(diff_level1, CompoundDiff)
+        diff_level2 = diff_level1.children["['level2']"]
+        assert isinstance(diff_level2, CompoundDiff)
+        diff_leaf = diff_level2.children["['level3']"]
+        assert isinstance(diff_leaf, CompoundDiff)
+        assert '[1]' in diff_leaf.children
+        assert '[0]' not in diff_leaf.children
 
     def test_filtering_with_format_diff_as_markdown(self):
         """Filtered results should work with format_diff_as_markdown."""
@@ -2308,9 +2350,9 @@ class TestReportCloseFlag:
 
         # Should report only the imaginary part difference
         assert 'z' in result
-        assert isinstance(result['z'], dict)
-        assert '.imag' in result['z']
-        assert '.real' not in result['z']
+        assert isinstance(result['z'], CompoundDiff)
+        assert '.imag' in result['z'].children
+        assert '.real' not in result['z'].children
 
     def test_report_close_false_nested_structures(self):
         """report_close=False with nested structures."""
@@ -2331,8 +2373,9 @@ class TestReportCloseFlag:
 
         # Should only report different
         assert 'data' in result
-        assert "['different']" in result['data']
-        assert "['close']" not in result['data']
+        assert isinstance(result['data'], CompoundDiff)
+        assert "['different']" in result['data'].children
+        assert "['close']" not in result['data'].children
 
     def test_report_close_false_list_values(self):
         """report_close=False with lists containing close values."""
@@ -2343,9 +2386,10 @@ class TestReportCloseFlag:
 
         # Should only report index 1 (different)
         assert 'lst' in result
-        assert '[1]' in result['lst']
-        assert '[0]' not in result['lst']
-        assert '[2]' not in result['lst']
+        assert isinstance(result['lst'], CompoundDiff)
+        assert '[1]' in result['lst'].children
+        assert '[0]' not in result['lst'].children
+        assert '[2]' not in result['lst'].children
 
     def test_report_close_false_object_attributes(self):
         """report_close=False with object attributes."""
@@ -2361,8 +2405,9 @@ class TestReportCloseFlag:
 
         # Should only report .b
         assert 'obj' in result
-        assert '.b' in result['obj']
-        assert '.a' not in result['obj']
+        assert isinstance(result['obj'], CompoundDiff)
+        assert '.b' in result['obj'].children
+        assert '.a' not in result['obj'].children
 
     def test_equivalence_with_different_only(self):
         """Verify report_close=False is equivalent to different_only()."""
@@ -2464,9 +2509,14 @@ class TestReportCloseFlag:
 
         # Should only report the different value
         assert 'level1' in result
-        level3 = result['level1']["['level2']"]["['level3']"]
-        assert '[1]' in level3
-        assert '[0]' not in level3
+        level1 = result['level1']
+        assert isinstance(level1, CompoundDiff)
+        level2 = level1.children["['level2']"]
+        assert isinstance(level2, CompoundDiff)
+        level3 = level2.children["['level3']"]
+        assert isinstance(level3, CompoundDiff)
+        assert '[1]' in level3.children
+        assert '[0]' not in level3.children
 
     def test_report_close_false_with_format_markdown(self):
         """report_close=False results should format correctly."""
@@ -2495,63 +2545,60 @@ if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-v', '--tb=short']))
 
 class TestMultiDiffSupport:
-    """Test the max_diffs_per_structure parameter."""
+    """Test the max_diffs_per_container/max_diffs_per_structure parameters."""
 
     def test_array_multiple_diffs_default(self):
-        """Test that arrays collect up to default max_diffs_per_structure (5) differences."""
-        differ = Diff()  # default max_diffs_per_structure=5
+        """Test that arrays collect up to max_diffs_per_container differences."""
+        # Arrays now use max_diffs_per_container (treated as containers)
+        differ = Diff(max_diffs_per_container=5)
         a = {'arr': np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])}
         b = {'arr': np.array([10, 20, 30, 40, 50, 60, 70, 80, 90, 100])}
         result = differ.diff(a, b)
 
         assert 'arr' in result
-        assert isinstance(result['arr'], dict)
-        # Should have 5 diffs + truncation marker
-        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
-        assert len(diff_keys) == 5
-        assert '_truncated' in result['arr']
+        assert isinstance(result['arr'], CompoundDiff)
+        # Should have 5 diffs + truncated flag set
+        assert len(result['arr'].children) == 5
+        assert result['arr'].truncated
 
     def test_array_multiple_diffs_custom_limit(self):
-        """Test custom max_diffs_per_structure parameter."""
-        differ = Diff(max_diffs_per_structure=3)
+        """Test custom max_diffs_per_container parameter for arrays."""
+        differ = Diff(max_diffs_per_container=3)
         a = {'arr': np.array([1, 2, 3, 4, 5, 6, 7, 8])}
         b = {'arr': np.array([10, 20, 30, 40, 50, 60, 70, 80])}
         result = differ.diff(a, b)
 
         assert 'arr' in result
-        assert isinstance(result['arr'], dict)
-        # Should have 3 diffs + truncation marker
-        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
-        assert len(diff_keys) == 3
-        assert '_truncated' in result['arr']
+        assert isinstance(result['arr'], CompoundDiff)
+        # Should have 3 diffs + truncated flag set
+        assert len(result['arr'].children) == 3
+        assert result['arr'].truncated
 
     def test_array_no_truncation_when_below_limit(self):
         """Test that no truncation occurs when diffs are below limit."""
-        differ = Diff(max_diffs_per_structure=5)
+        differ = Diff(max_diffs_per_container=5)
         a = {'arr': np.array([1, 2, 3, 4, 5])}
         b = {'arr': np.array([10, 2, 30, 4, 5])}
         result = differ.diff(a, b)
 
         assert 'arr' in result
-        assert isinstance(result['arr'], dict)
+        assert isinstance(result['arr'], CompoundDiff)
         # Should have exactly 2 diffs, no truncation
-        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
-        assert len(diff_keys) == 2
-        assert '_truncated' not in result['arr']
+        assert len(result['arr'].children) == 2
+        assert not result['arr'].truncated
 
     def test_series_multiple_diffs(self):
-        """Test that Series collect multiple differences."""
-        differ = Diff(max_diffs_per_structure=3)
+        """Test that Series collect multiple differences (uses max_diffs_per_container)."""
+        differ = Diff(max_diffs_per_container=3)
         a = {'s': pd.Series([1, 2, 3, 4, 5, 6, 7, 8], index=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])}
         b = {'s': pd.Series([10, 2, 30, 4, 50, 6, 70, 80], index=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])}
         result = differ.diff(a, b)
 
         assert 's' in result
-        assert isinstance(result['s'], dict)
-        # Should have 3 diffs + truncation marker
-        diff_keys = [k for k in result['s'].keys() if k != '_truncated']
-        assert len(diff_keys) == 3
-        assert '_truncated' in result['s']
+        assert isinstance(result['s'], CompoundDiff)
+        # Should have 3 diffs + truncated flag set
+        assert len(result['s'].children) == 3
+        assert result['s'].truncated
 
     def test_dataframe_multiple_diffs_across_columns(self):
         """Test that DataFrames collect differences across multiple columns."""
@@ -2569,46 +2616,51 @@ class TestMultiDiffSupport:
         result = differ.diff(a, b)
 
         assert 'df' in result
-        assert isinstance(result['df'], dict)
-        # Should have 5 diffs + truncation marker (7 total diffs truncated to 5)
-        diff_keys = [k for k in result['df'].keys() if k != '_truncated']
-        assert len(diff_keys) == 5
-        assert '_truncated' in result['df']
+        assert isinstance(result['df'], CompoundDiff)
+        # With nested structure, we have 3 column keys (A, B, C)
+        col_keys = list(result['df'].children.keys())
+        assert len(col_keys) == 3  # A, B, C columns (nested structure)
+        # Total element diffs across columns >= max_diffs_per_structure (5)
+        total_element_diffs = sum(
+            len(result['df'].children[col].children) if isinstance(result['df'].children[col], CompoundDiff) else 0
+            for col in col_keys
+        )
+        assert total_element_diffs >= 5  # 2 + 2 + 3 = 7 total
+        assert result['df'].truncated
 
     def test_multidim_array_multiple_diffs(self):
         """Test that multidimensional arrays report multiple differences."""
-        differ = Diff(max_diffs_per_structure=3)
+        differ = Diff(max_diffs_per_container=3)
         a = {'arr': np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])}
         b = {'arr': np.array([[10, 2, 30], [4, 50, 6], [70, 8, 90]])}
         result = differ.diff(a, b)
 
         assert 'arr' in result
-        assert isinstance(result['arr'], dict)
-        # Should have 3 diffs + truncation marker (5 total diffs truncated to 3)
-        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
-        assert len(diff_keys) == 3
-        assert '_truncated' in result['arr']
+        assert isinstance(result['arr'], CompoundDiff)
+        # Should have 3 diffs + truncated flag set (5 total diffs truncated to 3)
+        assert len(result['arr'].children) == 3
+        assert result['arr'].truncated
         # Check that indices are properly formatted as tuples
-        for key in diff_keys:
+        for key in result['arr'].children.keys():
             assert '(' in key and ')' in key  # Should have (row, col) format
 
     def test_float_array_multiple_diffs(self):
         """Test that float arrays with multiple differences work correctly."""
-        differ = Diff(max_diffs_per_structure=4, rtol=1e-5, atol=1e-8)
+        differ = Diff(max_diffs_per_container=4, rtol=1e-5, atol=1e-8)
         a = {'arr': np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])}
         b = {'arr': np.array([1.0, 2.5, 3.0, 4.5, 5.0, 6.5])}
         result = differ.diff(a, b)
 
         assert 'arr' in result
-        assert isinstance(result['arr'], dict)
+        assert isinstance(result['arr'], CompoundDiff)
         # Should have 3 actual diffs, no truncation
-        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
-        assert len(diff_keys) == 3
-        assert '_truncated' not in result['arr']
+        assert len(result['arr'].children) == 3
+        assert not result['arr'].truncated
 
     def test_mixed_structures_independent_limits(self):
-        """Test that different structures have independent diff limits."""
-        differ = Diff(max_diffs_per_structure=2)
+        """Test that arrays and series use max_diffs_per_container."""
+        # Arrays and Series now use max_diffs_per_container (treated as containers)
+        differ = Diff(max_diffs_per_container=2)
         a = {
             'arr': np.array([1, 2, 3, 4, 5]),
             's': pd.Series([1, 2, 3, 4, 5])
@@ -2622,44 +2674,41 @@ class TestMultiDiffSupport:
         # Both should have independent limits
         assert 'arr' in result
         assert 's' in result
-
-        arr_diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
-        s_diff_keys = [k for k in result['s'].keys() if k != '_truncated']
+        assert isinstance(result['arr'], CompoundDiff)
+        assert isinstance(result['s'], CompoundDiff)
 
         # Each should be truncated at 2
-        assert len(arr_diff_keys) == 2
-        assert len(s_diff_keys) == 2
-        assert '_truncated' in result['arr']
-        assert '_truncated' in result['s']
+        assert len(result['arr'].children) == 2
+        assert len(result['s'].children) == 2
+        assert result['arr'].truncated
+        assert result['s'].truncated
 
-    def test_zero_max_diffs_per_structure(self):
-        """Test edge case with max_diffs_per_structure=0."""
-        differ = Diff(max_diffs_per_structure=0)
+    def test_zero_max_diffs_per_container(self):
+        """Test edge case with max_diffs_per_container=0 for arrays."""
+        differ = Diff(max_diffs_per_container=0)
         a = {'arr': np.array([1, 2, 3])}
         b = {'arr': np.array([10, 20, 30])}
         result = differ.diff(a, b)
 
         # Should still detect differences exist and report at least one + truncation
         assert 'arr' in result
-        assert isinstance(result['arr'], dict)
-        # Should have 1 diff + truncation marker (reports at least one before truncating)
-        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
-        assert len(diff_keys) >= 1  # Reports at least one diff
-        assert '_truncated' in result['arr']
+        assert isinstance(result['arr'], CompoundDiff)
+        # Should have 1 diff + truncated flag (reports at least one before truncating)
+        assert len(result['arr'].children) >= 1  # Reports at least one diff
+        assert result['arr'].truncated
 
-    def test_large_max_diffs_per_structure(self):
-        """Test with very large max_diffs_per_structure."""
-        differ = Diff(max_diffs_per_structure=1000)
+    def test_large_max_diffs_per_container(self):
+        """Test with very large max_diffs_per_container (arrays use container limit)."""
+        differ = Diff(max_diffs_per_container=1000)
         a = {'arr': np.arange(100)}
         b = {'arr': np.arange(100, 200)}
         result = differ.diff(a, b)
 
         assert 'arr' in result
-        assert isinstance(result['arr'], dict)
+        assert isinstance(result['arr'], CompoundDiff)
         # Should have all 100 diffs, no truncation
-        diff_keys = [k for k in result['arr'].keys() if k != '_truncated']
-        assert len(diff_keys) == 100
-        assert '_truncated' not in result['arr']
+        assert len(result['arr'].children) == 100
+        assert not result['arr'].truncated
 
 
 # ============================================================================
@@ -2777,7 +2826,8 @@ class TestUseLeqDataFrame:
         b = {'df': df_b}
         result = differ.diff(a, b)
         assert_has_diff(result, 'df')
-        assert_message_contains(result, 'df', 'missing columns')
+        # Now reports individual column differences
+        assert_message_contains(result, 'df', 'missing in second DataFrame')
 
     def test_multiple_missing_columns_detected(self):
         """Multiple missing columns should be reported."""
@@ -2788,7 +2838,8 @@ class TestUseLeqDataFrame:
         b = {'df': df_b}
         result = differ.diff(a, b)
         assert_has_diff(result, 'df')
-        assert_message_contains(result, 'df', 'missing columns')
+        # Now reports individual column differences
+        assert_message_contains(result, 'df', 'missing in second DataFrame')
 
     def test_column_value_difference_detected(self):
         """Value differences in columns should still be detected."""

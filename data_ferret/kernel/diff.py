@@ -12,6 +12,7 @@ import math
 
 from data_ferret.kernel.types import (
     ValueComparison,
+    CompoundDiff,
     DiffNode,
     DiffResult,
     IndexComponent,
@@ -19,6 +20,7 @@ from data_ferret.kernel.types import (
     AttributeComponent,
     DataFrameLocation,
 )
+from data_ferret.util.output import log, timer
 
 
 def _is_floating_dtype(dtype) -> bool:
@@ -169,8 +171,8 @@ class Diff:
         self,
         rtol=1e-5,
         atol=1e-8,
-        max_diffs_per_container: int = 1000,
-        max_diffs_per_structure: int = 5,
+        max_diffs_per_container: int = 10,
+        max_diffs_per_structure: int = 100,
         sample_large_arrays: bool = False,
         strict: bool = True,
         report_close: bool = True,
@@ -345,6 +347,7 @@ class Diff:
         for var in sorted(
             common_vars & keys_to_include
         ):  # Sort for deterministic output
+            # with timer(key="compare_values", message=f"Comparing {var}"):
             diff_result = self._compare_values(a[var], b[var], path=var)
             if diff_result:  # Only include if there are differences
                 differences[var] = diff_result
@@ -761,14 +764,16 @@ class Diff:
     def _compare_complex(
         self, val_a: complex, val_b: complex, path: str
     ) -> Optional[DiffNode]:
-        diffs = {}
+        children: Dict[str, DiffNode] = {}
         real_diff = self._compare_float(val_a.real, val_b.real, f"{path}.real")
         if real_diff:
-            diffs[".real"] = real_diff
+            children[".real"] = real_diff
         imag_diff = self._compare_float(val_a.imag, val_b.imag, f"{path}.imag")
         if imag_diff:
-            diffs[".imag"] = imag_diff
-        return diffs if diffs else None
+            children[".imag"] = imag_diff
+        if children:
+            return CompoundDiff(source_type="complex", children=children, truncated=False)
+        return None
 
     def _compare_str(
         self, val_a: str, val_b: str, path: str
@@ -849,24 +854,35 @@ class Diff:
     def _compare_ndarray(
         self, val_a: np.ndarray, val_b: np.ndarray, path: str
     ) -> Optional[DiffNode]:
-        """Compare numpy arrays, collecting up to max_diffs_per_structure differences."""
-        # Check shape
+        """Compare numpy arrays, collecting up to max_diffs_per_container differences.
+
+        This method records structural mismatches (shape, dtype) but continues
+        comparing elements where possible.
+        """
+        children: Dict[str, DiffNode] = {}
+        truncated = False
+
+        # Check shape - record mismatch but can't compare elements with different shapes
         if val_a.shape != val_b.shape:
-            return ValueComparison(
+            children["_shape"] = ValueComparison(
                 status="different",
-                value1=val_a,
-                value2=val_b,
+                value1=val_a.shape,
+                value2=val_b.shape,
                 message=f"Array shape mismatch at {path}: {val_a.shape} vs {val_b.shape}",
             )
+            # Can't compare elements with different shapes
+            return CompoundDiff(source_type="array", children=children, truncated=False)
 
-        # Check dtype compatibility
+        # Check dtype compatibility - record mismatch but can't compare incompatible dtypes
         if not are_compatible_dtypes(val_a, val_b):
-            return ValueComparison(
+            children["_dtype"] = ValueComparison(
                 status="different",
-                value1=val_a,
-                value2=val_b,
+                value1=val_a.dtype,
+                value2=val_b.dtype,
                 message=f"Array dtype mismatch at {path}: {val_a.dtype} vs {val_b.dtype}",
             )
+            # Can't compare elements with incompatible dtypes
+            return CompoundDiff(source_type="array", children=children, truncated=False)
 
         # Cast to common type if dtypes are compatible but different
         if val_a.dtype != val_b.dtype:
@@ -910,8 +926,7 @@ class Diff:
         except Exception:
             pass  # Fall through to element-by-element comparison
 
-        # Arrays are different - collect up to max_diffs_per_structure differences
-        diffs = {}
+        # Arrays are different - collect up to max_diffs_per_container differences
         diff_count = 0
 
         try:
@@ -934,7 +949,7 @@ class Diff:
                         idx = np.unravel_index(i, val_a.shape)
                         idx_tuple = tuple(int(x) for x in idx)
 
-                        diffs[f"[{idx_tuple}]"] = ValueComparison(
+                        children[f"[{idx_tuple}]"] = ValueComparison(
                             status="different",
                             value1=flat_a_orig[i],
                             value2=flat_b_orig[i],
@@ -942,13 +957,8 @@ class Diff:
                         )
 
                         diff_count += 1
-                        if diff_count >= self.max_diffs_per_structure:
-                            diffs["_truncated"] = ValueComparison(
-                                status="different",
-                                value1=None,
-                                value2=None,
-                                message=f"Truncated after {diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
-                            )
+                        if diff_count >= self.max_diffs_per_container:
+                            truncated = True
                             break
             else:
                 # Iterate to find specific differences
@@ -964,16 +974,11 @@ class Diff:
 
                     elem_diff = self._compare_values(flat_a_orig[i], flat_b_orig[i], f"{path}[{idx_tuple}]")
                     if elem_diff:
-                        diffs[f"[{idx_tuple}]"] = elem_diff
+                        children[f"[{idx_tuple}]"] = elem_diff
 
                         diff_count += 1
-                        if diff_count >= self.max_diffs_per_structure:
-                            diffs["_truncated"] = ValueComparison(
-                                status="different",
-                                value1=None,
-                                value2=None,
-                                message=f"Truncated after {diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
-                            )
+                        if diff_count >= self.max_diffs_per_container:
+                            truncated = True
                             break
         except Exception as e:
             return ValueComparison(
@@ -983,38 +988,52 @@ class Diff:
                 message=f"Array comparison error at {path}: {str(e)}",
             )
 
-        return diffs if diffs else None
+        if children:
+            return CompoundDiff(source_type="array", children=children, truncated=truncated)
+        return None
 
     def _compare_series(
         self, val_a: pd.Series, val_b: pd.Series, path: str
     ) -> Optional[DiffNode]:
-        """Compare pandas Series, collecting up to max_diffs_per_structure differences."""
-        # Check index
-        if not val_a.index.equals(val_b.index):
-            return ValueComparison(
+        """Compare pandas Series, collecting up to max_diffs_per_container differences.
+
+        This method records structural mismatches (index, name, dtype) but continues
+        comparing values where possible.
+        """
+        children: Dict[str, DiffNode] = {}
+        truncated = False
+
+        # Check index - if indexes differ, can't compare values by label
+        indexes_match = val_a.index.equals(val_b.index)
+        if not indexes_match:
+            children["_index"] = ValueComparison(
                 status="different",
-                value1=val_a,
-                value2=val_b,
+                value1=val_a.index,
+                value2=val_b.index,
                 message=f"Series index mismatch at {path}",
             )
+            # Can't compare values when indexes differ (labels don't match)
+            return CompoundDiff(source_type="series", children=children, truncated=False)
 
-        # Check name
+        # Check name - record mismatch but continue
         if val_a.name != val_b.name:
-            return ValueComparison(
+            children["_name"] = ValueComparison(
                 status="different",
-                value1=val_a,
-                value2=val_b,
+                value1=val_a.name,
+                value2=val_b.name,
                 message=f"Series name mismatch at {path}: {val_a.name} vs {val_b.name}",
             )
 
-        # Check dtype compatibility
+        # Check dtype compatibility - record mismatch but can't compare incompatible dtypes
         if not are_compatible_dtypes(val_a, val_b):
-            return ValueComparison(
+            children["_dtype"] = ValueComparison(
                 status="different",
-                value1=val_a,
-                value2=val_b,
+                value1=val_a.dtype,
+                value2=val_b.dtype,
                 message=f"Series dtype mismatch at {path}: {val_a.dtype} vs {val_b.dtype}",
             )
+            # Can't compare values with incompatible dtypes
+            return CompoundDiff(source_type="series", children=children, truncated=False)
 
         # Cast to common type if dtypes are compatible but different
         if val_a.dtype != val_b.dtype:
@@ -1053,83 +1072,106 @@ class Diff:
                     if len(non_nan_a) == 0 or np.allclose(
                         non_nan_a, non_nan_b, rtol=self.rtol, atol=self.atol
                     ):
-                        return None  # Series are equal
+                        # Values equal, return any structural diffs
+                        if children:
+                            return CompoundDiff(source_type="series", children=children, truncated=False)
+                        return None
             else:
                 # For non-float types, use equals
                 if val_a_cmp.equals(val_b_cmp):
-                    return None  # Series are equal
+                    # Values equal, return any structural diffs
+                    if children:
+                        return CompoundDiff(source_type="series", children=children, truncated=False)
+                    return None
         except Exception:
             pass  # Fall through to element-by-element comparison
 
-        # Series are different - collect up to max_diffs_per_structure differences
-        diffs = {}
-        diff_count = 0
+        # Series are different - collect up to max_diffs_per_container differences
+        # Use vectorized operations to find diff indices, then only iterate over actual diffs
 
         try:
             if pd.api.types.is_float_dtype(val_a_cmp.dtype):
-                # For float dtypes, use allclose with NaN handling
-                mask_nan_a = pd.isna(val_a_cmp)
-                mask_nan_b = pd.isna(val_b_cmp)
+                # OPTIMIZED: Vectorized diff detection for float dtypes
+                # Extract numpy arrays for fast access
+                arr_a = val_a_cmp.values
+                arr_b = val_b_cmp.values
+                arr_a_orig = val_a.values  # Original values for output
+                arr_b_orig = val_b.values
+                index = val_a_cmp.index
 
-                # Check NaN position mismatches
-                for idx in val_a_cmp.index:
-                    if mask_nan_a[idx] != mask_nan_b[idx]:
-                        diffs[f"[{repr(idx)}]"] = ValueComparison(
-                            status="different",
-                            value1=val_a[idx],
-                            value2=val_b[idx],
-                            message=f"Series NaN positions mismatch at {path}[{repr(idx)}]: is_nan={mask_nan_a[idx]} vs is_nan={mask_nan_b[idx]}",
-                        )
-                        diff_count += 1
-                        if diff_count >= self.max_diffs_per_structure:
-                            diffs["_truncated"] = ValueComparison(
-                                status="different",
-                                value1=None,
-                                value2=None,
-                                message=f"Truncated after {diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
-                            )
-                            return diffs
+                # Vectorized NaN detection
+                nan_a = np.isnan(arr_a)
+                nan_b = np.isnan(arr_b)
 
-                # Check value mismatches for non-NaN values
-                non_nan_a = val_a_cmp[~mask_nan_a]
-                non_nan_b = val_b_cmp[~mask_nan_b]
-                for idx in non_nan_a.index:
-                    if not np.allclose(
-                        [non_nan_a[idx]],
-                        [non_nan_b[idx]],
-                        rtol=self.rtol,
-                        atol=self.atol,
-                    ):
-                        diffs[f"[{repr(idx)}]"] = ValueComparison(
+                # Find all difference indices at once:
+                # 1. NaN position mismatches (one is NaN, other is not)
+                nan_mismatch = nan_a != nan_b
+                # 2. Value mismatches (both non-NaN but values differ beyond tolerance)
+                both_valid = ~nan_a & ~nan_b
+                value_mismatch = both_valid & ~np.isclose(
+                    arr_a, arr_b, rtol=self.rtol, atol=self.atol
+                )
+
+                # Combined: all differences
+                all_diffs = nan_mismatch | value_mismatch
+                diff_indices = np.where(all_diffs)[0]
+
+                # Check if truncation needed
+                truncated = len(diff_indices) > self.max_diffs_per_container
+
+                # Only iterate over actual differences (up to max_diffs)
+                for i in diff_indices[: self.max_diffs_per_container]:
+                    idx_label = index[i]
+                    v1, v2 = arr_a_orig[i], arr_b_orig[i]
+
+                    if nan_mismatch[i]:
+                        children[f"[{repr(idx_label)}]"] = ValueComparison(
                             status="different",
-                            value1=val_a[idx],
-                            value2=val_b[idx],
-                            message=f"Series values mismatch at {path}[{repr(idx)}]: {val_a[idx]} vs {val_b[idx]}",
+                            value1=v1,
+                            value2=v2,
+                            message=f"Series NaN positions mismatch at {path}[{repr(idx_label)}]: is_nan={nan_a[i]} vs is_nan={nan_b[i]}",
                         )
-                        diff_count += 1
-                        if diff_count >= self.max_diffs_per_structure:
-                            diffs["_truncated"] = ValueComparison(
-                                status="different",
-                                value1=None,
-                                value2=None,
-                                message=f"Truncated after {diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
-                            )
-                            break
+                    else:
+                        children[f"[{repr(idx_label)}]"] = ValueComparison(
+                            status="different",
+                            value1=v1,
+                            value2=v2,
+                            message=f"Series values mismatch at {path}[{repr(idx_label)}]: {v1} vs {v2}",
+                        )
             else:
-                # For non-float dtypes, compare element-by-element
-                # Use _compare_values() to properly handle floats with tolerance even in object dtype Series
-                for idx in val_a_cmp.index:
-                    elem_diff = self._compare_values(val_a[idx], val_b[idx], f"{path}[{repr(idx)}]")
+                # For non-float dtypes, use vectorized equality check first
+                # then only call _compare_values on different elements
+                arr_a = val_a_cmp.values
+                arr_b = val_b_cmp.values
+                index = val_a_cmp.index
+
+                # Try vectorized comparison first for simple types
+                try:
+                    # For object dtype or other types, try pandas not-equal
+                    not_equal = val_a_cmp != val_b_cmp
+                    # Handle case where comparison returns non-boolean (e.g., nested objects)
+                    if hasattr(not_equal, 'values'):
+                        diff_mask = not_equal.values
+                    else:
+                        diff_mask = np.array([True] * len(arr_a))  # Fall back to check all
+                except (TypeError, ValueError):
+                    # Comparison failed, check all elements
+                    diff_mask = np.array([True] * len(arr_a))
+
+                diff_indices = np.where(diff_mask)[0]
+                diff_count = 0
+
+                # Only iterate over potentially different elements
+                for i in diff_indices:
+                    idx_label = index[i]
+                    elem_diff = self._compare_values(
+                        arr_a[i], arr_b[i], f"{path}[{repr(idx_label)}]"
+                    )
                     if elem_diff:
-                        diffs[f"[{repr(idx)}]"] = elem_diff
+                        children[f"[{repr(idx_label)}]"] = elem_diff
                         diff_count += 1
-                        if diff_count >= self.max_diffs_per_structure:
-                            diffs["_truncated"] = ValueComparison(
-                                status="different",
-                                value1=None,
-                                value2=None,
-                                message=f"Truncated after {diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
-                            )
+                        if diff_count >= self.max_diffs_per_container:
+                            truncated = True
                             break
         except Exception as e:
             return ValueComparison(
@@ -1139,158 +1181,157 @@ class Diff:
                 message=f"Series comparison error at {path}: {str(e)}",
             )
 
-        return diffs if diffs else None
+        if children:
+            return CompoundDiff(source_type="series", children=children, truncated=truncated)
+        return None
 
     def _compare_dataframe(
         self, val_a: pd.DataFrame, val_b: pd.DataFrame, path: str
     ) -> Optional[DiffNode]:
-        """Compare pandas DataFrames, collecting up to max_diffs_per_structure differences."""
-        # Check columns
-        if self.use_leq:
-            # Check if we have column-level RBW info for this variable
-            # The path is the variable name (e.g., "df", "data['train']")
-            if path in self.column_rbw:
-                # Only compare columns that were read-before-write
-                rbw_cols = self.column_rbw[path]
+        """Compare pandas DataFrames, collecting up to max_diffs_per_structure differences.
 
-                # If no columns were read-before-write, skip comparison entirely
-                # The cell doesn't depend on any data from this DataFrame
-                if not rbw_cols:
-                    return None
-
-                # Verify RBW columns exist in both DataFrames
-                missing_in_a = rbw_cols - set(val_a.columns)
-                if missing_in_a:
-                    return ValueComparison(
-                        status="different",
-                        value1=val_a,
-                        value2=val_b,
-                        message=f"DataFrame missing RBW columns in pre-state at {path}: {sorted(missing_in_a)}",
-                    )
-                missing_in_b = rbw_cols - set(val_b.columns)
-                if missing_in_b:
-                    return ValueComparison(
-                        status="different",
-                        value1=val_a,
-                        value2=val_b,
-                        message=f"DataFrame RBW columns deleted at {path}: {sorted(missing_in_b)}",
-                    )
-                # Only compare RBW columns
-                cols_to_compare = pd.Index(sorted(rbw_cols))
-            else:
-                # No column-level RBW info - fall back to existing behavior
-                # In leq mode, val_a's columns must be a subset of val_b's columns
-                missing_cols = set(val_a.columns) - set(val_b.columns)
-                if missing_cols:
-                    return ValueComparison(
-                        status="different",
-                        value1=val_a,
-                        value2=val_b,
-                        message=f"DataFrame missing columns at {path}: {sorted(missing_cols)} not in second DataFrame",
-                    )
-                # Use only val_a's columns for comparison
-                cols_to_compare = val_a.columns
-        else:
-            # Standard mode: columns must match exactly
-            if not val_a.columns.equals(val_b.columns):
-                return ValueComparison(
-                    status="different",
-                    value1=val_a,
-                    value2=val_b,
-                    message=f"DataFrame columns mismatch at {path}: {val_a.columns} vs {val_b.columns}",
-                )
-            # Check shape (only in non-leq mode since column count may differ)
-            if val_a.shape != val_b.shape:
-                return ValueComparison(
-                    status="different",
-                    value1=val_a,
-                    value2=val_b,
-                    message=f"DataFrame shape mismatch at {path}: {val_a.shape} vs {val_b.shape}",
-                )
-            cols_to_compare = val_a.columns
-
-        # Check index
-        if not val_a.index.equals(val_b.index):
-            return ValueComparison(
-                status="different",
-                value1=val_a,
-                value2=val_b,
-                message=f"DataFrame index mismatch at {path}",
-            )
-
-        # Check dtype compatibility for each column
-        for col in cols_to_compare:
-            if not are_compatible_dtypes(val_a[col], val_b[col]):
-                return ValueComparison(
-                    status="different",
-                    value1=val_a,
-                    value2=val_b,
-                    message=f"DataFrame column '{col}' dtype mismatch at {path}: {val_a[col].dtype} vs {val_b[col].dtype}",
-                )
-
-        # Cast columns with compatible but different dtypes to common type
-        needs_cast = any(val_a[col].dtype != val_b[col].dtype for col in cols_to_compare)
-        if needs_cast:
-            val_a_cmp = val_a.copy()
-            val_b_cmp = val_b.copy()
-            for col in cols_to_compare:
-                if val_a[col].dtype != val_b[col].dtype:
-                    # Special handling for object dtype with floats
-                    if val_a[col].dtype == np.object_ and _is_floating_dtype(val_b[col].dtype):
-                        val_a_cmp[col] = val_a[col].astype(np.float64)
-                        val_b_cmp[col] = val_b[col].astype(np.float64)
-                    elif val_b[col].dtype == np.object_ and _is_floating_dtype(val_a[col].dtype):
-                        val_a_cmp[col] = val_a[col].astype(np.float64)
-                        val_b_cmp[col] = val_b[col].astype(np.float64)
-                    else:
-                        # Check if either is an extension dtype
-                        from pandas.api.types import is_extension_array_dtype
-                        if is_extension_array_dtype(val_a[col].dtype) or is_extension_array_dtype(val_b[col].dtype):
-                            # Extension dtypes can't use np.promote_types, compare as-is
-                            pass  # Already in val_a_cmp and val_b_cmp from the copy
-                        else:
-                            # Safe to use np.promote_types for numpy dtypes
-                            common_dtype = np.promote_types(val_a[col].dtype, val_b[col].dtype)
-                            val_a_cmp[col] = val_a[col].astype(common_dtype)
-                            val_b_cmp[col] = val_b[col].astype(common_dtype)
-        else:
-            val_a_cmp = val_a
-            val_b_cmp = val_b
-
-        # Compare each column and collect differences across the entire DataFrame
-        diffs = {}
+        This method NEVER returns early - it always compares all columns that exist in both
+        DataFrames, accumulating all differences found.
+        """
+        children: Dict[str, DiffNode] = {}
+        truncated = False
         total_diff_count = 0
 
-        for col in cols_to_compare:
-            col_diff = self._compare_series(
-                val_a_cmp[col], val_b_cmp[col], f"{path}['{col}']"
-            )
-            if col_diff:
-                if isinstance(col_diff, ValueComparison):
-                    # Single-level difference (e.g., dtype mismatch)
-                    diffs[f"['{col}']"] = col_diff
-                    total_diff_count += 1
-                elif isinstance(col_diff, dict):
-                    # Nested differences from series comparison
-                    # Flatten them into the dataframe's diff dict with column prefix
-                    for key, value in col_diff.items():
-                        if key == "_truncated":
-                            # Don't count truncation marker
-                            continue
-                        diffs[f"['{col}']{key}"] = value
+        # Determine which columns to compare
+        cols_a = set(val_a.columns)
+        cols_b = set(val_b.columns)
+
+        if self.use_leq:
+            # Check if we have column-level RBW info for this variable
+            if path in self.column_rbw:
+                rbw_cols = self.column_rbw[path]
+
+                if not rbw_cols:
+                    # No columns tracked - compare ALL common columns (conservative)
+                    cols_to_compare = cols_a & cols_b
+                else:
+                    # Track missing RBW columns as differences (but don't return early!)
+                    missing_in_a = rbw_cols - cols_a
+                    for col in sorted(missing_in_a):
+                        children[f"['{col}']"] = ValueComparison(
+                            status="different",
+                            value1=None,
+                            value2=None,
+                            message=f"DataFrame column '{col}' missing in pre-state at {path}",
+                        )
                         total_diff_count += 1
 
-                        # Check if we've hit the limit
-                        if total_diff_count >= self.max_diffs_per_structure:
-                            diffs["_truncated"] = ValueComparison(
-                                status="different",
-                                value1=None,
-                                value2=None,
-                                message=f"Truncated after {total_diff_count} differences (max_diffs_per_structure={self.max_diffs_per_structure})",
-                            )
-                            return diffs
+                    missing_in_b = rbw_cols - cols_b
+                    for col in sorted(missing_in_b):
+                        children[f"['{col}']"] = ValueComparison(
+                            status="different",
+                            value1=None,
+                            value2=None,
+                            message=f"DataFrame column '{col}' deleted in post-state at {path}",
+                        )
+                        total_diff_count += 1
 
-        return diffs if diffs else None
+                    # Compare RBW columns that exist in both
+                    cols_to_compare = rbw_cols & cols_a & cols_b
+            else:
+                # No column-level RBW info - in leq mode, compare all of val_a's columns
+                # Track columns missing in b
+                missing_cols = cols_a - cols_b
+                for col in sorted(missing_cols):
+                    children[f"['{col}']"] = ValueComparison(
+                        status="different",
+                        value1=val_a[col] if col in val_a.columns else None,
+                        value2=None,
+                        message=f"DataFrame column '{col}' missing in second DataFrame at {path}",
+                    )
+                    total_diff_count += 1
+
+                # Compare columns that exist in both
+                cols_to_compare = cols_a & cols_b
+        else:
+            # Standard mode: track column differences
+            only_in_a = cols_a - cols_b
+            only_in_b = cols_b - cols_a
+
+            for col in sorted(only_in_a):
+                children[f"['{col}']"] = ValueComparison(
+                    status="different",
+                    value1=val_a[col],
+                    value2=None,
+                    message=f"Column '{col}' only in first DataFrame",
+                )
+                total_diff_count += 1
+
+            for col in sorted(only_in_b):
+                children[f"['{col}']"] = ValueComparison(
+                    status="different",
+                    value1=None,
+                    value2=val_b[col],
+                    message=f"Column '{col}' only in second DataFrame",
+                )
+                total_diff_count += 1
+
+            # Compare common columns
+            cols_to_compare = cols_a & cols_b
+
+        # Check index mismatch (record as difference but continue comparing columns)
+        if not val_a.index.equals(val_b.index):
+            children["_index"] = ValueComparison(
+                status="different",
+                value1=val_a.index,
+                value2=val_b.index,
+                message=f"DataFrame index mismatch at {path}",
+            )
+            total_diff_count += 1
+            # We still try to compare columns if they have the same length
+            if len(val_a) != len(val_b):
+                # Can't compare columns with different row counts
+                if children:
+                    return CompoundDiff(source_type="dataframe", children=children, truncated=False)
+                return None
+
+        # Check dtype compatibility for each column (record mismatches but continue)
+        cols_with_dtype_issues = set()
+        for col in cols_to_compare:
+            if not are_compatible_dtypes(val_a[col], val_b[col]):
+                children[f"['{col}']._dtype"] = ValueComparison(
+                    status="different",
+                    value1=val_a[col].dtype,
+                    value2=val_b[col].dtype,
+                    message=f"DataFrame column '{col}' dtype mismatch at {path}: {val_a[col].dtype} vs {val_b[col].dtype}",
+                )
+                cols_with_dtype_issues.add(col)
+                total_diff_count += 1
+
+        # Only compare columns that don't have dtype issues
+        cols_to_compare_values = cols_to_compare - cols_with_dtype_issues
+
+        # Compare each column - _compare_series handles dtype casting internally
+        for col in sorted(cols_to_compare_values):
+            # with timer(key="compare_series", message=f"Comparing {col}"):
+            col_diff = self._compare_series(
+                val_a[col], val_b[col], f"{path}['{col}']"
+            )
+            # log(f"col_diff: {col_diff}")
+            if col_diff:
+                # Keep nested structure - don't flatten series diffs
+                children[f"['{col}']"] = col_diff
+
+                # Count diffs for truncation limit
+                if isinstance(col_diff, CompoundDiff):
+                    # Count non-metadata keys in the nested children
+                    total_diff_count += len(col_diff.children) # len([k for k in col_diff.children if not k.startswith("_")])
+                else:
+                    total_diff_count += 1
+
+                # Check if we've hit the limit
+                if total_diff_count >= self.max_diffs_per_structure:
+                    truncated = True
+                    return CompoundDiff(source_type="dataframe", children=children, truncated=truncated)
+
+        if children:
+            return CompoundDiff(source_type="dataframe", children=children, truncated=truncated)
+        return None
 
     def _compare_index(
         self, val_a: pd.Index, val_b: pd.Index, path: str
@@ -1459,81 +1500,88 @@ class Diff:
         return ""
 
     def _compare_list(self, val_a: list, val_b: list, path: str) -> Optional[DiffNode]:
-        diffs = {}
+        """Compare lists, recording length mismatch but comparing common elements."""
+        children: Dict[str, DiffNode] = {}
+        truncated = False
 
-        # Check length mismatch
+        # Record length mismatch but continue comparing common elements
         if len(val_a) != len(val_b):
-            return ValueComparison(
+            children["_length"] = ValueComparison(
                 status="different",
-                value1=val_a,
-                value2=val_b,
+                value1=len(val_a),
+                value2=len(val_b),
                 message=f"List length mismatch at {path}: {len(val_a)} vs {len(val_b)}",
             )
 
-        # Compare each element, collecting ALL differences
+        # Compare common elements, collecting differences
+        min_len = min(len(val_a), len(val_b))
         diff_count = 0
-        for i, (item_a, item_b) in enumerate(zip(val_a, val_b)):
+        for i in range(min_len):
+            item_a, item_b = val_a[i], val_b[i]
             diff = self._compare_values(item_a, item_b, f"{path}[{i}]")
             if diff:
-                diffs[f"[{i}]"] = diff
+                children[f"[{i}]"] = diff
                 diff_count += 1
                 # Stop if we hit the limit
                 if diff_count >= self.max_diffs_per_container:
-                    diffs["_truncated"] = ValueComparison(
-                        status="different",
-                        value1=None,
-                        value2=None,
-                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})",
-                    )
+                    truncated = True
                     break
 
-        return diffs if diffs else None
+        if children:
+            return CompoundDiff(source_type="list", children=children, truncated=truncated)
+        return None
 
     def _compare_tuple(
         self, val_a: tuple, val_b: tuple, path: str
     ) -> Optional[DiffNode]:
-        diffs = {}
+        """Compare tuples, recording length mismatch but comparing common elements."""
+        children: Dict[str, DiffNode] = {}
+        truncated = False
 
-        # Check length mismatch
+        # Record length mismatch but continue comparing common elements
         if len(val_a) != len(val_b):
-            return ValueComparison(
+            children["_length"] = ValueComparison(
                 status="different",
-                value1=val_a,
-                value2=val_b,
+                value1=len(val_a),
+                value2=len(val_b),
                 message=f"Tuple length mismatch at {path}: {len(val_a)} vs {len(val_b)}",
             )
 
-        # Compare each element, collecting ALL differences
+        # Compare common elements, collecting differences
+        min_len = min(len(val_a), len(val_b))
         diff_count = 0
-        for i, (item_a, item_b) in enumerate(zip(val_a, val_b)):
+        for i in range(min_len):
+            item_a, item_b = val_a[i], val_b[i]
             diff = self._compare_values(item_a, item_b, f"{path}[{i}]")
             if diff:
-                diffs[f"[{i}]"] = diff
+                children[f"[{i}]"] = diff
                 diff_count += 1
                 # Stop if we hit the limit
                 if diff_count >= self.max_diffs_per_container:
-                    diffs["_truncated"] = ValueComparison(
-                        status="different",
-                        value1=None,
-                        value2=None,
-                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})",
-                    )
+                    truncated = True
                     break
 
-        return diffs if diffs else None
+        if children:
+            return CompoundDiff(source_type="tuple", children=children, truncated=truncated)
+        return None
 
     def _compare_set(
         self, val_a: set, val_b: set, path: str
-    ) -> Optional[ValueComparison]:
+    ) -> Optional[DiffNode]:
         """
         Compare sets by finding matching elements and comparing them recursively.
         This properly handles pointer structure within sets.
+        Records size mismatch but continues to find unmatched elements.
         """
+        children: Dict[str, DiffNode] = {}
+        truncated = False
+
+        # Record size mismatch but continue
         if len(val_a) != len(val_b):
-            return ValueComparison(
+            children["_size"] = ValueComparison(
                 status="different",
-                value1=val_a,
-                value2=val_b,
+                value1=len(val_a),
+                value2=len(val_b),
                 message=f"Set size mismatch at {path}: {len(val_a)} vs {len(val_b)}",
             )
 
@@ -1543,6 +1591,8 @@ class Diff:
 
         # Try to find a matching between elements
         used_b = set()
+        unmatched_a = []
+        diff_count = len(children)
 
         for i, item_a in enumerate(list_a):
             found_match = False
@@ -1560,24 +1610,55 @@ class Diff:
                     break
 
             if not found_match:
-                return ValueComparison(
-                    status="different",
-                    value1=val_a,
-                    value2=val_b,
-                    message=f"Set contents mismatch at {path}: element {repr(item_a)} has no matching element in second set",
-                )
+                unmatched_a.append((i, item_a))
 
+        # Record unmatched elements from set A
+        for i, item_a in unmatched_a:
+            children[f"{{unmatched_a_{i}}}"] = ValueComparison(
+                status="different",
+                value1=item_a,
+                value2=None,
+                message=f"Set element {repr(item_a)} from first set has no match in second set",
+            )
+            diff_count += 1
+            if diff_count >= self.max_diffs_per_container:
+                truncated = True
+                return CompoundDiff(source_type="set", children=children, truncated=truncated)
+
+        # Record unmatched elements from set B
+        for j, item_b in enumerate(list_b):
+            if j not in used_b:
+                children[f"{{unmatched_b_{j}}}"] = ValueComparison(
+                    status="different",
+                    value1=None,
+                    value2=item_b,
+                    message=f"Set element {repr(item_b)} from second set has no match in first set",
+                )
+                diff_count += 1
+                if diff_count >= self.max_diffs_per_container:
+                    truncated = True
+                    return CompoundDiff(source_type="set", children=children, truncated=truncated)
+
+        if children:
+            return CompoundDiff(source_type="set", children=children, truncated=truncated)
         return None
 
     def _compare_frozenset(
         self, val_a: frozenset, val_b: frozenset, path: str
-    ) -> Optional[ValueComparison]:
-        """Compare frozensets using the same recursive approach as sets."""
+    ) -> Optional[DiffNode]:
+        """
+        Compare frozensets by finding matching elements and comparing them recursively.
+        Records size mismatch but continues to find unmatched elements.
+        """
+        children: Dict[str, DiffNode] = {}
+        truncated = False
+
+        # Record size mismatch but continue
         if len(val_a) != len(val_b):
-            return ValueComparison(
+            children["_size"] = ValueComparison(
                 status="different",
-                value1=val_a,
-                value2=val_b,
+                value1=len(val_a),
+                value2=len(val_b),
                 message=f"Frozenset size mismatch at {path}: {len(val_a)} vs {len(val_b)}",
             )
 
@@ -1587,6 +1668,8 @@ class Diff:
 
         # Try to find a matching between elements
         used_b = set()
+        unmatched_a = []
+        diff_count = len(children)
 
         for i, item_a in enumerate(list_a):
             found_match = False
@@ -1604,17 +1687,42 @@ class Diff:
                     break
 
             if not found_match:
-                return ValueComparison(
-                    status="different",
-                    value1=val_a,
-                    value2=val_b,
-                    message=f"Frozenset contents mismatch at {path}: element {repr(item_a)} has no matching element in second set",
-                )
+                unmatched_a.append((i, item_a))
 
+        # Record unmatched elements from frozenset A
+        for i, item_a in unmatched_a:
+            children[f"{{unmatched_a_{i}}}"] = ValueComparison(
+                status="different",
+                value1=item_a,
+                value2=None,
+                message=f"Frozenset element {repr(item_a)} from first set has no match in second set",
+            )
+            diff_count += 1
+            if diff_count >= self.max_diffs_per_container:
+                truncated = True
+                return CompoundDiff(source_type="frozenset", children=children, truncated=truncated)
+
+        # Record unmatched elements from frozenset B
+        for j, item_b in enumerate(list_b):
+            if j not in used_b:
+                children[f"{{unmatched_b_{j}}}"] = ValueComparison(
+                    status="different",
+                    value1=None,
+                    value2=item_b,
+                    message=f"Frozenset element {repr(item_b)} from second set has no match in first set",
+                )
+                diff_count += 1
+                if diff_count >= self.max_diffs_per_container:
+                    truncated = True
+                    return CompoundDiff(source_type="frozenset", children=children, truncated=truncated)
+
+        if children:
+            return CompoundDiff(source_type="frozenset", children=children, truncated=truncated)
         return None
 
     def _compare_dict(self, val_a: dict, val_b: dict, path: str) -> Optional[DiffNode]:
-        diffs = {}
+        children: Dict[str, DiffNode] = {}
+        truncated = False
         keys_a = set(val_a.keys())
         keys_b = set(val_b.keys())
 
@@ -1623,7 +1731,7 @@ class Diff:
         only_b = keys_b - keys_a
 
         for key in only_a:
-            diffs[f"[{repr(key)}]"] = ValueComparison(
+            children[f"[{repr(key)}]"] = ValueComparison(
                 status="different",
                 value1=val_a[key],
                 value2=None,
@@ -1631,7 +1739,7 @@ class Diff:
             )
 
         for key in only_b:
-            diffs[f"[{repr(key)}]"] = ValueComparison(
+            children[f"[{repr(key)}]"] = ValueComparison(
                 status="different",
                 value1=None,
                 value2=val_b[key],
@@ -1640,23 +1748,20 @@ class Diff:
 
         # Compare common keys, collecting ALL differences
         common_keys = keys_a & keys_b
-        diff_count = len(diffs)  # Count keys already different
+        diff_count = len(children)  # Count keys already different
         for key in sorted(common_keys, key=str):  # Sort for deterministic output
             diff = self._compare_values(val_a[key], val_b[key], f"{path}[{repr(key)}]")
             if diff:
-                diffs[f"[{repr(key)}]"] = diff
+                children[f"[{repr(key)}]"] = diff
                 diff_count += 1
                 # Stop if we hit the limit
                 if diff_count >= self.max_diffs_per_container:
-                    diffs["_truncated"] = ValueComparison(
-                        status="different",
-                        value1=None,
-                        value2=None,
-                        message=f"Truncated after {diff_count} differences (max_diffs_per_container={self.max_diffs_per_container})",
-                    )
+                    truncated = True
                     break
 
-        return diffs if diffs else None
+        if children:
+            return CompoundDiff(source_type="dict", children=children, truncated=truncated)
+        return None
 
     def _compare_object(self, val_a: Any, val_b: Any, path: str) -> Optional[DiffNode]:
         """
@@ -1689,7 +1794,8 @@ class Diff:
                     message=f"Object comparison not supported at {path} (type: {type(val_a).__name__})",
                 )
 
-        diffs = {}
+        children: Dict[str, DiffNode] = {}
+        truncated = False
         diff_count = 0
 
         # Compare __dict__ attributes if available
@@ -1705,7 +1811,7 @@ class Diff:
             only_b = keys_b - keys_a
 
             for key in only_a:
-                diffs[f".{key}"] = ValueComparison(
+                children[f".{key}"] = ValueComparison(
                     status="different",
                     value1=dict_a[key],
                     value2=None,
@@ -1714,7 +1820,7 @@ class Diff:
                 diff_count += 1
 
             for key in only_b:
-                diffs[f".{key}"] = ValueComparison(
+                children[f".{key}"] = ValueComparison(
                     status="different",
                     value1=None,
                     value2=dict_b[key],
@@ -1727,16 +1833,11 @@ class Diff:
             for key in sorted(common_keys, key=str):
                 diff = self._compare_values(dict_a[key], dict_b[key], f"{path}.{key}")
                 if diff:
-                    diffs[f".{key}"] = diff
+                    children[f".{key}"] = diff
                     diff_count += 1
                     if diff_count >= self.max_diffs_per_container:
-                        diffs["_truncated"] = ValueComparison(
-                            status="different",
-                            value1=None,
-                            value2=None,
-                            message=f"Truncated after {diff_count} differences",
-                        )
-                        return diffs
+                        truncated = True
+                        return CompoundDiff(source_type="object", children=children, truncated=truncated)
         elif has_dict_a != has_dict_b:
             # One has __dict__, the other doesn't (and no slots to fall back on)
             if not slots_a and not slots_b:
@@ -1771,7 +1872,7 @@ class Diff:
                 has_b = hasattr(val_b, slot)
 
                 if has_a and not has_b:
-                    diffs[f".{slot}"] = ValueComparison(
+                    children[f".{slot}"] = ValueComparison(
                         status="different",
                         value1=getattr(val_a, slot),
                         value2=None,
@@ -1779,7 +1880,7 @@ class Diff:
                     )
                     diff_count += 1
                 elif has_b and not has_a:
-                    diffs[f".{slot}"] = ValueComparison(
+                    children[f".{slot}"] = ValueComparison(
                         status="different",
                         value1=None,
                         value2=getattr(val_b, slot),
@@ -1791,19 +1892,16 @@ class Diff:
                         getattr(val_a, slot), getattr(val_b, slot), f"{path}.{slot}"
                     )
                     if diff:
-                        diffs[f".{slot}"] = diff
+                        children[f".{slot}"] = diff
                         diff_count += 1
 
                 if diff_count >= self.max_diffs_per_container:
-                    diffs["_truncated"] = ValueComparison(
-                        status="different",
-                        value1=None,
-                        value2=None,
-                        message=f"Truncated after {diff_count} differences",
-                    )
-                    return diffs
+                    truncated = True
+                    return CompoundDiff(source_type="object", children=children, truncated=truncated)
 
-        return diffs if diffs else None
+        if children:
+            return CompoundDiff(source_type="object", children=children, truncated=truncated)
+        return None
 
 
 # Example usage

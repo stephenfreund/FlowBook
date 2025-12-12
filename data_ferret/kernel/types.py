@@ -10,7 +10,7 @@ Key Functions:
 """
 
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Dict, Literal, Optional, Union
+from typing import Annotated, Any, Dict, Literal, Optional, Union, ForwardRef
 from pydantic import BaseModel, Field, field_validator
 import traceback
 import math
@@ -161,11 +161,55 @@ class ValueComparison(BaseModel):
         arbitrary_types_allowed = True
 
 
+# Source types for compound diffs - helps identify what kind of structure the diff came from
+DiffSourceType = Literal[
+    "array",      # numpy ndarray
+    "list",       # Python list
+    "tuple",      # Python tuple
+    "dataframe",  # pandas DataFrame
+    "series",     # pandas Series
+    "dict",       # Python dict
+    "object",     # User-defined object (via __dict__ or __slots__)
+    "set",        # Python set
+    "frozenset",  # Python frozenset
+    "complex",    # Complex number (real/imag parts)
+]
+
+
+class CompoundDiff(BaseModel):
+    """
+    Represents diffs for a compound/container structure.
+
+    This wrapper provides type information about what kind of structure
+    the diffs came from, enabling smarter truncation handling. For example,
+    truncation in an array's values is OK (we know it changed), but
+    truncation in a DataFrame's columns is NOT OK (we might miss columns).
+
+    Attributes:
+        source_type: What kind of structure this diff represents
+        children: Dict mapping path strings to nested DiffNodes
+        truncated: Whether the diff was truncated (hit max_diffs limit)
+
+    Example:
+        >>> diff = CompoundDiff(
+        ...     source_type="dataframe",
+        ...     children={"['A']": ValueComparison(...), "['B']": ValueComparison(...)},
+        ...     truncated=False
+        ... )
+    """
+    source_type: DiffSourceType = Field(..., description="Type of structure this diff represents")
+    children: Dict[str, "DiffNode"] = Field(default_factory=dict, description="Nested diffs")
+    truncated: bool = Field(default=False, description="Whether diff was truncated")
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
 # Type alias for the tree structure of differences
 # A DiffNode is either:
 # - A ValueComparison (leaf node - actual difference)
-# - A Dict mapping path strings to nested DiffNodes (compound structure)
-DiffNode = Union[ValueComparison, Dict[str, "DiffNode"]]
+# - A CompoundDiff (container node with type info and nested diffs)
+DiffNode = Union[ValueComparison, CompoundDiff]
 
 
 class DiffResult(BaseModel):
@@ -329,7 +373,7 @@ class DiffResult(BaseModel):
         Recursively filter a DiffNode by status.
 
         Args:
-            node: DiffNode to filter (ValueComparison or dict)
+            node: DiffNode to filter (ValueComparison, CompoundDiff, or dict)
             status: Status to filter for
 
         Returns:
@@ -338,8 +382,24 @@ class DiffResult(BaseModel):
         if isinstance(node, ValueComparison):
             # Leaf node - return it only if status matches
             return node if node.status == status else None
+        elif isinstance(node, CompoundDiff):
+            # CompoundDiff node - recursively filter children
+            filtered_children: Dict[str, DiffNode] = {}
+            for key, child_node in node.children.items():
+                filtered_child = self._filter_node_by_status(child_node, status)
+                if filtered_child is not None:
+                    filtered_children[key] = filtered_child
+
+            # Return filtered CompoundDiff only if it has content
+            if filtered_children:
+                return CompoundDiff(
+                    source_type=node.source_type,
+                    children=filtered_children,
+                    truncated=node.truncated
+                )
+            return None
         elif isinstance(node, dict):
-            # Compound node - recursively filter children
+            # Legacy dict node - recursively filter children
             filtered_dict = {}
             for key, child_node in node.items():
                 filtered_child = self._filter_node_by_status(child_node, status)
@@ -373,8 +433,16 @@ def serialize_diff_result(diff_result: DiffResult) -> Dict[str, Any]:
                 "message": node.message,
                 # Don't include value1/value2 to avoid serialization issues
             }
+        elif isinstance(node, CompoundDiff):
+            # Recursively serialize CompoundDiff
+            return {
+                "type": "compound",
+                "source_type": node.source_type,
+                "truncated": node.truncated,
+                "children": {key: serialize_node(value) for key, value in node.children.items()}
+            }
         elif isinstance(node, dict):
-            # Recursively serialize nested diffs
+            # Legacy dict - recursively serialize nested diffs
             return {key: serialize_node(value) for key, value in node.items()}
         else:
             # Shouldn't happen, but handle gracefully
@@ -513,8 +581,20 @@ def format_diff_as_markdown(diff_result: DiffResult) -> str:
             # Format the bullet point
             lines.append(f"- **{full_path}**{status_indicator}: {node.message}")
 
+        elif isinstance(node, CompoundDiff):
+            # CompoundDiff structure - recurse into children
+            for key, child_node in node.children.items():
+                # Build the new path
+                new_path = f"{path}{key}"
+                format_node(var_name, child_node, new_path)
+
+            # Add truncation message if applicable
+            if node.truncated:
+                full_path = f"{var_name}{path}" if path else var_name
+                lines.append(f"  - *{full_path}: (truncated, more differences exist)*")
+
         elif isinstance(node, dict):
-            # Compound structure - recurse into nested diffs
+            # Legacy dict structure - recurse into nested diffs
             for key, child_node in node.items():
                 # Skip special truncation markers
                 if key == "_truncated":
