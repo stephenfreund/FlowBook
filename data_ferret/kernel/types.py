@@ -10,7 +10,7 @@ Key Functions:
 """
 
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Dict, Literal, Optional, Union, ForwardRef
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union, ForwardRef
 from pydantic import BaseModel, Field, field_validator
 import traceback
 import math
@@ -189,17 +189,20 @@ class CompoundDiff(BaseModel):
         source_type: What kind of structure this diff represents
         children: Dict mapping path strings to nested DiffNodes
         truncated: Whether the diff was truncated (hit max_diffs limit)
+        warnings: Structural warnings (used in warn mode)
 
     Example:
         >>> diff = CompoundDiff(
         ...     source_type="dataframe",
         ...     children={"['A']": ValueComparison(...), "['B']": ValueComparison(...)},
-        ...     truncated=False
+        ...     truncated=False,
+        ...     warnings=["DataFrame columns differ but in warn mode"]
         ... )
     """
     source_type: DiffSourceType = Field(..., description="Type of structure this diff represents")
     children: Dict[str, "DiffNode"] = Field(default_factory=dict, description="Nested diffs")
     truncated: bool = Field(default=False, description="Whether diff was truncated")
+    warnings: List[str] = Field(default_factory=list, description="Structural warnings (warn mode)")
 
     class Config:
         arbitrary_types_allowed = True
@@ -222,6 +225,7 @@ class DiffResult(BaseModel):
 
     Attributes:
         differences: Dictionary mapping variable names to DiffNode trees
+        warnings: Structural warnings (for warn mode - not blocking but informative)
 
     Example:
         >>> result = DiffResult(differences={
@@ -234,6 +238,10 @@ class DiffResult(BaseModel):
     differences: Dict[str, Any] = Field(
         default_factory=dict,
         description="Dictionary mapping variable names to diff trees (DiffNode)"
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Structural warnings (warn mode - informative but not blocking)"
     )
 
     class Config:

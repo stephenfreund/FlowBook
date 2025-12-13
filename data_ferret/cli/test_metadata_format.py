@@ -56,8 +56,7 @@ def test_format_metadata_with_list():
     assert "Issues:" in result
     assert "- Issue 1" in result
     assert "- Issue 2" in result
-    assert "Warnings:" in result
-    assert "(none)" in result
+    assert "Warnings: []" in result
 
 
 def test_format_metadata_with_list_of_dicts():
@@ -104,3 +103,25 @@ def test_format_metadata_underscore_to_title_case():
 
     assert "Some Field Name:" in result
     assert "Another Field: 123" in result
+
+
+def test_format_metadata_with_multiline_strings_in_list():
+    """Test that multi-line strings in lists use YAML literal block scalar (|)."""
+    metadata = {
+        "status": "success",
+        "command": "test",
+        "data": {
+            "warnings": [
+                "Line 1\nLine 2\nLine 3"
+            ]
+        }
+    }
+
+    result = format_metadata(metadata)
+
+    # Should use YAML literal block scalar style
+    assert "- |" in result
+    # Lines should be indented
+    assert "        Line 1" in result
+    assert "        Line 2" in result
+    assert "        Line 3" in result

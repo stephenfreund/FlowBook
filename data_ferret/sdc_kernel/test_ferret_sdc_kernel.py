@@ -177,3 +177,65 @@ class TestMakeTracking:
         assert tracking.writes == {"z"}
         assert tracking.column_reads_before_writes == {"df": {"price"}}
         assert tracking.column_writes == {"df": {"qty"}}
+
+
+class TestIsPureMagic:
+    """Tests for _is_pure_magic detection."""
+
+    def test_pure_line_magic(self):
+        """Single line magic is detected."""
+        from .ferret_sdc_kernel import FerretSDCKernel
+        kernel = FerretSDCKernel.__new__(FerretSDCKernel)
+        assert kernel._is_pure_magic("%some_magic arg")
+
+    def test_cell_magic_with_code_not_pure(self):
+        """Cell magic with code body is NOT pure magic (body is tracked)."""
+        from .ferret_sdc_kernel import FerretSDCKernel
+        kernel = FerretSDCKernel.__new__(FerretSDCKernel)
+        # Cell magic body contains real Python code that needs tracking
+        assert not kernel._is_pure_magic("%%timeit\nx = 1")
+
+    def test_shell_command(self):
+        """Shell command is detected."""
+        from .ferret_sdc_kernel import FerretSDCKernel
+        kernel = FerretSDCKernel.__new__(FerretSDCKernel)
+        assert kernel._is_pure_magic("!ls -la")
+
+    def test_magic_with_comments(self):
+        """Magic with comments is detected as pure magic."""
+        from .ferret_sdc_kernel import FerretSDCKernel
+        kernel = FerretSDCKernel.__new__(FerretSDCKernel)
+        code = """# This is a comment
+%structural_tracking off"""
+        assert kernel._is_pure_magic(code)
+
+    def test_magic_with_multiline_comments(self):
+        """Magic with multiple comment lines is detected."""
+        from .ferret_sdc_kernel import FerretSDCKernel
+        kernel = FerretSDCKernel.__new__(FerretSDCKernel)
+        code = """# Comment 1
+# Comment 2
+%some_magic
+# Trailing comment"""
+        assert kernel._is_pure_magic(code)
+
+    def test_regular_code_not_pure_magic(self):
+        """Regular Python code is not pure magic."""
+        from .ferret_sdc_kernel import FerretSDCKernel
+        kernel = FerretSDCKernel.__new__(FerretSDCKernel)
+        assert not kernel._is_pure_magic("x = 1")
+
+    def test_mixed_code_and_magic_not_pure(self):
+        """Code mixed with magic is not pure magic."""
+        from .ferret_sdc_kernel import FerretSDCKernel
+        kernel = FerretSDCKernel.__new__(FerretSDCKernel)
+        code = """%magic
+x = 1"""
+        assert not kernel._is_pure_magic(code)
+
+    def test_empty_code(self):
+        """Empty code is pure magic (vacuously true)."""
+        from .ferret_sdc_kernel import FerretSDCKernel
+        kernel = FerretSDCKernel.__new__(FerretSDCKernel)
+        assert kernel._is_pure_magic("")
+        assert kernel._is_pure_magic("   \n  \n  ")

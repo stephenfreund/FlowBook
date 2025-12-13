@@ -2,54 +2,166 @@
 FerretSDCKernel - IPython kernel with Sequential Dataflow Consistency enforcement.
 
 ================================================================================
-SEQUENTIAL DATAFLOW CONSISTENCY (SDC) - ARCHITECTURE OVERVIEW
+SEQUENTIAL DATAFLOW CONSISTENCY (SDC) - SPECIFICATION
 ================================================================================
 
 SDC ensures notebook reproducibility by enforcing dataflow rules that prevent
 hidden state dependencies. When SDC is enforced, running cells top-to-bottom
-always produces the same result.
+always produces the same result as running them in any order.
 
+================================================================================
 THE THREE SDC RULES
+================================================================================
+
+Rule 1: Reproducibility Invariant (Goal)
+----------------------------------------
+A notebook is reproducible if running all cells in document order from a fresh
+kernel produces identical results every time. This is the goal SDC enforces.
+
+Rule 2: Staleness Propagation (Computed)
+----------------------------------------
+A cell becomes "stale" when any variable it reads has a different value than
+when the cell last executed. Stale cells are displayed in the UI; users should
+re-execute them to reflect current state.
+
+A cell X is stale if:
+    - X was previously executed
+    - Some variable V was in X's "reads_before_writes" set
+    - V's current value differs from when X was executed
+
+Rule 3: No Backward Mutation (Enforced)
+----------------------------------------
+A cell may NOT modify a variable that an earlier cell (in document order)
+reads. This prevents "hidden" dependencies where earlier cells depend on later
+cells having run first.
+
+VIOLATION CONDITION: Cell X at position P causes a violation if:
+    - X modifies variable V (detected via checkpoint diff)
+    - Cell Y at position Q < P exists such that:
+        - Y was previously executed
+        - Y read V (V is in Y's reads_before_writes set)
+        - The modification affects values Y depends on (see conflict rules below)
+
+================================================================================
+WHAT IS TRACKED AND CHECKED
+================================================================================
+
+1. GLOBAL VARIABLES
 -------------------
+Every cell execution tracks:
+    - reads_before_writes: Variables read before being written in that cell
+    - writes: All variables written in that cell
 
-Rule 1: Reproducibility Invariant (Structural)
-    A notebook is reproducible if running all cells in document order from a
-    fresh kernel produces identical results every time. This is the goal.
+When a cell accesses a variable from the namespace (e.g., `x`), it's recorded
+as a read if the cell hasn't already written to it. Writing to a variable
+records it as a write.
 
-Rule 2: Staleness Propagation Rule (Computed)
-    A cell becomes "stale" when any variable it reads has changed since it
-    last executed. Stale cells need re-execution to reflect current state.
+CONFLICT RULE: If Cell B modifies variable V, and earlier Cell A read V, this
+is a backward mutation violation (unless column-level tracking exempts it).
 
-    Example:
-        Cell A: x = 1
-        Cell B: y = x + 1  # B reads x
-        Cell A: x = 2      # Re-run A -> B is now stale (x changed)
+Example (VIOLATION):
+    Cell A: y = x + 1       # reads_before_writes = {x}
+    Cell B: x = 10          # writes = {x} → VIOLATES because A read x
 
-Rule 3: No Backward Mutation Constraint (Enforced)
-    A cell may NOT modify a variable that an earlier cell (in document order)
-    reads. This prevents "hidden" dependencies where earlier cells depend on
-    later cells having run first.
+Example (OK):
+    Cell A: x = 1           # writes = {x}
+    Cell B: y = x + 1       # reads_before_writes = {x}
+    Cell A re-run: x = 2    # B becomes STALE (not a violation, just needs re-run)
 
-    Example (VIOLATION):
-        Cell A: y = x + 1  # A reads x
-        Cell B: x = 10     # B modifies x -> VIOLATION! A depends on B.
+2. DATAFRAME COLUMN-LEVEL TRACKING
+----------------------------------
+For pandas DataFrames, SDC tracks individual columns for precision:
+    - column_reads_before_writes: {var: {columns read}}
+    - column_writes: {var: {columns written}}
 
-    This is the key rule that makes notebooks reproducible. Without it, the
-    order you run cells affects results in unpredictable ways.
+CONFLICT RULE: Modifying df['col_a'] does NOT conflict with reading df['col_b'].
+Only overlapping columns cause violations.
 
-COLUMN-LEVEL TRACKING
----------------------
+Example (OK - different columns):
+    Cell A: total = df['price'].sum()           # column_reads = {df: {price}}
+    Cell B: df['quantity'] = df['quantity'] * 2 # column_writes = {df: {quantity}}
+    → No violation: price ≠ quantity
 
-For DataFrames, SDC tracks at the column level for precision:
+Example (VIOLATION - same column):
+    Cell A: total = df['price'].sum()           # column_reads = {df: {price}}
+    Cell B: df['price'] = df['price'] * 1.1     # column_writes = {df: {price}}
+    → VIOLATION: B modifies price which A read
 
-    Cell A: total = df['price'].sum()     # Reads df.price
-    Cell B: df['quantity'] = df['quantity'] * 2  # Modifies df.quantity
+CONSERVATIVE FALLBACK: If column information is unavailable on either side,
+SDC conservatively treats it as a variable-level conflict.
 
-This is NOT a violation because different columns are involved. Without
-column tracking, any DataFrame modification would trigger false violations.
+3. STRUCTURAL ATTRIBUTE TRACKING
+--------------------------------
+Structural tracking detects when code accesses attributes that reveal a
+DataFrame/Series structure (shape, columns, index, dtypes).
 
-DATA FLOW
----------
+TRACKED ATTRIBUTES (explicit access only):
+
+DataFrame column-revealing:
+    columns, keys, dtypes, T, axes, values
+
+DataFrame row-revealing:
+    index, shape, size, empty
+
+DataFrame methods:
+    describe(), to_dict(), to_records(), head(), tail(), sample(),
+    info(), select_dtypes(), memory_usage()
+
+Series:
+    index, shape, dtype, name, size, empty, values, to_dict(), to_list()
+
+STRUCTURE-USING vs STRUCTURE-REVEALING:
+    - "Structure-revealing" methods (e.g., df.columns) ARE tracked
+    - "Structure-using" methods (e.g., df['col'], df.mean()) are NOT tracked
+      because they use structure internally but don't expose it to the user
+
+Example: df['x'] = 3 internally checks df.columns, but this is NOT recorded
+as a structural read because the primary purpose is mutation, not inspection.
+
+STRUCTURAL TRACKING MODES:
+
+%structural_tracking off     - Don't track structural attributes
+%structural_tracking warn    - Track and warn, but don't block (DEFAULT)
+%structural_tracking enforce - Track and block violations
+
+WARN mode example:
+    Cell A: cols = df.columns.tolist()  # structural_reads = {df: {columns}}
+    Cell B: df['new_col'] = 1           # adds column
+    → WARNING: "Cell @B modified 'df' which Cell @A previously read."
+    → Shows what was read (df.columns → ['a', 'b']) and what changed
+
+ENFORCE mode example:
+    Cell A: n = len(df)                 # structural_reads = {df: {len}}
+    Cell B: df.loc[len(df)] = [1, 2]    # adds row
+    → VIOLATION: "Cell @B modified 'df' which Cell @A (earlier) reads."
+    → Cell B is rolled back
+
+================================================================================
+HOW CHANGE DETECTION WORKS
+================================================================================
+
+SDC uses checkpoint-based diffing to detect actual changes:
+
+1. PRE-CHECKPOINT: Deep copy of namespace before cell execution
+2. EXECUTION: Run cell with TrackingDict recording reads/writes
+3. POST-CHECKPOINT: Deep copy of namespace after cell execution
+4. DIFF: Compare pre vs post to find actual changes
+
+DIFF SEMANTICS:
+    - Value equality for primitives (int, str, etc.)
+    - Deep equality for containers (list, dict, etc.)
+    - Element-wise equality for numpy arrays (with dtype tolerance)
+    - Column-by-column equality for DataFrames
+    - LEQ (Less-or-Equal) semantics for column tracking: new columns OK for writes
+
+STALENESS CHECK:
+    For each previously-executed cell X with reads_before_writes R:
+    Compare X's pre-checkpoint (what X saw) vs current namespace
+    If any variable in R differs → X is stale
+
+================================================================================
+EXECUTION FLOW
+================================================================================
 
     ┌─────────────────────────────────────────────────────────────────────┐
     │                         FerretSDCKernel                             │
@@ -57,40 +169,159 @@ DATA FLOW
     │  1. do_execute() receives code + cell_id + cell_order               │
     │                         │                                           │
     │                         ▼                                           │
-    │  2. Take PRE-checkpoint (snapshot namespace before execution)       │
+    │  2. Take PRE-checkpoint (deep copy namespace)                       │
     │                         │                                           │
     │                         ▼                                           │
     │  3. Execute code with TrackingDict (records reads/writes)           │
+    │     - Track variable access via __getitem__/__setitem__             │
+    │     - Track column access via monkey-patched DataFrame methods      │
+    │     - Track structural access via monkey-patched properties         │
     │                         │                                           │
     │                         ▼                                           │
-    │  4. Take POST-checkpoint (snapshot namespace after execution)       │
+    │  4. Take POST-checkpoint (deep copy namespace)                      │
     │                         │                                           │
     │                         ▼                                           │
-    │  5. SDCEnforcer.check() compares checkpoints + tracking:            │
-    │     - Detect backward mutations (Rule 3 violations)                 │
-    │     - Compute which cells are now stale (Rule 2)                    │
-    │     - Extract column-level changes for DataFrames                   │
+    │  5. SDCEnforcer.check():                                            │
+    │     a. Diff pre vs post to find actual changes                      │
+    │     b. Check Rule 3 violations against earlier cells                │
+    │     c. Update staleness cache (Rule 2)                              │
+    │     d. Capture structural read values for error messages            │
     │                         │                                           │
     │                         ▼                                           │
-    │  6. On violation: restore PRE-checkpoint (rollback) + error         │
-    │     On success: display metadata (reads, writes, stale cells)       │
+    │  6. On violation:                                                   │
+    │     - Restore PRE-checkpoint (rollback cell effects)                │
+    │     - Return error with detailed diagnostics                        │
+    │     On success:                                                     │
+    │     - Display metadata (reads, writes, stale cells)                 │
+    │     - Send structural warnings if any                               │
     └─────────────────────────────────────────────────────────────────────┘
 
-KEY COMPONENTS
---------------
-
-- TrackingDict: Wraps user namespace to record variable reads/writes
-- Checkpoints: Deep-copies namespace for before/after comparison
-- SDCEnforcer: Implements Rule 2 (staleness) and Rule 3 (backward mutation)
-- SDCMetadata: Data sent to frontend for UI display (stale cell highlighting)
-
+================================================================================
 MAGIC COMMANDS
---------------
+================================================================================
 
-%notebook_structure cell1 cell2 ...  - Set cell order (usually auto-injected)
+%notebook_structure cell1 cell2 ...  - Set cell order (auto-injected by client)
 %sdc_status                          - Display current SDC state
 %sdc_stale                           - Show which cells are currently stale
-%continue_after_violation [true|false] - Control violation handling
+%continue_after_violation [on|off]   - Continue execution after violations
+%structural_tracking [off|warn|enforce] - Set structural tracking mode
+
+================================================================================
+ASSUMPTIONS AND LIMITATIONS
+================================================================================
+
+ASSUMPTIONS:
+------------
+1. Cell order is provided correctly by the client (via cell_order metadata)
+2. All code executes synchronously (no background threads modifying state)
+3. Variables accessed via the global namespace dict are the primary data
+4. Pandas DataFrames/Series are the primary data structures for column tracking
+
+KNOWN LIMITATIONS:
+------------------
+
+1. CLASS VARIABLES NOT TRACKED
+   Class-level attributes (class variables) are not restored on rollback:
+       class Counter:
+           count = 0  # This won't be restored on rollback!
+   Workaround: Use instance attributes instead.
+
+2. NESTED OBJECT MUTATIONS
+   Mutations to objects stored inside other objects may not be fully tracked:
+       data['nested']['key'] = value  # Tracked at 'data' level, not 'nested'
+   The outer variable is tracked, but we can't always detect which inner
+   part changed.
+
+3. GENERATOR/ITERATOR STATE
+   Generators and iterators cannot be checkpointed (they have execution state).
+   Restored iterators may behave unexpectedly.
+
+4. EXTERNAL SIDE EFFECTS
+   File I/O, network calls, database modifications are NOT rolled back:
+       f.write(data)  # File is modified even if cell is rolled back
+   SDC only manages Python namespace state.
+
+5. MATPLOTLIB OBJECTS EXCLUDED
+   Matplotlib figures/axes are not checkpointed (unpicklable).
+   Plot state is not restored on rollback.
+
+6. APPROXIMATE COLUMN TRACKING
+   Column tracking uses monkey-patching and may miss edge cases:
+   - Custom DataFrame subclasses may bypass tracking
+   - Very complex chained operations might not track correctly
+   - df.values mutations bypass column tracking entirely
+
+7. STRUCTURAL TRACKING LIMITATIONS
+   - Only tracks explicit attribute access (df.columns), not implicit use
+   - Structure-using methods (df['x']) internally access .columns but aren't
+     tracked because tracking internal implementation details would cause
+     excessive false positives
+   - df.attrs (user-defined metadata) is not currently tracked
+
+8. PERFORMANCE OVERHEAD
+   - Each cell execution requires two deep copies (pre/post checkpoint)
+   - Large DataFrames increase checkpoint time significantly
+   - Column tracking adds overhead to every DataFrame operation
+
+9. NOT THREAD-SAFE
+   Concurrent cell executions would corrupt tracking state.
+
+================================================================================
+AREAS FOR IMPROVEMENT
+================================================================================
+
+DESIGN IMPROVEMENTS:
+--------------------
+
+1. INCREMENTAL CHECKPOINTING
+   Currently: Full deep copy before and after every cell
+   Improvement: Copy-on-write or incremental snapshots to reduce overhead
+   Challenge: Detecting mutations without full copies is complex
+
+2. FINER-GRAINED TRACKING
+   Currently: Variable and column level
+   Improvement: Track array indices, dict keys, object attributes
+   Challenge: Performance cost of fine-grained tracking; complexity
+
+3. STRUCTURAL ATTRIBUTE VALUES
+   Currently: Capture values at read time for better error messages
+   Improvement: Show before/after values in all violation messages
+   Status: Partially implemented (structural_reads_values in SDCExecutionRecord)
+
+4. ASYNC EXECUTION SUPPORT
+   Currently: Assumes synchronous execution
+   Improvement: Support await/async code with proper state tracking
+   Challenge: Interleaved execution complicates read/write ordering
+
+IMPLEMENTATION IMPROVEMENTS:
+----------------------------
+
+1. ATTRS TRACKING
+   df.attrs (DataFrame metadata dict) should be tracked like columns
+   Currently not tracked at all
+
+2. INDEX TRACKING
+   df.index is tracked structurally but not at element level
+   Could track index element access like columns
+
+3. MULTIINDEX SUPPORT
+   MultiIndex columns/indices may need special handling for tracking
+
+4. SERIES AS COLUMN PROXY
+   When user does `s = df['col']`, mutations to s should trigger df warnings
+   Currently only direct df mutations are tracked
+
+5. BETTER ERROR RECOVERY
+   Currently: Rollback entire cell on violation
+   Improvement: Partial execution recovery, show what succeeded
+
+6. VISUALIZATION OF DEPENDENCIES
+   Add command to visualize cell dependency graph
+   Show which cells would become stale if a variable changes
+
+7. UNDO HISTORY
+   Allow undoing multiple cells, not just the current one
+   Keep checkpoint history for user-initiated undo
 
 ================================================================================
 """
@@ -200,22 +431,27 @@ class FerretSDCKernel(IPythonKernel, Magics):
         Control whether execution continues after SDC violations.
 
         Usage:
-            %continue_after_violation        # Enable (continue after violations)
-            %continue_after_violation true   # Enable
-            %continue_after_violation false  # Disable (default: stop on violation)
+            %continue_after_violation        - Show current status
+            %continue_after_violation on     - Enable (continue after violations)
+            %continue_after_violation off    - Disable (stop on violation)
         """
         arg = line.strip().lower()
-        if arg == "false":
-            self._continue_after_violation = False
-        elif arg == "true" or arg == "":
+
+        if not arg:
+            status = "on" if self._continue_after_violation else "off"
+            self._display.display_icon_and_text("ℹ️", f"Continue after violation: {status}")
+            return
+
+        if arg in ("on", "true", "1", "enable"):
             self._continue_after_violation = True
+            self._display.display_icon_and_text("ℹ️", "Continue after violation: enabled")
+        elif arg in ("off", "false", "0", "disable"):
+            self._continue_after_violation = False
+            self._display.display_icon_and_text("ℹ️", "Continue after violation: disabled")
         else:
             self._display.display_icon_and_text(
-                "⚠️", f"Invalid argument: '{arg}'. Use 'true' or 'false'."
+                "⚠️", f"Invalid: '{arg}'. Use 'on' or 'off'"
             )
-            return
-        state = "enabled" if self._continue_after_violation else "disabled"
-        self._display.display_icon_and_text("ℹ️", f"Continue after violation: {state}")
 
     @line_magic
     def sdc_stale(self, line: str) -> None:
@@ -239,48 +475,106 @@ class FerretSDCKernel(IPythonKernel, Magics):
             except (ValueError, IndexError):
                 stale_refs.append(cell_id)
 
-        self._display.display_icon_and_text(
-            "⚠️", f"Stale cells: {', '.join(stale_refs)}"
-        )
+        self._display.display_icon_and_text("⚠️", f"Stale cells: {', '.join(stale_refs)}")
+
+    @line_magic
+    def structural_tracking(self, line: str) -> None:
+        """
+        Set structural tracking mode for DataFrame/Series attribute monitoring.
+
+        Structural tracking detects when code accesses attributes that reveal
+        DataFrame/Series structure (like df.columns, df.shape, len(df)).
+        When structural tracking is enabled and these attributes are read,
+        subsequent changes to the structure (adding columns, changing row count)
+        are either warned about or treated as SDC violations.
+
+        Usage:
+            %structural_tracking           - Show current mode
+            %structural_tracking off       - Disable structural tracking
+            %structural_tracking warn      - Track and warn only (default)
+            %structural_tracking enforce   - Track and treat changes as violations
+        """
+        from data_ferret.kernel.structural_tracking import StructuralTrackingMode
+
+        # Suspend tracking during magic execution to avoid recording infrastructure reads
+        tracking = self._tracking
+        if tracking is not None and hasattr(tracking, 'suspended'):
+            ctx = tracking.suspended()
+        else:
+            from contextlib import nullcontext
+            ctx = nullcontext()
+
+        with ctx:
+            mode_str = line.strip().lower()
+
+            if not mode_str:
+                # Show current mode
+                current_mode = self._sdc.structural_mode.value
+                self._display.display_icon_and_text(
+                    "🔍",
+                    f"Structural tracking mode: {current_mode}"
+                )
+                return
+
+            try:
+                mode = StructuralTrackingMode(mode_str)
+            except ValueError:
+                self._display.display_icon_and_text(
+                    "❌",
+                    f"Invalid mode: {mode_str}. Use 'off', 'warn', or 'enforce'"
+                )
+                return
+
+            # Update SDC enforcer
+            self._sdc.set_structural_mode(mode)
+
+            # Update TrackingDict if it exists
+            if tracking is not None:
+                tracking.set_structural_tracking_mode(mode_str)
+
+            self._display.display_icon_and_text(
+                "✅",
+                f"Structural tracking mode set to: {mode.value}"
+            )
 
     # =========================================================================
     # Stub magics for compatibility with FerretKernel notebooks
     # =========================================================================
 
     @line_magic
-    def enable_scalene(self, line: str) -> None:
+    def scalene(self, line: str) -> None:
         """Stub for Scalene profiling (not supported in SDC kernel)."""
-        pass
+        self._display.display_icon_and_text("ℹ️", "Scalene profiling not supported in SDC kernel")
 
     @line_magic
-    def disable_scalene(self, line: str) -> None:
-        """Stub for Scalene profiling (not supported in SDC kernel)."""
-        pass
+    def tracking(self, line: str) -> None:
+        """Stub for global tracking (always on in SDC kernel)."""
+        self._display.display_icon_and_text("ℹ️", "Global tracking is always enabled in SDC kernel")
 
     @line_magic
-    def enable_global_tracking(self, line: str) -> None:
-        """Stub for global tracking (not supported in SDC kernel)."""
-        pass
+    def monotone(self, line: str) -> None:
+        """Stub for monotone enforcement (use SDC rules instead)."""
+        self._display.display_icon_and_text("ℹ️", "SDC kernel uses SDC rules instead of monotone enforcement")
 
     @line_magic
-    def disable_global_tracking(self, line: str) -> None:
-        """Stub for global tracking (not supported in SDC kernel)."""
-        pass
+    def force_checkpoints(self, line: str) -> None:
+        """Stub for force checkpoints (SDC kernel always checkpoints)."""
+        self._display.display_icon_and_text("ℹ️", "SDC kernel always takes checkpoints")
 
     @line_magic
     def checkpoint(self, line: str) -> None:
         """Stub for checkpoint magic (not supported in SDC kernel)."""
-        pass
+        self._display.display_icon_and_text("ℹ️", "Manual checkpoints not supported in SDC kernel")
 
     @line_magic
     def restore(self, line: str) -> None:
         """Stub for restore magic (not supported in SDC kernel)."""
-        pass
+        self._display.display_icon_and_text("ℹ️", "Restore not supported in SDC kernel")
 
     @line_magic
     def list_checkpoints(self, line: str) -> None:
         """Stub for list checkpoints magic (not supported in SDC kernel)."""
-        pass
+        self._display.display_icon_and_text("ℹ️", "List checkpoints not supported in SDC kernel")
 
     # =========================================================================
     # Tracking Initialization
@@ -449,6 +743,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
                         post_checkpoint=post_checkpoint,
                         tracking=tracking,
                         continue_on_violation=self._continue_after_violation,
+                        namespace=self.shell.user_ns,  # For capturing structural read values
                     )
 
                 # Handle violation
@@ -529,9 +824,13 @@ class FerretSDCKernel(IPythonKernel, Magics):
         return code
 
     def _is_pure_magic(self, code: str) -> bool:
-        """Check if code is only magic commands."""
+        """Check if code is only magic commands (with optional comments)."""
         lines = [line.strip() for line in code.strip().split("\n") if line.strip()]
-        return all(line.startswith("%") or line.startswith("!") for line in lines)
+        # Allow magics (%), shell commands (!), and comments (#)
+        return all(
+            line.startswith("%") or line.startswith("!") or line.startswith("#")
+            for line in lines
+        )
 
     def _take_checkpoint(self, checkpoint_name: str) -> Checkpoint:
         """
@@ -556,7 +855,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
         cell_meta: Optional[dict],
     ) -> dict:
         """Execute without SDC tracking (for magics, empty code)."""
-        return await super().do_execute(
+        result = await super().do_execute(
             code,
             silent,
             store_history,
@@ -565,6 +864,28 @@ class FerretSDCKernel(IPythonKernel, Magics):
             cell_meta=cell_meta,
             cell_id=self._cell_id,
         )
+
+        # Send empty metadata to clear any stale metadata from previous executions
+        # This ensures the frontend shows empty reads/writes for magic-only cells
+        if not silent and self._cell_id:
+            empty_metadata = SDCMetadata(
+                cell_id=self._cell_id,
+                execution_seq=self._sdc.seq_counter,
+                reads=[],
+                writes=[],
+                changed_variables=[],
+                stale_cells=self._sdc.get_stale_cells(),
+                violation=None,
+                cell_order=self._sdc.cell_order,
+            )
+            # Use display_icon_and_text with metadata to send to frontend
+            self._display.display_icon_and_text(
+                "✓",
+                "Magic cell",
+                metadata=empty_metadata.to_display_metadata(),
+            )
+
+        return result
 
     def _format_var_with_columns(
         self,
@@ -606,6 +927,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
     ) -> None:
         """Display execution timing and SDC metadata."""
         # Build metadata for display
+        structural_warnings = (
+            sdc_result.structural_warnings if sdc_result else []
+        )
         metadata = SDCMetadata(
             cell_id=self._cell_id or "",
             execution_seq=self._sdc.seq_counter,
@@ -630,10 +954,22 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 else {}
             ),
             column_changed=sdc_result.column_changed if sdc_result else {},
+            structural_reads=(
+                {k: sorted(v) for k, v in tracking.structural_reads.items()}
+                if tracking
+                else {}
+            ),
+            structural_warnings=structural_warnings,
             run_duration_ms=run_duration,
             state_duration_ms=state_duration,
             check_duration_ms=check_duration,
         )
+
+        # Log and display structural warnings
+        if structural_warnings:
+            for warning in structural_warnings:
+                error(f"[structural] {warning}")
+            self._send_structural_warnings(structural_warnings)
 
         # Build display text
         parts = [
@@ -720,6 +1056,19 @@ class FerretSDCKernel(IPythonKernel, Magics):
             self.iopub_socket,
             "stream",
             {"name": "stderr", "text": f"\n{truncation_details}\n"},
+        )
+
+    def _send_structural_warnings(self, warnings: list) -> None:
+        """Send structural warnings to stderr for user visibility."""
+        if not warnings:
+            return
+        warning_text = "⚠️ Structural Warning(s):\n"
+        for warning in warnings:
+            warning_text += f"  • {warning}\n"
+        self.send_response(
+            self.iopub_socket,
+            "stream",
+            {"name": "stderr", "text": warning_text},
         )
 
     def _get_violation_alphas(self, violation) -> tuple:

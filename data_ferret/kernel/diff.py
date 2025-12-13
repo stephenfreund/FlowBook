@@ -7,9 +7,10 @@ import numpy as np
 import pandas as pd
 from pandas.core.groupby import DataFrameGroupBy, SeriesGroupBy
 from pandas.core.groupby.ops import BaseGrouper
-from typing import Any, Dict, Set, Tuple, Optional
+from typing import Any, Dict, List, Set, Tuple, Optional
 import math
 
+from data_ferret.kernel.structural_tracking import StructuralTrackingMode
 from data_ferret.kernel.types import (
     ValueComparison,
     CompoundDiff,
@@ -178,6 +179,8 @@ class Diff:
         report_close: bool = True,
         use_leq: bool = False,
         column_rbw: Optional[Dict[str, Set[str]]] = None,
+        structural_reads: Optional[Dict[str, Set[str]]] = None,
+        structural_mode: StructuralTrackingMode = StructuralTrackingMode.OFF,
     ):
         """
         Initialize the Diff comparator.
@@ -200,6 +203,14 @@ class Diff:
                        Maps variable path (e.g., 'df', 'data["train"]') to set of column names
                        that were read-before-write. When provided with use_leq=True, only these
                        columns are compared for each DataFrame.
+            structural_reads: Structural attribute accesses per variable path (default: None).
+                       Maps variable path to set of structural attributes accessed (e.g., 'columns',
+                       'shape', 'len', 'iter'). Used with structural_mode to enforce or warn about
+                       structural changes to variables where these attributes were read.
+            structural_mode: How to handle structural reads (default: OFF).
+                       - OFF: Ignore structural reads, use standard LEQ behavior
+                       - WARN: Track structural changes as warnings but don't fail
+                       - ENFORCE: Treat structural changes as differences when attributes were read
 
         Example:
             >>> # Default behavior - reports close values
@@ -221,10 +232,14 @@ class Diff:
         self.report_close = report_close
         self.use_leq = use_leq
         self.column_rbw = column_rbw or {}
+        self.structural_reads = structural_reads or {}
+        self.structural_mode = structural_mode
         # Track object identities to ensure pointer structure matches
         self.id_map_a = {}  # Maps id(obj_a) -> canonical_id
         self.id_map_b = {}  # Maps id(obj_b) -> canonical_id
         self.next_canonical_id = 0
+        # Accumulated warnings for WARN mode
+        self._warnings: List[str] = []
 
     def _is_immutable_atomic(self, val: Any) -> bool:
         """
@@ -310,6 +325,7 @@ class Diff:
         Returns:
             DiffResult instance containing diff trees for variables with differences.
             The differences dict is empty if all variables are equal.
+            The warnings list contains structural warnings when structural_mode is WARN.
         """
         if keys_to_include is None:
             keys_to_include = set(a.keys()) | set(b.keys())
@@ -318,6 +334,7 @@ class Diff:
         self.id_map_a = {}
         self.id_map_b = {}
         self.next_canonical_id = 0
+        self._warnings = []  # Reset warnings
 
         differences: Dict[str, DiffNode] = {}
 
@@ -352,7 +369,69 @@ class Diff:
             if diff_result:  # Only include if there are differences
                 differences[var] = diff_result
 
-        return DiffResult(differences=differences)
+        return DiffResult(differences=differences, warnings=list(self._warnings))
+
+    def _check_structural_change(
+        self, path: str, change_type: str, detail: str
+    ) -> Optional[ValueComparison]:
+        """
+        Check if a structural change should be reported based on structural_mode.
+
+        Args:
+            path: Variable path (e.g., 'df', 'data["train"]')
+            change_type: Type of structural change ('columns', 'rows', 'index', etc.)
+            detail: Human-readable description of the change
+
+        Returns:
+            ValueComparison if ENFORCE mode and structural read exists, None otherwise.
+            In WARN mode, adds to self._warnings instead.
+        """
+        if self.structural_mode == StructuralTrackingMode.OFF:
+            return None
+
+        # Check if this path has any structural reads
+        structural_attrs = self.structural_reads.get(path, set())
+        if not structural_attrs:
+            return None
+
+        # Determine which structural reads are relevant for this change type
+        # Note: shape and size reveal BOTH row and column structure
+        column_revealing = {
+            'columns', 'keys', 'iter', 'dtypes', 'T', 'axes', 'values',
+            'describe', 'to_dict', 'info', 'head', 'tail', 'sample',
+            'select_dtypes', 'to_records', 'memory_usage',
+            'shape', 'size',  # shape=(rows,cols), size=rows*cols
+        }
+        row_revealing = {'index', 'len', 'shape', 'size', 'empty'}
+
+        relevant_attrs = set()
+        if change_type in ('columns', 'column_add', 'column_remove'):
+            relevant_attrs = structural_attrs & column_revealing
+        elif change_type in ('rows', 'row_add', 'row_remove', 'shape', 'len'):
+            relevant_attrs = structural_attrs & row_revealing
+        elif change_type == 'index':
+            relevant_attrs = structural_attrs & {'index'}
+        elif change_type == 'dtype':
+            relevant_attrs = structural_attrs & {'dtype', 'dtypes'}
+        else:
+            # Generic structural change
+            relevant_attrs = structural_attrs
+
+        if not relevant_attrs:
+            return None
+
+        message = f"Structural change at {path}: {detail} (read: {', '.join(sorted(relevant_attrs))})"
+
+        if self.structural_mode == StructuralTrackingMode.WARN:
+            self._warnings.append(message)
+            return None
+        else:  # ENFORCE
+            return ValueComparison(
+                status="different",
+                value1=None,
+                value2=None,
+                message=message,
+            )
 
     def _compare_values(
         self, val_a: Any, val_b: Any, path: str = ""
@@ -999,9 +1078,30 @@ class Diff:
 
         This method records structural mismatches (index, name, dtype) but continues
         comparing values where possible.
+
+        Structural tracking: When structural_mode is WARN or ENFORCE and structural reads
+        were made on this Series, changes to structure (length, index) are reported.
         """
         children: Dict[str, DiffNode] = {}
         truncated = False
+
+        # Check for structural changes (length)
+        if len(val_a) != len(val_b):
+            structural_diff = self._check_structural_change(
+                path, 'len',
+                f"Series length changed from {len(val_a)} to {len(val_b)}"
+            )
+            if structural_diff:
+                children["_structural_len"] = structural_diff
+
+        # Check for structural changes (dtype)
+        if val_a.dtype != val_b.dtype:
+            structural_diff = self._check_structural_change(
+                path, 'dtype',
+                f"Series dtype changed from {val_a.dtype} to {val_b.dtype}"
+            )
+            if structural_diff:
+                children["_structural_dtype"] = structural_diff
 
         # Check index - if indexes differ, can't compare values by label
         indexes_match = val_a.index.equals(val_b.index)
@@ -1192,6 +1292,9 @@ class Diff:
 
         This method NEVER returns early - it always compares all columns that exist in both
         DataFrames, accumulating all differences found.
+
+        Structural tracking: When structural_mode is WARN or ENFORCE and structural reads
+        were made on this DataFrame, changes to structure (columns, rows) are reported.
         """
         children: Dict[str, DiffNode] = {}
         truncated = False
@@ -1201,14 +1304,38 @@ class Diff:
         cols_a = set(val_a.columns)
         cols_b = set(val_b.columns)
 
+        # Check for structural changes (row count)
+        if len(val_a) != len(val_b):
+            structural_diff = self._check_structural_change(
+                path, 'rows',
+                f"Row count changed from {len(val_a)} to {len(val_b)}"
+            )
+            if structural_diff:
+                children["_structural_rows"] = structural_diff
+                total_diff_count += 1
+
+        # Check for structural changes (column additions)
+        added_cols = cols_b - cols_a
+        if added_cols:
+            structural_diff = self._check_structural_change(
+                path, 'columns',
+                f"Columns added: {sorted(added_cols)}"
+            )
+            if structural_diff:
+                children["_structural_columns"] = structural_diff
+                total_diff_count += 1
+
         if self.use_leq:
             # Check if we have column-level RBW info for this variable
             if path in self.column_rbw:
                 rbw_cols = self.column_rbw[path]
 
                 if not rbw_cols:
-                    # No columns tracked - compare ALL common columns (conservative)
-                    cols_to_compare = cols_a & cols_b
+                    # Empty set means write-only - skip DataFrame comparison entirely
+                    # (only report structural changes if structural tracking is enabled)
+                    if children:
+                        return CompoundDiff(source_type="dataframe", children=children, truncated=False)
+                    return None
                 else:
                     # Track missing RBW columns as differences (but don't return early!)
                     missing_in_a = rbw_cols - cols_a

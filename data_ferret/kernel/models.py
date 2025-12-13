@@ -31,13 +31,15 @@ class TrackingData(BaseModel):
         writes: All variables written during cell execution
         column_reads_before_writes: DataFrame columns read before written, by variable path
         column_writes: DataFrame columns written, by variable path
+        structural_reads: Structural attributes/methods accessed per variable path
 
     Example:
         >>> data = TrackingData(
         ...     reads_before_writes=["df", "config"],
         ...     writes=["result", "df"],
         ...     column_reads_before_writes={"df": ["price", "quantity"]},
-        ...     column_writes={"df": ["total"]}
+        ...     column_writes={"df": ["total"]},
+        ...     structural_reads={"df": {"columns", "shape"}}
         ... )
     """
 
@@ -56,6 +58,16 @@ class TrackingData(BaseModel):
         default_factory=dict,
         description="DataFrame columns written, keyed by variable path",
     )
+    structural_reads: Dict[str, Set[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Structural attributes/methods accessed, keyed by variable path. "
+            "When code accesses df.columns, df.shape, df.describe(), etc., "
+            "these are recorded here. The diff then requires structural "
+            "equality for these variables, not just column value equality. "
+            "e.g., {'df': {'columns', 'shape'}, 'data[\"train\"]': {'describe'}}"
+        ),
+    )
 
     def get_rbw_vars(self) -> Set[str]:
         """Return read-before-write variables as a set."""
@@ -64,6 +76,39 @@ class TrackingData(BaseModel):
     def get_column_rbw_sets(self) -> Dict[str, Set[str]]:
         """Return column RBW data with sets instead of lists."""
         return {k: set(v) for k, v in self.column_reads_before_writes.items()}
+
+    def has_structural_read(self, var_path: str) -> bool:
+        """Check if any structural attribute was read for a variable."""
+        return bool(self.structural_reads.get(var_path))
+
+    def has_column_structure_read(self, var_path: str) -> bool:
+        """
+        Check if column-revealing attributes were read.
+
+        These include: columns, keys, iter, dtypes, T, axes, describe,
+        to_dict, info, head, tail, sample, select_dtypes, etc.
+
+        If any of these were accessed, adding columns should be detected.
+        """
+        attrs = self.structural_reads.get(var_path, set())
+        column_revealing = {
+            'columns', 'keys', 'iter', 'dtypes', 'T', 'axes', 'values',
+            'describe', 'to_dict', 'info', 'head', 'tail', 'sample',
+            'select_dtypes', 'to_records', 'memory_usage',
+        }
+        return bool(attrs & column_revealing)
+
+    def has_row_structure_read(self, var_path: str) -> bool:
+        """
+        Check if row-revealing attributes were read.
+
+        These include: index, len, shape, size, empty
+
+        If any of these were accessed, adding/removing rows should be detected.
+        """
+        attrs = self.structural_reads.get(var_path, set())
+        row_revealing = {'index', 'len', 'shape', 'size', 'empty'}
+        return bool(attrs & row_revealing)
 
     class Config:
         frozen = False  # Allow modification after creation

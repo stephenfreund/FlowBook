@@ -157,6 +157,25 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
         </div>
       </div>
 
+      {/* Structural Reads */}
+      {metadata.structural_reads && Object.keys(metadata.structural_reads).length > 0 && (
+        <>
+          <div className="sdc-metadata-divider" />
+          <div className="sdc-metadata-section">
+            <div className="sdc-metadata-item">
+              <strong>Structural Reads:</strong>
+              <ul className="sdc-variable-list sdc-structural">
+                {Object.entries(metadata.structural_reads).flatMap(([varName, attrs]) =>
+                  attrs.map((attr, i) => (
+                    <li key={`${varName}.${attr}`}><code>{varName}.{attr}</code></li>
+                  ))
+                )}
+              </ul>
+            </div>
+          </div>
+        </>
+      )}
+
       {/* Writes */}
       <div className="sdc-metadata-divider" />
       <div className="sdc-metadata-section">
@@ -221,6 +240,23 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
               <ul className="sdc-cell-list sdc-stale">
                 {metadata.stale_cells.map((id, i) => (
                   <li key={i}><code>{cellIdToReference(id, currentCellOrder)}</code></li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Structural Warnings */}
+      {metadata.structural_warnings && metadata.structural_warnings.length > 0 && (
+        <>
+          <div className="sdc-metadata-divider" />
+          <div className="sdc-metadata-section sdc-warning-section">
+            <div className="sdc-warning-header">Structural Warnings</div>
+            <div className="sdc-warning-content">
+              <ul className="sdc-warning-list">
+                {metadata.structural_warnings.map((warning, i) => (
+                  <li key={i}>{warning}</li>
                 ))}
               </ul>
             </div>

@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.models import TrackingData
+from data_ferret.kernel.structural_tracking import StructuralTrackingMode
 from data_ferret.kernel.types import DiffResult, DiffNode, ValueComparison, CompoundDiff
 from data_ferret.util.cell_index import index_to_alpha
 
@@ -32,14 +33,31 @@ class SDCEnforcer:
 
     Tracks cell executions and their read/write sets.
     On each execution, checks for backward mutations and computes staleness.
+
+    Supports structural tracking mode for detecting structural changes
+    (like df.columns, df.shape) when those attributes were read.
     """
 
-    def __init__(self, checkpoints: Checkpoints):
+    def __init__(
+        self,
+        checkpoints: Checkpoints,
+        structural_mode: StructuralTrackingMode = StructuralTrackingMode.WARN,
+    ):
         self.checkpoints = checkpoints
         self.records: Dict[str, SDCExecutionRecord] = {}
         self.seq_counter: int = 0
         self._cell_order: List[str] = []
         self._stale_cells: Set[str] = set()  # Cache for absolute staleness state
+        self._structural_mode = structural_mode
+
+    @property
+    def structural_mode(self) -> StructuralTrackingMode:
+        """Get the current structural tracking mode."""
+        return self._structural_mode
+
+    def set_structural_mode(self, mode: StructuralTrackingMode) -> None:
+        """Set the structural tracking mode."""
+        self._structural_mode = mode
 
     @property
     def cell_order(self) -> List[str]:
@@ -74,6 +92,7 @@ class SDCEnforcer:
         post_checkpoint: Checkpoint,
         tracking: TrackingData,
         continue_on_violation: bool = False,
+        namespace: Optional[dict] = None,
     ) -> SDCResult:
         """
         Main entry point. Call after cell execution.
@@ -84,6 +103,7 @@ class SDCEnforcer:
             post_checkpoint: Snapshot of namespace after execution
             tracking: TrackingData with reads/writes
             continue_on_violation: If True, compute staleness even when violation detected
+            namespace: Optional user namespace for capturing structural read values
 
         Returns:
             SDCResult with violation info, absolute set of stale cells, and changed variables
@@ -108,14 +128,29 @@ class SDCEnforcer:
         stale = []
         changed_vars = []
         column_changed = {}
+        structural_warnings = []
+
+        # Extract structural warnings from diff (always, even with violations)
+        # This ensures users see warnings about structural changes regardless of
+        # whether there's also a violation
+        if current_diff is not None and current_diff.warnings:
+            structural_warnings = list(current_diff.warnings)
 
         if not violation or continue_on_violation:
+            # Capture structural read values for better error messages later
+            structural_read_values = {}
+            if namespace is not None and tracking.structural_reads:
+                structural_read_values = capture_structural_read_values(
+                    namespace, tracking.structural_reads
+                )
+
             # Update our record for this cell BEFORE computing staleness
             # (so this cell is considered "fresh" in the computation)
             self.records[cell_id] = SDCExecutionRecord(
                 cell_id=cell_id,
                 tracking=tracking,
                 execution_seq=self.seq_counter,
+                structural_reads_values=structural_read_values,
             )
 
             # This cell just executed, so it's now fresh
@@ -128,7 +163,12 @@ class SDCEnforcer:
                     post_checkpoint,
                     use_leq=True,
                     column_rbw=tracking.column_reads_before_writes,
+                    structural_reads=tracking.structural_reads,
+                    structural_mode=self._structural_mode,
                 )
+                # Extract warnings from newly computed diff
+                if current_diff.warnings:
+                    structural_warnings = list(current_diff.warnings)
 
             # Check if diff was truncated - if so, return violation
             truncated_vars = _check_for_truncation(current_diff)
@@ -149,6 +189,7 @@ class SDCEnforcer:
                     stale_cells=[],
                     changed_variables=[],
                     column_changed={},
+                    structural_warnings=structural_warnings,
                 )
 
             if current_diff.differences:
@@ -158,15 +199,19 @@ class SDCEnforcer:
             column_changed = _extract_column_changes(current_diff, tracking)
 
             # Update staleness INCREMENTALLY (only check cells that might have become stale)
-            stale = self._update_staleness_incremental(
+            # Also captures structural warnings from affected cells
+            stale, staleness_warnings = self._update_staleness_incremental(
                 post_checkpoint, set(changed_vars), column_changed, cell_id
             )
+            # Merge warnings from staleness checks
+            structural_warnings.extend(staleness_warnings)
 
         return SDCResult(
             violation=violation,
             stale_cells=stale,
             changed_variables=changed_vars,
             column_changed=column_changed,
+            structural_warnings=structural_warnings,
         )
 
     def _check_backward_mutation(
@@ -207,6 +252,8 @@ class SDCEnforcer:
             post_checkpoint,
             use_leq=True,
             column_rbw=all_accessed_columns,
+            structural_reads=tracking.structural_reads,
+            structural_mode=self._structural_mode,
         )
 
         # Check if diff was truncated - if so, return violation
@@ -250,21 +297,37 @@ class SDCEnforcer:
                 modified_columns=modified_columns,
                 prior_reads=prior_record.tracking.reads_before_writes,
                 prior_column_reads=prior_record.tracking.column_reads_before_writes,
+                prior_structural_reads=prior_record.tracking.structural_reads,
+                structural_mode=self._structural_mode,
             )
 
             if conflicts:
                 mutating_alpha = self._cell_id_to_alpha(cell_id)
                 affected_alpha = self._cell_id_to_alpha(prior_cell_id)
+
+                # Get structural reads values from the prior record
+                prior_structural_values = prior_record.structural_reads_values
+
+                # Extract change descriptions from diff
+                changes = _extract_change_descriptions(current_diff, modified_columns)
+
+                # Build the detailed message
+                message = format_structural_violation(
+                    mutating_alpha,
+                    affected_alpha,
+                    conflicts,
+                    prior_structural_values,
+                    changes,
+                )
+
                 return (
                     SDCViolation(
                         mutating_cell=cell_id,
                         affected_cell=prior_cell_id,
                         variables=conflicts,
-                        message=(
-                            f"Cell {mutating_alpha} modified {conflicts} "
-                            f"which cell {affected_alpha} (earlier in notebook) reads. "
-                            f"This violates Sequential Dataflow Consistency."
-                        ),
+                        message=message,
+                        structural_reads_detail=prior_structural_values,
+                        changes_detail=changes,
                     ),
                     current_diff,
                 )
@@ -277,7 +340,7 @@ class SDCEnforcer:
         changed_vars: Set[str],
         column_changed: Dict[str, List[str]],
         just_executed: str,
-    ) -> List[str]:
+    ) -> Tuple[List[str], List[str]]:
         """
         Incrementally update staleness cache (Rule 2 computation).
 
@@ -292,8 +355,12 @@ class SDCEnforcer:
             just_executed: The cell_id that just executed (already marked fresh)
 
         Returns:
-            List of all currently stale cell IDs (in document order)
+            Tuple of:
+            - List of all currently stale cell IDs (in document order)
+            - List of structural warnings from affected cells
         """
+        all_warnings: List[str] = []
+
         for cell_id, record in self.records.items():
             if cell_id == just_executed:
                 continue  # This cell just ran, already marked fresh
@@ -316,13 +383,62 @@ class SDCEnforcer:
                 keys_to_include=record.tracking.reads_before_writes,
                 use_leq=True,
                 column_rbw=record.tracking.column_reads_before_writes,
+                structural_reads=record.tracking.structural_reads,
+                structural_mode=self._structural_mode,
             )
 
             if diff_result.differences:
                 self._stale_cells.add(cell_id)
 
+            # Capture warnings (these come from WARN mode structural tracking)
+            if diff_result.warnings:
+                affected_alpha = self._cell_id_to_alpha(cell_id)
+                mutating_alpha = self._cell_id_to_alpha(just_executed)
+
+                for warning in diff_result.warnings:
+                    # Parse the warning to extract variable name and changes
+                    # Format: "Structural change at var_name: details (read: attrs)"
+                    var_match = re.match(r"Structural change at (\w+):", warning)
+                    if var_match:
+                        var_name = var_match.group(1)
+                        # Get saved structural values from the affected cell's record
+                        read_values = record.structural_reads_values.get(var_name, {})
+                        # Extract change descriptions
+                        changes = []
+                        if "Columns added:" in warning:
+                            match = re.search(r"Columns added: \[([^\]]+)\]", warning)
+                            if match:
+                                changes.append(f"Column(s) added: [{match.group(1)}]")
+                        if "Rows added:" in warning:
+                            match = re.search(r"Rows added: (\d+)", warning)
+                            if match:
+                                changes.append(f"Row(s) added: {match.group(1)}")
+                        if "Shape:" in warning:
+                            match = re.search(r"Shape: (\([^)]+\)) → (\([^)]+\))", warning)
+                            if match:
+                                changes.append(f"Shape: {match.group(1)} → {match.group(2)}")
+                        if not changes:
+                            # Fallback: use the raw warning detail
+                            detail_match = re.search(r"Structural change at \w+: (.+)$", warning)
+                            if detail_match:
+                                changes.append(detail_match.group(1))
+
+                        # Format the detailed warning
+                        formatted = format_structural_warning(
+                            mutating_alpha,
+                            affected_alpha,
+                            var_name,
+                            read_values,
+                            changes,
+                        )
+                        all_warnings.append(formatted)
+                    else:
+                        # Fallback for unrecognized warning format
+                        all_warnings.append(f"Cell {affected_alpha}: {warning}")
+
         # Return in document order
-        return [cid for cid in self._cell_order if cid in self._stale_cells]
+        stale_cells = [cid for cid in self._cell_order if cid in self._stale_cells]
+        return stale_cells, all_warnings
 
     def _has_relevant_overlap(
         self,
@@ -331,12 +447,13 @@ class SDCEnforcer:
         column_changed: Dict[str, List[str]],
     ) -> bool:
         """
-        Check if cell's reads overlap with changes at variable or column level.
+        Check if cell's reads overlap with changes at variable, column, or structural level.
 
         Returns True if:
         - Cell reads a variable that changed AND either:
           - No column-level info available (conservative: assume overlap)
           - Column-level info shows actual column overlap
+          - Cell has structural reads for this variable (structural changes possible)
 
         Args:
             record: The cell's execution record with tracking info
@@ -363,6 +480,11 @@ class SDCEnforcer:
 
             if changed_cols & read_cols:
                 # Actual column overlap found
+                return True
+
+            # Check if cell has structural reads for this variable
+            # If columns were added/changed and cell read structure, it might be affected
+            if var in record.tracking.structural_reads and changed_cols:
                 return True
 
         # All overlapping vars have column info and no column overlap
@@ -407,6 +529,8 @@ class SDCEnforcer:
                 keys_to_include=record.tracking.reads_before_writes,
                 use_leq=True,
                 column_rbw=record.tracking.column_reads_before_writes,
+                structural_reads=record.tracking.structural_reads,
+                structural_mode=self._structural_mode,
             )
 
             if diff_result.differences:
@@ -427,6 +551,8 @@ def _check_read_write_conflict(
     modified_columns: Dict[str, List[str]],
     prior_reads: Set[str],
     prior_column_reads: Dict[str, Set[str]],
+    prior_structural_reads: Optional[Dict[str, Set[str]]] = None,
+    structural_mode: StructuralTrackingMode = StructuralTrackingMode.WARN,
 ) -> List[str]:
     """
     Check if modifications conflict with prior reads at variable or column level.
@@ -436,11 +562,17 @@ def _check_read_write_conflict(
     2. Mixed conflicts: Column info on one side only (conservative: flag as conflict)
     3. Column-level conflicts: Both have column info, check column overlap
 
+    Special case: When structural tracking is OFF and the prior cell only did
+    structural reads (like df.shape) without column reads, we don't flag a
+    conflict for column-level modifications.
+
     Args:
         modified_vars: Set of variable names modified by current cell
         modified_columns: Dict of variable -> list of modified columns
         prior_reads: Set of variables read by prior cell
         prior_column_reads: Dict of variable -> set of read columns for prior cell
+        prior_structural_reads: Dict of variable -> set of structural attrs read
+        structural_mode: Current structural tracking mode
 
     Returns:
         List of conflicting variable/column references (e.g., ["df.price", "config"])
@@ -460,6 +592,26 @@ def _check_read_write_conflict(
 
         if prior_cols is None or not current_cols:
             # Level 1 or 2: No column info on one or both sides
+
+            # Special case: structural-only read with structural tracking OFF or WARN
+            # If the prior cell only did structural reads (var in structural_reads
+            # but NOT in column_reads) and structural tracking is OFF or WARN, we
+            # should NOT flag a conflict for column-level modifications.
+            # - OFF: ignore structural reads entirely
+            # - WARN: structural warnings are generated separately by diff, not here
+            # - ENFORCE: this IS a violation (structural reads are protected)
+            if (
+                structural_mode in (StructuralTrackingMode.OFF, StructuralTrackingMode.WARN)
+                and prior_cols is None
+                and current_cols
+                and prior_structural_reads is not None
+                and var in prior_structural_reads
+            ):
+                # Prior cell only accessed structural attributes (like .shape),
+                # current cell modified specific columns - no backward mutation
+                # violation (warnings handled separately in WARN mode)
+                continue
+
             # Conservative: flag as conflict at variable level
             conflicts.append(var)
         else:
@@ -469,7 +621,24 @@ def _check_read_write_conflict(
                 # Conflict at column level - report each column
                 for col in sorted(overlap_cols):
                     conflicts.append(f"{var}.{col}")
-            # else: No overlap, no conflict
+            elif (
+                structural_mode == StructuralTrackingMode.ENFORCE
+                and prior_structural_reads is not None
+                and var in prior_structural_reads
+            ):
+                # ENFORCE mode: Even with no column overlap, check if prior cell
+                # read structural attributes that depend on column structure.
+                # If prior read .columns/.dtypes/etc and current added/removed columns,
+                # that's a structural violation.
+                #
+                # We detect this by checking if modified columns are NEW (not in prior_cols)
+                # which indicates a structural change (column added).
+                new_cols = current_cols - prior_cols
+                if new_cols:
+                    # New columns were added - this affects .columns, .shape, etc.
+                    # Prior cell's structural read is now invalid
+                    conflicts.append(var)
+            # else: No overlap and not ENFORCE structural violation, no conflict
 
     return sorted(conflicts)
 
@@ -692,3 +861,192 @@ def _truncate_value(value, max_len: int = 100) -> str:
     if len(s) > max_len:
         return s[: max_len - 3] + "..."
     return s
+
+
+def _extract_change_descriptions(
+    diff_result: DiffResult,
+    modified_columns: Dict[str, List[str]],
+) -> List[str]:
+    """
+    Extract human-readable change descriptions from diff result.
+
+    Args:
+        diff_result: The diff result from Checkpoint.diff()
+        modified_columns: Dict of variable -> list of modified columns
+
+    Returns:
+        List of change description strings
+    """
+    changes: List[str] = []
+
+    for var_name, diff_node in diff_result.differences.items():
+        # Report column changes
+        cols = modified_columns.get(var_name, [])
+        if cols:
+            if len(cols) == 1:
+                changes.append(f"Column '{cols[0]}' modified")
+            else:
+                changes.append(f"Columns modified: {cols}")
+
+        # Check for structural changes in the diff
+        if isinstance(diff_node, CompoundDiff):
+            # Look for shape/size/index changes in children
+            for key, child in diff_node.children.items():
+                if key == "._shape" and isinstance(child, ValueComparison):
+                    changes.append(f"Shape: {child.value1} → {child.value2}")
+                elif key == "._len" and isinstance(child, ValueComparison):
+                    changes.append(f"Length: {child.value1} → {child.value2}")
+                elif key == "._columns" and isinstance(child, ValueComparison):
+                    # Don't duplicate if we already reported column changes
+                    if not cols:
+                        changes.append(f"Columns changed")
+
+        # Check warnings from the diff (these contain structural change info)
+        if diff_result.warnings:
+            for warning in diff_result.warnings:
+                # Parse out useful info from warnings like:
+                # "Structural change at var: Columns added: ['y'] (read: columns, shape)"
+                if var_name in warning and warning not in changes:
+                    # Extract the change description part
+                    if "Columns added:" in warning:
+                        match = re.search(r"Columns added: \[([^\]]+)\]", warning)
+                        if match:
+                            changes.append(f"Column(s) added: [{match.group(1)}]")
+                    elif "Rows added:" in warning:
+                        match = re.search(r"Rows added: (\d+)", warning)
+                        if match:
+                            changes.append(f"Row(s) added: {match.group(1)}")
+
+    return changes
+
+
+def capture_structural_read_values(
+    namespace: dict,
+    structural_reads: Dict[str, Set[str]],
+) -> Dict[str, Dict[str, str]]:
+    """
+    Capture the current values of structural attributes that were read.
+
+    Args:
+        namespace: The user namespace containing the variables
+        structural_reads: Dict mapping var names to sets of structural attrs read
+
+    Returns:
+        Dict mapping var names to dicts of {attr_name: repr_value}
+    """
+    result: Dict[str, Dict[str, str]] = {}
+
+    for var_name, attrs in structural_reads.items():
+        obj = namespace.get(var_name)
+        if obj is None:
+            continue
+
+        result[var_name] = {}
+        for attr in attrs:
+            try:
+                value = getattr(obj, attr)
+                # Truncate long values
+                result[var_name][attr] = _truncate_value(value, max_len=80)
+            except Exception:
+                result[var_name][attr] = "<unavailable>"
+
+    return result
+
+
+def format_structural_violation(
+    mutating_cell_alpha: str,
+    affected_cell_alpha: str,
+    variables: List[str],
+    structural_reads_values: Dict[str, Dict[str, str]],
+    changes: List[str],
+) -> str:
+    """
+    Format a detailed structural violation message.
+
+    Args:
+        mutating_cell_alpha: Cell that caused violation (@A notation)
+        affected_cell_alpha: Earlier cell whose reads were mutated (@A notation)
+        variables: List of affected variable names
+        structural_reads_values: Values of structural attrs at read time
+        changes: List of change descriptions
+
+    Returns:
+        Formatted multi-line message string
+    """
+    lines = [
+        "❌ SDC Violation: Backward Structural Mutation",
+        "",
+        f"Cell {mutating_cell_alpha} modified {variables} which Cell {affected_cell_alpha} (earlier) reads.",
+    ]
+
+    # What was read
+    if structural_reads_values:
+        lines.append("")
+        lines.append(f"What Cell {affected_cell_alpha} read:")
+        for var_name, attrs in structural_reads_values.items():
+            for attr, value in sorted(attrs.items()):
+                lines.append(f"  • {var_name}.{attr} → {value}")
+
+    # What changed
+    if changes:
+        lines.append("")
+        lines.append(f"What Cell {mutating_cell_alpha} changed:")
+        for change in changes:
+            lines.append(f"  • {change}")
+
+    # Explanation
+    lines.append("")
+    lines.append(f"Why blocked: Cell {affected_cell_alpha} depends on Cell {mutating_cell_alpha} "
+                 "having run first, breaking top-to-bottom reproducibility.")
+    lines.append("")
+    lines.append("Fix: Move the modification before the read, or avoid reading "
+                 "structural attributes that will change.")
+
+    return "\n".join(lines)
+
+
+def format_structural_warning(
+    mutating_cell_alpha: str,
+    affected_cell_alpha: str,
+    var_name: str,
+    structural_reads_values: Dict[str, str],
+    changes: List[str],
+) -> str:
+    """
+    Format a detailed structural warning message.
+
+    Args:
+        mutating_cell_alpha: Cell that caused the change (@A notation)
+        affected_cell_alpha: Earlier cell whose reads were affected (@A notation)
+        var_name: Name of the affected variable
+        structural_reads_values: Dict of {attr_name: value_repr} at read time
+        changes: List of change descriptions
+
+    Returns:
+        Formatted multi-line message string
+    """
+    lines = [
+        "⚠️ Structural Warning",
+        "",
+        f"Cell {mutating_cell_alpha} modified '{var_name}' which Cell {affected_cell_alpha} previously read.",
+    ]
+
+    # What was read
+    if structural_reads_values:
+        lines.append("")
+        lines.append(f"What Cell {affected_cell_alpha} read:")
+        for attr, value in sorted(structural_reads_values.items()):
+            lines.append(f"  • {var_name}.{attr} → {value}")
+
+    # What changed
+    if changes:
+        lines.append("")
+        lines.append(f"What Cell {mutating_cell_alpha} changed:")
+        for change in changes:
+            lines.append(f"  • {change}")
+
+    # Impact
+    lines.append("")
+    lines.append(f"Impact: Re-running from top will give Cell {affected_cell_alpha} different results.")
+
+    return "\n".join(lines)

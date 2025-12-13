@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Optional
 
 from data_ferret.kernel.checkpoint import Checkpoint
 from data_ferret.kernel.models import MonotonicityViolation, TrackingData
+from data_ferret.kernel.structural_tracking import StructuralTrackingMode
 from data_ferret.kernel.types import ValueComparison
 from data_ferret.util.output import log, timer
 
@@ -56,20 +57,32 @@ class MonotonicityEnforcer:
         _checkpoints: Checkpoint manager for saving/restoring state
         _user_ns: The user namespace dict being monitored
         _pre_checkpoint_name: Name used for the pre-execution checkpoint
+        _structural_mode: How to handle structural reads (OFF, WARN, ENFORCE)
     """
 
     _pre_checkpoint_name = "_monotone_pre"
 
-    def __init__(self, checkpoints: "Checkpoints", user_ns: dict):
+    def __init__(
+        self,
+        checkpoints: "Checkpoints",
+        user_ns: dict,
+        structural_mode: StructuralTrackingMode = StructuralTrackingMode.WARN,
+    ):
         """
         Initialize the enforcer.
 
         Args:
             checkpoints: Checkpoint manager instance
             user_ns: The user namespace dict (may be TrackingDict)
+            structural_mode: How to handle structural reads (default: WARN)
         """
         self._checkpoints = checkpoints
         self._user_ns = user_ns
+        self._structural_mode = structural_mode
+
+    def set_structural_mode(self, mode: StructuralTrackingMode) -> None:
+        """Set the structural tracking mode."""
+        self._structural_mode = mode
 
     def save_pre_state(self, cell_id: str) -> None:
         """
@@ -124,6 +137,9 @@ class MonotonicityEnforcer:
         # Get column-level RBW data
         column_rbw = tracking_data.get_column_rbw_sets()
 
+        # Get structural reads
+        structural_reads = tracking_data.structural_reads
+
         # Compare pre and post states
         with timer(key="monotone_diff", message="[monotone] Computing diff"):
             pre = self._checkpoints.get(self._pre_checkpoint_name)
@@ -134,6 +150,8 @@ class MonotonicityEnforcer:
                 keys_to_include=rbw_vars,
                 use_leq=True,
                 column_rbw=column_rbw,
+                structural_reads=structural_reads,
+                structural_mode=self._structural_mode,
             )
 
         log(

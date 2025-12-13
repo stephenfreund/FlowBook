@@ -37,7 +37,8 @@ Usage:
 from contextlib import contextmanager
 from typing import Dict, Generator, Optional, Set
 
-from .column_tracking import ColumnAccessTracker, walk_dataframes
+from .column_tracking import ColumnAccessTracker, walk_dataframes, walk_pandas_objects
+from .structural_tracking import StructuralAccessTracker, StructuralTrackingMode
 
 
 class TrackingDict(dict):
@@ -76,6 +77,7 @@ class TrackingDict(dict):
         object.__setattr__(self, '_writes', set())
         object.__setattr__(self, '_tracking_enabled', True)  # Track by default
         object.__setattr__(self, '_column_tracker', ColumnAccessTracker())
+        object.__setattr__(self, '_structural_tracker', StructuralAccessTracker())
 
     # =========================================================================
     # Core dict protocol - delegate to _real_ns
@@ -170,6 +172,7 @@ class TrackingDict(dict):
         self._reads_before_writes.clear()
         self._writes.clear()
         self._column_tracker.reset()
+        self._structural_tracker.reset()
 
     @property
     def reads_before_writes(self) -> Set[str]:
@@ -189,26 +192,50 @@ class TrackingDict(dict):
         """Get column-level writes, keyed by variable path."""
         return self._column_tracker.resolve_writes_to_paths()
 
+    @property
+    def structural_reads(self) -> Dict[str, Set[str]]:
+        """Get structural attribute reads, keyed by variable path."""
+        return self._structural_tracker.resolve_to_paths()
+
+    @property
+    def structural_tracking_mode(self) -> StructuralTrackingMode:
+        """Get current structural tracking mode."""
+        return self._structural_tracker.mode
+
+    def set_structural_tracking_mode(self, mode: str) -> None:
+        """
+        Set structural tracking mode.
+
+        Args:
+            mode: One of "off", "warn", "enforce"
+        """
+        self._structural_tracker.set_mode(mode)
+
     # =========================================================================
     # Column tracking
     # =========================================================================
 
     def start_column_tracking(self) -> None:
-        """Call before cell execution to enable column tracking.
+        """Call before cell execution to enable column and structural tracking.
 
         This registers all existing DataFrames and installs monkey-patches
-        on DataFrame methods to track column access.
+        on DataFrame methods to track column access and structural attribute access.
         """
         # Ensure clean state before tracking (guards against leaked state from
         # previous cells if patches remained installed due to exceptions)
         self._column_tracker.reset()
-        # Register all existing DataFrames with their paths
+        self._structural_tracker.reset()
+        # Register all existing DataFrames with their paths (for column tracking)
         for path, df in walk_dataframes(self._real_ns):
             self._column_tracker.register_df(df, path)
+        # Register all pandas objects (DataFrames AND Series) for structural tracking
+        for path, obj in walk_pandas_objects(self._real_ns):
+            self._structural_tracker.register(obj, path)
         self._column_tracker.install()
+        self._structural_tracker.install()
 
     def stop_column_tracking(self) -> None:
-        """Call after cell execution to finalize column tracking.
+        """Call after cell execution to finalize column and structural tracking.
 
         This re-registers DataFrames (to catch newly created ones),
         resolves tracking data, and restores original DataFrame methods.
@@ -216,7 +243,11 @@ class TrackingDict(dict):
         # Re-register DataFrames (new DFs may have been created during execution)
         for path, df in walk_dataframes(self._real_ns):
             self._column_tracker.register_df(df, path)
+        # Re-register all pandas objects for structural tracking
+        for path, obj in walk_pandas_objects(self._real_ns):
+            self._structural_tracker.register(obj, path)
         self._column_tracker.uninstall()
+        self._structural_tracker.uninstall()
 
     # =========================================================================
     # Context Manager API
@@ -249,6 +280,26 @@ class TrackingDict(dict):
             self.stop_column_tracking()
             self._tracking_enabled = False
 
+    @contextmanager
+    def suspended(self):
+        """
+        Temporarily suspend all tracking.
+
+        Use this to prevent reads/writes during infrastructure code
+        (like magic commands) from being recorded.
+
+        Usage:
+            with user_ns.suspended():
+                # do stuff that shouldn't be tracked
+                pass
+        """
+        prev_enabled = self._tracking_enabled
+        self._tracking_enabled = False
+        try:
+            yield
+        finally:
+            self._tracking_enabled = prev_enabled
+
     def get_tracking_data(self) -> "TrackingData":
         """
         Return captured tracking data as a Pydantic model.
@@ -257,7 +308,7 @@ class TrackingDict(dict):
         to get the captured variable access patterns.
 
         Returns:
-            TrackingData model with reads_before_writes, writes, and column data
+            TrackingData model with reads_before_writes, writes, column data, and structural reads
         """
         from .checkpoint import is_valid_variable
         from .models import TrackingData
@@ -277,4 +328,5 @@ class TrackingDict(dict):
                 k: set(v) for k, v in self.column_reads_before_writes.items()
             },
             column_writes={k: set(v) for k, v in self.column_writes.items()},
+            structural_reads={k: set(v) for k, v in self.structural_reads.items()},
         )

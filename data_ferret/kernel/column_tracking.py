@@ -608,3 +608,148 @@ def _walk_object_attrs(
                     yield from _walk_object_attrs(item, item_path, visited)
         elif hasattr(attr_val, '__dict__') and not callable(attr_val):
             yield from _walk_object_attrs(attr_val, path, visited)
+
+
+def walk_pandas_objects(
+    namespace: dict,
+    prefix: str = "",
+    visited: Optional[Set[int]] = None
+) -> Generator[Tuple[str, Any], None, None]:
+    """
+    Recursively find all DataFrames AND Series in namespace, including nested in objects.
+
+    This is similar to walk_dataframes but also yields Series objects, which is
+    needed for structural tracking (Series have index, dtype, name, etc.).
+
+    Handles:
+    - Top-level variables: df, s
+    - Dict values: data['train']
+    - List/tuple items: datasets[0]
+    - Object attributes: obj.df
+
+    Args:
+        namespace: The namespace dict to walk
+        prefix: Current path prefix for nested access
+        visited: Set of visited object IDs to prevent cycles
+
+    Yields:
+        Tuples of (path, pandas_object) for each DataFrame or Series found
+    """
+    # Local import to avoid circular dependency
+    from data_ferret.kernel.checkpoint import is_valid_variable_name
+
+    if visited is None:
+        visited = set()
+
+    for key, val in namespace.items():
+        # Skip IPython special variables and private variables
+        if not isinstance(key, str) or not is_valid_variable_name(key):
+            continue
+
+        # Avoid cycles
+        val_id = id(val)
+        if val_id in visited:
+            continue
+        visited.add(val_id)
+
+        # Build path
+        if prefix:
+            path = f"{prefix}['{key}']"
+        else:
+            path = str(key)
+
+        # Skip modules - they can have DataFrames but we don't want to walk into them
+        if isinstance(val, types.ModuleType):
+            continue
+
+        if isinstance(val, pd.DataFrame):
+            yield path, val
+        elif isinstance(val, pd.Series):
+            yield path, val
+        elif isinstance(val, dict):
+            yield from walk_pandas_objects(val, path, visited)
+        elif isinstance(val, (list, tuple)):
+            for i, item in enumerate(val):
+                item_id = id(item)
+                if item_id in visited:
+                    continue
+                visited.add(item_id)
+                # Skip modules in lists/tuples
+                if isinstance(item, types.ModuleType):
+                    continue
+                item_path = f"{path}[{i}]"
+                if isinstance(item, pd.DataFrame):
+                    yield item_path, item
+                elif isinstance(item, pd.Series):
+                    yield item_path, item
+                elif isinstance(item, dict):
+                    yield from walk_pandas_objects(item, item_path, visited)
+                elif hasattr(item, '__dict__') and not callable(item):
+                    yield from _walk_object_attrs_pandas(item, item_path, visited)
+        elif hasattr(val, '__dict__') and not callable(val):
+            # Recurse into object attributes
+            yield from _walk_object_attrs_pandas(val, path, visited)
+
+
+def _walk_object_attrs_pandas(
+    obj: Any,
+    prefix: str,
+    visited: Set[int]
+) -> Generator[Tuple[str, Any], None, None]:
+    """
+    Walk object attributes looking for DataFrames and Series.
+
+    Args:
+        obj: The object to inspect
+        prefix: Current path prefix
+        visited: Set of visited object IDs
+
+    Yields:
+        Tuples of (path, pandas_object) for each DataFrame or Series found
+    """
+    try:
+        attrs = vars(obj)  # Get instance __dict__
+    except TypeError:
+        return  # Can't get vars for this object
+
+    # Make a copy of items to avoid "dictionary changed size during iteration" errors
+    for attr_name, attr_val in list(attrs.items()):
+        # Skip private attributes
+        if attr_name.startswith('_'):
+            continue
+
+        val_id = id(attr_val)
+        if val_id in visited:
+            continue
+        visited.add(val_id)
+
+        # Skip modules
+        if isinstance(attr_val, types.ModuleType):
+            continue
+
+        path = f"{prefix}.{attr_name}"
+
+        if isinstance(attr_val, pd.DataFrame):
+            yield path, attr_val
+        elif isinstance(attr_val, pd.Series):
+            yield path, attr_val
+        elif isinstance(attr_val, dict):
+            yield from walk_pandas_objects(attr_val, path, visited)
+        elif isinstance(attr_val, (list, tuple)):
+            for i, item in enumerate(attr_val):
+                item_id = id(item)
+                if item_id in visited:
+                    continue
+                visited.add(item_id)
+                # Skip modules in lists/tuples
+                if isinstance(item, types.ModuleType):
+                    continue
+                item_path = f"{path}[{i}]"
+                if isinstance(item, pd.DataFrame):
+                    yield item_path, item
+                elif isinstance(item, pd.Series):
+                    yield item_path, item
+                elif hasattr(item, '__dict__') and not callable(item):
+                    yield from _walk_object_attrs_pandas(item, item_path, visited)
+        elif hasattr(attr_val, '__dict__') and not callable(attr_val):
+            yield from _walk_object_attrs_pandas(attr_val, path, visited)

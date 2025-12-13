@@ -244,67 +244,183 @@ class FerretKernel(IPythonKernel, Magics):
     # =========================================================================
 
     @line_cell_magic
-    def enable_scalene(self, line: str, cell: str = "") -> None:
-        """Enable Scalene profiling."""
-        from data_ferret.kernel.kernel_commands import EnableScaleneRequest
+    def scalene(self, line: str, cell: str = "") -> None:
+        """
+        Control Scalene profiling.
 
-        req = EnableScaleneRequest()
-        response = self.command_handlers.handle_enable_scalene(req)
-        self.display_icon_and_text("\U0001F50D", response.message)
+        Usage:
+            %scalene        - Show current status
+            %scalene on     - Enable profiling
+            %scalene off    - Disable profiling
+        """
+        arg = line.strip().lower()
 
-    @line_cell_magic
-    def disable_scalene(self, line: str, cell: str = "") -> None:
-        """Disable Scalene profiling."""
-        from data_ferret.kernel.kernel_commands import DisableScaleneRequest
+        if not arg:
+            status = "on" if self._use_scalene else "off"
+            self.display_icon_and_text("\U0001F50D", f"Scalene profiling: {status}")
+            return
 
-        req = DisableScaleneRequest()
-        response = self.command_handlers.handle_disable_scalene(req)
-        self.display_icon_and_text("\U0001F50D", response.message)
+        if arg in ("on", "true", "1", "enable"):
+            self._use_scalene = True
+            self.display_icon_and_text("\U0001F50D", "Scalene profiling enabled")
+        elif arg in ("off", "false", "0", "disable"):
+            self._use_scalene = False
+            self.display_icon_and_text("\U0001F50D", "Scalene profiling disabled")
+        else:
+            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on' or 'off'")
 
     @line_cell_magic
     def force_checkpoints(self, line: str, cell: str = "") -> None:
-        """Enable or disable force checkpoints mode."""
-        from data_ferret.kernel.kernel_commands import ForceCheckpointsRequest
+        """
+        Control force checkpoints mode.
 
-        enabled = line.strip().lower() not in ["false", "0", "disable", "off"]
-        req = ForceCheckpointsRequest(enabled=enabled)
-        response = self.command_handlers.handle_force_checkpoints(req)
-        self.display_icon_and_text("\u2705", response.message)
+        Usage:
+            %force_checkpoints        - Show current status
+            %force_checkpoints on     - Enable force checkpoints
+            %force_checkpoints off    - Disable force checkpoints
+        """
+        arg = line.strip().lower()
 
-    @line_cell_magic
-    def enable_global_tracking(self, line: str, cell: str = "") -> None:
-        """Enable global variable tracking."""
-        from data_ferret.kernel.kernel_commands import EnableGlobalTrackingRequest
+        if not arg:
+            status = "on" if self._force_checkpoints else "off"
+            self.display_icon_and_text("\u2705", f"Force checkpoints: {status}")
+            return
 
-        req = EnableGlobalTrackingRequest()
-        response = self.command_handlers.handle_enable_global_tracking(req)
-        self.display_icon_and_text("\U0001F4CA", response.message)
-
-    @line_cell_magic
-    def disable_global_tracking(self, line: str, cell: str = "") -> None:
-        """Disable global variable tracking."""
-        from data_ferret.kernel.kernel_commands import DisableGlobalTrackingRequest
-
-        req = DisableGlobalTrackingRequest()
-        response = self.command_handlers.handle_disable_global_tracking(req)
-        self.display_icon_and_text("\U0001F4CA", response.message)
+        if arg in ("on", "true", "1", "enable"):
+            self._force_checkpoints = True
+            self.display_icon_and_text("\u2705", "Force checkpoints enabled")
+        elif arg in ("off", "false", "0", "disable"):
+            self._force_checkpoints = False
+            self.display_icon_and_text("\u2705", "Force checkpoints disabled")
+        else:
+            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on' or 'off'")
 
     @line_cell_magic
-    def enable_monotone_updates(self, line: str, cell: str = "") -> None:
-        """Enable monotone updates enforcement."""
-        log("[monotone] Enabling monotone updates enforcement")
-        if not self._use_global_tracking:
-            log("[monotone] Auto-enabling global tracking (required for RBW detection)")
-            self.enable_global_tracking("", "")
-        self._enforce_monotone_updates = True
-        self.display_icon_and_text("\u2705", "Monotone updates enforcement enabled")
+    def tracking(self, line: str, cell: str = "") -> None:
+        """
+        Control global variable tracking.
+
+        Usage:
+            %tracking        - Show current status
+            %tracking on     - Enable tracking
+            %tracking off    - Disable tracking
+        """
+        arg = line.strip().lower()
+
+        if not arg:
+            status = "on" if self._use_global_tracking else "off"
+            self.display_icon_and_text("\U0001F4CA", f"Global tracking: {status}")
+            return
+
+        if arg in ("on", "true", "1", "enable"):
+            self._use_global_tracking = True
+            # Initialize tracking if not already done
+            if not isinstance(self.shell.user_ns, TrackingDict):
+                tracking_dict = TrackingDict(self.shell.user_global_ns)
+                self.shell.user_ns = tracking_dict
+                self._patch_run_code(tracking_dict)
+            self.display_icon_and_text("\U0001F4CA", "Global tracking enabled")
+        elif arg in ("off", "false", "0", "disable"):
+            self._use_global_tracking = False
+            self.display_icon_and_text("\U0001F4CA", "Global tracking disabled")
+        else:
+            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on' or 'off'")
 
     @line_cell_magic
-    def disable_monotone_updates(self, line: str, cell: str = "") -> None:
-        """Disable monotone updates enforcement."""
-        log("[monotone] Disabling monotone updates enforcement")
-        self._enforce_monotone_updates = False
-        self.display_icon_and_text("\u2705", "Monotone updates enforcement disabled")
+    def monotone(self, line: str, cell: str = "") -> None:
+        """
+        Control monotone updates enforcement.
+
+        Usage:
+            %monotone        - Show current status
+            %monotone on     - Enable enforcement
+            %monotone off    - Disable enforcement
+        """
+        arg = line.strip().lower()
+
+        if not arg:
+            status = "on" if self._enforce_monotone_updates else "off"
+            self.display_icon_and_text("\u2705", f"Monotone enforcement: {status}")
+            return
+
+        if arg in ("on", "true", "1", "enable"):
+            log("[monotone] Enabling monotone updates enforcement")
+            if not self._use_global_tracking:
+                log("[monotone] Auto-enabling global tracking (required for RBW detection)")
+                self.tracking("on", "")
+            self._enforce_monotone_updates = True
+            self.display_icon_and_text("\u2705", "Monotone enforcement enabled")
+        elif arg in ("off", "false", "0", "disable"):
+            log("[monotone] Disabling monotone updates enforcement")
+            self._enforce_monotone_updates = False
+            self.display_icon_and_text("\u2705", "Monotone enforcement disabled")
+        else:
+            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on' or 'off'")
+
+    @line_cell_magic
+    def structural_tracking(self, line: str, cell: str = "") -> None:
+        """
+        Set structural tracking mode for DataFrame/Series attribute monitoring.
+
+        Structural tracking detects when code accesses attributes that reveal
+        DataFrame/Series structure (like df.columns, df.shape, len(df)).
+        When structural tracking is enabled and these attributes are read,
+        subsequent changes to the structure (adding columns, changing row count)
+        are either warned about or treated as violations.
+
+        Usage:
+            %structural_tracking           - Show current mode
+            %structural_tracking off       - Disable structural tracking
+            %structural_tracking warn      - Track and warn only (default)
+            %structural_tracking enforce   - Track and treat changes as violations
+        """
+        from contextlib import nullcontext
+
+        from data_ferret.kernel.structural_tracking import StructuralTrackingMode
+
+        # Suspend tracking during magic execution to avoid recording infrastructure reads
+        user_ns = self.shell.user_ns
+        if isinstance(user_ns, TrackingDict) and hasattr(user_ns, 'suspended'):
+            ctx = user_ns.suspended()
+        else:
+            ctx = nullcontext()
+
+        with ctx:
+            mode_str = line.strip().lower()
+
+            if not mode_str:
+                # Show current mode
+                current_mode = "off"
+                if isinstance(user_ns, TrackingDict):
+                    current_mode = user_ns.structural_tracking_mode.value
+                elif hasattr(self, '_structural_mode'):
+                    current_mode = self._structural_mode.value
+                self.display_icon_and_text(
+                    "\U0001F50D",
+                    f"Structural tracking mode: {current_mode}"
+                )
+                return
+
+            try:
+                mode = StructuralTrackingMode(mode_str)
+            except ValueError:
+                self.display_icon_and_text(
+                    "\u274C",
+                    f"Invalid mode: {mode_str}. Use 'off', 'warn', or 'enforce'"
+                )
+                return
+
+            # Store mode for use in MonotonicityEnforcer
+            self._structural_mode = mode
+
+            # Update TrackingDict if it exists
+            if isinstance(user_ns, TrackingDict):
+                user_ns.set_structural_tracking_mode(mode_str)
+
+            self.display_icon_and_text(
+                "\u2705",
+                f"Structural tracking mode set to: {mode.value}"
+            )
 
     # =========================================================================
     # Magic Commands - Checkpoints

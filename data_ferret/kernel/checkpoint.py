@@ -953,7 +953,9 @@ class Checkpoint:
     def diff(
         a: Checkpoint, b: Checkpoint, keys_to_include: set[str] | None = None,
         use_leq: bool = False,
-        column_rbw: Optional[Dict[str, Set[str]]] = None
+        column_rbw: Optional[Dict[str, Set[str]]] = None,
+        structural_reads: Optional[Dict[str, Set[str]]] = None,
+        structural_mode: Optional["StructuralTrackingMode"] = None,
     ):
         """
         Compare two checkpoints and return structured diff results.
@@ -968,17 +970,27 @@ class Checkpoint:
                        Maps variable path to set of column names that were RBW.
                        When provided with use_leq=True, only these columns are
                        compared for each DataFrame.
+            structural_reads: Optional structural attribute reads mapping.
+                       Maps variable path to set of structural attributes read
+                       (e.g., 'columns', 'shape', 'len'). Used with structural_mode.
+            structural_mode: How to handle structural reads (OFF, WARN, ENFORCE).
+                       If None, defaults to OFF.
 
         Returns:
             DiffResult: Structured diff tree with only differences
         """
+        from .structural_tracking import StructuralTrackingMode
+        if structural_mode is None:
+            structural_mode = StructuralTrackingMode.OFF
         differ = Diff(
             strict=False,
             report_close=False,
             atol=1e-5,
             rtol=1e-5,
             use_leq=use_leq,
-            column_rbw=column_rbw
+            column_rbw=column_rbw,
+            structural_reads=structural_reads or {},
+            structural_mode=structural_mode,
         )
         return differ.diff(a.user_ns, b.user_ns, keys_to_include)
 

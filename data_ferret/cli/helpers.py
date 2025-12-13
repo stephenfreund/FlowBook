@@ -449,6 +449,11 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
                                         lines.append(f"{indent_str}    {line}")
                                 else:
                                     lines.append(f"{indent_str}  {k_formatted}: {v}")
+                elif isinstance(item, str) and '\n' in item:
+                    # Multi-line string in list: use YAML literal block scalar (|)
+                    lines.append(f"{indent_str}- |")
+                    for line in item.split('\n'):
+                        lines.append(f"{indent_str}    {line}")
                 else:
                     lines.append(f"{indent_str}- {item}")
     else:

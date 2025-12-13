@@ -487,3 +487,81 @@ class TestStartStopColumnTracking:
         td.start_column_tracking()
         td.stop_column_tracking()
         td.stop_column_tracking()  # Should not raise
+
+
+class TestSuspendedContextManager:
+    """Tests for TrackingDict.suspended() context manager."""
+
+    def test_suspended_prevents_tracking(self):
+        """suspended() prevents reads and writes from being tracked."""
+        td = TrackingDict({"x": 1, "y": 2})
+        td.reset_tracking()
+        td._tracking_enabled = True
+
+        with td.suspended():
+            _ = td["x"]  # Read - should not be tracked
+            td["z"] = 3  # Write - should not be tracked
+
+        assert "x" not in td.reads_before_writes
+        assert "z" not in td.writes
+
+    def test_suspended_restores_state(self):
+        """suspended() restores tracking state after exit."""
+        td = TrackingDict({"x": 1})
+        td.reset_tracking()
+        td._tracking_enabled = True
+
+        with td.suspended():
+            pass
+
+        # Tracking should be restored
+        _ = td["x"]
+        assert "x" in td.reads_before_writes
+
+    def test_suspended_with_exception(self):
+        """suspended() restores state even if exception occurs."""
+        td = TrackingDict({"x": 1})
+        td.reset_tracking()
+        td._tracking_enabled = True
+
+        try:
+            with td.suspended():
+                raise ValueError("test")
+        except ValueError:
+            pass
+
+        # Tracking should be restored despite exception
+        _ = td["x"]
+        assert "x" in td.reads_before_writes
+
+    def test_suspended_when_already_disabled(self):
+        """suspended() works correctly when tracking already disabled."""
+        td = TrackingDict({"x": 1})
+        td.reset_tracking()
+        td._tracking_enabled = False
+
+        with td.suspended():
+            _ = td["x"]
+
+        # Should still be disabled after exiting
+        assert not td._tracking_enabled
+
+    def test_nested_suspended(self):
+        """Nested suspended() contexts work correctly."""
+        td = TrackingDict({"x": 1, "y": 2, "z": 3})
+        td.reset_tracking()
+        td._tracking_enabled = True
+
+        with td.suspended():
+            _ = td["x"]  # Not tracked
+            with td.suspended():
+                _ = td["y"]  # Not tracked
+            _ = td["z"]  # Still not tracked (outer context)
+
+        assert "x" not in td.reads_before_writes
+        assert "y" not in td.reads_before_writes
+        assert "z" not in td.reads_before_writes
+
+        # Verify tracking is re-enabled after both contexts exit
+        _ = td["x"]
+        assert "x" in td.reads_before_writes

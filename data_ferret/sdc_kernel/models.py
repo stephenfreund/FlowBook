@@ -17,6 +17,9 @@ class SDCViolation:
     variables: List[str]  # variables that were mutated
     message: str  # human-readable description
     truncation_details: Optional[str] = None  # pretty-printed diff if truncation occurred
+    # Detailed diagnostic info for better messages
+    structural_reads_detail: Dict[str, Dict[str, str]] = field(default_factory=dict)  # var -> {attr -> value_repr}
+    changes_detail: List[str] = field(default_factory=list)  # ["Column 'y' added", "Shape: (5,4) → (5,5)"]
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -27,6 +30,10 @@ class SDCViolation:
         }
         if self.truncation_details:
             result["truncation_details"] = self.truncation_details
+        if self.structural_reads_detail:
+            result["structural_reads_detail"] = self.structural_reads_detail
+        if self.changes_detail:
+            result["changes_detail"] = self.changes_detail
         return result
 
     def to_error_result(self, execution_count: int) -> dict:
@@ -47,6 +54,9 @@ class SDCExecutionRecord:
     cell_id: str
     tracking: TrackingData
     execution_seq: int  # monotonic execution counter
+    # Captured values of structural attrs at read time (for better error messages)
+    # Format: {var_name: {attr_name: repr_value}}
+    structural_reads_values: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -57,6 +67,7 @@ class SDCResult:
     stale_cells: List[str]  # cell IDs that need re-execution (document order)
     changed_variables: List[str]  # variables that changed value
     column_changed: Dict[str, List[str]] = field(default_factory=dict)  # var -> [changed columns]
+    structural_warnings: List[str] = field(default_factory=list)  # warnings from WARN mode
 
 
 @dataclass
@@ -77,6 +88,8 @@ class SDCMetadata:
     column_reads: Dict[str, List[str]] = field(default_factory=dict)  # var -> [read columns]
     column_writes: Dict[str, List[str]] = field(default_factory=dict)  # var -> [written columns]
     column_changed: Dict[str, List[str]] = field(default_factory=dict)  # var -> [changed columns]
+    structural_reads: Dict[str, List[str]] = field(default_factory=dict)  # var -> [structural attrs read]
+    structural_warnings: List[str] = field(default_factory=list)  # warnings from WARN mode
     # Timing information (in milliseconds)
     run_duration_ms: float = 0.0  # Code execution time
     state_duration_ms: float = 0.0  # Checkpoint time (pre + post)
@@ -97,6 +110,8 @@ class SDCMetadata:
                 "column_reads": self.column_reads,
                 "column_writes": self.column_writes,
                 "column_changed": self.column_changed,
+                "structural_reads": self.structural_reads,
+                "structural_warnings": self.structural_warnings,
                 "run_duration_ms": self.run_duration_ms,
                 "state_duration_ms": self.state_duration_ms,
                 "check_duration_ms": self.check_duration_ms,
