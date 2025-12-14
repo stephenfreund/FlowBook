@@ -1,12 +1,101 @@
 """
 SDC Enforcer - Sequential Dataflow Consistency enforcement.
 
-Implements the three SDC rules:
-1. Reproducibility Invariant (structural) - the goal
-2. Staleness Propagation Rule (computed here) - tracks which cells need re-execution
-3. No Backward Mutation Constraint (enforced here) - prevents hidden dependencies
+================================================================================
+OVERVIEW
+================================================================================
 
-See ferret_sdc_kernel.py module docstring for detailed architecture documentation.
+This module implements the core SDC enforcement logic, responsible for:
+1. Recording cell execution history with access patterns
+2. Detecting backward mutation violations (Rule 3)
+3. Computing staleness for downstream cells (Rule 2)
+4. Managing checkpoints for rollback on violation
+
+================================================================================
+THE THREE SDC RULES
+================================================================================
+
+Rule 1: Reproducibility Invariant (Goal)
+    A notebook is reproducible if running cells in document order from a fresh
+    kernel always produces the same result. This is the property SDC guarantees.
+
+Rule 2: Staleness Propagation (Computed)
+    A cell is "stale" when variables it read have changed since execution.
+    Staleness is informational - stale cells are highlighted for user awareness.
+
+Rule 3: No Backward Mutation (Enforced)
+    A cell may NOT modify variables that earlier cells (in document order) read.
+    This prevents hidden dependencies where earlier cells depend on later cells.
+
+================================================================================
+CONFLICT RESOLUTION HIERARCHY
+================================================================================
+
+When checking for backward mutations, conflicts are evaluated in precedence order:
+
+1. COLUMN-LEVEL EXEMPTION (most specific)
+   If both cells have column tracking for variable V:
+   - Modifying df['col_a'] does NOT conflict with reading df['col_b']
+   - Only overlapping columns cause violations
+
+2. STRUCTURAL CONFLICTS (if structural tracking enabled)
+   If earlier cell read structural attributes (df.columns, df.shape, len(df)):
+   - Adding/removing columns triggers conflict with .columns reads
+   - Adding/removing rows triggers conflict with .shape/len reads
+   - Mode determines response: WARN (warning) or ENFORCE (violation)
+
+3. VARIABLE-LEVEL FALLBACK (most conservative)
+   If column information is unavailable on either side:
+   - Any modification to a read variable is treated as a conflict
+   - This ensures safety when precise tracking isn't possible
+
+================================================================================
+KEY COMPONENTS
+================================================================================
+
+SDCEnforcer: Main enforcement class
+    - records: Dict[cell_id, SDCExecutionRecord] - execution history
+    - checkpoints: Checkpoints - pre/post state snapshots
+    - cell_order: List[cell_id] - document order from notebook
+
+SDCExecutionRecord: Per-cell execution data
+    - tracking: TrackingData - reads/writes at variable, column, structural levels
+    - pre_checkpoint_name: Reference to pre-execution state
+    - structural_reads_values: Captured values for error messages
+
+ConflictResolver: Declarative conflict rule evaluation
+    - Evaluates access events against change events
+    - Applies rules in precedence order
+    - Returns conflict/no-conflict decision with explanation
+
+================================================================================
+ALGORITHM OVERVIEW
+================================================================================
+
+On cell execution:
+1. SDCEnforcer.check() receives:
+   - cell_id, cell_order (document position)
+   - tracking_data (access record from TrackingDict)
+   - pre_checkpoint, post_checkpoint (state snapshots)
+
+2. Backward mutation check:
+   - Diff pre vs post to find actual changes
+   - For each earlier cell that was previously executed:
+     - Check if changes conflict with that cell's reads
+     - Apply conflict resolution hierarchy
+   - If conflict found: return violation, caller rolls back
+
+3. Staleness computation:
+   - For each previously executed cell:
+     - Compare current state vs that cell's pre-checkpoint
+     - If any read variable differs: cell is stale
+   - Return set of stale cell IDs for UI display
+
+4. Record keeping:
+   - Store execution record for this cell
+   - Capture structural read values for future error messages
+
+See analysis.md for formal specification and pseudocode algorithms.
 """
 
 import pprint
@@ -22,9 +111,26 @@ from data_ferret.util.cell_index import index_to_alpha
 
 from .models import SDCExecutionRecord, SDCResult, SDCViolation
 
+# Conflict resolution imports
+from .access_events import StructuralRead, VariableRead
+from .conflict_resolver import ConflictResolver
+from .conflict_rules import StructuralMode
+from .change_detector import detect_changes
+
 # Checkpoint naming constants
 PRE_CHECKPOINT_PREFIX = "_pre_"
 POST_CHECKPOINT_PREFIX = "_post_"
+
+
+
+def _tracking_mode_to_structural_mode(mode: StructuralTrackingMode) -> StructuralMode:
+    """Convert StructuralTrackingMode to StructuralMode for the new resolver."""
+    if mode == StructuralTrackingMode.ENFORCE:
+        return StructuralMode.ENFORCE
+    elif mode == StructuralTrackingMode.WARN:
+        return StructuralMode.WARN
+    else:
+        return StructuralMode.OFF
 
 
 class SDCEnforcer:
@@ -49,6 +155,10 @@ class SDCEnforcer:
         self._cell_order: List[str] = []
         self._stale_cells: Set[str] = set()  # Cache for absolute staleness state
         self._structural_mode = structural_mode
+        # New declarative conflict resolver
+        self._conflict_resolver = ConflictResolver(
+            structural_mode=_tracking_mode_to_structural_mode(structural_mode)
+        )
 
     @property
     def structural_mode(self) -> StructuralTrackingMode:
@@ -58,6 +168,10 @@ class SDCEnforcer:
     def set_structural_mode(self, mode: StructuralTrackingMode) -> None:
         """Set the structural tracking mode."""
         self._structural_mode = mode
+        # Update the conflict resolver's mode too
+        self._conflict_resolver = ConflictResolver(
+            structural_mode=_tracking_mode_to_structural_mode(mode)
+        )
 
     @property
     def cell_order(self) -> List[str]:
@@ -158,17 +272,17 @@ class SDCEnforcer:
 
             # Reuse diff from backward mutation check, or compute if not available
             if current_diff is None:
+                # Note: Don't pass current cell's structural_reads - intra-cell
+                # structural reads are not backward mutations. Structural warnings
+                # for prior cells are handled in staleness computation.
                 current_diff = Checkpoint.diff(
                     pre_checkpoint,
                     post_checkpoint,
                     use_leq=True,
                     column_rbw=tracking.column_reads_before_writes,
-                    structural_reads=tracking.structural_reads,
+                    structural_reads={},  # Empty - no intra-cell structural warnings
                     structural_mode=self._structural_mode,
                 )
-                # Extract warnings from newly computed diff
-                if current_diff.warnings:
-                    structural_warnings = list(current_diff.warnings)
 
             # Check if diff was truncated - if so, return violation
             truncated_vars = _check_for_truncation(current_diff)
@@ -247,12 +361,15 @@ class SDCEnforcer:
             else:
                 all_accessed_columns[var] = set(cols)
 
+        # Compute diff without structural_reads - intra-cell structural reads
+        # are not backward mutations. Structural conflict detection is handled
+        # by the ConflictResolver which uses prior cells' structural reads.
         current_diff = Checkpoint.diff(
             pre_checkpoint,
             post_checkpoint,
             use_leq=True,
             column_rbw=all_accessed_columns,
-            structural_reads=tracking.structural_reads,
+            structural_reads={},  # Empty - ConflictResolver handles this
             structural_mode=self._structural_mode,
         )
 
@@ -279,11 +396,13 @@ class SDCEnforcer:
             # This cell didn't modify anything, no backward mutation possible
             return (None, current_diff)
 
-        # Variable-level modifications
-        modified_vars = set(current_diff.differences.keys())
-
         # Column-level modifications (for DataFrames)
         modified_columns = _extract_column_changes(current_diff, tracking)
+
+        # Convert diff to typed Changes for conflict detection
+        typed_changes = detect_changes(current_diff)
+        if not typed_changes:
+            return (None, current_diff)
 
         # Check if any earlier cell reads something we modified
         for prior_cell_id in self._cell_order[:my_position]:
@@ -291,15 +410,31 @@ class SDCEnforcer:
             if prior_record is None:
                 continue
 
-            # Column-aware conflict detection
-            conflicts = _check_read_write_conflict(
-                modified_vars=modified_vars,
-                modified_columns=modified_columns,
-                prior_reads=prior_record.tracking.reads_before_writes,
-                prior_column_reads=prior_record.tracking.column_reads_before_writes,
-                prior_structural_reads=prior_record.tracking.structural_reads,
-                structural_mode=self._structural_mode,
-            )
+            # Convert prior cell's tracking to typed AccessEvents
+            prior_reads = prior_record.tracking.to_read_events()
+            if not prior_reads:
+                continue
+
+            # Use declarative ConflictResolver to detect conflicts
+            violations = self._conflict_resolver.get_violations(typed_changes, prior_reads)
+            if not violations:
+                continue
+
+            # Extract conflict names in the format expected by messages
+            # When the read is a VariableRead or StructuralRead, report just
+            # the variable name (for backward compatibility with old behavior)
+            conflicts = []
+            for v in violations:
+                var = v.change.variable
+                # Check if the read was a VariableRead or StructuralRead
+                if isinstance(v.read, (VariableRead, StructuralRead)):
+                    # Report just the variable name for variable/structural reads
+                    conflicts.append(var)
+                elif hasattr(v.change, 'column'):
+                    conflicts.append(f"{var}.{v.change.column}")
+                else:
+                    conflicts.append(var)
+            conflicts = sorted(set(conflicts))
 
             if conflicts:
                 mutating_alpha = self._cell_id_to_alpha(cell_id)
@@ -544,103 +679,6 @@ class SDCEnforcer:
         self.seq_counter = 0
         self._cell_order = []
         self._stale_cells.clear()
-
-
-def _check_read_write_conflict(
-    modified_vars: Set[str],
-    modified_columns: Dict[str, List[str]],
-    prior_reads: Set[str],
-    prior_column_reads: Dict[str, Set[str]],
-    prior_structural_reads: Optional[Dict[str, Set[str]]] = None,
-    structural_mode: StructuralTrackingMode = StructuralTrackingMode.WARN,
-) -> List[str]:
-    """
-    Check if modifications conflict with prior reads at variable or column level.
-
-    Implements three-level conflict detection:
-    1. Variable-only conflicts: Prior reads var, no column info on either side
-    2. Mixed conflicts: Column info on one side only (conservative: flag as conflict)
-    3. Column-level conflicts: Both have column info, check column overlap
-
-    Special case: When structural tracking is OFF and the prior cell only did
-    structural reads (like df.shape) without column reads, we don't flag a
-    conflict for column-level modifications.
-
-    Args:
-        modified_vars: Set of variable names modified by current cell
-        modified_columns: Dict of variable -> list of modified columns
-        prior_reads: Set of variables read by prior cell
-        prior_column_reads: Dict of variable -> set of read columns for prior cell
-        prior_structural_reads: Dict of variable -> set of structural attrs read
-        structural_mode: Current structural tracking mode
-
-    Returns:
-        List of conflicting variable/column references (e.g., ["df.price", "config"])
-    """
-    conflicts = []
-
-    # Check each variable that was modified
-    for var in modified_vars:
-        # Does prior cell read this variable?
-        if var not in prior_reads:
-            continue
-
-        # Variable is read by prior cell - check if we have column-level info
-
-        current_cols = set(modified_columns.get(var, []))
-        prior_cols = prior_column_reads.get(var, None)
-
-        if prior_cols is None or not current_cols:
-            # Level 1 or 2: No column info on one or both sides
-
-            # Special case: structural-only read with structural tracking OFF or WARN
-            # If the prior cell only did structural reads (var in structural_reads
-            # but NOT in column_reads) and structural tracking is OFF or WARN, we
-            # should NOT flag a conflict for column-level modifications.
-            # - OFF: ignore structural reads entirely
-            # - WARN: structural warnings are generated separately by diff, not here
-            # - ENFORCE: this IS a violation (structural reads are protected)
-            if (
-                structural_mode in (StructuralTrackingMode.OFF, StructuralTrackingMode.WARN)
-                and prior_cols is None
-                and current_cols
-                and prior_structural_reads is not None
-                and var in prior_structural_reads
-            ):
-                # Prior cell only accessed structural attributes (like .shape),
-                # current cell modified specific columns - no backward mutation
-                # violation (warnings handled separately in WARN mode)
-                continue
-
-            # Conservative: flag as conflict at variable level
-            conflicts.append(var)
-        else:
-            # Level 3: Both have column info - check overlap
-            overlap_cols = current_cols & prior_cols
-            if overlap_cols:
-                # Conflict at column level - report each column
-                for col in sorted(overlap_cols):
-                    conflicts.append(f"{var}.{col}")
-            elif (
-                structural_mode == StructuralTrackingMode.ENFORCE
-                and prior_structural_reads is not None
-                and var in prior_structural_reads
-            ):
-                # ENFORCE mode: Even with no column overlap, check if prior cell
-                # read structural attributes that depend on column structure.
-                # If prior read .columns/.dtypes/etc and current added/removed columns,
-                # that's a structural violation.
-                #
-                # We detect this by checking if modified columns are NEW (not in prior_cols)
-                # which indicates a structural change (column added).
-                new_cols = current_cols - prior_cols
-                if new_cols:
-                    # New columns were added - this affects .columns, .shape, etc.
-                    # Prior cell's structural read is now invalid
-                    conflicts.append(var)
-            # else: No overlap and not ENFORCE structural violation, no conflict
-
-    return sorted(conflicts)
 
 
 def _extract_column_changes(
@@ -953,6 +991,25 @@ def capture_structural_read_values(
     return result
 
 
+def format_variable_list(variables: List[str]) -> str:
+    """
+    Format a list of variable names as a human-readable string (no brackets).
+
+    Examples:
+        ["df"] -> "df"
+        ["df", "other"] -> "df and other"
+        ["df", "other", "third"] -> "df, other, and third"
+    """
+    if len(variables) == 0:
+        return ""
+    elif len(variables) == 1:
+        return variables[0]
+    elif len(variables) == 2:
+        return f"{variables[0]} and {variables[1]}"
+    else:
+        return ", ".join(variables[:-1]) + f", and {variables[-1]}"
+
+
 def format_structural_violation(
     mutating_cell_alpha: str,
     affected_cell_alpha: str,
@@ -976,7 +1033,7 @@ def format_structural_violation(
     lines = [
         "❌ SDC Violation: Backward Structural Mutation",
         "",
-        f"Cell {mutating_cell_alpha} modified {variables} which Cell {affected_cell_alpha} (earlier) reads.",
+        f"Cell {mutating_cell_alpha} modified {format_variable_list(variables)} which Cell {affected_cell_alpha} (earlier) reads.",
     ]
 
     # What was read

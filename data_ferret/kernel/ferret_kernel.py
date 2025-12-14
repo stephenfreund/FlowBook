@@ -249,25 +249,26 @@ class FerretKernel(IPythonKernel, Magics):
         Control Scalene profiling.
 
         Usage:
-            %scalene        - Show current status
+            %scalene        - Enable profiling (default)
             %scalene on     - Enable profiling
             %scalene off    - Disable profiling
+            %scalene ?      - Show current status
         """
         arg = line.strip().lower()
 
-        if not arg:
+        if arg == "?":
             status = "on" if self._use_scalene else "off"
             self.display_icon_and_text("\U0001F50D", f"Scalene profiling: {status}")
             return
 
-        if arg in ("on", "true", "1", "enable"):
+        if not arg or arg in ("on", "true", "1", "enable"):
             self._use_scalene = True
             self.display_icon_and_text("\U0001F50D", "Scalene profiling enabled")
         elif arg in ("off", "false", "0", "disable"):
             self._use_scalene = False
             self.display_icon_and_text("\U0001F50D", "Scalene profiling disabled")
         else:
-            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on' or 'off'")
+            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on', 'off', or '?'")
 
     @line_cell_magic
     def force_checkpoints(self, line: str, cell: str = "") -> None:
@@ -275,25 +276,26 @@ class FerretKernel(IPythonKernel, Magics):
         Control force checkpoints mode.
 
         Usage:
-            %force_checkpoints        - Show current status
+            %force_checkpoints        - Enable force checkpoints (default)
             %force_checkpoints on     - Enable force checkpoints
             %force_checkpoints off    - Disable force checkpoints
+            %force_checkpoints ?      - Show current status
         """
         arg = line.strip().lower()
 
-        if not arg:
+        if arg == "?":
             status = "on" if self._force_checkpoints else "off"
             self.display_icon_and_text("\u2705", f"Force checkpoints: {status}")
             return
 
-        if arg in ("on", "true", "1", "enable"):
+        if not arg or arg in ("on", "true", "1", "enable"):
             self._force_checkpoints = True
             self.display_icon_and_text("\u2705", "Force checkpoints enabled")
         elif arg in ("off", "false", "0", "disable"):
             self._force_checkpoints = False
             self.display_icon_and_text("\u2705", "Force checkpoints disabled")
         else:
-            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on' or 'off'")
+            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on', 'off', or '?'")
 
     @line_cell_magic
     def tracking(self, line: str, cell: str = "") -> None:
@@ -301,18 +303,19 @@ class FerretKernel(IPythonKernel, Magics):
         Control global variable tracking.
 
         Usage:
-            %tracking        - Show current status
+            %tracking        - Enable tracking (default)
             %tracking on     - Enable tracking
             %tracking off    - Disable tracking
+            %tracking ?      - Show current status
         """
         arg = line.strip().lower()
 
-        if not arg:
+        if arg == "?":
             status = "on" if self._use_global_tracking else "off"
             self.display_icon_and_text("\U0001F4CA", f"Global tracking: {status}")
             return
 
-        if arg in ("on", "true", "1", "enable"):
+        if not arg or arg in ("on", "true", "1", "enable"):
             self._use_global_tracking = True
             # Initialize tracking if not already done
             if not isinstance(self.shell.user_ns, TrackingDict):
@@ -324,7 +327,7 @@ class FerretKernel(IPythonKernel, Magics):
             self._use_global_tracking = False
             self.display_icon_and_text("\U0001F4CA", "Global tracking disabled")
         else:
-            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on' or 'off'")
+            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on', 'off', or '?'")
 
     @line_cell_magic
     def monotone(self, line: str, cell: str = "") -> None:
@@ -332,18 +335,19 @@ class FerretKernel(IPythonKernel, Magics):
         Control monotone updates enforcement.
 
         Usage:
-            %monotone        - Show current status
+            %monotone        - Enable enforcement (default)
             %monotone on     - Enable enforcement
             %monotone off    - Disable enforcement
+            %monotone ?      - Show current status
         """
         arg = line.strip().lower()
 
-        if not arg:
+        if arg == "?":
             status = "on" if self._enforce_monotone_updates else "off"
             self.display_icon_and_text("\u2705", f"Monotone enforcement: {status}")
             return
 
-        if arg in ("on", "true", "1", "enable"):
+        if not arg or arg in ("on", "true", "1", "enable"):
             log("[monotone] Enabling monotone updates enforcement")
             if not self._use_global_tracking:
                 log("[monotone] Auto-enabling global tracking (required for RBW detection)")
@@ -355,7 +359,7 @@ class FerretKernel(IPythonKernel, Magics):
             self._enforce_monotone_updates = False
             self.display_icon_and_text("\u2705", "Monotone enforcement disabled")
         else:
-            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on' or 'off'")
+            self.display_icon_and_text("\u274C", f"Invalid: '{arg}'. Use 'on', 'off', or '?'")
 
     @line_cell_magic
     def structural_tracking(self, line: str, cell: str = "") -> None:

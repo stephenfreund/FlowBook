@@ -5,6 +5,9 @@ FerretSDCKernel - IPython kernel with Sequential Dataflow Consistency enforcemen
 SEQUENTIAL DATAFLOW CONSISTENCY (SDC) - SPECIFICATION
 ================================================================================
 
+For a formal treatment with algorithms and proofs, see analysis.md in the
+project root. This docstring provides implementation-level documentation.
+
 SDC ensures notebook reproducibility by enforcing dataflow rules that prevent
 hidden state dependencies. When SDC is enforced, running cells top-to-bottom
 always produces the same result as running them in any order.
@@ -203,8 +206,17 @@ MAGIC COMMANDS
 %notebook_structure cell1 cell2 ...  - Set cell order (auto-injected by client)
 %sdc_status                          - Display current SDC state
 %sdc_stale                           - Show which cells are currently stale
-%continue_after_violation [on|off]   - Continue execution after violations
+
+Boolean toggle commands (no arg = enable, ? = show status):
+%continue_after_violation            - Enable continuing after violations
+%continue_after_violation off        - Stop on violation (default behavior)
+%continue_after_violation ?          - Show current setting
+
+Mode selection command:
 %structural_tracking [off|warn|enforce] - Set structural tracking mode
+    off     - Don't track structural attributes
+    warn    - Track and warn, but don't block (default)
+    enforce - Track and block violations
 
 ================================================================================
 ASSUMPTIONS AND LIMITATIONS
@@ -431,18 +443,19 @@ class FerretSDCKernel(IPythonKernel, Magics):
         Control whether execution continues after SDC violations.
 
         Usage:
-            %continue_after_violation        - Show current status
+            %continue_after_violation        - Enable (continue after violations, default)
             %continue_after_violation on     - Enable (continue after violations)
             %continue_after_violation off    - Disable (stop on violation)
+            %continue_after_violation ?      - Show current status
         """
         arg = line.strip().lower()
 
-        if not arg:
+        if arg == "?":
             status = "on" if self._continue_after_violation else "off"
             self._display.display_icon_and_text("ℹ️", f"Continue after violation: {status}")
             return
 
-        if arg in ("on", "true", "1", "enable"):
+        if not arg or arg in ("on", "true", "1", "enable"):
             self._continue_after_violation = True
             self._display.display_icon_and_text("ℹ️", "Continue after violation: enabled")
         elif arg in ("off", "false", "0", "disable"):
@@ -450,7 +463,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
             self._display.display_icon_and_text("ℹ️", "Continue after violation: disabled")
         else:
             self._display.display_icon_and_text(
-                "⚠️", f"Invalid: '{arg}'. Use 'on' or 'off'"
+                "⚠️", f"Invalid: '{arg}'. Use 'on', 'off', or '?'"
             )
 
     @line_magic
@@ -930,11 +943,21 @@ class FerretSDCKernel(IPythonKernel, Magics):
         structural_warnings = (
             sdc_result.structural_warnings if sdc_result else []
         )
+
+        # Use TrackingData.to_json_friendly() for clean serialization
+        tracking_json = tracking.to_json_friendly() if tracking else {
+            "reads": [],
+            "writes": [],
+            "column_reads": {},
+            "column_writes": {},
+            "structural_reads": {},
+        }
+
         metadata = SDCMetadata(
             cell_id=self._cell_id or "",
             execution_seq=self._sdc.seq_counter,
-            reads=list(tracking.reads_before_writes) if tracking else [],
-            writes=list(tracking.writes) if tracking else [],
+            reads=tracking_json["reads"],
+            writes=tracking_json["writes"],
             changed_variables=sdc_result.changed_variables if sdc_result else [],
             stale_cells=sdc_result.stale_cells if sdc_result else [],
             violation=(
@@ -943,22 +966,10 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 else None
             ),
             cell_order=self._sdc.cell_order,
-            column_reads=(
-                {k: list(v) for k, v in tracking.column_reads_before_writes.items()}
-                if tracking
-                else {}
-            ),
-            column_writes=(
-                {k: list(v) for k, v in tracking.column_writes.items()}
-                if tracking
-                else {}
-            ),
+            column_reads=tracking_json["column_reads"],
+            column_writes=tracking_json["column_writes"],
             column_changed=sdc_result.column_changed if sdc_result else {},
-            structural_reads=(
-                {k: sorted(v) for k, v in tracking.structural_reads.items()}
-                if tracking
-                else {}
-            ),
+            structural_reads=tracking_json["structural_reads"],
             structural_warnings=structural_warnings,
             run_duration_ms=run_duration,
             state_duration_ms=state_duration,
@@ -977,21 +988,23 @@ class FerretSDCKernel(IPythonKernel, Magics):
             f"State: {state_duration:.0f} ms",
             f"Check: {check_duration:.0f} ms",
         ]
-        if tracking:
-            if tracking.reads_before_writes:
+        if tracking_json["reads"] or tracking_json["column_reads"]:
+            # Combine variable-level reads with column-level read variables
+            read_vars = set(tracking_json["reads"]) | set(tracking_json["column_reads"].keys())
+            if read_vars:
                 reads_preview = [
-                    self._format_var_with_columns(v, metadata.column_reads, {})
-                    for v in list(tracking.reads_before_writes)[:3]
+                    self._format_var_with_columns(v, tracking_json["column_reads"], {})
+                    for v in list(read_vars)[:3]
                 ]
                 parts.append(f"Reads: {','.join(reads_preview)}")
-            # Show writes if there are variable-level writes OR column-level writes
-            write_vars = set(tracking.writes) | set(metadata.column_writes.keys())
-            if write_vars:
-                writes_preview = [
-                    self._format_var_with_columns(v, {}, metadata.column_writes)
-                    for v in list(write_vars)[:3]
-                ]
-                parts.append(f"Writes: {','.join(writes_preview)}")
+        # Show writes if there are variable-level writes OR column-level writes
+        write_vars = set(tracking_json["writes"]) | set(tracking_json["column_writes"].keys())
+        if write_vars:
+            writes_preview = [
+                self._format_var_with_columns(v, {}, tracking_json["column_writes"])
+                for v in list(write_vars)[:3]
+            ]
+            parts.append(f"Writes: {','.join(writes_preview)}")
 
         if sdc_result and sdc_result.stale_cells:
             # Convert cell IDs to @A references for display
@@ -1014,7 +1027,10 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
     def _send_violation_error(self, violation) -> None:
         """Send SDC violation as error via iopub."""
+        from .sdc_enforcer import format_variable_list
+
         mutating_alpha, affected_alpha = self._get_violation_alphas(violation)
+        vars_str = format_variable_list(violation.variables)
 
         self.send_response(
             self.iopub_socket,
@@ -1026,9 +1042,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
                     "Sequential Dataflow Consistency Violation",
                     "",
                     f"Cell {mutating_alpha} modified variables that "
-                    f"cell {affected_alpha} (earlier in notebook) reads.",
+                    f"Cell {affected_alpha} (earlier in notebook) reads.",
                     "",
-                    f"Affected variables: {violation.variables}",
+                    f"Affected variables: {vars_str}",
                     "",
                     "This breaks reproducibility. The earlier cell's behavior "
                     "depends on this cell having run first.",
@@ -1038,16 +1054,25 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
     def _send_violation_warning(self, violation) -> None:
         """Send SDC violation as warning via iopub (when continue_after_violation is enabled)."""
-        mutating_alpha, affected_alpha = self._get_violation_alphas(violation)
+        from .sdc_enforcer import format_variable_list
 
-        warning_text = (
-            f"⚠️ SDC Violation (continuing): Cell {mutating_alpha} modified "
-            f"{violation.variables} which cell {affected_alpha} reads.\n"
-        )
+        mutating_alpha, affected_alpha = self._get_violation_alphas(violation)
+        vars_str = format_variable_list(violation.variables)
+
+        # Build detailed warning
+        lines = [
+            "⚠️ SDC Violation (continuing)",
+            "",
+            f"Cell {mutating_alpha} modified {vars_str} which Cell {affected_alpha} (earlier) reads.",
+            "",
+            "This breaks reproducibility. The earlier cell's behavior",
+            "depends on this cell having run first.",
+        ]
+
         self.send_response(
             self.iopub_socket,
             "stream",
-            {"name": "stderr", "text": warning_text},
+            {"name": "stderr", "text": "\n".join(lines) + "\n"},
         )
 
     def _send_truncation_details(self, truncation_details: str) -> None:
@@ -1062,9 +1087,10 @@ class FerretSDCKernel(IPythonKernel, Magics):
         """Send structural warnings to stderr for user visibility."""
         if not warnings:
             return
-        warning_text = "⚠️ Structural Warning(s):\n"
-        for warning in warnings:
-            warning_text += f"  • {warning}\n"
+        # Separator line for visual separation (between warnings and from any preceding violation)
+        separator = "\n" + "═" * 80 + "\n\n"
+        # Start with separator to separate from any preceding output (like violation message)
+        warning_text = separator + separator.join(warnings) + "\n"
         self.send_response(
             self.iopub_socket,
             "stream",

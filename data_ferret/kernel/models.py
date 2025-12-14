@@ -14,8 +14,18 @@ These models ensure type safety and provide automatic serialization/deserializat
 for communication between kernel components and the frontend.
 """
 
-from typing import Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from data_ferret.sdc_kernel.access_events import (
+        AccessEvent,
+        ColumnRead,
+        ColumnWrite,
+        ReadEvent,
+        StructuralRead,
+        VariableRead,
+    )
 
 
 class TrackingData(BaseModel):
@@ -109,6 +119,133 @@ class TrackingData(BaseModel):
         attrs = self.structural_reads.get(var_path, set())
         row_revealing = {'index', 'len', 'shape', 'size', 'empty'}
         return bool(attrs & row_revealing)
+
+    def to_access_events(self) -> List["AccessEvent"]:
+        """
+        Convert to a list of typed AccessEvent objects.
+
+        Returns all access events in a deterministic order:
+        1. All ColumnRead events (sorted by variable, then column)
+        2. All ColumnWrite events (sorted by variable, then column)
+        3. All StructuralRead events (sorted by variable, then attr)
+
+        Returns:
+            List of AccessEvent objects
+        """
+        from data_ferret.sdc_kernel.access_events import (
+            ColumnRead,
+            ColumnWrite,
+            StructuralRead,
+        )
+
+        events: List["AccessEvent"] = []
+
+        # Column reads
+        for var, columns in sorted(self.column_reads_before_writes.items()):
+            for col in sorted(columns):
+                events.append(ColumnRead(variable=var, column=col))
+
+        # Column writes
+        for var, columns in sorted(self.column_writes.items()):
+            for col in sorted(columns):
+                events.append(ColumnWrite(variable=var, column=col))
+
+        # Structural reads
+        for var, attrs in sorted(self.structural_reads.items()):
+            for attr in sorted(attrs):
+                events.append(StructuralRead(variable=var, attr=attr))
+
+        return events
+
+    def to_read_events(self) -> List["ReadEvent"]:
+        """
+        Convert to only read events (for conflict detection).
+
+        This is the subset of access events that can conflict with changes:
+        - ColumnRead: conflicts with changes to that column
+        - StructuralRead: conflicts with structural changes
+        - VariableRead: conflicts with any change to the variable (whole-value read)
+
+        ColumnWrite events are not included because writes don't create
+        dependencies on prior values.
+
+        Returns:
+            List of ReadEvent objects (ColumnRead, StructuralRead, VariableRead)
+        """
+        from data_ferret.sdc_kernel.access_events import (
+            ColumnRead,
+            StructuralRead,
+            VariableRead,
+        )
+
+        events: List["ReadEvent"] = []
+
+        # Track which variables have specific read info
+        vars_with_detail = set()
+
+        # Column reads
+        for var, columns in sorted(self.column_reads_before_writes.items()):
+            vars_with_detail.add(var)
+            for col in sorted(columns):
+                events.append(ColumnRead(variable=var, column=col))
+
+        # Structural reads
+        for var, attrs in sorted(self.structural_reads.items()):
+            vars_with_detail.add(var)
+            for attr in sorted(attrs):
+                events.append(StructuralRead(variable=var, attr=attr))
+
+        # Variable-level reads (for variables without column or structural detail)
+        # These are non-DataFrame/Series variables that were read
+        for var in sorted(self.reads_before_writes):
+            if var not in vars_with_detail:
+                events.append(VariableRead(variable=var))
+
+        return events
+
+    def to_json_friendly(self) -> Dict[str, Any]:
+        """
+        Return dict with sorted lists instead of sets for JSON serialization.
+
+        This is the canonical format for sending tracking data to the frontend.
+
+        Returns:
+            Dict with keys: reads, writes, column_reads, column_writes, structural_reads
+        """
+        return {
+            "reads": sorted(self.reads_before_writes),
+            "writes": sorted(self.writes),
+            "column_reads": {k: sorted(v) for k, v in sorted(self.column_reads_before_writes.items())},
+            "column_writes": {k: sorted(v) for k, v in sorted(self.column_writes.items())},
+            "structural_reads": {k: sorted(v) for k, v in sorted(self.structural_reads.items())},
+        }
+
+    def get_read_variables(self) -> Set[str]:
+        """
+        Get all variables that were read during cell execution.
+
+        Combines:
+        - Variables with column reads
+        - Variables with structural reads
+        - Variable-level reads
+
+        Returns:
+            Set of variable names that were read
+        """
+        variables = set()
+        variables.update(self.column_reads_before_writes.keys())
+        variables.update(self.structural_reads.keys())
+        variables.update(self.reads_before_writes)
+        return variables
+
+    def get_written_variables(self) -> Set[str]:
+        """
+        Get all variables that were written during cell execution.
+
+        Returns:
+            Set of variable names that were written
+        """
+        return set(self.writes)
 
     class Config:
         frozen = False  # Allow modification after creation

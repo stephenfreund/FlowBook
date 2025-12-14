@@ -296,6 +296,15 @@ STRUCTURE_USING_METHODS = [
     ('DataFrame', 'notna'),
     ('DataFrame', 'notnull'),
 
+    # --- Bitwise (used for boolean mask operations like mask1 & mask2) ---
+    ('DataFrame', '__and__'),
+    ('DataFrame', '__rand__'),
+    ('DataFrame', '__or__'),
+    ('DataFrame', '__ror__'),
+    ('DataFrame', '__xor__'),
+    ('DataFrame', '__rxor__'),
+    ('DataFrame', '__invert__'),
+
     # --- Series ---
     ('Series', '_repr_html_'),
     ('Series', '__repr__'),
@@ -352,6 +361,8 @@ STRUCTURE_USING_METHODS = [
     ('Series', 'pipe'),
     ('Series', 'agg'),
     ('Series', 'aggregate'),
+    ('Series', 'unique'),
+    ('Series', 'nunique'),
     ('Series', 'groupby'),
     ('Series', 'sort_values'),
     ('Series', 'sort_index'),
@@ -372,10 +383,45 @@ STRUCTURE_USING_METHODS = [
     ('Series', 'isnull'),
     ('Series', 'notna'),
     ('Series', 'notnull'),
+
+    # --- Bitwise (used for boolean mask operations like mask1 & mask2) ---
+    ('Series', '__and__'),
+    ('Series', '__rand__'),
+    ('Series', '__or__'),
+    ('Series', '__ror__'),
+    ('Series', '__xor__'),
+    ('Series', '__rxor__'),
+    ('Series', '__invert__'),
+
     ('Series', 'to_csv'),
     ('Series', 'to_json'),
     ('Series', 'to_pickle'),
     ('Series', 'to_frame'),
+]
+
+# Indexer classes that need wrapping
+# These are accessed via df.loc, df.iloc, etc.
+INDEXER_METHODS_TO_WRAP = [
+    '__getitem__',
+    '__setitem__',
+]
+
+# Module-level pandas functions that internally access structural attrs
+# These are functions like pd.concat, pd.merge that operate on DataFrames
+# but shouldn't count as explicit structural reads
+PANDAS_FUNCTIONS_TO_WRAP = [
+    'concat',
+    'merge',
+    'merge_ordered',
+    'merge_asof',
+    'get_dummies',
+    'crosstab',
+    'cut',
+    'qcut',
+    'melt',
+    'wide_to_long',
+    'pivot',
+    'pivot_table',
 ]
 
 
@@ -404,6 +450,10 @@ class StructuralAccessTracker:
 
     # Class-level flag to suspend tracking (for deepcopy operations)
     _suspended = False
+
+    # Class-level tracking of patch state to prevent double-patching across instances
+    _patches_installed = False
+    _class_original_methods: Dict[str, Any] = {}
 
     def __init__(self, mode: StructuralTrackingMode = StructuralTrackingMode.WARN):
         """
@@ -443,16 +493,31 @@ class StructuralAccessTracker:
             return
         if self._mode == StructuralTrackingMode.OFF:
             return
-        self._patch_dataframe()
-        self._patch_series()
-        self._patch_structure_using_methods()
+        # Use class-level check to prevent double-patching across instances
+        if not StructuralAccessTracker._patches_installed:
+            self._patch_dataframe()
+            self._patch_series()
+            self._patch_structure_using_methods()
+            self._patch_indexers()
+            self._patch_pandas_functions()
+            self._patch_groupby()
+            # Save to class-level storage for other instances
+            StructuralAccessTracker._class_original_methods = self._original_methods.copy()
+            StructuralAccessTracker._patches_installed = True
+        else:
+            # Patches already installed by another instance - just copy the originals
+            self._original_methods = StructuralAccessTracker._class_original_methods.copy()
         self._installed = True
 
     def uninstall(self) -> None:
         """Restore original methods."""
         if not self._installed:
             return
-        self._restore_all()
+        # Only restore if we have the original methods stored
+        if self._original_methods:
+            self._restore_all()
+            StructuralAccessTracker._patches_installed = False
+            StructuralAccessTracker._class_original_methods.clear()
         self._installed = False
 
     def register(self, obj: Any, path: str) -> None:
@@ -606,12 +671,152 @@ class StructuralAccessTracker:
 
             setattr(cls, method_name, make_wrapper(original))
 
+    def _patch_indexers(self) -> None:
+        """Patch indexer classes (loc, iloc, at, iat) to suppress structural reads.
+
+        Indexers like df.loc[...] internally access structural attributes like
+        .columns, .index, .axes but from the user's perspective these are just
+        data access operations, not structure-revealing operations.
+        """
+        try:
+            from pandas.core.indexing import _LocIndexer, _iLocIndexer, _AtIndexer, _iAtIndexer
+            indexer_classes = [
+                ('_LocIndexer', _LocIndexer),
+                ('_iLocIndexer', _iLocIndexer),
+                ('_AtIndexer', _AtIndexer),
+                ('_iAtIndexer', _iAtIndexer),
+            ]
+        except ImportError:
+            # Older pandas versions may have different structure
+            return
+
+        for cls_name, cls in indexer_classes:
+            for method_name in INDEXER_METHODS_TO_WRAP:
+                original = getattr(cls, method_name, None)
+                if original is None:
+                    continue
+
+                key = f'{cls_name}.{method_name}'
+                self._original_methods[key] = original
+
+                def make_wrapper(orig):
+                    def wrapper(obj, *args, **kwargs):
+                        with _structure_using_context():
+                            return orig(obj, *args, **kwargs)
+                    return wrapper
+
+                setattr(cls, method_name, make_wrapper(original))
+
+    def _patch_pandas_functions(self) -> None:
+        """Patch module-level pandas functions to suppress structural reads.
+
+        Functions like pd.concat, pd.merge internally access structural attributes
+        of input DataFrames but from the user's perspective these are data
+        transformation operations, not structure-revealing operations.
+        """
+        for func_name in PANDAS_FUNCTIONS_TO_WRAP:
+            original = getattr(pd, func_name, None)
+            if original is None:
+                continue
+
+            key = f'pd.{func_name}'
+            self._original_methods[key] = original
+
+            def make_wrapper(orig):
+                def wrapper(*args, **kwargs):
+                    with _structure_using_context():
+                        return orig(*args, **kwargs)
+                return wrapper
+
+            setattr(pd, func_name, make_wrapper(original))
+
+    def _patch_groupby(self) -> None:
+        """Patch GroupBy classes to suppress structural reads.
+
+        When you do df.groupby(...)['col'], the __getitem__ on the GroupBy
+        object internally accesses df.columns to validate the column selection.
+        Aggregation methods like .sum(), .mean() also access structure internally.
+        This should not count as an explicit structural read.
+        """
+        try:
+            from pandas.core.groupby import DataFrameGroupBy, SeriesGroupBy
+            groupby_classes = [
+                ('DataFrameGroupBy', DataFrameGroupBy),
+                ('SeriesGroupBy', SeriesGroupBy),
+            ]
+        except ImportError:
+            return
+
+        # Methods on GroupBy that should suppress structural reads
+        groupby_methods = [
+            '__getitem__',
+            # Aggregation methods
+            'sum', 'mean', 'median', 'std', 'var', 'min', 'max',
+            'count', 'size', 'first', 'last', 'nth', 'prod',
+            'sem', 'ohlc', 'describe',
+            # Transform methods
+            'transform', 'apply', 'agg', 'aggregate',
+            'filter', 'pipe',
+            # Other methods that might access structure
+            'cumsum', 'cumprod', 'cummax', 'cummin', 'cumcount',
+            'diff', 'pct_change', 'rank', 'shift', 'fillna',
+            'ffill', 'bfill', 'head', 'tail', 'nunique', 'value_counts',
+        ]
+
+        for cls_name, cls in groupby_classes:
+            for method_name in groupby_methods:
+                original = getattr(cls, method_name, None)
+                if original is None:
+                    continue
+
+                key = f'{cls_name}.{method_name}'
+                self._original_methods[key] = original
+
+                def make_wrapper(orig):
+                    def wrapper(obj, *args, **kwargs):
+                        with _structure_using_context():
+                            return orig(obj, *args, **kwargs)
+                    return wrapper
+
+                setattr(cls, method_name, make_wrapper(original))
+
     def _restore_all(self) -> None:
         """Restore all original methods."""
+        # Try to import indexer classes for restoration
+        try:
+            from pandas.core.indexing import _LocIndexer, _iLocIndexer, _AtIndexer, _iAtIndexer
+            indexer_map = {
+                '_LocIndexer': _LocIndexer,
+                '_iLocIndexer': _iLocIndexer,
+                '_AtIndexer': _AtIndexer,
+                '_iAtIndexer': _iAtIndexer,
+            }
+        except ImportError:
+            indexer_map = {}
+
+        # Try to import GroupBy classes for restoration
+        try:
+            from pandas.core.groupby import DataFrameGroupBy, SeriesGroupBy
+            groupby_map = {
+                'DataFrameGroupBy': DataFrameGroupBy,
+                'SeriesGroupBy': SeriesGroupBy,
+            }
+        except ImportError:
+            groupby_map = {}
+
         for key, original in self._original_methods.items():
             cls_name, method_name = key.split('.', 1)
-            cls = pd.DataFrame if cls_name == 'DataFrame' else pd.Series
-            setattr(cls, method_name, original)
+            if cls_name == 'DataFrame':
+                setattr(pd.DataFrame, method_name, original)
+            elif cls_name == 'Series':
+                setattr(pd.Series, method_name, original)
+            elif cls_name == 'pd':
+                # Module-level pandas functions
+                setattr(pd, method_name, original)
+            elif cls_name in indexer_map:
+                setattr(indexer_map[cls_name], method_name, original)
+            elif cls_name in groupby_map:
+                setattr(groupby_map[cls_name], method_name, original)
         self._original_methods.clear()
 
 

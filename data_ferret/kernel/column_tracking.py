@@ -25,6 +25,10 @@ class ColumnAccessTracker:
     # Class-level flag to suspend tracking globally (for deepcopy operations)
     _suspended = False
 
+    # Class-level tracking of patch state to prevent double-patching across instances
+    _patches_installed = False
+    _class_original_methods: Dict[str, Any] = {}
+
     def __init__(self):
         self._reads_by_id: Dict[int, Set[str]] = defaultdict(set)
         self._writes_by_id: Dict[int, Set[str]] = defaultdict(set)
@@ -36,14 +40,24 @@ class ColumnAccessTracker:
         """Monkey-patch DataFrame methods to track column access."""
         if self._installed:
             return
-        self._patch_dataframe_methods()
+        # Use class-level check to prevent double-patching across instances
+        if not ColumnAccessTracker._patches_installed:
+            self._patch_dataframe_methods()
+            ColumnAccessTracker._patches_installed = True
+        else:
+            # Patches already installed by another instance - just copy the originals
+            self._original_methods = ColumnAccessTracker._class_original_methods.copy()
         self._installed = True
 
     def uninstall(self) -> None:
         """Restore original DataFrame methods."""
         if not self._installed:
             return
-        self._restore_dataframe_methods()
+        # Only restore if we have the original methods stored
+        if self._original_methods:
+            self._restore_dataframe_methods()
+            ColumnAccessTracker._patches_installed = False
+            ColumnAccessTracker._class_original_methods.clear()
         self._installed = False
 
     def register_df(self, df: pd.DataFrame, path: str) -> None:
@@ -89,11 +103,11 @@ class ColumnAccessTracker:
 
             path = self._id_to_path[df_id]
             read_cols = self._reads_by_id.get(df_id, set())
-            written_cols = self._writes_by_id.get(df_id, set())
 
-            # Compute RBW: reads that were not subsequently written
-            rbw = read_cols - written_cols
-            result[path] = rbw
+            # record_read() already ensures only reads-before-writes are recorded
+            # (it checks if column was already written before adding to reads)
+            # So _reads_by_id already contains the correct RBW set - no subtraction needed
+            result[path] = read_cols.copy()
 
         return result
 
@@ -353,6 +367,9 @@ class ColumnAccessTracker:
             return original_drop_duplicates(df, subset=subset, **kwargs)
 
         pd.DataFrame.drop_duplicates = tracked_drop_duplicates
+
+        # Save to class-level storage for other instances
+        ColumnAccessTracker._class_original_methods = self._original_methods.copy()
 
     def _restore_dataframe_methods(self) -> None:
         """Restore original DataFrame methods."""

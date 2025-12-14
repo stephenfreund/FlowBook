@@ -311,6 +311,24 @@ class TestColumnTracking:
         if "df" in data.column_reads_before_writes:
             assert "b" not in data.column_reads_before_writes["df"]
 
+    def test_column_tracking_read_then_write_same_column(self):
+        """Column read then written IS in RBW (common pattern: df['x'] = df['x'].transform())."""
+        df = pd.DataFrame({"prediction": [1.1, 2.2, 3.3]})
+        td = TrackingDict({"df": df})
+
+        with td.track_execution():
+            # Read then write same column - common pattern like:
+            # df['prediction'] = df['prediction'].astype(float).round().astype(int)
+            td["df"]["prediction"] = td["df"]["prediction"].astype(float).round().astype(int)
+
+        data = td.get_tracking_data()
+        # 'prediction' should be in BOTH RBW (because it was read) and writes (because it was written)
+        assert "df" in data.column_reads_before_writes
+        assert "prediction" in data.column_reads_before_writes["df"], \
+            "Column read before write should be in column_reads_before_writes"
+        assert "df" in data.column_writes
+        assert "prediction" in data.column_writes["df"]
+
     def test_column_tracking_multiple_dataframes(self):
         """Column tracking works with multiple DataFrames."""
         df1 = pd.DataFrame({"x": [1, 2]})
@@ -448,6 +466,91 @@ class TestColumnRBWProperty:
         td.reset_tracking()
         assert td.column_writes == {}
 
+    def test_column_reads_exclude_written_variables(self):
+        """Column reads from variables written in the cell are excluded.
+
+        If a variable is created in the cell (written), subsequent column reads
+        from it should NOT be in column_reads_before_writes.
+        """
+        df = pd.DataFrame({"x": [1, 2, 3]})
+        td = TrackingDict({"df": df})
+
+        with td.track_execution():
+            # Read from existing df - should be tracked
+            _ = td["df"]["x"]
+
+            # Create new DataFrame - this is a write
+            td["new_df"] = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+
+            # Read from new_df - should NOT be tracked (variable was written first)
+            _ = td["new_df"]["a"]
+
+        data = td.get_tracking_data()
+
+        # df.x should be in column_reads
+        assert "df" in data.column_reads_before_writes
+        assert "x" in data.column_reads_before_writes["df"]
+
+        # new_df should NOT be in column_reads (it was written)
+        assert "new_df" not in data.column_reads_before_writes
+
+    def test_groupby_merge_pattern_excludes_intermediate_df(self):
+        """The groupby().reset_index() then merge() pattern works correctly.
+
+        When a DataFrame is created via groupby and then used in a merge,
+        column reads from the intermediate DataFrame should not be tracked.
+        """
+        df = pd.DataFrame({
+            "year": [2020, 2020, 2021, 2021],
+            "country": ["US", "CA", "US", "CA"],
+            "num_sold": [100, 200, 150, 250]
+        })
+        td = TrackingDict({"df": df})
+
+        with td.track_execution():
+            # Create total_per_day via groupby (WRITE)
+            td["total_per_day"] = td["df"].groupby("year")["num_sold"].sum().reset_index()
+
+            # Create grouped_data (WRITE)
+            td["grouped_data"] = td["df"].groupby(["year", "country"])["num_sold"].sum().reset_index()
+
+            # Merge uses total_per_day - reads 'year' column but total_per_day was written
+            td["grouped_data"] = td["grouped_data"].merge(
+                td["total_per_day"],
+                on=["year"],
+                suffixes=["", "_total"]
+            )
+
+        data = td.get_tracking_data()
+
+        # total_per_day should NOT be in column_reads (it was created in this cell)
+        assert "total_per_day" not in data.column_reads_before_writes
+
+        # grouped_data should NOT be in column_reads (it was created in this cell)
+        assert "grouped_data" not in data.column_reads_before_writes
+
+        # df SHOULD be in column_reads (it existed before the cell)
+        assert "df" in data.column_reads_before_writes
+        assert "year" in data.column_reads_before_writes["df"]
+        assert "num_sold" in data.column_reads_before_writes["df"]
+
+    def test_structural_reads_exclude_written_variables(self):
+        """Structural reads from variables written in the cell are excluded."""
+        df = pd.DataFrame({"x": [1, 2, 3]})
+        td = TrackingDict({"df": df})
+
+        with td.track_execution():
+            # Create new DataFrame
+            td["new_df"] = pd.DataFrame({"a": [1, 2]})
+
+            # Structural read from new_df - should NOT be tracked
+            _ = td["new_df"].columns
+
+        data = td.get_tracking_data()
+
+        # new_df should NOT be in structural_reads (it was written)
+        assert "new_df" not in data.structural_reads
+
 
 class TestStartStopColumnTracking:
     """Tests for manual column tracking control."""
@@ -487,6 +590,31 @@ class TestStartStopColumnTracking:
         td.start_column_tracking()
         td.stop_column_tracking()
         td.stop_column_tracking()  # Should not raise
+
+    def test_multiple_tracker_instances_no_recursion(self):
+        """Multiple TrackingDict instances don't cause patch recursion.
+
+        When multiple TrackingDict instances are created, they should share
+        the same patches via class-level tracking, not double-patch and
+        cause infinite recursion.
+        """
+        df = pd.DataFrame({"a": [1, 2, 3]})
+
+        # Create first tracker and install patches
+        td1 = TrackingDict({"df": df})
+        td1.start_column_tracking()
+        _ = td1["df"]["a"]  # This should work
+        td1.stop_column_tracking()
+
+        # Create second tracker - should reuse existing patches
+        td2 = TrackingDict({"df": df})
+        td2.start_column_tracking()
+        _ = td2["df"]["a"]  # This should NOT cause infinite recursion
+        td2.stop_column_tracking()
+
+        # Verify tracking worked for both
+        assert "df" in td1.column_reads_before_writes
+        assert "df" in td2.column_reads_before_writes
 
 
 class TestSuspendedContextManager:

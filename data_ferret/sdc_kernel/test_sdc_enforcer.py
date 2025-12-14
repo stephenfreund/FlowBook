@@ -510,7 +510,8 @@ class TestColumnAwareBackwardMutation:
         # Violation - conservative when current has no column info
         assert result_b.violation is not None
         assert result_b.violation.affected_cell == "a"
-        assert "df" in result_b.violation.variables
+        # New resolver provides precise column info: "df.price" instead of just "df"
+        assert any(v.startswith("df") for v in result_b.violation.variables)
 
     def test_mixed_variable_and_column_conflicts(self):
         """Mixed scenario: variable-level conflict on config, no column conflict on df."""

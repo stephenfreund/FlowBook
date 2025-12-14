@@ -1660,6 +1660,48 @@ class TestStructureUsingMethodsExclusion:
 
         assert 's' not in result or len(result.get('s', set())) == 0
 
+    def test_series_bitwise_and_excluded(self, tracker, df):
+        """Boolean mask operations (mask1 & mask2) don't record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        # Create boolean masks and combine with &
+        mask1 = df['a'] > 1
+        mask2 = df['b'] < 6
+        _ = mask1 & mask2
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_series_bitwise_or_excluded(self, tracker, df):
+        """Boolean mask operations (mask1 | mask2) don't record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        mask1 = df['a'] > 1
+        mask2 = df['b'] < 6
+        _ = mask1 | mask2
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_series_bitwise_invert_excluded(self, tracker, df):
+        """Boolean mask inversion (~mask) doesn't record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        mask = df['a'] > 1
+        _ = ~mask
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
     def test_explicit_access_still_tracked(self, tracker, df):
         """Explicit structural access is still tracked after structure-using ops."""
         tracker.register(df, 'df')
@@ -1694,6 +1736,292 @@ class TestStructureUsingMethodsExclusion:
         result = tracker.resolve_to_paths()
 
         assert 'df' not in result or len(result.get('df', set())) == 0
+
+
+class TestIndexerExclusion:
+    """Tests that .loc, .iloc, .at, .iat indexers don't record structural reads."""
+
+    @pytest.fixture
+    def tracker(self):
+        return StructuralAccessTracker(mode=StructuralTrackingMode.ENFORCE)
+
+    @pytest.fixture
+    def df(self):
+        return pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
+
+    def test_loc_getitem_excluded(self, tracker, df):
+        """df.loc[...] does not record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        _ = df.loc[0, 'a']
+        _ = df.loc[1:2, 'b']
+        _ = df.loc[:, 'a']
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_loc_setitem_excluded(self, tracker, df):
+        """df.loc[...] = value does not record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        df.loc[0, 'a'] = 100
+        df.loc[df['a'] > 50, 'b'] = 200
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_loc_new_column_excluded(self, tracker, df):
+        """df.loc[:, 'new_col'] = value does not record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        df.loc[:, 'c'] = [7, 8, 9]
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_iloc_getitem_excluded(self, tracker, df):
+        """df.iloc[...] does not record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        _ = df.iloc[0, 0]
+        _ = df.iloc[1:2, :]
+        _ = df.iloc[:, 0]
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_iloc_setitem_excluded(self, tracker, df):
+        """df.iloc[...] = value does not record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        df.iloc[0, 0] = 100
+        df.iloc[1:3, 1] = 200
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_at_excluded(self, tracker, df):
+        """df.at[...] does not record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        _ = df.at[0, 'a']
+        df.at[1, 'b'] = 100
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_iat_excluded(self, tracker, df):
+        """df.iat[...] does not record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        _ = df.iat[0, 0]
+        df.iat[1, 1] = 100
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_explicit_access_after_loc_still_tracked(self, tracker, df):
+        """Explicit structural access after .loc is still tracked."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        # Use loc (should not be tracked)
+        _ = df.loc[0, 'a']
+
+        # Explicit structural access (should be tracked)
+        _ = df.columns
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'columns' in result['df']
+
+    def test_complex_loc_expression_excluded(self, tracker, df):
+        """Complex .loc expressions don't record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        # Boolean indexing with loc
+        df.loc[df['a'] > 1, 'b'] = df.loc[df['a'] > 1, 'a'] * 2
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+
+class TestPandasFunctionExclusion:
+    """Tests that module-level pandas functions don't record structural reads."""
+
+    @pytest.fixture
+    def tracker(self):
+        return StructuralAccessTracker(mode=StructuralTrackingMode.ENFORCE)
+
+    def test_concat_excluded(self, tracker):
+        """pd.concat does not record structural reads."""
+        df1 = pd.DataFrame({'a': [1, 2]})
+        df2 = pd.DataFrame({'a': [3, 4]})
+        tracker.register(df1, 'df1')
+        tracker.register(df2, 'df2')
+        tracker.install()
+
+        _ = pd.concat([df1, df2])
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df1' not in result or len(result.get('df1', set())) == 0
+        assert 'df2' not in result or len(result.get('df2', set())) == 0
+
+    def test_merge_excluded(self, tracker):
+        """pd.merge does not record structural reads."""
+        df1 = pd.DataFrame({'a': [1, 2], 'b': [10, 20]})
+        df2 = pd.DataFrame({'a': [1, 2], 'c': [100, 200]})
+        tracker.register(df1, 'df1')
+        tracker.register(df2, 'df2')
+        tracker.install()
+
+        _ = pd.merge(df1, df2, on='a')
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df1' not in result or len(result.get('df1', set())) == 0
+        assert 'df2' not in result or len(result.get('df2', set())) == 0
+
+    def test_get_dummies_excluded(self, tracker):
+        """pd.get_dummies does not record structural reads."""
+        df = pd.DataFrame({'a': ['x', 'y', 'x']})
+        tracker.register(df, 'df')
+        tracker.install()
+
+        _ = pd.get_dummies(df['a'])
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_melt_excluded(self, tracker):
+        """pd.melt does not record structural reads."""
+        df = pd.DataFrame({'a': [1, 2], 'b': [3, 4]})
+        tracker.register(df, 'df')
+        tracker.install()
+
+        _ = pd.melt(df)
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_explicit_access_after_concat_still_tracked(self, tracker):
+        """Explicit structural access after pd.concat is still tracked."""
+        df1 = pd.DataFrame({'a': [1, 2]})
+        df2 = pd.DataFrame({'a': [3, 4]})
+        tracker.register(df1, 'df1')
+        tracker.register(df2, 'df2')
+        tracker.install()
+
+        # Concat (should not be tracked)
+        _ = pd.concat([df1, df2])
+
+        # Explicit structural access (should be tracked)
+        _ = df1.columns
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'columns' in result['df1']
+
+
+class TestGroupByExclusion:
+    """Tests that GroupBy column selection doesn't record structural reads."""
+
+    @pytest.fixture
+    def tracker(self):
+        return StructuralAccessTracker(mode=StructuralTrackingMode.ENFORCE)
+
+    @pytest.fixture
+    def df(self):
+        return pd.DataFrame({
+            'category': ['A', 'A', 'B', 'B'],
+            'value': [1, 2, 3, 4],
+            'other': [10, 20, 30, 40]
+        })
+
+    def test_groupby_column_selection_excluded(self, tracker, df):
+        """df.groupby(...)['col'] does not record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        _ = df.groupby('category')['value'].sum()
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_groupby_multi_column_selection_excluded(self, tracker, df):
+        """df.groupby(...)[['col1', 'col2']] does not record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        _ = df.groupby('category')[['value', 'other']].sum()
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_groupby_with_reset_index_excluded(self, tracker, df):
+        """df.groupby(...).sum().reset_index() chain does not record structural reads."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        _ = df.groupby('category')['value'].sum().reset_index()
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'df' not in result or len(result.get('df', set())) == 0
+
+    def test_explicit_columns_after_groupby_still_tracked(self, tracker, df):
+        """Explicit df.columns access after groupby is still tracked."""
+        tracker.register(df, 'df')
+        tracker.install()
+
+        # GroupBy (should not be tracked)
+        _ = df.groupby('category')['value'].sum()
+
+        # Explicit structural access (should be tracked)
+        _ = df.columns
+
+        tracker.uninstall()
+        result = tracker.resolve_to_paths()
+
+        assert 'columns' in result['df']
 
 
 class TestIPythonIntegration:

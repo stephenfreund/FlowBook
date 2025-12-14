@@ -95,6 +95,10 @@ class ExecuteSDCCommand(NotebookCommand):
             total_executed = 0
             status = "success"
 
+            with timer(key="execute_magic", message="Executing magic %continue_after_violation on"):
+                kernel_client.execute("%continue_after_violation on")
+
+
             with timer(key="execute_sdc", message="Executing all cells with SDC"):
                 for idx, cell in enumerate(cells):
                     if cell.get("cell_type") != "code":

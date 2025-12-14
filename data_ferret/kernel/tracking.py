@@ -313,6 +313,22 @@ class TrackingDict(dict):
         from .checkpoint import is_valid_variable
         from .models import TrackingData
 
+        # Filter column reads: exclude DataFrames that were WRITTEN in this cell
+        # If a variable like `total_per_day` was created in this cell, column reads
+        # from it are not "reads before writes" because the whole variable is new
+        column_rbw = {
+            k: set(v)
+            for k, v in self.column_reads_before_writes.items()
+            if k not in self._writes  # Exclude variables that were written
+        }
+
+        # Same for structural reads: exclude variables that were written
+        struct_reads = {
+            k: set(v)
+            for k, v in self.structural_reads.items()
+            if k not in self._writes
+        }
+
         return TrackingData(
             reads_before_writes=set(
                 k
@@ -324,9 +340,7 @@ class TrackingDict(dict):
                 for k in self._writes
                 if is_valid_variable(k, self._real_ns.get(k))
             ),
-            column_reads_before_writes={
-                k: set(v) for k, v in self.column_reads_before_writes.items()
-            },
+            column_reads_before_writes=column_rbw,
             column_writes={k: set(v) for k, v in self.column_writes.items()},
-            structural_reads={k: set(v) for k, v in self.structural_reads.items()},
+            structural_reads=struct_reads,
         )
