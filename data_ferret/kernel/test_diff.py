@@ -3170,3 +3170,394 @@ class TestUseLeqEdgeCases:
         b = {'df': df_b}
         result = differ.diff(a, b)
         assert_no_diff(result)
+
+
+# ============================================================================
+# NaT (Not a Time) HANDLING TESTS
+# ============================================================================
+
+class TestNaTHandling:
+    """Test that NaT (Not a Time) values are compared like NaN - NaT equals NaT."""
+
+    # -------------------------------------------------------------------------
+    # numpy.datetime64 scalar tests
+    # -------------------------------------------------------------------------
+
+    def test_datetime64_both_nat_equal(self):
+        """Two numpy datetime64 NaT values should be equal."""
+        differ = Diff()
+        a = {'x': np.datetime64('NaT')}
+        b = {'x': np.datetime64('NaT')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_datetime64_nat_vs_date_different(self):
+        """datetime64 NaT vs actual date should be different."""
+        differ = Diff()
+        a = {'x': np.datetime64('NaT')}
+        b = {'x': np.datetime64('2024-01-01')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'one is NaT')
+
+    def test_datetime64_date_vs_nat_different(self):
+        """datetime64 actual date vs NaT should be different."""
+        differ = Diff()
+        a = {'x': np.datetime64('2024-01-01')}
+        b = {'x': np.datetime64('NaT')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'one is NaT')
+
+    def test_datetime64_same_dates_equal(self):
+        """Two identical datetime64 values should be equal."""
+        differ = Diff()
+        a = {'x': np.datetime64('2024-01-15')}
+        b = {'x': np.datetime64('2024-01-15')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_datetime64_different_dates_different(self):
+        """Two different datetime64 values should be different."""
+        differ = Diff()
+        a = {'x': np.datetime64('2024-01-15')}
+        b = {'x': np.datetime64('2024-01-16')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'datetime64 mismatch')
+
+    def test_datetime64_different_units_same_time(self):
+        """datetime64 with different units but same time should be equal."""
+        differ = Diff()
+        a = {'x': np.datetime64('2024-01-15', 'D')}
+        b = {'x': np.datetime64('2024-01-15', 'D')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    # -------------------------------------------------------------------------
+    # numpy.timedelta64 scalar tests
+    # -------------------------------------------------------------------------
+
+    def test_timedelta64_both_nat_equal(self):
+        """Two numpy timedelta64 NaT values should be equal."""
+        differ = Diff()
+        a = {'x': np.timedelta64('NaT')}
+        b = {'x': np.timedelta64('NaT')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_timedelta64_nat_vs_value_different(self):
+        """timedelta64 NaT vs actual duration should be different."""
+        differ = Diff()
+        a = {'x': np.timedelta64('NaT')}
+        b = {'x': np.timedelta64(5, 'D')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'one is NaT')
+
+    def test_timedelta64_value_vs_nat_different(self):
+        """timedelta64 actual duration vs NaT should be different."""
+        differ = Diff()
+        a = {'x': np.timedelta64(5, 'D')}
+        b = {'x': np.timedelta64('NaT')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'one is NaT')
+
+    def test_timedelta64_same_values_equal(self):
+        """Two identical timedelta64 values should be equal."""
+        differ = Diff()
+        a = {'x': np.timedelta64(10, 'D')}
+        b = {'x': np.timedelta64(10, 'D')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_timedelta64_different_values_different(self):
+        """Two different timedelta64 values should be different."""
+        differ = Diff()
+        a = {'x': np.timedelta64(10, 'D')}
+        b = {'x': np.timedelta64(20, 'D')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'timedelta64 mismatch')
+
+    # -------------------------------------------------------------------------
+    # pandas Timestamp tests
+    # -------------------------------------------------------------------------
+
+    def test_pandas_timestamp_both_nat_equal(self):
+        """Two pandas NaT values should be equal."""
+        differ = Diff()
+        a = {'x': pd.NaT}
+        b = {'x': pd.NaT}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_pandas_timestamp_nat_vs_timestamp_different(self):
+        """pandas NaT vs actual Timestamp should be different."""
+        differ = Diff()
+        a = {'x': pd.NaT}
+        b = {'x': pd.Timestamp('2024-01-15')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'one is NaT')
+
+    def test_pandas_timestamp_same_equal(self):
+        """Two identical pandas Timestamps should be equal."""
+        differ = Diff()
+        a = {'x': pd.Timestamp('2024-01-15 10:30:00')}
+        b = {'x': pd.Timestamp('2024-01-15 10:30:00')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_pandas_timestamp_different_different(self):
+        """Two different pandas Timestamps should be different."""
+        differ = Diff()
+        a = {'x': pd.Timestamp('2024-01-15')}
+        b = {'x': pd.Timestamp('2024-01-16')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'Timestamp mismatch')
+
+    # -------------------------------------------------------------------------
+    # pandas Timedelta tests
+    # -------------------------------------------------------------------------
+
+    def test_pandas_timedelta_both_nat_equal(self):
+        """Two pandas Timedelta NaT values should be equal."""
+        differ = Diff()
+        a = {'x': pd.Timedelta('NaT')}
+        b = {'x': pd.Timedelta('NaT')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_pandas_timedelta_nat_vs_value_different(self):
+        """pandas Timedelta NaT vs actual value should be different."""
+        differ = Diff()
+        a = {'x': pd.Timedelta('NaT')}
+        b = {'x': pd.Timedelta('5 days')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'one is NaT')
+
+    def test_pandas_timedelta_same_equal(self):
+        """Two identical pandas Timedeltas should be equal."""
+        differ = Diff()
+        a = {'x': pd.Timedelta('5 days 3 hours')}
+        b = {'x': pd.Timedelta('5 days 3 hours')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_pandas_timedelta_different_different(self):
+        """Two different pandas Timedeltas should be different."""
+        differ = Diff()
+        a = {'x': pd.Timedelta('5 days')}
+        b = {'x': pd.Timedelta('10 days')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'x')
+        assert_message_contains(result, 'x', 'Timedelta mismatch')
+
+    # -------------------------------------------------------------------------
+    # numpy array tests with NaT
+    # -------------------------------------------------------------------------
+
+    def test_datetime64_array_with_nat_same_positions_equal(self):
+        """datetime64 arrays with NaT at same positions should be equal."""
+        differ = Diff()
+        a = {'arr': np.array(['2024-01-01', 'NaT', '2024-01-03'], dtype='datetime64')}
+        b = {'arr': np.array(['2024-01-01', 'NaT', '2024-01-03'], dtype='datetime64')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_datetime64_array_with_nat_different_positions_different(self):
+        """datetime64 arrays with NaT at different positions should be different."""
+        differ = Diff()
+        a = {'arr': np.array(['2024-01-01', 'NaT', '2024-01-03'], dtype='datetime64')}
+        b = {'arr': np.array(['NaT', '2024-01-02', '2024-01-03'], dtype='datetime64')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'arr')
+
+    def test_datetime64_array_nat_vs_date_different(self):
+        """datetime64 array with NaT vs date at same position should be different."""
+        differ = Diff()
+        a = {'arr': np.array(['2024-01-01', 'NaT', '2024-01-03'], dtype='datetime64')}
+        b = {'arr': np.array(['2024-01-01', '2024-01-02', '2024-01-03'], dtype='datetime64')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'arr')
+        assert_message_contains(result, 'arr', 'one is NaT')
+
+    def test_datetime64_array_multiple_nats_equal(self):
+        """datetime64 arrays with multiple NaTs at same positions should be equal."""
+        differ = Diff()
+        a = {'arr': np.array(['NaT', 'NaT', 'NaT'], dtype='datetime64')}
+        b = {'arr': np.array(['NaT', 'NaT', 'NaT'], dtype='datetime64')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_timedelta64_array_with_nat_equal(self):
+        """timedelta64 arrays with NaT at same positions should be equal."""
+        differ = Diff()
+        a = {'arr': np.array([1, 'NaT', 3], dtype='timedelta64[D]')}
+        b = {'arr': np.array([1, 'NaT', 3], dtype='timedelta64[D]')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_timedelta64_array_nat_vs_value_different(self):
+        """timedelta64 array with NaT vs value should be different."""
+        differ = Diff()
+        a = {'arr': np.array([1, 'NaT', 3], dtype='timedelta64[D]')}
+        b = {'arr': np.array([1, 2, 3], dtype='timedelta64[D]')}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'arr')
+        assert_message_contains(result, 'arr', 'one is NaT')
+
+    def test_datetime64_2d_array_with_nat_equal(self):
+        """2D datetime64 arrays with NaT should be equal."""
+        differ = Diff()
+        a = {'arr': np.array([['2024-01-01', 'NaT'], ['NaT', '2024-01-04']], dtype='datetime64')}
+        b = {'arr': np.array([['2024-01-01', 'NaT'], ['NaT', '2024-01-04']], dtype='datetime64')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    # -------------------------------------------------------------------------
+    # pandas Series tests with NaT
+    # -------------------------------------------------------------------------
+
+    def test_datetime_series_with_nat_equal(self):
+        """datetime Series with NaT at same positions should be equal."""
+        differ = Diff()
+        a = {'s': pd.Series(pd.to_datetime(['2024-01-01', 'NaT', '2024-01-03']))}
+        b = {'s': pd.Series(pd.to_datetime(['2024-01-01', 'NaT', '2024-01-03']))}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_datetime_series_nat_vs_date_different(self):
+        """datetime Series with NaT vs date should be different."""
+        differ = Diff()
+        a = {'s': pd.Series(pd.to_datetime(['2024-01-01', 'NaT', '2024-01-03']))}
+        b = {'s': pd.Series(pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']))}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 's')
+
+    def test_timedelta_series_with_nat_equal(self):
+        """timedelta Series with NaT at same positions should be equal."""
+        differ = Diff()
+        a = {'s': pd.Series(pd.to_timedelta(['1 day', 'NaT', '3 days']))}
+        b = {'s': pd.Series(pd.to_timedelta(['1 day', 'NaT', '3 days']))}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_timedelta_series_nat_vs_value_different(self):
+        """timedelta Series with NaT vs value should be different."""
+        differ = Diff()
+        a = {'s': pd.Series(pd.to_timedelta(['1 day', 'NaT', '3 days']))}
+        b = {'s': pd.Series(pd.to_timedelta(['1 day', '2 days', '3 days']))}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 's')
+
+    # -------------------------------------------------------------------------
+    # pandas DataFrame tests with NaT
+    # -------------------------------------------------------------------------
+
+    def test_dataframe_datetime_column_with_nat_equal(self):
+        """DataFrame with datetime column containing NaT should be equal."""
+        differ = Diff()
+        a = {'df': pd.DataFrame({'date': pd.to_datetime(['2024-01-01', 'NaT', '2024-01-03'])})}
+        b = {'df': pd.DataFrame({'date': pd.to_datetime(['2024-01-01', 'NaT', '2024-01-03'])})}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_datetime_column_nat_vs_date_different(self):
+        """DataFrame datetime column with NaT vs date should be different."""
+        differ = Diff()
+        a = {'df': pd.DataFrame({'date': pd.to_datetime(['2024-01-01', 'NaT', '2024-01-03'])})}
+        b = {'df': pd.DataFrame({'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03'])})}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+
+    def test_dataframe_timedelta_column_with_nat_equal(self):
+        """DataFrame with timedelta column containing NaT should be equal."""
+        differ = Diff()
+        a = {'df': pd.DataFrame({'duration': pd.to_timedelta(['1 day', 'NaT', '3 days'])})}
+        b = {'df': pd.DataFrame({'duration': pd.to_timedelta(['1 day', 'NaT', '3 days'])})}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_mixed_columns_with_nat_equal(self):
+        """DataFrame with mixed columns including NaT should be equal."""
+        differ = Diff()
+        df_a = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', 'NaT']),
+            'value': [1.5, 2.5],
+            'name': ['alice', 'bob']
+        })
+        df_b = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', 'NaT']),
+            'value': [1.5, 2.5],
+            'name': ['alice', 'bob']
+        })
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    # -------------------------------------------------------------------------
+    # Edge cases and nested structures with NaT
+    # -------------------------------------------------------------------------
+
+    def test_nat_in_nested_dict(self):
+        """NaT values in nested dictionaries should be handled correctly."""
+        differ = Diff()
+        a = {'data': {'timestamp': np.datetime64('NaT')}}
+        b = {'data': {'timestamp': np.datetime64('NaT')}}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_nat_in_list(self):
+        """NaT values in lists should be handled correctly."""
+        differ = Diff()
+        a = {'times': [np.datetime64('2024-01-01'), np.datetime64('NaT')]}
+        b = {'times': [np.datetime64('2024-01-01'), np.datetime64('NaT')]}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_nat_in_tuple(self):
+        """NaT values in tuples should be handled correctly."""
+        differ = Diff()
+        a = {'times': (np.datetime64('NaT'), np.datetime64('2024-01-01'))}
+        b = {'times': (np.datetime64('NaT'), np.datetime64('2024-01-01'))}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_mixed_nat_and_nan_equal(self):
+        """Mixed NaT and NaN values should be handled correctly."""
+        differ = Diff()
+        a = {
+            'timestamp': np.datetime64('NaT'),
+            'value': float('nan'),
+            'duration': np.timedelta64('NaT')
+        }
+        b = {
+            'timestamp': np.datetime64('NaT'),
+            'value': float('nan'),
+            'duration': np.timedelta64('NaT')
+        }
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_nat_with_different_datetime64_units(self):
+        """NaT with different datetime64 units should still be equal."""
+        differ = Diff()
+        # NaT is NaT regardless of unit
+        a = {'x': np.datetime64('NaT', 'D')}
+        b = {'x': np.datetime64('NaT', 's')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_nat_with_different_timedelta64_units(self):
+        """NaT with different timedelta64 units should still be equal."""
+        differ = Diff()
+        a = {'x': np.timedelta64('NaT', 'D')}
+        b = {'x': np.timedelta64('NaT', 'h')}
+        result = differ.diff(a, b)
+        assert_no_diff(result)

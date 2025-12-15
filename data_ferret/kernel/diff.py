@@ -528,6 +528,35 @@ class Diff:
         else:
             # For non-atomic types (containers), use exact type matching
             if type(val_a) != type(val_b):
+                # Special case: pd.NaT (NaTType) vs Timestamp/Timedelta
+                # pd.NaT is a separate type that represents missing time values
+                # We should report this as "one is NaT" rather than a type mismatch
+                # Note: Check type name first to avoid calling pd.isna() on non-scalar types
+                is_nat_a = type(val_a).__name__ == 'NaTType'
+                is_nat_b = type(val_b).__name__ == 'NaTType'
+                is_timestamp_a = isinstance(val_a, pd.Timestamp)
+                is_timestamp_b = isinstance(val_b, pd.Timestamp)
+                is_timedelta_a = isinstance(val_a, pd.Timedelta)
+                is_timedelta_b = isinstance(val_b, pd.Timedelta)
+
+                # NaT vs Timestamp
+                if (is_nat_a and is_timestamp_b) or (is_timestamp_a and is_nat_b):
+                    return ValueComparison(
+                        status="different",
+                        value1=val_a,
+                        value2=val_b,
+                        message=f"Timestamp mismatch at {path}: {val_a} vs {val_b} (one is NaT)",
+                    )
+
+                # NaT vs Timedelta
+                if (is_nat_a and is_timedelta_b) or (is_timedelta_a and is_nat_b):
+                    return ValueComparison(
+                        status="different",
+                        value1=val_a,
+                        value2=val_b,
+                        message=f"Timedelta mismatch at {path}: {val_a} vs {val_b} (one is NaT)",
+                    )
+
                 # In non-strict mode, check if types are compatible
                 if not self.strict:
                     is_compatible, compat_type = self._types_compatible(val_a, val_b)
@@ -572,6 +601,9 @@ class Diff:
             result = None  # Both None (type check passed), so equal
         elif isinstance(val_a, bool):
             result = self._compare_bool(val_a, val_b, path)
+        # Check timedelta64 BEFORE integer (timedelta64 is subclass of np.integer)
+        elif isinstance(val_a, np.timedelta64):
+            result = self._compare_timedelta64(val_a, val_b, path)
         elif isinstance(val_a, (int, np.integer)):
             result = self._compare_int(val_a, val_b, path)
         elif isinstance(val_a, (float, np.floating)):
@@ -587,6 +619,9 @@ class Diff:
             result = self._compare_timestamp(val_a, val_b, path)
         elif isinstance(val_a, pd.Timedelta):
             result = self._compare_timedelta(val_a, val_b, path)
+        # Numpy datetime64 (timedelta64 handled earlier due to np.integer inheritance)
+        elif isinstance(val_a, np.datetime64):
+            result = self._compare_datetime64(val_a, val_b, path)
         elif callable(val_a):
             result = self._compare_callable(val_a, val_b, path)
         elif isinstance(val_a, np.ndarray):
@@ -1477,6 +1512,20 @@ class Diff:
         self, val_a: pd.Timestamp, val_b: pd.Timestamp, path: str
     ) -> Optional[ValueComparison]:
         """Compare pandas Timestamp objects."""
+        # Handle NaT (Not a Time) - similar to NaN, NaT != NaT is True
+        is_nat_a = pd.isna(val_a)
+        is_nat_b = pd.isna(val_b)
+
+        if is_nat_a and is_nat_b:
+            return None  # Both NaT, considered equal
+        if is_nat_a or is_nat_b:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Timestamp mismatch at {path}: {val_a} vs {val_b} (one is NaT)",
+            )
+
         if val_a != val_b:
             return ValueComparison(
                 status="different",
@@ -1490,12 +1539,80 @@ class Diff:
         self, val_a: pd.Timedelta, val_b: pd.Timedelta, path: str
     ) -> Optional[ValueComparison]:
         """Compare pandas Timedelta objects."""
+        # Handle NaT (Not a Time) - similar to NaN, NaT != NaT is True
+        is_nat_a = pd.isna(val_a)
+        is_nat_b = pd.isna(val_b)
+
+        if is_nat_a and is_nat_b:
+            return None  # Both NaT, considered equal
+        if is_nat_a or is_nat_b:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Timedelta mismatch at {path}: {val_a} vs {val_b} (one is NaT)",
+            )
+
         if val_a != val_b:
             return ValueComparison(
                 status="different",
                 value1=val_a,
                 value2=val_b,
                 message=f"Timedelta mismatch at {path}: {val_a} vs {val_b}",
+            )
+        return None
+
+    def _compare_datetime64(
+        self, val_a: np.datetime64, val_b: np.datetime64, path: str
+    ) -> Optional[ValueComparison]:
+        """Compare numpy datetime64 objects."""
+        # Handle NaT (Not a Time) - similar to NaN, NaT != NaT is True
+        is_nat_a = np.isnat(val_a)
+        is_nat_b = np.isnat(val_b)
+
+        if is_nat_a and is_nat_b:
+            return None  # Both NaT, considered equal
+        if is_nat_a or is_nat_b:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"datetime64 mismatch at {path}: {val_a} vs {val_b} (one is NaT)",
+            )
+
+        if val_a != val_b:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"datetime64 mismatch at {path}: {val_a} vs {val_b}",
+            )
+        return None
+
+    def _compare_timedelta64(
+        self, val_a: np.timedelta64, val_b: np.timedelta64, path: str
+    ) -> Optional[ValueComparison]:
+        """Compare numpy timedelta64 objects."""
+        # Handle NaT (Not a Time) - similar to NaN, NaT != NaT is True
+        is_nat_a = np.isnat(val_a)
+        is_nat_b = np.isnat(val_b)
+
+        if is_nat_a and is_nat_b:
+            return None  # Both NaT, considered equal
+        if is_nat_a or is_nat_b:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"timedelta64 mismatch at {path}: {val_a} vs {val_b} (one is NaT)",
+            )
+
+        if val_a != val_b:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"timedelta64 mismatch at {path}: {val_a} vs {val_b}",
             )
         return None
 
