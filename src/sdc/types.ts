@@ -7,6 +7,7 @@ export interface ISDCViolation {
   affected_cell: string;
   variables: string[];
   message: string;
+  violation_type?: 'backward_mutation' | 'forward_dependency';
 }
 
 export interface ISDCMetadata {

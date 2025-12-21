@@ -116,6 +116,7 @@ from .access_events import StructuralRead, VariableRead
 from .conflict_resolver import ConflictResolver
 from .conflict_rules import StructuralMode
 from .change_detector import detect_changes
+from data_ferret.util.output import timer
 
 # Checkpoint naming constants
 PRE_CHECKPOINT_PREFIX = "_pre_"
@@ -231,13 +232,23 @@ class SDCEnforcer:
             # Cell not in order list - can't enforce SDC
             my_position = -1
 
-        # Rule 3: Check backward mutation (also returns the diff for reuse)
+        # Rule 3: Check backward mutation (also returns diff and typed_changes for reuse)
         violation = None
         current_diff = None
+        typed_changes = []
         if my_position >= 0:
-            violation, current_diff = self._check_backward_mutation(
-                cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
-            )
+            with timer(key="sdc_backward_mutation", message=f"[sdc] Backward mutation check for {cell_id}"):
+                violation, current_diff, typed_changes = self._check_backward_mutation(
+                    cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
+                )
+
+        # Check forward dependency (reading from later cells that already executed)
+        forward_violation = None
+        if my_position >= 0:
+            with timer(key="sdc_forward_dependency", message=f"[sdc] Forward dependency check for {cell_id}"):
+                forward_violation = self._check_forward_dependency(
+                    cell_id, my_position, tracking
+                )
 
         stale = []
         changed_vars = []
@@ -260,11 +271,13 @@ class SDCEnforcer:
 
             # Update our record for this cell BEFORE computing staleness
             # (so this cell is considered "fresh" in the computation)
+            # typed_changes is cached for fast forward dependency checks
             self.records[cell_id] = SDCExecutionRecord(
                 cell_id=cell_id,
                 tracking=tracking,
                 execution_seq=self.seq_counter,
                 structural_reads_values=structural_read_values,
+                typed_changes=typed_changes,
             )
 
             # This cell just executed, so it's now fresh
@@ -294,10 +307,7 @@ class SDCEnforcer:
                         mutating_cell=cell_id,
                         affected_cell=cell_id,
                         variables=truncated_vars,
-                        message=(
-                            f"Cell {mutating_alpha}: SDC diff was truncated for variables: {truncated_vars}. "
-                            "Tracking may be incomplete. Consider increasing max_diffs_per_container."
-                        ),
+                        message=format_truncation_error(mutating_alpha, truncated_vars),
                         truncation_details=formatted_diff,
                     ),
                     stale_cells=[],
@@ -326,6 +336,7 @@ class SDCEnforcer:
             changed_variables=changed_vars,
             column_changed=column_changed,
             structural_warnings=structural_warnings,
+            forward_violation=forward_violation,
         )
 
     def _check_backward_mutation(
@@ -335,7 +346,7 @@ class SDCEnforcer:
         pre_checkpoint: Checkpoint,
         post_checkpoint: Checkpoint,
         tracking: TrackingData,
-    ) -> Tuple[Optional[SDCViolation], DiffResult]:
+    ) -> Tuple[Optional[SDCViolation], DiffResult, List]:
         """
         Check if current cell causes a backward mutation (Rule 3 violation).
 
@@ -347,8 +358,9 @@ class SDCEnforcer:
         df['price'] doesn't conflict with a cell that only reads df['quantity'].
 
         Returns:
-            Tuple of (violation, diff_result) - diff_result is returned for reuse
-            by caller to avoid redundant computation.
+            Tuple of (violation, diff_result, typed_changes):
+            - diff_result is returned for reuse by caller
+            - typed_changes is cached in the record for fast forward dependency checks
         """
         # Compute what THIS cell actually modified
         # For diff detection, check all accessed columns (read OR written)
@@ -364,10 +376,13 @@ class SDCEnforcer:
         # Compute diff without structural_reads - intra-cell structural reads
         # are not backward mutations. Structural conflict detection is handled
         # by the ConflictResolver which uses prior cells' structural reads.
+        # Note: use_leq=False to detect created variables too - these are cached
+        # for forward dependency checks. Created variables won't cause false
+        # positive backward mutations (earlier cells couldn't have read them).
         current_diff = Checkpoint.diff(
             pre_checkpoint,
             post_checkpoint,
-            use_leq=True,
+            use_leq=False,  # Detect creations for forward dependency caching
             column_rbw=all_accessed_columns,
             structural_reads={},  # Empty - ConflictResolver handles this
             structural_mode=self._structural_mode,
@@ -383,26 +398,25 @@ class SDCEnforcer:
                     mutating_cell=cell_id,
                     affected_cell=cell_id,
                     variables=truncated_vars,
-                    message=(
-                        f"⚠️ Cell {mutating_alpha}: SDC diff was truncated for variables: {truncated_vars}. "
-                        "Tracking may be incomplete. Consider increasing max_diffs_per_container."
-                    ),
+                    message=format_truncation_error(mutating_alpha, truncated_vars),
                     truncation_details=formatted_diff,
                 ),
                 current_diff,
+                [],  # No typed_changes on truncation
             )
 
         if not current_diff.differences:
             # This cell didn't modify anything, no backward mutation possible
-            return (None, current_diff)
+            return (None, current_diff, [])
 
         # Column-level modifications (for DataFrames)
         modified_columns = _extract_column_changes(current_diff, tracking)
 
         # Convert diff to typed Changes for conflict detection
+        # These are also cached in the record for forward dependency checks
         typed_changes = detect_changes(current_diff)
         if not typed_changes:
-            return (None, current_diff)
+            return (None, current_diff, [])
 
         # Check if any earlier cell reads something we modified
         for prior_cell_id in self._cell_order[:my_position]:
@@ -465,9 +479,86 @@ class SDCEnforcer:
                         changes_detail=changes,
                     ),
                     current_diff,
+                    typed_changes,
                 )
 
-        return (None, current_diff)
+        return (None, current_diff, typed_changes)
+
+    def _check_forward_dependency(
+        self,
+        cell_id: str,
+        my_position: int,
+        tracking: TrackingData,
+    ) -> Optional[SDCViolation]:
+        """
+        Check if current cell reads from a later cell that already executed.
+
+        A forward dependency occurs when a cell reads a variable that a later
+        cell (in document order) has already written. This means the reading
+        cell is seeing "future" state that wouldn't exist in top-to-bottom order.
+
+        Uses cached typed_changes from each cell's execution record, avoiding
+        expensive checkpoint diffs. The typed_changes are computed once during
+        backward mutation check and cached for reuse here.
+
+        Args:
+            cell_id: ID of the cell that just executed (the reading cell)
+            my_position: Position in document order
+            tracking: TrackingData with reads for this cell
+
+        Returns:
+            SDCViolation with violation_type="forward_dependency" if detected, None otherwise
+        """
+        # Convert current cell's reads to typed AccessEvents
+        my_read_events = tracking.to_read_events()
+        if not my_read_events:
+            return None
+
+        # Check later cells (in document order) that already executed
+        for later_cell_id in self._cell_order[my_position + 1:]:
+            later_record = self.records.get(later_cell_id)
+            if later_record is None:
+                continue  # Later cell hasn't executed yet - OK
+
+            # Use cached typed_changes from the later cell's execution
+            # These were computed during backward mutation check and include
+            # both modifications and creations (use_leq=False)
+            later_changes = later_record.typed_changes
+            if not later_changes:
+                continue  # Later cell didn't actually change anything
+
+            # Check if later cell's changes conflict with current cell's reads
+            violations = self._conflict_resolver.get_violations(later_changes, my_read_events)
+            if not violations:
+                continue
+
+            # Extract conflict names from violations
+            conflicts = []
+            for v in violations:
+                var = v.change.variable
+                if hasattr(v.change, 'column') and v.change.column:
+                    conflicts.append(f"{var}['{v.change.column}']")
+                else:
+                    conflicts.append(var)
+            conflicts = sorted(set(conflicts))
+
+            if conflicts:
+                reading_alpha = self._cell_id_to_alpha(cell_id)
+                writing_alpha = self._cell_id_to_alpha(later_cell_id)
+
+                message = format_forward_dependency_message(
+                    reading_alpha, writing_alpha, conflicts
+                )
+
+                return SDCViolation(
+                    mutating_cell=later_cell_id,
+                    affected_cell=cell_id,
+                    variables=conflicts,
+                    message=message,
+                    violation_type="forward_dependency",
+                )
+
+        return None
 
     def _update_staleness_incremental(
         self,
@@ -1105,5 +1196,79 @@ def format_structural_warning(
     # Impact
     lines.append("")
     lines.append(f"Impact: Re-running from top will give Cell {affected_cell_alpha} different results.")
+
+    return "\n".join(lines)
+
+
+def format_forward_dependency_message(
+    reading_cell_alpha: str,
+    writing_cell_alpha: str,
+    variables: List[str],
+) -> str:
+    """
+    Format a forward dependency violation message.
+
+    A forward dependency occurs when a cell reads a variable that a later cell
+    (in document order) has already written. This means the reading cell is
+    seeing "future" state that wouldn't exist in top-to-bottom order.
+
+    Args:
+        reading_cell_alpha: Cell that read the variable (@A notation)
+        writing_cell_alpha: Later cell that wrote the variable (@A notation)
+        variables: List of affected variable names
+
+    Returns:
+        Formatted multi-line message string
+    """
+    vars_str = format_variable_list(variables)
+
+    lines = [
+        "❌ SDC Violation: Forward Dependency",
+        "",
+        f"Cell {reading_cell_alpha} reads {vars_str} which was written by "
+        f"Cell {writing_cell_alpha} (later in notebook).",
+        "",
+        f"In top-to-bottom order, Cell {writing_cell_alpha} runs after "
+        f"Cell {reading_cell_alpha}, so {reading_cell_alpha} would see a "
+        "different (or undefined) value.",
+        "",
+        "Why blocked: This out-of-order execution breaks reproducibility.",
+        "",
+        f"Fix: Re-run from Cell {reading_cell_alpha} downward, or move the "
+        "write before the read.",
+    ]
+
+    return "\n".join(lines)
+
+
+def format_truncation_error(
+    cell_alpha: str,
+    variables: List[str],
+) -> str:
+    """
+    Format a truncation error message.
+
+    Truncation occurs when the diff tree exceeds max_diffs_per_container,
+    meaning we may miss some column/key changes. This is treated as an error
+    because SDC tracking may be incomplete.
+
+    Args:
+        cell_alpha: Cell where truncation occurred (@A notation)
+        variables: List of variable names that had truncated diffs
+
+    Returns:
+        Formatted multi-line message string
+    """
+    vars_str = format_variable_list(variables)
+
+    lines = [
+        "⚠️ SDC Warning: Diff Truncated",
+        "",
+        f"Cell {cell_alpha}: SDC diff was truncated for: {vars_str}.",
+        "",
+        "Tracking may be incomplete. Some column or key changes may not be detected.",
+        "",
+        "Fix: Consider increasing max_diffs_per_container or simplifying the data structure.",
+    ]
 
     return "\n".join(lines)

@@ -268,13 +268,25 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
       {hasViolation && metadata.violation && (
         <>
           <div className="sdc-metadata-divider" />
-          <div className="sdc-metadata-section sdc-violation-section">
-            <div className="sdc-violation-header">SDC Violation</div>
+          <div className={`sdc-metadata-section ${
+            metadata.violation.violation_type === 'forward_dependency'
+              ? 'sdc-forward-dep-section'
+              : 'sdc-violation-section'
+          }`}>
+            <div className={
+              metadata.violation.violation_type === 'forward_dependency'
+                ? 'sdc-forward-dep-header'
+                : 'sdc-violation-header'
+            }>
+              {metadata.violation.violation_type === 'forward_dependency'
+                ? 'Forward Dependency'
+                : 'SDC Violation'}
+            </div>
             <div className="sdc-violation-content">
               <p>{metadata.violation.message}</p>
               <div className="sdc-violation-details">
-                <strong>Mutating Cell:</strong> <code>{cellIdToReference(metadata.violation.mutating_cell, currentCellOrder)}</code><br />
-                <strong>Affected Cell:</strong> <code>{cellIdToReference(metadata.violation.affected_cell, currentCellOrder)}</code><br />
+                <strong>{metadata.violation.violation_type === 'forward_dependency' ? 'Writing Cell:' : 'Mutating Cell:'}</strong> <code>{cellIdToReference(metadata.violation.mutating_cell, currentCellOrder)}</code><br />
+                <strong>{metadata.violation.violation_type === 'forward_dependency' ? 'Reading Cell:' : 'Affected Cell:'}</strong> <code>{cellIdToReference(metadata.violation.affected_cell, currentCellOrder)}</code><br />
                 <strong>Variables:</strong> {metadata.violation.variables.join(', ')}
               </div>
             </div>

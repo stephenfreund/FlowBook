@@ -948,6 +948,21 @@
   font-family: var(--jp-code-font-family);
 }
 
+/* Forward Dependency Styles */
+.sdc-forward-dep-section {
+  background-color: rgba(255, 152, 0, 0.15);
+  padding: 12px;
+  border-radius: 4px;
+  margin: 8px -8px;
+  border: 1px solid #ff9800;
+}
+
+.sdc-forward-dep-header {
+  font-weight: bold;
+  color: #e65100;
+  margin-bottom: 8px;
+}
+
 /* Structural Warning Styles */
 .sdc-warning-section {
   background-color: rgba(255, 193, 7, 0.1);

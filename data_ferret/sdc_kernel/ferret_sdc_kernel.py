@@ -759,28 +759,49 @@ class FerretSDCKernel(IPythonKernel, Magics):
                         namespace=self.shell.user_ns,  # For capturing structural read values
                     )
 
-                # Handle violation
-                has_violation = sdc_result and sdc_result.violation
-                if has_violation:
-                    # Log truncation issues to terminal
-                    if sdc_result.violation.truncation_details:
-                        error(f"SDC truncation: {sdc_result.violation.message}")
-                        self._send_truncation_details(sdc_result.violation.truncation_details)
+                # Handle violations (backward mutation and/or forward dependency)
+                has_backward = sdc_result and sdc_result.violation
+                has_forward = sdc_result and sdc_result.forward_violation
 
+                if has_backward or has_forward:
                     if self._continue_after_violation:
-                        error(f"SDC violation (continuing): {sdc_result.violation.message}")
-                        self._send_violation_warning(sdc_result.violation)
+                        # Warn about both violations but continue
+                        if has_backward:
+                            if sdc_result.violation.truncation_details:
+                                error(f"SDC truncation: {sdc_result.violation.message}")
+                                self._send_truncation_details(sdc_result.violation.truncation_details)
+                            error(f"SDC violation (continuing): {sdc_result.violation.message}")
+                            self._send_violation_warning(sdc_result.violation)
+                        if has_forward:
+                            error(f"Forward dependency (continuing): {sdc_result.forward_violation.message}")
+                            self._send_violation_warning(sdc_result.forward_violation)
                     else:
-                        # Log violation to terminal, restore checkpoint, return error
-                        error(f"SDC violation: {sdc_result.violation.message}")
-                        self._sdc.checkpoints.restore(
-                            f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
-                        )
-                        self._send_violation_error(sdc_result.violation)
-                        return self._make_error_result(sdc_result.violation)
+                        # Block on violation - backward takes precedence
+                        primary = sdc_result.violation if has_backward else sdc_result.forward_violation
+
+                        # Log truncation issues to terminal (for backward mutations)
+                        if has_backward and sdc_result.violation.truncation_details:
+                            error(f"SDC truncation: {sdc_result.violation.message}")
+                            self._send_truncation_details(sdc_result.violation.truncation_details)
+
+                        error(f"SDC violation: {primary.message}")
+
+                        # Only rollback for backward mutations (forward deps didn't change anything)
+                        if has_backward:
+                            self._sdc.checkpoints.restore(
+                                f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
+                            )
+
+                        self._send_violation_error(primary)
+
+                        # Also report forward violation if both exist
+                        if has_backward and has_forward:
+                            self._send_violation_warning(sdc_result.forward_violation)
+
+                        return self._make_error_result(primary)
 
                 # Display results (skip if silent, error, or violation with rollback)
-                skip_display = has_violation and not self._continue_after_violation
+                skip_display = (has_backward or has_forward) and not self._continue_after_violation
                 if not silent and result.get("status") != "error" and not skip_display:
                     state_ms = pre_timer.duration() + post_timer.duration()
                     self._display_execution_result(
@@ -1026,53 +1047,29 @@ class FerretSDCKernel(IPythonKernel, Magics):
         )
 
     def _send_violation_error(self, violation) -> None:
-        """Send SDC violation as error via iopub."""
-        from .sdc_enforcer import format_variable_list
+        """Send SDC violation as error via iopub.
 
-        mutating_alpha, affected_alpha = self._get_violation_alphas(violation)
-        vars_str = format_variable_list(violation.variables)
-
+        Uses the violation.message from the enforcer verbatim.
+        """
         self.send_response(
             self.iopub_socket,
             "error",
             {
                 "ename": "SDCViolation",
                 "evalue": violation.message,
-                "traceback": [
-                    "Sequential Dataflow Consistency Violation",
-                    "",
-                    f"Cell {mutating_alpha} modified variables that "
-                    f"Cell {affected_alpha} (earlier in notebook) reads.",
-                    "",
-                    f"Affected variables: {vars_str}",
-                    "",
-                    "This breaks reproducibility. The earlier cell's behavior "
-                    "depends on this cell having run first.",
-                ],
+                "traceback": [violation.message],
             },
         )
 
     def _send_violation_warning(self, violation) -> None:
-        """Send SDC violation as warning via iopub (when continue_after_violation is enabled)."""
-        from .sdc_enforcer import format_variable_list
+        """Send SDC violation as warning via iopub (when continue_after_violation is enabled).
 
-        mutating_alpha, affected_alpha = self._get_violation_alphas(violation)
-        vars_str = format_variable_list(violation.variables)
-
-        # Build detailed warning
-        lines = [
-            "⚠️ SDC Violation (continuing)",
-            "",
-            f"Cell {mutating_alpha} modified {vars_str} which Cell {affected_alpha} (earlier) reads.",
-            "",
-            "This breaks reproducibility. The earlier cell's behavior",
-            "depends on this cell having run first.",
-        ]
-
+        Uses the violation.message from the enforcer verbatim.
+        """
         self.send_response(
             self.iopub_socket,
             "stream",
-            {"name": "stderr", "text": "\n".join(lines) + "\n"},
+            {"name": "stderr", "text": violation.message + "\n"},
         )
 
     def _send_truncation_details(self, truncation_details: str) -> None:
@@ -1096,22 +1093,6 @@ class FerretSDCKernel(IPythonKernel, Magics):
             "stream",
             {"name": "stderr", "text": warning_text},
         )
-
-    def _get_violation_alphas(self, violation) -> tuple:
-        """Get @A notation for violation cells."""
-        try:
-            mutating_idx = self._sdc.cell_order.index(violation.mutating_cell)
-            mutating_alpha = index_to_alpha(mutating_idx)
-        except (ValueError, IndexError):
-            mutating_alpha = violation.mutating_cell
-
-        try:
-            affected_idx = self._sdc.cell_order.index(violation.affected_cell)
-            affected_alpha = index_to_alpha(affected_idx)
-        except (ValueError, IndexError):
-            affected_alpha = violation.affected_cell
-
-        return mutating_alpha, affected_alpha
 
     def _make_error_result(self, violation) -> dict:
         """Create error result dict for SDC violation."""

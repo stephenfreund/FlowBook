@@ -3,19 +3,23 @@ Data models for Sequential Dataflow Consistency.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 from data_ferret.kernel.models import TrackingData
+
+if TYPE_CHECKING:
+    from .changes import Change
 
 
 @dataclass
 class SDCViolation:
-    """A backward mutation violation."""
+    """An SDC violation (backward mutation or forward dependency)."""
 
-    mutating_cell: str  # cell that caused violation
-    affected_cell: str  # earlier cell whose reads were mutated
-    variables: List[str]  # variables that were mutated
+    mutating_cell: str  # cell that caused violation (wrote the variable)
+    affected_cell: str  # cell whose reads were affected
+    variables: List[str]  # variables involved in the conflict
     message: str  # human-readable description
+    violation_type: str = "backward_mutation"  # "backward_mutation" | "forward_dependency"
     truncation_details: Optional[str] = None  # pretty-printed diff if truncation occurred
     # Detailed diagnostic info for better messages
     structural_reads_detail: Dict[str, Dict[str, str]] = field(default_factory=dict)  # var -> {attr -> value_repr}
@@ -27,6 +31,7 @@ class SDCViolation:
             "affected_cell": self.affected_cell,
             "variables": self.variables,
             "message": self.message,
+            "violation_type": self.violation_type,
         }
         if self.truncation_details:
             result["truncation_details"] = self.truncation_details
@@ -57,17 +62,21 @@ class SDCExecutionRecord:
     # Captured values of structural attrs at read time (for better error messages)
     # Format: {var_name: {attr_name: repr_value}}
     structural_reads_values: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    # Cached typed changes from this cell's execution (for fast forward dependency checks)
+    # These are computed once during backward mutation check and reused
+    typed_changes: List["Change"] = field(default_factory=list)
 
 
 @dataclass
 class SDCResult:
     """Result of SDC check after cell execution."""
 
-    violation: Optional[SDCViolation]
+    violation: Optional[SDCViolation]  # Primary violation (backward mutation)
     stale_cells: List[str]  # cell IDs that need re-execution (document order)
     changed_variables: List[str]  # variables that changed value
     column_changed: Dict[str, List[str]] = field(default_factory=dict)  # var -> [changed columns]
     structural_warnings: List[str] = field(default_factory=list)  # warnings from WARN mode
+    forward_violation: Optional[SDCViolation] = None  # Forward dependency violation (if any)
 
 
 @dataclass
