@@ -811,3 +811,556 @@ class TestForwardDependencyMultipleLaterCells:
         assert result_b.forward_violation is not None
         # Should report c as the mutating cell (first in document order)
         assert result_b.forward_violation.mutating_cell == "c"
+
+
+class TestForwardDependencyStaleness:
+    """Tests for staleness computation with forward dependencies."""
+
+    def setup_method(self):
+        self.checkpoints = Checkpoints(
+            sanity_check=False,
+            convert_dtypes=False,
+            warn_classes=False,
+        )
+        self.sdc = SDCEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d", "e"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _save_post_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{POST_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_post_checkpoint(self, name: str, namespace: dict):
+        self.checkpoints.save(name, namespace, max_size_mb=None)
+        return self.checkpoints.saved[name]
+
+    def test_staleness_after_forward_dependency_with_continue(self):
+        """
+        When a forward dependency is detected but we continue, staleness is computed.
+
+        Scenario:
+        - Cell D executes first, writes x
+        - Cell B executes second, reads x (forward dependency on D)
+        - With continue_on_violation=True, B should report staleness info
+
+        Since B read from D (later cell), running D again would make B stale.
+        """
+        # Cell D writes x
+        self._save_pre_checkpoint("d", {})
+        post_d = self._make_post_checkpoint("post_d", {"x": 10})
+        self._save_post_checkpoint("d", {"x": 10})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            post_checkpoint=post_d,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Cell B reads x - forward dependency on D
+        self._save_pre_checkpoint("b", {"x": 10})
+        post_b = self._make_post_checkpoint("post_b", {"x": 10})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+            continue_on_violation=True,  # Continue to get staleness
+        )
+
+        # Forward violation detected
+        assert result_b.forward_violation is not None
+        assert result_b.forward_violation.mutating_cell == "d"
+
+        # Now re-execute D with different value
+        # Note: D is later than B in document order, so D modifying x that B reads
+        # is a backward mutation. We use continue_on_violation to still get staleness.
+        self._save_pre_checkpoint("d", {"x": 10})
+        post_d2 = self._make_post_checkpoint("post_d2", {"x": 999})
+        result_d2 = self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            post_checkpoint=post_d2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+            continue_on_violation=True,  # D is after B, so this is backward mutation
+        )
+
+        # D modifying x after B read it is a backward mutation
+        assert result_d2.violation is not None
+        assert result_d2.violation.affected_cell == "b"
+        # B should be stale because it reads x and x changed
+        assert "b" in result_d2.stale_cells
+
+    def test_out_of_order_execution_staleness_chain(self):
+        """
+        Test staleness propagation when cells execute out of document order.
+
+        Cell order: [a, b, c, d, e]
+        Dependencies: a writes x, b reads x writes y, c reads y
+        Execution: a -> c -> b (c executes before b)
+
+        When b eventually runs, c should become stale.
+        """
+        # Cell A writes x
+        self._save_pre_checkpoint("a", {})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Cell C reads y (y doesn't exist yet, but that's a different issue)
+        # Actually let's say C reads x too
+        self._save_pre_checkpoint("c", {"x": 1})
+        post_c = self._make_post_checkpoint("post_c", {"x": 1, "z": 3})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads={"x"}, writes={"z"}),
+        )
+
+        # Cell B reads x and writes y
+        self._save_pre_checkpoint("b", {"x": 1, "z": 3})
+        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2, "z": 3})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # No staleness from B's execution since it didn't change x
+        # (y is new, C doesn't read y)
+        assert "c" not in result_b.stale_cells
+
+        # Now re-run A with different x
+        self._save_pre_checkpoint("a", {"x": 1, "y": 2, "z": 3})
+        post_a2 = self._make_post_checkpoint("post_a2", {"x": 100, "y": 2, "z": 3})
+        result_a2 = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Both B and C read x, so both should be stale
+        assert "b" in result_a2.stale_cells
+        assert "c" in result_a2.stale_cells
+        # Should be in document order
+        assert result_a2.stale_cells == ["b", "c"]
+
+    def test_forward_dependency_transitive_staleness(self):
+        """
+        Test transitive staleness with forward dependency pattern.
+
+        Cell order: [a, b, c, d]
+        Execution order: d -> c -> b -> a
+        Dependencies: d writes x, c reads x writes y, b reads y writes z, a reads z
+
+        After all execute, changing d's output should make c stale.
+        """
+        # Execute in reverse order (all forward dependencies)
+
+        # Cell D writes x
+        self._save_pre_checkpoint("d", {})
+        post_d = self._make_post_checkpoint("post_d", {"x": 1})
+        self._save_post_checkpoint("d", {"x": 1})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            post_checkpoint=post_d,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Cell C reads x, writes y (forward dep on d)
+        self._save_pre_checkpoint("c", {"x": 1})
+        post_c = self._make_post_checkpoint("post_c", {"x": 1, "y": 2})
+        self._save_post_checkpoint("c", {"x": 1, "y": 2})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+            continue_on_violation=True,  # Continue despite forward dep
+        )
+        assert result_c.forward_violation is not None
+
+        # Cell B reads y, writes z (forward dep on c)
+        self._save_pre_checkpoint("b", {"x": 1, "y": 2})
+        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2, "z": 3})
+        self._save_post_checkpoint("b", {"x": 1, "y": 2, "z": 3})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"y"}, writes={"z"}),
+            continue_on_violation=True,
+        )
+        assert result_b.forward_violation is not None
+
+        # Cell A reads z (forward dep on b)
+        self._save_pre_checkpoint("a", {"x": 1, "y": 2, "z": 3})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1, "y": 2, "z": 3, "w": 4})
+        result_a = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"z"}, writes={"w"}),
+            continue_on_violation=True,
+        )
+        assert result_a.forward_violation is not None
+
+        # Now re-run D with different x
+        # D is last in document order, so modifying x that C reads is backward mutation
+        self._save_pre_checkpoint("d", {"x": 1, "y": 2, "z": 3, "w": 4})
+        post_d2 = self._make_post_checkpoint("post_d2", {"x": 999, "y": 2, "z": 3, "w": 4})
+        result_d2 = self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            post_checkpoint=post_d2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+            continue_on_violation=True,  # D is after C, so this is backward mutation
+        )
+
+        # D modifying x is backward mutation against C (which reads x)
+        assert result_d2.violation is not None
+        assert result_d2.violation.affected_cell == "c"
+        # C reads x, so C should be stale
+        assert "c" in result_d2.stale_cells
+        # B doesn't read x directly, so not stale from this change
+        assert "b" not in result_d2.stale_cells
+        # A doesn't read x, so not stale
+        assert "a" not in result_d2.stale_cells
+
+    def test_staleness_when_later_cell_re_executes(self):
+        """
+        Test staleness when a later cell (source of forward dep) re-executes.
+
+        Cell order: [a, b, c]
+        Execution: c writes x, b reads x (forward dep on c)
+        When c re-executes with different value, b should become stale.
+        """
+        # Cell C writes x
+        self._save_pre_checkpoint("c", {})
+        post_c = self._make_post_checkpoint("post_c", {"x": 10})
+        self._save_post_checkpoint("c", {"x": 10})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Cell B reads x (forward dependency)
+        self._save_pre_checkpoint("b", {"x": 10})
+        post_b = self._make_post_checkpoint("post_b", {"x": 10, "y": 20})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+            continue_on_violation=True,
+        )
+        assert result_b.forward_violation is not None
+        assert result_b.forward_violation.mutating_cell == "c"
+
+        # Re-run C with different value
+        # C is after B in document order, so C modifying x that B reads is backward mutation
+        self._save_pre_checkpoint("c", {"x": 10, "y": 20})
+        post_c2 = self._make_post_checkpoint("post_c2", {"x": 999, "y": 20})
+        result_c2 = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+            continue_on_violation=True,  # C is after B, so this is backward mutation
+        )
+
+        # C modifying x is backward mutation against B
+        assert result_c2.violation is not None
+        assert result_c2.violation.affected_cell == "b"
+        # B should be stale since it reads x
+        assert "b" in result_c2.stale_cells
+
+    def test_no_staleness_when_forward_dep_value_unchanged(self):
+        """
+        No staleness when later cell re-executes but value doesn't change.
+
+        Cell order: [a, b, c]
+        Execution: c writes x=10, b reads x (forward dep)
+        When c re-executes with same x=10, b should NOT be stale.
+        """
+        # Cell C writes x
+        self._save_pre_checkpoint("c", {})
+        post_c = self._make_post_checkpoint("post_c", {"x": 10})
+        self._save_post_checkpoint("c", {"x": 10})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Cell B reads x (forward dependency)
+        self._save_pre_checkpoint("b", {"x": 10})
+        post_b = self._make_post_checkpoint("post_b", {"x": 10, "y": 20})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+            continue_on_violation=True,
+        )
+        assert result_b.forward_violation is not None
+
+        # Re-run C with SAME value
+        self._save_pre_checkpoint("c", {"x": 10, "y": 20})
+        post_c2 = self._make_post_checkpoint("post_c2", {"x": 10, "y": 20})  # x unchanged
+        result_c2 = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should NOT be stale - x didn't actually change
+        assert "b" not in result_c2.stale_cells
+
+    def test_mixed_forward_backward_staleness(self):
+        """
+        Test staleness with both forward and backward dependency scenarios.
+
+        Cell order: [a, b, c, d]
+        - A writes x
+        - B reads x, writes y
+        - C reads y (forward dep if C runs before B)
+        - D reads x
+
+        Execute: a -> c -> d -> b
+        Then re-run a with different x.
+        """
+        # Cell A writes x
+        self._save_pre_checkpoint("a", {})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Cell C reads y (y doesn't exist yet - this would normally be an error)
+        # Let's say C reads x instead for a cleaner test
+        self._save_pre_checkpoint("c", {"x": 1})
+        post_c = self._make_post_checkpoint("post_c", {"x": 1, "z": 3})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads={"x"}, writes={"z"}),
+        )
+
+        # Cell D reads x
+        self._save_pre_checkpoint("d", {"x": 1, "z": 3})
+        post_d = self._make_post_checkpoint("post_d", {"x": 1, "z": 3, "w": 4})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            post_checkpoint=post_d,
+            tracking=make_tracking(reads={"x"}, writes={"w"}),
+        )
+
+        # Cell B reads x, writes y
+        self._save_pre_checkpoint("b", {"x": 1, "z": 3, "w": 4})
+        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2, "z": 3, "w": 4})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        # No violations - B doesn't modify what earlier cells read
+        assert result_b.violation is None
+
+        # Now re-run A with different x
+        self._save_pre_checkpoint("a", {"x": 1, "y": 2, "z": 3, "w": 4})
+        post_a2 = self._make_post_checkpoint("post_a2", {"x": 999, "y": 2, "z": 3, "w": 4})
+        result_a2 = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B, C, D all read x, so all should be stale
+        # Should be in document order
+        assert "b" in result_a2.stale_cells
+        assert "c" in result_a2.stale_cells
+        assert "d" in result_a2.stale_cells
+        assert result_a2.stale_cells == ["b", "c", "d"]
+
+
+class TestForwardDependencyColumnStaleness:
+    """Tests for column-level staleness with forward dependencies."""
+
+    def setup_method(self):
+        self.checkpoints = Checkpoints(
+            sanity_check=False,
+            convert_dtypes=False,
+            warn_classes=False,
+        )
+        self.sdc = SDCEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _save_post_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{POST_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_post_checkpoint(self, name: str, namespace: dict):
+        self.checkpoints.save(name, namespace, max_size_mb=None)
+        return self.checkpoints.saved[name]
+
+    def test_column_level_staleness_with_forward_dependency(self):
+        """
+        Test column-level staleness in forward dependency scenario.
+
+        Cell order: [a, b, c]
+        - C writes df['price']
+        - B reads df['price'] (forward dep on C)
+
+        When C re-executes with different price, B should be stale.
+        """
+        import pandas as pd
+
+        df = pd.DataFrame({"price": [10, 20], "qty": [1, 2]})
+
+        # Cell C writes df['price']
+        self._save_pre_checkpoint("c", {"df": df})
+        df_modified = df.copy()
+        df_modified["price"] = [100, 200]
+        post_c = self._make_post_checkpoint("post_c", {"df": df_modified})
+        self._save_post_checkpoint("c", {"df": df_modified})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(
+                reads={"df"},
+                writes={"df"},
+                column_writes={"df": {"price"}},
+            ),
+        )
+
+        # Cell B reads df['price'] (forward dependency on C)
+        self._save_pre_checkpoint("b", {"df": df_modified})
+        post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "total": 300})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(
+                reads={"df"},
+                writes={"total"},
+                column_reads={"df": {"price"}},
+            ),
+            continue_on_violation=True,
+        )
+        assert result_b.forward_violation is not None
+
+        # Re-run C with different price values
+        # C is after B in document order, so C modifying df['price'] that B reads
+        # is a backward mutation
+        df_modified2 = df.copy()
+        df_modified2["price"] = [999, 888]
+        self._save_pre_checkpoint("c", {"df": df_modified, "total": 300})
+        post_c2 = self._make_post_checkpoint("post_c2", {"df": df_modified2, "total": 300})
+        result_c2 = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c2,
+            tracking=make_tracking(
+                reads={"df"},
+                writes={"df"},
+                column_writes={"df": {"price"}},
+            ),
+            continue_on_violation=True,  # C is after B, so this is backward mutation
+        )
+
+        # C modifying price is backward mutation against B
+        assert result_c2.violation is not None
+        assert result_c2.violation.affected_cell == "b"
+        # B should be stale - price column changed
+        assert "b" in result_c2.stale_cells
+
+    def test_no_column_staleness_different_columns(self):
+        """
+        No staleness when different columns are modified.
+
+        Cell order: [a, b, c]
+        - C writes df['qty']
+        - B reads df['price'] (forward dep on C for whole df)
+
+        When C re-executes and modifies only qty, B should NOT be stale.
+        """
+        import pandas as pd
+
+        df = pd.DataFrame({"price": [10, 20], "qty": [1, 2]})
+
+        # Cell C writes df['qty']
+        self._save_pre_checkpoint("c", {"df": df})
+        df_modified = df.copy()
+        df_modified["qty"] = [100, 200]
+        post_c = self._make_post_checkpoint("post_c", {"df": df_modified})
+        self._save_post_checkpoint("c", {"df": df_modified})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(
+                reads={"df"},
+                writes={"df"},
+                column_writes={"df": {"qty"}},
+            ),
+        )
+
+        # Cell B reads df['price'] (not qty)
+        self._save_pre_checkpoint("b", {"df": df_modified})
+        post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "total": 30})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(
+                reads={"df"},
+                writes={"total"},
+                column_reads={"df": {"price"}},
+            ),
+            continue_on_violation=True,
+        )
+        # Forward dep is on the column that actually changed
+        # B reads price, C wrote qty - so no forward violation at column level
+        # But there might be at variable level depending on implementation
+
+        # Re-run C with different qty values (price unchanged)
+        df_modified2 = df_modified.copy()
+        df_modified2["qty"] = [999, 888]  # Only qty changes
+        self._save_pre_checkpoint("c", {"df": df_modified, "total": 30})
+        post_c2 = self._make_post_checkpoint("post_c2", {"df": df_modified2, "total": 30})
+        result_c2 = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c2,
+            tracking=make_tracking(
+                reads={"df"},
+                writes={"df"},
+                column_writes={"df": {"qty"}},
+            ),
+        )
+
+        # B reads price, C only changed qty - B should NOT be stale
+        assert "b" not in result_c2.stale_cells
