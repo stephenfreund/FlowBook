@@ -973,6 +973,22 @@ class Diff:
         This method records structural mismatches (shape, dtype) but continues
         comparing elements where possible.
         """
+        # ======================================================================
+        # FAST PATH: If arrays have same shape and dtype, try vectorized
+        # equality check before any other processing.
+        # ======================================================================
+        if val_a.shape == val_b.shape and val_a.dtype == val_b.dtype:
+            try:
+                if _is_floating_dtype(val_a.dtype) or np.issubdtype(val_a.dtype, np.complexfloating):
+                    if np.allclose(val_a, val_b, rtol=self.rtol, atol=self.atol, equal_nan=True):
+                        return None  # Arrays are equal
+                else:
+                    if np.array_equal(val_a, val_b):
+                        return None  # Arrays are equal
+            except Exception:
+                pass  # Fall through to detailed comparison
+        # ======================================================================
+
         children: Dict[str, DiffNode] = {}
         truncated = False
 
@@ -1320,6 +1336,62 @@ class Diff:
             return CompoundDiff(source_type="series", children=children, truncated=truncated)
         return None
 
+    # ==========================================================================
+    # FAST PATH HELPERS: Vectorized equality checks for DataFrames and Series
+    # ==========================================================================
+
+    def _fast_series_equal(self, s_a: pd.Series, s_b: pd.Series) -> bool:
+        """
+        Fast vectorized equality check for two Series.
+
+        Assumes: same length, same index (caller should verify).
+        Uses tolerance (rtol, atol) for float columns.
+
+        Returns:
+            True if series values are equal (within tolerance for floats).
+
+        Raises:
+            Exception if comparison fails (caller should catch and fall back).
+        """
+        if s_a.dtype != s_b.dtype:
+            # Different dtypes - can't use fast path
+            return False
+
+        if pd.api.types.is_float_dtype(s_a.dtype):
+            # For floats: check NaN positions match, then use allclose
+            mask_nan_a = pd.isna(s_a)
+            mask_nan_b = pd.isna(s_b)
+            if not mask_nan_a.equals(mask_nan_b):
+                return False
+            non_nan_a = s_a[~mask_nan_a]
+            non_nan_b = s_b[~mask_nan_b]
+            if len(non_nan_a) == 0:
+                return True  # All NaN and NaN positions match
+            return np.allclose(non_nan_a, non_nan_b, rtol=self.rtol, atol=self.atol)
+        else:
+            # For non-float types, use pandas equals
+            return s_a.equals(s_b)
+
+    def _fast_dataframe_equal(self, df_a: pd.DataFrame, df_b: pd.DataFrame) -> bool:
+        """
+        Fast vectorized equality check for two DataFrames.
+
+        Assumes: same shape, same columns, same index (caller should verify).
+        Uses tolerance (rtol, atol) for float columns.
+
+        Returns:
+            True if all column values are equal (within tolerance for floats).
+
+        Raises:
+            Exception if comparison fails (caller should catch and fall back).
+        """
+        for col in df_a.columns:
+            if not self._fast_series_equal(df_a[col], df_b[col]):
+                return False
+        return True
+
+    # ==========================================================================
+
     def _compare_dataframe(
         self, val_a: pd.DataFrame, val_b: pd.DataFrame, path: str
     ) -> Optional[DiffNode]:
@@ -1331,6 +1403,21 @@ class Diff:
         Structural tracking: When structural_mode is WARN or ENFORCE and structural reads
         were made on this DataFrame, changes to structure (columns, rows) are reported.
         """
+        # ======================================================================
+        # FAST PATH: If DataFrames are structurally identical, try vectorized
+        # equality check before column-by-column comparison.
+        # ======================================================================
+        if (val_a.shape == val_b.shape and
+            val_a.columns.equals(val_b.columns) and
+            val_a.index.equals(val_b.index)):
+            try:
+                # Try fast equality check for all columns at once
+                if self._fast_dataframe_equal(val_a, val_b):
+                    return None  # DataFrames are equal, no differences
+            except Exception:
+                pass  # Fall through to detailed comparison
+        # ======================================================================
+
         children: Dict[str, DiffNode] = {}
         truncated = False
         total_diff_count = 0

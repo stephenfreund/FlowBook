@@ -98,6 +98,7 @@ On cell execution:
 See analysis.md for formal specification and pseudocode algorithms.
 """
 
+import os
 import pprint
 import re
 import time
@@ -121,6 +122,22 @@ from data_ferret.util.output import timer
 # Checkpoint naming constants
 PRE_CHECKPOINT_PREFIX = "_pre_"
 POST_CHECKPOINT_PREFIX = "_post_"
+
+# ============================================================================
+# OPTIMIZATION FLAGS (controlled via environment variables)
+# ============================================================================
+# Set to "0" or "false" to disable; any other value (or unset) enables
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    """Check environment variable for optimization flag."""
+    val = os.environ.get(name, "").lower()
+    if val in ("0", "false", "no", "off"):
+        return False
+    return default
+
+# OPT_CONFLICT_LOOP_SKIP: Skip the O(n) conflict detection loop when there's
+# no variable-level overlap between changed variables and prior reads.
+OPT_CONFLICT_LOOP_SKIP = _env_flag("FERRET_OPT_CONFLICT_LOOP_SKIP", default=True)
 
 
 
@@ -417,6 +434,24 @@ class SDCEnforcer:
         typed_changes = detect_changes(current_diff)
         if not typed_changes:
             return (None, current_diff, [])
+
+        # ======================================================================
+        # OPTIMIZATION: OPT_CONFLICT_LOOP_SKIP
+        # Skip the O(n) conflict detection loop when there's no variable-level
+        # overlap between changed variables and prior cell reads.
+        # ======================================================================
+        if OPT_CONFLICT_LOOP_SKIP:
+            changed_var_names = {c.variable for c in typed_changes}
+            all_prior_var_reads: Set[str] = set()
+            for prior_cell_id_check in self._cell_order[:my_position]:
+                prior_record_check = self.records.get(prior_cell_id_check)
+                if prior_record_check:
+                    all_prior_var_reads.update(prior_record_check.tracking.reads_before_writes)
+
+            # If no overlap at variable level, no conflict is possible
+            if not (changed_var_names & all_prior_var_reads):
+                return (None, current_diff, typed_changes)
+        # ======================================================================
 
         # Check if any earlier cell reads something we modified
         for prior_cell_id in self._cell_order[:my_position]:

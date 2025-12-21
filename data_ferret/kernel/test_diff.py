@@ -3561,3 +3561,569 @@ class TestNaTHandling:
         b = {'x': np.timedelta64('NaT', 'h')}
         result = differ.diff(a, b)
         assert_no_diff(result)
+
+
+# ============================================================================
+# OPTIMIZATION FAST PATH TESTS
+# ============================================================================
+
+class TestDataFrameFastPath:
+    """
+    Tests for the DataFrame vectorized equality fast path.
+
+    The fast path uses _fast_dataframe_equal() to check if DataFrames are
+    identical before doing column-by-column comparison.
+    """
+
+    def test_identical_dataframes_fast_path(self):
+        """Identical DataFrames should use fast path and return no diff."""
+        differ = Diff()
+        df = pd.DataFrame({'a': [1, 2, 3], 'b': [4.0, 5.0, 6.0]})
+        a = {'df': df.copy()}
+        b = {'df': df.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_identical_large_dataframe_fast_path(self):
+        """Large identical DataFrames should use fast path efficiently."""
+        differ = Diff()
+        # Create a moderately large DataFrame
+        df = pd.DataFrame({
+            'a': np.arange(10000),
+            'b': np.random.randn(10000),
+            'c': np.random.randn(10000),
+        })
+        a = {'df': df.copy()}
+        b = {'df': df.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_identical_dataframe_with_nan_fast_path(self):
+        """DataFrames with NaN values should match via fast path."""
+        differ = Diff()
+        df = pd.DataFrame({
+            'a': [1.0, np.nan, 3.0],
+            'b': [np.nan, 5.0, np.nan],
+        })
+        a = {'df': df.copy()}
+        b = {'df': df.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_identical_dataframe_with_mixed_types_fast_path(self):
+        """DataFrames with mixed column types should use fast path."""
+        differ = Diff()
+        df = pd.DataFrame({
+            'int_col': [1, 2, 3],
+            'float_col': [1.5, 2.5, 3.5],
+            'str_col': ['a', 'b', 'c'],
+            'bool_col': [True, False, True],
+        })
+        a = {'df': df.copy()}
+        b = {'df': df.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_different_shape_bypasses_fast_path(self):
+        """DataFrames with different shapes should bypass fast path."""
+        differ = Diff()
+        df_a = pd.DataFrame({'a': [1, 2, 3]})
+        df_b = pd.DataFrame({'a': [1, 2, 3, 4]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+
+    def test_dataframe_different_columns_bypasses_fast_path(self):
+        """DataFrames with different columns should bypass fast path."""
+        differ = Diff()
+        df_a = pd.DataFrame({'a': [1, 2, 3]})
+        df_b = pd.DataFrame({'b': [1, 2, 3]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+
+    def test_dataframe_different_index_bypasses_fast_path(self):
+        """DataFrames with different indexes should bypass fast path."""
+        differ = Diff()
+        df_a = pd.DataFrame({'a': [1, 2, 3]}, index=[0, 1, 2])
+        df_b = pd.DataFrame({'a': [1, 2, 3]}, index=[1, 2, 3])
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+
+    def test_dataframe_different_values_detected(self):
+        """DataFrames with different values should detect differences."""
+        differ = Diff()
+        df_a = pd.DataFrame({'a': [1, 2, 3]})
+        df_b = pd.DataFrame({'a': [1, 2, 999]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+
+    def test_dataframe_different_nan_positions_detected(self):
+        """DataFrames with different NaN positions should be detected."""
+        differ = Diff()
+        df_a = pd.DataFrame({'a': [1.0, np.nan, 3.0]})
+        df_b = pd.DataFrame({'a': [1.0, 2.0, np.nan]})
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+
+    def test_dataframe_float_tolerance_in_fast_path(self):
+        """Fast path should respect float tolerance."""
+        differ = Diff(rtol=1e-5, atol=1e-8)
+        df_a = pd.DataFrame({'a': [1.0, 2.0, 3.0]})
+        df_b = pd.DataFrame({'a': [1.0 + 1e-10, 2.0, 3.0]})  # Within tolerance
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_float_beyond_tolerance_detected(self):
+        """Fast path should detect differences beyond tolerance."""
+        differ = Diff(rtol=1e-10, atol=1e-10)  # Very strict tolerance
+        df_a = pd.DataFrame({'a': [1.0, 2.0, 3.0]})
+        df_b = pd.DataFrame({'a': [1.001, 2.0, 3.0]})  # Beyond tolerance
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'df')
+
+    def test_dataframe_different_dtypes_bypasses_fast_path(self):
+        """DataFrames with different column dtypes should bypass fast path and report mismatch."""
+        differ = Diff()
+        df_a = pd.DataFrame({'a': [1, 2, 3]})  # int
+        df_b = pd.DataFrame({'a': [1.0, 2.0, 3.0]})  # float
+        a = {'df': df_a}
+        b = {'df': df_b}
+        result = differ.diff(a, b)
+        # dtype mismatch is reported (int64 vs float64)
+        assert_has_diff(result, 'df')
+
+    def test_dataframe_with_object_dtype_fast_path(self):
+        """DataFrames with object dtype should work via fast path."""
+        differ = Diff()
+        df = pd.DataFrame({'a': ['x', 'y', 'z'], 'b': [1, 2, 3]})
+        a = {'df': df.copy()}
+        b = {'df': df.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_empty_fast_path(self):
+        """Empty DataFrames should use fast path."""
+        differ = Diff()
+        df = pd.DataFrame()
+        a = {'df': df.copy()}
+        b = {'df': df.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_single_row_fast_path(self):
+        """Single-row DataFrames should use fast path."""
+        differ = Diff()
+        df = pd.DataFrame({'a': [1], 'b': [2.0]})
+        a = {'df': df.copy()}
+        b = {'df': df.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_single_column_fast_path(self):
+        """Single-column DataFrames should use fast path."""
+        differ = Diff()
+        df = pd.DataFrame({'a': [1, 2, 3, 4, 5]})
+        a = {'df': df.copy()}
+        b = {'df': df.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+
+class TestSeriesFastPath:
+    """
+    Tests for the Series fast path helper used in DataFrame comparison.
+    """
+
+    def test_identical_int_series(self):
+        """Identical integer Series should be equal."""
+        differ = Diff()
+        s = pd.Series([1, 2, 3, 4, 5])
+        a = {'s': s.copy()}
+        b = {'s': s.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_identical_float_series_with_nan(self):
+        """Float Series with NaN should be equal."""
+        differ = Diff()
+        s = pd.Series([1.0, np.nan, 3.0, np.nan, 5.0])
+        a = {'s': s.copy()}
+        b = {'s': s.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_series_float_tolerance(self):
+        """Series comparison should respect float tolerance."""
+        differ = Diff(rtol=1e-5, atol=1e-8)
+        s_a = pd.Series([1.0, 2.0, 3.0])
+        s_b = pd.Series([1.0 + 1e-10, 2.0, 3.0])
+        a = {'s': s_a}
+        b = {'s': s_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_series_different_values_detected(self):
+        """Series with different values should be detected."""
+        differ = Diff()
+        s_a = pd.Series([1, 2, 3])
+        s_b = pd.Series([1, 2, 999])
+        a = {'s': s_a}
+        b = {'s': s_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 's')
+
+    def test_series_all_nan_equal(self):
+        """All-NaN Series should be equal."""
+        differ = Diff()
+        s = pd.Series([np.nan, np.nan, np.nan])
+        a = {'s': s.copy()}
+        b = {'s': s.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_series_string_type(self):
+        """String Series should work correctly."""
+        differ = Diff()
+        s = pd.Series(['a', 'b', 'c'])
+        a = {'s': s.copy()}
+        b = {'s': s.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_series_bool_type(self):
+        """Boolean Series should work correctly."""
+        differ = Diff()
+        s = pd.Series([True, False, True, False])
+        a = {'s': s.copy()}
+        b = {'s': s.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+
+class TestArrayFastPath:
+    """
+    Tests for the numpy array vectorized equality fast path.
+
+    The fast path uses np.allclose (floats) or np.array_equal (others)
+    before doing element-by-element comparison.
+    """
+
+    def test_identical_int_array_fast_path(self):
+        """Identical integer arrays should use fast path."""
+        differ = Diff()
+        arr = np.array([1, 2, 3, 4, 5])
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_identical_float_array_fast_path(self):
+        """Identical float arrays should use fast path."""
+        differ = Diff()
+        arr = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_identical_large_array_fast_path(self):
+        """Large identical arrays should use fast path efficiently."""
+        differ = Diff()
+        arr = np.random.randn(100000)
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_identical_2d_array_fast_path(self):
+        """2D arrays should use fast path."""
+        differ = Diff()
+        arr = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_identical_3d_array_fast_path(self):
+        """3D arrays should use fast path."""
+        differ = Diff()
+        arr = np.random.randn(10, 10, 10)
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_array_with_nan_fast_path(self):
+        """Arrays with NaN should match via fast path."""
+        differ = Diff()
+        arr = np.array([1.0, np.nan, 3.0, np.nan, 5.0])
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_array_with_inf_fast_path(self):
+        """Arrays with inf should match via fast path."""
+        differ = Diff()
+        arr = np.array([1.0, np.inf, -np.inf, 4.0])
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_array_float_tolerance_in_fast_path(self):
+        """Fast path should respect float tolerance."""
+        differ = Diff(rtol=1e-5, atol=1e-8)
+        arr_a = np.array([1.0, 2.0, 3.0])
+        arr_b = np.array([1.0 + 1e-10, 2.0, 3.0])  # Within tolerance
+        a = {'arr': arr_a}
+        b = {'arr': arr_b}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_array_float_beyond_tolerance_detected(self):
+        """Fast path should detect differences beyond tolerance."""
+        differ = Diff(rtol=1e-10, atol=1e-10)
+        arr_a = np.array([1.0, 2.0, 3.0])
+        arr_b = np.array([1.001, 2.0, 3.0])  # Beyond tolerance
+        a = {'arr': arr_a}
+        b = {'arr': arr_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'arr')
+
+    def test_array_different_shape_bypasses_fast_path(self):
+        """Arrays with different shapes should bypass fast path."""
+        differ = Diff()
+        arr_a = np.array([1, 2, 3])
+        arr_b = np.array([1, 2, 3, 4])
+        a = {'arr': arr_a}
+        b = {'arr': arr_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'arr')
+
+    def test_array_different_dtype_bypasses_fast_path(self):
+        """Arrays with different dtypes should bypass fast path but still work."""
+        differ = Diff()
+        arr_a = np.array([1, 2, 3], dtype=np.int32)
+        arr_b = np.array([1, 2, 3], dtype=np.int64)
+        a = {'arr': arr_a}
+        b = {'arr': arr_b}
+        result = differ.diff(a, b)
+        # Same values, different dtype - should reconcile
+        assert_no_diff(result)
+
+    def test_array_different_values_detected(self):
+        """Arrays with different values should be detected."""
+        differ = Diff()
+        arr_a = np.array([1, 2, 3])
+        arr_b = np.array([1, 2, 999])
+        a = {'arr': arr_a}
+        b = {'arr': arr_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'arr')
+
+    def test_array_different_nan_positions_detected(self):
+        """Arrays with different NaN positions should be detected."""
+        differ = Diff()
+        arr_a = np.array([1.0, np.nan, 3.0])
+        arr_b = np.array([1.0, 2.0, np.nan])
+        a = {'arr': arr_a}
+        b = {'arr': arr_b}
+        result = differ.diff(a, b)
+        assert_has_diff(result, 'arr')
+
+    def test_array_complex_dtype_fast_path(self):
+        """Complex arrays should use fast path."""
+        differ = Diff()
+        arr = np.array([1+2j, 3+4j, 5+6j])
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_array_bool_dtype_fast_path(self):
+        """Boolean arrays should use fast path."""
+        differ = Diff()
+        arr = np.array([True, False, True, False])
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_array_empty_fast_path(self):
+        """Empty arrays should use fast path."""
+        differ = Diff()
+        arr = np.array([])
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_array_single_element_fast_path(self):
+        """Single-element arrays should use fast path."""
+        differ = Diff()
+        arr = np.array([42])
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_array_object_dtype_fast_path(self):
+        """Object dtype arrays should work correctly."""
+        differ = Diff()
+        arr = np.array(['a', 'b', 'c'], dtype=object)
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+
+class TestFastPathEdgeCases:
+    """Edge cases and corner cases for fast paths."""
+
+    def test_mixed_types_in_namespace(self):
+        """Multiple types in namespace all use appropriate fast paths."""
+        differ = Diff()
+        a = {
+            'df': pd.DataFrame({'a': [1, 2, 3]}),
+            'arr': np.array([4, 5, 6]),
+            's': pd.Series([7, 8, 9]),
+            'scalar': 42,
+        }
+        b = {
+            'df': pd.DataFrame({'a': [1, 2, 3]}),
+            'arr': np.array([4, 5, 6]),
+            's': pd.Series([7, 8, 9]),
+            'scalar': 42,
+        }
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_nested_structures_with_arrays(self):
+        """Nested structures containing arrays should work."""
+        differ = Diff()
+        a = {'data': {'arr': np.array([1, 2, 3]), 'value': 42}}
+        b = {'data': {'arr': np.array([1, 2, 3]), 'value': 42}}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_list_of_arrays(self):
+        """Lists containing arrays should work."""
+        differ = Diff()
+        a = {'arrays': [np.array([1, 2]), np.array([3, 4])]}
+        b = {'arrays': [np.array([1, 2]), np.array([3, 4])]}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_with_datetime_index(self):
+        """DataFrame with datetime index should use fast path."""
+        differ = Diff()
+        df = pd.DataFrame(
+            {'a': [1, 2, 3]},
+            index=pd.date_range('2024-01-01', periods=3)
+        )
+        a = {'df': df.copy()}
+        b = {'df': df.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_dataframe_with_multiindex(self):
+        """DataFrame with MultiIndex should work correctly."""
+        differ = Diff()
+        index = pd.MultiIndex.from_tuples([('a', 1), ('a', 2), ('b', 1)])
+        df = pd.DataFrame({'val': [10, 20, 30]}, index=index)
+        a = {'df': df.copy()}
+        b = {'df': df.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_sparse_array(self):
+        """Sparse arrays should work correctly."""
+        differ = Diff()
+        arr = pd.arrays.SparseArray([0, 0, 1, 0, 2, 0, 0])
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_categorical_series(self):
+        """Categorical Series should work correctly."""
+        differ = Diff()
+        s = pd.Categorical(['a', 'b', 'a', 'c'])
+        a = {'cat': s.copy()}
+        b = {'cat': s.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_interval_index(self):
+        """IntervalIndex should work correctly."""
+        differ = Diff()
+        idx = pd.IntervalIndex.from_breaks([0, 1, 2, 3])
+        a = {'idx': idx.copy()}
+        b = {'idx': idx.copy()}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+
+class TestFastPathPerformance:
+    """
+    Tests to verify fast paths provide performance benefits.
+
+    These tests create scenarios where fast paths should significantly
+    reduce comparison time.
+    """
+
+    def test_large_identical_dataframe_no_diff(self):
+        """Large identical DataFrame should complete quickly via fast path."""
+        differ = Diff()
+        # Create a large DataFrame
+        df = pd.DataFrame({
+            f'col_{i}': np.random.randn(10000)
+            for i in range(50)
+        })
+        a = {'df': df.copy()}
+        b = {'df': df.copy()}
+
+        # This should be fast due to fast path
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_large_identical_array_no_diff(self):
+        """Large identical array should complete quickly via fast path."""
+        differ = Diff()
+        arr = np.random.randn(1000000)
+        a = {'arr': arr.copy()}
+        b = {'arr': arr.copy()}
+
+        # This should be fast due to fast path
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_many_small_arrays_no_diff(self):
+        """Many small arrays should all use fast path."""
+        differ = Diff()
+        a = {f'arr_{i}': np.arange(100) for i in range(100)}
+        b = {f'arr_{i}': np.arange(100) for i in range(100)}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_many_small_dataframes_no_diff(self):
+        """Many small DataFrames should all use fast path."""
+        differ = Diff()
+        a = {f'df_{i}': pd.DataFrame({'a': [1, 2, 3]}) for i in range(50)}
+        b = {f'df_{i}': pd.DataFrame({'a': [1, 2, 3]}) for i in range(50)}
+        result = differ.diff(a, b)
+        assert_no_diff(result)
