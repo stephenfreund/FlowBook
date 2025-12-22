@@ -780,7 +780,7 @@ class TestCallables:
                 self.x = x
             def bar(self):
                 return self.x
-        
+
         obj1 = Foo(1)
         obj2 = Foo(2)
         differ = Diff()
@@ -789,9 +789,10 @@ class TestCallables:
         result = differ.diff(a, b)
         assert 'm' in result
         # Should detect that __self__ differs
-        # Now returns nested structure with .__self__ key
-        assert isinstance(result['m'], dict)
-        assert '.__self__' in result['m']
+        # Returns a CompoundDiff with source_type="callable" containing .__self__ child
+        assert isinstance(result['m'], CompoundDiff)
+        assert result['m'].source_type == "callable"
+        assert '.__self__' in result['m'].children
     
     def test_method_comparable_instances(self):
         """Methods from different instances with same values should be equal."""
@@ -861,6 +862,107 @@ class TestCallables:
         a = {'x': obj.bar, 'y': obj.bar}
         b = {'x': obj.bar, 'y': obj.bar}
         assert differ.diff(a, b) == {}
+
+    def test_callable_diff_returns_compound_diff(self):
+        """Callable diff must return CompoundDiff, not raw dict (regression test)."""
+        class Foo:
+            def __init__(self, x: int):
+                self.x = x
+            def bar(self):
+                return self.x
+
+        obj1 = Foo(1)
+        obj2 = Foo(2)
+        differ = Diff()
+        a = {'m': obj1.bar}
+        b = {'m': obj2.bar}
+        result = differ.diff(a, b)
+        assert 'm' in result
+        # Must be CompoundDiff, not dict - this was the bug that caused Pydantic errors
+        assert isinstance(result['m'], CompoundDiff)
+        assert result['m'].source_type == "callable"
+
+    def test_callable_nested_in_list(self):
+        """Callable diff nested in list should not cause Pydantic validation errors."""
+        class Foo:
+            def __init__(self, x: int):
+                self.x = x
+            def bar(self):
+                return self.x
+
+        obj1 = Foo(1)
+        obj2 = Foo(2)
+        differ = Diff()
+        # Nested in a list
+        a = {'items': [obj1.bar]}
+        b = {'items': [obj2.bar]}
+        result = differ.diff(a, b)
+        assert 'items' in result
+        # Should successfully create nested CompoundDiff structures
+        assert isinstance(result['items'], CompoundDiff)
+
+    def test_callable_nested_in_object(self):
+        """Callable diff nested in object should not cause Pydantic validation errors."""
+        class Inner:
+            def __init__(self, x: int):
+                self.x = x
+            def method(self):
+                return self.x
+
+        class Outer:
+            def __init__(self, inner):
+                self.inner = inner
+                self.callback = inner.method
+
+        inner1 = Inner(1)
+        inner2 = Inner(2)
+        outer1 = Outer(inner1)
+        outer2 = Outer(inner2)
+
+        differ = Diff()
+        a = {'obj': outer1}
+        b = {'obj': outer2}
+        result = differ.diff(a, b)
+        assert 'obj' in result
+        # Should successfully create nested structure without Pydantic errors
+        assert isinstance(result['obj'], CompoundDiff)
+
+    def test_callable_nested_in_tuple(self):
+        """Callable diff nested in tuple should not cause Pydantic validation errors."""
+        class Foo:
+            def __init__(self, x: int):
+                self.x = x
+            def bar(self):
+                return self.x
+
+        obj1 = Foo(1)
+        obj2 = Foo(2)
+        differ = Diff()
+        # Nested in a tuple (this was the actual failure case from the bug report)
+        a = {'t': (obj1.bar,)}
+        b = {'t': (obj2.bar,)}
+        result = differ.diff(a, b)
+        assert 't' in result
+        assert isinstance(result['t'], CompoundDiff)
+
+    def test_callable_deeply_nested(self):
+        """Deeply nested callable diff should not cause Pydantic validation errors."""
+        class Foo:
+            def __init__(self, x: int):
+                self.x = x
+            def bar(self):
+                return self.x
+
+        obj1 = Foo(1)
+        obj2 = Foo(2)
+        differ = Diff()
+        # Deeply nested: dict -> list -> dict -> tuple -> callable
+        a = {'outer': [{'inner': (obj1.bar,)}]}
+        b = {'outer': [{'inner': (obj2.bar,)}]}
+        result = differ.diff(a, b)
+        assert 'outer' in result
+        # Should handle deep nesting without Pydantic errors
+        assert isinstance(result['outer'], CompoundDiff)
 
 
 class TestDetailedErrorMessages:

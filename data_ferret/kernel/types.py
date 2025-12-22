@@ -173,6 +173,7 @@ DiffSourceType = Literal[
     "set",        # Python set
     "frozenset",  # Python frozenset
     "complex",    # Complex number (real/imag parts)
+    "callable",   # Bound method (comparing __func__ and __self__)
 ]
 
 

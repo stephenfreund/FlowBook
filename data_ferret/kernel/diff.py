@@ -874,6 +874,10 @@ class Diff:
                 elif isinstance(val_a, (DataFrameGroupBy, SeriesGroupBy)):
                     _DISPATCH_CACHE[t] = "_compare_groupby"
                     result = self._compare_groupby(val_a, val_b, path)
+                elif isinstance(val_a, pd.Index):
+                    # Handle Index subclasses like IntervalIndex, MultiIndex, etc.
+                    _DISPATCH_CACHE[t] = "_compare_index"
+                    result = self._compare_index(val_a, val_b, path)
                 elif callable(val_a):
                     # Don't cache callables - too many different types
                     result = self._compare_callable(val_a, val_b, path)
@@ -1185,7 +1189,7 @@ class Diff:
             if self_diff:
                 diffs[".__self__"] = self_diff
 
-            return diffs if diffs else None
+            return CompoundDiff(source_type="callable", children=diffs) if diffs else None
         elif is_method_a != is_method_b:
             # One is a bound method, the other isn't
             return ValueComparison(
