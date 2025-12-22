@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 
 
-def create_ascii_histogram(data, bins=10, bar_char='#'):
+def create_ascii_histogram(data, bins=20, width=80, bar_char='#'):
     """
     Generates an ASCII histogram for the given data.
     """
@@ -51,8 +51,8 @@ def create_ascii_histogram(data, bins=10, bar_char='#'):
         bin_end = bin_start + bin_width
         count = counts[i]
         # Scale the bar length
-        bar_length = int((count / max_count) * 50) if max_count > 0 else 0
-        chart.append(f"{bin_start:8.2f} - {bin_end:8.2f} | {bar_char * bar_length} ({count})")
+        bar_length = int((count / max_count) * width) if max_count > 0 else 0
+        chart.append(f"{bin_start:7.3f} - {bin_end:7.3f} | {bar_char * bar_length} ({count})")
 
     return "\n".join(chart)
 
@@ -346,7 +346,7 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
                 if len(durations) > 1:  # Need at least 2 points for a histogram
                     lines.append("")
                     lines.append(f"--- {s.key} (n={len(durations)}) ---")
-                    hist = create_ascii_histogram(durations, bins=10, bar_char='█')
+                    hist = create_ascii_histogram(durations, bar_char='█')
                     lines.append(hist)
 
     return "\n".join(lines)
