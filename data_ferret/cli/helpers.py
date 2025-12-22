@@ -355,6 +355,19 @@ def format_metadata(metadata: Dict[str, Any], indent: int = 0) -> str:
     return "\n".join(lines)
 
 
+def _is_simple_list(value: list) -> bool:
+    """
+    Check if a list contains only simple scalar values (strings, numbers, bools).
+
+    Simple lists are formatted inline like [a, b, c] instead of with bullet points.
+    """
+    return all(
+        isinstance(item, (str, int, float, bool)) and
+        (not isinstance(item, str) or '\n' not in item)
+        for item in value
+    )
+
+
 def format_metadata_value(value: Any, indent: int = 0) -> str:
     """
     Format a single metadata value (helper for format_metadata).
@@ -380,6 +393,11 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
                     lines.append(f"{indent_str}{k_formatted}: {{}}")
                 elif isinstance(v, list) and not v:
                     lines.append(f"{indent_str}{k_formatted}: []")
+                elif isinstance(v, list) and _is_simple_list(v):
+                    # Simple list of strings/numbers - format inline with key
+                    formatted_items = [repr(item) if isinstance(item, str) else str(item) for item in v]
+                    inline = f"[{', '.join(formatted_items)}]"
+                    lines.append(f"{indent_str}{k_formatted}: {inline}")
                 elif isinstance(v, (dict, list)):
                     lines.append(f"{indent_str}{k_formatted}:")
                     lines.append(format_metadata_value(v, indent=indent+1))
@@ -393,6 +411,11 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
     elif isinstance(value, list):
         if not value:
             lines.append(f"{indent_str}(none)")
+        # Simple list of strings/numbers - format on one line
+        elif _is_simple_list(value):
+            formatted_items = [repr(item) if isinstance(item, str) else str(item) for item in value]
+            inline = f"[{', '.join(formatted_items)}]"
+            lines.append(f"{indent_str}{inline}")
         else:
             for item in value:
                 if isinstance(item, dict):
@@ -419,6 +442,11 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
                                     lines.append(f"{indent_str}  {k_formatted}: {{}}")
                                 elif isinstance(v, list) and not v:
                                     lines.append(f"{indent_str}  {k_formatted}: []")
+                                elif isinstance(v, list) and _is_simple_list(v):
+                                    # Simple list - format inline
+                                    formatted_items = [repr(item) if isinstance(item, str) else str(item) for item in v]
+                                    inline = f"[{', '.join(formatted_items)}]"
+                                    lines.append(f"{indent_str}  {k_formatted}: {inline}")
                                 elif isinstance(v, (dict, list)):
                                     lines.append(f"{indent_str}  {k_formatted}:")
                                     lines.append(format_metadata_value(v, indent=indent+2))
@@ -439,6 +467,11 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
                                     lines.append(f"{indent_str}  {k_formatted}: {{}}")
                                 elif isinstance(v, list) and not v:
                                     lines.append(f"{indent_str}  {k_formatted}: []")
+                                elif isinstance(v, list) and _is_simple_list(v):
+                                    # Simple list - format inline
+                                    formatted_items = [repr(item) if isinstance(item, str) else str(item) for item in v]
+                                    inline = f"[{', '.join(formatted_items)}]"
+                                    lines.append(f"{indent_str}  {k_formatted}: {inline}")
                                 elif isinstance(v, (dict, list)):
                                     lines.append(f"{indent_str}  {k_formatted}:")
                                     lines.append(format_metadata_value(v, indent=indent+2))

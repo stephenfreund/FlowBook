@@ -96,6 +96,34 @@ On cell execution:
    - Capture structural read values for future error messages
 
 See analysis.md for formal specification and pseudocode algorithms.
+
+
+================================================================================
+DEEP ALIAS DETECTION (OPT_ACCESSED_VARS_ONLY optimization)
+================================================================================
+
+When OPT_ACCESSED_VARS_ONLY is enabled (default), we only diff variables that
+the cell actually accessed (reads + writes) plus their DEEP aliases.
+
+A deep alias is a variable that shares ANY internal reference with an accessed
+variable - not just top-level object identity. For example:
+  - If a["b"] and c["b"] point to the same object
+  - If df1 and df2 share a column's underlying array
+  - If x.attr and y.attr point to the same mutable object
+
+This is critical for correctness: if cell C modifies a["b"]["f"], and c["b"]
+is the same object as a["b"], then c also changed! We need to diff c to detect
+that it changed (for backward mutation checks).
+
+The deep alias detection uses the pre-state checkpoint's precomputed alias index
+(see checkpoint.py section 12 for implementation details). The index is built
+once during checkpoint creation and provides O(accessed + aliases) lookup
+instead of O(total_objects_in_namespace).
+
+Key function: _expand_with_deep_aliases(accessed_vars, pre_checkpoint)
+  - Takes set of accessed variable names
+  - Returns expanded set including all deep aliases
+  - Optionally logs discovered alias relationships with paths
 """
 
 import os
@@ -145,43 +173,67 @@ OPT_CONFLICT_LOOP_SKIP = _env_flag("FERRET_OPT_CONFLICT_LOOP_SKIP", default=True
 OPT_ACCESSED_VARS_ONLY = _env_flag("FERRET_OPT_ACCESSED_VARS_ONLY", default=True)
 
 
+def _expand_with_deep_aliases(
+    accessed_vars: Set[str],
+    pre_checkpoint: Checkpoint,
+    log_aliases: bool = True,
+) -> Set[str]:
+    """
+    Expand a set of accessed variable names to include all DEEP aliases.
+
+    A deep alias is a variable that shares ANY internal reference with an
+    accessed variable - not just top-level identity. For example:
+    - If a["b"] and c["b"] point to the same object
+    - If df1 and df2 share a column's underlying array
+    - If x.attr and y.attr point to the same mutable object
+
+    This is critical for correctness: if cell C modifies a["b"]["f"], and
+    c["b"] is the same object as a["b"], then c also changed! We need to
+    diff c to detect that it changed (for backward mutation checks).
+
+    We use the pre-state checkpoint's precomputed alias index because:
+    1. Alias relationships existed before the cell ran
+    2. The index was built once during checkpoint creation (immutable)
+    3. Lookup is O(accessed + aliases) instead of O(total_objects)
+
+    Args:
+        accessed_vars: Set of variable names the cell accessed (reads + writes)
+        pre_checkpoint: The pre-execution checkpoint (has precomputed alias index)
+        log_aliases: If True, log discovered alias relationships
+
+    Returns:
+        Expanded set including accessed_vars plus all their deep aliases
+    """
+    # Use the checkpoint's precomputed deep alias index
+    return pre_checkpoint.get_aliases_for_vars(accessed_vars, log_aliases=log_aliases)
+
+
+# Keep the old function for backwards compatibility (but mark as deprecated)
 def _expand_with_aliases(
     accessed_vars: Set[str],
     pre_namespace: Dict[str, Any],
 ) -> Set[str]:
     """
-    Expand a set of accessed variable names to include all aliases.
+    DEPRECATED: Use _expand_with_deep_aliases() instead.
 
-    An alias is a variable that shares object identity with an accessed variable.
-    This is critical for correctness: if cell C modifies x, and y aliases x,
-    we need to diff y too to detect that it changed (for backward mutation checks).
+    This function only detects TOP-LEVEL aliases (same object identity).
+    It misses deep/nested aliases like a["b"] and c["b"] pointing to same object.
 
-    We use the pre-state namespace because alias relationships existed before
-    the cell ran. If earlier cells read y, and y aliased x pre-execution, we
-    need to detect changes to y even if the current cell only touched x by name.
-
-    Args:
-        accessed_vars: Set of variable names the cell accessed (reads + writes)
-        pre_namespace: The pre-execution namespace dictionary
-
-    Returns:
-        Expanded set including accessed_vars plus all their aliases
+    Kept for backwards compatibility with any external callers.
     """
-    # Collect object IDs of accessed variables that exist in pre-state
+    # Top-level only: collect object IDs of accessed variables
     accessed_ids: Set[int] = set()
     for var_name in accessed_vars:
         if var_name in pre_namespace:
             accessed_ids.add(id(pre_namespace[var_name]))
 
-    # Find all variables that share identity with accessed variables
+    # Find all variables that share top-level identity
     all_relevant_vars: Set[str] = set()
     for var_name, var_value in pre_namespace.items():
         if id(var_value) in accessed_ids:
             all_relevant_vars.add(var_name)
 
-    # Also include original accessed vars (handles new variables in post-state)
     all_relevant_vars |= accessed_vars
-
     return all_relevant_vars
 
 
@@ -451,20 +503,25 @@ class SDCEnforcer:
         # ======================================================================
         keys_to_include: Optional[Set[str]] = None
         if OPT_ACCESSED_VARS_ONLY:
-            with timer(key="bwm_expand_aliases", message=f"[bwm] OPT expand accessed vars with aliases"):
+            with timer(key="bwm_expand_aliases", message=f"[bwm] OPT expand accessed vars with DEEP aliases"):
                 # Get variables this cell accessed (reads + writes)
                 # Note: reads_before_writes is a Set[str], writes is also Set[str]
                 accessed_vars = set(tracking.reads_before_writes) | set(tracking.writes)
 
-                # Expand to include aliases (vars sharing object identity)
-                # Use pre-state because alias relationships existed before cell ran
-                keys_to_include = _expand_with_aliases(accessed_vars, pre_checkpoint.user_ns)
+                # Expand to include DEEP aliases (vars sharing ANY internal reference)
+                # Uses precomputed index from checkpoint (O(accessed + aliases))
+                keys_to_include = _expand_with_deep_aliases(accessed_vars, pre_checkpoint)
 
-                # Log the optimization impact
+                # Log the optimization impact with variable names
                 total_vars = len(pre_checkpoint.user_ns)
+                all_vars_sorted = sorted(pre_checkpoint.user_ns.keys())
                 from data_ferret.util.output import log
-                log(f"[bwm] OPT_ACCESSED_VARS_ONLY: diffing {len(keys_to_include)} of {total_vars} vars "
-                    f"(accessed={len(accessed_vars)}, with_aliases={len(keys_to_include)})")
+                accessed_sorted = sorted(accessed_vars)
+                expanded_sorted = sorted(keys_to_include)
+                log(f"[bwm] OPT_ACCESSED_VARS_ONLY: diffing {len(keys_to_include)} of {total_vars} vars")
+                log(f"[bwm]   all_vars={all_vars_sorted}")
+                log(f"[bwm]   accessed={accessed_sorted}")
+                log(f"[bwm]   deep_aliases_added={sorted(set(expanded_sorted) - set(accessed_sorted))}")
         # ======================================================================
 
         with timer(key="bwm_checkpoint_diff", message=f"[bwm] Checkpoint.diff (pre vs post)"):
