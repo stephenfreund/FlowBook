@@ -873,8 +873,9 @@ from typing import Any, Dict, List, Optional, Set
 import numpy as np
 import pandas as pd
 
-from data_ferret.kernel.deepcopy import deepcopy
+from data_ferret.kernel.deepcopy import deepcopy, _IMMUTABLE_INFERRED_KINDS
 from data_ferret.kernel.diff import Diff
+from pandas.api.types import infer_dtype
 from data_ferret.kernel.extended_types import TypeModel, get_type_model
 from data_ferret.util.output import log, timer
 
@@ -1150,6 +1151,11 @@ def _collect_reachable_ids_with_paths(
                 try:
                     series = obj[col]
                     if series.dtype == object:
+                        # FAST PATH: Skip object columns with immutable scalars (strings, ints, etc.)
+                        # These can't have nested mutable references
+                        kind = infer_dtype(series, skipna=True)
+                        if kind in _IMMUTABLE_INFERRED_KINDS:
+                            continue  # All scalars are immutable, no nested refs possible
                         col_repr = repr(col) if not isinstance(col, str) else f"'{col}'"
                         for i, item in enumerate(series):
                             _collect_reachable_ids_with_paths(
@@ -1164,8 +1170,11 @@ def _collect_reachable_ids_with_paths(
             # Optimization: Check dtype directly, iterate Series (avoids .values array creation)
             try:
                 if obj.dtype == object:
-                    for i, item in enumerate(obj):
-                        _collect_reachable_ids_with_paths(item, f"{path}[{i}]", visited, id_to_path)
+                    # FAST PATH: Skip object Series with immutable scalars
+                    kind = infer_dtype(obj, skipna=True)
+                    if kind not in _IMMUTABLE_INFERRED_KINDS:
+                        for i, item in enumerate(obj):
+                            _collect_reachable_ids_with_paths(item, f"{path}[{i}]", visited, id_to_path)
             except Exception:
                 pass
         elif isinstance(obj, np.ndarray):
@@ -1244,6 +1253,11 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
                 try:
                     series = obj[col]
                     if series.dtype == object:
+                        # FAST PATH: Skip object columns with immutable scalars (strings, ints, etc.)
+                        # These can't have nested mutable references
+                        kind = infer_dtype(series, skipna=True)
+                        if kind in _IMMUTABLE_INFERRED_KINDS:
+                            continue  # All scalars are immutable, no nested refs possible
                         for item in series:
                             _collect_reachable_ids(item, visited)
                 except Exception:
@@ -1255,8 +1269,11 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
             # Optimization: Check dtype directly, iterate Series (avoids .values array creation)
             try:
                 if obj.dtype == object:
-                    for item in obj:
-                        _collect_reachable_ids(item, visited)
+                    # FAST PATH: Skip object Series with immutable scalars
+                    kind = infer_dtype(obj, skipna=True)
+                    if kind not in _IMMUTABLE_INFERRED_KINDS:
+                        for item in obj:
+                            _collect_reachable_ids(item, visited)
             except Exception:
                 pass
         elif isinstance(obj, np.ndarray):

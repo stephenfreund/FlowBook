@@ -29,13 +29,14 @@ from data_ferret.kernel.column_tracking import suspend_column_tracking
 # Sentinel for memo lookups
 _nil = []
 
-# Global flag to control dtype conversion (set by Checkpoints.__init__)
-_convert_object_dtypes = True
-
-# Object column handling mode: "convert" (default) or "preserve"
+# Object column handling mode controlled by FERRET_OBJECT_MODE env var:
 # - "convert": convert object columns to specialized dtypes (string, Int64, etc.)
-# - "preserve": keep object dtype, use shallow copy if all values are immutable
+# - "preserve" (default): keep object dtype, use shallow copy if all values are immutable
 _OBJECT_MODE = os.environ.get("FERRET_OBJECT_MODE", "preserve").lower()
+
+# Global flag to control dtype conversion (can be overridden by Checkpoints.__init__)
+# Default based on FERRET_OBJECT_MODE env var
+_convert_object_dtypes = (_OBJECT_MODE == "convert")
 
 
 # ============================================================================
@@ -542,8 +543,8 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
     # Suspend column tracking during deepcopy to avoid recording internal accesses
     with suspend_column_tracking():
         # Convert object columns to specialized dtypes on the original DataFrame first
-        # (only in "convert" mode)
-        if _OBJECT_MODE == "convert" and _convert_object_dtypes:
+        # (only when _convert_object_dtypes=True, set by Checkpoints or FERRET_OBJECT_MODE env var)
+        if _convert_object_dtypes:
             for col in df.columns:
                 if df[col].dtype == object:
                     converted = _convert_object_column_dtype(df[col])
@@ -558,7 +559,7 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
         for col in df_copy.columns:
             if df_copy[col].dtype == object:
                 # In preserve mode, check if all values are immutable
-                if _OBJECT_MODE == "preserve" and _object_column_is_all_immutable(df_copy[col], col_name=str(col)):
+                if not _convert_object_dtypes and _object_column_is_all_immutable(df_copy[col], col_name=str(col)):
                     # All immutable - shallow copy is sufficient (already done by df.copy)
                     log(f"Shallow copying immutable object column {col}")
                     # Force a copy of the underlying array to ensure independence
@@ -604,8 +605,8 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
     # Suspend column tracking during deepcopy to avoid recording internal accesses
     with suspend_column_tracking():
         # Convert object Series to specialized dtype on the original Series first
-        # (only in "convert" mode)
-        if _OBJECT_MODE == "convert" and _convert_object_dtypes and series.dtype == object:
+        # (only when _convert_object_dtypes=True, set by Checkpoints or FERRET_OBJECT_MODE env var)
+        if _convert_object_dtypes and series.dtype == object:
             # Try to convert to specialized dtype first
             converted = _convert_object_column_dtype(series)
 
@@ -620,7 +621,7 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
         # Process if still object dtype
         if series_copy.dtype == object:
             # In preserve mode, check if all values are immutable
-            if _OBJECT_MODE == "preserve" and _object_column_is_all_immutable(series_copy, col_name=series_copy.name):
+            if not _convert_object_dtypes and _object_column_is_all_immutable(series_copy, col_name=series_copy.name):
                 # All immutable - shallow copy is sufficient
                 log(f"Shallow copying immutable object Series")
                 # Force a copy of the underlying array to ensure independence
