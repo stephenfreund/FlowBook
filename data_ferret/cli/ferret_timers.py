@@ -18,6 +18,45 @@ from typing import Optional
 import numpy as np
 
 
+def create_ascii_histogram(data, bins=10, bar_char='#'):
+    """
+    Generates an ASCII histogram for the given data.
+    """
+    if not data:
+        return ""
+
+    # 1. Determine the range of the data
+    min_val = min(data)
+    max_val = max(data)
+    if max_val == min_val:
+        return "All data points are the same."
+
+    bin_width = (max_val - min_val) / bins
+
+    # 2. Count frequencies for each bin
+    counts = [0] * bins
+    for item in data:
+        # Calculate the bin index
+        if item == max_val:
+            bin_index = bins - 1 # Handle the edge case of max value
+        else:
+            bin_index = int((item - min_val) // bin_width)
+        counts[bin_index] += 1
+
+    # 3. Generate the ASCII visualization
+    max_count = max(counts)
+    chart = []
+    for i in range(bins):
+        bin_start = min_val + i * bin_width
+        bin_end = bin_start + bin_width
+        count = counts[i]
+        # Scale the bar length
+        bar_length = int((count / max_count) * 50) if max_count > 0 else 0
+        chart.append(f"{bin_start:8.2f} - {bin_end:8.2f} | {bar_char * bar_length} ({count})")
+
+    return "\n".join(chart)
+
+
 @dataclass
 class TimerStats:
     """Statistics for a single timer."""
@@ -207,7 +246,9 @@ def format_time(ms: float, use_commas: bool = False) -> str:
 
 
 def format_table(stats: list[TimerStats], sort_by: str = 'total',
-                 title: Optional[str] = None, top: Optional[int] = None) -> str:
+                 title: Optional[str] = None, top: Optional[int] = None,
+                 grouped_timings: Optional[dict[str, list[float]]] = None,
+                 show_histograms: bool = False) -> str:
     """
     Format statistics as a table.
 
@@ -216,6 +257,8 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
         sort_by: Field to sort by ('total', 'mean', 'count', 'max', 'key')
         title: Optional title for the table
         top: Optional limit to show only top N timers
+        grouped_timings: Optional dict mapping key -> list of durations (for histograms)
+        show_histograms: Whether to show histograms for each key (requires grouped_timings)
 
     Returns:
         Formatted table string
@@ -290,6 +333,21 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
         f"{format_time(total_time, use_commas=True):>14}"
     )
     lines.append(footer)
+
+    # Add histograms if requested
+    if show_histograms and grouped_timings:
+        lines.append("")
+        lines.append("=" * 80)
+        lines.append("HISTOGRAMS (all times in ms)")
+        lines.append("=" * 80)
+        for s in sorted_stats:
+            if s.key in grouped_timings:
+                durations = grouped_timings[s.key]
+                if len(durations) > 1:  # Need at least 2 points for a histogram
+                    lines.append("")
+                    lines.append(f"--- {s.key} (n={len(durations)}) ---")
+                    hist = create_ascii_histogram(durations, bins=10, bar_char='█')
+                    lines.append(hist)
 
     return "\n".join(lines)
 
@@ -417,7 +475,7 @@ def format_csv_multi(timings_by_file: dict[str, list[dict]],
     return "\n".join(lines)
 
 
-def process_single_file(file_path: str, args) -> tuple[list[dict], list[TimerStats]]:
+def process_single_file(file_path: str, args) -> tuple[list[dict], list[TimerStats], dict[str, list[float]]]:
     """
     Process a single timing file.
 
@@ -426,12 +484,18 @@ def process_single_file(file_path: str, args) -> tuple[list[dict], list[TimerSta
         args: Command line arguments
 
     Returns:
-        Tuple of (timings, stats)
+        Tuple of (timings, stats, grouped_timings)
     """
     timings = load_timings(file_path)
     if not timings:
-        return [], []
+        return [], [], {}
 
+    # Filter by keys if specified
+    if args.keys:
+        keys_set = set(args.keys)
+        timings = [t for t in timings if t['key'] in keys_set]
+
+    grouped = group_by_key(timings)
     stats = build_stats_table(timings)
 
     # Sort stats
@@ -450,7 +514,7 @@ def process_single_file(file_path: str, args) -> tuple[list[dict], list[TimerSta
     if args.top is not None and args.top > 0:
         stats = stats[:args.top]
 
-    return timings, stats
+    return timings, stats, grouped
 
 
 def process_multiple_files(file_paths: list[str], args):
@@ -468,14 +532,27 @@ def process_multiple_files(file_paths: list[str], args):
         print("Error: No valid timing files found", file=sys.stderr)
         sys.exit(1)
 
-    # Build stats for each file
+    # Filter by keys if specified
+    if args.keys:
+        keys_set = set(args.keys)
+        timings_by_file = {
+            fp: [t for t in timings if t['key'] in keys_set]
+            for fp, timings in timings_by_file.items()
+        }
+        # Remove files with no matching timings
+        timings_by_file = {fp: t for fp, t in timings_by_file.items() if t}
+
+    # Build stats and grouped timings for each file
     stats_by_file = {}
+    grouped_by_file = {}
     for file_path, timings in timings_by_file.items():
+        grouped_by_file[file_path] = group_by_key(timings)
         stats = build_stats_table(timings)
         stats_by_file[file_path] = stats
 
     # Build combined stats
     combined_timings = combine_timings(timings_by_file)
+    combined_grouped = group_by_key(combined_timings)
     combined_stats = build_stats_table(combined_timings)
 
     # Output based on format
@@ -483,14 +560,21 @@ def process_multiple_files(file_paths: list[str], args):
         # Print table for each file
         for file_path in timings_by_file.keys():
             stats = stats_by_file[file_path]
+            grouped = grouped_by_file[file_path]
             title = f"Timer Statistics: {file_path} (all times in ms)"
-            print(format_table(stats, args.sort_by, title, args.top))
+            print(format_table(
+                stats, args.sort_by, title, args.top,
+                grouped_timings=grouped, show_histograms=args.histograms
+            ))
             print()  # Blank line between tables
             print()
 
         # Print combined table
         title = f"COMBINED Timer Statistics ({len(timings_by_file)} files) (all times in ms)"
-        print(format_table(combined_stats, args.sort_by, title, args.top))
+        print(format_table(
+            combined_stats, args.sort_by, title, args.top,
+            grouped_timings=combined_grouped, show_histograms=args.histograms
+        ))
 
     elif args.format == 'json':
         output = format_json_multi(timings_by_file, stats_by_file, combined_stats)
@@ -519,6 +603,12 @@ Examples:
 
   # Sort by mean time, show top 10
   ferret_timers --sort-by mean --top 10
+
+  # Show only specific timer keys
+  ferret_timers --keys diff.compute checkpoint.create
+
+  # Show histograms for top 5 timers
+  ferret_timers --top 5 --histograms
 
   # Output as JSON
   ferret_timers --format json
@@ -553,19 +643,35 @@ Examples:
         help='Show only top N timers'
     )
 
+    parser.add_argument(
+        '--keys',
+        nargs='+',
+        metavar='KEY',
+        help='Only show these specific timer keys'
+    )
+
+    parser.add_argument(
+        '--histograms',
+        action='store_true',
+        help='Show ASCII histograms for each timer (table mode only)'
+    )
+
     args = parser.parse_args()
 
     # Single or multi-file mode?
     if len(args.files) == 1:
         # Single file mode
-        timings, stats = process_single_file(args.files[0], args)
+        timings, stats, grouped = process_single_file(args.files[0], args)
 
         if not stats:
             print("No timing data available", file=sys.stderr)
             sys.exit(1)
 
         if args.format == 'table':
-            print(format_table(stats, args.sort_by, top=args.top))
+            print(format_table(
+                stats, args.sort_by, top=args.top,
+                grouped_timings=grouped, show_histograms=args.histograms
+            ))
         elif args.format == 'json':
             print(format_json_single(stats, timings))
         elif args.format == 'csv':
