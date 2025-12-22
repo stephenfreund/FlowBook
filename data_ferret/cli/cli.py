@@ -14,7 +14,7 @@ from typing import Optional
 
 from data_ferret.server.registry import CommandRegistry
 from data_ferret.server.config import FerretConfig
-from data_ferret.util.output import error, log, output
+from data_ferret.util.output import error, log, output, timer
 from data_ferret.util.socket_receiver import setup_socket_receiver
 
 from .helpers import (
@@ -289,7 +289,8 @@ def cli_main():
         if metadata_data is None or metadata_data.get("status") == "error":
             return 1
 
-        return 0
+        with timer(key="cli_main_exit", message="CLI main exit"):
+            return 0
 
     except FileNotFoundError as e:
         print(f"Error: File not found: {e}", file=sys.stderr)
