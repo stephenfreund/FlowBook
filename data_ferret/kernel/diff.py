@@ -5,10 +5,14 @@ Compares Jupyter kernel user namespaces for equality with isomorphic pointer str
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import infer_dtype
 from pandas.core.groupby import DataFrameGroupBy, SeriesGroupBy
 from pandas.core.groupby.ops import BaseGrouper
 from typing import Any, Dict, List, Set, Tuple, Optional
 import math
+
+# Import immutable kinds for fast path in object column comparison
+from data_ferret.kernel.deepcopy import _IMMUTABLE_INFERRED_KINDS
 
 from data_ferret.kernel.structural_tracking import StructuralTrackingMode
 from data_ferret.kernel.types import (
@@ -1548,6 +1552,28 @@ class Diff:
 
                 diff_indices = np.where(diff_mask)[0]
                 diff_count = 0
+
+                # FAST PATH for homogeneous immutable object columns (strings, ints, etc.)
+                # Skip _compare_values dispatch overhead and record diffs directly
+                if val_a_cmp.dtype == object and len(diff_indices) > 0:
+                    kind = infer_dtype(val_a_cmp, skipna=True)
+                    if kind in _IMMUTABLE_INFERRED_KINDS:
+                        with timer(key="diff_series_immutable_fast_path", message=f"[diff] Series immutable fast path ({kind}, {len(diff_indices)} diffs)"):
+                            # Direct recording without dispatch - much faster for large diffs
+                            truncated = len(diff_indices) > self.max_diffs_per_container
+                            for i in diff_indices[:self.max_diffs_per_container]:
+                                idx_label = index[i]
+                                v1, v2 = arr_a[i], arr_b[i]
+                                children[f"[{repr(idx_label)}]"] = ValueComparison(
+                                    status="different",
+                                    value1=v1,
+                                    value2=v2,
+                                    message=f"Series value mismatch at {path}[{repr(idx_label)}]: {v1!r} vs {v2!r}",
+                                )
+                            # Skip the normal loop
+                            if children:
+                                return CompoundDiff(source_type="series", children=children, truncated=truncated)
+                            return None
 
                 # Only iterate over potentially different elements
                 for i in diff_indices:

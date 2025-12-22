@@ -149,6 +149,10 @@ def install_kernel_spec(kernel_name: str, spec_source_dir: Path):
                 install_kernel(kernel_name, spec_source_dir)
                 log(f"Kernel '{kernel_name}' installation complete")
 
+        except Exception as e:
+            log(f"Error installing kernel spec '{kernel_name}': {e}")
+            log(f"Continuing anyway...")
+
         except Timeout:
             log(
                 f"Warning: Timeout acquiring lock for kernel installation. "
