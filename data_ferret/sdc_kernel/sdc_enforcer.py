@@ -102,7 +102,7 @@ import os
 import pprint
 import re
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.models import TrackingData
@@ -139,6 +139,50 @@ def _env_flag(name: str, default: bool = True) -> bool:
 # no variable-level overlap between changed variables and prior reads.
 OPT_CONFLICT_LOOP_SKIP = _env_flag("FERRET_OPT_CONFLICT_LOOP_SKIP", default=True)
 
+# OPT_ACCESSED_VARS_ONLY: Only diff variables that the cell actually accessed
+# (reads + writes) plus their aliases, instead of diffing the entire namespace.
+# This can provide 5-10x speedup when cells access few variables.
+OPT_ACCESSED_VARS_ONLY = _env_flag("FERRET_OPT_ACCESSED_VARS_ONLY", default=True)
+
+
+def _expand_with_aliases(
+    accessed_vars: Set[str],
+    pre_namespace: Dict[str, Any],
+) -> Set[str]:
+    """
+    Expand a set of accessed variable names to include all aliases.
+
+    An alias is a variable that shares object identity with an accessed variable.
+    This is critical for correctness: if cell C modifies x, and y aliases x,
+    we need to diff y too to detect that it changed (for backward mutation checks).
+
+    We use the pre-state namespace because alias relationships existed before
+    the cell ran. If earlier cells read y, and y aliased x pre-execution, we
+    need to detect changes to y even if the current cell only touched x by name.
+
+    Args:
+        accessed_vars: Set of variable names the cell accessed (reads + writes)
+        pre_namespace: The pre-execution namespace dictionary
+
+    Returns:
+        Expanded set including accessed_vars plus all their aliases
+    """
+    # Collect object IDs of accessed variables that exist in pre-state
+    accessed_ids: Set[int] = set()
+    for var_name in accessed_vars:
+        if var_name in pre_namespace:
+            accessed_ids.add(id(pre_namespace[var_name]))
+
+    # Find all variables that share identity with accessed variables
+    all_relevant_vars: Set[str] = set()
+    for var_name, var_value in pre_namespace.items():
+        if id(var_value) in accessed_ids:
+            all_relevant_vars.add(var_name)
+
+    # Also include original accessed vars (handles new variables in post-state)
+    all_relevant_vars |= accessed_vars
+
+    return all_relevant_vars
 
 
 def _tracking_mode_to_structural_mode(mode: StructuralTrackingMode) -> StructuralMode:
@@ -341,9 +385,10 @@ class SDCEnforcer:
 
             # Update staleness INCREMENTALLY (only check cells that might have become stale)
             # Also captures structural warnings from affected cells
-            stale, staleness_warnings = self._update_staleness_incremental(
-                post_checkpoint, set(changed_vars), column_changed, cell_id
-            )
+            with timer(key="sdc_staleness", message=f"[sdc] Staleness update for {cell_id}"):
+                stale, staleness_warnings = self._update_staleness_incremental(
+                    post_checkpoint, set(changed_vars), column_changed, cell_id
+                )
             # Merge warnings from staleness checks
             structural_warnings.extend(staleness_warnings)
 
@@ -381,14 +426,15 @@ class SDCEnforcer:
         """
         # Compute what THIS cell actually modified
         # For diff detection, check all accessed columns (read OR written)
-        all_accessed_columns = {}
-        for var, cols in tracking.column_reads_before_writes.items():
-            all_accessed_columns[var] = set(cols)
-        for var, cols in tracking.column_writes.items():
-            if var in all_accessed_columns:
-                all_accessed_columns[var].update(cols)
-            else:
+        with timer(key="bwm_prepare_columns", message=f"[bwm] Prepare accessed columns"):
+            all_accessed_columns = {}
+            for var, cols in tracking.column_reads_before_writes.items():
                 all_accessed_columns[var] = set(cols)
+            for var, cols in tracking.column_writes.items():
+                if var in all_accessed_columns:
+                    all_accessed_columns[var].update(cols)
+                else:
+                    all_accessed_columns[var] = set(cols)
 
         # Compute diff without structural_reads - intra-cell structural reads
         # are not backward mutations. Structural conflict detection is handled
@@ -396,17 +442,45 @@ class SDCEnforcer:
         # Note: use_leq=False to detect created variables too - these are cached
         # for forward dependency checks. Created variables won't cause false
         # positive backward mutations (earlier cells couldn't have read them).
-        current_diff = Checkpoint.diff(
-            pre_checkpoint,
-            post_checkpoint,
-            use_leq=False,  # Detect creations for forward dependency caching
-            column_rbw=all_accessed_columns,
-            structural_reads={},  # Empty - ConflictResolver handles this
-            structural_mode=self._structural_mode,
-        )
+
+        # ======================================================================
+        # OPTIMIZATION: OPT_ACCESSED_VARS_ONLY
+        # Only diff variables that the cell accessed (reads + writes) plus their
+        # aliases, instead of diffing the entire namespace. This can provide
+        # 5-10x speedup when cells access few variables out of many.
+        # ======================================================================
+        keys_to_include: Optional[Set[str]] = None
+        if OPT_ACCESSED_VARS_ONLY:
+            with timer(key="bwm_expand_aliases", message=f"[bwm] OPT expand accessed vars with aliases"):
+                # Get variables this cell accessed (reads + writes)
+                # Note: reads_before_writes is a Set[str], writes is also Set[str]
+                accessed_vars = set(tracking.reads_before_writes) | set(tracking.writes)
+
+                # Expand to include aliases (vars sharing object identity)
+                # Use pre-state because alias relationships existed before cell ran
+                keys_to_include = _expand_with_aliases(accessed_vars, pre_checkpoint.user_ns)
+
+                # Log the optimization impact
+                total_vars = len(pre_checkpoint.user_ns)
+                from data_ferret.util.output import log
+                log(f"[bwm] OPT_ACCESSED_VARS_ONLY: diffing {len(keys_to_include)} of {total_vars} vars "
+                    f"(accessed={len(accessed_vars)}, with_aliases={len(keys_to_include)})")
+        # ======================================================================
+
+        with timer(key="bwm_checkpoint_diff", message=f"[bwm] Checkpoint.diff (pre vs post)"):
+            current_diff = Checkpoint.diff(
+                pre_checkpoint,
+                post_checkpoint,
+                keys_to_include=keys_to_include,
+                use_leq=False,  # Detect creations for forward dependency caching
+                column_rbw=all_accessed_columns,
+                structural_reads={},  # Empty - ConflictResolver handles this
+                structural_mode=self._structural_mode,
+            )
 
         # Check if diff was truncated - if so, return violation
-        truncated_vars = _check_for_truncation(current_diff)
+        with timer(key="bwm_check_truncation", message=f"[bwm] Check truncation"):
+            truncated_vars = _check_for_truncation(current_diff)
         if truncated_vars:
             formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
             mutating_alpha = self._cell_id_to_alpha(cell_id)
@@ -427,11 +501,13 @@ class SDCEnforcer:
             return (None, current_diff, [])
 
         # Column-level modifications (for DataFrames)
-        modified_columns = _extract_column_changes(current_diff, tracking)
+        with timer(key="bwm_extract_columns", message=f"[bwm] Extract column changes"):
+            modified_columns = _extract_column_changes(current_diff, tracking)
 
         # Convert diff to typed Changes for conflict detection
         # These are also cached in the record for forward dependency checks
-        typed_changes = detect_changes(current_diff)
+        with timer(key="bwm_detect_changes", message=f"[bwm] detect_changes (diff -> typed)"):
+            typed_changes = detect_changes(current_diff)
         if not typed_changes:
             return (None, current_diff, [])
 
@@ -441,81 +517,88 @@ class SDCEnforcer:
         # overlap between changed variables and prior cell reads.
         # ======================================================================
         if OPT_CONFLICT_LOOP_SKIP:
-            changed_var_names = {c.variable for c in typed_changes}
-            all_prior_var_reads: Set[str] = set()
-            for prior_cell_id_check in self._cell_order[:my_position]:
-                prior_record_check = self.records.get(prior_cell_id_check)
-                if prior_record_check:
-                    all_prior_var_reads.update(prior_record_check.tracking.reads_before_writes)
+            with timer(key="bwm_opt_skip_check", message=f"[bwm] OPT skip check ({my_position} prior cells)"):
+                changed_var_names = {c.variable for c in typed_changes}
+                all_prior_var_reads: Set[str] = set()
+                for prior_cell_id_check in self._cell_order[:my_position]:
+                    prior_record_check = self.records.get(prior_cell_id_check)
+                    if prior_record_check:
+                        all_prior_var_reads.update(prior_record_check.tracking.reads_before_writes)
 
-            # If no overlap at variable level, no conflict is possible
-            if not (changed_var_names & all_prior_var_reads):
+                # If no overlap at variable level, no conflict is possible
+                has_overlap = bool(changed_var_names & all_prior_var_reads)
+
+            if not has_overlap:
                 return (None, current_diff, typed_changes)
         # ======================================================================
 
         # Check if any earlier cell reads something we modified
-        for prior_cell_id in self._cell_order[:my_position]:
-            prior_record = self.records.get(prior_cell_id)
-            if prior_record is None:
-                continue
+        with timer(key="bwm_conflict_loop", message=f"[bwm] Conflict detection loop ({my_position} prior cells)"):
+            conflict_checks = 0
+            for prior_cell_id in self._cell_order[:my_position]:
+                prior_record = self.records.get(prior_cell_id)
+                if prior_record is None:
+                    continue
 
-            # Convert prior cell's tracking to typed AccessEvents
-            prior_reads = prior_record.tracking.to_read_events()
-            if not prior_reads:
-                continue
+                # Convert prior cell's tracking to typed AccessEvents
+                prior_reads = prior_record.tracking.to_read_events()
+                if not prior_reads:
+                    continue
 
-            # Use declarative ConflictResolver to detect conflicts
-            violations = self._conflict_resolver.get_violations(typed_changes, prior_reads)
-            if not violations:
-                continue
+                conflict_checks += 1
 
-            # Extract conflict names in the format expected by messages
-            # When the read is a VariableRead or StructuralRead, report just
-            # the variable name (for backward compatibility with old behavior)
-            conflicts = []
-            for v in violations:
-                var = v.change.variable
-                # Check if the read was a VariableRead or StructuralRead
-                if isinstance(v.read, (VariableRead, StructuralRead)):
-                    # Report just the variable name for variable/structural reads
-                    conflicts.append(var)
-                elif hasattr(v.change, 'column'):
-                    conflicts.append(f"{var}.{v.change.column}")
-                else:
-                    conflicts.append(var)
-            conflicts = sorted(set(conflicts))
+                # Use declarative ConflictResolver to detect conflicts
+                violations = self._conflict_resolver.get_violations(typed_changes, prior_reads)
+                if not violations:
+                    continue
 
-            if conflicts:
-                mutating_alpha = self._cell_id_to_alpha(cell_id)
-                affected_alpha = self._cell_id_to_alpha(prior_cell_id)
+                # Extract conflict names in the format expected by messages
+                # When the read is a VariableRead or StructuralRead, report just
+                # the variable name (for backward compatibility with old behavior)
+                conflicts = []
+                for v in violations:
+                    var = v.change.variable
+                    # Check if the read was a VariableRead or StructuralRead
+                    if isinstance(v.read, (VariableRead, StructuralRead)):
+                        # Report just the variable name for variable/structural reads
+                        conflicts.append(var)
+                    elif hasattr(v.change, 'column'):
+                        conflicts.append(f"{var}.{v.change.column}")
+                    else:
+                        conflicts.append(var)
+                conflicts = sorted(set(conflicts))
 
-                # Get structural reads values from the prior record
-                prior_structural_values = prior_record.structural_reads_values
+                if conflicts:
+                    mutating_alpha = self._cell_id_to_alpha(cell_id)
+                    affected_alpha = self._cell_id_to_alpha(prior_cell_id)
 
-                # Extract change descriptions from diff
-                changes = _extract_change_descriptions(current_diff, modified_columns)
+                    # Get structural reads values from the prior record
+                    prior_structural_values = prior_record.structural_reads_values
 
-                # Build the detailed message
-                message = format_structural_violation(
-                    mutating_alpha,
-                    affected_alpha,
-                    conflicts,
-                    prior_structural_values,
-                    changes,
-                )
+                    # Extract change descriptions from diff
+                    changes = _extract_change_descriptions(current_diff, modified_columns)
 
-                return (
-                    SDCViolation(
-                        mutating_cell=cell_id,
-                        affected_cell=prior_cell_id,
-                        variables=conflicts,
-                        message=message,
-                        structural_reads_detail=prior_structural_values,
-                        changes_detail=changes,
-                    ),
-                    current_diff,
-                    typed_changes,
-                )
+                    # Build the detailed message
+                    message = format_structural_violation(
+                        mutating_alpha,
+                        affected_alpha,
+                        conflicts,
+                        prior_structural_values,
+                        changes,
+                    )
+
+                    return (
+                        SDCViolation(
+                            mutating_cell=cell_id,
+                            affected_cell=prior_cell_id,
+                            variables=conflicts,
+                            message=message,
+                            structural_reads_detail=prior_structural_values,
+                            changes_detail=changes,
+                        ),
+                        current_diff,
+                        typed_changes,
+                    )
 
         return (None, current_diff, typed_changes)
 
@@ -621,32 +704,42 @@ class SDCEnforcer:
             - List of structural warnings from affected cells
         """
         all_warnings: List[str] = []
+        cells_checked = 0
+        cells_skipped_stale = 0
+        cells_skipped_no_overlap = 0
+        diffs_performed = 0
 
         for cell_id, record in self.records.items():
             if cell_id == just_executed:
                 continue  # This cell just ran, already marked fresh
 
             if cell_id in self._stale_cells:
+                cells_skipped_stale += 1
                 continue  # Already stale, no need to re-check
 
             # Skip cells whose reads don't overlap with changed vars
             if not self._has_relevant_overlap(record, changed_vars, column_changed):
+                cells_skipped_no_overlap += 1
                 continue
+
+            cells_checked += 1
 
             # Cell MIGHT be stale - do the expensive diff check
             pre_checkpoint = self.checkpoints.get(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
             if pre_checkpoint is None:
                 continue
 
-            diff_result = Checkpoint.diff(
-                pre_checkpoint,
-                current_checkpoint,
-                keys_to_include=record.tracking.reads_before_writes,
-                use_leq=True,
-                column_rbw=record.tracking.column_reads_before_writes,
-                structural_reads=record.tracking.structural_reads,
-                structural_mode=self._structural_mode,
-            )
+            diffs_performed += 1
+            with timer(key="staleness_diff", message=f"[staleness] Diff for cell {cell_id}"):
+                diff_result = Checkpoint.diff(
+                    pre_checkpoint,
+                    current_checkpoint,
+                    keys_to_include=record.tracking.reads_before_writes,
+                    use_leq=True,
+                    column_rbw=record.tracking.column_reads_before_writes,
+                    structural_reads=record.tracking.structural_reads,
+                    structural_mode=self._structural_mode,
+                )
 
             if diff_result.differences:
                 self._stale_cells.add(cell_id)
@@ -699,6 +792,13 @@ class SDCEnforcer:
 
         # Return in document order
         stale_cells = [cid for cid in self._cell_order if cid in self._stale_cells]
+
+        # Log summary
+        from data_ferret.util.output import log
+        log(f"[staleness] Summary: checked={cells_checked}, skipped_stale={cells_skipped_stale}, "
+            f"skipped_no_overlap={cells_skipped_no_overlap}, diffs={diffs_performed}, "
+            f"newly_stale={len(stale_cells) - cells_skipped_stale}")
+
         return stale_cells, all_warnings
 
     def _has_relevant_overlap(

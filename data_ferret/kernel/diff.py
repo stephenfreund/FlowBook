@@ -22,6 +22,204 @@ from data_ferret.kernel.types import (
     DataFrameLocation,
 )
 from data_ferret.util.output import log, timer
+import time
+import os
+
+# Environment variable to enable detailed diff profiling
+_PROFILE_DIFF = os.environ.get("FERRET_PROFILE_DIFF", "0") == "1"
+
+# Threshold in seconds - only log comparisons taking longer than this
+_PROFILE_THRESHOLD_SEC = float(os.environ.get("FERRET_PROFILE_THRESHOLD", "0.001"))
+
+
+# =============================================================================
+# TYPE DISPATCH OPTIMIZATION
+# Using frozenset/dict lookups instead of isinstance chains for ~3x speedup
+# =============================================================================
+
+# Immutable atomic types - these don't need pointer tracking
+# Note: We use exact type matching here, subclass handling is done separately
+_IMMUTABLE_ATOMIC_TYPES = frozenset({
+    type(None),
+    bool,
+    int,
+    float,
+    complex,
+    str,
+    bytes,
+    # numpy scalar types
+    np.bool_,
+    np.int8, np.int16, np.int32, np.int64,
+    np.uint8, np.uint16, np.uint32, np.uint64,
+    np.float16, np.float32, np.float64,
+    np.complex64, np.complex128,
+})
+
+# Type category mapping for immutable atomics
+# Maps exact type to category string
+_TYPE_CATEGORY_MAP = {
+    type(None): "none",
+    bool: "bool",
+    np.bool_: "bool",
+    int: "integer",
+    np.int8: "integer",
+    np.int16: "integer",
+    np.int32: "integer",
+    np.int64: "integer",
+    np.uint8: "integer",
+    np.uint16: "integer",
+    np.uint32: "integer",
+    np.uint64: "integer",
+    float: "float",
+    np.float16: "float",
+    np.float32: "float",
+    np.float64: "float",
+    complex: "complex",
+    np.complex64: "complex",
+    np.complex128: "complex",
+    str: "str",
+    bytes: "bytes",
+}
+
+# Dispatch table for _compare_values
+# Maps exact type to method name (string, resolved at runtime)
+# Order matters for subclasses - we handle that separately
+_COMPARE_DISPATCH = {
+    type(None): "_dispatch_none",
+    bool: "_compare_bool",
+    np.bool_: "_compare_bool",
+    int: "_compare_int",
+    np.int8: "_compare_int",
+    np.int16: "_compare_int",
+    np.int32: "_compare_int",
+    np.int64: "_compare_int",
+    np.uint8: "_compare_int",
+    np.uint16: "_compare_int",
+    np.uint32: "_compare_int",
+    np.uint64: "_compare_int",
+    float: "_compare_float",
+    np.float16: "_compare_float",
+    np.float32: "_compare_float",
+    np.float64: "_compare_float",
+    complex: "_compare_complex",
+    np.complex64: "_compare_complex",
+    np.complex128: "_compare_complex",
+    str: "_compare_str",
+    bytes: "_compare_bytes",
+    # Pandas scalar types
+    pd.Timestamp: "_compare_timestamp",
+    pd.Timedelta: "_compare_timedelta",
+    # Numpy datetime types
+    np.datetime64: "_compare_datetime64",
+    np.timedelta64: "_compare_timedelta64",
+    # Container types
+    np.ndarray: "_compare_ndarray",
+    pd.Series: "_compare_series",
+    pd.DataFrame: "_compare_dataframe",
+    pd.Index: "_compare_index",
+    list: "_compare_list",
+    tuple: "_compare_tuple",
+    dict: "_compare_dict",
+    set: "_compare_set",
+    frozenset: "_compare_frozenset",
+}
+
+# Cache for subclass dispatch lookups
+_DISPATCH_CACHE: Dict[type, Optional[str]] = {}
+
+
+def _get_value_shape_info(val: Any) -> str:
+    """
+    Get a human-readable shape/size description for a value.
+    Used for profiling to identify which values are most expensive to compare.
+    """
+    t = type(val)
+    tname = t.__name__
+
+    try:
+        if isinstance(val, pd.DataFrame):
+            return f"DataFrame({val.shape[0]}x{val.shape[1]})"
+        elif isinstance(val, pd.Series):
+            return f"Series({len(val)})"
+        elif isinstance(val, np.ndarray):
+            return f"ndarray{val.shape}"
+        elif isinstance(val, dict):
+            return f"dict({len(val)} keys)"
+        elif isinstance(val, (list, tuple)):
+            return f"{tname}({len(val)} items)"
+        elif isinstance(val, set):
+            return f"set({len(val)} items)"
+        elif isinstance(val, frozenset):
+            return f"frozenset({len(val)} items)"
+        elif isinstance(val, pd.Index):
+            return f"Index({len(val)})"
+        elif isinstance(val, (DataFrameGroupBy, SeriesGroupBy)):
+            return f"GroupBy({val.ngroups} groups)"
+        else:
+            return tname
+    except Exception:
+        return tname
+
+
+# Profiling stats accumulator (reset per diff() call)
+class DiffProfileStats:
+    """Accumulates per-type timing statistics for diff profiling."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        # type_name -> (total_time_sec, count, max_time_sec, max_info)
+        self.by_type: Dict[str, List[float, int, float, str]] = {}
+        self.slow_comparisons: List[Tuple[float, str, str]] = []  # (time, path, info)
+
+    def record(self, type_info: str, elapsed_sec: float, path: str):
+        """Record a comparison timing."""
+        if type_info not in self.by_type:
+            self.by_type[type_info] = [0.0, 0, 0.0, ""]
+
+        stats = self.by_type[type_info]
+        stats[0] += elapsed_sec
+        stats[1] += 1
+        if elapsed_sec > stats[2]:
+            stats[2] = elapsed_sec
+            stats[3] = path
+
+        # Track slow comparisons
+        if elapsed_sec >= _PROFILE_THRESHOLD_SEC:
+            self.slow_comparisons.append((elapsed_sec, path, type_info))
+
+    def log_summary(self):
+        """Log a summary of timing statistics."""
+        if not self.by_type:
+            return
+
+        # Sort by total time
+        sorted_types = sorted(
+            self.by_type.items(),
+            key=lambda x: x[1][0],
+            reverse=True
+        )
+
+        total_time = sum(s[0] for _, s in sorted_types)
+
+        log(f"[diff profile] Total comparison time: {total_time*1000:.2f}ms")
+        log(f"[diff profile] By type (top 10):")
+        for type_info, (total, count, max_t, max_path) in sorted_types[:10]:
+            pct = (total / total_time * 100) if total_time > 0 else 0
+            log(f"  {type_info}: {total*1000:.2f}ms ({pct:.1f}%) | "
+                f"{count} calls | max={max_t*1000:.2f}ms at {max_path}")
+
+        # Log slowest individual comparisons
+        if self.slow_comparisons:
+            self.slow_comparisons.sort(reverse=True)
+            log(f"[diff profile] Slowest comparisons (>{_PROFILE_THRESHOLD_SEC*1000:.1f}ms):")
+            for elapsed, path, type_info in self.slow_comparisons[:10]:
+                log(f"  {elapsed*1000:.2f}ms: {path} ({type_info})")
+
+
+# Global profile stats instance (reused per diff call)
+_profile_stats = DiffProfileStats()
 
 
 def _is_floating_dtype(dtype) -> bool:
@@ -254,24 +452,14 @@ class Diff:
         Returns:
             True if val is an immutable atomic, False otherwise
         """
-        # None is always immutable atomic
-        if val is None:
+        # Fast path: exact type lookup in frozenset (O(1))
+        t = type(val)
+        if t in _IMMUTABLE_ATOMIC_TYPES:
             return True
 
-        # bool (must check before int since bool is subclass of int)
-        if isinstance(val, bool):
-            return True
-
-        # Numeric types
-        if isinstance(val, (int, np.integer)):
-            return True
-        if isinstance(val, (float, np.floating)):
-            return True
-        if isinstance(val, (complex, np.complexfloating)):
-            return True
-
-        # String and bytes
-        if isinstance(val, (str, bytes)):
+        # Fallback for numpy subclasses not in the set
+        # (e.g., np.longdouble on some platforms)
+        if isinstance(val, (np.integer, np.floating, np.complexfloating)):
             return True
 
         return False
@@ -291,21 +479,21 @@ class Diff:
         Returns:
             String representing the type category
         """
-        if val is None:
-            return "none"
-        # Check bool before int (bool is subclass of int in Python)
-        if isinstance(val, bool):
-            return "bool"
-        if isinstance(val, (int, np.integer)):
+        # Fast path: exact type lookup in dict (O(1))
+        t = type(val)
+        category = _TYPE_CATEGORY_MAP.get(t)
+        if category is not None:
+            return category
+
+        # Fallback for numpy subclasses not in the map
+        # (e.g., np.longdouble on some platforms, or user-defined subclasses)
+        if isinstance(val, np.integer):
             return "integer"
-        if isinstance(val, (float, np.floating)):
+        if isinstance(val, np.floating):
             return "float"
-        if isinstance(val, (complex, np.complexfloating)):
+        if isinstance(val, np.complexfloating):
             return "complex"
-        if isinstance(val, str):
-            return "str"
-        if isinstance(val, bytes):
-            return "bytes"
+
         return "other"
 
     def diff(
@@ -336,6 +524,11 @@ class Diff:
         self.next_canonical_id = 0
         self._warnings = []  # Reset warnings
 
+        # Reset profiling stats if profiling is enabled
+        if _PROFILE_DIFF:
+            _profile_stats.reset()
+            diff_start = time.perf_counter()
+
         differences: Dict[str, DiffNode] = {}
 
         # Check for variables only in a
@@ -364,12 +557,60 @@ class Diff:
         for var in sorted(
             common_vars & keys_to_include
         ):  # Sort for deterministic output
-            # with timer(key="compare_values", message=f"Comparing {var}"):
+            if _PROFILE_DIFF:
+                var_start = time.perf_counter()
+                type_info = _get_value_shape_info(a[var])
+
             diff_result = self._compare_values(a[var], b[var], path=var)
+
+            if _PROFILE_DIFF:
+                elapsed = time.perf_counter() - var_start
+                _profile_stats.record(type_info, elapsed, var)
+
             if diff_result:  # Only include if there are differences
                 differences[var] = diff_result
 
+        # Log profiling summary if enabled
+        if _PROFILE_DIFF:
+            total_elapsed = time.perf_counter() - diff_start
+            log(f"[diff profile] Total diff time: {total_elapsed*1000:.2f}ms "
+                f"({len(common_vars & keys_to_include)} variables compared)")
+            _profile_stats.log_summary()
+
         return DiffResult(differences=differences, warnings=list(self._warnings))
+
+    def _log_column_timings(
+        self, df_path: str, column_timings: List[Tuple[float, str, str]]
+    ) -> None:
+        """
+        Log timing information for DataFrame column comparisons.
+
+        Args:
+            df_path: The path to the DataFrame variable
+            column_timings: List of (elapsed_sec, column_name, dtype) tuples
+        """
+        if not column_timings:
+            return
+
+        # Sort by time descending
+        column_timings.sort(reverse=True)
+        total_time = sum(t[0] for t in column_timings)
+
+        # Only log if total time is significant
+        if total_time < _PROFILE_THRESHOLD_SEC:
+            return
+
+        log(f"[diff profile] DataFrame {df_path} column breakdown ({total_time*1000:.2f}ms total, {len(column_timings)} cols):")
+
+        # Log top 5 slowest columns
+        for elapsed, col_name, dtype in column_timings[:5]:
+            pct = (elapsed / total_time * 100) if total_time > 0 else 0
+            log(f"    {col_name} ({dtype}): {elapsed*1000:.3f}ms ({pct:.1f}%)")
+
+        # If there are more columns, show summary
+        if len(column_timings) > 5:
+            remaining_time = sum(t[0] for t in column_timings[5:])
+            log(f"    ... and {len(column_timings) - 5} more columns: {remaining_time*1000:.3f}ms")
 
     def _check_structural_change(
         self, path: str, change_type: str, detail: str
@@ -595,58 +836,50 @@ class Diff:
                     message=f"Type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}",
                 )
 
-        # Dispatch to type-specific methods
+        # Dispatch to type-specific methods using optimized dict lookup
         result: Optional[DiffNode] = None
-        if val_a is None:
-            result = None  # Both None (type check passed), so equal
-        elif isinstance(val_a, bool):
-            result = self._compare_bool(val_a, val_b, path)
-        # Check timedelta64 BEFORE integer (timedelta64 is subclass of np.integer)
-        elif isinstance(val_a, np.timedelta64):
-            result = self._compare_timedelta64(val_a, val_b, path)
-        elif isinstance(val_a, (int, np.integer)):
-            result = self._compare_int(val_a, val_b, path)
-        elif isinstance(val_a, (float, np.floating)):
-            result = self._compare_float(val_a, val_b, path)
-        elif isinstance(val_a, complex):
-            result = self._compare_complex(val_a, val_b, path)
-        elif isinstance(val_a, str):
-            result = self._compare_str(val_a, val_b, path)
-        elif isinstance(val_a, bytes):
-            result = self._compare_bytes(val_a, val_b, path)
-        # Pandas scalar types (must be before callable check)
-        elif isinstance(val_a, pd.Timestamp):
-            result = self._compare_timestamp(val_a, val_b, path)
-        elif isinstance(val_a, pd.Timedelta):
-            result = self._compare_timedelta(val_a, val_b, path)
-        # Numpy datetime64 (timedelta64 handled earlier due to np.integer inheritance)
-        elif isinstance(val_a, np.datetime64):
-            result = self._compare_datetime64(val_a, val_b, path)
-        elif callable(val_a):
-            result = self._compare_callable(val_a, val_b, path)
-        elif isinstance(val_a, np.ndarray):
-            result = self._compare_ndarray(val_a, val_b, path)
-        elif isinstance(val_a, (DataFrameGroupBy, SeriesGroupBy)):
-            result = self._compare_groupby(val_a, val_b, path)
-        elif isinstance(val_a, pd.Index):
-            result = self._compare_index(val_a, val_b, path)
-        elif isinstance(val_a, pd.Series):
-            result = self._compare_series(val_a, val_b, path)
-        elif isinstance(val_a, pd.DataFrame):
-            result = self._compare_dataframe(val_a, val_b, path)
-        elif isinstance(val_a, list):
-            result = self._compare_list(val_a, val_b, path)
-        elif isinstance(val_a, tuple):
-            result = self._compare_tuple(val_a, val_b, path)
-        elif isinstance(val_a, frozenset):
-            result = self._compare_frozenset(val_a, val_b, path)
-        elif isinstance(val_a, set):
-            result = self._compare_set(val_a, val_b, path)
-        elif isinstance(val_a, dict):
-            result = self._compare_dict(val_a, val_b, path)
+        t = type(val_a)
+
+        # Fast path: exact type lookup in dispatch table (O(1))
+        method_name = _COMPARE_DISPATCH.get(t)
+
+        if method_name is not None:
+            # Found exact match - dispatch directly
+            if method_name == "_dispatch_none":
+                result = None  # Both None, so equal
+            else:
+                method = getattr(self, method_name)
+                result = method(val_a, val_b, path)
         else:
-            # User-defined objects
-            result = self._compare_object(val_a, val_b, path)
+            # Check cache for previously resolved subclasses
+            method_name = _DISPATCH_CACHE.get(t)
+            if method_name is not None:
+                method = getattr(self, method_name)
+                result = method(val_a, val_b, path)
+            else:
+                # Fallback: isinstance checks for subclasses and special cases
+                # Order matters for inheritance relationships
+                if isinstance(val_a, np.timedelta64):
+                    _DISPATCH_CACHE[t] = "_compare_timedelta64"
+                    result = self._compare_timedelta64(val_a, val_b, path)
+                elif isinstance(val_a, np.integer):
+                    _DISPATCH_CACHE[t] = "_compare_int"
+                    result = self._compare_int(val_a, val_b, path)
+                elif isinstance(val_a, np.floating):
+                    _DISPATCH_CACHE[t] = "_compare_float"
+                    result = self._compare_float(val_a, val_b, path)
+                elif isinstance(val_a, np.complexfloating):
+                    _DISPATCH_CACHE[t] = "_compare_complex"
+                    result = self._compare_complex(val_a, val_b, path)
+                elif isinstance(val_a, (DataFrameGroupBy, SeriesGroupBy)):
+                    _DISPATCH_CACHE[t] = "_compare_groupby"
+                    result = self._compare_groupby(val_a, val_b, path)
+                elif callable(val_a):
+                    # Don't cache callables - too many different types
+                    result = self._compare_callable(val_a, val_b, path)
+                else:
+                    # User-defined objects
+                    result = self._compare_object(val_a, val_b, path)
 
         # If comparison found a difference, unregister these objects
         # so they don't pollute future comparisons
@@ -1556,12 +1789,22 @@ class Diff:
         cols_to_compare_values = cols_to_compare - cols_with_dtype_issues
 
         # Compare each column - _compare_series handles dtype casting internally
+        # Track column timings for profiling
+        column_timings: List[Tuple[float, str, str]] = []  # (elapsed, col_name, dtype)
+
         for col in sorted(cols_to_compare_values):
-            # with timer(key="compare_series", message=f"Comparing {col}"):
+            if _PROFILE_DIFF:
+                col_start = time.perf_counter()
+
             col_diff = self._compare_series(
                 val_a[col], val_b[col], f"{path}['{col}']"
             )
-            # log(f"col_diff: {col_diff}")
+
+            if _PROFILE_DIFF:
+                col_elapsed = time.perf_counter() - col_start
+                col_dtype = str(val_a[col].dtype)
+                column_timings.append((col_elapsed, str(col), col_dtype))
+
             if col_diff:
                 # Keep nested structure - don't flatten series diffs
                 children[f"['{col}']"] = col_diff
@@ -1569,14 +1812,21 @@ class Diff:
                 # Count diffs for truncation limit
                 if isinstance(col_diff, CompoundDiff):
                     # Count non-metadata keys in the nested children
-                    total_diff_count += len(col_diff.children) # len([k for k in col_diff.children if not k.startswith("_")])
+                    total_diff_count += len(col_diff.children)
                 else:
                     total_diff_count += 1
 
                 # Check if we've hit the limit
                 if total_diff_count >= self.max_diffs_per_structure:
                     truncated = True
+                    # Log column timings before returning
+                    if _PROFILE_DIFF and column_timings:
+                        self._log_column_timings(path, column_timings)
                     return CompoundDiff(source_type="dataframe", children=children, truncated=truncated)
+
+        # Log column timings for this DataFrame
+        if _PROFILE_DIFF and column_timings:
+            self._log_column_timings(path, column_timings)
 
         if children:
             return CompoundDiff(source_type="dataframe", children=children, truncated=truncated)

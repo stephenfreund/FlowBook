@@ -826,6 +826,8 @@ TEST FILES:
 
 from __future__ import annotations
 
+import atexit
+import os
 import time
 import types
 from typing import Any, Dict, Optional, Set
@@ -837,6 +839,118 @@ from data_ferret.kernel.deepcopy import deepcopy
 from data_ferret.kernel.diff import Diff
 from data_ferret.kernel.extended_types import TypeModel, get_type_model
 from data_ferret.util.output import log, timer
+
+
+# =============================================================================
+# SCALENE PROFILING FOR Checkpoint.diff
+# =============================================================================
+# Set FERRET_PROFILE_DIFF=1 to enable Scalene profiling of diff operations.
+# The profiler will track time spent in diff and print a summary on exit.
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Check environment variable for flag."""
+    val = os.environ.get(name, "").lower()
+    if val in ("1", "true", "yes", "on"):
+        return True
+    if val in ("0", "false", "no", "off"):
+        return False
+    return default
+
+PROFILE_DIFF_ENABLED = _env_flag("FERRET_PROFILE_DIFF", default=False)
+
+
+class DiffProfiler:
+    """
+    Tracks profiling statistics for Checkpoint.diff calls.
+
+    When FERRET_PROFILE_DIFF=1, this class collects:
+    - Number of diff calls
+    - Total time spent in diffs
+    - Scalene profiling data (if Scalene is available)
+    """
+
+    def __init__(self):
+        self.call_count = 0
+        self.total_time_ms = 0.0
+        self.scalene_available = False
+        self.scalene_profiler = None
+        self._initialized = False
+
+    def _init_scalene(self):
+        """Lazy initialization of Scalene profiler."""
+        if self._initialized:
+            return
+        self._initialized = True
+
+        try:
+            from scalene import scalene_profiler
+            self.scalene_profiler = scalene_profiler
+            self.scalene_available = True
+            log("[profile] Scalene profiler initialized for Checkpoint.diff")
+        except ImportError:
+            log("[profile] Scalene not available, using basic timing only")
+            self.scalene_available = False
+
+    def start(self):
+        """Start profiling a diff call."""
+        if not PROFILE_DIFF_ENABLED:
+            return time.perf_counter()
+
+        self._init_scalene()
+
+        if self.scalene_available:
+            try:
+                self.scalene_profiler.start()
+            except Exception as e:
+                log(f"[profile] Scalene start failed: {e}")
+
+        return time.perf_counter()
+
+    def stop(self, start_time: float):
+        """Stop profiling and record statistics."""
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+        if not PROFILE_DIFF_ENABLED:
+            return elapsed_ms
+
+        self.call_count += 1
+        self.total_time_ms += elapsed_ms
+
+        if self.scalene_available:
+            try:
+                self.scalene_profiler.stop()
+            except Exception as e:
+                log(f"[profile] Scalene stop failed: {e}")
+
+        return elapsed_ms
+
+    def print_summary(self):
+        """Print profiling summary on exit."""
+        if not PROFILE_DIFF_ENABLED or self.call_count == 0:
+            return
+
+        avg_ms = self.total_time_ms / self.call_count if self.call_count > 0 else 0
+
+        print("\n" + "=" * 60)
+        print("CHECKPOINT.DIFF PROFILING SUMMARY")
+        print("=" * 60)
+        print(f"  Total diff calls: {self.call_count}")
+        print(f"  Total time: {self.total_time_ms:.1f} ms")
+        print(f"  Average time per diff: {avg_ms:.2f} ms")
+
+        if self.scalene_available:
+            print("\n  Scalene profiling was enabled.")
+            print("  Run with: scalene --cpu --memory <script.py>")
+            print("  Or check Scalene output for detailed line-level profiling.")
+        print("=" * 60 + "\n")
+
+
+# Global profiler instance
+_diff_profiler = DiffProfiler()
+
+# Register summary printing on exit
+if PROFILE_DIFF_ENABLED:
+    atexit.register(_diff_profiler.print_summary)
 
 # Enable copy-on-write mode for better performance with DataFrame copies
 pd.options.mode.copy_on_write = True

@@ -1317,3 +1317,601 @@ class TestStructuralTrackingEnforce:
         # SHOULD cause violation - prior cell read .columns, we added column x
         assert result_c.violation is not None
         assert "df" in result_c.violation.variables
+
+
+# =============================================================================
+# TESTS FOR OPT_ACCESSED_VARS_ONLY OPTIMIZATION
+# These tests verify correctness of the optimization that only diffs accessed
+# variables plus their aliases, instead of the entire namespace.
+# =============================================================================
+
+class TestAccessedVarsOnlyOptimization:
+    """
+    Tests for the OPT_ACCESSED_VARS_ONLY optimization.
+
+    This optimization only diffs variables that the cell accessed (reads + writes)
+    plus their aliases (variables sharing object identity), instead of diffing
+    the entire namespace. This provides significant speedup for large namespaces.
+
+    Critical correctness requirement: alias detection must find all variables
+    that share object identity with accessed variables, so we detect backward
+    mutations through aliases.
+    """
+
+    def setup_method(self):
+        self.checkpoints = Checkpoints(
+            sanity_check=False,
+            convert_dtypes=False,
+            warn_classes=False,
+        )
+        self.sdc = SDCEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d", "e"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        """Save a pre-checkpoint for a cell."""
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
+        """Create a post-checkpoint."""
+        self.checkpoints.save(name, namespace, max_size_mb=None)
+        return self.checkpoints.saved[name]
+
+    # -------------------------------------------------------------------------
+    # Basic alias detection tests
+    # -------------------------------------------------------------------------
+
+    def test_alias_detected_simple(self):
+        """
+        Test that modifications through an alias are detected.
+
+        Scenario:
+        - Cell A creates y and reads it
+        - Cell B creates alias x = y
+        - Cell C modifies through x
+
+        Cell C should cause a backward mutation violation because y changed,
+        and Cell A read y.
+        """
+        import pandas as pd
+
+        # Cell A: creates y, reads y
+        y = [1, 2, 3]
+        self._save_pre_checkpoint("a", {"y": y})
+        post_a = self._make_post_checkpoint("post_a", {"y": y})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"y"}, writes=set()),
+        )
+
+        # Cell B: creates alias x = y (same object)
+        x = y  # x and y are the same object
+        self._save_pre_checkpoint("b", {"y": y, "x": x})
+        post_b = self._make_post_checkpoint("post_b", {"y": y, "x": x})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"y"}, writes={"x"}),
+        )
+
+        # Cell C: modifies through x (which changes y too!)
+        x_modified = [1, 2, 3]
+        x_modified[0] = 999  # Simulate in-place modification
+        self._save_pre_checkpoint("c", {"y": y, "x": x})
+        # After modification, both x and y point to modified list
+        post_c = self._make_post_checkpoint("post_c", {"y": x_modified, "x": x_modified})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Should detect violation - Cell A read y, Cell C modified y (via x)
+        assert result_c.violation is not None
+        assert result_c.violation.affected_cell == "a"
+        # The violation should mention y (the variable Cell A read)
+        assert "y" in result_c.violation.variables or "x" in result_c.violation.variables
+
+    def test_alias_detected_dataframe(self):
+        """
+        Test alias detection with DataFrames.
+
+        Scenario:
+        - Cell A creates df and reads df['price']
+        - Cell B creates alias df_copy = df (same object, not a copy!)
+        - Cell C modifies df_copy['price']
+
+        Cell C should cause a backward mutation violation.
+        """
+        import pandas as pd
+
+        df = pd.DataFrame({'price': [100, 200], 'quantity': [5, 10]})
+
+        # Cell A: creates df, reads price column
+        self._save_pre_checkpoint("a", {"df": df})
+        post_a = self._make_post_checkpoint("post_a", {"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_reads={"df": {"price"}}
+            ),
+        )
+
+        # Cell B: creates alias (NOT a copy)
+        df_alias = df  # Same object!
+        self._save_pre_checkpoint("b", {"df": df, "df_alias": df_alias})
+        post_b = self._make_post_checkpoint("post_b", {"df": df, "df_alias": df_alias})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"df"}, writes={"df_alias"}),
+        )
+
+        # Cell C: modifies through alias
+        df_modified = pd.DataFrame({'price': [999, 999], 'quantity': [5, 10]})
+        self._save_pre_checkpoint("c", {"df": df, "df_alias": df_alias})
+        post_c = self._make_post_checkpoint("post_c", {"df": df_modified, "df_alias": df_modified})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(
+                reads=set(), writes={"df_alias"},
+                column_writes={"df_alias": {"price"}}
+            ),
+        )
+
+        # Should detect violation
+        assert result_c.violation is not None
+        assert result_c.violation.affected_cell == "a"
+
+    def test_multiple_aliases_all_detected(self):
+        """
+        Test that multiple aliases are all detected.
+
+        Scenario:
+        - Cell A creates x and reads it
+        - Cell B creates aliases: y = x, z = x
+        - Cell C modifies through z
+
+        Should detect that x (and y) also changed.
+        """
+        x = {"value": 1}
+
+        # Cell A: creates x, reads x
+        self._save_pre_checkpoint("a", {"x": x})
+        post_a = self._make_post_checkpoint("post_a", {"x": x})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell B: creates multiple aliases
+        y = x
+        z = x
+        self._save_pre_checkpoint("b", {"x": x, "y": y, "z": z})
+        post_b = self._make_post_checkpoint("post_b", {"x": x, "y": y, "z": z})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes={"y", "z"}),
+        )
+
+        # Cell C: modifies through z
+        modified = {"value": 999}
+        self._save_pre_checkpoint("c", {"x": x, "y": y, "z": z})
+        post_c = self._make_post_checkpoint("post_c", {"x": modified, "y": modified, "z": modified})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads=set(), writes={"z"}),
+        )
+
+        # Should detect violation - x was read by Cell A
+        assert result_c.violation is not None
+        assert result_c.violation.affected_cell == "a"
+
+    def test_no_alias_no_spurious_diff(self):
+        """
+        Test that non-aliased variables are not diffed when optimization is active.
+
+        Scenario:
+        - Cell A reads x
+        - Cell B has many other variables (not aliases)
+        - Cell B only accesses y
+
+        The diff should only check y, not the many other variables.
+        (We can't directly test this, but we ensure correctness.)
+        """
+        # Cell A: reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell B: has many variables, only accesses y (writes it)
+        namespace = {"x": 1, "y": 2}
+        # Add many unrelated variables
+        for i in range(50):
+            namespace[f"unrelated_{i}"] = i * 100
+
+        self._save_pre_checkpoint("b", namespace)
+        namespace_after = namespace.copy()
+        namespace_after["y"] = 999  # Only y changes
+        post_b = self._make_post_checkpoint("post_b", namespace_after)
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # No violation - y wasn't read by any earlier cell
+        assert result_b.violation is None
+
+    def test_alias_broken_by_copy(self):
+        """
+        Test that breaking an alias (via copy) is handled correctly.
+
+        Scenario:
+        - Cell A creates df, reads df
+        - Cell B creates alias: df_alias = df
+        - Cell C breaks alias: df_alias = df_alias.copy(), then modifies df_alias
+
+        Cell C should NOT cause a violation because df_alias is now independent.
+        """
+        import pandas as pd
+
+        df = pd.DataFrame({'a': [1, 2, 3]})
+
+        # Cell A: creates df, reads df
+        self._save_pre_checkpoint("a", {"df": df})
+        post_a = self._make_post_checkpoint("post_a", {"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"df"}, writes=set()),
+        )
+
+        # Cell B: creates alias
+        df_alias = df
+        self._save_pre_checkpoint("b", {"df": df, "df_alias": df_alias})
+        post_b = self._make_post_checkpoint("post_b", {"df": df, "df_alias": df_alias})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"df"}, writes={"df_alias"}),
+        )
+
+        # Cell C: breaks alias with copy, then modifies the copy
+        # Pre-state: df and df_alias are same object
+        self._save_pre_checkpoint("c", {"df": df, "df_alias": df_alias})
+        # Post-state: df_alias is now a different object (the copy, modified)
+        df_copy_modified = df.copy()
+        df_copy_modified['a'] = [999, 999, 999]
+        post_c = self._make_post_checkpoint("post_c", {"df": df, "df_alias": df_copy_modified})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads={"df_alias"}, writes={"df_alias"}),
+        )
+
+        # No violation - df is unchanged, only the copy (df_alias) changed
+        assert result_c.violation is None
+
+    def test_new_variable_not_alias(self):
+        """
+        Test that new variables (only in post-state) are handled correctly.
+
+        Scenario:
+        - Cell A reads x
+        - Cell B creates new variable y (wasn't in pre-state)
+
+        Should not cause any issues.
+        """
+        # Cell A: reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell B: creates new variable y
+        self._save_pre_checkpoint("b", {"x": 1})
+        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 42})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # No violation - y is new, x is unchanged
+        assert result_b.violation is None
+
+    def test_deleted_variable(self):
+        """
+        Test that deleted variables are handled correctly.
+
+        Scenario:
+        - Cell A reads x
+        - Cell B deletes y (which was not read by anyone)
+
+        Should not cause any issues.
+        """
+        # Cell A: reads x
+        self._save_pre_checkpoint("a", {"x": 1, "y": 2})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell B: deletes y
+        self._save_pre_checkpoint("b", {"x": 1, "y": 2})
+        post_b = self._make_post_checkpoint("post_b", {"x": 1})  # y deleted
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # No violation - y wasn't read by earlier cells
+        assert result_b.violation is None
+
+    def test_alias_in_nested_structure(self):
+        """
+        Test alias detection when the same object appears multiple times in a structure.
+
+        Scenario:
+        - Cell A creates data dict containing df, reads data['df1']
+        - Cell B accesses data['df2'] which is the same object
+
+        Modification through data['df2'] should be detected as affecting data['df1'].
+        """
+        import pandas as pd
+
+        df = pd.DataFrame({'a': [1, 2, 3]})
+        # Same df object stored under two keys
+        data = {'df1': df, 'df2': df}
+
+        # Cell A: reads data, specifically data['df1']
+        self._save_pre_checkpoint("a", {"data": data})
+        post_a = self._make_post_checkpoint("post_a", {"data": data})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"data"}, writes=set()),
+        )
+
+        # Cell B: modifies data['df2'] (same underlying object as df1)
+        data_modified = data.copy()
+        df_modified = pd.DataFrame({'a': [999, 999, 999]})
+        data_modified['df1'] = df_modified
+        data_modified['df2'] = df_modified
+
+        self._save_pre_checkpoint("b", {"data": data})
+        post_b = self._make_post_checkpoint("post_b", {"data": data_modified})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads=set(), writes={"data"}),
+        )
+
+        # Should detect violation - data was read by Cell A
+        assert result_b.violation is not None
+        assert result_b.violation.affected_cell == "a"
+        assert "data" in result_b.violation.variables
+
+    def test_empty_accessed_vars(self):
+        """
+        Test edge case where cell accesses no variables.
+
+        Should still work correctly (diff nothing, no violation).
+        """
+        # Cell A: reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell B: accesses nothing (e.g., just prints a constant)
+        self._save_pre_checkpoint("b", {"x": 1})
+        post_b = self._make_post_checkpoint("post_b", {"x": 1})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads=set(), writes=set()),
+        )
+
+        # No violation - nothing was modified
+        assert result_b.violation is None
+
+    def test_all_vars_accessed(self):
+        """
+        Test edge case where cell accesses all variables.
+
+        Should work correctly (diff everything).
+        """
+        # Cell A: reads x
+        self._save_pre_checkpoint("a", {"x": 1, "y": 2, "z": 3})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1, "y": 2, "z": 3})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell B: accesses all variables, modifies x
+        self._save_pre_checkpoint("b", {"x": 1, "y": 2, "z": 3})
+        post_b = self._make_post_checkpoint("post_b", {"x": 999, "y": 2, "z": 3})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x", "y", "z"}, writes={"x"}),
+        )
+
+        # Should detect violation - Cell A read x, Cell B modified x
+        assert result_b.violation is not None
+        assert result_b.violation.affected_cell == "a"
+        assert "x" in result_b.violation.variables
+
+
+class TestExpandWithAliases:
+    """
+    Direct unit tests for the _expand_with_aliases helper function.
+    """
+
+    def test_no_aliases(self):
+        """Test with no aliases - returns just the accessed vars."""
+        from data_ferret.sdc_kernel.sdc_enforcer import _expand_with_aliases
+
+        namespace = {"x": [1, 2, 3], "y": [4, 5, 6], "z": "string"}
+        accessed = {"x"}
+
+        result = _expand_with_aliases(accessed, namespace)
+
+        assert result == {"x"}
+
+    def test_simple_alias(self):
+        """Test with one alias."""
+        from data_ferret.sdc_kernel.sdc_enforcer import _expand_with_aliases
+
+        shared_list = [1, 2, 3]
+        namespace = {"x": shared_list, "y": shared_list, "z": "other"}
+        accessed = {"x"}
+
+        result = _expand_with_aliases(accessed, namespace)
+
+        assert result == {"x", "y"}
+
+    def test_multiple_aliases(self):
+        """Test with multiple aliases."""
+        from data_ferret.sdc_kernel.sdc_enforcer import _expand_with_aliases
+
+        shared_obj = {"data": 123}
+        namespace = {"a": shared_obj, "b": shared_obj, "c": shared_obj, "d": "other"}
+        accessed = {"a"}
+
+        result = _expand_with_aliases(accessed, namespace)
+
+        assert result == {"a", "b", "c"}
+
+    def test_multiple_accessed_with_aliases(self):
+        """Test with multiple accessed vars, each with aliases."""
+        from data_ferret.sdc_kernel.sdc_enforcer import _expand_with_aliases
+
+        obj1 = [1, 2]
+        obj2 = {"x": 1}
+        namespace = {
+            "a1": obj1, "a2": obj1,  # aliases of each other
+            "b1": obj2, "b2": obj2,  # aliases of each other
+            "c": "independent",
+        }
+        accessed = {"a1", "b1"}
+
+        result = _expand_with_aliases(accessed, namespace)
+
+        assert result == {"a1", "a2", "b1", "b2"}
+
+    def test_accessed_var_not_in_namespace(self):
+        """Test when accessed var is not in namespace (new variable case)."""
+        from data_ferret.sdc_kernel.sdc_enforcer import _expand_with_aliases
+
+        namespace = {"x": [1, 2, 3]}
+        accessed = {"x", "y"}  # y doesn't exist in namespace
+
+        result = _expand_with_aliases(accessed, namespace)
+
+        # Should still include y (for new variable case)
+        assert result == {"x", "y"}
+
+    def test_empty_accessed(self):
+        """Test with empty accessed set."""
+        from data_ferret.sdc_kernel.sdc_enforcer import _expand_with_aliases
+
+        namespace = {"x": [1, 2, 3], "y": [4, 5, 6]}
+        accessed = set()
+
+        result = _expand_with_aliases(accessed, namespace)
+
+        assert result == set()
+
+    def test_empty_namespace(self):
+        """Test with empty namespace."""
+        from data_ferret.sdc_kernel.sdc_enforcer import _expand_with_aliases
+
+        namespace = {}
+        accessed = {"x", "y"}  # New variables
+
+        result = _expand_with_aliases(accessed, namespace)
+
+        # Should return the accessed vars (for new variable case)
+        assert result == {"x", "y"}
+
+    def test_immutable_types_not_aliased(self):
+        """
+        Test that immutable types with same value are not considered aliases.
+
+        Python interns small integers and strings, but for our purposes,
+        these should not be treated as aliases since modifying one doesn't
+        affect the other.
+        """
+        from data_ferret.sdc_kernel.sdc_enforcer import _expand_with_aliases
+
+        # Python may intern these, making id(x) == id(y)
+        # But they're immutable, so it doesn't matter for our use case
+        namespace = {"x": 42, "y": 42, "z": "hello", "w": "hello"}
+        accessed = {"x"}
+
+        result = _expand_with_aliases(accessed, namespace)
+
+        # Due to interning, y might be included. That's fine - it's conservative.
+        # The important thing is we don't miss aliases of mutable objects.
+        assert "x" in result
+
+    def test_dataframe_aliases(self):
+        """Test with DataFrame aliases."""
+        import pandas as pd
+        from data_ferret.sdc_kernel.sdc_enforcer import _expand_with_aliases
+
+        df = pd.DataFrame({'a': [1, 2, 3]})
+        namespace = {"df": df, "df_view": df, "other_df": pd.DataFrame({'b': [4, 5, 6]})}
+        accessed = {"df"}
+
+        result = _expand_with_aliases(accessed, namespace)
+
+        assert result == {"df", "df_view"}
