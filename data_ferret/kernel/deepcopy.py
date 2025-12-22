@@ -353,7 +353,7 @@ def _convert_object_column_dtype(series: pd.Series) -> pd.Series:
         elif kind == "complex":
             return series.astype(complex)
         elif kind == "string":
-            return series.astype("string")
+            return series.astype("category")
         elif kind == "boolean":
             return series.astype("boolean")
         elif kind in {"datetime64", "datetime", "date"}:
