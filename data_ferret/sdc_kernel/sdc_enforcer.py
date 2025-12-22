@@ -413,21 +413,22 @@ class SDCEnforcer:
             # Check if diff was truncated - if so, return violation
             truncated_vars = _check_for_truncation(current_diff)
             if truncated_vars:
-                formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
-                mutating_alpha = self._cell_id_to_alpha(cell_id)
-                return SDCResult(
-                    violation=SDCViolation(
-                        mutating_cell=cell_id,
-                        affected_cell=cell_id,
-                        variables=truncated_vars,
-                        message=format_truncation_error(mutating_alpha, truncated_vars),
-                        truncation_details=formatted_diff,
-                    ),
-                    stale_cells=[],
-                    changed_variables=[],
-                    column_changed={},
-                    structural_warnings=structural_warnings,
-                )
+                with timer(key="violation_truncation_check", message=f"[violation] Building truncation violation (check)"):
+                    formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
+                    mutating_alpha = self._cell_id_to_alpha(cell_id)
+                    return SDCResult(
+                        violation=SDCViolation(
+                            mutating_cell=cell_id,
+                            affected_cell=cell_id,
+                            variables=truncated_vars,
+                            message=format_truncation_error(mutating_alpha, truncated_vars),
+                            truncation_details=formatted_diff,
+                        ),
+                        stale_cells=[],
+                        changed_variables=[],
+                        column_changed={},
+                        structural_warnings=structural_warnings,
+                    )
 
             if current_diff.differences:
                 changed_vars = list(current_diff.differences.keys())
@@ -539,19 +540,20 @@ class SDCEnforcer:
         with timer(key="bwm_check_truncation", message=f"[bwm] Check truncation"):
             truncated_vars = _check_for_truncation(current_diff)
         if truncated_vars:
-            formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
-            mutating_alpha = self._cell_id_to_alpha(cell_id)
-            return (
-                SDCViolation(
-                    mutating_cell=cell_id,
-                    affected_cell=cell_id,
-                    variables=truncated_vars,
-                    message=format_truncation_error(mutating_alpha, truncated_vars),
-                    truncation_details=formatted_diff,
-                ),
-                current_diff,
-                [],  # No typed_changes on truncation
-            )
+            with timer(key="violation_truncation", message=f"[violation] Building truncation violation"):
+                formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
+                mutating_alpha = self._cell_id_to_alpha(cell_id)
+                return (
+                    SDCViolation(
+                        mutating_cell=cell_id,
+                        affected_cell=cell_id,
+                        variables=truncated_vars,
+                        message=format_truncation_error(mutating_alpha, truncated_vars),
+                        truncation_details=formatted_diff,
+                    ),
+                    current_diff,
+                    [],  # No typed_changes on truncation
+                )
 
         if not current_diff.differences:
             # This cell didn't modify anything, no backward mutation possible
@@ -626,36 +628,37 @@ class SDCEnforcer:
                 conflicts = sorted(set(conflicts))
 
                 if conflicts:
-                    mutating_alpha = self._cell_id_to_alpha(cell_id)
-                    affected_alpha = self._cell_id_to_alpha(prior_cell_id)
+                    with timer(key="violation_backward_mutation", message=f"[violation] Building backward mutation violation"):
+                        mutating_alpha = self._cell_id_to_alpha(cell_id)
+                        affected_alpha = self._cell_id_to_alpha(prior_cell_id)
 
-                    # Get structural reads values from the prior record
-                    prior_structural_values = prior_record.structural_reads_values
+                        # Get structural reads values from the prior record
+                        prior_structural_values = prior_record.structural_reads_values
 
-                    # Extract change descriptions from diff
-                    changes = _extract_change_descriptions(current_diff, modified_columns)
+                        # Extract change descriptions from diff
+                        changes = _extract_change_descriptions(current_diff, modified_columns)
 
-                    # Build the detailed message
-                    message = format_structural_violation(
-                        mutating_alpha,
-                        affected_alpha,
-                        conflicts,
-                        prior_structural_values,
-                        changes,
-                    )
+                        # Build the detailed message
+                        message = format_structural_violation(
+                            mutating_alpha,
+                            affected_alpha,
+                            conflicts,
+                            prior_structural_values,
+                            changes,
+                        )
 
-                    return (
-                        SDCViolation(
-                            mutating_cell=cell_id,
-                            affected_cell=prior_cell_id,
-                            variables=conflicts,
-                            message=message,
-                            structural_reads_detail=prior_structural_values,
-                            changes_detail=changes,
-                        ),
-                        current_diff,
-                        typed_changes,
-                    )
+                        return (
+                            SDCViolation(
+                                mutating_cell=cell_id,
+                                affected_cell=prior_cell_id,
+                                variables=conflicts,
+                                message=message,
+                                structural_reads_detail=prior_structural_values,
+                                changes_detail=changes,
+                            ),
+                            current_diff,
+                            typed_changes,
+                        )
 
         return (None, current_diff, typed_changes)
 
@@ -718,20 +721,21 @@ class SDCEnforcer:
             conflicts = sorted(set(conflicts))
 
             if conflicts:
-                reading_alpha = self._cell_id_to_alpha(cell_id)
-                writing_alpha = self._cell_id_to_alpha(later_cell_id)
+                with timer(key="violation_forward_dependency", message=f"[violation] Building forward dependency violation"):
+                    reading_alpha = self._cell_id_to_alpha(cell_id)
+                    writing_alpha = self._cell_id_to_alpha(later_cell_id)
 
-                message = format_forward_dependency_message(
-                    reading_alpha, writing_alpha, conflicts
-                )
+                    message = format_forward_dependency_message(
+                        reading_alpha, writing_alpha, conflicts
+                    )
 
-                return SDCViolation(
-                    mutating_cell=later_cell_id,
-                    affected_cell=cell_id,
-                    variables=conflicts,
-                    message=message,
-                    violation_type="forward_dependency",
-                )
+                    return SDCViolation(
+                        mutating_cell=later_cell_id,
+                        affected_cell=cell_id,
+                        variables=conflicts,
+                        message=message,
+                        violation_type="forward_dependency",
+                    )
 
         return None
 

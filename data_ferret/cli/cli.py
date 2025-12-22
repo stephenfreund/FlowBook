@@ -136,6 +136,12 @@ def cli_main():
         help="Force checkpointing before every cell execution (stored as pre_{cell_id})",
     )
 
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Verbose output",
+    )
+
     args = parser.parse_args()
 
     # log the args in a nice format (arg and value in columns)
@@ -257,11 +263,12 @@ def cli_main():
         print("=" * 60)
 
         # Display metadata
-        print("\n" + "=" * 60)
-        print("DETAILED METADATA")
-        print("=" * 60)
-        print(format_metadata(metadata_data))
-        print("=" * 60)
+        if args.verbose:
+            print("\n" + "=" * 60)
+            print("DETAILED METADATA")
+            print("=" * 60)
+            print(format_metadata(metadata_data))
+            print("=" * 60)
 
         # Save metadata to file
         try:

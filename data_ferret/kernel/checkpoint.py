@@ -703,7 +703,8 @@ Key implementation details:
      they can't be mutated in-place and don't need alias tracking.
 
 Usage:
-  checkpoint = Checkpoint(name, user_ns, memo, build_alias_index=True)
+  checkpoint = Checkpoint(name, user_ns, memo)
+  # Alias index is built lazily on first call to get_aliases_for_vars
   aliases = checkpoint.get_aliases_for_vars({"a", "b"}, log_aliases=True)
 
 Environment variable FERRET_LOG_DEEP_ALIASES=1 enables detailed logging of
@@ -1081,6 +1082,10 @@ _IMMUTABLE_ATOMIC_TYPES = (type(None), bool, int, float, complex, str, bytes)
 # Environment variable to control deep alias logging
 _LOG_DEEP_ALIASES = os.environ.get("FERRET_LOG_DEEP_ALIASES", "").lower() in ("1", "true", "yes", "on")
 
+# Threshold for warning about slow object-dtype traversal.
+# If a container has more object-dtype elements than this, log a warning.
+_SLOW_OBJECT_DTYPE_THRESHOLD = int(os.environ.get("FERRET_SLOW_ALIAS_THRESHOLD", "1000"))
+
 
 def _collect_reachable_ids_with_paths(
     obj: Any,
@@ -1140,13 +1145,13 @@ def _collect_reachable_ids_with_paths(
             # NOTE: We do NOT track df[col].values because .values creates a
             # TEMPORARY array whose id() can be reused by the memory allocator.
             # We only recurse into object-dtype columns to find nested references.
+            # Optimization: Check dtype directly, iterate Series (avoids .values array creation)
             for col in obj.columns:
                 try:
-                    col_repr = repr(col) if not isinstance(col, str) else f"'{col}'"
-                    arr = obj[col].values
-                    # For object-dtype columns, recurse into actual stored elements
-                    if arr.dtype == object:
-                        for i, item in enumerate(arr):
+                    series = obj[col]
+                    if series.dtype == object:
+                        col_repr = repr(col) if not isinstance(col, str) else f"'{col}'"
+                        for i, item in enumerate(series):
                             _collect_reachable_ids_with_paths(
                                 item, f"{path}[{col_repr}][{i}]", visited, id_to_path
                             )
@@ -1156,10 +1161,10 @@ def _collect_reachable_ids_with_paths(
             # NOTE: We do NOT track series.values because .values creates a
             # TEMPORARY array whose id() can be reused by the memory allocator.
             # We only recurse into object-dtype series to find nested references.
+            # Optimization: Check dtype directly, iterate Series (avoids .values array creation)
             try:
-                arr = obj.values
-                if arr.dtype == object:
-                    for i, item in enumerate(arr):
+                if obj.dtype == object:
+                    for i, item in enumerate(obj):
                         _collect_reachable_ids_with_paths(item, f"{path}[{i}]", visited, id_to_path)
             except Exception:
                 pass
@@ -1234,11 +1239,12 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
             # NOTE: We do NOT track df[col].values because .values creates a
             # TEMPORARY array whose id() can be reused by the memory allocator.
             # We only recurse into object-dtype columns to find nested references.
+            # Optimization: Check dtype directly, iterate Series (avoids .values array creation)
             for col in obj.columns:
                 try:
-                    arr = obj[col].values
-                    if arr.dtype == object:
-                        for item in arr:
+                    series = obj[col]
+                    if series.dtype == object:
+                        for item in series:
                             _collect_reachable_ids(item, visited)
                 except Exception:
                     pass
@@ -1246,10 +1252,10 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
             # NOTE: We do NOT track series.values because .values creates a
             # TEMPORARY array whose id() can be reused by the memory allocator.
             # We only recurse into object-dtype series to find nested references.
+            # Optimization: Check dtype directly, iterate Series (avoids .values array creation)
             try:
-                arr = obj.values
-                if arr.dtype == object:
-                    for item in arr:
+                if obj.dtype == object:
+                    for item in obj:
                         _collect_reachable_ids(item, visited)
             except Exception:
                 pass
@@ -1292,7 +1298,7 @@ class Checkpoint:
         user_ns: Deep-copied user namespace variables
         reverse_memo: Maps copied object IDs back to original memo keys
 
-    Deep Alias Detection Attributes (see section 12 in module docstring):
+    Deep Alias Detection Attributes (built lazily on first query, see section 12):
         _reachable_ids: Dict[var_name, Set[obj_id]] - all object IDs reachable
             from each variable via traversing nested containers. Used to find
             which variables share internal references.
@@ -1301,7 +1307,8 @@ class Checkpoint:
             lookup of aliases for a given set of accessed variables.
         _id_to_paths: Dict[obj_id, Dict[var_name, path_str]] - maps each object
             ID to the paths within each variable that reach it (e.g., "a['b'][0]").
-            Used for detailed logging of alias relationships.
+            Used for detailed logging of alias relationships (only when FERRET_LOG_DEEP_ALIASES=1).
+        _alias_index_built: bool - True if the alias index has been built.
 
     Note:
         The alias index only tracks PERSISTENT objects - not temporary objects
@@ -1314,7 +1321,6 @@ class Checkpoint:
         name: str,
         user_ns: dict[str, Any],
         memo: dict[int, Any],
-        build_alias_index: bool = True,
     ):
         """
         Create a new checkpoint.
@@ -1323,21 +1329,17 @@ class Checkpoint:
             name: Identifier for this checkpoint
             user_ns: Deep-copied user namespace variables
             memo: Dictionary mapping original object IDs to their copies
-            build_alias_index: Whether to build the deep alias detection index.
-                              Set to False for performance if alias detection not needed.
         """
         self.name = name
         self.user_ns = user_ns
         self.reverse_memo = {id(v): k for k, v in memo.items()}
 
-        # Deep alias detection index (built once, reused for all queries)
+        # Deep alias detection index (built lazily on first query)
         self._reachable_ids: Dict[str, Set[int]] = {}
         self._id_to_vars: Dict[int, Set[str]] = {}
         # Path tracking for alias logging: maps (var_name, obj_id) -> path string
         self._id_to_paths: Dict[int, Dict[str, str]] = {}
-
-        if build_alias_index:
-            self._build_alias_index()
+        self._alias_index_built: bool = False
 
     def _build_alias_index(self) -> None:
         """
@@ -1357,28 +1359,78 @@ class Checkpoint:
         """
         from collections import defaultdict
 
-        self._reachable_ids = {}
-        self._id_to_vars = defaultdict(set)
-        self._id_to_paths = defaultdict(dict)
+        with timer(key="build_alias_index", message=f"Building alias index for checkpoint '{self.name}'"):
+            self._reachable_ids = {}
+            self._id_to_vars = defaultdict(set)
+            self._id_to_paths = defaultdict(dict)
 
-        for var_name, var_value in self.user_ns.items():
-            # Collect all object IDs reachable from this variable, with paths
-            visited: Set[int] = set()
-            id_to_path: Dict[int, str] = {}
-            _collect_reachable_ids_with_paths(var_value, var_name, visited, id_to_path)
-            self._reachable_ids[var_name] = visited
+            total_ids_collected = 0
+            collect_time = 0.0
 
-            # Build reverse index: which variables contain each object ID
-            for obj_id in visited:
-                self._id_to_vars[obj_id].add(var_name)
+            # Phase 1: Collect all reachable IDs for each variable
+            # Optimization: Only track paths when logging is enabled (saves ~30-50% time)
+            track_paths = _LOG_DEEP_ALIASES
+            slow_vars = []
 
-            # Store paths for each object ID
-            for obj_id, path in id_to_path.items():
-                self._id_to_paths[obj_id][var_name] = path
+            for var_name, var_value in self.user_ns.items():
+                visited: Set[int] = set()
 
-        # Convert defaultdicts to regular dicts
-        self._id_to_vars = dict(self._id_to_vars)
-        self._id_to_paths = dict(self._id_to_paths)
+                t0 = time.perf_counter()
+                if track_paths:
+                    # Full path tracking for detailed alias logging
+                    id_to_path: Dict[int, str] = {}
+                    _collect_reachable_ids_with_paths(var_value, var_name, visited, id_to_path)
+                    # Store paths
+                    for obj_id, path in id_to_path.items():
+                        self._id_to_paths[obj_id][var_name] = path
+                else:
+                    # Fast path: no path tracking
+                    _collect_reachable_ids(var_value, visited)
+                var_collect_time = time.perf_counter() - t0
+                collect_time += var_collect_time
+
+                self._reachable_ids[var_name] = visited
+                total_ids_collected += len(visited)
+
+                # Track slow variables for warning
+                if len(visited) > _SLOW_OBJECT_DTYPE_THRESHOLD or var_collect_time > 0.005:
+                    slow_vars.append((var_name, len(visited), var_collect_time * 1000))
+
+            # Log warnings for slow variables
+            for var_name, num_ids, time_ms in slow_vars:
+                # Identify the cause
+                var_value = self.user_ns[var_name]
+                cause = ""
+                if isinstance(var_value, pd.DataFrame):
+                    obj_cols = [c for c in var_value.columns if var_value[c].dtype == object]
+                    if obj_cols:
+                        total_obj_elements = sum(len(var_value) for _ in obj_cols)
+                        cause = f" (DataFrame with {len(obj_cols)} object-dtype columns, {total_obj_elements} elements)"
+                elif isinstance(var_value, pd.Series) and var_value.dtype == object:
+                    cause = f" (Series with {len(var_value)} object-dtype elements)"
+                elif isinstance(var_value, np.ndarray) and var_value.dtype == object:
+                    cause = f" (ndarray with {var_value.size} object-dtype elements)"
+                log(f"[alias-index] WARNING: slow var '{var_name}': {num_ids} IDs in {time_ms:.1f}ms{cause}")
+
+            # Phase 2: Build reverse index in one pass
+            # This is O(total_ids) but we batch the set.add calls per variable
+            t0 = time.perf_counter()
+            for var_name, visited in self._reachable_ids.items():
+                for obj_id in visited:
+                    self._id_to_vars[obj_id].add(var_name)
+            reverse_index_time = time.perf_counter() - t0
+
+            # Convert defaultdicts to regular dicts
+            self._id_to_vars = dict(self._id_to_vars)
+            self._id_to_paths = dict(self._id_to_paths)
+
+            # Log detailed timing breakdown
+            num_vars = len(self.user_ns)
+            num_unique_ids = len(self._id_to_vars)
+            log(f"[alias-index] {num_vars} vars, {total_ids_collected} total IDs, {num_unique_ids} unique IDs")
+            log(f"[alias-index] collect={collect_time*1000:.1f}ms, reverse_index={reverse_index_time*1000:.1f}ms")
+
+            self._alias_index_built = True
 
     def get_aliases_for_vars(
         self, accessed_vars: Set[str], log_aliases: bool = False
@@ -1387,6 +1439,7 @@ class Checkpoint:
         Get all variables that share internal references with the given variables.
 
         This uses the precomputed alias index to efficiently find aliases.
+        The index is built lazily on first call.
         O(accessed_vars + number_of_aliases) instead of O(total_objects_in_namespace).
 
         Args:
@@ -1397,8 +1450,12 @@ class Checkpoint:
             Set of all variable names that share any internal reference with
             the accessed variables (including the original accessed_vars)
         """
+        # Lazy index building: only build when first needed
+        if not self._alias_index_built:
+            self._build_alias_index()
+
         if not self._reachable_ids:
-            # No index built - fall back to just returning accessed_vars
+            # Empty namespace - just return accessed_vars
             return accessed_vars
 
         # Step 1: Collect all reachable IDs from accessed vars

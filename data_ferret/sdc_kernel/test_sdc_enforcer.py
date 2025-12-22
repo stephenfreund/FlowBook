@@ -2448,7 +2448,7 @@ class TestDeepAliasIntegration:
         assert "c" in expanded, "Deep alias detection should find c shares refs with a"
 
     def test_expand_with_deep_aliases_uses_checkpoint_index(self):
-        """Verify _expand_with_deep_aliases uses the checkpoint's precomputed index."""
+        """Verify _expand_with_deep_aliases uses the checkpoint's lazy-built index."""
         from data_ferret.kernel.checkpoint import Checkpoint
         from data_ferret.sdc_kernel.sdc_enforcer import _expand_with_deep_aliases
 
@@ -2457,13 +2457,18 @@ class TestDeepAliasIntegration:
 
         checkpoint = Checkpoint("test", namespace, {})
 
-        # Verify index was built
-        assert checkpoint._reachable_ids, "Alias index should be built"
-        assert checkpoint._id_to_vars, "Reverse index should be built"
+        # Verify index is NOT built initially (lazy building)
+        assert not checkpoint._alias_index_built, "Alias index should be built lazily"
+        assert not checkpoint._reachable_ids, "Reachable IDs should be empty before first query"
 
-        # Test the expansion
+        # Test the expansion - this triggers lazy index building
         result = _expand_with_deep_aliases({"var_a"}, checkpoint)
         assert result == {"var_a", "var_b"}
+
+        # Now verify index WAS built
+        assert checkpoint._alias_index_built, "Alias index should be built after query"
+        assert checkpoint._reachable_ids, "Reachable IDs should be populated"
+        assert checkpoint._id_to_vars, "Reverse index should be populated"
 
     def test_performance_precomputed_vs_runtime(self):
         """Verify that using precomputed index is efficient."""

@@ -213,7 +213,7 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
 
     Args:
         stats: List of TimerStats objects
-        sort_by: Field to sort by ('total', 'mean', 'count', 'max')
+        sort_by: Field to sort by ('total', 'mean', 'count', 'max', 'key')
         title: Optional title for the table
         top: Optional limit to show only top N timers
 
@@ -224,15 +224,16 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
         return "No timing data available\n"
 
     # Sort by specified field
-    reverse = True  # Most fields: higher is first
     if sort_by == 'count':
-        sorted_stats = sorted(stats, key=lambda s: s.count, reverse=reverse)
+        sorted_stats = sorted(stats, key=lambda s: s.count, reverse=True)
     elif sort_by == 'mean':
-        sorted_stats = sorted(stats, key=lambda s: s.mean, reverse=reverse)
+        sorted_stats = sorted(stats, key=lambda s: s.mean, reverse=True)
     elif sort_by == 'max':
-        sorted_stats = sorted(stats, key=lambda s: s.max, reverse=reverse)
+        sorted_stats = sorted(stats, key=lambda s: s.max, reverse=True)
+    elif sort_by == 'key':
+        sorted_stats = sorted(stats, key=lambda s: s.key, reverse=False)
     else:  # total (default)
-        sorted_stats = sorted(stats, key=lambda s: s.total, reverse=reverse)
+        sorted_stats = sorted(stats, key=lambda s: s.total, reverse=True)
 
     # Apply top N filter if specified
     if top is not None and top > 0:
@@ -440,6 +441,8 @@ def process_single_file(file_path: str, args) -> tuple[list[dict], list[TimerSta
         stats.sort(key=lambda s: s.mean, reverse=True)
     elif args.sort_by == 'max':
         stats.sort(key=lambda s: s.max, reverse=True)
+    elif args.sort_by == 'key':
+        stats.sort(key=lambda s: s.key, reverse=False)
     else:  # total (default)
         stats.sort(key=lambda s: s.total, reverse=True)
 
@@ -531,9 +534,9 @@ Examples:
 
     parser.add_argument(
         '--sort-by',
-        choices=['total', 'mean', 'count', 'max'],
-        default='total',
-        help='Sort timers by field (default: total)'
+        choices=['total', 'mean', 'count', 'max', 'key'],
+        default='key',
+        help='Sort timers by field (default: key)'
     )
 
     parser.add_argument(

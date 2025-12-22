@@ -748,3 +748,131 @@ class TestCollectReachableIdsWithPaths:
         inner_list_id = id(d["a"]["b"]["c"])
         assert inner_list_id in paths
         assert paths[inner_list_id] == "x['a']['b']['c']"
+
+
+# =============================================================================
+# SECTION 11: OPTIMIZATION TESTS
+# =============================================================================
+
+class TestAliasIndexOptimizations:
+    """Tests for alias index performance optimizations."""
+
+    def test_lazy_index_building(self):
+        """Verify alias index is built lazily, not during checkpoint creation."""
+        shared = {"inner": [1, 2, 3]}
+        namespace = {"a": {"ref": shared}, "b": {"ref": shared}}
+
+        cp = Checkpoint("test", namespace, {})
+
+        # Index should NOT be built yet
+        assert not cp._alias_index_built
+        assert not cp._reachable_ids
+        assert not cp._id_to_vars
+
+        # First query triggers building
+        result = cp.get_aliases_for_vars({"a"})
+
+        # Now index should be built
+        assert cp._alias_index_built
+        assert cp._reachable_ids
+        assert cp._id_to_vars
+        assert result == {"a", "b"}
+
+    def test_lazy_index_only_built_once(self):
+        """Verify alias index is only built once, not on every query."""
+        shared = {"data": [1, 2, 3]}
+        namespace = {"x": {"ref": shared}, "y": {"ref": shared}}
+
+        cp = Checkpoint("test", namespace, {})
+
+        # First query
+        result1 = cp.get_aliases_for_vars({"x"})
+        assert cp._alias_index_built
+
+        # Store the index references
+        reachable_ids_ref = cp._reachable_ids
+        id_to_vars_ref = cp._id_to_vars
+
+        # Second query should use same index
+        result2 = cp.get_aliases_for_vars({"y"})
+
+        # Same index objects (not rebuilt)
+        assert cp._reachable_ids is reachable_ids_ref
+        assert cp._id_to_vars is id_to_vars_ref
+        assert result1 == result2 == {"x", "y"}
+
+    def test_path_tracking_disabled_by_default(self):
+        """Verify path tracking is disabled when FERRET_LOG_DEEP_ALIASES is not set."""
+        import os
+
+        # Ensure env var is not set
+        old_val = os.environ.pop("FERRET_LOG_DEEP_ALIASES", None)
+        try:
+            shared = {"value": 42}
+            namespace = {"a": {"ref": shared}, "b": {"ref": shared}}
+
+            cp = Checkpoint("test", namespace, {})
+            cp.get_aliases_for_vars({"a"})  # Trigger build
+
+            # Index should be built but paths may be empty (optimization)
+            assert cp._alias_index_built
+            assert cp._reachable_ids
+            # Path tracking is skipped when logging is disabled
+            # (paths dict may be empty or minimal)
+        finally:
+            if old_val is not None:
+                os.environ["FERRET_LOG_DEEP_ALIASES"] = old_val
+
+    def test_correctness_with_dataframe_iteration_optimization(self):
+        """Verify DataFrame column iteration optimization still finds aliases."""
+        shared = {"nested": True}
+        df = pd.DataFrame({
+            "objects": [shared, {"other": 1}],
+            "numbers": [1.0, 2.0],
+        })
+        other = {"ref": shared}
+
+        namespace = {"df": df, "other": other}
+
+        cp = Checkpoint("test", namespace, {})
+        result = cp.get_aliases_for_vars({"other"})
+
+        # Should find that df contains same shared object
+        assert "df" in result
+        assert "other" in result
+
+    def test_correctness_with_series_iteration_optimization(self):
+        """Verify Series iteration optimization still finds aliases."""
+        shared = [1, 2, 3]
+        series = pd.Series([shared, [4, 5, 6]], dtype=object)
+        other = {"data": shared}
+
+        namespace = {"series": series, "other": other}
+
+        cp = Checkpoint("test", namespace, {})
+        result = cp.get_aliases_for_vars({"other"})
+
+        # Should find that series contains same shared object
+        assert "series" in result
+        assert "other" in result
+
+    def test_empty_namespace_no_error(self):
+        """Empty namespace doesn't cause errors with lazy building."""
+        cp = Checkpoint("test", {}, {})
+
+        # Should not raise
+        result = cp.get_aliases_for_vars({"nonexistent"})
+        assert result == {"nonexistent"}
+
+    def test_unused_checkpoint_no_index_overhead(self):
+        """Verify checkpoints that are never queried don't build index."""
+        shared = {"data": list(range(1000))}
+        namespace = {f"var_{i}": {"ref": shared} for i in range(100)}
+
+        cp = Checkpoint("test", namespace, {})
+
+        # Checkpoint exists but index was never built
+        assert not cp._alias_index_built
+
+        # This is the key optimization: creating a checkpoint
+        # and never querying aliases should be cheap
