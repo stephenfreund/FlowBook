@@ -50,9 +50,10 @@ def create_ascii_histogram(data, bins=20, width=80, bar_char='#'):
         bin_start = min_val + i * bin_width
         bin_end = bin_start + bin_width
         count = counts[i]
+        percent = (count / len(data)) * 100 if max_count > 0 else 0
         # Scale the bar length
         bar_length = int((count / max_count) * width) if max_count > 0 else 0
-        chart.append(f"{bin_start:7.3f} - {bin_end:7.3f} | {bar_char * bar_length} ({count})")
+        chart.append(f"{bin_start:7.3f} - {bin_end:7.3f} | {bar_char * bar_length} ({percent:.1f}%)")
 
     return "\n".join(chart)
 
