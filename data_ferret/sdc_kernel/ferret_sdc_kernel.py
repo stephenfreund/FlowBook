@@ -349,7 +349,7 @@ from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
 from data_ferret.kernel.display_helpers import DisplayHelper
 from data_ferret.kernel.tracking import TrackingDict
 from data_ferret.util.cell_index import index_to_alpha
-from data_ferret.util.output import error, timer
+from data_ferret.util.output import error, timer, output
 
 from .models import SDCMetadata
 from .sdc_enforcer import SDCEnforcer, PRE_CHECKPOINT_PREFIX, POST_CHECKPOINT_PREFIX
@@ -1113,6 +1113,11 @@ class FerretSDCKernel(IPythonKernel, Magics):
         if restart:
             # Clear SDC state on restart for clean slate
             self._sdc.reset()
+
+        # Explicitly flush timings before shutdown - atexit may not run
+        # if the kernel is killed by jupyter_client after timeout
+        output._print_timings()
+
         return super().do_shutdown(restart)
 
 

@@ -12,13 +12,17 @@ copy module for consistency and extensibility.
 
 from __future__ import annotations
 
+import datetime
+import decimal
+import os
 import types
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from pandas.api.types import infer_dtype
 
-from data_ferret.util.output import log
+from data_ferret.util.output import log, timer
 from data_ferret.kernel.column_tracking import suspend_column_tracking
 
 
@@ -27,6 +31,152 @@ _nil = []
 
 # Global flag to control dtype conversion (set by Checkpoints.__init__)
 _convert_object_dtypes = True
+
+# Object column handling mode: "convert" (default) or "preserve"
+# - "convert": convert object columns to specialized dtypes (string, Int64, etc.)
+# - "preserve": keep object dtype, use shallow copy if all values are immutable
+_OBJECT_MODE = os.environ.get("FERRET_OBJECT_MODE", "preserve").lower()
+
+
+# ============================================================================
+# Immutability checking for preserve mode
+# ============================================================================
+
+def is_immutable(obj: Any, _seen: set[int] | None = None, max_depth: int = 10) -> bool:
+    """
+    Check if an object is deeply immutable (safe to share references).
+
+    Unlike is_deepcopyable, this checks if the object cannot be mutated,
+    meaning a shallow copy is sufficient for isolation.
+
+    Args:
+        obj: Any Python object to check
+        _seen: Internal set for cycle detection (do not pass externally)
+        max_depth: Maximum recursion depth for container types
+
+    Returns:
+        True if the object is immutable, False otherwise
+    """
+    # Fast path for common immutable primitives
+    if obj is None or obj is True or obj is False:
+        return True
+
+    obj_type = type(obj)
+
+    # Immutable primitive types
+    if obj_type in (int, float, complex, str, bytes, range):
+        return True
+
+    # datetime/time types are immutable
+    if obj_type in (
+        datetime.date,
+        datetime.time,
+        datetime.datetime,
+        datetime.timedelta,
+    ):
+        return True
+
+    # Decimal is immutable
+    if obj_type is decimal.Decimal:
+        return True
+
+    # NumPy scalars are immutable
+    if isinstance(obj, np.generic):
+        return True
+
+    # Pandas immutable types
+    if isinstance(obj, (pd.Timestamp, pd.Timedelta, pd.Period)):
+        return True
+    if obj is pd.NA:
+        return True
+
+    # tuple - immutable if all elements are immutable
+    if obj_type is tuple:
+        if max_depth <= 0:
+            return False  # Too deep, assume mutable
+        # Handle cycles
+        if _seen is None:
+            _seen = set()
+        obj_id = id(obj)
+        if obj_id in _seen:
+            return True  # Already checking this object
+        _seen.add(obj_id)
+        return all(is_immutable(item, _seen, max_depth - 1) for item in obj)
+
+    # frozenset - immutable if all elements are immutable
+    if obj_type is frozenset:
+        if max_depth <= 0:
+            return False
+        if _seen is None:
+            _seen = set()
+        obj_id = id(obj)
+        if obj_id in _seen:
+            return True
+        _seen.add(obj_id)
+        return all(is_immutable(item, _seen, max_depth - 1) for item in obj)
+
+    # Everything else is considered mutable (list, dict, set, ndarray, custom objects, etc.)
+    return False
+
+
+# These infer_dtype results guarantee all elements are immutable
+_IMMUTABLE_INFERRED_KINDS = frozenset({
+    "string",
+    "bytes",
+    "integer",
+    "mixed-integer",       # still all ints
+    "floating",
+    "mixed-integer-float",  # ints and floats - both immutable
+    "decimal",
+    "complex",
+    "boolean",
+    "datetime64",
+    "datetime",
+    "date",
+    "timedelta64",
+    "timedelta",
+    "time",
+})
+
+
+def _object_column_is_all_immutable(series: pd.Series, col_name: str = None) -> bool:
+    """
+    Check if ALL values in an object column are immutable.
+
+    Uses fast path via infer_dtype for homogeneous columns,
+    falls back to element-by-element check only for mixed columns.
+
+    Args:
+        series: Series to check (must be object dtype)
+        col_name: Optional column name for logging
+
+    Returns:
+        True if all values are immutable, False otherwise
+    """
+    if series.dtype != object or series.empty:
+        return True
+
+    col_label = f" ({col_name})" if col_name else ""
+    n_rows = len(series)
+
+    with timer(key="immutability_check", message=f"[deepcopy] Immutability check{col_label} ({n_rows} rows)"):
+        # FAST PATH: infer_dtype tells us the homogeneous type - O(1)
+        kind = infer_dtype(series, skipna=True)
+        if kind in _IMMUTABLE_INFERRED_KINDS:
+            log(f"Immutability fast path{col_label}: {kind}")
+            return True  # All elements are known-immutable types
+
+        # SLOW PATH: mixed or unknown - check element by element - O(n)
+        if kind == "mixed":
+            log(f"Immutability slow path{col_label}: {kind}, checking {n_rows} elements")
+            for val in series.dropna():
+                if not is_immutable(val):
+                    return False
+            return True
+
+        # Unknown kind (e.g., "empty", "unknown-array") - be conservative
+        log(f"Immutability unknown kind{col_label}: {kind}, assuming mutable")
+        return False
 
 
 def deepcopy(x, memo=None):
@@ -353,7 +503,7 @@ def _convert_object_column_dtype(series: pd.Series) -> pd.Series:
         elif kind == "complex":
             return series.astype(complex)
         elif kind == "string":
-            return series.astype("category")
+            return series.astype("string")
         elif kind == "boolean":
             return series.astype("boolean")
         elif kind in {"datetime64", "datetime", "date"}:
@@ -374,10 +524,9 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
     """
     Deep copy a DataFrame with special object column handling.
 
-    Converts object columns to specialized dtypes (Int64, string, datetime64, etc.)
-    on the original DataFrame before copying. Uses shallow copy with copy-on-write
-    for non-object columns. For object columns that remain object dtype after
-    conversion, deep copy to ensure mutable objects are isolated.
+    Behavior depends on FERRET_OBJECT_MODE environment variable:
+    - "convert" (default): Convert object columns to specialized dtypes
+    - "preserve": Keep object dtype, use shallow copy if all values are immutable
 
     Args:
         df: DataFrame to copy
@@ -393,7 +542,8 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
     # Suspend column tracking during deepcopy to avoid recording internal accesses
     with suspend_column_tracking():
         # Convert object columns to specialized dtypes on the original DataFrame first
-        if _convert_object_dtypes:
+        # (only in "convert" mode)
+        if _OBJECT_MODE == "convert" and _convert_object_dtypes:
             for col in df.columns:
                 if df[col].dtype == object:
                     converted = _convert_object_column_dtype(df[col])
@@ -404,18 +554,26 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
         # Shallow copy: CoW handles non-object columns efficiently
         df_copy = df.copy(deep=False)
 
-        # Process remaining object columns: deep copy for mutable objects
+        # Process remaining object columns
         for col in df_copy.columns:
             if df_copy[col].dtype == object:
-                num_rows = len(df_copy)
-                if num_rows > 10000:
-                    log(f"Deep copying large object column {col} with {num_rows:,} rows...")
+                # In preserve mode, check if all values are immutable
+                if _OBJECT_MODE == "preserve" and _object_column_is_all_immutable(df_copy[col], col_name=str(col)):
+                    # All immutable - shallow copy is sufficient (already done by df.copy)
+                    log(f"Shallow copying immutable object column {col}")
+                    # Force a copy of the underlying array to ensure independence
+                    df_copy[col] = df_copy[col].copy(deep=False)
                 else:
-                    log(f"Deep copying object column {col}")
+                    # Has mutable objects - need element-wise deepcopy
+                    num_rows = len(df_copy)
+                    if num_rows > 10000:
+                        log(f"Deep copying large object column {col} with {num_rows:,} rows...")
+                    else:
+                        log(f"Deep copying object column {col}")
 
-                # Apply deep copy and explicitly preserve object dtype
-                result = df_copy[col].apply(lambda x: deepcopy(x, memo))
-                df_copy[col] = result.astype(object)
+                    # Apply deep copy and explicitly preserve object dtype
+                    result = df_copy[col].apply(lambda x: deepcopy(x, memo))
+                    df_copy[col] = result.astype(object)
 
         memo[obj_id] = df_copy
         return df_copy
@@ -428,10 +586,9 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
     """
     Deep copy a Series with special object dtype handling.
 
-    Converts object Series to specialized dtypes (Int64, string, datetime64, etc.)
-    on the original Series before copying. Uses shallow copy with copy-on-write
-    for non-object Series. For object Series that remain object dtype after
-    conversion, deep copy to ensure mutable objects are isolated.
+    Behavior depends on FERRET_OBJECT_MODE environment variable:
+    - "convert" (default): Convert object Series to specialized dtypes
+    - "preserve": Keep object dtype, use shallow copy if all values are immutable
 
     Args:
         series: Series to copy
@@ -447,8 +604,8 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
     # Suspend column tracking during deepcopy to avoid recording internal accesses
     with suspend_column_tracking():
         # Convert object Series to specialized dtype on the original Series first
-        # (only if conversion is enabled globally)
-        if _convert_object_dtypes and series.dtype == object:
+        # (only in "convert" mode)
+        if _OBJECT_MODE == "convert" and _convert_object_dtypes and series.dtype == object:
             # Try to convert to specialized dtype first
             converted = _convert_object_column_dtype(series)
 
@@ -460,18 +617,25 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
         # Shallow copy: CoW handles non-object Series efficiently
         series_copy = series.copy(deep=False)
 
-        # Process if still object dtype: deep copy for mutable objects
+        # Process if still object dtype
         if series_copy.dtype == object:
-            # Still object dtype - need to deep copy for mutable objects
-            num_rows = len(series_copy)
-            if num_rows > 10000:
-                log(f"Deep copying large object Series with {num_rows:,} rows...")
+            # In preserve mode, check if all values are immutable
+            if _OBJECT_MODE == "preserve" and _object_column_is_all_immutable(series_copy, col_name=series_copy.name):
+                # All immutable - shallow copy is sufficient
+                log(f"Shallow copying immutable object Series")
+                # Force a copy of the underlying array to ensure independence
+                series_copy = series_copy.copy(deep=False)
             else:
-                log(f"Deep copying object Series")
+                # Has mutable objects - need element-wise deepcopy
+                num_rows = len(series_copy)
+                if num_rows > 10000:
+                    log(f"Deep copying large object Series with {num_rows:,} rows...")
+                else:
+                    log(f"Deep copying object Series")
 
-            # Apply deep copy and explicitly preserve object dtype
-            result = series_copy.apply(lambda x: deepcopy(x, memo))
-            series_copy = result.astype(object)
+                # Apply deep copy and explicitly preserve object dtype
+                result = series_copy.apply(lambda x: deepcopy(x, memo))
+                series_copy = result.astype(object)
 
         memo[obj_id] = series_copy
         return series_copy

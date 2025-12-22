@@ -97,6 +97,7 @@ class Output:
         self.timings: Timings = []
         self.timings_file = timings_file
         self.quiet = 0
+        self._timings_flushed = False  # Prevent double-write
         atexit.register(self._print_timings)
 
     def _is_kernel_context(self):
@@ -140,6 +141,11 @@ class Output:
         self.timings_file = timings_file
 
     def _print_timings(self):
+        # Prevent double-write (can be called explicitly from do_shutdown and by atexit)
+        if self._timings_flushed:
+            return
+        self._timings_flushed = True
+
         timings = self.timings
         if timings:
             if os.path.exists(self.timings_file):

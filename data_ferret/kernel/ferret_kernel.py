@@ -75,7 +75,7 @@ from data_ferret.kernel.monotonicity import MonotonicityEnforcer
 from data_ferret.kernel.scalene_runner import ScaleneRunner
 from data_ferret.kernel.timeout_handler import CellTimeoutHandler
 from data_ferret.kernel.tracking import TrackingDict
-from data_ferret.util.output import log
+from data_ferret.util.output import log, output
 
 
 # =============================================================================
@@ -907,6 +907,17 @@ class FerretKernel(IPythonKernel, Magics):
     def _make_json_safe(self, obj: Any) -> Any:
         """Convert an object to a JSON-safe format."""
         return make_json_safe(obj)
+
+    # =========================================================================
+    # Lifecycle
+    # =========================================================================
+
+    def do_shutdown(self, restart: bool) -> dict:
+        """Handle kernel shutdown/restart."""
+        # Explicitly flush timings before shutdown - atexit may not run
+        # if the kernel is killed by jupyter_client after timeout
+        output._print_timings()
+        return super().do_shutdown(restart)
 
 
 if __name__ == "__main__":
