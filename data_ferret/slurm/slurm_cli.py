@@ -23,14 +23,16 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 SUBMITTED_RE = re.compile(r"Submitted batch job (\d+)")
 
@@ -73,6 +75,133 @@ def strip_ansi_codes(text: str) -> str:
     """
     ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
     return ansi_escape.sub("", text)
+
+
+def wait_for_jobs(job_ids: List[int], poll_interval: int = 30) -> Dict[int, str]:
+    """Wait for all SLURM jobs to complete, polling sacct.
+
+    Args:
+        job_ids: List of SLURM job IDs to monitor
+        poll_interval: Seconds between status checks
+
+    Returns:
+        Dictionary mapping job_id -> final_state (e.g., "COMPLETED", "FAILED")
+    """
+    terminal_states = {
+        "COMPLETED",
+        "FAILED",
+        "TIMEOUT",
+        "CANCELLED",
+        "NODE_FAIL",
+        "PREEMPTED",
+        "OUT_OF_MEMORY",
+    }
+    results: Dict[int, str] = {}
+    pending = set(job_ids)
+
+    while pending:
+        job_list = ",".join(str(j) for j in pending)
+        cmd = [
+            "sacct",
+            "-j",
+            job_list,
+            "--noheader",
+            "--parsable2",
+            "-o",
+            "JobID,State",
+        ]
+        try:
+            output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError as e:
+            print(f"[WARN] sacct failed: {e}")
+            time.sleep(poll_interval)
+            continue
+
+        for line in output.strip().split("\n"):
+            if not line:
+                continue
+            parts = line.split("|")
+            if len(parts) < 2:
+                continue
+            job_id_str, state = parts[0], parts[1]
+            # Skip step entries (e.g., "12345.0", "12345.batch")
+            if "." in job_id_str:
+                continue
+            try:
+                job_id = int(job_id_str)
+            except ValueError:
+                continue
+            if job_id in pending and state in terminal_states:
+                results[job_id] = state
+                pending.discard(job_id)
+                print(f"[STATUS] Job {job_id} -> {state}")
+
+        if pending:
+            print(f"[WAIT] {len(pending)} jobs still running...")
+            time.sleep(poll_interval)
+
+    return results
+
+
+def extract_timings_file_from_command(cmd_tokens: List[str]) -> Optional[str]:
+    """Extract --timings-file value from command tokens.
+
+    Args:
+        cmd_tokens: List of command tokens (after template substitution)
+
+    Returns:
+        The timings file path if found, None otherwise
+    """
+    for i, token in enumerate(cmd_tokens):
+        # Handle --timings-file=value format
+        if token.startswith("--timings-file="):
+            return token.split("=", 1)[1]
+        # Handle --timings-file value format
+        if token == "--timings-file" and i + 1 < len(cmd_tokens):
+            return cmd_tokens[i + 1]
+    return None
+
+
+def check_job_timers(timings_file_path: Optional[str]) -> Tuple[bool, str]:
+    """Check if a job finished normally by examining its timers file.
+
+    A job is considered to have finished normally if cli_main_exit was
+    triggered exactly once.
+
+    Args:
+        timings_file_path: Full path to the timings file
+
+    Returns:
+        (success, message) tuple where success=True if completed normally
+    """
+    if timings_file_path is None:
+        return (False, "no --timings-file in command")
+
+    timers_path = Path(timings_file_path)
+
+    if not timers_path.exists():
+        return (False, f"timings file not found: {timers_path}")
+
+    try:
+        with open(timers_path) as f:
+            timings = json.load(f)
+    except json.JSONDecodeError as e:
+        return (False, f"invalid JSON in timings file: {e}")
+    except Exception as e:
+        return (False, f"error reading timings file: {e}")
+
+    if not isinstance(timings, list):
+        return (False, "timings file is not a list")
+
+    # Count occurrences of cli_main_exit
+    exit_count = sum(1 for t in timings if t.get("key") == "cli_main_exit")
+
+    if exit_count == 1:
+        return (True, "completed normally (cli_main_exit triggered once)")
+    elif exit_count == 0:
+        return (False, "cli_main_exit not found in timings")
+    else:
+        return (False, f"cli_main_exit triggered {exit_count} times (expected 1)")
 
 
 def split_cli_sections(argv: Sequence[str]) -> tuple[List[str], List[str]]:
@@ -141,6 +270,17 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--local",
         action="store_true",
         help="Run commands locally in sequence instead of submitting to Slurm (respects --time limit)",
+    )
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Exit immediately after submitting jobs (don't wait for completion)",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=int,
+        default=30,
+        help="Seconds between SLURM status checks when waiting (default: 30)",
     )
     parser.add_argument(
         "--log-dir",
@@ -427,12 +567,31 @@ def main() -> None:
     else:
         # SLURM submission mode
         submitted: List[int] = []
+        job_targets: Dict[int, Path] = {}
+        job_timings_files: Dict[int, Optional[str]] = {}
+        log_dir = Path(args.log_dir).resolve()
+
         for target_path in targets:
             print(target_path)
             print("-----------------------")
             job_id = submit_single_job(target=target_path, args=args)
             if job_id is not None:
                 submitted.append(job_id)
+                job_targets[job_id] = target_path
+
+                # Build context and command tokens to extract timings file
+                abs_target = target_path.expanduser()
+                if not abs_target.is_absolute():
+                    abs_target = abs_target.resolve(strict=False)
+                context = {
+                    "target": str(abs_target),
+                    "target_dir": str(abs_target.parent),
+                    "target_name": abs_target.name,
+                    "target_stem": abs_target.stem,
+                    "log_dir": str(log_dir),
+                }
+                cmd_tokens = build_command_tokens(context, args)
+                job_timings_files[job_id] = extract_timings_file_from_command(cmd_tokens)
             print()
 
         if submitted:
@@ -440,6 +599,37 @@ def main() -> None:
             print("Job IDs:", " ".join(str(job) for job in submitted))
         else:
             print("[WARN] No jobs submitted.")
+
+        # Wait for jobs and check completion status
+        if not args.no_wait and submitted and not args.dry_run:
+            print(f"\n[WAIT] Monitoring {len(submitted)} jobs...")
+            print(f"[WAIT] Poll interval: {args.poll_interval}s")
+            print()
+
+            final_states = wait_for_jobs(submitted, poll_interval=args.poll_interval)
+
+            print()
+            print("=" * 60)
+            print("[RESULTS] Job completion status:")
+            print("=" * 60)
+
+            normal_count = 0
+            for job_id in submitted:
+                state = final_states.get(job_id, "UNKNOWN")
+                target = job_targets[job_id]
+                timings_file = job_timings_files.get(job_id)
+                if state == "COMPLETED":
+                    success, msg = check_job_timers(timings_file)
+                    if success:
+                        print(f"[OK] Job {job_id} ({target.stem}): {msg}")
+                        normal_count += 1
+                    else:
+                        print(f"[WARN] Job {job_id} ({target.stem}): {msg}")
+                else:
+                    print(f"[FAIL] Job {job_id} ({target.stem}): {state}")
+
+            print()
+            print(f"[SUMMARY] {normal_count}/{len(submitted)} jobs finished normally")
 
 
 if __name__ == "__main__":

@@ -99,12 +99,14 @@ See analysis.md for formal specification and pseudocode algorithms.
 
 
 ================================================================================
-DEEP ALIAS DETECTION (OPT_ACCESSED_VARS_ONLY optimization)
+DEEP ALIAS DETECTION
 ================================================================================
 
 When OPT_ACCESSED_VARS_ONLY is enabled (default), we only diff variables that
 the cell actually accessed (reads + writes) plus their DEEP aliases.
 
+WHY ALIAS DETECTION MATTERS
+---------------------------
 A deep alias is a variable that shares ANY internal reference with an accessed
 variable - not just top-level object identity. For example:
   - If a["b"] and c["b"] point to the same object
@@ -112,18 +114,45 @@ variable - not just top-level object identity. For example:
   - If x.attr and y.attr point to the same mutable object
 
 This is critical for correctness: if cell C modifies a["b"]["f"], and c["b"]
-is the same object as a["b"], then c also changed! We need to diff c to detect
-that it changed (for backward mutation checks).
+is the same object as a["b"], then c also changed! We must diff c to detect
+that change (for backward mutation checks).
 
-The deep alias detection uses the pre-state checkpoint's precomputed alias index
-(see checkpoint.py section 12 for implementation details). The index is built
-once during checkpoint creation and provides O(accessed + aliases) lookup
-instead of O(total_objects_in_namespace).
+ARCHITECTURE
+------------
+Alias detection uses precomputed indexes stored in Checkpoint objects:
 
-Key function: _expand_with_deep_aliases(accessed_vars, pre_checkpoint)
-  - Takes set of accessed variable names
+  Checkpoint._reachable_ids: Dict[var_name, Set[obj_id]]
+      All object IDs reachable from each variable via nested containers.
+
+  Checkpoint._id_to_vars: Dict[obj_id, Set[var_name]]
+      Reverse index: maps each object ID to variables containing it.
+
+  Checkpoint._id_to_paths: Dict[obj_id, Dict[var_name, path_str]]
+      Path tracking for detailed logging (e.g., "a['b'] ↔ c['b']").
+
+The index is built LAZILY on first query (via get_aliases_for_vars) and
+provides O(accessed + aliases) lookup instead of O(total_objects_in_namespace).
+
+KEY FUNCTION
+------------
+_expand_with_deep_aliases(accessed_vars, pre_checkpoint, log_aliases=True)
+  - Takes set of accessed variable names and the pre-execution checkpoint
   - Returns expanded set including all deep aliases
-  - Optionally logs discovered alias relationships with paths
+  - Uses pre-state checkpoint because alias relationships existed before cell ran
+
+WHAT GETS TRACKED
+-----------------
+  - Containers: dict, list, tuple, set, frozenset
+  - Pandas: DataFrame (via _mgr), Series, object-dtype columns
+  - NumPy: ndarray (via .base for views), object-dtype arrays
+  - Custom objects: via __dict__ and __slots__
+
+WHAT GETS SKIPPED
+-----------------
+  - Immutable atomics: None, bool, int, float, str, bytes
+  - Temporary objects: .values, .data (id can be reused after GC)
+
+See checkpoint.py section 12 for full implementation details.
 """
 
 import os
@@ -206,35 +235,6 @@ def _expand_with_deep_aliases(
     """
     # Use the checkpoint's precomputed deep alias index
     return pre_checkpoint.get_aliases_for_vars(accessed_vars, log_aliases=log_aliases)
-
-
-# Keep the old function for backwards compatibility (but mark as deprecated)
-def _expand_with_aliases(
-    accessed_vars: Set[str],
-    pre_namespace: Dict[str, Any],
-) -> Set[str]:
-    """
-    DEPRECATED: Use _expand_with_deep_aliases() instead.
-
-    This function only detects TOP-LEVEL aliases (same object identity).
-    It misses deep/nested aliases like a["b"] and c["b"] pointing to same object.
-
-    Kept for backwards compatibility with any external callers.
-    """
-    # Top-level only: collect object IDs of accessed variables
-    accessed_ids: Set[int] = set()
-    for var_name in accessed_vars:
-        if var_name in pre_namespace:
-            accessed_ids.add(id(pre_namespace[var_name]))
-
-    # Find all variables that share top-level identity
-    all_relevant_vars: Set[str] = set()
-    for var_name, var_value in pre_namespace.items():
-        if id(var_value) in accessed_ids:
-            all_relevant_vars.add(var_name)
-
-    all_relevant_vars |= accessed_vars
-    return all_relevant_vars
 
 
 def _tracking_mode_to_structural_mode(mode: StructuralTrackingMode) -> StructuralMode:

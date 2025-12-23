@@ -679,36 +679,77 @@ Checkpoints support deep alias detection - identifying when variables share
 ANY internal references, not just top-level object identity. This is critical
 for the SDC enforcer's backward mutation checking.
 
-Example: If a["b"] and c["b"] point to the same object, modifying a["b"]["f"]
-also changes c. We must diff c to detect that change.
+12.1 Why It Matters
+~~~~~~~~~~~~~~~~~~~
+When a cell accesses only some variables, we must still detect changes to
+variables that share internal references. Example:
 
-The alias detection index is built ONCE during checkpoint creation and stored
-in three data structures:
-  - _reachable_ids: Dict[var_name, Set[obj_id]] - all object IDs reachable from each var
-  - _id_to_vars: Dict[obj_id, Set[var_name]] - reverse index for lookup
-  - _id_to_paths: Dict[obj_id, Dict[var_name, path_str]] - path tracking for logging
+  a = {"b": {"data": 1}}
+  c = {"b": a["b"]}  # c["b"] is same object as a["b"]
 
-Key implementation details:
-  a) TEMPORARY OBJECTS NOT TRACKED: .values and .data create temporary arrays/memoryviews
-     whose id() can be reused by Python's memory allocator after garbage collection.
-     We only track PERSISTENT objects (the container itself, ._mgr for DataFrames,
-     .base for numpy views).
+  # Cell accesses only 'a' and modifies a["b"]["data"]
+  a["b"]["data"] = 2  # This ALSO changes c!
 
-  b) OBJECT-DTYPE ELEMENTS TRACKED: For object-dtype arrays/Series/DataFrames, we
-     recurse into the actual stored elements because these are persistent references.
+Without deep alias detection, we'd miss the change to 'c' and could allow
+backward mutations that should be blocked.
 
-  c) CIRCULAR REFERENCES HANDLED: The visited set prevents infinite loops.
+12.2 Data Structures
+~~~~~~~~~~~~~~~~~~~~
+The alias index is built LAZILY on first query and stored in Checkpoint:
 
-  d) IMMUTABLE TYPES SKIPPED: None, bool, int, float, str, bytes are skipped since
-     they can't be mutated in-place and don't need alias tracking.
+  _reachable_ids: Dict[var_name, Set[obj_id]]
+      All object IDs reachable from each variable via nested traversal.
 
-Usage:
+  _id_to_vars: Dict[obj_id, Set[var_name]]
+      Reverse index: maps each object ID to all variables containing it.
+      Enables O(1) lookup: "which variables contain this object?"
+
+  _id_to_paths: Dict[obj_id, Dict[var_name, path_str]]
+      Path tracking for logging (e.g., "a['b'] ↔ c['b']").
+      Only populated when FERRET_LOG_DEEP_ALIASES=1.
+
+12.3 What Gets Tracked
+~~~~~~~~~~~~~~~~~~~~~~
+  - Containers: dict, list, tuple, set, frozenset
+  - Pandas: DataFrame (via _mgr), Series, object-dtype columns/elements
+  - NumPy: ndarray (via .base for views), object-dtype array elements
+  - Custom objects: via __dict__ and __slots__
+
+12.4 What Gets Skipped
+~~~~~~~~~~~~~~~~~~~~~~
+  - Immutable atomics: None, bool, int, float, str, bytes
+      Can't be mutated in-place, no aliasing concern.
+
+  - Temporary objects: .values, .data properties
+      These create temporary arrays/memoryviews whose id() can be reused
+      by Python's memory allocator after garbage collection.
+
+  - Circular references: Handled via visited set to prevent infinite loops.
+
+12.5 Usage
+~~~~~~~~~~
   checkpoint = Checkpoint(name, user_ns, memo)
-  # Alias index is built lazily on first call to get_aliases_for_vars
-  aliases = checkpoint.get_aliases_for_vars({"a", "b"}, log_aliases=True)
 
-Environment variable FERRET_LOG_DEEP_ALIASES=1 enables detailed logging of
-discovered alias relationships with paths (e.g., "a['b'] ↔ c['b']").
+  # Alias index is built lazily on first call
+  accessed = {"a", "b"}
+  all_relevant = checkpoint.get_aliases_for_vars(accessed, log_aliases=True)
+  # Returns accessed + any variables sharing internal references
+
+12.6 Performance
+~~~~~~~~~~~~~~~~
+  - Index built once per checkpoint (checkpoints are immutable)
+  - Lookup is O(accessed_vars + number_of_aliases)
+  - Much faster than O(total_objects_in_namespace) runtime traversal
+
+12.7 Environment Variables
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+  FERRET_LOG_DEEP_ALIASES=1
+      Enable detailed logging of discovered alias relationships.
+      Shows paths like "a['b'] ↔ c['b'] (share internal ref)".
+
+  FERRET_SLOW_ALIAS_THRESHOLD=1000
+      Warn if alias collection takes too long for a variable.
+      Default: 1000 object-dtype elements.
 
 
 13. FUTURE WORK / TODOS
@@ -722,141 +763,6 @@ discovered alias relationships with paths (e.g., "a['b'] ↔ c['b']").
   - [ ] Size estimation before checkpoint (warn on large data)
 
 
-14. TESTING NOTES
------------------
-Key test scenarios:
-
-BASIC FUNCTIONALITY:
-  1. Basic save/restore roundtrip
-  2. Mutation isolation (change original, verify checkpoint unchanged)
-  3. Repeated restore from same checkpoint
-  4. Checkpoint deletion and memory cleanup
-  5. Multiple checkpoints with different states
-  6. Checkpoint overwrite
-  7. Empty namespace save/restore
-  8. Restore into empty namespace
-  9. Sanity check mode verification
-
-CIRCULAR REFERENCES & SHARED OBJECTS (7.1, 4.6):
-  10. Self-referential list (list containing itself)
-  11. Mutually referential lists (A contains B, B contains A)
-  12. Self-referential dict
-  13. Circular reference in DataFrame cells
-  14. Same list shared by multiple variables (identity preservation)
-  15. Shared dict in multiple DataFrame cells
-  16. Reverse memo tracking for object identity
-
-PANDAS DATA STRUCTURES:
-  17. DataFrame with lists in cells
-  18. DataFrame with dicts in cells
-  19. DataFrame with nested mutable structures
-  20. DataFrame with mixed dtypes (int, float, str, object)
-  21. Multiple DataFrames with mutable objects
-  22. Series with lists
-  23. Series with dicts
-  24. Series with non-object dtypes
-  25. Empty DataFrame
-  26. Empty Series
-  27. DataFrame with None values
-  28. Large DataFrames (100+ rows) with mutable objects
-  29. MultiIndex DataFrames (row and column MultiIndex)
-  30. DataFrame with custom index
-  31. Series with custom index
-  32. Nested DataFrames (DataFrame containing DataFrames)
-  33. List of DataFrames
-  34. Sparse DataFrames
-
-OBJECT DTYPE CONVERSION (4.3, 7.2):
-  35. Object column with truly mixed types (can't convert)
-  36. Object column with integers (converts to Int64)
-  37. Object column with strings (converts to string dtype)
-  38. Object column with floats (converts to float64)
-  39. Object column with booleans (converts to boolean)
-  40. Object column with datetimes (converts to datetime64)
-
-EXTENSION DTYPES:
-  41. Categorical dtype
-  42. Nullable integer dtype (Int64)
-  43. String dtype (StringDtype)
-  44. Boolean dtype (nullable boolean)
-
-SPECIAL NUMERIC VALUES:
-  45. NaN values in DataFrames
-  46. Infinity values (inf, -inf)
-  47. Complex numbers (in arrays and DataFrames)
-  48. Decimal objects
-
-FUNCTION CHECKPOINTING (8.4):
-  49. Function with closure variables - verify isolation
-  50. Function with mutable default list []
-  51. Function with mutable default dict {}
-  52. Lambda with captured variables
-  53. Nested functions with shared closure
-  54. Recursive function (factorial, etc.)
-  55. Function without closure or defaults (optimization check)
-  56. Bound method (method references object)
-  57. Function with nested mutable closure (dict containing list)
-  58. Function with mutable __dict__ attributes
-
-CLASS DEFINITIONS (8.5 - KNOWN ISSUES):
-  59. Class variable not restored (known issue)
-  60. Instance attributes ARE restored correctly
-  61. Class method modification persists (known issue)
-  62. Class redefinition works correctly
-  63. Instance with mutable attributes in __dict__
-
-CUSTOM DEEPCOPY & PICKLE (7.4):
-  64. Object with custom __deepcopy__ method
-  65. Object with __getstate__ and __setstate__
-  66. Object with __reduce__ or __reduce_ex__
-
-GENERATORS & ITERATORS (7.7):
-  67. Generator objects (may fail or exhaust)
-  68. Iterator over list (may produce unexpected results)
-
-COLLECTION TYPES:
-  69. Sets (mutable)
-  70. Frozensets (immutable)
-  71. Named tuples
-  72. collections.deque
-  73. Tuples with mutable contents
-  74. Regular lists with nested lists
-  75. Regular dicts with nested dicts
-  76. Numpy arrays (numeric and object dtype)
-
-DATETIME TYPES:
-  77. datetime.datetime objects
-  78. datetime.timedelta objects
-  79. datetime64 in DataFrames
-  80. timedelta64 in DataFrames
-
-FILTERING & ERROR HANDLING:
-  81. Filters out modules
-  82. Filters out system variables (_, __, get_ipython, etc.)
-  83. Filters out private variables (_prefix)
-  84. Filters out matplotlib objects
-  85. Uncopyable object tracked as removed
-  86. Restore removes variables not in checkpoint
-
-EDGE CASES:
-  87. Very deeply nested structures (dict in dict in dict...)
-  88. None values
-  89. Unicode strings
-  90. Bytes objects
-  91. Restore preserves private variables (doesn't delete them)
-  92. Variable deletion between save and restore
-
-INTEGRATION TESTS:
-  93. Save/restore/delete cycle with multiple checkpoints
-  94. Checkpoint diff after modification
-  95. Type models generation
-  96. Mixed types in single namespace
-
-TEST FILES:
-  - test_checkpoint.py: Basic functionality and common scenarios
-  - test_checkpoint_comprehensive.py: All corner cases and edge cases from above
-
-
 ================================================================================
                             END DESIGN DOCUMENT
 ================================================================================
@@ -864,7 +770,6 @@ TEST FILES:
 
 from __future__ import annotations
 
-import atexit
 import os
 import time
 import types
@@ -879,117 +784,6 @@ from pandas.api.types import infer_dtype
 from data_ferret.kernel.extended_types import TypeModel, get_type_model
 from data_ferret.util.output import log, timer
 
-
-# =============================================================================
-# SCALENE PROFILING FOR Checkpoint.diff
-# =============================================================================
-# Set FERRET_PROFILE_DIFF=1 to enable Scalene profiling of diff operations.
-# The profiler will track time spent in diff and print a summary on exit.
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    """Check environment variable for flag."""
-    val = os.environ.get(name, "").lower()
-    if val in ("1", "true", "yes", "on"):
-        return True
-    if val in ("0", "false", "no", "off"):
-        return False
-    return default
-
-PROFILE_DIFF_ENABLED = _env_flag("FERRET_PROFILE_DIFF", default=False)
-
-
-class DiffProfiler:
-    """
-    Tracks profiling statistics for Checkpoint.diff calls.
-
-    When FERRET_PROFILE_DIFF=1, this class collects:
-    - Number of diff calls
-    - Total time spent in diffs
-    - Scalene profiling data (if Scalene is available)
-    """
-
-    def __init__(self):
-        self.call_count = 0
-        self.total_time_ms = 0.0
-        self.scalene_available = False
-        self.scalene_profiler = None
-        self._initialized = False
-
-    def _init_scalene(self):
-        """Lazy initialization of Scalene profiler."""
-        if self._initialized:
-            return
-        self._initialized = True
-
-        try:
-            from scalene import scalene_profiler
-            self.scalene_profiler = scalene_profiler
-            self.scalene_available = True
-            log("[profile] Scalene profiler initialized for Checkpoint.diff")
-        except ImportError:
-            log("[profile] Scalene not available, using basic timing only")
-            self.scalene_available = False
-
-    def start(self):
-        """Start profiling a diff call."""
-        if not PROFILE_DIFF_ENABLED:
-            return time.perf_counter()
-
-        self._init_scalene()
-
-        if self.scalene_available:
-            try:
-                self.scalene_profiler.start()
-            except Exception as e:
-                log(f"[profile] Scalene start failed: {e}")
-
-        return time.perf_counter()
-
-    def stop(self, start_time: float):
-        """Stop profiling and record statistics."""
-        elapsed_ms = (time.perf_counter() - start_time) * 1000
-
-        if not PROFILE_DIFF_ENABLED:
-            return elapsed_ms
-
-        self.call_count += 1
-        self.total_time_ms += elapsed_ms
-
-        if self.scalene_available:
-            try:
-                self.scalene_profiler.stop()
-            except Exception as e:
-                log(f"[profile] Scalene stop failed: {e}")
-
-        return elapsed_ms
-
-    def print_summary(self):
-        """Print profiling summary on exit."""
-        if not PROFILE_DIFF_ENABLED or self.call_count == 0:
-            return
-
-        avg_ms = self.total_time_ms / self.call_count if self.call_count > 0 else 0
-
-        print("\n" + "=" * 60)
-        print("CHECKPOINT.DIFF PROFILING SUMMARY")
-        print("=" * 60)
-        print(f"  Total diff calls: {self.call_count}")
-        print(f"  Total time: {self.total_time_ms:.1f} ms")
-        print(f"  Average time per diff: {avg_ms:.2f} ms")
-
-        if self.scalene_available:
-            print("\n  Scalene profiling was enabled.")
-            print("  Run with: scalene --cpu --memory <script.py>")
-            print("  Or check Scalene output for detailed line-level profiling.")
-        print("=" * 60 + "\n")
-
-
-# Global profiler instance
-_diff_profiler = DiffProfiler()
-
-# Register summary printing on exit
-if PROFILE_DIFF_ENABLED:
-    atexit.register(_diff_profiler.print_summary)
 
 # Enable copy-on-write mode for better performance with DataFrame copies
 pd.options.mode.copy_on_write = True
