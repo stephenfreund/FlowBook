@@ -189,6 +189,73 @@ def wait_for_jobs(
     return results
 
 
+def setup_environment(env_name: str, ferret_source: Path, requirements_file: Path) -> bool:
+    """Create/recreate a conda environment with DataFerret and requirements.
+
+    Args:
+        env_name: Name of the conda environment to create
+        ferret_source: Path to DataFerret source directory (for pip install -e .)
+        requirements_file: Path to requirements.txt
+
+    Returns:
+        True if successful, False otherwise
+    """
+    # 1. Remove existing environment if it exists
+    print(f"[ENV] Removing existing environment '{env_name}' if present...")
+    subprocess.run(
+        ["conda", "env", "remove", "-n", env_name, "-y"],
+        capture_output=True,
+    )
+
+    # 2. Create new environment with Python 3.11
+    print(f"[ENV] Creating new environment '{env_name}' with Python 3.11...")
+    result = subprocess.run(
+        ["conda", "create", "-n", env_name, "python=3.11", "-y"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"[ERROR] Failed to create environment: {result.stderr}")
+        return False
+
+    # 3. Install DataFerret from source
+    print(f"[ENV] Installing DataFerret from {ferret_source}...")
+    result = subprocess.run(
+        ["conda", "run", "-n", env_name, "pip", "install", "-e", str(ferret_source)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"[ERROR] Failed to install DataFerret: {result.stderr}")
+        return False
+
+    # 4. Install requirements if file exists
+    if requirements_file.exists():
+        print(f"[ENV] Installing requirements from {requirements_file}...")
+        result = subprocess.run(
+            [
+                "conda",
+                "run",
+                "-n",
+                env_name,
+                "pip",
+                "install",
+                "-r",
+                str(requirements_file),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f"[ERROR] Failed to install requirements: {result.stderr}")
+            return False
+    else:
+        print(f"[ENV] No requirements file found at {requirements_file}, skipping")
+
+    print(f"[ENV] Environment '{env_name}' setup complete")
+    return True
+
+
 def extract_timings_file_from_command(cmd_tokens: List[str]) -> Optional[str]:
     """Extract --timings-file value from command tokens.
 
@@ -306,6 +373,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--env",
         default="ferret",
         help="Conda environment to activate inside each job (default: ferret)",
+    )
+    parser.add_argument(
+        "--reset-env",
+        action="store_true",
+        help="Create/recreate the conda environment before submitting jobs",
+    )
+    parser.add_argument(
+        "--requirements",
+        default=None,
+        help="Path to requirements.txt (default: requirements.txt in work_file directory)",
     )
     parser.add_argument(
         "--dry-run",
@@ -590,6 +667,28 @@ def main() -> None:
     if not targets:
         print("[INFO] No valid targets found. Nothing to submit.")
         return
+
+    # Handle --reset-env: create/recreate conda environment before submitting jobs
+    if args.reset_env:
+        # DataFerret source is the repo root (parent of data_ferret/slurm/)
+        ferret_source = Path(__file__).parent.parent.parent
+        work_file_dir = Path(args.work_file).resolve().parent
+        requirements_file = (
+            Path(args.requirements)
+            if args.requirements
+            else work_file_dir / "requirements.txt"
+        )
+
+        print(f"[ENV] Setting up environment '{args.env}'...")
+        print(f"[ENV] DataFerret source: {ferret_source}")
+        print(f"[ENV] Requirements file: {requirements_file}")
+        print()
+
+        if not setup_environment(args.env, ferret_source, requirements_file):
+            print("[ERROR] Environment setup failed, aborting")
+            return
+
+        print()
 
     if args.local:
         # Local execution mode
