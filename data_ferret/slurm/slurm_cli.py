@@ -78,67 +78,69 @@ def strip_ansi_codes(text: str) -> str:
 
 
 def wait_for_jobs(job_ids: List[int], poll_interval: int = 30) -> Dict[int, str]:
-    """Wait for all SLURM jobs to complete, polling sacct.
+    """Wait for all SLURM jobs to complete, polling squeue.
+
+    Uses squeue to monitor jobs. When a job disappears from squeue,
+    it's assumed to have finished (marked as FINISHED since sacct
+    may not be available to get the exact exit status).
 
     Args:
         job_ids: List of SLURM job IDs to monitor
         poll_interval: Seconds between status checks
 
     Returns:
-        Dictionary mapping job_id -> final_state (e.g., "COMPLETED", "FAILED")
+        Dictionary mapping job_id -> final_state
     """
-    terminal_states = {
-        "COMPLETED",
-        "FAILED",
-        "TIMEOUT",
-        "CANCELLED",
-        "NODE_FAIL",
-        "PREEMPTED",
-        "OUT_OF_MEMORY",
-    }
     results: Dict[int, str] = {}
     pending = set(job_ids)
 
-    while pending:
-        job_list = ",".join(str(j) for j in pending)
-        cmd = [
-            "sacct",
-            "-j",
-            job_list,
-            "--noheader",
-            "--parsable2",
-            "-o",
-            "JobID,State",
-        ]
-        try:
-            output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError as e:
-            print(f"[WARN] sacct failed: {e}")
-            time.sleep(poll_interval)
-            continue
+    try:
+        while pending:
+            job_list = ",".join(str(j) for j in pending)
+            still_in_queue: set[int] = set()
 
-        for line in output.strip().split("\n"):
-            if not line:
-                continue
-            parts = line.split("|")
-            if len(parts) < 2:
-                continue
-            job_id_str, state = parts[0], parts[1]
-            # Skip step entries (e.g., "12345.0", "12345.batch")
-            if "." in job_id_str:
-                continue
             try:
-                job_id = int(job_id_str)
-            except ValueError:
-                continue
-            if job_id in pending and state in terminal_states:
-                results[job_id] = state
-                pending.discard(job_id)
-                print(f"[STATUS] Job {job_id} -> {state}")
+                # squeue shows jobs that are still running or pending
+                squeue_cmd = [
+                    "squeue",
+                    "-j",
+                    job_list,
+                    "--noheader",
+                    "--format=%i|%T",
+                ]
+                squeue_output = subprocess.check_output(
+                    squeue_cmd, text=True, stderr=subprocess.DEVNULL
+                )
+                for line in squeue_output.strip().split("\n"):
+                    if not line:
+                        continue
+                    parts = line.split("|")
+                    if len(parts) >= 1:
+                        try:
+                            still_in_queue.add(int(parts[0].strip()))
+                        except ValueError:
+                            continue
+            except subprocess.CalledProcessError:
+                # squeue may fail if all jobs in the list have finished
+                # (returns non-zero when no matching jobs found)
+                pass
 
-        if pending:
-            print(f"[WAIT] {len(pending)} jobs still running...")
-            time.sleep(poll_interval)
+            # Jobs not in squeue are finished
+            finished_jobs = pending - still_in_queue
+            for job_id in finished_jobs:
+                results[job_id] = "FINISHED"
+                pending.discard(job_id)
+                print(f"[STATUS] Job {job_id} -> FINISHED")
+
+            if pending:
+                print(f"[WAIT] {len(pending)} jobs still running...")
+                time.sleep(poll_interval)
+
+    except KeyboardInterrupt:
+        print("\n[INTERRUPTED] Ctrl+C received, stopping monitoring.")
+        # Mark remaining jobs as interrupted
+        for job_id in pending:
+            results[job_id] = "MONITORING_INTERRUPTED"
 
     return results
 
@@ -618,7 +620,8 @@ def main() -> None:
                 state = final_states.get(job_id, "UNKNOWN")
                 target = job_targets[job_id]
                 timings_file = job_timings_files.get(job_id)
-                if state == "COMPLETED":
+                if state == "FINISHED":
+                    # Job left the queue - check timers to see if it completed normally
                     success, msg = check_job_timers(timings_file)
                     if success:
                         print(f"[OK] Job {job_id} ({target.stem}): {msg}")
@@ -626,7 +629,7 @@ def main() -> None:
                     else:
                         print(f"[WARN] Job {job_id} ({target.stem}): {msg}")
                 else:
-                    print(f"[FAIL] Job {job_id} ({target.stem}): {state}")
+                    print(f"[SKIP] Job {job_id} ({target.stem}): {state}")
 
             print()
             print(f"[SUMMARY] {normal_count}/{len(submitted)} jobs finished normally")
