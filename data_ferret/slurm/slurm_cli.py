@@ -77,7 +77,41 @@ def strip_ansi_codes(text: str) -> str:
     return ansi_escape.sub("", text)
 
 
-def wait_for_jobs(job_ids: List[int], poll_interval: int = 30) -> Dict[int, str]:
+def get_timer_count(timings_file_path: Optional[str]) -> Tuple[int, str]:
+    """Get the count of cli_main_exit in a timings file.
+
+    Args:
+        timings_file_path: Full path to the timings file
+
+    Returns:
+        (count, status_str) where count is the number of cli_main_exit entries
+        and status_str is a human-readable status
+    """
+    if timings_file_path is None:
+        return (-1, "no timings file specified")
+
+    timers_path = Path(timings_file_path)
+    if not timers_path.exists():
+        return (-1, "timings file not found")
+
+    try:
+        with open(timers_path) as f:
+            timings = json.load(f)
+    except (json.JSONDecodeError, Exception):
+        return (-1, "error reading timings")
+
+    if not isinstance(timings, list):
+        return (-1, "invalid timings format")
+
+    count = sum(1 for t in timings if t.get("key") == "cli_main_exit")
+    return (count, "ok" if count == 1 else f"count={count}")
+
+
+def wait_for_jobs(
+    job_ids: List[int],
+    job_info: Dict[int, Tuple[Path, Optional[str]]],
+    poll_interval: int = 5,
+) -> Dict[int, str]:
     """Wait for all SLURM jobs to complete, polling squeue.
 
     Uses squeue to monitor jobs. When a job disappears from squeue,
@@ -86,6 +120,7 @@ def wait_for_jobs(job_ids: List[int], poll_interval: int = 30) -> Dict[int, str]
 
     Args:
         job_ids: List of SLURM job IDs to monitor
+        job_info: Dict mapping job_id -> (target_path, timings_file_path)
         poll_interval: Seconds between status checks
 
     Returns:
@@ -130,7 +165,16 @@ def wait_for_jobs(job_ids: List[int], poll_interval: int = 30) -> Dict[int, str]
             for job_id in finished_jobs:
                 results[job_id] = "FINISHED"
                 pending.discard(job_id)
-                print(f"[STATUS] Job {job_id} -> FINISHED")
+                target, timings_file = job_info.get(job_id, (Path("unknown"), None))
+                count, status = get_timer_count(timings_file)
+                if count == 1:
+                    print(f"[STATUS] Job {job_id} -> FINISHED (ok) {target}")
+                elif count == 0:
+                    print(f"[STATUS] Job {job_id} -> FINISHED (cli_main_exit=0) {target}")
+                elif count > 1:
+                    print(f"[STATUS] Job {job_id} -> FINISHED (cli_main_exit={count}) {target}")
+                else:
+                    print(f"[STATUS] Job {job_id} -> FINISHED ({status}) {target}")
 
             if pending:
                 print(f"[WAIT] {len(pending)} jobs still running...")
@@ -281,8 +325,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--poll-interval",
         type=int,
-        default=30,
-        help="Seconds between SLURM status checks when waiting (default: 30)",
+        default=5,
+        help="Seconds between SLURM status checks when waiting (default: 5)",
     )
     parser.add_argument(
         "--log-dir",
@@ -608,7 +652,15 @@ def main() -> None:
             print(f"[WAIT] Poll interval: {args.poll_interval}s")
             print()
 
-            final_states = wait_for_jobs(submitted, poll_interval=args.poll_interval)
+            # Build job_info dict: job_id -> (target_path, timings_file_path)
+            job_info: Dict[int, Tuple[Path, Optional[str]]] = {
+                job_id: (job_targets[job_id], job_timings_files.get(job_id))
+                for job_id in submitted
+            }
+
+            final_states = wait_for_jobs(
+                submitted, job_info, poll_interval=args.poll_interval
+            )
 
             print()
             print("=" * 60)
