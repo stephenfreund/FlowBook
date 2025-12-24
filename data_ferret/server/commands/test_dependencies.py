@@ -695,7 +695,7 @@ class TestDependenciesCommand(NotebookCommand):
                                         result = KernelHelper.execute_code(
                                             kernel_client,
                                             source,
-                                            timeout=30 * 60,  # 30 minutes
+                                            self.timeout,
                                             cell_id=cell_id,
                                             cell_metadata=metadata,
                                         )

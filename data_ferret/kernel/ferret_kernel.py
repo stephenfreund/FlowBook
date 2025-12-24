@@ -822,9 +822,10 @@ class FerretKernel(IPythonKernel, Magics):
         for k in non_copyable:
             del self.shell.user_ns[k]
         if non_copyable:
+            non_copyable_with_types = [f"{k}:({type(v).__name__})" for k, v in user_ns.items() if k in non_copyable]
             self.display_icon_and_text(
                 "\u26A0\uFE0F",
-                f"The following objects cannot be passed between cells: {', '.join(non_copyable)}",
+                f"The following objects cannot be passed between cells: {', '.join(non_copyable_with_types)}",
             )
 
     def _display_execution_result(

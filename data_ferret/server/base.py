@@ -127,6 +127,11 @@ class NotebookCommand(ABC):
         """
         return "ferret_kernel"
 
+    @property
+    def timeout(self) -> int:
+        """Return the timeout for this command."""
+        return 5 * 60 * 60  # 5 hours
+
     @staticmethod
     def config_from_serverapp(serverapp: ServerApp) -> FerretConfig:
         """Return the configuration from the serverapp."""

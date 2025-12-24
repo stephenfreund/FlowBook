@@ -4,6 +4,21 @@ Determine if a Python object can be deep copied without actually copying it.
 This module provides a function to check if an object is deepcopyable,
 avoiding the overhead of actual deepcopy for known types while falling
 back to try/except for user-defined types.
+
+MultiIndex Column Support
+-------------------------
+DataFrames with MultiIndex columns (hierarchical column labels) are fully
+supported. When checking DataFrame columns, we use positional indexing
+(`.iloc[:, i]`) rather than label-based indexing (`df[col]`) to avoid
+issues where `df[tuple]` might return a DataFrame instead of a Series
+when the tuple is interpreted as a partial key.
+
+Example of supported MultiIndex DataFrame:
+    >>> arrays = [['A', 'A', 'B'], ['one', 'two', 'one']]
+    >>> tuples = list(zip(*arrays))
+    >>> columns = pd.MultiIndex.from_tuples(tuples)
+    >>> df = pd.DataFrame([[1, 2, 3]], columns=columns)
+    >>> is_deepcopyable(df)  # Returns True
 """
 
 from typing import Any, Set
@@ -212,9 +227,11 @@ def is_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> bool:
         # Pandas DataFrame
         if isinstance(obj, pd.DataFrame):
             _seen.add(obj_id)
-            for col in obj.columns:
-                if obj[col].dtype == object:
-                    for item in obj[col]:
+            # Use .iloc to avoid issues with MultiIndex columns
+            for i in range(len(obj.columns)):
+                col_series = obj.iloc[:, i]
+                if col_series.dtype == object:
+                    for item in col_series:
                         if not is_deepcopyable(item, _seen):
                             return False
             return True

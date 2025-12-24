@@ -763,6 +763,40 @@ The alias index is built LAZILY on first query and stored in Checkpoint:
   - [ ] Size estimation before checkpoint (warn on large data)
 
 
+14. MULTIINDEX COLUMN SUPPORT
+-----------------------------
+DataFrames with MultiIndex columns (hierarchical column labels) are fully
+supported throughout the checkpoint system. This includes:
+
+  - Deep copying of MultiIndex DataFrames
+  - Alias detection for variables containing MultiIndex DataFrames
+  - Checkpoint diffing between MultiIndex DataFrames
+
+14.1 Implementation Details
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When iterating over DataFrame columns, we use positional indexing
+(`.iloc[:, col_idx]`) rather than label-based indexing (`df[col]`).
+This avoids issues where `df[tuple]` might return a DataFrame instead
+of a Series when pandas interprets the tuple as a partial key.
+
+Example patterns used:
+  # CORRECT - always returns a Series
+  for col_idx in range(len(df.columns)):
+      series = df.iloc[:, col_idx]
+
+  # PROBLEMATIC - may return DataFrame for MultiIndex
+  for col in df.columns:
+      series = df[col]  # Could be DataFrame!
+
+14.2 Supported MultiIndex Features
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  - 2-level and 3+ level column hierarchies
+  - Mixed-type level values (strings, integers, None)
+  - Duplicate column names within MultiIndex
+  - Object-dtype columns with mutable elements
+  - Empty MultiIndex DataFrames
+
+
 ================================================================================
                             END DESIGN DOCUMENT
 ================================================================================
@@ -941,9 +975,11 @@ def _collect_reachable_ids_with_paths(
             # TEMPORARY array whose id() can be reused by the memory allocator.
             # We only recurse into object-dtype columns to find nested references.
             # Optimization: Check dtype directly, iterate Series (avoids .values array creation)
-            for col in obj.columns:
+            # Use iloc to avoid issues with MultiIndex columns
+            for col_idx in range(len(obj.columns)):
                 try:
-                    series = obj[col]
+                    col = obj.columns[col_idx]
+                    series = obj.iloc[:, col_idx]
                     if series.dtype == object:
                         # FAST PATH: Skip object columns with immutable scalars (strings, ints, etc.)
                         # These can't have nested mutable references
@@ -1043,9 +1079,10 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
             # TEMPORARY array whose id() can be reused by the memory allocator.
             # We only recurse into object-dtype columns to find nested references.
             # Optimization: Check dtype directly, iterate Series (avoids .values array creation)
-            for col in obj.columns:
+            # Use iloc to avoid issues with MultiIndex columns
+            for col_idx in range(len(obj.columns)):
                 try:
-                    series = obj[col]
+                    series = obj.iloc[:, col_idx]
                     if series.dtype == object:
                         # FAST PATH: Skip object columns with immutable scalars (strings, ints, etc.)
                         # These can't have nested mutable references
@@ -1213,7 +1250,9 @@ class Checkpoint:
                 var_value = self.user_ns[var_name]
                 cause = ""
                 if isinstance(var_value, pd.DataFrame):
-                    obj_cols = [c for c in var_value.columns if var_value[c].dtype == object]
+                    # Use iloc to avoid issues with MultiIndex columns
+                    obj_cols = [var_value.columns[i] for i in range(len(var_value.columns))
+                                if var_value.iloc[:, i].dtype == object]
                     if obj_cols:
                         total_obj_elements = sum(len(var_value) for _ in obj_cols)
                         cause = f" (DataFrame with {len(obj_cols)} object-dtype columns, {total_obj_elements} elements)"
