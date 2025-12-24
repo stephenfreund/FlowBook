@@ -128,7 +128,7 @@ class ExecuteSDCCommand(NotebookCommand):
                                 result = KernelHelper.execute_code(
                                     kernel_client,
                                     source,
-                                    self.timeout
+                                    self.timeout,
                                     cell_id=cell_id,
                                     cell_metadata=cell_metadata,
                                 )
