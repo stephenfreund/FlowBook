@@ -53,7 +53,7 @@ class SocketOutputReceiver:
     @staticmethod
     def _default_handler(text: str) -> None:
         """Default handler: print to stdout."""
-        sys.stdout.write(text + "\n")
+        sys.stdout.write(text)
         sys.stdout.flush()
 
     @classmethod
@@ -118,7 +118,6 @@ class SocketOutputReceiver:
     def _handle_client(self, client_socket: socket.socket) -> None:
         """Handle output from a single kernel connection."""
         client_socket.settimeout(1.0)
-        buffer = b""
 
         while self.running:
             try:
@@ -126,16 +125,12 @@ class SocketOutputReceiver:
                 if not data:
                     break
 
-                buffer += data
-
-                # Process complete lines
-                while b"\n" in buffer:
-                    line, buffer = buffer.split(b"\n", 1)
-                    try:
-                        text = line.decode("utf-8")
-                        self.output_handler(text)
-                    except UnicodeDecodeError:
-                        pass
+                # Process data immediately without waiting for newlines
+                try:
+                    text = data.decode("utf-8")
+                    self.output_handler(text)
+                except UnicodeDecodeError:
+                    pass
 
             except socket.timeout:
                 continue
