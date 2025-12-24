@@ -116,6 +116,61 @@ def format_elapsed(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+def get_expected_runtime(target_path: Path) -> Optional[float]:
+    """Get expected runtime from Kaggle log file if available.
+
+    Notebooks downloaded from Kaggle include a .log file with execution
+    timestamps. The last entry's 'time' field is the total runtime.
+
+    Args:
+        target_path: Path to the notebook file
+
+    Returns:
+        Expected runtime in seconds, or None if not available
+    """
+    log_file = target_path.parent / (target_path.stem + ".log")
+    if not log_file.exists():
+        return None
+    try:
+        with open(log_file) as f:
+            log = json.load(f)
+            if log and isinstance(log, list) and len(log) > 0:
+                last_entry = log[-1]
+                if isinstance(last_entry, dict) and "time" in last_entry:
+                    return float(last_entry["time"])
+    except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def build_job_id(target_path: Path) -> str:
+    """Build a unique job identifier from the notebook path.
+
+    Format: {username}---{slug}---{stem}
+
+    Given: user/notebook-slug/notebook.ipynb
+    Returns: user---notebook-slug---notebook
+
+    Falls back to just the stem if path doesn't have enough components.
+
+    Args:
+        target_path: Path to the notebook file
+
+    Returns:
+        Job identifier string suitable for filenames
+    """
+    stem = target_path.stem or "target"
+    parent_name = target_path.parent.name
+    grandparent_name = target_path.parent.parent.name
+
+    if grandparent_name and parent_name:
+        return f"{grandparent_name}---{parent_name}---{stem}"
+    elif parent_name:
+        return f"{parent_name}---{stem}"
+    else:
+        return stem
+
+
 def wait_for_jobs(
     job_ids: List[int],
     job_info: Dict[int, Tuple[Path, Optional[str]]],
@@ -355,7 +410,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
               {target_name}          -> filename with extension (no directory)
               {target_stem}          -> filename stem (no extension)
               {target_with_extension} -> filename plus any --target-extension
-              {log_dir}              -> directory where Slurm stdout/stderr files go
+              {log_dir}              -> directory where output files go
+              {job_id}               -> unique job identifier (user---slug---stem)
+              {metadata_file}        -> path for metadata output (in log_dir)
+              {timers_file}          -> path for timers output (in log_dir)
             """
         ),
     )
@@ -481,16 +539,20 @@ def run_local_job(target: Path, args: argparse.Namespace) -> bool:
     log_dir = Path(args.log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    job_id = build_job_id(abs_target)
+
     context = {
         "target": str(abs_target),
         "target_dir": str(work_dir),
         "target_name": abs_target.name,
         "target_stem": abs_target.stem,
         "log_dir": str(log_dir),
+        "job_id": job_id,
+        "metadata_file": str(log_dir / f"{job_id}.metadata.json"),
+        "timers_file": str(log_dir / f"{job_id}.timers.json"),
     }
 
-    basename = abs_target.stem or "target"
-    job_label = f"{args.job_name}-{basename}"
+    job_label = f"{args.job_name}-{job_id}"
     command_tokens = build_command_tokens(context, args)
 
     # Parse timeout from time limit
@@ -528,8 +590,13 @@ def run_local_job(target: Path, args: argparse.Namespace) -> bool:
         """
     ).strip()
 
-    stdout_path = log_dir / f"local-{job_label}.out"
-    stderr_path = log_dir / f"local-{job_label}.err"
+    stdout_path = log_dir / f"{job_id}.out"
+    stderr_path = log_dir / f"{job_id}.err"
+
+    # Report expected runtime if available from Kaggle logs
+    expected_runtime = get_expected_runtime(abs_target)
+    if expected_runtime is not None:
+        print(f"[LOCAL] Expected runtime (Kaggle): {format_elapsed(expected_runtime)}")
 
     print(f"[LOCAL] Running: {command_str}")
     print(f"[LOCAL] Working directory: {work_dir}")
@@ -582,16 +649,20 @@ def submit_single_job(target: Path, args: argparse.Namespace) -> Optional[int]:
     log_dir = Path(args.log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    job_id = build_job_id(abs_target)
+
     context = {
         "target": str(abs_target),
         "target_dir": str(work_dir),
         "target_name": abs_target.name,
         "target_stem": abs_target.stem,
         "log_dir": str(log_dir),
+        "job_id": job_id,
+        "metadata_file": str(log_dir / f"{job_id}.metadata.json"),
+        "timers_file": str(log_dir / f"{job_id}.timers.json"),
     }
 
-    basename = abs_target.stem or "target"
-    job_label = f"{args.job_name}-{basename}"
+    job_label = f"{args.job_name}-{job_id}"
     command_tokens = build_command_tokens(context, args)
     command_str = shlex.join(command_tokens)
 
@@ -634,8 +705,8 @@ def submit_single_job(target: Path, args: argparse.Namespace) -> Optional[int]:
         """
     ).strip()
 
-    stdout_path = log_dir / f"slurm-{job_label}.out"
-    stderr_path = log_dir / f"slurm-{job_label}.err"
+    stdout_path = log_dir / f"{job_id}.out"
+    stderr_path = log_dir / f"{job_id}.err"
 
     sbatch_args: List[str] = [
         "sbatch",
@@ -655,6 +726,11 @@ def submit_single_job(target: Path, args: argparse.Namespace) -> Optional[int]:
 
     wrapped = f"bash -lc {shlex.quote(inner_cmd)}"
     cmd = sbatch_args + ["--wrap", wrapped]
+
+    # Report expected runtime if available from Kaggle logs
+    expected_runtime = get_expected_runtime(abs_target)
+    if expected_runtime is not None:
+        print(f"[SUBMIT] Expected runtime (Kaggle): {format_elapsed(expected_runtime)}")
 
     if args.dry_run:
         print("DRY RUN:", " ".join(shlex.quote(part) for part in cmd))
