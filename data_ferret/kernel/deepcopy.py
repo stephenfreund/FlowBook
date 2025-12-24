@@ -8,6 +8,26 @@ This module extends Python's standard copy.deepcopy with custom handlers for:
 
 The implementation follows the same dispatch pattern as the standard library's
 copy module for consistency and extensibility.
+
+MultiIndex Column Support
+-------------------------
+DataFrames with MultiIndex columns (hierarchical column labels) are fully
+supported. When iterating over DataFrame columns, we use positional indexing
+(`.iloc[:, i]`) to read columns, which always returns a Series regardless of
+column name type. For writing, we use column name indexing (`df[col]`) to
+preserve dtype correctly.
+
+This approach handles edge cases where `df[tuple]` might return a DataFrame
+instead of a Series when pandas interprets the tuple as a partial key in a
+MultiIndex.
+
+Example of supported MultiIndex DataFrame:
+    >>> arrays = [['A', 'A', 'B'], ['one', 'two', 'one']]
+    >>> tuples = list(zip(*arrays))
+    >>> columns = pd.MultiIndex.from_tuples(tuples)
+    >>> df = pd.DataFrame([[1, 2, 3]], columns=columns)
+    >>> memo = {}
+    >>> copy = deepcopy(df, memo)  # Works correctly
 """
 
 from __future__ import annotations
@@ -545,25 +565,33 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
         # Convert object columns to specialized dtypes on the original DataFrame first
         # (only when _convert_object_dtypes=True, set by Checkpoints or FERRET_OBJECT_MODE env var)
         if _convert_object_dtypes:
-            for col in df.columns:
-                if df[col].dtype == object:
-                    converted = _convert_object_column_dtype(df[col])
+            # Use iloc to read columns (handles MultiIndex) but column name to write
+            # (preserves dtype correctly)
+            for i in range(len(df.columns)):
+                col = df.columns[i]
+                col_series = df.iloc[:, i]
+                if col_series.dtype == object:
+                    converted = _convert_object_column_dtype(col_series)
                     if converted.dtype != object:
                         log(f"Converted column {col} from object to {converted.dtype}")
+                        # Use column name for assignment to preserve dtype
                         df[col] = converted
 
         # Shallow copy: CoW handles non-object columns efficiently
         df_copy = df.copy(deep=False)
 
         # Process remaining object columns
-        for col in df_copy.columns:
-            if df_copy[col].dtype == object:
+        # Use iloc to read columns (handles MultiIndex) but column name to write
+        for i in range(len(df_copy.columns)):
+            col = df_copy.columns[i]
+            col_series = df_copy.iloc[:, i]
+            if col_series.dtype == object:
                 # In preserve mode, check if all values are immutable
-                if not _convert_object_dtypes and _object_column_is_all_immutable(df_copy[col], col_name=str(col)):
+                if not _convert_object_dtypes and _object_column_is_all_immutable(col_series, col_name=str(col)):
                     # All immutable - shallow copy is sufficient (already done by df.copy)
                     log(f"Shallow copying immutable object column {col}")
                     # Force a copy of the underlying array to ensure independence
-                    df_copy[col] = df_copy[col].copy(deep=False)
+                    df_copy[col] = col_series.copy(deep=False)
                 else:
                     # Has mutable objects - need element-wise deepcopy
                     num_rows = len(df_copy)
@@ -573,7 +601,7 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
                         log(f"Deep copying object column {col}")
 
                     # Apply deep copy and explicitly preserve object dtype
-                    result = df_copy[col].apply(lambda x: deepcopy(x, memo))
+                    result = col_series.apply(lambda x: deepcopy(x, memo))
                     df_copy[col] = result.astype(object)
 
         memo[obj_id] = df_copy
@@ -643,6 +671,43 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
 
 
 d[pd.Series] = _deepcopy_series
+
+
+# CatBoost Pool handler - Pool explicitly blocks deepcopy, use slice workaround
+try:
+    from catboost import Pool as CatBoostPool
+
+    def _deepcopy_catboost_pool(pool: "CatBoostPool", memo: dict[int, Any]) -> "CatBoostPool":
+        """
+        Deep copy a CatBoost Pool using the slice workaround.
+
+        CatBoost Pool explicitly raises CatBoostError on __deepcopy__ and has no
+        __reduce__ support. However, pool.slice() creates an independent copy
+        that doesn't share memory with the original.
+
+        Verified to preserve: features, labels, weights, categorical features,
+        feature names, and group_id.
+
+        Args:
+            pool: CatBoost Pool to copy
+            memo: Shared memo dict for tracking copied objects
+
+        Returns:
+            Independent copy of the Pool
+        """
+        obj_id = id(pool)
+        if obj_id in memo:
+            return memo[obj_id]
+
+        # slice() with all indices creates a full independent copy
+        pool_copy = pool.slice(list(range(pool.num_row())))
+        memo[obj_id] = pool_copy
+        return pool_copy
+
+    d[CatBoostPool] = _deepcopy_catboost_pool
+except ImportError:
+    pass  # CatBoost not installed
+
 
 del d  # Clean up namespace
 

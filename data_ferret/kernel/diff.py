@@ -1,6 +1,31 @@
 """
 Data Ferret Kernel Namespace Diff Comparator
-Compares Jupyter kernel user namespaces for equality with isomorphic pointer structure.
+
+Compares Jupyter kernel user namespaces for equality with isomorphic pointer
+structure. Supports structured diff results with detailed difference reporting.
+
+MultiIndex Column Support
+-------------------------
+DataFrames with MultiIndex columns (hierarchical column labels) are fully
+supported. The `_get_column_as_series()` helper function safely extracts
+columns using `get_loc()` to find the column position, then `iloc` to access
+it. This ensures we always get a Series, even when column names are tuples
+that pandas might otherwise interpret as partial keys.
+
+The comparison methods handle:
+- 2-level and 3+ level MultiIndex columns
+- Mixed-type level values (strings, integers, None)
+- Duplicate column names in MultiIndex
+
+Example of supported MultiIndex DataFrame comparison:
+    >>> arrays = [['A', 'A', 'B'], ['one', 'two', 'one']]
+    >>> tuples = list(zip(*arrays))
+    >>> columns = pd.MultiIndex.from_tuples(tuples)
+    >>> df1 = pd.DataFrame([[1, 2, 3]], columns=columns)
+    >>> df2 = pd.DataFrame([[1, 2, 4]], columns=columns)  # Different value
+    >>> differ = Diff()
+    >>> result = differ.diff({'df': df1}, {'df': df2})
+    >>> 'df' in result.differences  # True - difference detected
 """
 
 import numpy as np
@@ -127,6 +152,13 @@ _COMPARE_DISPATCH = {
     set: "_compare_set",
     frozenset: "_compare_frozenset",
 }
+
+# CatBoost Pool - add to dispatch table if available
+try:
+    from catboost import Pool as CatBoostPool
+    _COMPARE_DISPATCH[CatBoostPool] = "_compare_catboost_pool"
+except ImportError:
+    CatBoostPool = None  # type: ignore
 
 # Cache for subclass dispatch lookups
 _DISPATCH_CACHE: Dict[type, Optional[str]] = {}
@@ -361,6 +393,35 @@ def are_compatible_dtypes(arr1, arr2) -> bool:
         return _all_elements_are_floats(arr2)
 
     return False
+
+
+def _get_column_as_series(df: pd.DataFrame, col) -> pd.Series:
+    """
+    Safely get a column from a DataFrame as a Series.
+
+    Handles MultiIndex columns by using iloc with get_loc to ensure
+    we always get a single Series, not a DataFrame.
+
+    Args:
+        df: The DataFrame to get the column from
+        col: The column name (can be a tuple for MultiIndex)
+
+    Returns:
+        The column as a pandas Series
+    """
+    # Use get_loc to find the integer position, then iloc to access
+    # This handles MultiIndex columns correctly
+    col_idx = df.columns.get_loc(col)
+    # get_loc can return an int, slice, or boolean array for duplicates
+    if isinstance(col_idx, int):
+        return df.iloc[:, col_idx]
+    else:
+        # For duplicates or other cases, fall back to loc which handles it
+        # but ensure we get a Series (take first match if multiple)
+        result = df.loc[:, col]
+        if isinstance(result, pd.DataFrame):
+            return result.iloc[:, 0]
+        return result
 
 
 class Diff:
@@ -1648,8 +1709,9 @@ class Diff:
         Raises:
             Exception if comparison fails (caller should catch and fall back).
         """
-        for col in df_a.columns:
-            if not self._fast_series_equal(df_a[col], df_b[col]):
+        # Use iloc to avoid issues with MultiIndex columns
+        for i in range(len(df_a.columns)):
+            if not self._fast_series_equal(df_a.iloc[:, i], df_b.iloc[:, i]):
                 return False
         return True
 
@@ -1752,7 +1814,7 @@ class Diff:
                 for col in sorted(missing_cols):
                     children[f"['{col}']"] = ValueComparison(
                         status="different",
-                        value1=val_a[col] if col in val_a.columns else None,
+                        value1=_get_column_as_series(val_a, col) if col in val_a.columns else None,
                         value2=None,
                         message=f"DataFrame column '{col}' missing in second DataFrame at {path}",
                     )
@@ -1768,7 +1830,7 @@ class Diff:
             for col in sorted(only_in_a):
                 children[f"['{col}']"] = ValueComparison(
                     status="different",
-                    value1=val_a[col],
+                    value1=_get_column_as_series(val_a, col),
                     value2=None,
                     message=f"Column '{col}' only in first DataFrame",
                 )
@@ -1778,7 +1840,7 @@ class Diff:
                 children[f"['{col}']"] = ValueComparison(
                     status="different",
                     value1=None,
-                    value2=val_b[col],
+                    value2=_get_column_as_series(val_b, col),
                     message=f"Column '{col}' only in second DataFrame",
                 )
                 total_diff_count += 1
@@ -1805,12 +1867,14 @@ class Diff:
         # Check dtype compatibility for each column (record mismatches but continue)
         cols_with_dtype_issues = set()
         for col in cols_to_compare:
-            if not are_compatible_dtypes(val_a[col], val_b[col]):
+            col_a = _get_column_as_series(val_a, col)
+            col_b = _get_column_as_series(val_b, col)
+            if not are_compatible_dtypes(col_a, col_b):
                 children[f"['{col}']._dtype"] = ValueComparison(
                     status="different",
-                    value1=val_a[col].dtype,
-                    value2=val_b[col].dtype,
-                    message=f"DataFrame column '{col}' dtype mismatch at {path}: {val_a[col].dtype} vs {val_b[col].dtype}",
+                    value1=col_a.dtype,
+                    value2=col_b.dtype,
+                    message=f"DataFrame column '{col}' dtype mismatch at {path}: {col_a.dtype} vs {col_b.dtype}",
                 )
                 cols_with_dtype_issues.add(col)
                 total_diff_count += 1
@@ -1826,13 +1890,15 @@ class Diff:
             if _PROFILE_DIFF:
                 col_start = time.perf_counter()
 
+            col_a = _get_column_as_series(val_a, col)
+            col_b = _get_column_as_series(val_b, col)
             col_diff = self._compare_series(
-                val_a[col], val_b[col], f"{path}['{col}']"
+                col_a, col_b, f"{path}['{col}']"
             )
 
             if _PROFILE_DIFF:
                 col_elapsed = time.perf_counter() - col_start
-                col_dtype = str(val_a[col].dtype)
+                col_dtype = str(col_a.dtype)
                 column_timings.append((col_elapsed, str(col), col_dtype))
 
             if col_diff:
@@ -1981,6 +2047,145 @@ class Diff:
                 value2=val_b,
                 message=f"timedelta64 mismatch at {path}: {val_a} vs {val_b}",
             )
+        return None
+
+    def _compare_catboost_pool(
+        self, val_a: "CatBoostPool", val_b: "CatBoostPool", path: str
+    ) -> Optional[DiffNode]:
+        """
+        Compare CatBoost Pool objects by their content.
+
+        Pools are compared by:
+        - Shape (num_row, num_col)
+        - Quantization state (is_quantized)
+        - Feature names (get_feature_names)
+        - Categorical feature indices (get_cat_feature_indices)
+        - Features (get_features)
+        - Labels (get_label)
+        - Weights (get_weight)
+
+        Returns None if pools are equal, CompoundDiff with differences otherwise.
+        """
+        children: Dict[str, DiffNode] = {}
+
+        # Fast path: shape check first (cheapest)
+        num_row_a, num_row_b = val_a.num_row(), val_b.num_row()
+        num_col_a, num_col_b = val_a.num_col(), val_b.num_col()
+
+        if num_row_a != num_row_b:
+            children["_num_row"] = ValueComparison(
+                status="different",
+                value1=num_row_a,
+                value2=num_row_b,
+                message=f"Pool row count mismatch at {path}: {num_row_a} vs {num_row_b}",
+            )
+            # Can't compare data with different row counts
+            return CompoundDiff(source_type="catboost_pool", children=children, truncated=False)
+
+        if num_col_a != num_col_b:
+            children["_num_col"] = ValueComparison(
+                status="different",
+                value1=num_col_a,
+                value2=num_col_b,
+                message=f"Pool column count mismatch at {path}: {num_col_a} vs {num_col_b}",
+            )
+            # Can't compare features with different column counts
+            return CompoundDiff(source_type="catboost_pool", children=children, truncated=False)
+
+        # Metadata checks (cheap)
+        quant_a, quant_b = val_a.is_quantized(), val_b.is_quantized()
+        if quant_a != quant_b:
+            children["_quantized"] = ValueComparison(
+                status="different",
+                value1=quant_a,
+                value2=quant_b,
+                message=f"Pool quantization state mismatch at {path}: {quant_a} vs {quant_b}",
+            )
+
+        feat_names_a, feat_names_b = val_a.get_feature_names(), val_b.get_feature_names()
+        if feat_names_a != feat_names_b:
+            children["_feature_names"] = ValueComparison(
+                status="different",
+                value1=feat_names_a,
+                value2=feat_names_b,
+                message=f"Pool feature names mismatch at {path}",
+            )
+
+        cat_feat_a, cat_feat_b = val_a.get_cat_feature_indices(), val_b.get_cat_feature_indices()
+        if cat_feat_a != cat_feat_b:
+            children["_cat_features"] = ValueComparison(
+                status="different",
+                value1=cat_feat_a,
+                value2=cat_feat_b,
+                message=f"Pool categorical feature indices mismatch at {path}",
+            )
+
+        # Data checks (expensive - extract arrays)
+        # Only compare features if shape matches (already checked above)
+        # Note: Quantized pools don't support get_features(), so skip if either is quantized
+        if num_row_a > 0 and num_col_a > 0 and not quant_a and not quant_b:
+            try:
+                features_a = np.array(val_a.get_features())
+                features_b = np.array(val_b.get_features())
+                feat_diff = self._compare_ndarray(features_a, features_b, f"{path}._features")
+                if feat_diff:
+                    children["_features"] = feat_diff
+            except Exception:
+                # Can't extract features (e.g., quantized pool)
+                pass
+
+        # Compare labels if present
+        labels_a = val_a.get_label()
+        labels_b = val_b.get_label()
+        if labels_a is not None or labels_b is not None:
+            if labels_a is None:
+                children["_labels"] = ValueComparison(
+                    status="different",
+                    value1=None,
+                    value2=labels_b,
+                    message=f"Pool labels mismatch at {path}: first has no labels",
+                )
+            elif labels_b is None:
+                children["_labels"] = ValueComparison(
+                    status="different",
+                    value1=labels_a,
+                    value2=None,
+                    message=f"Pool labels mismatch at {path}: second has no labels",
+                )
+            else:
+                labels_diff = self._compare_ndarray(
+                    np.array(labels_a), np.array(labels_b), f"{path}._labels"
+                )
+                if labels_diff:
+                    children["_labels"] = labels_diff
+
+        # Compare weights if present
+        weights_a = val_a.get_weight()
+        weights_b = val_b.get_weight()
+        if weights_a is not None or weights_b is not None:
+            if weights_a is None:
+                children["_weights"] = ValueComparison(
+                    status="different",
+                    value1=None,
+                    value2=weights_b,
+                    message=f"Pool weights mismatch at {path}: first has no weights",
+                )
+            elif weights_b is None:
+                children["_weights"] = ValueComparison(
+                    status="different",
+                    value1=weights_a,
+                    value2=None,
+                    message=f"Pool weights mismatch at {path}: second has no weights",
+                )
+            else:
+                weights_diff = self._compare_ndarray(
+                    np.array(weights_a), np.array(weights_b), f"{path}._weights"
+                )
+                if weights_diff:
+                    children["_weights"] = weights_diff
+
+        if children:
+            return CompoundDiff(source_type="catboost_pool", children=children, truncated=False)
         return None
 
     def _compare_groupby(self, val_a, val_b, path: str) -> Optional[ValueComparison]:
