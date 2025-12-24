@@ -67,7 +67,7 @@ class ExecuteAllCommand(NotebookCommand):
             total_executed = 0
             status = "success"  # Track actual execution status
 
-            kernel_client.execute("%enable_scalene")
+            KernelHelper.execute_code(kernel_client, "%scalene on", store_history=False)
 
             with timer(key="execute_all", message="Executing all cells"):
                 for idx, cell in enumerate(cells):
