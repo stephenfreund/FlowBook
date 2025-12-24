@@ -107,6 +107,15 @@ def get_timer_count(timings_file_path: Optional[str]) -> Tuple[int, str]:
     return (count, "ok" if count == 1 else f"count={count}")
 
 
+def format_elapsed(seconds: float) -> str:
+    """Format elapsed seconds as HH:MM:SS or MM:SS."""
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
 def wait_for_jobs(
     job_ids: List[int],
     job_info: Dict[int, Tuple[Path, Optional[str]]],
@@ -128,6 +137,7 @@ def wait_for_jobs(
     """
     results: Dict[int, str] = {}
     pending = set(job_ids)
+    start_time = time.time()
 
     try:
         while pending:
@@ -177,7 +187,8 @@ def wait_for_jobs(
                     print(f"[STATUS] Job {job_id} -> FINISHED ({status}) {target}")
 
             if pending:
-                print(f"[WAIT] {len(pending)} jobs still running...")
+                elapsed = format_elapsed(time.time() - start_time)
+                print(f"[WAIT] {len(pending)} jobs still running... (elapsed: {elapsed})")
                 time.sleep(poll_interval)
 
     except KeyboardInterrupt:
