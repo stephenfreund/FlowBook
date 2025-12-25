@@ -223,16 +223,20 @@ class ExecuteSDCCommand(NotebookCommand):
                             # Extract all metadata types using generic extractor
                             extract_and_set_metadata(cell, result["outputs"])
 
-                            # Log cell outputs
                             for output in result["outputs"]:
-                                if output.get("output_type") == "stream":
-                                    log(output.get("text", ""))
-                                elif output.get("output_type") == "execute_result":
-                                    log(output.get("data", ""))
-                                elif output.get("output_type") == "display_data":
-                                    data = output.get("data", {})
-                                    if isinstance(data, dict) and "text/plain" in data:
-                                        log(data["text/plain"])
+                                if output["output_type"] == "stream":
+                                    log(output["text"])
+
+                                elif output["output_type"] == "execute_result":
+                                    log(output["data"])
+                                elif output["output_type"] == "display_data":
+                                    if isinstance(output["data"], dict):
+                                        if "text/plain" in output["data"]:
+                                            log(output["data"]["text/plain"])
+                                        else:
+                                            log(f"No text/plain in display_data: {output['data'].keys()}")
+                                    else:
+                                        log(f"Display data is not a dict: {output['data']}")
 
                             # Build execution result with timing
                             cell_result = {

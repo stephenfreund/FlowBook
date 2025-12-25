@@ -842,7 +842,7 @@ class FerretKernel(IPythonKernel, Magics):
 
         if non_copyable:
             for k, typ, reason in non_copyable:
-                message = f"The object {k}: {typ} cannot be passed between cells: {reason}"
+                message = f"The object {k} (type {typ}) cannot be passed between cells: {reason}"
                 log(message)
                 self.display_icon_and_text(
                     "\u26A0\uFE0F",
