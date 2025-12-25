@@ -7,6 +7,7 @@ used by both cli.py and optimize_cli.py.
 
 import json
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from jupyter_client import KernelManager
@@ -238,13 +239,25 @@ def setup_kernel(
 
                 except Exception as e:
                     log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
-                    if kernel_manager is not None and kernel_manager.is_alive():
-                        log("Kernel is still running but not responding")
-                    else:
-                        log("Kernel has died")
+                    if kernel_manager is not None:
+                        if kernel_manager.is_alive():
+                            log("Kernel process is running but not responding to messages")
+                        else:
+                            log("Kernel process has exited")
+                        # Try to get kernel stderr for diagnostics
+                        try:
+                            if hasattr(kernel_manager, 'kernel') and kernel_manager.kernel is not None:
+                                proc = kernel_manager.kernel
+                                if hasattr(proc, 'stderr') and proc.stderr:
+                                    stderr_output = proc.stderr.read()
+                                    if stderr_output:
+                                        log(f"Kernel stderr: {stderr_output[:1000]}")
+                        except Exception as diag_e:
+                            log(f"Could not read kernel stderr: {diag_e}")
 
                     if attempt < max_attempts - 1:
                         log("Restarting kernel...")
+                        time.sleep(2)  # Give system time to clean up
                     else:
                         # Clean up before raising
                         if kernel_client is not None:
