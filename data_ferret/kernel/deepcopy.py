@@ -67,7 +67,7 @@ def is_immutable(obj: Any, _seen: set[int] | None = None, max_depth: int = 10) -
     """
     Check if an object is deeply immutable (safe to share references).
 
-    Unlike is_deepcopyable, this checks if the object cannot be mutated,
+    Unlike check_deepcopyable, this checks if the object cannot be mutated,
     meaning a shallow copy is sufficient for isolation.
 
     Args:

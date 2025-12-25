@@ -64,7 +64,7 @@ from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
 
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
-from data_ferret.kernel.deepcopyable import is_deepcopyable
+from data_ferret.kernel.deepcopyable import check_deepcopyable
 from data_ferret.kernel.display_helpers import DisplayHelper
 from data_ferret.kernel.ferret_pdb import FerretPdb
 from data_ferret.kernel.json_utils import make_json_safe
@@ -818,14 +818,23 @@ class FerretKernel(IPythonKernel, Magics):
         from data_ferret.kernel.checkpoint import filter_user_namespace
 
         user_ns = filter_user_namespace(self.shell.user_ns)
-        non_copyable = [k for k, v in user_ns.items() if not is_deepcopyable(v)]
-        for k in non_copyable:
+
+        # Collect non-copyable variables with their types and reasons
+        non_copyable = []
+        for k, v in user_ns.items():
+            reason = check_deepcopyable(v)
+            if reason:
+                non_copyable.append((k, type(v).__name__, reason))
+
+        for k, _, _ in non_copyable:
             del self.shell.user_ns[k]
+
         if non_copyable:
-            non_copyable_with_types = [f"{k}:({type(v).__name__})" for k, v in user_ns.items() if k in non_copyable]
+            details = [f"{k}: {typ} ({reason})" for k, typ, reason in non_copyable]
             self.display_icon_and_text(
                 "\u26A0\uFE0F",
-                f"The following objects cannot be passed between cells: {', '.join(non_copyable_with_types)}",
+                f"The following objects cannot be passed between cells:\n" +
+                "\n".join(f"  - {d}" for d in details),
             )
 
     def _display_execution_result(
