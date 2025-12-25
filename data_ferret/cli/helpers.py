@@ -233,11 +233,17 @@ def setup_kernel(
                     kernel_client.start_channels()
 
                     # issue with race condition where the kernel is not ready yet
-                    log("Pausing for 1 second...")
-                    time.sleep(1)
-                    log("Waiting for kernel to be ready...")
+                    log("Pausing for 2 second...")
+                    time.sleep(2)
+                    while True:
+                        try:
+                            log("Waiting for kernel to be ready...")
+                            kernel_client.wait_for_ready(timeout=30)
+                            break
+                        except Exception as e:
+                            log(f"Error waiting for kernel to be ready: {e}")
+                            time.sleep(0.5)
 
-                    kernel_client.wait_for_ready()
                     assert isinstance(kernel_client, FerretKernelClient)
                     log("Kernel started successfully")
                     break
