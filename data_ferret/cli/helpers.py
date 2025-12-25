@@ -242,13 +242,12 @@ def setup_kernel(
                     if kernel_manager is not None and kernel_manager.is_alive():
                         log("Kernel is still running but not responding")
                         kernel_manager.shutdown_kernel(now=True)
-                    else:
-                        log("Kernel has died")
 
-                    # Wait 5 seconds before restarting
-                    while kernel_manager.is_alive():
-                        log("Waiting for kernel to die...")
-                        time.sleep(1)
+                        # Wait 5 seconds before restarting
+                        while kernel_manager.is_alive():
+                            log("Waiting for kernel to die...")
+                            time.sleep(1)
+
                     log("Kernel has died")
 
                     if attempt < max_attempts - 1:
@@ -266,6 +265,10 @@ def setup_kernel(
                             except Exception:
                                 pass
                         raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
+                    kernel_manager = None
+                    kernel_client = None
+
+
 
     return kernel_manager, kernel_client
 
