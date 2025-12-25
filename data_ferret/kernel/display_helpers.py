@@ -34,24 +34,35 @@ class DisplayHelper:
         contents: Optional[str] = None,
         metadata: Optional[dict] = None,
     ) -> None:
-        """Display an icon with text, optionally with expandable contents."""
+        """Display an icon with text, optionally with expandable contents.
+
+        Creates display data with both text/markdown and text/plain representations.
+        """
+        # Build plain text version
+        # if contents is None:
+        plain_text = f"{icon} {text}"
+        # else:
+        #     plain_text = f"{icon} {text}\n{contents}"
+
+        # Build markdown version
         if contents is None:
-            display(
-                Markdown(f"<div style='{self.div_style}'>{icon} {text}</div>"),
-                metadata=metadata,
-            )
+            markdown_text = f"<div style='{self.div_style}'>{icon} {text}</div>"
         else:
-            display(
-                Markdown(
-                    f"<div style='{self.div_style}'>"
-                    f"<details style='display: inline-block; text-align: left;'>"
-                    f"<summary>{icon} {text}</summary>\n\n"
-                    f"<pre style='margin: 0;'><code>{contents}</code></pre>\n\n"
-                    f"</details>"
-                    f"</div>"
-                ),
-                metadata=metadata,
+            markdown_text = (
+                f"<div style='{self.div_style}'>"
+                f"<details style='display: inline-block; text-align: left;'>"
+                f"<summary>{icon} {text}</summary>\n\n"
+                f"<pre style='margin: 0;'><code>{contents}</code></pre>\n\n"
+                f"</details>"
+                f"</div>"
             )
+
+        # Display with both MIME types
+        display(
+            {"text/markdown": markdown_text, "text/plain": plain_text},
+            raw=True,
+            metadata=metadata,
+        )
 
     def display_checkpoint_diff(self, old: Checkpoint, new: Checkpoint) -> None:
         """Display the diff between two checkpoints."""

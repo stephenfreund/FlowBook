@@ -171,10 +171,13 @@ class ExecuteAllCommand(NotebookCommand):
                                         elif output["output_type"] == "execute_result":
                                             log(output["data"])
                                         elif output["output_type"] == "display_data":
-                                            if "text/plain" in output["data"]:
-                                                log(output["data"]["text/plain"])
+                                            if isinstance(output["data"], dict):
+                                                if "text/plain" in output["data"]:
+                                                    log(output["data"]["text/plain"])
+                                                else:
+                                                    log(f"No text/plain in display_data: {output['data'].keys()}")
                                             else:
-                                                log(f"No text/plain in display_data: {output["data"].keys()}")
+                                                log(f"Display data is not a dict: {output['data']}")
 
                                     execution_results.append(
                                         {
