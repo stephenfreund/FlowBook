@@ -709,6 +709,57 @@ except ImportError:
     pass  # CatBoost not installed
 
 
+# Keras model handler - models have custom pickle support via __reduce_ex__
+# but check_deepcopyable would fail on internal attributes like _tracker
+def _deepcopy_keras_model(model, memo: dict[int, Any]):
+    """
+    Deep copy a Keras model using standard deepcopy.
+
+    Keras models implement __reduce_ex__ with KerasSaveable._unpickle_model,
+    which properly serializes architecture, weights, and optimizer state
+    while avoiding internal attributes (like _tracker) that contain
+    non-picklable objects (mappingproxy).
+
+    This explicit handler ensures:
+    1. Proper memo registration for shared references
+    2. Consistent behavior with other specialized copiers
+
+    Args:
+        model: Keras model (Sequential, Functional, or Model subclass)
+        memo: Shared memo dict for tracking copied objects
+
+    Returns:
+        Independent copy of the model with weights and optimizer state
+    """
+    obj_id = id(model)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    # Standard deepcopy works because Keras implements __reduce_ex__
+    import copy as stdlib_copy
+    model_copy = stdlib_copy.deepcopy(model)
+    memo[obj_id] = model_copy
+    return model_copy
+
+
+# Try tensorflow.keras first (more common), then standalone keras
+try:
+    from tensorflow.keras.models import Sequential as TFSequential
+    from tensorflow.keras.models import Model as TFModel
+    d[TFSequential] = _deepcopy_keras_model
+    d[TFModel] = _deepcopy_keras_model
+except ImportError:
+    pass
+
+try:
+    from keras.models import Sequential as KerasSequential
+    from keras.models import Model as KerasModel
+    d[KerasSequential] = _deepcopy_keras_model
+    d[KerasModel] = _deepcopy_keras_model
+except ImportError:
+    pass  # Keras not installed
+
+
 del d  # Clean up namespace
 
 

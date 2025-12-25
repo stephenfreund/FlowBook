@@ -338,18 +338,21 @@ IMPLEMENTATION IMPROVEMENTS:
 ================================================================================
 """
 
+import re
 import traceback
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from IPython.core.magic import Magics, line_magic, magics_class
 from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
 
-from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints
+from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints, filter_user_namespace
+from data_ferret.kernel.deepcopyable import check_deepcopyable
 from data_ferret.kernel.display_helpers import DisplayHelper
+from data_ferret.kernel.timeout_handler import CellTimeoutHandler
 from data_ferret.kernel.tracking import TrackingDict
 from data_ferret.util.cell_index import index_to_alpha
-from data_ferret.util.output import error, timer, output
+from data_ferret.util.output import error, log, timer, output
 
 from .models import SDCMetadata
 from .sdc_enforcer import SDCEnforcer, PRE_CHECKPOINT_PREFIX, POST_CHECKPOINT_PREFIX
@@ -372,6 +375,16 @@ class FerretSDCKernel(IPythonKernel, Magics):
     implementation = "ferret_sdc_kernel"
     implementation_version = "0.1"
     banner = "Ferret SDC Kernel - Sequential Dataflow Consistency"
+
+    # =========================================================================
+    # Configuration Constants
+    # =========================================================================
+
+    _default_cell_timeout = 30 * 60  # 30 minutes
+    _post_kb_grace = 1.0  # Grace period after KeyboardInterrupt
+    _kill_timeout = 3.0  # Time to wait before force kill
+    _verbose = False
+    _max_passes = 2  # Max timeout handler passes
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -690,6 +703,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
             # Check for notebook_structure magic (parse and remove if present)
             code = self._process_structure_magic(code)
 
+            # Extract timeout from code directive or cell_meta
+            code, timeout = self._extract_timeout(code, cell_meta)
+
             # Skip SDC for empty code or pure magic
             if not code.strip() or self._is_pure_magic(code):
                 return await self._execute_without_sdc(
@@ -710,10 +726,33 @@ class FerretSDCKernel(IPythonKernel, Magics):
             if isinstance(user_ns, TrackingDict):
                 user_ns.reset_tracking()
 
-            # Execute with tracking
-            with timer(key="sdc_execute") as run_timer:
-                if isinstance(user_ns, TrackingDict):
-                    with user_ns.track_execution():
+            # Setup timeout handler
+            timeout_handler = CellTimeoutHandler(
+                timeout=timeout,
+                post_kb_grace=self._post_kb_grace,
+                kill_timeout=self._kill_timeout,
+                verbose=self._verbose,
+                max_passes=self._max_passes,
+            )
+            timeout_handler.start()
+            normal_exit = False
+
+            try:
+                # Execute with tracking
+                with timer(key="sdc_execute") as run_timer:
+                    if isinstance(user_ns, TrackingDict):
+                        with user_ns.track_execution():
+                            result = await super().do_execute(
+                                code,
+                                silent,
+                                store_history,
+                                user_expressions,
+                                allow_stdin,
+                                cell_meta=cell_meta,
+                                cell_id=self._cell_id,
+                            )
+                        tracking = user_ns.get_tracking_data()
+                    else:
                         result = await super().do_execute(
                             code,
                             silent,
@@ -723,18 +762,18 @@ class FerretSDCKernel(IPythonKernel, Magics):
                             cell_meta=cell_meta,
                             cell_id=self._cell_id,
                         )
-                    tracking = user_ns.get_tracking_data()
-                else:
-                    result = await super().do_execute(
-                        code,
-                        silent,
-                        store_history,
-                        user_expressions,
-                        allow_stdin,
-                        cell_meta=cell_meta,
-                        cell_id=self._cell_id,
-                    )
-                    tracking = None
+                        tracking = None
+                normal_exit = True
+            except KeyboardInterrupt:
+                # Timeout occurred - restore pre-state
+                self._sdc.checkpoints.restore(
+                    f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
+                )
+                return self._handle_timeout_error(timeout)
+            finally:
+                timeout_handler.cancel()
+                if not normal_exit:
+                    await timeout_handler.cleanup_on_error()
 
             # If execution had an error, restore pre-state and skip SDC checks
             if result.get("status") == "error":
@@ -742,6 +781,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
                     f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
                 )
                 return result
+
+            # Warn about non-deepcopyable objects after successful execution
+            self._warn_non_deepcopyable_objects()
 
             # Take post-execution snapshot
             with timer(key="sdc_post_checkpoint") as post_timer:
@@ -865,6 +907,82 @@ class FerretSDCKernel(IPythonKernel, Magics):
             line.startswith("%") or line.startswith("!") or line.startswith("#")
             for line in lines
         )
+
+    def _parse_timeout_from_code(self, code: str) -> Tuple[str, float]:
+        """Parse timeout directive from code if present."""
+        match = re.match(r"# timeout (\d+)\n", code)
+        if match:
+            timeout = int(match.group(1))
+            code = code.replace(match.group(0), "", 1)
+        else:
+            timeout = self._default_cell_timeout
+        return code, timeout
+
+    def _extract_timeout(
+        self, code: str, cell_meta: Optional[dict]
+    ) -> Tuple[str, float]:
+        """
+        Extract timeout from code directive or cell_meta.
+
+        Priority:
+        1. # timeout N directive in code (highest)
+        2. timeout from cell_meta (from command)
+        3. _default_cell_timeout (fallback)
+
+        Returns:
+            Tuple of (code with directive removed, timeout in seconds)
+        """
+        # Parse timeout from code (highest priority)
+        parsed_code, code_timeout = self._parse_timeout_from_code(code)
+
+        # Determine timeout: code directive > cell_meta > default
+        if code_timeout != self._default_cell_timeout:
+            # Code had explicit # timeout directive
+            timeout = code_timeout
+        elif cell_meta and "timeout" in cell_meta:
+            # Use timeout from cell_metadata (from command)
+            timeout = float(cell_meta["timeout"])
+        else:
+            # Fall back to default
+            timeout = self._default_cell_timeout
+
+        return parsed_code, timeout
+
+    def _handle_timeout_error(self, timeout: float) -> dict:
+        """Create timeout error result."""
+        timeout_msg = f"Cell execution timed out after {timeout} seconds"
+        self.send_response(
+            self.iopub_socket,
+            "error",
+            {"ename": "TimeoutError", "evalue": timeout_msg, "traceback": [timeout_msg]},
+        )
+        return {
+            "status": "error",
+            "execution_count": self.execution_count,
+            "ename": "TimeoutError",
+            "evalue": timeout_msg,
+            "traceback": [timeout_msg],
+        }
+
+    def _warn_non_deepcopyable_objects(self) -> None:
+        """Warn about objects that can't be deep copied (won't be checkpointed)."""
+        user_ns = filter_user_namespace(self.shell.user_ns)
+
+        # Collect non-copyable variables with their types and reasons
+        non_copyable = []
+        for k, v in user_ns.items():
+            reason = check_deepcopyable(v)
+            if reason:
+                non_copyable.append((k, type(v).__name__, reason))
+
+        if non_copyable:
+            for k, typ, reason in non_copyable:
+                message = f"The object {k}: {typ} cannot be checkpointed: {reason}"
+                log(message)
+                self._display.display_icon_and_text(
+                    "\u26A0\uFE0F",
+                    message
+                )
 
     def _take_checkpoint(self, checkpoint_name: str) -> Checkpoint:
         """

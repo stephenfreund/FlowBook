@@ -167,6 +167,14 @@ def check_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> str | None:
     if module_name.startswith("matplotlib"):
         return "matplotlib objects cannot be deepcopied"
 
+    # === 3b. Keras models - have custom pickle support via __reduce_ex__ ===
+    # Keras models contain internal attributes (like _tracker) that have
+    # non-picklable objects (mappingproxy), but the model itself IS copyable
+    # because Keras implements __reduce_ex__ with KerasSaveable._unpickle_model
+    if module_name.startswith("keras") or module_name.startswith("tensorflow.keras"):
+        if type_name in ("Sequential", "Functional") or "Model" in type_name:
+            return None  # Known to work via __reduce_ex__
+
     # === 4. NumPy types ===
     try:
         import numpy as np

@@ -24,7 +24,11 @@ class KernelHelper:
         Returns:
             Dictionary with execution results including outputs and status
         """
-        msg_id = kernel_client.execute(code, cell_id=cell_id, cell_metadata=cell_metadata, store_history=store_history)
+        # Merge timeout into cell_metadata so the kernel can use it
+        meta_with_timeout = dict(cell_metadata) if cell_metadata else {}
+        meta_with_timeout['timeout'] = timeout
+
+        msg_id = kernel_client.execute(code, cell_id=cell_id, cell_metadata=meta_with_timeout, store_history=store_history)
 
         outputs = []
         execution_count = None
