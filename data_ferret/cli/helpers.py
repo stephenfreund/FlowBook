@@ -232,7 +232,12 @@ def setup_kernel(
                     kernel_client.load_connection_info(kernel_manager.get_connection_info())
                     kernel_client.start_channels()
 
-                    kernel_client.wait_for_ready(timeout=30)
+                    # issue with race condition where the kernel is not ready yet
+                    log("Pausing for 1 second...")
+                    time.sleep(1)
+                    log("Waiting for kernel to be ready...")
+
+                    kernel_client.wait_for_ready()
                     assert isinstance(kernel_client, FerretKernelClient)
                     log("Kernel started successfully")
                     break
@@ -267,8 +272,6 @@ def setup_kernel(
                             except Exception:
                                 pass
                         raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
-                    kernel_manager = None
-                    kernel_client = None
 
 
 
