@@ -175,6 +175,7 @@ def wait_for_jobs(
     job_ids: List[int],
     job_info: Dict[int, Tuple[Path, Optional[str]]],
     poll_interval: int = 5,
+    log_dir: Optional[Path] = None,
 ) -> Dict[int, str]:
     """Wait for all SLURM jobs to complete, polling squeue.
 
@@ -186,6 +187,7 @@ def wait_for_jobs(
         job_ids: List of SLURM job IDs to monitor
         job_info: Dict mapping job_id -> (target_path, timings_file_path)
         poll_interval: Seconds between status checks
+        log_dir: Directory containing job output files (for dumping on warnings)
 
     Returns:
         Dictionary mapping job_id -> final_state
@@ -234,12 +236,26 @@ def wait_for_jobs(
                 count, status = get_timer_count(timings_file)
                 if count == 1:
                     print(f"[STATUS] Job {job_id} -> FINISHED (ok) {target}")
-                elif count == 0:
-                    print(f"[STATUS] Job {job_id} -> FINISHED (cli_main_exit=0) {target}")
-                elif count > 1:
-                    print(f"[STATUS] Job {job_id} -> FINISHED (cli_main_exit={count}) {target}")
                 else:
-                    print(f"[STATUS] Job {job_id} -> FINISHED ({status}) {target}")
+                    # Warning case - dump output file for debugging
+                    if count == 0:
+                        print(f"[WARNING] Job {job_id} -> FINISHED (cli_main_exit=0) {target}")
+                    elif count > 1:
+                        print(f"[WARNING] Job {job_id} -> FINISHED (cli_main_exit={count}) {target}")
+                    else:
+                        print(f"[WARNING] Job {job_id} -> FINISHED ({status}) {target}")
+                    # Dump the .out file contents for debugging
+                    if log_dir is not None:
+                        out_file = log_dir / f"{job_id}.out"
+                        if out_file.exists():
+                            print(f"[WARNING]   --- {out_file} ---")
+                            try:
+                                content = out_file.read_text()
+                                for line in content.splitlines():
+                                    print(f"[WARNING]     {line}")
+                                print(f"[WARNING]   --- end of {job_id}.out ---")
+                            except Exception as e:
+                                print(f"[WARNING]   (failed to read: {e})")
 
             if pending:
                 elapsed = format_elapsed(time.time() - start_time)
@@ -845,7 +861,7 @@ def main() -> None:
             }
 
             final_states = wait_for_jobs(
-                submitted, job_info, poll_interval=args.poll_interval
+                submitted, job_info, poll_interval=args.poll_interval, log_dir=log_dir
             )
 
             print()
