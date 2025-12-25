@@ -232,7 +232,7 @@ def setup_kernel(
                     kernel_client.load_connection_info(kernel_manager.get_connection_info())
                     kernel_client.start_channels()
 
-                    kernel_client.wait_for_ready(timeout=30)
+                    kernel_client.wait_for_ready()
                     assert isinstance(kernel_client, FerretKernelClient)
                     log("Kernel started successfully")
                     break

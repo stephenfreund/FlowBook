@@ -1426,7 +1426,7 @@ class Checkpoints:
     def __init__(
         self,
         sanity_check: bool = False,
-        convert_dtypes: bool = True,
+        convert_dtypes: bool = False,
         warn_classes: bool = True,
     ):
         """
@@ -1435,8 +1435,7 @@ class Checkpoints:
         Args:
             sanity_check: If True, verify copies match originals after save
             convert_dtypes: If True, automatically convert object dtype columns to specialized
-                dtypes (Int64, string, datetime64, etc.) during checkpointing. Default True.
-                Set to False to preserve original object dtypes.
+                dtypes (Int64, string, datetime64, etc.) during checkpointing. Default False.
             warn_classes: If True, warn when user-defined classes are checkpointed, since
                 class variables won't be properly restored. Default True.
         """
