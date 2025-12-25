@@ -412,8 +412,6 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
               {target_with_extension} -> filename plus any --target-extension
               {log_dir}              -> directory where output files go
               {job_id}               -> unique job identifier (user---slug---stem)
-              {metadata_file}        -> path for metadata output (in log_dir)
-              {timers_file}          -> path for timers output (in log_dir)
             """
         ),
     )
@@ -548,8 +546,6 @@ def run_local_job(target: Path, args: argparse.Namespace) -> bool:
         "target_stem": abs_target.stem,
         "log_dir": str(log_dir),
         "job_id": job_id,
-        "metadata_file": str(log_dir / f"{job_id}.metadata.json"),
-        "timers_file": str(log_dir / f"{job_id}.timers.json"),
     }
 
     job_label = f"{args.job_name}-{job_id}"
@@ -658,8 +654,6 @@ def submit_single_job(target: Path, args: argparse.Namespace) -> Optional[int]:
         "target_stem": abs_target.stem,
         "log_dir": str(log_dir),
         "job_id": job_id,
-        "metadata_file": str(log_dir / f"{job_id}.metadata.json"),
-        "timers_file": str(log_dir / f"{job_id}.timers.json"),
     }
 
     job_label = f"{args.job_name}-{job_id}"
@@ -821,6 +815,7 @@ def main() -> None:
                     "target_name": abs_target.name,
                     "target_stem": abs_target.stem,
                     "log_dir": str(log_dir),
+                    "job_id": build_job_id(abs_target),
                 }
                 cmd_tokens = build_command_tokens(context, args)
                 job_timings_files[job_id] = extract_timings_file_from_command(cmd_tokens)
