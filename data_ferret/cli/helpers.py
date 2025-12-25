@@ -252,6 +252,7 @@ def setup_kernel(
 
                     if attempt < max_attempts - 1:
                         log("Restarting kernel...")
+                        time.sleep(0.5)  # Give ZMQ sockets time to release
                     else:
                         # Clean up before raising
                         if kernel_client is not None:
