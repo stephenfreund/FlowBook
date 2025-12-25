@@ -218,6 +218,10 @@ def deepcopy(x, memo=None):
     if memo is None:
         memo = {}
 
+    # Register Keras handlers lazily on first deepcopy call
+    # (avoids import-time side effects that can break kernel startup)
+    _register_keras_handlers_if_needed()
+
     d = id(x)
     y = memo.get(d, _nil)
     if y is not _nil:
@@ -711,6 +715,8 @@ except ImportError:
 
 # Keras model handler - models have custom pickle support via __reduce_ex__
 # but check_deepcopyable would fail on internal attributes like _tracker
+# NOTE: We don't import Keras at module load time to avoid triggering
+# matplotlib backend initialization before the kernel is ready.
 def _deepcopy_keras_model(model, memo: dict[int, Any]):
     """
     Deep copy a Keras model using standard deepcopy.
@@ -742,22 +748,33 @@ def _deepcopy_keras_model(model, memo: dict[int, Any]):
     return model_copy
 
 
-# Try tensorflow.keras first (more common), then standalone keras
-try:
-    from tensorflow.keras.models import Sequential as TFSequential
-    from tensorflow.keras.models import Model as TFModel
-    d[TFSequential] = _deepcopy_keras_model
-    d[TFModel] = _deepcopy_keras_model
-except ImportError:
-    pass
+# Flag to track if we've registered Keras handlers (done lazily on first use)
+_keras_handlers_registered = False
 
-try:
-    from keras.models import Sequential as KerasSequential
-    from keras.models import Model as KerasModel
-    d[KerasSequential] = _deepcopy_keras_model
-    d[KerasModel] = _deepcopy_keras_model
-except ImportError:
-    pass  # Keras not installed
+
+def _register_keras_handlers_if_needed():
+    """Register Keras model handlers lazily to avoid import-time side effects."""
+    global _keras_handlers_registered
+    if _keras_handlers_registered:
+        return
+    _keras_handlers_registered = True
+
+    # Try tensorflow.keras first (more common), then standalone keras
+    try:
+        from tensorflow.keras.models import Sequential as TFSequential
+        from tensorflow.keras.models import Model as TFModel
+        _deepcopy_dispatch[TFSequential] = _deepcopy_keras_model
+        _deepcopy_dispatch[TFModel] = _deepcopy_keras_model
+    except ImportError:
+        pass
+
+    try:
+        from keras.models import Sequential as KerasSequential
+        from keras.models import Model as KerasModel
+        _deepcopy_dispatch[KerasSequential] = _deepcopy_keras_model
+        _deepcopy_dispatch[KerasModel] = _deepcopy_keras_model
+    except ImportError:
+        pass  # Keras not installed
 
 
 del d  # Clean up namespace
