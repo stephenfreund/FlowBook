@@ -232,7 +232,18 @@ def setup_kernel(
                     kernel_client.load_connection_info(kernel_manager.get_connection_info())
                     kernel_client.start_channels()
 
-                    kernel_client.wait_for_ready()
+                    # issue with race condition where the kernel is not ready yet
+                    log("Pausing for 2 second...")
+                    time.sleep(2)
+                    while True:
+                        try:
+                            log("Waiting for kernel to be ready...")
+                            kernel_client.wait_for_ready(timeout=30)
+                            break
+                        except Exception as e:
+                            log(f"Error waiting for kernel to be ready: {e}")
+                            time.sleep(0.5)
+
                     assert isinstance(kernel_client, FerretKernelClient)
                     log("Kernel started successfully")
                     break
@@ -243,7 +254,7 @@ def setup_kernel(
                         log("Kernel is still running but not responding")
                         kernel_manager.shutdown_kernel(now=True)
 
-                        # Wait 5 seconds before restarting
+                        # Wait 1 second before restarting
                         while kernel_manager.is_alive():
                             log("Waiting for kernel to die...")
                             time.sleep(1)
@@ -267,8 +278,6 @@ def setup_kernel(
                             except Exception:
                                 pass
                         raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
-                    kernel_manager = None
-                    kernel_client = None
 
 
 
