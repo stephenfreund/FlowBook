@@ -239,25 +239,20 @@ def setup_kernel(
 
                 except Exception as e:
                     log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
-                    if kernel_manager is not None:
-                        if kernel_manager.is_alive():
-                            log("Kernel process is running but not responding to messages")
-                        else:
-                            log("Kernel process has exited")
-                        # Try to get kernel stderr for diagnostics
-                        try:
-                            if hasattr(kernel_manager, 'kernel') and kernel_manager.kernel is not None:
-                                proc = kernel_manager.kernel
-                                if hasattr(proc, 'stderr') and proc.stderr:
-                                    stderr_output = proc.stderr.read()
-                                    if stderr_output:
-                                        log(f"Kernel stderr: {stderr_output[:1000]}")
-                        except Exception as diag_e:
-                            log(f"Could not read kernel stderr: {diag_e}")
+                    if kernel_manager is not None and kernel_manager.is_alive():
+                        log("Kernel is still running but not responding")
+                        kernel_manager.shutdown_kernel(now=True)
+                    else:
+                        log("Kernel has died")
+
+                    # Wait 5 seconds before restarting
+                    while kernel_manager.is_alive():
+                        log("Waiting for kernel to die...")
+                        time.sleep(1)
+                    log("Kernel has died")
 
                     if attempt < max_attempts - 1:
                         log("Restarting kernel...")
-                        time.sleep(2)  # Give system time to clean up
                     else:
                         # Clean up before raising
                         if kernel_client is not None:

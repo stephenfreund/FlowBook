@@ -349,18 +349,10 @@ from ipykernel.kernelapp import IPKernelApp
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints, filter_user_namespace
 from data_ferret.kernel.deepcopyable import check_deepcopyable
 from data_ferret.kernel.display_helpers import DisplayHelper
+from data_ferret.kernel.timeout_handler import CellTimeoutHandler
 from data_ferret.kernel.tracking import TrackingDict
 from data_ferret.util.cell_index import index_to_alpha
 from data_ferret.util.output import error, log, timer, output
-
-# Optional timeout handler - may not be available in all environments
-try:
-    from data_ferret.kernel.timeout_handler import CellTimeoutHandler
-    _HAS_TIMEOUT_HANDLER = True
-except ImportError as e:
-    log(f"CellTimeoutHandler not available: {e}")
-    _HAS_TIMEOUT_HANDLER = False
-    CellTimeoutHandler = None  # type: ignore
 
 from .models import SDCMetadata
 from .sdc_enforcer import SDCEnforcer, PRE_CHECKPOINT_PREFIX, POST_CHECKPOINT_PREFIX
@@ -734,19 +726,17 @@ class FerretSDCKernel(IPythonKernel, Magics):
             if isinstance(user_ns, TrackingDict):
                 user_ns.reset_tracking()
 
-            # Setup timeout handler if available
-            timeout_handler = None
-            if _HAS_TIMEOUT_HANDLER and CellTimeoutHandler is not None:
-                timeout_handler = CellTimeoutHandler(
-                    timeout=timeout,
-                    post_kb_grace=self._post_kb_grace,
-                    kill_timeout=self._kill_timeout,
-                    verbose=self._verbose,
-                    max_passes=self._max_passes,
-                )
-                timeout_handler.start()
-
+            # Setup timeout handler
+            timeout_handler = CellTimeoutHandler(
+                timeout=timeout,
+                post_kb_grace=self._post_kb_grace,
+                kill_timeout=self._kill_timeout,
+                verbose=self._verbose,
+                max_passes=self._max_passes,
+            )
+            timeout_handler.start()
             normal_exit = False
+
             try:
                 # Execute with tracking
                 with timer(key="sdc_execute") as run_timer:
@@ -781,10 +771,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 )
                 return self._handle_timeout_error(timeout)
             finally:
-                if timeout_handler is not None:
-                    timeout_handler.cancel()
-                    if not normal_exit:
-                        await timeout_handler.cleanup_on_error()
+                timeout_handler.cancel()
+                if not normal_exit:
+                    await timeout_handler.cleanup_on_error()
 
             # If execution had an error, restore pre-state and skip SDC checks
             if result.get("status") == "error":
