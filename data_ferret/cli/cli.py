@@ -205,9 +205,11 @@ def cli_main():
             # Use command's preferred kernel if no --kernel-name was explicitly provided
             # (check if it's the default value)
             kernel_to_use = args.kernel_name
-            if args.kernel_name == "ferret_kernel":
+            if args.kernel_name == "ferret_kernel" and hasattr(command, 'kernel_name'):
                 # User didn't override, use command's preference
                 kernel_to_use = command.kernel_name
+                if kernel_to_use != args.kernel_name:
+                    log(f"Command prefers kernel: {kernel_to_use} (overriding default)")
 
             log(f"Using kernel: {kernel_to_use}")
 
