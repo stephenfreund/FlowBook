@@ -167,9 +167,14 @@ class ExecuteAllCommand(NotebookCommand):
                                     for output in result["outputs"]:
                                         if output["output_type"] == "stream":
                                             log(output["text"])
-
                                         elif output["output_type"] == "execute_result":
-                                            log(output["data"])
+                                            if isinstance(output["data"], dict):
+                                                if "text/plain" in output["data"]:
+                                                    log(output["data"]["text/plain"])
+                                                else:
+                                                    log(f"No text/plain in execute_result: {output['data'].keys()}")
+                                            else:
+                                                log(f"Execute result is not a dict: {output['data']}")
                                         elif output["output_type"] == "display_data":
                                             if isinstance(output["data"], dict):
                                                 if "text/plain" in output["data"]:
