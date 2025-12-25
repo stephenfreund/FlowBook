@@ -861,6 +861,17 @@ def main() -> None:
                         normal_count += 1
                     else:
                         print(f"[WARN] Job {job_id} ({target.stem}): {msg}")
+                        # Dump the .out file contents for debugging
+                        out_file = log_dir / f"{job_id}.out"
+                        if out_file.exists():
+                            print(f"[WARN]   --- {out_file} ---")
+                            try:
+                                content = out_file.read_text()
+                                for line in content.splitlines():
+                                    print(f"[WARN]     {line}")
+                                print(f"[WARN]   --- end of {job_id}.out ---")
+                            except Exception as e:
+                                print(f"[WARN]   (failed to read: {e})")
                 else:
                     print(f"[SKIP] Job {job_id} ({target.stem}): {state}")
 
