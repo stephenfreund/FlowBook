@@ -246,7 +246,8 @@ def wait_for_jobs(
                         print(f"[WARNING] Job {job_id} -> FINISHED ({status}) {target}")
                     # Dump the .out file contents for debugging
                     if log_dir is not None:
-                        out_file = log_dir / f"{job_id}.out"
+                        custom_job_id = build_job_id(target)
+                        out_file = log_dir / f"{custom_job_id}.out"
                         if out_file.exists():
                             print(f"[WARNING]   --- {out_file} ---")
                             try:
