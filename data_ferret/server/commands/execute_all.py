@@ -2,8 +2,10 @@
 Execute all cells command implementation.
 """
 
+import argparse
 import copy
 import sys
+import textwrap
 import traceback
 from typing import Any, Dict, Optional
 
@@ -38,6 +40,26 @@ class ExecuteAllCommand(NotebookCommand):
     def requires_kernel(self) -> bool:
         return True
 
+    def make_subparser(
+        self, subparsers: argparse._SubParsersAction
+    ) -> argparse.ArgumentParser:
+        """Add command-specific CLI arguments."""
+        subparser = super().make_subparser(subparsers)
+        subparser.add_argument(
+            "--timeout",
+            type=float,
+            default=None,
+            help="Timeout in seconds for each cell execution",
+        )
+        subparser.add_argument(
+            "--downsample-csv",
+            type=float,
+            default=None,
+            metavar="PROPORTION",
+            help="Proportion of rows to keep from CSV files (e.g., 0.1 for 10%%)",
+        )
+        return subparser
+
     async def process(
         self,
         notebook_content: Dict[str, Any],
@@ -59,6 +81,10 @@ class ExecuteAllCommand(NotebookCommand):
                 total_time=0.0
             )
 
+        # Extract command-specific kwargs
+        cell_timeout = kwargs.get("timeout") or self.timeout
+        downsample_csv = kwargs.get("downsample_csv")
+
         with self.timing_context() as get_elapsed:
             new_notebook = copy.deepcopy(notebook_content)
             cells = new_notebook.get("cells", [])
@@ -68,6 +94,24 @@ class ExecuteAllCommand(NotebookCommand):
             status = "success"  # Track actual execution status
 
             KernelHelper.execute_code(kernel_client, "%scalene on", store_history=False)
+
+            # Inject CSV downsampling monkey-patch if requested
+            if downsample_csv is not None:
+                patch_code = textwrap.dedent(
+                    f'''
+                    import pandas as pd
+                    _original_read_csv = pd.read_csv
+
+                    def _downsampled_read_csv(*args, **kwargs):
+                        df = _original_read_csv(*args, **kwargs)
+                        n_rows = int(len(df) * {downsample_csv})
+                        return df.head(n_rows)
+
+                    pd.read_csv = _downsampled_read_csv
+                    '''
+                )
+                KernelHelper.execute_code(kernel_client, patch_code, store_history=False)
+                log(f"CSV downsampling enabled: keeping top {downsample_csv*100:.1f}% of rows")
 
             with timer(key="execute_all", message="Executing all cells"):
                 for idx, cell in enumerate(cells):
@@ -90,7 +134,7 @@ class ExecuteAllCommand(NotebookCommand):
                                         result = KernelHelper.execute_code(
                                             kernel_client,
                                             source,
-                                            self.timeout,
+                                            cell_timeout,
                                             cell_id=cell.get("id"),
                                             cell_metadata=metadata,
                                         )   
@@ -120,6 +164,18 @@ class ExecuteAllCommand(NotebookCommand):
                                     # Extract all metadata types using generic extractor
                                     extract_and_set_metadata(cell, result["outputs"])
 
+                                    for output in result["outputs"]:
+                                        if output["output_type"] == "stream":
+                                            log(output["text"])
+
+                                        elif output["output_type"] == "execute_result":
+                                            log(output["data"])
+                                        elif output["output_type"] == "display_data":
+                                            if "text/plain" in output["data"]:
+                                                log(output["data"]["text/plain"])
+                                            else:
+                                                log(f"No text/plain in display_data: {output["data"].keys()}")
+
                                     execution_results.append(
                                         {
                                             "cell_index": idx,
@@ -128,7 +184,7 @@ class ExecuteAllCommand(NotebookCommand):
                                             "execution_time": cell_get_elapsed() * 1000,
                                         }
                                     )
-                                    log(f"[{result['execution_count']}]")
+                                    log(f"Execution count: {result['execution_count']}")
 
                                     total_executed += 1
 

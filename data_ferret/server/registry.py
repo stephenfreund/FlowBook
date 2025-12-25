@@ -59,7 +59,11 @@ class CommandRegistry:
 
     def list_commands(self) -> List[str]:
         """List all registered command names."""
-        return list(self._commands.keys())  
+        return list(self._commands.keys())
+
+    def get_all_commands(self) -> List[NotebookCommand]:
+        """Get all registered command instances."""
+        return list(self._commands.values())  
 
     def register(self, command: NotebookCommand):
         """Register a command."""

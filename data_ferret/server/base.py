@@ -5,6 +5,7 @@ Abstract base class for notebook processing commands.
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from contextlib import contextmanager
+import argparse
 import time
 
 from agents import Usage
@@ -139,3 +140,24 @@ class NotebookCommand(ABC):
             model=serverapp.web_app.settings["data_ferret"].model,
             fast_model=serverapp.web_app.settings["data_ferret"].fast_model,
         )
+
+    def make_subparser(
+        self, subparsers: argparse._SubParsersAction
+    ) -> argparse.ArgumentParser:
+        """
+        Create and return the subparser for this command.
+
+        Override to add command-specific CLI arguments. The CLI will add
+        the 'paths' argument after this returns.
+
+        Args:
+            subparsers: The subparsers action from the parent parser
+
+        Returns:
+            The configured subparser for this command
+        """
+        subparser = subparsers.add_parser(
+            self.command_name,
+            help=self.display_name,
+        )
+        return subparser

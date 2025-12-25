@@ -78,16 +78,7 @@ def cli_main():
 
     registry = CommandRegistry()
 
-    parser.add_argument(
-        "command", choices=registry.list_commands(), help="Command to execute"
-    )
-
-    parser.add_argument(
-        "paths",
-        nargs="+",
-        help="Notebook file (.ipynb) and/or kernel connection file (kernel-*.json). Provide one or both in any order.",
-    )
-
+    # Common arguments (before command)
     parser.add_argument(
         "--kernel-name",
         default="ferret_kernel",
@@ -141,6 +132,19 @@ def cli_main():
         action="store_true",
         help="Verbose output",
     )
+
+    # Subparsers for each command
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    for command in registry.get_all_commands():
+        # Command creates its subparser (may add command-specific args)
+        subparser = command.make_subparser(subparsers)
+        # CLI adds paths after command returns it
+        subparser.add_argument(
+            "paths",
+            nargs="+",
+            help="Notebook file (.ipynb) and/or kernel connection file (kernel-*.json). Provide one or both in any order.",
+        )
 
     args = parser.parse_args()
 
@@ -219,6 +223,16 @@ def cli_main():
                 command_client.force_checkpoints(enabled=True)
                 log("Force checkpoints enabled")
 
+        # Extract command-specific kwargs (those not in common CLI args)
+        common_args = {
+            'command', 'paths', 'kernel_name', 'output', 'model', 'fast_model',
+            'cell_ids', 'timings_file', 'metadata_file', 'force_checkpoints', 'verbose'
+        }
+        command_kwargs = {
+            k: v for k, v in vars(args).items()
+            if k not in common_args and v is not None
+        }
+
         # Run async command.process() in event loop
         result = asyncio.run(
             command.process(
@@ -226,6 +240,7 @@ def cli_main():
                 kernel_client=kernel_client,
                 selected_cell_ids=selected_cell_ids,
                 config=config,
+                **command_kwargs,
             )
         )
 
