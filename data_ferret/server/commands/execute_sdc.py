@@ -2,7 +2,9 @@
 Execute all cells command with Sequential Dataflow Consistency enforcement.
 """
 
+import argparse
 import copy
+import textwrap
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -45,6 +47,26 @@ class ExecuteSDCCommand(NotebookCommand):
     def kernel_name(self) -> str:
         return "ferret_sdc_kernel"
 
+    def make_subparser(
+        self, subparsers: argparse._SubParsersAction
+    ) -> argparse.ArgumentParser:
+        """Add command-specific CLI arguments."""
+        subparser = super().make_subparser(subparsers)
+        subparser.add_argument(
+            "--timeout",
+            type=float,
+            default=None,
+            help="Timeout in seconds for each cell execution",
+        )
+        subparser.add_argument(
+            "--downsample-csv",
+            type=float,
+            default=None,
+            metavar="PROPORTION",
+            help="Proportion of rows to keep from CSV files (e.g., 0.1 for 10%%)",
+        )
+        return subparser
+
     async def process(
         self,
         notebook_content: Dict[str, Any],
@@ -80,6 +102,10 @@ class ExecuteSDCCommand(NotebookCommand):
                 total_time=0.0,
             )
 
+        # Extract command-specific kwargs
+        cell_timeout = kwargs.get("timeout") or self.timeout
+        downsample_csv = kwargs.get("downsample_csv")
+
         with self.timing_context() as get_elapsed:
             new_notebook = copy.deepcopy(notebook_content)
             cells = new_notebook.get("cells", [])
@@ -98,6 +124,23 @@ class ExecuteSDCCommand(NotebookCommand):
             with timer(key="execute_magic", message="Executing magic %continue_after_violation on"):
                 kernel_client.execute("%continue_after_violation on")
 
+            # Inject CSV downsampling monkey-patch if requested
+            if downsample_csv is not None:
+                patch_code = textwrap.dedent(
+                    f'''
+                    import pandas as pd
+                    _original_read_csv = pd.read_csv
+
+                    def _downsampled_read_csv(*args, **kwargs):
+                        df = _original_read_csv(*args, **kwargs)
+                        n_rows = int(len(df) * {downsample_csv})
+                        return df.head(n_rows)
+
+                    pd.read_csv = _downsampled_read_csv
+                    '''
+                )
+                KernelHelper.execute_code(kernel_client, patch_code, store_history=False)
+                log(f"CSV downsampling enabled: keeping top {downsample_csv*100:.1f}% of rows")
 
             with timer(key="execute_sdc", message="Executing all cells with SDC"):
                 for idx, cell in enumerate(cells):
@@ -128,7 +171,7 @@ class ExecuteSDCCommand(NotebookCommand):
                                 result = KernelHelper.execute_code(
                                     kernel_client,
                                     source,
-                                    self.timeout,
+                                    cell_timeout,
                                     cell_id=cell_id,
                                     cell_metadata=cell_metadata,
                                 )
@@ -160,7 +203,10 @@ class ExecuteSDCCommand(NotebookCommand):
                                 error_message = result.get(
                                     "error_message", "Unknown error"
                                 )
-                                log(f"Error in cell {cell_id}: {error_message}")
+                                print()
+                                print("--------------------------------")
+                                print(f"{error_message}")
+                                print("--------------------------------")
 
                                 execution_results.append(
                                     {
@@ -176,6 +222,17 @@ class ExecuteSDCCommand(NotebookCommand):
 
                             # Extract all metadata types using generic extractor
                             extract_and_set_metadata(cell, result["outputs"])
+
+                            # Log cell outputs
+                            for output in result["outputs"]:
+                                if output.get("output_type") == "stream":
+                                    log(output.get("text", ""))
+                                elif output.get("output_type") == "execute_result":
+                                    log(output.get("data", ""))
+                                elif output.get("output_type") == "display_data":
+                                    data = output.get("data", {})
+                                    if isinstance(data, dict) and "text/plain" in data:
+                                        log(data["text/plain"])
 
                             # Build execution result with timing
                             cell_result = {
@@ -193,7 +250,7 @@ class ExecuteSDCCommand(NotebookCommand):
                                 cell_result["check_ms"] = sdc_meta.get("check_duration_ms", 0.0)
 
                             execution_results.append(cell_result)
-                            log(f"[{result['execution_count']}]")
+                            log(f"Execution count: {result['execution_count']}")
 
                             total_executed += 1
 
