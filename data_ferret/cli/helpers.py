@@ -203,34 +203,61 @@ def setup_kernel(
             except Exception as e:
                 raise Exception(f"Error connecting to kernel: {e}")
     else:
-        # Start new kernel
+        # Start new kernel with retry logic
+        max_attempts = 3
+        kernel_manager = None
+        kernel_client = None
+
         with timer(key="start_kernel", message=f"Starting new kernel: {kernel_name}"):
-            kernel_manager = KernelManager(kernel_name=kernel_name)
-            try:
-                kernel_manager.start_kernel()
-            except Exception as e:
-                raise Exception(f"Error starting kernel: {e}")
-
-            kernel_client = FerretKernelClient(kernel_id=kernel_manager.kernel_id)
-            kernel_client.load_connection_info(kernel_manager.get_connection_info())
-            kernel_client.start_channels()
-
-            for i in range(3):
+            for attempt in range(max_attempts):
                 try:
+                    # Clean up any previous failed attempt
+                    if kernel_client is not None:
+                        try:
+                            kernel_client.stop_channels()
+                        except Exception:
+                            pass
+                    if kernel_manager is not None:
+                        try:
+                            kernel_manager.shutdown_kernel(now=True)
+                        except Exception:
+                            pass
+
+                    # Start fresh kernel
+                    kernel_manager = KernelManager(kernel_name=kernel_name)
+                    kernel_manager.start_kernel()
+
+                    kernel_client = FerretKernelClient(kernel_id=kernel_manager.kernel_id)
+                    kernel_client.load_connection_info(kernel_manager.get_connection_info())
+                    kernel_client.start_channels()
+
                     kernel_client.wait_for_ready(timeout=30)
                     assert isinstance(kernel_client, FerretKernelClient)
                     log("Kernel started successfully")
                     break
+
                 except Exception as e:
-                    log(f"Error waiting for kernel to be ready: {e}")
-                    if kernel_manager.is_alive():
+                    log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
+                    if kernel_manager is not None and kernel_manager.is_alive():
                         log("Kernel is still running but not responding")
                     else:
                         log("Kernel has died")
-                    if i < 2:
-                        log("Retrying...")
+
+                    if attempt < max_attempts - 1:
+                        log("Restarting kernel...")
                     else:
-                        raise Exception("Giving up after 3 attempts")
+                        # Clean up before raising
+                        if kernel_client is not None:
+                            try:
+                                kernel_client.stop_channels()
+                            except Exception:
+                                pass
+                        if kernel_manager is not None:
+                            try:
+                                kernel_manager.shutdown_kernel(now=True)
+                            except Exception:
+                                pass
+                        raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
 
     return kernel_manager, kernel_client
 
