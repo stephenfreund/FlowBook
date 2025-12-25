@@ -680,6 +680,7 @@ d[pd.Series] = _deepcopy_series
 # CatBoost Pool handler - Pool explicitly blocks deepcopy, use slice workaround
 try:
     from catboost import Pool as CatBoostPool
+    from _catboost import _PoolBase
 
     def _deepcopy_catboost_pool(pool: "CatBoostPool", memo: dict[int, Any]) -> "CatBoostPool":
         """
@@ -693,7 +694,7 @@ try:
         feature names, and group_id.
 
         Args:
-            pool: CatBoost Pool to copy
+            pool: CatBoost Pool to copy (Pool or _PoolBase)
             memo: Shared memo dict for tracking copied objects
 
         Returns:
@@ -709,6 +710,7 @@ try:
         return pool_copy
 
     d[CatBoostPool] = _deepcopy_catboost_pool
+    d[_PoolBase] = _deepcopy_catboost_pool  # Also handle the base class
 except ImportError:
     pass  # CatBoost not installed
 

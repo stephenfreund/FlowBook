@@ -175,6 +175,14 @@ def check_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> str | None:
         if type_name in ("Sequential", "Functional") or "Model" in type_name:
             return None  # Known to work via __reduce_ex__
 
+    # === 3c. CatBoost Pool - has custom deepcopy handler via slice workaround ===
+    # CatBoost Pool explicitly blocks __deepcopy__, but our custom deepcopy
+    # handles it via pool.slice() which creates an independent copy.
+    if module_name == "catboost.core" and type_name == "Pool":
+        return None  # Handled by custom deepcopy via pool.slice()
+    if module_name == "_catboost" and type_name == "_PoolBase":
+        return None  # Handled by custom deepcopy via pool.slice()
+
     # === 4. NumPy types ===
     try:
         import numpy as np
