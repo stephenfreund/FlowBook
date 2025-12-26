@@ -1724,7 +1724,13 @@ class Diff:
         try:
             arr_a = s_a.values
             arr_b = s_b.values
-            if arr_a is arr_b or np.shares_memory(arr_a, arr_b):
+            if arr_a is arr_b:
+                if _PROFILE_DIFF:
+                    log(f"[diff profile] Fast path: identity (same object)")
+                return True
+            if np.shares_memory(arr_a, arr_b):
+                if _PROFILE_DIFF:
+                    log(f"[diff profile] Fast path: identity (shared memory)")
                 return True
         except (TypeError, ValueError):
             pass  # Some array types don't support shares_memory
@@ -1784,6 +1790,7 @@ class Diff:
         # Log all column timings
         if _PROFILE_DIFF and column_timings:
             self._log_column_timings(path, column_timings)
+            log(f"[diff profile] Fast path: DataFrame {path} equal ({len(df_a.columns)} cols compared)")
 
         return True
 
