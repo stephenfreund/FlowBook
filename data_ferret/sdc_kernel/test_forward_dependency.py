@@ -881,8 +881,9 @@ class TestForwardDependencyStaleness:
         # D modifying x after B read it is a backward mutation
         assert result_d2.violation is not None
         assert result_d2.violation.affected_cell == "b"
-        # B should be stale because it reads x and x changed
-        assert "b" in result_d2.stale_cells
+        # B is NOT stale because staleness only propagates forward (to cells below D)
+        # The backward mutation violation is sufficient to indicate the issue
+        assert "b" not in result_d2.stale_cells
 
     def test_out_of_order_execution_staleness_chain(self):
         """
@@ -1021,11 +1022,11 @@ class TestForwardDependencyStaleness:
         # D modifying x is backward mutation against C (which reads x)
         assert result_d2.violation is not None
         assert result_d2.violation.affected_cell == "c"
-        # C reads x, so C should be stale
-        assert "c" in result_d2.stale_cells
-        # B doesn't read x directly, so not stale from this change
+        # C is NOT stale because staleness only propagates forward (to cells below D)
+        # The backward mutation violation is sufficient to indicate the issue
+        assert "c" not in result_d2.stale_cells
+        # B and A are also not stale (above D)
         assert "b" not in result_d2.stale_cells
-        # A doesn't read x, so not stale
         assert "a" not in result_d2.stale_cells
 
     def test_staleness_when_later_cell_re_executes(self):
@@ -1075,8 +1076,9 @@ class TestForwardDependencyStaleness:
         # C modifying x is backward mutation against B
         assert result_c2.violation is not None
         assert result_c2.violation.affected_cell == "b"
-        # B should be stale since it reads x
-        assert "b" in result_c2.stale_cells
+        # B is NOT stale because staleness only propagates forward (to cells below C)
+        # The backward mutation violation is sufficient to indicate the issue
+        assert "b" not in result_c2.stale_cells
 
     def test_no_staleness_when_forward_dep_value_unchanged(self):
         """
@@ -1286,8 +1288,9 @@ class TestForwardDependencyColumnStaleness:
         # C modifying price is backward mutation against B
         assert result_c2.violation is not None
         assert result_c2.violation.affected_cell == "b"
-        # B should be stale - price column changed
-        assert "b" in result_c2.stale_cells
+        # B is NOT stale because staleness only propagates forward (to cells below C)
+        # The backward mutation violation is sufficient to indicate the issue
+        assert "b" not in result_c2.stale_cells
 
     def test_no_column_staleness_different_columns(self):
         """

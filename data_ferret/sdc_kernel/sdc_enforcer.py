@@ -436,11 +436,11 @@ class SDCEnforcer:
             # Extract column-level changes from diff result
             column_changed = _extract_column_changes(current_diff, tracking)
 
-            # Update staleness INCREMENTALLY (only check cells that might have become stale)
+            # Update staleness INCREMENTALLY (only check cells below that might have become stale)
             # Also captures structural warnings from affected cells
             with timer(key="sdc_staleness", message=f"[sdc] Staleness update for {cell_id}"):
                 stale, staleness_warnings = self._update_staleness_incremental(
-                    post_checkpoint, set(changed_vars), column_changed, cell_id
+                    post_checkpoint, set(changed_vars), column_changed, cell_id, my_position
                 )
             # Merge warnings from staleness checks
             structural_warnings.extend(staleness_warnings)
@@ -745,19 +745,24 @@ class SDCEnforcer:
         changed_vars: Set[str],
         column_changed: Dict[str, List[str]],
         just_executed: str,
+        my_position: int,
     ) -> Tuple[List[str], List[str]]:
         """
         Incrementally update staleness cache (Rule 2 computation).
 
-        Only checks cells that could have become stale from this execution:
-        - Skips cells already marked stale
-        - Skips cells whose reads don't overlap with changed variables/columns
+        Only checks cells BELOW the executed cell in document order (forward propagation).
+        Cells above are not checked - backward dependencies are handled by violation detection.
+
+        Skips cells that don't need checking:
+        - Cells already marked stale
+        - Cells whose reads don't overlap with changed variables/columns
 
         Args:
             current_checkpoint: The current state of the namespace
             changed_vars: Set of variable names that changed in this execution
             column_changed: Dict mapping var names to lists of changed column names
             just_executed: The cell_id that just executed (already marked fresh)
+            my_position: Position of the executed cell in document order
 
         Returns:
             Tuple of:
@@ -770,9 +775,12 @@ class SDCEnforcer:
         cells_skipped_no_overlap = 0
         diffs_performed = 0
 
-        for cell_id, record in self.records.items():
-            if cell_id == just_executed:
-                continue  # This cell just ran, already marked fresh
+        # Only check cells BELOW the executed cell (forward staleness only)
+        cells_below = self._cell_order[my_position + 1:]
+        for cell_id in cells_below:
+            record = self.records.get(cell_id)
+            if record is None:
+                continue  # Cell below hasn't executed yet
 
             if cell_id in self._stale_cells:
                 cells_skipped_stale += 1

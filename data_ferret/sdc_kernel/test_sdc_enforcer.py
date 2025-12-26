@@ -716,9 +716,10 @@ class TestContinueOnViolation:
         assert result.violation is not None
         assert result.violation.mutating_cell == "b"
         assert result.violation.affected_cell == "a"
-        # Key assertion: stale_cells is computed
-        assert "a" in result.stale_cells  # A is stale because x changed
-        # changed_variables is also computed
+        # A is NOT stale because staleness only propagates forward (to cells below B)
+        # The backward mutation violation is sufficient to indicate the issue
+        assert "a" not in result.stale_cells
+        # changed_variables is still computed
         assert "x" in result.changed_variables
 
     def test_continue_updates_execution_record(self):
@@ -825,11 +826,12 @@ class TestContinueOnViolation:
         assert result.violation is not None
         # B reads x, so D modifying x is a backward mutation against B
         assert result.violation.affected_cell == "b"
-        # B is stale because x changed (B reads x)
-        assert "b" in result.stale_cells
-        # C is NOT stale (reads y, which hasn't changed)
+        # B is NOT stale because staleness only propagates forward (to cells below D)
+        # The backward mutation violation is sufficient to indicate the issue
+        assert "b" not in result.stale_cells
+        # C is NOT stale (reads y, and is above D)
         assert "c" not in result.stale_cells
-        # A doesn't read anything, so not stale
+        # A is also above D, so not stale
         assert "a" not in result.stale_cells
 
 
