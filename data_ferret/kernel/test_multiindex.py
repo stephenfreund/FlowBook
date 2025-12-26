@@ -229,7 +229,7 @@ class TestCheckpointsMultiIndex:
         """Should save and restore MultiIndex DataFrame."""
         user_ns = {'df': multiindex_df.copy()}
 
-        cp = Checkpoints(convert_dtypes=False)
+        cp = Checkpoints()
         cp.save('test', user_ns)
 
         # Modify
@@ -253,7 +253,7 @@ class TestCheckpointsMultiIndex:
                     lambda x: x.copy() if hasattr(x, 'copy') else x
                 )
 
-        cp = Checkpoints(convert_dtypes=False)
+        cp = Checkpoints()
         cp.save('test', user_ns)
 
         # Modify
@@ -274,7 +274,7 @@ class TestCheckpointsMultiIndex:
         user_ns_b = {'df': multiindex_df.copy()}
         user_ns_b['df'].iloc[0, 0] = 999
 
-        cp = Checkpoints(convert_dtypes=False)
+        cp = Checkpoints()
 
         cp.save('a', user_ns_a)
         cp.save('b', user_ns_b)

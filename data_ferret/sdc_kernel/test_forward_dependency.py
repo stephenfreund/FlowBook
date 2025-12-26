@@ -33,7 +33,6 @@ class TestForwardDependencyBasic:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)
@@ -238,7 +237,6 @@ class TestForwardDependencyColumnLevel:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)
@@ -436,7 +434,6 @@ class TestForwardDependencyWithBackwardMutation:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)
@@ -563,7 +560,6 @@ class TestForwardDependencyWithContinueOnViolation:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)
@@ -640,7 +636,6 @@ class TestForwardDependencyViolationType:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)
@@ -741,7 +736,6 @@ class TestForwardDependencyMultipleLaterCells:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)
@@ -819,7 +813,6 @@ class TestForwardDependencyStaleness:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)
@@ -1209,7 +1202,6 @@ class TestForwardDependencyColumnStaleness:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)

@@ -672,109 +672,6 @@ class TestCopyOnWriteVerification:
 
 
 # ============================================================================
-# DTYPE CONVERSION OPTION TESTS
-# ============================================================================
-
-class TestDtypeConversionOption:
-    """Test the convert_dtypes parameter."""
-
-    def test_convert_dtypes_true_converts_integers(self):
-        """Test that convert_dtypes=True converts object integers to Int64."""
-        cp = Checkpoints(convert_dtypes=True)
-
-        # Create DataFrame with object dtype integers
-        df = pd.DataFrame({'data': pd.Series([1, 2, 3, None], dtype=object)})
-        assert df['data'].dtype == object
-
-        user_ns = {'df': df}
-        cp.save('test', user_ns)
-
-        # Original DataFrame should have been converted in-place
-        # (this is expected behavior with convert_dtypes=True)
-        # The dtype should be Int64 or similar nullable integer type
-        assert df['data'].dtype.name in ['Int64', 'int64']
-
-    def test_convert_dtypes_false_preserves_object(self):
-        """Test that convert_dtypes=False preserves object dtype."""
-        cp = Checkpoints(convert_dtypes=False)
-
-        # Create DataFrame with object dtype integers
-        df = pd.DataFrame({'data': pd.Series([1, 2, 3, None], dtype=object)})
-        original_dtype = df['data'].dtype
-        assert original_dtype == object
-
-        user_ns = {'df': df}
-        cp.save('test', user_ns)
-
-        # Original DataFrame should still be object dtype
-        assert df['data'].dtype == object
-
-        # Restored DataFrame should also be object dtype
-        cp.restore('test', user_ns)
-        assert user_ns['df']['data'].dtype == object
-
-    def test_convert_dtypes_true_converts_strings(self):
-        """Test that convert_dtypes=True converts object strings."""
-        cp = Checkpoints(convert_dtypes=True)
-
-        df = pd.DataFrame({'text': pd.Series(['a', 'b', 'c'], dtype=object)})
-        assert df['text'].dtype == object
-
-        user_ns = {'df': df}
-        cp.save('test', user_ns)
-
-        # Should be converted to string dtype
-        assert df['text'].dtype.name in ['string', 'object']
-
-    def test_convert_dtypes_affects_series(self):
-        """Test that convert_dtypes flag affects Series too."""
-        cp_convert = Checkpoints(convert_dtypes=True)
-        cp_no_convert = Checkpoints(convert_dtypes=False)
-
-        # Test with conversion enabled
-        s1 = pd.Series([1, 2, 3], dtype=object)
-        user_ns1 = {'s': s1}
-        cp_convert.save('test', user_ns1)
-        # Checkpoint should have converted dtype
-        checkpoint1 = cp_convert.get('test')
-        assert checkpoint1.user_ns['s'].dtype.name in ['Int64', 'int64']
-
-        # Test with conversion disabled
-        s2 = pd.Series([1, 2, 3], dtype=object)
-        user_ns2 = {'s': s2}
-        cp_no_convert.save('test', user_ns2)
-        # Checkpoint should preserve object dtype
-        checkpoint2 = cp_no_convert.get('test')
-        assert checkpoint2.user_ns['s'].dtype == object
-
-    def test_convert_dtypes_with_nested_dataframes(self):
-        """Test that convert_dtypes affects nested DataFrames."""
-        cp = Checkpoints(convert_dtypes=False)
-
-        # Create nested DataFrame with object dtype
-        inner_df = pd.DataFrame({'nums': pd.Series([1, 2, 3], dtype=object)})
-        outer_df = pd.DataFrame({'nested': [inner_df]})
-
-        user_ns = {'outer': outer_df}
-        cp.save('test', user_ns)
-
-        # Inner DataFrame should still have object dtype (not converted)
-        restored_inner = outer_df.iloc[0, 0]
-        assert restored_inner['nums'].dtype == object
-
-    def test_default_behavior_unchanged(self):
-        """Test that default behavior is to convert (backward compatibility)."""
-        cp = Checkpoints()  # No explicit convert_dtypes parameter
-
-        df = pd.DataFrame({'data': pd.Series([1, 2, 3], dtype=object)})
-        user_ns = {'df': df}
-        cp.save('test', user_ns)
-
-        # Default should convert
-        assert df['data'].dtype.name in ['Int64', 'int64']
-
-
-# ============================================================================
 # SIZE WARNING TESTS
 # ============================================================================
 
@@ -962,7 +859,7 @@ class TestProgressLogging:
 
     def test_small_dataframe_normal_logging(self):
         """Test that small DataFrames use normal logging."""
-        cp = Checkpoints(convert_dtypes=False)  # Keep object dtype
+        cp = Checkpoints()
 
         # Small DataFrame (< 10k rows)
         df = pd.DataFrame({'data': [[i] for i in range(100)]})
@@ -973,7 +870,7 @@ class TestProgressLogging:
 
     def test_large_dataframe_progress_logging(self):
         """Test that large DataFrames log row count."""
-        cp = Checkpoints(convert_dtypes=False)  # Keep object dtype
+        cp = Checkpoints()
 
         # Large DataFrame (> 10k rows)
         df = pd.DataFrame({'data': [[i] for i in range(15000)]})
@@ -984,7 +881,7 @@ class TestProgressLogging:
 
     def test_large_series_progress_logging(self):
         """Test that large Series log row count."""
-        cp = Checkpoints(convert_dtypes=False)  # Keep object dtype
+        cp = Checkpoints()
 
         # Large Series (> 10k rows)
         s = pd.Series([[i] for i in range(12000)])

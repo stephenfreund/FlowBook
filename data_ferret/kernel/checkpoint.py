@@ -28,7 +28,7 @@ while maintaining reasonable performance for large data science workloads.
 -------------------------------------------
 Before using checkpoints, be aware of these fundamental limitations:
 
-❌ CLASS VARIABLES ARE NOT RESTORED (Section 8.5)
+❌ CLASS VARIABLES ARE NOT RESTORED (Section 8.4)
    - User-defined classes can be checkpointed
    - BUT mutable class variables (class-level attributes) will NOT be restored
    - Only instance attributes are properly checkpointed
@@ -40,15 +40,6 @@ Before using checkpoints, be aware of these fundamental limitations:
        Counter.count = 100
        cp.restore('before', user_ns)
        # Counter.count is STILL 100 (not restored to 0)
-
-⚠️  IN-PLACE DTYPE CONVERSION (Section 8.3)
-   - By default, object dtype columns are converted to specialized types
-   - This modifies your ORIGINAL DataFrames during checkpointing
-   - object → Int64, string, datetime64, etc.
-   - Set convert_dtypes=False to preserve object dtypes
-   - Example:
-       df = pd.DataFrame({'data': pd.Series([1, 2, 3], dtype=object)})
-       cp.save('test', user_ns)  # df['data'].dtype is now Int64!
 
 ⚠️  NOT THREAD-SAFE
    - Concurrent save/restore operations will corrupt data
@@ -71,11 +62,10 @@ Key Components:
   Checkpoint          - Single snapshot containing deep-copied namespace
   Checkpoints         - Manager for multiple named checkpoints
   filter_user_namespace() - Filters namespace to user-defined variables
-  convert_*_to_specialized() - Converts object dtypes for efficiency
   deepcopy module     - Custom deepcopy with pandas/function support
 
 Data Flow:
-  user_ns → filter → convert dtypes → deep copy → Checkpoint
+  user_ns → filter → deep copy → Checkpoint
   Checkpoint → deep copy → user_ns (on restore)
 
 Dependency Graph:
@@ -136,28 +126,7 @@ still require explicit deep copying because the objects they contain could
 be mutable (lists, dicts, custom objects).
 
 
-4.3 Object Dtype Conversion
----------------------------
-Problem: Object dtype columns are slow to copy and compare because each
-element must be handled individually.
-
-Solution: Before checkpointing, convert object columns to specialized
-dtypes when possible using infer_dtype():
-  - Integer/mixed-integer → Int64 (nullable)
-  - Float/mixed-float → float64
-  - String → StringDtype
-  - Boolean → boolean (nullable)
-  - Datetime → datetime64[ns]
-  - Etc.
-
-This conversion:
-  - Makes subsequent copies faster (contiguous memory)
-  - Makes comparisons faster (vectorized operations)
-  - Reduces memory for common cases
-  - Is done in-place on user_ns (intentional side effect)
-
-
-4.4 Restore Creates New Copies
+4.3 Restore Creates New Copies
 ------------------------------
 When restoring a checkpoint, we deep copy from the checkpoint rather than
 just updating references. This ensures:
@@ -344,16 +313,7 @@ Matplotlib figures/axes are excluded entirely because:
 Users must recreate plots after restore.
 
 
-8.3 In-Place Dtype Conversion
------------------------------
-convert_object_to_specialized() modifies user_ns IN PLACE.
-This is intentional (avoids another copy) but may surprise users:
-  - DataFrame columns may have different dtypes after checkpoint
-  - This is generally an improvement (proper types vs. object)
-  - But could break code relying on exact object dtype
-
-
-8.4 Function/Lambda Checkpointing
+8.3 Function/Lambda Checkpointing
 ---------------------------------
 Functions are handled via deepcopy module's _deepcopy_function():
   - Closure cell contents are deep copied using the shared memo
@@ -386,7 +346,7 @@ EDGE CASE WARNING - Direct checkpoint access:
   (restore then use) works correctly.
 
 
-8.5 Class Definitions Not Properly Checkpointed
+8.4 Class Definitions Not Properly Checkpointed
 ------------------------------------------------
 User-defined classes are NOT properly deep copied. Python's copy.deepcopy()
 returns the same class object for types. This causes several issues:
@@ -588,9 +548,6 @@ Example 4: Debugging with Historical State
     # ... debug data cleaning issues ...
 
 Example 5: Optional Features
-    # Disable dtype conversion to preserve object dtypes
-    cp = Checkpoints(convert_dtypes=False)
-
     # Disable size warnings for large checkpoints
     cp.save("big_data", user_ns, max_size_mb=None)
 
@@ -644,13 +601,10 @@ Example 7: Managing Multiple Checkpoints
 Example 8: Performance Tips
     cp = Checkpoints()
 
-    # For large DataFrames, checkpointing object columns is expensive
-    # Consider converting to specialized dtypes first
+    # For large DataFrames, checkpointing object columns with mutable values is expensive
+    # Consider using specialized dtypes when possible
     df['int_col'] = df['int_col'].astype('Int64')  # Not object
     df['str_col'] = df['str_col'].astype('string')  # Not object
-
-    # Or disable conversion and keep object dtype
-    cp = Checkpoints(convert_dtypes=False)
 
     # Monitor checkpoint time
     import time
@@ -1426,7 +1380,6 @@ class Checkpoints:
     def __init__(
         self,
         sanity_check: bool = False,
-        convert_dtypes: bool = False,
         warn_classes: bool = True,
     ):
         """
@@ -1434,13 +1387,10 @@ class Checkpoints:
 
         Args:
             sanity_check: If True, verify copies match originals after save
-            convert_dtypes: If True, automatically convert object dtype columns to specialized
-                dtypes (Int64, string, datetime64, etc.) during checkpointing. Default False.
             warn_classes: If True, warn when user-defined classes are checkpointed, since
                 class variables won't be properly restored. Default True.
         """
         self.sanity_check = sanity_check
-        self.convert_dtypes = convert_dtypes
         self.warn_classes = warn_classes
         self.saved: dict[str, Checkpoint] = {}
 
@@ -1448,10 +1398,6 @@ class Checkpoints:
         if not pd.options.mode.copy_on_write:
             log("WARNING: pandas copy_on_write was disabled - re-enabling for checkpoint performance")
             pd.options.mode.copy_on_write = True
-
-        # Set global dtype conversion flag in deepcopy module
-        import data_ferret.kernel.deepcopy as deepcopy_module
-        deepcopy_module._convert_object_dtypes = convert_dtypes
 
     def _estimate_size(self, variables: dict[str, Any]) -> int:
         """
@@ -1507,49 +1453,40 @@ class Checkpoints:
             Tuple of (copied dictionary, memo dictionary for tracking copied objects,
                      dictionary of failed variables with their exceptions)
         """
-        # Temporarily set the dtype conversion flag for this operation
-        import data_ferret.kernel.deepcopy as deepcopy_module
-        old_convert_flag = deepcopy_module._convert_object_dtypes
-        deepcopy_module._convert_object_dtypes = self.convert_dtypes
+        copied = {}
+        memo = {}
+        failed = {}
 
-        try:
-            copied = {}
-            memo = {}
-            failed = {}
+        for k, v in variables.items():
+            try:
+                start_time = time.time()
+                # Use custom deepcopy which handles pandas and functions specially
+                copied[k] = deepcopy(v, memo)
 
-            for k, v in variables.items():
-                try:
-                    start_time = time.time()
-                    # Use custom deepcopy which handles pandas and functions specially
-                    copied[k] = deepcopy(v, memo)
+                end_time = time.time()
+                duration = end_time - start_time
+                if duration > 0.010:
+                    log(f"Deep copying variable {k} took {duration:.3f} seconds")
+            except Exception as e:
+                error_msg = f"Failed to deep copy variable {k}: {type(e).__name__}: {e}"
 
-                    end_time = time.time()
-                    duration = end_time - start_time
-                    if duration > 0.010:
-                        log(f"Deep copying variable {k} took {duration:.3f} seconds")
-                except Exception as e:
-                    error_msg = f"Failed to deep copy variable {k}: {type(e).__name__}: {e}"
+                # Add helpful hints based on the type
+                if isinstance(v, types.GeneratorType):
+                    error_msg += "\n  Hint: Generators cannot be checkpointed (they maintain execution state)"
+                elif hasattr(type(v), '__module__') and type(v).__module__.startswith('matplotlib'):
+                    error_msg += "\n  Hint: Matplotlib objects are excluded from checkpoints"
+                elif isinstance(v, types.ModuleType):
+                    error_msg += "\n  Hint: Modules cannot be checkpointed"
+                elif hasattr(v, '__iter__') and not isinstance(v, (str, bytes, list, tuple, dict, set, frozenset)):
+                    error_msg += "\n  Hint: Iterator objects may not be checkpointable"
+                elif 'thread' in str(type(v)).lower() or 'lock' in str(type(v)).lower():
+                    error_msg += "\n  Hint: Thread/lock objects cannot be pickled"
 
-                    # Add helpful hints based on the type
-                    if isinstance(v, types.GeneratorType):
-                        error_msg += "\n  Hint: Generators cannot be checkpointed (they maintain execution state)"
-                    elif hasattr(type(v), '__module__') and type(v).__module__.startswith('matplotlib'):
-                        error_msg += "\n  Hint: Matplotlib objects are excluded from checkpoints"
-                    elif isinstance(v, types.ModuleType):
-                        error_msg += "\n  Hint: Modules cannot be checkpointed"
-                    elif hasattr(v, '__iter__') and not isinstance(v, (str, bytes, list, tuple, dict, set, frozenset)):
-                        error_msg += "\n  Hint: Iterator objects may not be checkpointable"
-                    elif 'thread' in str(type(v)).lower() or 'lock' in str(type(v)).lower():
-                        error_msg += "\n  Hint: Thread/lock objects cannot be pickled"
+                log(error_msg)
+                # Track variables that failed to copy
+                failed[k] = e
 
-                    log(error_msg)
-                    # Track variables that failed to copy
-                    failed[k] = e
-
-            return copied, memo, failed
-        finally:
-            # Restore the old flag
-            deepcopy_module._convert_object_dtypes = old_convert_flag
+        return copied, memo, failed
 
     def _is_user_defined_class(self, v: Any) -> bool:
         """
@@ -1685,7 +1622,7 @@ class Checkpoints:
                 if self._is_user_defined_class(var_value):
                     log(f"WARNING: Variable '{var_name}' is a user-defined class ({var_value.__name__})")
                     log(f"         Class variables (mutable class attributes) will NOT be properly restored")
-                    log(f"         Only instance attributes will be checkpointed. See documentation section 8.5")
+                    log(f"         Only instance attributes will be checkpointed. See documentation section 8.4")
 
         with timer(key="deep_copy_user_ns", message="Deep copying user namespace"):
             saved = {}

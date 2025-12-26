@@ -400,7 +400,6 @@ class FerretSDCKernel(IPythonKernel, Magics):
         # Checkpointing (for pre/post comparison)
         self._checkpoint = Checkpoints(
             sanity_check=False,
-            convert_dtypes=True,
             warn_classes=False,
         )
 

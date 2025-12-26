@@ -160,6 +160,36 @@ try:
 except ImportError:
     CatBoostPool = None  # type: ignore
 
+# Keras models - add to dispatch table if available
+# We register lazily to avoid import-time side effects (matplotlib backend, etc.)
+_keras_dispatch_registered = False
+
+
+def _register_keras_dispatch_if_needed():
+    """Register Keras model types in dispatch table lazily."""
+    global _keras_dispatch_registered
+    if _keras_dispatch_registered:
+        return
+    _keras_dispatch_registered = True
+
+    # Try tensorflow.keras first (more common), then standalone keras
+    try:
+        from tensorflow.keras.models import Sequential as TFSequential
+        from tensorflow.keras.models import Model as TFModel
+        _COMPARE_DISPATCH[TFSequential] = "_compare_keras_model"
+        _COMPARE_DISPATCH[TFModel] = "_compare_keras_model"
+    except ImportError:
+        pass
+
+    try:
+        from keras.models import Sequential as KerasSequential
+        from keras.models import Model as KerasModel
+        _COMPARE_DISPATCH[KerasSequential] = "_compare_keras_model"
+        _COMPARE_DISPATCH[KerasModel] = "_compare_keras_model"
+    except ImportError:
+        pass
+
+
 # Cache for subclass dispatch lookups
 _DISPATCH_CACHE: Dict[type, Optional[str]] = {}
 
@@ -580,6 +610,9 @@ class Diff:
             The differences dict is empty if all variables are equal.
             The warnings list contains structural warnings when structural_mode is WARN.
         """
+        # Register Keras handlers lazily on first diff call
+        _register_keras_dispatch_if_needed()
+
         if keys_to_include is None:
             keys_to_include = set(a.keys()) | set(b.keys())
 
@@ -2186,6 +2219,111 @@ class Diff:
 
         if children:
             return CompoundDiff(source_type="catboost_pool", children=children, truncated=False)
+        return None
+
+    def _compare_keras_model(
+        self, val_a, val_b, path: str
+    ) -> Optional[DiffNode]:
+        """
+        Compare Keras model objects by their weights and configuration.
+
+        Models are compared by:
+        - Number of layers
+        - Layer configurations (type, units, activation, etc.)
+        - Model weights (layer by layer comparison)
+
+        Returns None if models are equal, CompoundDiff with differences otherwise.
+        """
+        children: Dict[str, DiffNode] = {}
+
+        # Compare number of layers
+        layers_a = val_a.layers
+        layers_b = val_b.layers
+
+        if len(layers_a) != len(layers_b):
+            children["_num_layers"] = ValueComparison(
+                status="different",
+                value1=len(layers_a),
+                value2=len(layers_b),
+                message=f"Model layer count mismatch at {path}: {len(layers_a)} vs {len(layers_b)}",
+            )
+            # Can't meaningfully compare weights with different architectures
+            return CompoundDiff(source_type="keras_model", children=children, truncated=False)
+
+        # Compare layer configurations
+        for i, (layer_a, layer_b) in enumerate(zip(layers_a, layers_b)):
+            layer_path = f"{path}.layer[{i}]"
+
+            # Compare layer types
+            type_a = type(layer_a).__name__
+            type_b = type(layer_b).__name__
+            if type_a != type_b:
+                children[f"_layer_{i}_type"] = ValueComparison(
+                    status="different",
+                    value1=type_a,
+                    value2=type_b,
+                    message=f"Layer type mismatch at {layer_path}: {type_a} vs {type_b}",
+                )
+                continue
+
+            # Compare layer configs (units, activation, etc.)
+            try:
+                config_a = layer_a.get_config()
+                config_b = layer_b.get_config()
+
+                # Exclude 'name' from config comparison as auto-generated names may differ
+                config_a_filtered = {k: v for k, v in config_a.items() if k != 'name'}
+                config_b_filtered = {k: v for k, v in config_b.items() if k != 'name'}
+
+                if config_a_filtered != config_b_filtered:
+                    # Find specific differences
+                    all_keys = set(config_a_filtered.keys()) | set(config_b_filtered.keys())
+                    for key in all_keys:
+                        val_cfg_a = config_a_filtered.get(key)
+                        val_cfg_b = config_b_filtered.get(key)
+                        if val_cfg_a != val_cfg_b:
+                            children[f"_layer_{i}_config_{key}"] = ValueComparison(
+                                status="different",
+                                value1=val_cfg_a,
+                                value2=val_cfg_b,
+                                message=f"Layer config mismatch at {layer_path}.{key}",
+                            )
+            except Exception:
+                # Some layers may not support get_config
+                pass
+
+        # Compare weights - this is the critical comparison for trained models
+        try:
+            weights_a = val_a.get_weights()
+            weights_b = val_b.get_weights()
+
+            if len(weights_a) != len(weights_b):
+                children["_num_weight_arrays"] = ValueComparison(
+                    status="different",
+                    value1=len(weights_a),
+                    value2=len(weights_b),
+                    message=f"Model weight array count mismatch at {path}: {len(weights_a)} vs {len(weights_b)}",
+                )
+            else:
+                # Compare each weight array
+                for i, (w_a, w_b) in enumerate(zip(weights_a, weights_b)):
+                    weight_path = f"{path}._weights[{i}]"
+                    weight_diff = self._compare_ndarray(
+                        np.asarray(w_a), np.asarray(w_b), weight_path
+                    )
+                    if weight_diff:
+                        children[f"_weights_{i}"] = weight_diff
+        except Exception as e:
+            # Handle edge cases where weights can't be extracted
+            children["_weights_error"] = ValueComparison(
+                status="different",
+                value1=str(e),
+                value2=None,
+                message=f"Could not compare weights at {path}: {e}",
+            )
+
+        if children:
+            return CompoundDiff(source_type="keras_model", children=children, truncated=False)
         return None
 
     def _compare_groupby(self, val_a, val_b, path: str) -> Optional[ValueComparison]:

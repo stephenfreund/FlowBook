@@ -50,7 +50,6 @@ class SDCTestHelper:
     def __init__(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)

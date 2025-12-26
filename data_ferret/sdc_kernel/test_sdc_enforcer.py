@@ -15,7 +15,6 @@ class TestSDCEnforcer:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)
@@ -332,7 +331,6 @@ class TestColumnAwareBackwardMutation:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)
@@ -651,7 +649,6 @@ class TestContinueOnViolation:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)
@@ -945,7 +942,6 @@ class TestStructuralTrackingOff:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         # Create enforcer with structural tracking OFF
@@ -1092,7 +1088,6 @@ class TestStructuralTrackingWarn:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         # Create enforcer with structural tracking WARN
@@ -1178,7 +1173,6 @@ class TestStructuralTrackingEnforce:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         # Create enforcer with structural tracking ENFORCE
@@ -1341,7 +1335,6 @@ class TestAccessedVarsOnlyOptimization:
     def setup_method(self):
         self.checkpoints = Checkpoints(
             sanity_check=False,
-            convert_dtypes=False,
             warn_classes=False,
         )
         self.sdc = SDCEnforcer(self.checkpoints)
