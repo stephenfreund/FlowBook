@@ -18,6 +18,8 @@ import pandas as pd
 from typing import Dict, Set, Iterable, Tuple, Optional, Generator, Any
 from collections import defaultdict
 
+from data_ferret.util.output import log, error
+
 
 class ColumnAccessTracker:
     """Tracks DataFrame column access via monkey-patching."""
@@ -35,6 +37,9 @@ class ColumnAccessTracker:
         self._id_to_path: Dict[int, str] = {}
         self._original_methods: Dict[str, Any] = {}
         self._installed = False
+        # Mapping from GroupBy object id -> source DataFrame id
+        # Used for cudf compatibility where gb.obj may not be accessible
+        self._groupby_to_df: Dict[int, int] = {}
 
     def install(self) -> None:
         """Monkey-patch DataFrame methods to track column access."""
@@ -133,6 +138,7 @@ class ColumnAccessTracker:
         self._reads_by_id.clear()
         self._writes_by_id.clear()
         self._id_to_path.clear()
+        self._groupby_to_df.clear()
 
     def _patch_dataframe_methods(self) -> None:
         """Apply monkey-patches to DataFrame and related classes."""
@@ -214,7 +220,10 @@ class ColumnAccessTracker:
                     str_keys = [k for k in by if isinstance(k, str)]
                     if str_keys:
                         tracker.record_read(id(df), str_keys)
-            return original_groupby(df, by=by, *args, **kwargs)
+            result = original_groupby(df, by=by, *args, **kwargs)
+            # Store mapping from GroupBy -> DataFrame for cudf compatibility
+            tracker._groupby_to_df[id(result)] = id(df)
+            return result
 
         pd.DataFrame.groupby = tracked_groupby
 
@@ -331,14 +340,26 @@ class ColumnAccessTracker:
 
             def tracked_gb_getitem(gb, key):
                 # Get the underlying DataFrame from the GroupBy object
-                df = gb.obj
-                if isinstance(df, pd.DataFrame):
+                # Use try/except for cudf compatibility (cudf's GroupBy proxy
+                # doesn't expose .obj the same way as pandas)
+                df_id = None
+                try:
+                    df = gb.obj
+                    if isinstance(df, pd.DataFrame):
+                        df_id = id(df)
+                except AttributeError:
+                    import traceback
+                    log(f"AttributeError in tracked_gb_getitem: {gb}.{key}. Traceback: {traceback.format_exc()}")
+                    # Fallback: look up DataFrame id from groupby mapping (cudf compat)
+                    df_id = tracker._groupby_to_df.get(id(gb))
+
+                if df_id is not None:
                     if isinstance(key, str):
-                        tracker.record_read(id(df), [key])
+                        tracker.record_read(df_id, [key])
                     elif isinstance(key, list):
                         str_keys = [k for k in key if isinstance(k, str)]
                         if str_keys:
-                            tracker.record_read(id(df), str_keys)
+                            tracker.record_read(df_id, str_keys)
                 return original_gb_getitem(gb, key)
 
             DataFrameGroupBy.__getitem__ = tracked_gb_getitem
