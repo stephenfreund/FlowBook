@@ -54,10 +54,19 @@ class ColumnAccessTracker:
             self._original_methods = ColumnAccessTracker._class_original_methods.copy()
         self._installed = True
 
+        # Install cudf tracking if available (all cudf logic in cudf_compat)
+        from . import cudf_compat
+        cudf_compat.install_cudf_tracking(self)
+
     def uninstall(self) -> None:
         """Restore original DataFrame methods."""
         if not self._installed:
             return
+
+        # Uninstall cudf tracking if available (all cudf logic in cudf_compat)
+        from . import cudf_compat
+        cudf_compat.uninstall_cudf_tracking()
+
         # Only restore if we have the original methods stored
         if self._original_methods:
             self._restore_dataframe_methods()
@@ -139,6 +148,10 @@ class ColumnAccessTracker:
         self._writes_by_id.clear()
         self._id_to_path.clear()
         self._groupby_to_df.clear()
+
+        # Reset cudf tracking state (all cudf logic in cudf_compat)
+        from . import cudf_compat
+        cudf_compat.reset_cudf_tracking()
 
     def _patch_dataframe_methods(self) -> None:
         """Apply monkey-patches to DataFrame and related classes."""

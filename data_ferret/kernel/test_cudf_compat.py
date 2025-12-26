@@ -272,15 +272,10 @@ class TestCudfGroupByNoRecursion:
 
 @pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
 class TestCudfColumnTracking:
-    """Test column tracking behavior with cudf DataFrames."""
+    """Test that column tracking works for cudf DataFrames."""
 
-    def test_cudf_groupby_no_crash(self):
-        """cudf GroupBy operations should not crash (tracking is limited).
-
-        Note: We only patch pd.DataFrame methods, so native cudf DataFrames
-        won't have column tracking. This test verifies the operation completes
-        without the recursion error, not that tracking works.
-        """
+    def test_cudf_groupby_tracks_columns(self):
+        """cudf GroupBy should track column access."""
         import cudf
 
         tracker = ColumnAccessTracker()
@@ -292,15 +287,77 @@ class TestCudfColumnTracking:
             })
             tracker.register_df(gdf, 'gdf')
 
-            # This should complete without recursion error
-            result = gdf.groupby('category')['value'].mean()
+            _ = gdf.groupby('category')['value'].mean()
 
-            # Verify the operation worked
-            assert len(result) == 2
+            reads = tracker.resolve_to_paths()
+            assert 'gdf' in reads
+            assert 'category' in reads['gdf']
+            assert 'value' in reads['gdf']
+        finally:
+            tracker.uninstall()
 
-            # Note: cudf native operations don't go through our pandas patches,
-            # so tracking won't capture these accesses. This is expected.
-            # Full cudf tracking would require patching cudf methods (Phase 1+).
+    def test_cudf_getitem_tracks_columns(self):
+        """cudf DataFrame.__getitem__ should track column access."""
+        import cudf
+
+        tracker = ColumnAccessTracker()
+        tracker.install()
+        try:
+            gdf = cudf.DataFrame({
+                'a': [1, 2, 3],
+                'b': [4, 5, 6]
+            })
+            tracker.register_df(gdf, 'gdf')
+
+            _ = gdf['a']
+            _ = gdf[['a', 'b']]
+
+            reads = tracker.resolve_to_paths()
+            assert 'gdf' in reads
+            assert 'a' in reads['gdf']
+            assert 'b' in reads['gdf']
+        finally:
+            tracker.uninstall()
+
+    def test_cudf_setitem_tracks_writes(self):
+        """cudf DataFrame.__setitem__ should track column writes."""
+        import cudf
+
+        tracker = ColumnAccessTracker()
+        tracker.install()
+        try:
+            gdf = cudf.DataFrame({
+                'a': [1, 2, 3],
+                'b': [4, 5, 6]
+            })
+            tracker.register_df(gdf, 'gdf')
+
+            gdf['c'] = [7, 8, 9]
+
+            writes = tracker.resolve_writes_to_paths()
+            assert 'gdf' in writes
+            assert 'c' in writes['gdf']
+        finally:
+            tracker.uninstall()
+
+    def test_cudf_sort_values_tracks_columns(self):
+        """cudf DataFrame.sort_values should track column access."""
+        import cudf
+
+        tracker = ColumnAccessTracker()
+        tracker.install()
+        try:
+            gdf = cudf.DataFrame({
+                'a': [3, 1, 2],
+                'b': [4, 5, 6]
+            })
+            tracker.register_df(gdf, 'gdf')
+
+            _ = gdf.sort_values('a')
+
+            reads = tracker.resolve_to_paths()
+            assert 'gdf' in reads
+            assert 'a' in reads['gdf']
         finally:
             tracker.uninstall()
 
