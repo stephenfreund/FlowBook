@@ -50,7 +50,7 @@ from data_ferret.kernel.opaque import OpaqueRegistry
 # Sentinel for memo lookups
 _nil = []
 
-_convert_object_dtypes = False
+_convert_object_dtypes = True
 
 
 # ============================================================================
