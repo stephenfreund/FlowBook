@@ -46,6 +46,19 @@ from typing import Dict, List, Optional, Sequence, Tuple
 SUBMITTED_RE = re.compile(r"Submitted batch job (\d+)")
 
 
+def get_ferret_env_exports() -> str:
+    """Generate export statements for all FERRET_* environment variables.
+
+    Iterates over the current process environment and returns shell export
+    statements for any variables starting with 'FERRET_'.
+    """
+    exports = []
+    for var, value in sorted(os.environ.items()):
+        if var.startswith("FERRET_"):
+            exports.append(f"export {var}={shlex.quote(value)}")
+    return "\n".join(exports)
+
+
 def parse_time_limit(time_str: str) -> int:
     """Parse SLURM time format (HH:MM:SS or D-HH:MM:SS) to seconds.
 
@@ -617,6 +630,9 @@ def run_local_job(target: Path, args: argparse.Namespace) -> bool:
         export PYTHONUNBUFFERED=1
         export PYTHONFAULTHANDLER=1
 
+        # ---- FERRET environment variables ----
+        {get_ferret_env_exports()}
+
         # ---- Node info ----
         echo "===== LOCAL EXECUTION INFO ====="
         hostname
@@ -739,6 +755,9 @@ def submit_single_job(target: Path, args: argparse.Namespace) -> Optional[int]:
         export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
         export VECLIB_MAXIMUM_THREADS=$SLURM_CPUS_PER_TASK
         export LOKY_MAX_CPU_COUNT=$SLURM_CPUS_PER_TASK
+
+        # ---- FERRET environment variables ----
+        {get_ferret_env_exports()}
 
         # ---- Conda environment ----
         source ~/.bashrc
