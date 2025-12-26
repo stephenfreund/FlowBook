@@ -498,6 +498,123 @@ class TestCudfDiff:
 
 
 @pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
+class TestCudfAliasDetection:
+    """Test that alias detection works with cudf checkpoints."""
+
+    def test_cudf_alias_detection_basic(self):
+        """Alias detection should work for cudf DataFrames in checkpoint."""
+        import cudf
+        from data_ferret.kernel.checkpoint import Checkpoints
+
+        gdf = cudf.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
+
+        cp = Checkpoints(sanity_check=False)
+        user_ns = {'gdf': gdf}
+        cp.save('test', user_ns)
+
+        # Build alias index (triggers _build_alias_index)
+        saved_cp = cp.saved['test']
+        # Access aliases to trigger lazy build
+        aliases = saved_cp.get_deep_aliases({'gdf'})
+
+        # Should complete without error
+        assert isinstance(aliases, set)
+
+    def test_cudf_shared_reference_detection(self):
+        """Shared references between cudf DataFrames should be detected after checkpoint."""
+        import cudf
+        from data_ferret.kernel.checkpoint import Checkpoints
+
+        # Create DataFrames that share data
+        gdf1 = cudf.DataFrame({'a': [1, 2, 3]})
+        gdf2 = gdf1  # Same object
+
+        cp = Checkpoints(sanity_check=False)
+        user_ns = {'gdf1': gdf1, 'gdf2': gdf2}
+        cp.save('test', user_ns)
+
+        # After checkpoint, both should be independent pandas copies
+        saved_cp = cp.saved['test']
+        assert saved_cp.user_ns['gdf1'] is not saved_cp.user_ns['gdf2']
+
+
+@pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
+class TestCudfAdvancedTypes:
+    """Test advanced cudf types (CategoricalIndex, MultiIndex, etc.)."""
+
+    def test_cudf_categorical_column(self):
+        """cudf DataFrame with categorical column should checkpoint correctly."""
+        import cudf
+
+        from data_ferret.kernel.checkpoint import Checkpoints
+
+        gdf = cudf.DataFrame({'a': [1, 2, 3]})
+        gdf['cat'] = cudf.Series(['x', 'y', 'x']).astype('category')
+
+        cp = Checkpoints(sanity_check=False)
+        user_ns = {'gdf': gdf}
+        cp.save('test', user_ns)
+
+        # Modify
+        user_ns['gdf'] = cudf.DataFrame({'z': [9]})
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        assert isinstance(user_ns['gdf'], cudf.DataFrame)
+        assert 'cat' in user_ns['gdf'].columns
+
+    def test_cudf_multiindex_dataframe(self):
+        """cudf DataFrame with MultiIndex should checkpoint correctly."""
+        import cudf
+
+        from data_ferret.kernel.checkpoint import Checkpoints
+
+        # Create DataFrame with MultiIndex
+        gdf = cudf.DataFrame({
+            'a': [1, 2, 3, 4],
+            'b': [5, 6, 7, 8],
+            'c': [9, 10, 11, 12]
+        })
+        gdf = gdf.set_index(['a', 'b'])
+
+        cp = Checkpoints(sanity_check=False)
+        user_ns = {'gdf': gdf}
+        cp.save('test', user_ns)
+
+        # Modify
+        user_ns['gdf'] = cudf.DataFrame({'z': [9]})
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        assert isinstance(user_ns['gdf'], cudf.DataFrame)
+        assert 'c' in user_ns['gdf'].columns
+
+    def test_cudf_datetime_index(self):
+        """cudf DataFrame with datetime index should checkpoint correctly."""
+        import cudf
+
+        from data_ferret.kernel.checkpoint import Checkpoints
+
+        dates = cudf.date_range('2020-01-01', periods=3, freq='D')
+        gdf = cudf.DataFrame({'a': [1, 2, 3]}, index=dates)
+
+        cp = Checkpoints(sanity_check=False)
+        user_ns = {'gdf': gdf}
+        cp.save('test', user_ns)
+
+        # Modify
+        user_ns['gdf'] = cudf.DataFrame({'z': [9]})
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        assert isinstance(user_ns['gdf'], cudf.DataFrame)
+        assert len(user_ns['gdf']) == 3
+
+
+@pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
 class TestCudfCheckpointCache:
     """Test cudf checkpoint cache functionality."""
 
