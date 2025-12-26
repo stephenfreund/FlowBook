@@ -303,11 +303,11 @@ def cli_main():
 
         # if any of the metadata has a status of error, return 1
 
+        if metadata_data is None or metadata_data.get("status") == "error":
+            return 1
+
         with timer(key="cli_main_exit", message="CLI main exit"):
-            if metadata_data is None or metadata_data.get("status") == "error":
-                return 1
-            else:
-                return 0
+            return 0
 
     except FileNotFoundError as e:
         print(f"Error: File not found: {e}", file=sys.stderr)
