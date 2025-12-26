@@ -1734,12 +1734,19 @@ class Diff:
             # For non-float types, use pandas equals
             return s_a.equals(s_b)
 
-    def _fast_dataframe_equal(self, df_a: pd.DataFrame, df_b: pd.DataFrame) -> bool:
+    def _fast_dataframe_equal(
+        self, df_a: pd.DataFrame, df_b: pd.DataFrame, path: str = ""
+    ) -> bool:
         """
         Fast vectorized equality check for two DataFrames.
 
         Assumes: same shape, same columns, same index (caller should verify).
         Uses tolerance (rtol, atol) for float columns.
+
+        Args:
+            df_a: First DataFrame
+            df_b: Second DataFrame
+            path: Variable path for profiling output
 
         Returns:
             True if all column values are equal (within tolerance for floats).
@@ -1747,10 +1754,33 @@ class Diff:
         Raises:
             Exception if comparison fails (caller should catch and fall back).
         """
+        # Collect column timings if profiling is enabled
+        column_timings: List[Tuple[float, str, str]] = []
+
         # Use iloc to avoid issues with MultiIndex columns
         for i in range(len(df_a.columns)):
-            if not self._fast_series_equal(df_a.iloc[:, i], df_b.iloc[:, i]):
+            col_name = str(df_a.columns[i])
+            col_dtype = str(df_a.iloc[:, i].dtype)
+
+            if _PROFILE_DIFF:
+                col_start = time.perf_counter()
+
+            is_equal = self._fast_series_equal(df_a.iloc[:, i], df_b.iloc[:, i])
+
+            if _PROFILE_DIFF:
+                col_elapsed = time.perf_counter() - col_start
+                column_timings.append((col_elapsed, col_name, col_dtype))
+
+            if not is_equal:
+                # Log timings collected so far before returning
+                if _PROFILE_DIFF and column_timings:
+                    self._log_column_timings(path, column_timings)
                 return False
+
+        # Log all column timings
+        if _PROFILE_DIFF and column_timings:
+            self._log_column_timings(path, column_timings)
+
         return True
 
     # ==========================================================================
@@ -1775,7 +1805,7 @@ class Diff:
             val_a.index.equals(val_b.index)):
             try:
                 # Try fast equality check for all columns at once
-                if self._fast_dataframe_equal(val_a, val_b):
+                if self._fast_dataframe_equal(val_a, val_b, path):
                     return None  # DataFrames are equal, no differences
             except Exception:
                 pass  # Fall through to detailed comparison
