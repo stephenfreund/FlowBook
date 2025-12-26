@@ -339,18 +339,33 @@ class ColumnAccessTracker:
             original_gb_getitem = self._original_methods['DataFrameGroupBy.__getitem__']
 
             def tracked_gb_getitem(gb, key):
-                # Get the underlying DataFrame from the GroupBy object
-                # Use try/except for cudf compatibility (cudf's GroupBy proxy
-                # doesn't expose .obj the same way as pandas)
+                # Import cudf_compat for proxy detection
+                from . import cudf_compat
+
+                # Check for cudf GroupBy/proxy FIRST to avoid recursion
+                # The cudf.pandas proxy system causes infinite recursion when our
+                # patched method calls original_gb_getitem on a proxy object
+                if cudf_compat.is_cudf_groupby(gb) or cudf_compat.is_cudf_proxy(gb):
+                    # Still track column access using our stored mapping
+                    df_id = tracker._groupby_to_df.get(id(gb))
+                    if df_id is not None:
+                        if isinstance(key, str):
+                            tracker.record_read(df_id, [key])
+                        elif isinstance(key, list):
+                            str_keys = [k for k in key if isinstance(k, str)]
+                            if str_keys:
+                                tracker.record_read(df_id, str_keys)
+                    # Call cudf's native method directly (bypass proxy recursion)
+                    return cudf_compat.call_native_groupby_getitem(gb, key)
+
+                # Standard pandas handling below
                 df_id = None
                 try:
                     df = gb.obj
                     if isinstance(df, pd.DataFrame):
                         df_id = id(df)
                 except AttributeError:
-                    import traceback
-                    log(f"AttributeError in tracked_gb_getitem: {gb}.{key}. Traceback: {traceback.format_exc()}")
-                    # Fallback: look up DataFrame id from groupby mapping (cudf compat)
+                    # Fallback: look up DataFrame id from groupby mapping
                     df_id = tracker._groupby_to_df.get(id(gb))
 
                 if df_id is not None:
