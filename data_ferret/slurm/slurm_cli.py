@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """Submit DataFerret CLI jobs to Slurm.
 
-Reads a text file containing one work item (path) per line (for example,
-`zyh1104/sticker-sales-solution-ensembling/nb.ipynb`), then launches a separate
-`sbatch` job for each entry using the command that follows the `--` separator.
-Every job activates a Conda environment, prints node diagnostics, changes into
-the notebook’s directory, and runs the requested CLI on the notebook filename.
+Accepts any number of input files: .txt files (one work item per line) or .ipynb
+files (treated as individual jobs). For each work item, launches a separate
+`sbatch` job using the command that follows the `--` separator. Every job
+activates a Conda environment, prints node diagnostics, changes into the
+notebook's directory, and runs the requested CLI on the notebook filename.
 
 Examples:
-    # Run `data_ferret info <notebook>` from its directory
+    # Single text file with list of notebooks
     python slurm_cli.py notebooks.txt --env=ferret -- data_ferret info
 
+    # Multiple text files
+    python slurm_cli.py batch1.txt batch2.txt --env=ferret -- data_ferret info
+
+    # Direct notebook files as jobs
+    python slurm_cli.py notebook1.ipynb notebook2.ipynb -- data_ferret info
+
+    # Mixed: text files and notebooks
+    python slurm_cli.py notebooks.txt extra.ipynb -- data_ferret info
+
     # Run optimize without automatically appending the notebook filename
-    python slurm_cli.py notebooks.txt -env=moo --no-append-target -- \
+    python slurm_cli.py notebooks.txt --env=moo --no-append-target -- \
         data_ferret_optimize --plan-only --config configs/opt.json
 
     # Collect timing stats for every work item
-    python slurm_cli.py notebooks.txt --partition=gpu -env=perf -- \
+    python slurm_cli.py notebooks.txt --partition=gpu --env=perf -- \
         data_ferret_timers --summary
 """
 
@@ -507,8 +516,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Suffix appended to the target name when missing (default: .ipynb; set to '' to disable)",
     )
     parser.add_argument(
-        "work_file",
-        help="Text file containing one target path per line (empty lines and #comments are ignored)",
+        "input_files",
+        nargs="+",
+        help="Input files: .txt files (one target per line) or .ipynb files (direct jobs)",
     )
     args = parser.parse_args(slurm_args)
 
@@ -528,6 +538,32 @@ def load_work_items(work_file: Path) -> List[Path]:
         if not line or line.startswith("#"):
             continue
         items.append(Path(line))
+    return items
+
+
+def collect_work_items(input_files: List[str]) -> List[Path]:
+    """Collect work items from multiple input files.
+
+    - .txt files: read line-by-line (existing behavior)
+    - .ipynb files: treated as single work items
+    """
+    items: List[Path] = []
+    for file_str in input_files:
+        file_path = Path(file_str)
+        if not file_path.is_file():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        suffix = file_path.suffix.lower()
+        if suffix == ".txt":
+            # Existing behavior: each line is a work item
+            items.extend(load_work_items(file_path))
+        elif suffix == ".ipynb":
+            # Notebook files are direct work items
+            items.append(file_path)
+        else:
+            raise ValueError(
+                f"Unsupported file type: {file_path} (expected .txt or .ipynb)"
+            )
     return items
 
 
@@ -761,7 +797,7 @@ def submit_single_job(target: Path, args: argparse.Namespace) -> Optional[int]:
 def main() -> None:
     """Script entry point."""
     args = parse_args(sys.argv[1:])
-    targets = load_work_items(Path(args.work_file))
+    targets = collect_work_items(args.input_files)
     if not targets:
         print("[INFO] No valid targets found. Nothing to submit.")
         return
@@ -770,11 +806,12 @@ def main() -> None:
     if args.reset_env:
         # DataFerret source is the repo root (parent of data_ferret/slurm/)
         ferret_source = Path(__file__).parent.parent.parent
-        work_file_dir = Path(args.work_file).resolve().parent
+        # Use CWD for default requirements.txt (since we now accept multiple input files)
+        work_dir = Path.cwd()
         requirements_file = (
             Path(args.requirements)
             if args.requirements
-            else work_file_dir / "requirements.txt"
+            else work_dir / "requirements.txt"
         )
 
         print(f"[ENV] Setting up environment '{args.env}'...")
