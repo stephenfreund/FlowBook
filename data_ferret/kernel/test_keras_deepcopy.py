@@ -157,17 +157,29 @@ class TestFunctionalModel:
 class TestEdgeCases:
     """Edge case tests."""
 
-    def test_uncompiled_model(self):
-        """Uncompiled model should be copyable."""
+    def test_uncompiled_but_built_model(self):
+        """Uncompiled but built model should be copyable."""
         model = keras.Sequential([
             keras.layers.Dense(10, input_shape=(5,))
         ])
-        # Not compiled
+        # Not compiled but IS built (input_shape specified)
+        assert model.built
         result = check_deepcopyable(model)
         assert result is None
 
         model_copy = ferret_deepcopy(model)
         assert len(model_copy.layers) == 1
+
+    def test_unbuilt_model_not_copyable(self):
+        """Unbuilt model should NOT be copyable."""
+        model = keras.Sequential([
+            keras.layers.Dense(10)  # No input_shape
+        ])
+        # Model is NOT built
+        assert not model.built
+        result = check_deepcopyable(model)
+        assert result is not None
+        assert "not built" in result.lower()
 
     def test_model_with_custom_layer(self):
         """Model with registered custom layer should be copyable."""

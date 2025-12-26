@@ -768,6 +768,7 @@ import pandas as pd
 
 from data_ferret.kernel.deepcopy import deepcopy, _IMMUTABLE_INFERRED_KINDS
 from data_ferret.kernel.diff import Diff
+from data_ferret.kernel.opaque import OpaqueRegistry
 from pandas.api.types import infer_dtype
 from data_ferret.kernel.extended_types import TypeModel, get_type_model
 from data_ferret.util.output import log, timer
@@ -900,6 +901,13 @@ def _collect_reachable_ids_with_paths(
     if isinstance(obj, (np.integer, np.floating, np.complexfloating, np.bool_)):
         return
 
+    # Skip opaque objects (e.g., Keras models) - treat as atomic, don't traverse internals
+    if OpaqueRegistry.is_opaque(obj):
+        visited.add(obj_id)
+        if obj_id not in id_to_path:
+            id_to_path[obj_id] = path
+        return  # Don't recurse into opaque object internals
+
     visited.add(obj_id)
     # Record the first path to this object
     if obj_id not in id_to_path:
@@ -1011,6 +1019,11 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
     # Skip numpy scalar types
     if isinstance(obj, (np.integer, np.floating, np.complexfloating, np.bool_)):
         return
+
+    # Skip opaque objects (e.g., Keras models) - treat as atomic, don't traverse internals
+    if OpaqueRegistry.is_opaque(obj):
+        visited.add(obj_id)
+        return  # Don't recurse into opaque object internals
 
     visited.add(obj_id)
 
