@@ -28,6 +28,8 @@ import io
 import datetime
 import decimal
 
+from data_ferret.kernel.opaque import OpaqueRegistry
+
 
 def check_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> str | None:
     """
@@ -167,13 +169,20 @@ def check_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> str | None:
     if module_name.startswith("matplotlib"):
         return "matplotlib objects cannot be deepcopied"
 
-    # === 3b. Keras models - have custom pickle support via __reduce_ex__ ===
-    # Keras models contain internal attributes (like _tracker) that have
-    # non-picklable objects (mappingproxy), but the model itself IS copyable
-    # because Keras implements __reduce_ex__ with KerasSaveable._unpickle_model
+    # === 3b. Keras models - use opaque handler to check if built ===
+    # Keras models are copyable via our opaque handler pattern, but only
+    # if they are built (architecture frozen). Unbuilt models cannot be
+    # checkpointed because we can't extract/restore weights.
     if module_name.startswith("keras") or module_name.startswith("tensorflow.keras"):
         if type_name in ("Sequential", "Functional") or "Model" in type_name:
-            return None  # Known to work via __reduce_ex__
+            handler = OpaqueRegistry.get_handler(obj)
+            if handler is not None:
+                can_cp, error = handler.is_checkpointable(obj)
+                if can_cp:
+                    return None  # Copyable via opaque handler
+                else:
+                    return error  # Return the error message (e.g., "model not built")
+            return None  # Fallback: assume copyable if no handler
 
     # === 3c. CatBoost Pool - has custom deepcopy handler via slice workaround ===
     # CatBoost Pool explicitly blocks __deepcopy__, but our custom deepcopy

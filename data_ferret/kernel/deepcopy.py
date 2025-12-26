@@ -44,6 +44,7 @@ from pandas.api.types import infer_dtype
 
 from data_ferret.util.output import log, timer
 from data_ferret.kernel.column_tracking import suspend_column_tracking
+from data_ferret.kernel.opaque import OpaqueRegistry
 
 
 # Sentinel for memo lookups
@@ -708,38 +709,53 @@ except ImportError:
     pass  # CatBoost not installed
 
 
-# Keras model handler - models have custom pickle support via __reduce_ex__
-# but check_deepcopyable would fail on internal attributes like _tracker
+# Keras model handler - uses opaque handler pattern for efficient copying
 # NOTE: We don't import Keras at module load time to avoid triggering
 # matplotlib backend initialization before the kernel is ready.
 def _deepcopy_keras_model(model, memo: dict[int, Any]):
     """
-    Deep copy a Keras model using standard deepcopy.
+    Deep copy a Keras model using the opaque handler pattern.
 
-    Keras models implement __reduce_ex__ with KerasSaveable._unpickle_model,
-    which properly serializes architecture, weights, and optimizer state
-    while avoiding internal attributes (like _tracker) that contain
-    non-picklable objects (mappingproxy).
+    For built models:
+    - Uses clone_model() to share architecture (immutable after build)
+    - Only copies weights via get_weights()/set_weights()
+    - Much faster than full deepcopy for large models
 
-    This explicit handler ensures:
-    1. Proper memo registration for shared references
-    2. Consistent behavior with other specialized copiers
+    For unbuilt models:
+    - Raises TypeError (cannot checkpoint unbuilt models)
 
     Args:
         model: Keras model (Sequential, Functional, or Model subclass)
         memo: Shared memo dict for tracking copied objects
 
     Returns:
-        Independent copy of the model with weights and optimizer state
+        Independent copy of the model with weights
+
+    Raises:
+        TypeError: If model is not built
     """
     obj_id = id(model)
     if obj_id in memo:
         return memo[obj_id]
 
-    # Standard deepcopy works because Keras implements __reduce_ex__
-    import copy as stdlib_copy
-    model_copy = stdlib_copy.deepcopy(model)
-    memo[obj_id] = model_copy
+    # Get the opaque handler for this model
+    handler = OpaqueRegistry.get_handler(model)
+    if handler is None:
+        # Fallback to stdlib deepcopy if no handler (shouldn't happen)
+        import copy as stdlib_copy
+        model_copy = stdlib_copy.deepcopy(model)
+        memo[obj_id] = model_copy
+        return model_copy
+
+    # Check if model can be checkpointed (must be built)
+    can_cp, error = handler.is_checkpointable(model)
+    if not can_cp:
+        raise TypeError(f"Cannot checkpoint Keras model: {error}")
+
+    # Extract mutable state (weights) and create copy with shared architecture
+    state = handler.get_mutable_state(model)
+    model_copy = handler.copy_with_state(model, state, memo)
+
     return model_copy
 
 
