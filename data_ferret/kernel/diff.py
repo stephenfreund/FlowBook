@@ -1719,6 +1719,16 @@ class Diff:
             # Different dtypes - can't use fast path
             return False
 
+        # Identity check: if underlying arrays are the same object, they're equal
+        # This is nearly instant (0.002ms) when arrays share memory
+        try:
+            arr_a = s_a.values
+            arr_b = s_b.values
+            if arr_a is arr_b or np.shares_memory(arr_a, arr_b):
+                return True
+        except (TypeError, ValueError):
+            pass  # Some array types don't support shares_memory
+
         # For float types, use numpy's array_equal with NaN handling
         # This is ~3x faster than mask+allclose for float columns
         if pd.api.types.is_float_dtype(s_a.dtype):
