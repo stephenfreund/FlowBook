@@ -515,17 +515,18 @@ class TestCudfAliasDetection:
         # Build alias index (triggers _build_alias_index)
         saved_cp = cp.saved['test']
         # Access aliases to trigger lazy build
-        aliases = saved_cp.get_deep_aliases({'gdf'})
+        aliases = saved_cp.get_aliases_for_vars({'gdf'})
 
-        # Should complete without error
+        # Should complete without error and include the variable itself
         assert isinstance(aliases, set)
+        assert 'gdf' in aliases
 
     def test_cudf_shared_reference_detection(self):
-        """Shared references between cudf DataFrames should be detected after checkpoint."""
+        """Shared references between cudf DataFrames should be detected as aliases."""
         import cudf
         from data_ferret.kernel.checkpoint import Checkpoints
 
-        # Create DataFrames that share data
+        # Create DataFrames that share data (same object)
         gdf1 = cudf.DataFrame({'a': [1, 2, 3]})
         gdf2 = gdf1  # Same object
 
@@ -533,9 +534,14 @@ class TestCudfAliasDetection:
         user_ns = {'gdf1': gdf1, 'gdf2': gdf2}
         cp.save('test', user_ns)
 
-        # After checkpoint, both should be independent pandas copies
+        # After checkpoint, the memo preserves sharing - both point to same copy
+        # This is correct behavior: alias detection should find them as related
         saved_cp = cp.saved['test']
-        assert saved_cp.user_ns['gdf1'] is not saved_cp.user_ns['gdf2']
+        aliases = saved_cp.get_aliases_for_vars({'gdf1'})
+
+        # Both variables should be detected as aliases of each other
+        assert 'gdf1' in aliases
+        assert 'gdf2' in aliases
 
 
 @pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
