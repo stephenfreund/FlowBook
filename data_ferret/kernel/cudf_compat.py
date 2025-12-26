@@ -382,3 +382,336 @@ def is_cudf_dataframe(obj: Any) -> bool:
     if not has_cudf():
         return False
     return isinstance(obj, _cudf_module.DataFrame)
+
+
+def is_cudf_series(obj: Any) -> bool:
+    """Check if object is a cudf Series."""
+    if not has_cudf():
+        return False
+    return isinstance(obj, _cudf_module.Series)
+
+
+def is_cudf_index(obj: Any) -> bool:
+    """Check if object is a cudf Index."""
+    if not has_cudf():
+        return False
+    return isinstance(obj, _cudf_module.Index)
+
+
+def is_cudf_object(obj: Any) -> bool:
+    """Check if object is any cudf type that needs special checkpoint handling."""
+    if not has_cudf():
+        return False
+    return isinstance(obj, (_cudf_module.DataFrame, _cudf_module.Series, _cudf_module.Index))
+
+
+def get_cudf_type(obj: Any) -> Optional[type]:
+    """Get the cudf type of an object, or None if not cudf."""
+    if is_cudf_dataframe(obj):
+        return _cudf_module.DataFrame
+    elif is_cudf_series(obj):
+        return _cudf_module.Series
+    elif is_cudf_index(obj):
+        return _cudf_module.Index
+    return None
+
+
+# =============================================================================
+# Hash-Based Checkpoint Cache
+# =============================================================================
+
+import weakref
+
+
+class CuDFCheckpointCache:
+    """
+    Cache for GPU→CPU conversions to avoid repeated expensive copies.
+
+    Uses a fingerprint (shape + dtypes + data hash) to detect changes.
+    If the same cuDF object is checkpointed again and hasn't changed,
+    we return the cached pandas copy instead of copying from GPU again.
+
+    The cache uses weak references to cuDF objects as keys, so entries
+    are automatically removed when the cuDF object is garbage collected.
+    """
+
+    def __init__(self):
+        # Maps id(cudf_obj) -> (fingerprint, pandas_copy, weak_ref)
+        self._cache: Dict[int, tuple] = {}
+
+    def _fingerprint(self, obj: Any) -> Optional[tuple]:
+        """
+        Compute a cheap fingerprint of a cuDF object.
+
+        This runs on the GPU and is much faster than a full GPU→CPU copy.
+        The fingerprint includes shape, dtypes, and a hash of the data.
+        """
+        if is_cudf_dataframe(obj):
+            try:
+                data_hash = obj.hash_values().sum()
+                if hasattr(data_hash, 'item'):
+                    data_hash = data_hash.item()
+            except Exception:
+                data_hash = None
+            return ('DataFrame', obj.shape, tuple(obj.dtypes.items()), data_hash)
+
+        elif is_cudf_series(obj):
+            try:
+                data_hash = obj.hash_values().sum()
+                if hasattr(data_hash, 'item'):
+                    data_hash = data_hash.item()
+            except Exception:
+                data_hash = None
+            return ('Series', len(obj), str(obj.dtype), data_hash)
+
+        elif is_cudf_index(obj):
+            try:
+                data_hash = hash(str(obj[:10].to_pandas()))
+            except Exception:
+                data_hash = None
+            return ('Index', len(obj), str(obj.dtype), data_hash)
+
+        return None
+
+    def get_cached(self, obj: Any) -> Optional[Any]:
+        """
+        Get cached pandas copy if object hasn't changed.
+
+        Returns None if not in cache or fingerprint changed.
+        """
+        obj_id = id(obj)
+
+        if obj_id not in self._cache:
+            return None
+
+        cached_fp, pandas_copy, weak_ref = self._cache[obj_id]
+
+        # Verify weak reference still points to same object
+        ref_obj = weak_ref()
+        if ref_obj is None or ref_obj is not obj:
+            del self._cache[obj_id]
+            return None
+
+        # Verify fingerprint matches
+        current_fp = self._fingerprint(obj)
+        if current_fp != cached_fp:
+            del self._cache[obj_id]
+            return None
+
+        return pandas_copy
+
+    def cache(self, obj: Any, pandas_copy: Any) -> None:
+        """Store a pandas copy in the cache."""
+        obj_id = id(obj)
+        fp = self._fingerprint(obj)
+
+        try:
+            weak_ref = weakref.ref(obj)
+        except TypeError:
+            return
+
+        self._cache[obj_id] = (fp, pandas_copy, weak_ref)
+
+    def get_or_convert(self, obj: Any) -> Any:
+        """Get cached pandas copy or convert from GPU."""
+        cached = self.get_cached(obj)
+        if cached is not None:
+            return cached
+
+        pandas_copy = obj.to_pandas()
+        self.cache(obj, pandas_copy)
+        return pandas_copy
+
+    def clear(self) -> None:
+        """Clear the cache."""
+        self._cache.clear()
+
+
+# Global cache instance
+_checkpoint_cache = CuDFCheckpointCache()
+
+
+def get_checkpoint_cache() -> CuDFCheckpointCache:
+    """Get the global checkpoint cache."""
+    return _checkpoint_cache
+
+
+# =============================================================================
+# Origin Tracking for Restore
+# =============================================================================
+
+class CuDFOriginTracker:
+    """
+    Tracks which checkpoint values originated from cuDF objects.
+
+    Used during restore to convert pandas back to cuDF.
+    """
+
+    def __init__(self):
+        self._origins: Dict[str, type] = {}
+
+    def record(self, name: str, obj: Any) -> None:
+        """Record that a variable originated from a cuDF object."""
+        cudf_type = get_cudf_type(obj)
+        if cudf_type is not None:
+            self._origins[name] = cudf_type
+
+    def get_origin(self, name: str) -> Optional[type]:
+        """Get the original cuDF type for a variable, or None."""
+        return self._origins.get(name)
+
+    def restore_value(self, name: str, value: Any) -> Any:
+        """Restore a value, converting to cuDF if it originated from cuDF."""
+        origin_type = self.get_origin(name)
+        if origin_type is not None:
+            return from_pandas(value, origin_type)
+        return value
+
+    def clear(self) -> None:
+        """Clear all origin records."""
+        self._origins.clear()
+
+    def to_dict(self) -> Dict[str, str]:
+        """Serialize origins to dict (for pickling checkpoints)."""
+        return {name: t.__name__ for name, t in self._origins.items()}
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, str]) -> 'CuDFOriginTracker':
+        """Deserialize origins from dict."""
+        tracker = cls()
+        cudf = get_cudf()
+        if cudf is not None:
+            type_map = {
+                'DataFrame': cudf.DataFrame,
+                'Series': cudf.Series,
+                'Index': cudf.Index,
+            }
+            for name, type_name in d.items():
+                if type_name in type_map:
+                    tracker._origins[name] = type_map[type_name]
+        return tracker
+
+
+# =============================================================================
+# Conversion Functions
+# =============================================================================
+
+def to_pandas_cached(obj: Any) -> Any:
+    """
+    Convert cuDF object to pandas, using cache to avoid repeated copies.
+
+    If obj is not a cuDF object, returns it unchanged.
+    """
+    if not is_cudf_object(obj):
+        return obj
+    return _checkpoint_cache.get_or_convert(obj)
+
+
+def to_pandas(obj: Any) -> Any:
+    """
+    Convert cuDF object to pandas (uncached, always copies).
+
+    If obj is not a cuDF object, returns it unchanged.
+    """
+    if not is_cudf_object(obj):
+        return obj
+    return obj.to_pandas()
+
+
+def from_pandas(obj: Any, target_type: type) -> Any:
+    """
+    Convert pandas object back to cuDF.
+
+    Args:
+        obj: A pandas DataFrame, Series, or Index
+        target_type: The cuDF type to convert to
+
+    Returns:
+        cuDF object, or original object if cuDF not available
+    """
+    cudf = get_cudf()
+    if cudf is None:
+        return obj
+
+    type_name = target_type.__name__
+    if type_name == 'DataFrame':
+        return cudf.DataFrame.from_pandas(obj)
+    elif type_name == 'Series':
+        return cudf.Series.from_pandas(obj)
+    elif type_name == 'Index':
+        return cudf.Index.from_pandas(obj)
+    return obj
+
+
+# =============================================================================
+# Deepcopy Support
+# =============================================================================
+
+def deepcopy_cudf(obj: Any, memo: Dict[int, Any]) -> Any:
+    """
+    Deep copy a cuDF object by converting to pandas (CPU memory).
+
+    Args:
+        obj: cuDF DataFrame, Series, or Index
+        memo: deepcopy memo dict
+
+    Returns:
+        pandas equivalent (stored in CPU memory)
+    """
+    obj_id = id(obj)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    # Convert to pandas using cache
+    pandas_copy = to_pandas_cached(obj)
+
+    # The pandas copy may need its own deep copy (e.g., object columns)
+    from .deepcopy import deepcopy as ferret_deepcopy
+    result = ferret_deepcopy(pandas_copy, memo)
+
+    memo[obj_id] = result
+    return result
+
+
+# =============================================================================
+# Diff Support
+# =============================================================================
+
+def are_both_cudf_same_type(obj1: Any, obj2: Any) -> bool:
+    """Check if both objects are cuDF objects of the same type."""
+    if not has_cudf():
+        return False
+
+    if is_cudf_dataframe(obj1) and is_cudf_dataframe(obj2):
+        return True
+    if is_cudf_series(obj1) and is_cudf_series(obj2):
+        return True
+    if is_cudf_index(obj1) and is_cudf_index(obj2):
+        return True
+    return False
+
+
+def diff_cudf(obj1: Any, obj2: Any, path: str, pointer_tracker: Any,
+              structural_tracker: Any = None, column_rbw: Any = None,
+              use_leq: bool = False) -> Optional[Any]:
+    """
+    Compare two cuDF objects by converting to pandas.
+
+    Returns None if equal, or a DiffNode if different.
+    """
+    # Convert both to pandas (uncached - we want fresh copies for comparison)
+    pdf1 = to_pandas(obj1)
+    pdf2 = to_pandas(obj2)
+
+    # Use the pandas diff logic
+    from .diff import _compare_dataframe, _compare_series, _compare_index
+
+    if is_cudf_dataframe(obj1):
+        return _compare_dataframe(pdf1, pdf2, path, pointer_tracker,
+                                  structural_tracker, column_rbw, use_leq)
+    elif is_cudf_series(obj1):
+        return _compare_series(pdf1, pdf2, path, pointer_tracker)
+    elif is_cudf_index(obj1):
+        return _compare_index(pdf1, pdf2, path, pointer_tracker)
+
+    return None

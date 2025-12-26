@@ -363,6 +363,178 @@ class TestCudfColumnTracking:
 
 
 @pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
+class TestCudfCheckpoint:
+    """Test cudf checkpoint save/restore functionality."""
+
+    def test_checkpoint_cudf_dataframe(self):
+        """cudf DataFrame should be checkpointed to CPU memory."""
+        import cudf
+        from data_ferret.kernel.checkpoint import Checkpoints
+
+        gdf = cudf.DataFrame({'a': [1, 2, 3], 'b': [4.0, 5.0, 6.0]})
+
+        cp = Checkpoints(sanity_check=False)
+        user_ns = {'gdf': gdf}
+        cp.save('test', user_ns)
+
+        # Internally stored as pandas
+        saved_cp = cp.saved['test']
+        assert isinstance(saved_cp.user_ns['gdf'], pd.DataFrame)
+
+    def test_restore_cudf_dataframe(self):
+        """Restored DataFrame should be cudf again."""
+        import cudf
+        from data_ferret.kernel.checkpoint import Checkpoints
+
+        gdf = cudf.DataFrame({'a': [1, 2, 3]})
+
+        cp = Checkpoints(sanity_check=False)
+        user_ns = {'gdf': gdf}
+        cp.save('test', user_ns)
+
+        # Modify the namespace
+        user_ns['gdf'] = cudf.DataFrame({'x': [9, 9, 9]})
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # Should be cudf again
+        assert isinstance(user_ns['gdf'], cudf.DataFrame)
+        assert list(user_ns['gdf']['a'].to_pandas()) == [1, 2, 3]
+
+    def test_checkpoint_cudf_series(self):
+        """cudf Series should be checkpointed and restored."""
+        import cudf
+        from data_ferret.kernel.checkpoint import Checkpoints
+
+        gs = cudf.Series([1, 2, 3], name='values')
+
+        cp = Checkpoints(sanity_check=False)
+        user_ns = {'gs': gs}
+        cp.save('test', user_ns)
+
+        # Modify
+        user_ns['gs'] = cudf.Series([9, 9, 9])
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # Should be cudf Series again
+        assert isinstance(user_ns['gs'], cudf.Series)
+        assert list(user_ns['gs'].to_pandas()) == [1, 2, 3]
+
+    def test_mixed_pandas_cudf_checkpoint(self):
+        """Mixed pandas/cudf checkpoint should work."""
+        import cudf
+        from data_ferret.kernel.checkpoint import Checkpoints
+
+        gdf = cudf.DataFrame({'a': [1, 2, 3]})
+        pdf = pd.DataFrame({'b': [4, 5, 6]})
+
+        cp = Checkpoints(sanity_check=False)
+        user_ns = {'gdf': gdf, 'pdf': pdf}
+        cp.save('test', user_ns)
+
+        # Modify both
+        user_ns['gdf'] = cudf.DataFrame({'x': [9]})
+        user_ns['pdf'] = pd.DataFrame({'y': [9]})
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # cudf should be cudf, pandas should be pandas
+        assert isinstance(user_ns['gdf'], cudf.DataFrame)
+        assert isinstance(user_ns['pdf'], pd.DataFrame)
+        assert list(user_ns['gdf']['a'].to_pandas()) == [1, 2, 3]
+        assert list(user_ns['pdf']['b']) == [4, 5, 6]
+
+    def test_cudf_checkpoint_independence(self):
+        """Modifications after restore should not affect checkpoint."""
+        import cudf
+        from data_ferret.kernel.checkpoint import Checkpoints
+
+        gdf = cudf.DataFrame({'a': [1, 2, 3]})
+
+        cp = Checkpoints(sanity_check=False)
+        user_ns = {'gdf': gdf}
+        cp.save('test', user_ns)
+
+        # Restore and modify
+        cp.restore('test', user_ns)
+        user_ns['gdf']['a'] = [9, 9, 9]
+
+        # Restore again - should get original values
+        cp.restore('test', user_ns)
+        assert list(user_ns['gdf']['a'].to_pandas()) == [1, 2, 3]
+
+
+@pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
+class TestCudfDiff:
+    """Test cudf diff functionality."""
+
+    def test_diff_cudf_equal(self):
+        """Equal cudf DataFrames should show no diff."""
+        import cudf
+        from data_ferret.kernel.diff import Diff
+
+        gdf1 = cudf.DataFrame({'a': [1, 2, 3]})
+        gdf2 = cudf.DataFrame({'a': [1, 2, 3]})
+
+        differ = Diff()
+        result = differ.diff({'gdf': gdf1}, {'gdf': gdf2})
+        assert not result.differences
+
+    def test_diff_cudf_different(self):
+        """Different cudf DataFrames should show diff."""
+        import cudf
+        from data_ferret.kernel.diff import Diff
+
+        gdf1 = cudf.DataFrame({'a': [1, 2, 3]})
+        gdf2 = cudf.DataFrame({'a': [1, 2, 4]})
+
+        differ = Diff()
+        result = differ.diff({'gdf': gdf1}, {'gdf': gdf2})
+        assert result.differences
+
+
+@pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
+class TestCudfCheckpointCache:
+    """Test cudf checkpoint cache functionality."""
+
+    def test_cache_hit(self):
+        """Same cudf object should use cached copy."""
+        import cudf
+
+        cache = cudf_compat.CuDFCheckpointCache()
+        gdf = cudf.DataFrame({'a': [1, 2, 3]})
+
+        # First access - cache miss
+        result1 = cache.get_or_convert(gdf)
+        assert isinstance(result1, pd.DataFrame)
+
+        # Second access - cache hit
+        result2 = cache.get_or_convert(gdf)
+        assert result2 is result1
+
+    def test_cache_invalidation_on_mutation(self):
+        """Modified cudf object should not use stale cache."""
+        import cudf
+
+        cache = cudf_compat.CuDFCheckpointCache()
+        gdf = cudf.DataFrame({'a': [1, 2, 3]})
+
+        result1 = cache.get_or_convert(gdf)
+
+        # Mutate
+        gdf['a'] = [4, 5, 6]
+
+        # Should get new copy
+        result2 = cache.get_or_convert(gdf)
+        assert result2 is not result1
+        assert list(result2['a']) == [4, 5, 6]
+
+
+@pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
 class TestCudfProxyDetection:
     """Test proxy detection with cudf.pandas mode (if available)."""
 

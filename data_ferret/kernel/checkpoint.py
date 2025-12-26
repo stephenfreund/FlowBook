@@ -1136,6 +1136,7 @@ class Checkpoint:
         name: str,
         user_ns: dict[str, Any],
         memo: dict[int, Any],
+        cudf_origins: Optional['cudf_compat.CuDFOriginTracker'] = None,
     ):
         """
         Create a new checkpoint.
@@ -1144,10 +1145,15 @@ class Checkpoint:
             name: Identifier for this checkpoint
             user_ns: Deep-copied user namespace variables
             memo: Dictionary mapping original object IDs to their copies
+            cudf_origins: Optional tracker for cudf object origins (for restore)
         """
         self.name = name
         self.user_ns = user_ns
         self.reverse_memo = {id(v): k for k, v in memo.items()}
+
+        # cuDF origin tracking (for restore)
+        from . import cudf_compat
+        self._cudf_origins = cudf_origins or cudf_compat.CuDFOriginTracker()
 
         # Deep alias detection index (built lazily on first query)
         self._reachable_ids: Dict[str, Set[int]] = {}
@@ -1646,6 +1652,12 @@ class Checkpoints:
             for k in checkpointable_vars.keys() - checkpointable_values.keys():
                 removed[k] = get_type_model(user_ns[k])
 
+            # Record cudf origins before deep copy (cudf objects become pandas)
+            from . import cudf_compat
+            cudf_origins = cudf_compat.CuDFOriginTracker()
+            for k, v in checkpointable_values.items():
+                cudf_origins.record(k, v)
+
             # Use helper to deep copy all variables
             cp, memo, failed = self._deep_copy_user_ns(checkpointable_values)
 
@@ -1657,7 +1669,7 @@ class Checkpoints:
             for k in failed:
                 removed[k] = get_type_model(checkpointable_values[k])
 
-            self.saved[name] = Checkpoint(name, cp, memo)
+            self.saved[name] = Checkpoint(name, cp, memo, cudf_origins)
 
         if self.sanity_check:
             with timer(key="sanity_check", message="Running sanity check"):
@@ -1692,6 +1704,11 @@ class Checkpoints:
         # Deep copy the checkpoint before restoring to keep the checkpoint pristine
         # This ensures that modifications to restored variables don't affect the checkpoint
         restored_vars, _, _ = self._deep_copy_user_ns(cp.user_ns)
+
+        # Convert pandas objects back to cudf if they originated from cudf
+        for k in list(restored_vars.keys()):
+            restored_vars[k] = cp._cudf_origins.restore_value(k, restored_vars[k])
+
         user_ns.update(restored_vars)
 
     def type_models(self, user_ns: dict[str, Any]) -> dict[str, TypeModel]:

@@ -779,6 +779,14 @@ class Diff:
         Compare two values, dispatching to type-specific methods.
         Returns None if equal, otherwise returns DiffNode with differences.
         """
+        # Handle cudf objects by converting to pandas (all cudf logic in cudf_compat)
+        from . import cudf_compat
+        if cudf_compat.are_both_cudf_same_type(val_a, val_b):
+            return cudf_compat.diff_cudf(
+                val_a, val_b, path, self,
+                self.structural_tracker, self.column_rbw, self.use_leq
+            )
+
         # Skip pointer tracking for immutable atomic values
         # For these types, only value equality matters, not object identity
         both_immutable_atomic = self._is_immutable_atomic(

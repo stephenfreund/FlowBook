@@ -221,6 +221,11 @@ def deepcopy(x, memo=None):
     if y is not _nil:
         return y
 
+    # Handle cudf objects by converting to pandas (all cudf logic in cudf_compat)
+    from . import cudf_compat
+    if cudf_compat.is_cudf_object(x):
+        return cudf_compat.deepcopy_cudf(x, memo)
+
     cls = type(x)
 
     copier = _deepcopy_dispatch.get(cls)
