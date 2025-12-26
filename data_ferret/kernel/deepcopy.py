@@ -49,7 +49,7 @@ from data_ferret.kernel.column_tracking import suspend_column_tracking
 # Sentinel for memo lookups
 _nil = []
 
-_convert_object_dtypes = False
+_convert_object_dtypes = True
 
 
 # ============================================================================

@@ -129,6 +129,7 @@ def load_multiple_timings(file_paths: list[str]) -> dict[str, list[dict]]:
         timings = load_timings(file_path)
         if timings:  # Only include files that loaded successfully
             results[file_path] = timings
+
     return results
 
 
@@ -491,6 +492,7 @@ def process_single_file(file_path: str, args) -> tuple[list[dict], list[TimerSta
     if not timings:
         return [], [], {}
 
+
     # Filter by keys if specified
     if args.keys:
         keys_set = set(args.keys)
@@ -584,6 +586,32 @@ def process_multiple_files(file_paths: list[str], args):
     elif args.format == 'csv':
         output = format_csv_multi(timings_by_file, stats_by_file, combined_stats)
         print(output)
+
+
+    print()
+    first_error = True
+    for file_path, valid_records in timings_by_file.items():
+        # Look for a cli_main_exit key
+        cli_main_exit = [t for t in valid_records if t['key'] == 'cli_main_exit']
+        if len(cli_main_exit) > 1:
+            if first_error:
+                print("=" * 60)
+                print("WARNINGS")
+                print("=" * 60)
+            print(f"Warning: Multiple cli_main_exit keys found in {file_path}", file=sys.stderr)
+            print(f"Warning: {len(cli_main_exit)} cli_main_exit keys found in {file_path}", file=sys.stderr)
+            print(f"Warning: {cli_main_exit}", file=sys.stderr)
+            first_error = False
+        elif len(cli_main_exit) == 0:
+            if first_error:
+                print("=" * 60)
+                print("WARNINGS")
+                print("=" * 60)
+            print(f"Warning: No cli_main_exit key found in {file_path}", file=sys.stderr)
+            first_error = False
+    if not first_error:
+        print("=" * 60)
+        print()
 
 
 def main():
