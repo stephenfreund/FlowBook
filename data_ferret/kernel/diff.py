@@ -782,10 +782,7 @@ class Diff:
         # Handle cudf objects by converting to pandas (all cudf logic in cudf_compat)
         from . import cudf_compat
         if cudf_compat.are_both_cudf_same_type(val_a, val_b):
-            return cudf_compat.diff_cudf(
-                val_a, val_b, path, self,
-                self.structural_tracker, self.column_rbw, self.use_leq
-            )
+            return cudf_compat.diff_cudf(val_a, val_b, path, self)
 
         # Skip pointer tracking for immutable atomic values
         # For these types, only value equality matters, not object identity

@@ -691,11 +691,15 @@ def are_both_cudf_same_type(obj1: Any, obj2: Any) -> bool:
     return False
 
 
-def diff_cudf(obj1: Any, obj2: Any, path: str, pointer_tracker: Any,
-              structural_tracker: Any = None, column_rbw: Any = None,
-              use_leq: bool = False) -> Optional[Any]:
+def diff_cudf(obj1: Any, obj2: Any, path: str, differ: Any) -> Optional[Any]:
     """
     Compare two cuDF objects by converting to pandas.
+
+    Args:
+        obj1: First cudf object
+        obj2: Second cudf object
+        path: Variable path for error messages
+        differ: The Diff instance (has _compare_dataframe etc. methods)
 
     Returns None if equal, or a DiffNode if different.
     """
@@ -703,15 +707,12 @@ def diff_cudf(obj1: Any, obj2: Any, path: str, pointer_tracker: Any,
     pdf1 = to_pandas(obj1)
     pdf2 = to_pandas(obj2)
 
-    # Use the pandas diff logic
-    from .diff import _compare_dataframe, _compare_series, _compare_index
-
+    # Use the Diff instance's comparison methods
     if is_cudf_dataframe(obj1):
-        return _compare_dataframe(pdf1, pdf2, path, pointer_tracker,
-                                  structural_tracker, column_rbw, use_leq)
+        return differ._compare_dataframe(pdf1, pdf2, path)
     elif is_cudf_series(obj1):
-        return _compare_series(pdf1, pdf2, path, pointer_tracker)
+        return differ._compare_series(pdf1, pdf2, path)
     elif is_cudf_index(obj1):
-        return _compare_index(pdf1, pdf2, path, pointer_tracker)
+        return differ._compare_index(pdf1, pdf2, path)
 
     return None
