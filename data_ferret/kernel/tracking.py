@@ -37,6 +37,7 @@ Usage:
 from contextlib import contextmanager
 from typing import Dict, Generator, Optional, Set
 
+from data_ferret.util.output import timer
 from .column_tracking import ColumnAccessTracker, walk_dataframes, walk_pandas_objects
 from .structural_tracking import StructuralAccessTracker, StructuralTrackingMode
 
@@ -223,16 +224,20 @@ class TrackingDict(dict):
         """
         # Ensure clean state before tracking (guards against leaked state from
         # previous cells if patches remained installed due to exceptions)
-        self._column_tracker.reset()
-        self._structural_tracker.reset()
+        with timer(key="track_reset", message="Track reset"):
+            self._column_tracker.reset()
+            self._structural_tracker.reset()
         # Register all existing DataFrames with their paths (for column tracking)
-        for path, df in walk_dataframes(self._real_ns):
-            self._column_tracker.register_df(df, path)
+        with timer(key="walk_dataframes", message="Walk dataframes"):
+            for path, df in walk_dataframes(self._real_ns):
+                self._column_tracker.register_df(df, path)
         # Register all pandas objects (DataFrames AND Series) for structural tracking
-        for path, obj in walk_pandas_objects(self._real_ns):
-            self._structural_tracker.register(obj, path)
-        self._column_tracker.install()
-        self._structural_tracker.install()
+        with timer(key="walk_pandas_objects", message="Walk pandas objects"):
+            for path, obj in walk_pandas_objects(self._real_ns):
+                self._structural_tracker.register(obj, path)
+        with timer(key="install_trackers", message="Install trackers"):
+            self._column_tracker.install()
+            self._structural_tracker.install()
 
     def stop_column_tracking(self) -> None:
         """Call after cell execution to finalize column and structural tracking.
@@ -241,13 +246,16 @@ class TrackingDict(dict):
         resolves tracking data, and restores original DataFrame methods.
         """
         # Re-register DataFrames (new DFs may have been created during execution)
-        for path, df in walk_dataframes(self._real_ns):
-            self._column_tracker.register_df(df, path)
+        with timer(key="walk_dataframes_post", message="Walk dataframes (post)"):
+            for path, df in walk_dataframes(self._real_ns):
+                self._column_tracker.register_df(df, path)
         # Re-register all pandas objects for structural tracking
-        for path, obj in walk_pandas_objects(self._real_ns):
-            self._structural_tracker.register(obj, path)
-        self._column_tracker.uninstall()
-        self._structural_tracker.uninstall()
+        with timer(key="walk_pandas_objects_post", message="Walk pandas objects (post)"):
+            for path, obj in walk_pandas_objects(self._real_ns):
+                self._structural_tracker.register(obj, path)
+        with timer(key="uninstall_trackers", message="Uninstall trackers"):
+            self._column_tracker.uninstall()
+            self._structural_tracker.uninstall()
 
     # =========================================================================
     # Context Manager API

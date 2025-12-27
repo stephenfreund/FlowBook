@@ -4,7 +4,6 @@ Execute all cells command with Sequential Dataflow Consistency enforcement.
 
 import argparse
 import copy
-import textwrap
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -126,39 +125,7 @@ class ExecuteSDCCommand(NotebookCommand):
 
             # Inject CSV downsampling monkey-patch if requested
             if downsample_csv is not None:
-                patch_code = textwrap.dedent(
-                    f'''
-                    # Patch pandas read_csv
-                    import pandas as pd
-                    _original_pd_read_csv = pd.read_csv
-
-                    def _downsampled_pd_read_csv(*args, **kwargs):
-                        df = _original_pd_read_csv(*args, **kwargs)
-                        n_rows = int(len(df) * {downsample_csv})
-                        print(f"[pandas] Downsampling CSV: keeping top", n_rows, "of", len(df), "rows")
-                        return df.head(n_rows)
-
-                    pd.read_csv = _downsampled_pd_read_csv
-
-                    # Patch cuDF read_csv if available
-                    try:
-                        import cudf
-                        _original_cudf_read_csv = cudf.read_csv
-
-                        def _downsampled_cudf_read_csv(*args, **kwargs):
-                            df = _original_cudf_read_csv(*args, **kwargs)
-                            n_rows = int(len(df) * {downsample_csv})
-                            print(f"[cudf] Downsampling CSV: keeping top", n_rows, "of", len(df), "rows")
-                            return df.head(n_rows)
-
-                        cudf.read_csv = _downsampled_cudf_read_csv
-                        print("CSV downsampling enabled for both pandas and cuDF")
-                    except ImportError:
-                        print("CSV downsampling enabled for pandas (cuDF not available)")
-                    '''
-                )
-                KernelHelper.execute_code(kernel_client, patch_code, store_history=False)
-                log(f"CSV downsampling enabled: keeping top {downsample_csv*100:.1f}% of rows")
+                KernelHelper.inject_csv_downsampling(kernel_client, downsample_csv)
 
             with timer(key="execute_sdc", message="Executing all cells with SDC"):
                 for idx, cell in enumerate(cells):
