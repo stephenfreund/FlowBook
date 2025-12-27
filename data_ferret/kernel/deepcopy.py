@@ -212,10 +212,6 @@ def deepcopy(x, memo=None):
     if memo is None:
         memo = {}
 
-    # Register Keras handlers lazily on first deepcopy call
-    # (avoids import-time side effects that can break kernel startup)
-    _register_keras_handlers_if_needed()
-
     d = id(x)
     y = memo.get(d, _nil)
     if y is not _nil:
@@ -232,6 +228,20 @@ def deepcopy(x, memo=None):
     if copier is not None:
         y = copier(x, memo)
     else:
+        # Check if this is a Keras model - register handlers lazily to avoid
+        # expensive Keras import (~3s) on every deepcopy call
+        if _is_keras_model(x):
+            _register_keras_handlers_if_needed()
+            # Retry dispatch after registration
+            copier = _deepcopy_dispatch.get(cls)
+            if copier is not None:
+                y = copier(x, memo)
+                # Skip to the end
+                if y is not x:
+                    memo[d] = y
+                    _keep_alive(x, memo)
+                return y
+
         if issubclass(cls, type):
             y = _deepcopy_atomic(x, memo)
         else:
@@ -768,8 +778,27 @@ def _deepcopy_keras_model(model, memo: dict[int, Any]):
 _keras_handlers_registered = False
 
 
+def _is_keras_model(x) -> bool:
+    """Check if x is a Keras model without importing Keras.
+
+    Uses module name checking to avoid the expensive Keras import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Check for tensorflow.keras or standalone keras
+    return 'keras' in module and any(
+        base.__name__ in ('Model', 'Sequential')
+        for base in cls.__mro__
+        if hasattr(base, '__name__')
+    )
+
+
 def _register_keras_handlers_if_needed():
-    """Register Keras model handlers lazily to avoid import-time side effects."""
+    """Register Keras model handlers lazily to avoid import-time side effects.
+
+    IMPORTANT: This is expensive (~3s) due to Keras import. Only call when
+    we know we're dealing with a Keras model (use _is_keras_model first).
+    """
     global _keras_handlers_registered
     if _keras_handlers_registered:
         return
