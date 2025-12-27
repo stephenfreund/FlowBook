@@ -401,10 +401,20 @@ def is_cudf_index(obj: Any) -> bool:
 
 
 def is_cudf_object(obj: Any) -> bool:
-    """Check if object is any cudf type that needs special checkpoint handling."""
+    """Check if object is any cudf type that needs special checkpoint handling.
+
+    Handles both native cudf objects and cudf.pandas proxy objects.
+    """
     if not has_cudf():
         return False
-    return isinstance(obj, (_cudf_module.DataFrame, _cudf_module.Series, _cudf_module.Index))
+    # Check native cudf types
+    if isinstance(obj, (_cudf_module.DataFrame, _cudf_module.Series, _cudf_module.Index)):
+        return True
+    # Check cudf.pandas proxy types (DataFrame, Series, or Index proxies)
+    if is_cudf_proxy(obj):
+        type_name = type(obj).__name__
+        return type_name in ('DataFrame', 'Series') or 'Index' in type_name
+    return False
 
 
 def get_cudf_type(obj: Any) -> Optional[type]:
@@ -679,17 +689,56 @@ def deepcopy_cudf(obj: Any, memo: Dict[int, Any]) -> Any:
 # Diff Support
 # =============================================================================
 
+def _is_proxy_dataframe(obj: Any) -> bool:
+    """Check if object is a cudf.pandas proxy wrapping a DataFrame."""
+    if not is_cudf_proxy(obj):
+        return False
+    # Check the type name - proxies report as pandas types
+    type_name = type(obj).__name__
+    return type_name == 'DataFrame'
+
+
+def _is_proxy_series(obj: Any) -> bool:
+    """Check if object is a cudf.pandas proxy wrapping a Series."""
+    if not is_cudf_proxy(obj):
+        return False
+    type_name = type(obj).__name__
+    return type_name == 'Series'
+
+
+def _is_proxy_index(obj: Any) -> bool:
+    """Check if object is a cudf.pandas proxy wrapping an Index."""
+    if not is_cudf_proxy(obj):
+        return False
+    type_name = type(obj).__name__
+    # Index has various subclasses
+    return 'Index' in type_name
+
+
 def are_both_cudf_same_type(obj1: Any, obj2: Any) -> bool:
-    """Check if both objects are cuDF objects of the same type."""
+    """Check if both objects are cuDF objects of the same type.
+
+    Handles both native cudf objects and cudf.pandas proxy objects.
+    """
     if not has_cudf():
         return False
 
+    # Check native cudf types
     if is_cudf_dataframe(obj1) and is_cudf_dataframe(obj2):
         return True
     if is_cudf_series(obj1) and is_cudf_series(obj2):
         return True
     if is_cudf_index(obj1) and is_cudf_index(obj2):
         return True
+
+    # Check cudf.pandas proxy types
+    if _is_proxy_dataframe(obj1) and _is_proxy_dataframe(obj2):
+        return True
+    if _is_proxy_series(obj1) and _is_proxy_series(obj2):
+        return True
+    if _is_proxy_index(obj1) and _is_proxy_index(obj2):
+        return True
+
     return False
 
 
@@ -698,8 +747,8 @@ def diff_cudf(obj1: Any, obj2: Any, path: str, differ: Any) -> Optional[Any]:
     Compare two cuDF objects by converting to pandas.
 
     Args:
-        obj1: First cudf object
-        obj2: Second cudf object
+        obj1: First cudf object (native cudf or cudf.pandas proxy)
+        obj2: Second cudf object (native cudf or cudf.pandas proxy)
         path: Variable path for error messages
         differ: The Diff instance (has _compare_dataframe etc. methods)
 
@@ -711,11 +760,12 @@ def diff_cudf(obj1: Any, obj2: Any, path: str, differ: Any) -> Optional[Any]:
         pdf2 = to_pandas(obj2)
 
     # Use the Diff instance's comparison methods
-    if is_cudf_dataframe(obj1):
+    # Check both native cudf types and cudf.pandas proxy types
+    if is_cudf_dataframe(obj1) or _is_proxy_dataframe(obj1):
         return differ._compare_dataframe(pdf1, pdf2, path)
-    elif is_cudf_series(obj1):
+    elif is_cudf_series(obj1) or _is_proxy_series(obj1):
         return differ._compare_series(pdf1, pdf2, path)
-    elif is_cudf_index(obj1):
+    elif is_cudf_index(obj1) or _is_proxy_index(obj1):
         return differ._compare_index(pdf1, pdf2, path)
 
     return None
