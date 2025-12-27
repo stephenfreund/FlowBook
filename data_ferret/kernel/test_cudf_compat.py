@@ -846,5 +846,681 @@ class TestCudfStructuralTracking:
             tracker.uninstall()
 
 
+# =============================================================================
+# Tests for cudf.pandas proxy detection and handling
+# =============================================================================
+
+class MockFastSlowProxy:
+    """
+    Mock base class that simulates cudf.pandas _FastSlowProxy behavior.
+
+    cudf.pandas creates proxy objects that:
+    - Have _fsproxy_slow attribute containing the pandas object
+    - Have _fsproxy_fast attribute containing the cudf object (may be None)
+    - Report their type name as the pandas type name
+    """
+    pass
+
+
+@pytest.fixture
+def mock_cudf_proxy_env():
+    """
+    Fixture that sets up a complete mock environment for cudf.pandas proxy testing.
+
+    This properly mocks all cudf_compat internals so that proxy detection works
+    without requiring cudf to be installed.
+    """
+    from data_ferret.kernel import cudf_compat
+
+    # Save originals
+    original_proxy_type = cudf_compat._cudf_pandas_proxy_type
+    original_has_cudf_pandas = cudf_compat._HAS_CUDF_PANDAS
+    original_has_cudf = cudf_compat.has_cudf
+    original_is_cudf_proxy = cudf_compat.is_cudf_proxy
+    original_is_cudf_dataframe = cudf_compat.is_cudf_dataframe
+    original_is_cudf_series = cudf_compat.is_cudf_series
+    original_is_cudf_index = cudf_compat.is_cudf_index
+
+    # Set up mocks
+    cudf_compat._cudf_pandas_proxy_type = MockFastSlowProxy
+    cudf_compat._HAS_CUDF_PANDAS = True
+    cudf_compat.has_cudf = lambda: True
+    cudf_compat.is_cudf_proxy = lambda obj: isinstance(obj, MockFastSlowProxy)
+
+    # These should return False for our mock proxies (they're not native cudf)
+    cudf_compat.is_cudf_dataframe = lambda obj: False
+    cudf_compat.is_cudf_series = lambda obj: False
+    cudf_compat.is_cudf_index = lambda obj: False
+
+    yield cudf_compat
+
+    # Restore originals
+    cudf_compat._cudf_pandas_proxy_type = original_proxy_type
+    cudf_compat._HAS_CUDF_PANDAS = original_has_cudf_pandas
+    cudf_compat.has_cudf = original_has_cudf
+    cudf_compat.is_cudf_proxy = original_is_cudf_proxy
+    cudf_compat.is_cudf_dataframe = original_is_cudf_dataframe
+    cudf_compat.is_cudf_series = original_is_cudf_series
+    cudf_compat.is_cudf_index = original_is_cudf_index
+
+
+class MockDataFrameProxy(MockFastSlowProxy):
+    """Mock cudf.pandas DataFrame proxy."""
+
+    def __init__(self, data):
+        self._underlying_df = pd.DataFrame(data)
+        self._fsproxy_slow = self._underlying_df
+        self._fsproxy_fast = None  # Would be cudf.DataFrame in real proxy
+
+    def copy(self):
+        return MockDataFrameProxy(self._underlying_df.to_dict())
+
+
+class MockSeriesProxy(MockFastSlowProxy):
+    """Mock cudf.pandas Series proxy."""
+
+    def __init__(self, data, name=None):
+        self._underlying_series = pd.Series(data, name=name)
+        self._fsproxy_slow = self._underlying_series
+        self._fsproxy_fast = None
+
+    def copy(self):
+        return MockSeriesProxy(self._underlying_series.tolist(), self._underlying_series.name)
+
+
+class MockIndexProxy(MockFastSlowProxy):
+    """Mock cudf.pandas Index proxy."""
+
+    def __init__(self, data):
+        self._underlying_index = pd.Index(data)
+        self._fsproxy_slow = self._underlying_index
+        self._fsproxy_fast = None
+
+
+class MockCallableFsprosySlow(MockFastSlowProxy):
+    """Mock proxy where _fsproxy_slow is a callable."""
+
+    def __init__(self, data):
+        self._underlying_df = pd.DataFrame(data)
+
+    def _fsproxy_slow(self):
+        return self._underlying_df
+
+
+class TestProxyDetectionHelpers:
+    """Test the proxy detection helper functions."""
+
+    def test_is_proxy_dataframe_with_mock(self):
+        """_is_proxy_dataframe should detect DataFrame proxies."""
+        from data_ferret.kernel import cudf_compat
+
+        # Temporarily make our mock look like a real proxy
+        original_proxy_type = cudf_compat._cudf_pandas_proxy_type
+        cudf_compat._cudf_pandas_proxy_type = MockFastSlowProxy
+        cudf_compat._HAS_CUDF_PANDAS = True
+
+        try:
+            # Create a mock that reports as DataFrame
+            class DataFrameMock(MockFastSlowProxy):
+                pass
+            DataFrameMock.__name__ = 'DataFrame'
+
+            proxy = DataFrameMock()
+            assert cudf_compat._is_proxy_dataframe(proxy) is True
+
+            # Series proxy should not match
+            class SeriesMock(MockFastSlowProxy):
+                pass
+            SeriesMock.__name__ = 'Series'
+
+            series_proxy = SeriesMock()
+            assert cudf_compat._is_proxy_dataframe(series_proxy) is False
+
+        finally:
+            cudf_compat._cudf_pandas_proxy_type = original_proxy_type
+
+    def test_is_proxy_series_with_mock(self):
+        """_is_proxy_series should detect Series proxies."""
+        from data_ferret.kernel import cudf_compat
+
+        original_proxy_type = cudf_compat._cudf_pandas_proxy_type
+        cudf_compat._cudf_pandas_proxy_type = MockFastSlowProxy
+        cudf_compat._HAS_CUDF_PANDAS = True
+
+        try:
+            class SeriesMock(MockFastSlowProxy):
+                pass
+            SeriesMock.__name__ = 'Series'
+
+            proxy = SeriesMock()
+            assert cudf_compat._is_proxy_series(proxy) is True
+
+            # DataFrame proxy should not match
+            class DataFrameMock(MockFastSlowProxy):
+                pass
+            DataFrameMock.__name__ = 'DataFrame'
+
+            df_proxy = DataFrameMock()
+            assert cudf_compat._is_proxy_series(df_proxy) is False
+
+        finally:
+            cudf_compat._cudf_pandas_proxy_type = original_proxy_type
+
+    def test_is_proxy_index_with_mock(self):
+        """_is_proxy_index should detect Index proxies."""
+        from data_ferret.kernel import cudf_compat
+
+        original_proxy_type = cudf_compat._cudf_pandas_proxy_type
+        cudf_compat._cudf_pandas_proxy_type = MockFastSlowProxy
+        cudf_compat._HAS_CUDF_PANDAS = True
+
+        try:
+            # Test various Index types
+            for index_name in ['Index', 'RangeIndex', 'DatetimeIndex', 'MultiIndex']:
+                class IndexMock(MockFastSlowProxy):
+                    pass
+                IndexMock.__name__ = index_name
+
+                proxy = IndexMock()
+                assert cudf_compat._is_proxy_index(proxy) is True, f"Failed for {index_name}"
+
+            # DataFrame should not match
+            class DataFrameMock(MockFastSlowProxy):
+                pass
+            DataFrameMock.__name__ = 'DataFrame'
+
+            df_proxy = DataFrameMock()
+            assert cudf_compat._is_proxy_index(df_proxy) is False
+
+        finally:
+            cudf_compat._cudf_pandas_proxy_type = original_proxy_type
+
+    def test_non_proxy_objects_return_false(self):
+        """Non-proxy objects should return False for all proxy checks."""
+        from data_ferret.kernel import cudf_compat
+
+        # Regular pandas objects
+        df = pd.DataFrame({'a': [1, 2, 3]})
+        series = pd.Series([1, 2, 3])
+        index = pd.Index([1, 2, 3])
+
+        assert cudf_compat._is_proxy_dataframe(df) is False
+        assert cudf_compat._is_proxy_series(series) is False
+        assert cudf_compat._is_proxy_index(index) is False
+
+        # Other types
+        assert cudf_compat._is_proxy_dataframe(None) is False
+        assert cudf_compat._is_proxy_dataframe("string") is False
+        assert cudf_compat._is_proxy_dataframe(123) is False
+        assert cudf_compat._is_proxy_dataframe([1, 2, 3]) is False
+
+
+class TestAreBothCudfSameTypeWithProxies:
+    """Test are_both_cudf_same_type with proxy objects."""
+
+    def test_both_dataframe_proxies(self, mock_cudf_proxy_env):
+        """Two DataFrame proxies should return True."""
+        cudf_compat = mock_cudf_proxy_env
+
+        class DataFrameMock(MockFastSlowProxy):
+            pass
+        DataFrameMock.__name__ = 'DataFrame'
+
+        proxy1 = DataFrameMock()
+        proxy2 = DataFrameMock()
+
+        result = cudf_compat.are_both_cudf_same_type(proxy1, proxy2)
+        assert result is True
+
+    def test_both_series_proxies(self, mock_cudf_proxy_env):
+        """Two Series proxies should return True."""
+        cudf_compat = mock_cudf_proxy_env
+
+        class SeriesMock(MockFastSlowProxy):
+            pass
+        SeriesMock.__name__ = 'Series'
+
+        proxy1 = SeriesMock()
+        proxy2 = SeriesMock()
+
+        result = cudf_compat.are_both_cudf_same_type(proxy1, proxy2)
+        assert result is True
+
+    def test_both_index_proxies(self, mock_cudf_proxy_env):
+        """Two Index proxies should return True."""
+        cudf_compat = mock_cudf_proxy_env
+
+        class IndexMock(MockFastSlowProxy):
+            pass
+        IndexMock.__name__ = 'RangeIndex'
+
+        proxy1 = IndexMock()
+        proxy2 = IndexMock()
+
+        result = cudf_compat.are_both_cudf_same_type(proxy1, proxy2)
+        assert result is True
+
+    def test_mixed_proxy_types_return_false(self, mock_cudf_proxy_env):
+        """DataFrame proxy + Series proxy should return False."""
+        cudf_compat = mock_cudf_proxy_env
+
+        class DataFrameMock(MockFastSlowProxy):
+            pass
+        DataFrameMock.__name__ = 'DataFrame'
+
+        class SeriesMock(MockFastSlowProxy):
+            pass
+        SeriesMock.__name__ = 'Series'
+
+        df_proxy = DataFrameMock()
+        series_proxy = SeriesMock()
+
+        result = cudf_compat.are_both_cudf_same_type(df_proxy, series_proxy)
+        assert result is False
+
+    def test_proxy_and_regular_pandas_return_false(self, mock_cudf_proxy_env):
+        """Proxy DataFrame + regular pandas DataFrame should return False."""
+        cudf_compat = mock_cudf_proxy_env
+
+        class DataFrameMock(MockFastSlowProxy):
+            pass
+        DataFrameMock.__name__ = 'DataFrame'
+
+        proxy = DataFrameMock()
+        regular_df = pd.DataFrame({'a': [1, 2, 3]})
+
+        result = cudf_compat.are_both_cudf_same_type(proxy, regular_df)
+        assert result is False
+
+
+class TestIsCudfObjectWithProxies:
+    """Test is_cudf_object with proxy objects."""
+
+    def test_proxy_dataframe_is_cudf_object(self, mock_cudf_proxy_env):
+        """Proxy DataFrame should be detected as cudf object."""
+        cudf_compat = mock_cudf_proxy_env
+
+        class DataFrameMock(MockFastSlowProxy):
+            pass
+        DataFrameMock.__name__ = 'DataFrame'
+
+        proxy = DataFrameMock()
+        result = cudf_compat.is_cudf_object(proxy)
+        assert result is True
+
+    def test_proxy_series_is_cudf_object(self, mock_cudf_proxy_env):
+        """Proxy Series should be detected as cudf object."""
+        cudf_compat = mock_cudf_proxy_env
+
+        class SeriesMock(MockFastSlowProxy):
+            pass
+        SeriesMock.__name__ = 'Series'
+
+        proxy = SeriesMock()
+        result = cudf_compat.is_cudf_object(proxy)
+        assert result is True
+
+    def test_proxy_index_is_cudf_object(self, mock_cudf_proxy_env):
+        """Proxy Index should be detected as cudf object."""
+        cudf_compat = mock_cudf_proxy_env
+
+        class IndexMock(MockFastSlowProxy):
+            pass
+        IndexMock.__name__ = 'RangeIndex'
+
+        proxy = IndexMock()
+        result = cudf_compat.is_cudf_object(proxy)
+        assert result is True
+
+    def test_regular_pandas_not_cudf_object(self):
+        """Regular pandas objects should not be detected as cudf objects."""
+        from data_ferret.kernel import cudf_compat
+
+        df = pd.DataFrame({'a': [1, 2, 3]})
+        series = pd.Series([1, 2, 3])
+        index = pd.Index([1, 2, 3])
+
+        # These should return False regardless of cudf availability
+        # (assuming no cudf is installed on test machine)
+        assert cudf_compat.is_cudf_object(df) is False or cudf_compat.has_cudf()
+        assert cudf_compat.is_cudf_object(series) is False or cudf_compat.has_cudf()
+        assert cudf_compat.is_cudf_object(index) is False or cudf_compat.has_cudf()
+
+
+class TestToPandasWithProxies:
+    """Test to_pandas function with proxy objects."""
+
+    def test_to_pandas_with_proxy_dataframe(self, mock_cudf_proxy_env):
+        """to_pandas should extract underlying DataFrame from proxy."""
+        cudf_compat = mock_cudf_proxy_env
+
+        underlying_df = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
+
+        class DataFrameMock(MockFastSlowProxy):
+            pass
+        DataFrameMock.__name__ = 'DataFrame'
+
+        proxy = DataFrameMock()
+        proxy._fsproxy_slow = underlying_df
+
+        result = cudf_compat.to_pandas(proxy)
+
+        # Should be a copy, not the same object
+        assert result is not underlying_df
+        # But should have same data
+        pd.testing.assert_frame_equal(result, underlying_df)
+
+    def test_to_pandas_with_proxy_series(self, mock_cudf_proxy_env):
+        """to_pandas should extract underlying Series from proxy."""
+        cudf_compat = mock_cudf_proxy_env
+
+        underlying_series = pd.Series([1, 2, 3], name='values')
+
+        class SeriesMock(MockFastSlowProxy):
+            pass
+        SeriesMock.__name__ = 'Series'
+
+        proxy = SeriesMock()
+        proxy._fsproxy_slow = underlying_series
+
+        result = cudf_compat.to_pandas(proxy)
+
+        # Should be a copy
+        assert result is not underlying_series
+        pd.testing.assert_series_equal(result, underlying_series)
+
+    def test_to_pandas_with_callable_fsproxy_slow(self, mock_cudf_proxy_env):
+        """to_pandas should handle callable _fsproxy_slow."""
+        cudf_compat = mock_cudf_proxy_env
+
+        underlying_df = pd.DataFrame({'a': [1, 2, 3]})
+
+        class DataFrameMock(MockFastSlowProxy):
+            def _fsproxy_slow(self):
+                return underlying_df
+        DataFrameMock.__name__ = 'DataFrame'
+
+        proxy = DataFrameMock()
+
+        result = cudf_compat.to_pandas(proxy)
+
+        # Should return the underlying DataFrame (copied)
+        pd.testing.assert_frame_equal(result, underlying_df)
+
+    def test_to_pandas_returns_copy(self, mock_cudf_proxy_env):
+        """to_pandas should return a copy for independence."""
+        cudf_compat = mock_cudf_proxy_env
+
+        underlying_df = pd.DataFrame({'a': [1, 2, 3]})
+
+        class DataFrameMock(MockFastSlowProxy):
+            pass
+        DataFrameMock.__name__ = 'DataFrame'
+
+        proxy = DataFrameMock()
+        proxy._fsproxy_slow = underlying_df
+
+        result = cudf_compat.to_pandas(proxy)
+
+        # Modify the result
+        result['a'] = [9, 9, 9]
+
+        # Original should be unchanged
+        assert list(underlying_df['a']) == [1, 2, 3]
+
+    def test_to_pandas_passthrough_for_regular_objects(self):
+        """to_pandas should return regular pandas objects unchanged."""
+        from data_ferret.kernel import cudf_compat
+
+        df = pd.DataFrame({'a': [1, 2, 3]})
+        result = cudf_compat.to_pandas(df)
+
+        # Regular pandas should pass through unchanged
+        assert result is df
+
+    def test_to_pandas_passthrough_for_non_pandas(self):
+        """to_pandas should return non-pandas objects unchanged."""
+        from data_ferret.kernel import cudf_compat
+
+        assert cudf_compat.to_pandas(None) is None
+        assert cudf_compat.to_pandas("string") == "string"
+        assert cudf_compat.to_pandas(123) == 123
+        assert cudf_compat.to_pandas([1, 2, 3]) == [1, 2, 3]
+
+
+class TestCacheWithProxies:
+    """Test CuDFCheckpointCache with proxy objects."""
+
+    def test_cache_get_or_convert_with_proxy(self, mock_cudf_proxy_env):
+        """Cache should handle proxy objects correctly."""
+        cudf_compat = mock_cudf_proxy_env
+
+        underlying_df = pd.DataFrame({'a': [1, 2, 3]})
+
+        class DataFrameMock(MockFastSlowProxy):
+            pass
+        DataFrameMock.__name__ = 'DataFrame'
+
+        proxy = DataFrameMock()
+        proxy._fsproxy_slow = underlying_df
+
+        cache = cudf_compat.CuDFCheckpointCache()
+
+        result = cache.get_or_convert(proxy)
+
+        # Should return a pandas DataFrame
+        assert isinstance(result, pd.DataFrame)
+        pd.testing.assert_frame_equal(result, underlying_df)
+
+
+class TestDiffWithProxies:
+    """Test diff functionality with proxy objects."""
+
+    def test_diff_cudf_with_proxy_dataframes(self, mock_cudf_proxy_env):
+        """diff_cudf should work with proxy DataFrames."""
+        from data_ferret.kernel.diff import Diff
+
+        cudf_compat = mock_cudf_proxy_env
+
+        df1 = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
+        df2 = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
+
+        class DataFrameMock(MockFastSlowProxy):
+            pass
+        DataFrameMock.__name__ = 'DataFrame'
+
+        proxy1 = DataFrameMock()
+        proxy1._fsproxy_slow = df1
+
+        proxy2 = DataFrameMock()
+        proxy2._fsproxy_slow = df2
+
+        differ = Diff()
+
+        result = cudf_compat.diff_cudf(proxy1, proxy2, 'test', differ)
+
+        # Equal DataFrames should return None
+        assert result is None
+
+    def test_diff_cudf_with_different_proxy_dataframes(self, mock_cudf_proxy_env):
+        """diff_cudf should detect differences in proxy DataFrames."""
+        from data_ferret.kernel.diff import Diff
+
+        cudf_compat = mock_cudf_proxy_env
+
+        df1 = pd.DataFrame({'a': [1, 2, 3]})
+        df2 = pd.DataFrame({'a': [1, 2, 999]})  # Different!
+
+        class DataFrameMock(MockFastSlowProxy):
+            pass
+        DataFrameMock.__name__ = 'DataFrame'
+
+        proxy1 = DataFrameMock()
+        proxy1._fsproxy_slow = df1
+
+        proxy2 = DataFrameMock()
+        proxy2._fsproxy_slow = df2
+
+        differ = Diff()
+
+        result = cudf_compat.diff_cudf(proxy1, proxy2, 'test', differ)
+
+        # Different DataFrames should return a diff
+        assert result is not None
+
+    def test_diff_cudf_with_proxy_series(self, mock_cudf_proxy_env):
+        """diff_cudf should work with proxy Series."""
+        from data_ferret.kernel.diff import Diff
+
+        cudf_compat = mock_cudf_proxy_env
+
+        s1 = pd.Series([1, 2, 3], name='values')
+        s2 = pd.Series([1, 2, 3], name='values')
+
+        class SeriesMock(MockFastSlowProxy):
+            pass
+        SeriesMock.__name__ = 'Series'
+
+        proxy1 = SeriesMock()
+        proxy1._fsproxy_slow = s1
+
+        proxy2 = SeriesMock()
+        proxy2._fsproxy_slow = s2
+
+        differ = Diff()
+
+        result = cudf_compat.diff_cudf(proxy1, proxy2, 'test', differ)
+
+        # Equal Series should return None
+        assert result is None
+
+
+class TestProxyEdgeCases:
+    """Test edge cases for proxy handling."""
+
+    def test_proxy_with_none_fsproxy_slow(self):
+        """Handle proxy with None _fsproxy_slow gracefully."""
+        from data_ferret.kernel import cudf_compat
+
+        original_proxy_type = cudf_compat._cudf_pandas_proxy_type
+        cudf_compat._cudf_pandas_proxy_type = MockFastSlowProxy
+        cudf_compat._HAS_CUDF_PANDAS = True
+
+        try:
+            class DataFrameMock(MockFastSlowProxy):
+                _fsproxy_slow = None
+            DataFrameMock.__name__ = 'DataFrame'
+
+            proxy = DataFrameMock()
+
+            original_has_cudf_func = cudf_compat.has_cudf
+            cudf_compat.has_cudf = lambda: True
+
+            try:
+                # Should not crash
+                result = cudf_compat.to_pandas(proxy)
+                # With None _fsproxy_slow, should return the proxy itself
+                assert result is proxy
+            finally:
+                cudf_compat.has_cudf = original_has_cudf_func
+
+        finally:
+            cudf_compat._cudf_pandas_proxy_type = original_proxy_type
+
+    def test_proxy_without_fsproxy_slow_attribute(self):
+        """Handle proxy without _fsproxy_slow attribute."""
+        from data_ferret.kernel import cudf_compat
+
+        original_proxy_type = cudf_compat._cudf_pandas_proxy_type
+        cudf_compat._cudf_pandas_proxy_type = MockFastSlowProxy
+        cudf_compat._HAS_CUDF_PANDAS = True
+
+        try:
+            # Create a proxy-like object without _fsproxy_slow
+            class WeirdProxy(MockFastSlowProxy):
+                pass
+            WeirdProxy.__name__ = 'DataFrame'
+
+            # Remove _fsproxy_slow if inherited
+            proxy = WeirdProxy()
+            if hasattr(proxy, '_fsproxy_slow'):
+                delattr(proxy, '_fsproxy_slow')
+
+            original_has_cudf_func = cudf_compat.has_cudf
+            cudf_compat.has_cudf = lambda: True
+
+            try:
+                # Should not crash, should return proxy unchanged
+                result = cudf_compat.to_pandas(proxy)
+                assert result is proxy
+            finally:
+                cudf_compat.has_cudf = original_has_cudf_func
+
+        finally:
+            cudf_compat._cudf_pandas_proxy_type = original_proxy_type
+
+    def test_proxy_with_to_pandas_method(self):
+        """Proxy with to_pandas method should use it as fallback."""
+        from data_ferret.kernel import cudf_compat
+
+        original_proxy_type = cudf_compat._cudf_pandas_proxy_type
+        cudf_compat._cudf_pandas_proxy_type = MockFastSlowProxy
+        cudf_compat._HAS_CUDF_PANDAS = True
+
+        try:
+            underlying_df = pd.DataFrame({'a': [1, 2, 3]})
+
+            class DataFrameMock(MockFastSlowProxy):
+                def to_pandas(self):
+                    return underlying_df.copy()
+            DataFrameMock.__name__ = 'DataFrame'
+
+            proxy = DataFrameMock()
+            # No _fsproxy_slow, but has to_pandas
+
+            original_has_cudf_func = cudf_compat.has_cudf
+            cudf_compat.has_cudf = lambda: True
+
+            try:
+                result = cudf_compat.to_pandas(proxy)
+                pd.testing.assert_frame_equal(result, underlying_df)
+            finally:
+                cudf_compat.has_cudf = original_has_cudf_func
+
+        finally:
+            cudf_compat._cudf_pandas_proxy_type = original_proxy_type
+
+    def test_empty_dataframe_proxy(self):
+        """Handle empty DataFrame proxy."""
+        from data_ferret.kernel import cudf_compat
+
+        original_proxy_type = cudf_compat._cudf_pandas_proxy_type
+        cudf_compat._cudf_pandas_proxy_type = MockFastSlowProxy
+        cudf_compat._HAS_CUDF_PANDAS = True
+
+        try:
+            empty_df = pd.DataFrame()
+
+            class DataFrameMock(MockFastSlowProxy):
+                pass
+            DataFrameMock.__name__ = 'DataFrame'
+
+            proxy = DataFrameMock()
+            proxy._fsproxy_slow = empty_df
+
+            original_has_cudf_func = cudf_compat.has_cudf
+            cudf_compat.has_cudf = lambda: True
+
+            try:
+                result = cudf_compat.to_pandas(proxy)
+                assert isinstance(result, pd.DataFrame)
+                assert len(result) == 0
+            finally:
+                cudf_compat.has_cudf = original_has_cudf_func
+
+        finally:
+            cudf_compat._cudf_pandas_proxy_type = original_proxy_type
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

@@ -381,21 +381,21 @@ def reset_cudf_tracking() -> None:
 
 def is_cudf_dataframe(obj: Any) -> bool:
     """Check if object is a cudf DataFrame."""
-    if not has_cudf():
+    if not has_cudf() or _cudf_module is None:
         return False
     return isinstance(obj, _cudf_module.DataFrame)
 
 
 def is_cudf_series(obj: Any) -> bool:
     """Check if object is a cudf Series."""
-    if not has_cudf():
+    if not has_cudf() or _cudf_module is None:
         return False
     return isinstance(obj, _cudf_module.Series)
 
 
 def is_cudf_index(obj: Any) -> bool:
     """Check if object is a cudf Index."""
-    if not has_cudf():
+    if not has_cudf() or _cudf_module is None:
         return False
     return isinstance(obj, _cudf_module.Index)
 
@@ -407,9 +407,10 @@ def is_cudf_object(obj: Any) -> bool:
     """
     if not has_cudf():
         return False
-    # Check native cudf types
-    if isinstance(obj, (_cudf_module.DataFrame, _cudf_module.Series, _cudf_module.Index)):
-        return True
+    # Check native cudf types (guard against _cudf_module being None in proxy-only mode)
+    if _cudf_module is not None:
+        if isinstance(obj, (_cudf_module.DataFrame, _cudf_module.Series, _cudf_module.Index)):
+            return True
     # Check cudf.pandas proxy types (DataFrame, Series, or Index proxies)
     if is_cudf_proxy(obj):
         type_name = type(obj).__name__
@@ -650,10 +651,12 @@ def to_pandas(obj: Any) -> Any:
             slow_obj = obj._fsproxy_slow
             if callable(slow_obj):
                 slow_obj = slow_obj()
-            # Return a copy to ensure independence
-            if hasattr(slow_obj, 'copy'):
-                return slow_obj.copy()
-            return slow_obj
+            # Only use slow_obj if it's not None
+            if slow_obj is not None:
+                # Return a copy to ensure independence
+                if hasattr(slow_obj, 'copy'):
+                    return slow_obj.copy()
+                return slow_obj
         # Fallback: proxy might have to_pandas
         if hasattr(obj, 'to_pandas'):
             return obj.to_pandas()
