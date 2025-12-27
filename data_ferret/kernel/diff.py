@@ -4,8 +4,119 @@ Data Ferret Kernel Namespace Diff Comparator
 Compares Jupyter kernel user namespaces for equality with isomorphic pointer
 structure. Supports structured diff results with detailed difference reporting.
 
-MultiIndex Column Support
--------------------------
+================================================================================
+OVERVIEW
+================================================================================
+
+The Diff module compares two kernel namespaces (dictionaries of variables) and
+returns a structured tree of differences. It handles complex Python objects
+including pandas DataFrames/Series, numpy arrays, nested containers, and
+special types like Keras models and cudf objects.
+
+Key capabilities:
+- Deep structural comparison with pointer tracking (detects aliasing)
+- Type-specific comparison methods for optimal performance
+- Column-level DataFrame comparison for precise change detection
+- LEQ mode for monotonicity checking (allows additions, blocks modifications)
+- Integration with structural tracking for shape/columns/index changes
+
+================================================================================
+ARCHITECTURE
+================================================================================
+
+Type Dispatch System
+--------------------
+The module uses a two-tier dispatch system for O(1) type lookups:
+
+1. _COMPARE_DISPATCH (dict): Maps exact types to method names
+   - Pre-populated for common types (int, float, str, DataFrame, etc.)
+   - Keras models registered lazily to avoid import overhead
+
+2. _DISPATCH_CACHE (dict): Caches subclass lookups
+   - When a type isn't in _COMPARE_DISPATCH, isinstance checks are used
+   - Results are cached to avoid repeated isinstance chains
+
+Fallback order for unknown types:
+   1. Check _COMPARE_DISPATCH for exact type match
+   2. Check _DISPATCH_CACHE for previously resolved subclass
+   3. isinstance checks: timedelta64 → integer → floating → complex →
+      GroupBy → Index → DataFrame → Series → Keras model → callable → object
+
+Deferred Keras Import
+---------------------
+Keras/TensorFlow import is expensive (~3 seconds). To avoid this penalty:
+
+1. _is_keras_model(obj) checks if obj is a Keras model WITHOUT importing Keras
+   - Uses module name inspection: 'keras' in type(obj).__module__
+   - Checks MRO for 'Model' or 'Sequential' base classes
+
+2. _register_keras_dispatch_if_needed() only called when Keras model detected
+   - Imports Keras and registers types in _COMPARE_DISPATCH
+   - Subsequent Keras models use fast dispatch path
+
+cudf Support
+------------
+cudf objects (GPU DataFrames) are handled via cudf_compat module:
+- are_both_cudf_same_type() detects matching cudf types (native or proxy)
+- diff_cudf() converts to pandas and delegates to standard comparison
+- Supports cudf.pandas proxy mode (transparent GPU acceleration)
+
+================================================================================
+KEY FEATURES
+================================================================================
+
+LEQ Mode (use_leq=True)
+-----------------------
+For monotonicity checking, LEQ mode allows "conservative extensions":
+- Extra keys in namespace b are allowed (variable creation OK)
+- Extra columns in DataFrames are allowed (column creation OK)
+- Modifications to existing values are still detected as differences
+
+Column-Level Comparison (column_rbw parameter)
+----------------------------------------------
+When column_rbw is provided, only specified columns are compared:
+- column_rbw = {'df': {'price', 'quantity'}} → only compare these columns
+- Unspecified columns are ignored even if different
+- Enables precise backward mutation detection for DataFrame operations
+
+Structural Tracking (structural_reads, structural_mode)
+-------------------------------------------------------
+Detects changes to DataFrame/Series structure:
+- Tracks reads of .columns, .shape, .index, len()
+- WARN mode: Log warnings for structural changes
+- ENFORCE mode: Treat structural changes as differences
+
+================================================================================
+PERFORMANCE OPTIMIZATIONS
+================================================================================
+
+Fast Path for DataFrames
+------------------------
+_fast_dataframe_equal() provides vectorized comparison:
+1. Check shape, columns, index match
+2. For each column, try identity check (same object)
+3. For numeric columns, use array_equal
+4. For object columns, check if all values are immutable strings/ints
+5. Fall back to element-wise comparison only when needed
+
+Pointer Structure Tracking
+--------------------------
+The differ tracks object identity to detect aliasing:
+- id_map_a/id_map_b map object IDs to canonical IDs
+- If same object appears multiple times, only compared once
+- Detects pointer structure mismatches (a[0] is a[1] but b[0] is not b[1])
+
+Profiling
+---------
+Set FERRET_PROFILE_DIFF=1 to enable detailed timing:
+- Per-variable comparison times
+- Per-column breakdown for DataFrames
+- Aggregated statistics by type
+
+================================================================================
+MULTIINDEX COLUMN SUPPORT
+================================================================================
+
 DataFrames with MultiIndex columns (hierarchical column labels) are fully
 supported. The `_get_column_as_series()` helper function safely extracts
 columns using `get_loc()` to find the column position, then `iloc` to access
@@ -17,15 +128,23 @@ The comparison methods handle:
 - Mixed-type level values (strings, integers, None)
 - Duplicate column names in MultiIndex
 
-Example of supported MultiIndex DataFrame comparison:
-    >>> arrays = [['A', 'A', 'B'], ['one', 'two', 'one']]
-    >>> tuples = list(zip(*arrays))
-    >>> columns = pd.MultiIndex.from_tuples(tuples)
-    >>> df1 = pd.DataFrame([[1, 2, 3]], columns=columns)
-    >>> df2 = pd.DataFrame([[1, 2, 4]], columns=columns)  # Different value
+================================================================================
+USAGE
+================================================================================
+
+Basic comparison:
     >>> differ = Diff()
-    >>> result = differ.diff({'df': df1}, {'df': df2})
-    >>> 'df' in result.differences  # True - difference detected
+    >>> result = differ.diff({'x': 1, 'y': [1,2]}, {'x': 1, 'y': [1,3]})
+    >>> 'y' in result.differences  # True
+
+LEQ mode for monotonicity:
+    >>> differ = Diff(use_leq=True)
+    >>> result = differ.diff({'x': 1}, {'x': 1, 'new_var': 2})
+    >>> result.differences  # {} - new_var allowed in LEQ mode
+
+Column-level comparison:
+    >>> differ = Diff(use_leq=True, column_rbw={'df': {'price'}})
+    >>> # Only compares 'price' column, ignores other columns
 """
 
 import numpy as np

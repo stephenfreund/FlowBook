@@ -153,6 +153,43 @@ WHAT GETS SKIPPED
   - Temporary objects: .values, .data (id can be reused after GC)
 
 See checkpoint.py section 12 for full implementation details.
+
+================================================================================
+CUDF AND KERAS SUPPORT
+================================================================================
+
+cuDF Objects
+------------
+cuDF (GPU DataFrames) are transparently handled:
+- Checkpoints convert cuDF to pandas via cudf_compat.to_pandas()
+- Works with both native cuDF and cudf.pandas proxy objects
+- Diff comparisons operate on pandas representations
+
+Keras Models
+------------
+Keras models use the opaque object pattern (see checkpoint.py section 14):
+- Only weights are checkpointed, not internal TensorFlow objects
+- Deferred Keras import avoids ~3s penalty for non-Keras notebooks
+- _is_keras_model() detects Keras via module inspection
+
+================================================================================
+PERFORMANCE TUNING
+================================================================================
+
+Checkpoint.diff() Timers
+------------------------
+The diff operation includes timing phases for debugging:
+- [diff] Setup - Import and initialization
+- [diff] Create Diff object - Comparator construction
+- [diff] Compare namespaces - Actual comparison
+
+Enable FERRET_PROFILE_DIFF=1 for per-variable timing breakdowns.
+
+Optimization Flags
+------------------
+Controlled via environment variables:
+- FERRET_OPT_CONFLICT_LOOP_SKIP: Skip O(n) loop when no overlap (default: on)
+- FERRET_OPT_ACCESSED_VARS_ONLY: Only diff accessed vars + aliases (default: on)
 """
 
 import os

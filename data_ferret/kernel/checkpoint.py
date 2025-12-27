@@ -706,7 +706,88 @@ The alias index is built LAZILY on first query and stored in Checkpoint:
       Default: 1000 object-dtype elements.
 
 
-13. FUTURE WORK / TODOS
+13. CUDF (GPU DATAFRAME) SUPPORT
+---------------------------------
+cuDF objects are transparently handled during checkpoint operations.
+
+13.1 Checkpoint Save
+~~~~~~~~~~~~~~~~~~~~
+When saving, cuDF objects are converted to pandas:
+- cudf.DataFrame → pd.DataFrame (GPU→CPU transfer)
+- cudf.Series → pd.Series
+- cudf.Index → pd.Index
+
+This conversion uses cudf_compat.to_pandas() which handles both:
+- Native cuDF objects (calls .to_pandas())
+- cudf.pandas proxy objects (extracts _fsproxy_slow)
+
+13.2 Origin Tracking
+~~~~~~~~~~~~~~~~~~~~
+CuDFOriginTracker records which variables were originally cuDF:
+- Before save: cudf_origins.record(var_name, value)
+- After restore: cudf_origins.should_convert_back(var_name) → bool
+
+This enables optional GPU restore (not currently implemented).
+
+13.3 cudf.pandas Proxy Mode
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cudf.pandas provides transparent GPU acceleration. Proxies wrap pandas
+objects and route operations to GPU when beneficial. Key challenges:
+- type(proxy).__name__ == 'DataFrame' but may not pass isinstance checks
+- Proxies have _fsproxy_slow (pandas) and _fsproxy_fast (cudf) attributes
+- Accessing attributes can trigger infinite recursion in wrapped code
+
+Solution: cudf_compat provides safe detection and extraction utilities.
+
+
+14. OPAQUE OBJECT PATTERN
+--------------------------
+Some complex objects have simple mutable state. The opaque pattern
+provides efficient handling without deep traversal.
+
+14.1 Architecture
+~~~~~~~~~~~~~~~~~
+OpaqueRegistry (in opaque.py) manages handlers:
+- OpaqueHandler.can_handle(obj) → True if handler applies
+- OpaqueHandler.get_mutable_state(obj) → extract checkpointable state
+- OpaqueHandler.copy_with_state(obj, state, memo) → create copy
+- OpaqueHandler.states_equal(state1, state2) → equality check
+
+14.2 Keras Model Handler
+~~~~~~~~~~~~~~~~~~~~~~~~
+KerasModelHandler checkpoints Keras Sequential/Functional models:
+- Only model weights change during training
+- Weights extracted via model.get_weights()
+- Copy via keras.models.clone_model() + set_weights()
+- Rejects unbuilt models (architecture not frozen)
+
+This reduces checkpointing from millions of objects to weight arrays.
+
+14.3 Deferred Keras Import
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+Importing Keras/TensorFlow takes ~3 seconds. To avoid this penalty:
+- _is_keras_model(obj) detects Keras models WITHOUT importing Keras
+- Uses module name inspection: 'keras' in type(obj).__module__
+- Keras handlers registered lazily when first Keras model encountered
+
+This is implemented in both deepcopy.py and diff.py.
+
+
+15. CHECKPOINT.DIFF TIMERS
+---------------------------
+Checkpoint.diff() includes timing for debugging performance issues:
+
+  with timer(key="checkpoint_diff_setup", message="[diff] Setup"):
+      # Import and mode initialization
+  with timer(key="checkpoint_diff_create", message="[diff] Create Diff object"):
+      # Diff constructor
+  with timer(key="checkpoint_diff_compare", message="[diff] Compare namespaces"):
+      # Actual comparison
+
+Additional profiling available via FERRET_PROFILE_DIFF=1 environment variable.
+
+
+16. FUTURE WORK / TODOS
 -----------------------
   - [ ] Incremental checkpointing (store only changes from previous)
   - [ ] Checkpoint compression for memory efficiency
@@ -717,7 +798,7 @@ The alias index is built LAZILY on first query and stored in Checkpoint:
   - [ ] Size estimation before checkpoint (warn on large data)
 
 
-14. MULTIINDEX COLUMN SUPPORT
+17. MULTIINDEX COLUMN SUPPORT
 -----------------------------
 DataFrames with MultiIndex columns (hierarchical column labels) are fully
 supported throughout the checkpoint system. This includes:
@@ -726,7 +807,7 @@ supported throughout the checkpoint system. This includes:
   - Alias detection for variables containing MultiIndex DataFrames
   - Checkpoint diffing between MultiIndex DataFrames
 
-14.1 Implementation Details
+17.1 Implementation Details
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When iterating over DataFrame columns, we use positional indexing
 (`.iloc[:, col_idx]`) rather than label-based indexing (`df[col]`).
@@ -742,7 +823,7 @@ Example patterns used:
   for col in df.columns:
       series = df[col]  # Could be DataFrame!
 
-14.2 Supported MultiIndex Features
+17.2 Supported MultiIndex Features
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   - 2-level and 3+ level column hierarchies
   - Mixed-type level values (strings, integers, None)

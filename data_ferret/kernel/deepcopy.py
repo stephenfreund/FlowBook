@@ -1,33 +1,170 @@
 """
-Custom deepcopy implementation with special handling for pandas and functions.
+Custom Deepcopy Implementation
 
-This module extends Python's standard copy.deepcopy with custom handlers for:
-- pandas DataFrame: shallow copy with CoW + deep copy of object columns
-- pandas Series: shallow copy with CoW + deep copy if object dtype
-- FunctionType: deep copy of closure contents and mutable defaults
+Extends Python's standard copy.deepcopy with optimized handlers for data science
+objects including pandas, Keras models, CatBoost, and cuDF.
 
-The implementation follows the same dispatch pattern as the standard library's
-copy module for consistency and extensibility.
+================================================================================
+OVERVIEW
+================================================================================
 
-MultiIndex Column Support
--------------------------
+This module provides a drop-in replacement for copy.deepcopy() that is optimized
+for Jupyter notebook checkpointing. It handles complex objects that standard
+deepcopy either fails on or handles inefficiently.
+
+Key optimizations:
+- Pandas DataFrame/Series: Uses Copy-on-Write (CoW) for non-object columns
+- Keras models: Extracts weights only via opaque object pattern
+- CatBoost Pool: Uses slice workaround for unpicklable objects
+- cuDF objects: Converts to pandas for GPU→CPU transfer
+- Functions: Deep copies closures and mutable default arguments
+
+================================================================================
+ARCHITECTURE
+================================================================================
+
+Dispatch Table Pattern
+----------------------
+Like the standard library's copy module, we use a dispatch table:
+
+_deepcopy_dispatch (dict): Maps types to handler functions
+    - Pre-populated for atomic types (int, str, float, etc.)
+    - Pandas types (DataFrame, Series, Index, etc.)
+    - Special types (CatBoost Pool, Keras models)
+
+Handler signature: handler(obj, memo) → copied_obj
+
+The memo dictionary tracks already-copied objects to handle:
+- Circular references (a contains b contains a)
+- Shared references (multiple vars pointing to same object)
+
+Deferred Keras Import
+---------------------
+Keras/TensorFlow import is expensive (~3 seconds). To avoid this penalty:
+
+1. _is_keras_model(obj): Detects Keras models WITHOUT importing Keras
+   - Checks type(obj).__module__ for 'keras' substring
+   - Checks MRO for 'Model' or 'Sequential' base classes
+   - O(1) check that never triggers import
+
+2. _register_keras_handlers_if_needed(): Only called when Keras model found
+   - Imports Keras and registers handlers in _deepcopy_dispatch
+   - Subsequent Keras models use fast dispatch path
+
+Opaque Object Pattern
+---------------------
+Some objects have complex internal structure but simple mutable state.
+The OpaqueRegistry pattern handles these:
+
+1. OpaqueHandler.can_handle(obj) → True if handler applies
+2. OpaqueHandler.get_mutable_state(obj) → extract state (e.g., weights)
+3. OpaqueHandler.copy_with_state(obj, state, memo) → create copy
+
+Currently registered handlers:
+- KerasModelHandler: Keras Sequential/Functional models
+  - Extracts: model.get_weights()
+  - Copies via: clone_model() + set_weights()
+  - Rejects unbuilt models (architecture not frozen)
+
+================================================================================
+PANDAS HANDLING
+================================================================================
+
+DataFrame Deepcopy
+------------------
+_deepcopy_dataframe(df, memo):
+1. Create shallow copy: df.copy(deep=False)
+   - With CoW enabled, non-object columns share memory until mutated
+2. For each object-dtype column:
+   - Deep copy elements recursively
+   - Handles nested lists, dicts, custom objects
+3. Register in memo for circular reference handling
+
+Optimization: If object column contains only immutable values (strings, ints,
+None), skip deep copy entirely (_object_column_is_all_immutable).
+
+Series Deepcopy
+---------------
+_deepcopy_series(series, memo):
+1. If object dtype: deep copy element by element
+2. Otherwise: shallow copy (CoW handles mutations)
+
+================================================================================
+SPECIAL TYPE HANDLING
+================================================================================
+
+CatBoost Pool
+-------------
+CatBoost Pool objects cannot be pickled directly, but can be sliced.
+_deepcopy_catboost_pool uses pool.slice(range(len(pool))) to create a copy.
+
+Keras Models
+------------
+_deepcopy_keras_model uses the opaque handler pattern:
+1. Check if model is built (architecture frozen)
+2. Clone model structure via keras.models.clone_model()
+3. Copy weights via get_weights()/set_weights()
+
+This avoids copying millions of internal TensorFlow objects.
+
+cuDF Objects
+------------
+cuDF objects are handled via cudf_compat.deepcopy_cudf:
+1. Convert to pandas (GPU→CPU transfer)
+2. Standard pandas deepcopy
+3. Optionally convert back on restore
+
+Functions
+---------
+_deepcopy_function handles:
+- Closure contents (__closure__)
+- Mutable default arguments (__defaults__, __kwdefaults__)
+- Does NOT copy __globals__ (would duplicate module state)
+
+================================================================================
+MULTIINDEX COLUMN SUPPORT
+================================================================================
+
 DataFrames with MultiIndex columns (hierarchical column labels) are fully
 supported. When iterating over DataFrame columns, we use positional indexing
 (`.iloc[:, i]`) to read columns, which always returns a Series regardless of
 column name type. For writing, we use column name indexing (`df[col]`) to
 preserve dtype correctly.
 
-This approach handles edge cases where `df[tuple]` might return a DataFrame
-instead of a Series when pandas interprets the tuple as a partial key in a
-MultiIndex.
+================================================================================
+IMMUTABILITY CHECKING
+================================================================================
 
-Example of supported MultiIndex DataFrame:
-    >>> arrays = [['A', 'A', 'B'], ['one', 'two', 'one']]
-    >>> tuples = list(zip(*arrays))
-    >>> columns = pd.MultiIndex.from_tuples(tuples)
-    >>> df = pd.DataFrame([[1, 2, 3]], columns=columns)
+For "preserve mode" deepcopy (used in some optimizations):
+
+is_immutable(obj, max_depth=10) → bool:
+    Recursively checks if obj and all nested contents are immutable.
+    Returns True for: int, float, str, bytes, tuple (of immutables), frozenset
+
+_IMMUTABLE_INFERRED_KINDS: Set of pandas inferred_dtype values that are immutable
+    Used by diff module for fast-path column comparisons.
+
+================================================================================
+USAGE
+================================================================================
+
+Basic usage:
+    >>> from data_ferret.kernel.deepcopy import deepcopy
     >>> memo = {}
-    >>> copy = deepcopy(df, memo)  # Works correctly
+    >>> copy = deepcopy(original, memo)
+
+With Keras model:
+    >>> model = keras.Sequential([...])
+    >>> model_copy = deepcopy(model, {})  # Uses opaque handler
+
+Shared references preserved:
+    >>> shared = [1, 2, 3]
+    >>> a = {'x': shared}
+    >>> b = {'y': shared}
+    >>> memo = {}
+    >>> a_copy = deepcopy(a, memo)
+    >>> b_copy = deepcopy(b, memo)
+    >>> a_copy['x'] is b_copy['y']  # True - sharing preserved
 """
 
 from __future__ import annotations

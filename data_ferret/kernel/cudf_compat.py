@@ -1,12 +1,170 @@
 """
-cuDF compatibility layer.
+cuDF Compatibility Layer
 
 All cuDF-specific logic is isolated here to keep core modules clean.
 When cuDF is not installed, all functions gracefully return False/None/passthrough.
 
-Phase 0: Proxy detection and GroupBy handling (fixes recursion with cudf.pandas)
-Phase 0.5: cuDF column tracking via method patching
-Phase 1+: Checkpoint/diff support (to be added)
+================================================================================
+OVERVIEW
+================================================================================
+
+This module provides transparent support for NVIDIA cuDF (GPU-accelerated pandas)
+in the Data Ferret kernel. It handles two modes of cuDF usage:
+
+1. Native cuDF: Direct use of cudf.DataFrame, cudf.Series, cudf.Index
+2. cudf.pandas: Proxy mode where pandas API is transparently accelerated
+
+The key challenge is that cudf.pandas uses proxy objects that wrap pandas
+objects but appear as pandas types to isinstance checks. This module provides
+detection and conversion utilities that work with both modes.
+
+================================================================================
+ARCHITECTURE
+================================================================================
+
+Lazy Import Pattern
+-------------------
+cuDF is imported lazily to avoid startup overhead when not used:
+- has_cudf() → cached check for cudf availability
+- get_cudf() → returns cudf module or None
+- _cudf_module → cached module reference
+
+Proxy Detection
+---------------
+cudf.pandas wraps objects in _FastSlowProxy from cudf.pandas.fast_slow_proxy:
+- is_cudf_proxy(obj) → True if obj is a proxy wrapper
+- Proxies have _fsproxy_slow (pandas) and _fsproxy_fast (cudf) attributes
+
+Type-Specific Proxy Detection
+-----------------------------
+For dispatch purposes, we need to know WHAT TYPE of proxy:
+- _is_proxy_dataframe(obj) → proxy wrapping a DataFrame
+- _is_proxy_series(obj) → proxy wrapping a Series
+- _is_proxy_index(obj) → proxy wrapping an Index
+
+These check is_cudf_proxy() AND type(obj).__name__ to determine the wrapped type.
+
+Unified Detection
+-----------------
+is_cudf_object(obj) returns True for ANY cudf-related object:
+- Native cudf.DataFrame, cudf.Series, cudf.Index
+- cudf.pandas proxy DataFrames, Series, Indexes
+- Guards against _cudf_module being None (proxy-only mode)
+
+================================================================================
+KEY FUNCTIONS
+================================================================================
+
+Detection Functions
+-------------------
+- has_cudf() → bool: Is cuDF installed?
+- is_cudf_proxy(obj) → bool: Is obj a cudf.pandas proxy?
+- is_cudf_object(obj) → bool: Is obj any cuDF type (native or proxy)?
+- is_cudf_dataframe(obj) → bool: Native cudf.DataFrame?
+- is_cudf_series(obj) → bool: Native cudf.Series?
+- is_cudf_groupby(obj) → bool: Native or proxied GroupBy?
+- are_both_cudf_same_type(a, b) → bool: Both same cuDF type? (for diff dispatch)
+
+Conversion Functions
+--------------------
+- to_pandas(obj) → pandas object:
+    Converts cuDF objects to pandas for checkpointing/diffing.
+    For proxies: extracts _fsproxy_slow (the underlying pandas object)
+    For native: calls obj.to_pandas()
+    Returns copy to ensure independence.
+
+- get_or_convert(obj, cache) → pandas object:
+    Like to_pandas() but with caching for repeated conversions.
+    Uses CuDFCheckpointCache for efficient checkpoint operations.
+
+Diff Integration
+----------------
+- diff_cudf(val_a, val_b, path, differ) → DiffNode:
+    Entry point for comparing cuDF objects.
+    Converts both to pandas and delegates to differ._compare_dataframe/series.
+    Handles DataFrame, Series, and Index types.
+
+Deepcopy Integration
+--------------------
+- deepcopy_cudf(obj, memo) → object:
+    Deep copies cuDF objects by converting to pandas.
+    Uses get_or_convert() with memo-based caching.
+
+================================================================================
+CUDF.PANDAS PROXY HANDLING
+================================================================================
+
+cudf.pandas provides transparent GPU acceleration by wrapping pandas objects.
+The proxy pattern creates challenges:
+
+1. Type Identity: type(proxy).__name__ == 'DataFrame' but
+   isinstance(proxy, pd.DataFrame) may be False
+
+2. Method Access: Proxies intercept attribute access, which can cause
+   infinite recursion if we use hasattr() in our own __getattribute__
+
+3. Underlying Object: The _fsproxy_slow attribute contains the pandas object
+   - May be a callable (method) or direct reference
+   - May be None in edge cases
+
+Solution: Extract pandas object via _fsproxy_slow:
+    if is_cudf_proxy(obj):
+        slow_obj = obj._fsproxy_slow
+        if callable(slow_obj):
+            slow_obj = slow_obj()
+        return slow_obj.copy()  # Ensure independence
+
+================================================================================
+CHECKPOINT/RESTORE INTEGRATION
+================================================================================
+
+CuDFOriginTracker
+-----------------
+Tracks which variables were originally cuDF objects before checkpoint:
+- record(var_name, obj): Store origin info if obj is cuDF
+- get_origin(var_name) → CuDFOrigin: Get original type info
+- should_convert_back(var_name) → bool: Should restore as cuDF?
+
+During checkpoint, cuDF objects are converted to pandas (GPU→CPU).
+During restore, CuDFOriginTracker enables conversion back to cuDF.
+
+CuDFCheckpointCache
+-------------------
+Caches to_pandas() results during a single checkpoint operation:
+- Avoids redundant GPU→CPU transfers
+- Keyed by object ID
+- Cleared after each checkpoint
+
+================================================================================
+COLUMN TRACKING INTEGRATION
+================================================================================
+
+patch_cudf_column_tracking(tracker)
+-----------------------------------
+Installs method patches on cudf.DataFrame for column access tracking:
+- __getitem__ → track column reads
+- __setitem__ → track column writes
+- Similar to pandas patching in column_tracking.py
+
+unpatch_cudf_column_tracking()
+------------------------------
+Removes patches after cell execution.
+
+================================================================================
+USAGE
+================================================================================
+
+Checking for cuDF:
+    >>> if cudf_compat.is_cudf_object(df):
+    ...     pandas_df = cudf_compat.to_pandas(df)
+
+In diff dispatch:
+    >>> if cudf_compat.are_both_cudf_same_type(val_a, val_b):
+    ...     return cudf_compat.diff_cudf(val_a, val_b, path, self)
+
+In deepcopy:
+    >>> if cudf_compat.is_cudf_object(obj):
+    ...     return cudf_compat.deepcopy_cudf(obj, memo)
 """
 
 from __future__ import annotations

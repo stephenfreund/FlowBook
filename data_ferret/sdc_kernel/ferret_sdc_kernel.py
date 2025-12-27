@@ -336,6 +336,26 @@ IMPLEMENTATION IMPROVEMENTS:
    Keep checkpoint history for user-initiated undo
 
 ================================================================================
+SPECIAL TYPE SUPPORT
+================================================================================
+
+cuDF (GPU DataFrames)
+---------------------
+cuDF objects are transparently handled via cudf_compat module:
+- Supports both native cudf and cudf.pandas proxy mode
+- Checkpoints convert GPU→CPU (cudf→pandas) for storage
+- Column tracking works with cudf.DataFrame.__getitem__/__setitem__
+
+Keras Models
+------------
+Keras/TensorFlow models use the opaque object pattern:
+- Only weights are checkpointed (not millions of TensorFlow objects)
+- Deferred import avoids ~3s penalty for non-Keras notebooks
+- Detection via module inspection: _is_keras_model() in deepcopy.py/diff.py
+
+See checkpoint.py sections 13-14 for implementation details.
+
+================================================================================
 """
 
 import re
