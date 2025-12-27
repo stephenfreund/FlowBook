@@ -1726,11 +1726,11 @@ class Diff:
             arr_b = s_b.values
             if arr_a is arr_b:
                 if _PROFILE_DIFF:
-                    log(f"[diff profile] Fast path: identity (same object) at {path}")
+                    log(f"[diff profile] {path}: Fast path identity (same object)")
                 return True
             if np.shares_memory(arr_a, arr_b):
                 if _PROFILE_DIFF:
-                    log(f"[diff profile] Fast path: identity (shared memory) at {path}")
+                    log(f"[diff profile] {path}: Fast path identity (shared memory)")
                 return True
         except (TypeError, ValueError):
             pass  # Some array types don't support shares_memory
@@ -1768,31 +1768,32 @@ class Diff:
         column_timings: List[Tuple[float, str, str]] = []
 
         # Use iloc to avoid issues with MultiIndex columns
-        for i in range(len(df_a.columns)):
-            col_name = str(df_a.columns[i])
-            col_dtype = str(df_a.iloc[:, i].dtype)
+        if _PROFILE_DIFF:
+            with timer(key="diff_fast_dataframe_equal", message=f"[diff] Fast path DataFrame equal ({len(df_a.columns)} cols compared)"):
+                # Profiling enabled: collect timing, pass path names
+                for i in range(len(df_a.columns)):
+                    col_name = str(df_a.columns[i])
+                    col_dtype = str(df_a.iloc[:, i].dtype)
+                    col_start = time.perf_counter()
+                    path_col = f"{path}['{col_name}']" if path else col_name
+                    is_equal = self._fast_series_equal(df_a.iloc[:, i], df_b.iloc[:, i], path_col)
+                    col_elapsed = time.perf_counter() - col_start
+                    column_timings.append((col_elapsed, col_name, col_dtype))
+                    if not is_equal:
+                        # Log timings collected so far before returning
+                        if column_timings:
+                            self._log_column_timings(path, column_timings)
+                        return False
 
-            if _PROFILE_DIFF:
-                col_start = time.perf_counter()
-                path_col = f"{path}['{col_name}']" if path else col_name
-                is_equal = self._fast_series_equal(df_a.iloc[:, i], df_b.iloc[:, i], path_col)
-            else:
-                is_equal = self._fast_series_equal(df_a.iloc[:, i], df_b.iloc[:, i])
-
-            if _PROFILE_DIFF:
-                col_elapsed = time.perf_counter() - col_start
-                column_timings.append((col_elapsed, col_name, col_dtype))
-
-            if not is_equal:
-                # Log timings collected so far before returning
-                if _PROFILE_DIFF and column_timings:
+                # Log all column timings
+                if column_timings:
                     self._log_column_timings(path, column_timings)
-                return False
-
-        # Log all column timings
-        if _PROFILE_DIFF and column_timings:
-            self._log_column_timings(path, column_timings)
-            log(f"[diff profile] Fast path: DataFrame {path} equal ({len(df_a.columns)} cols compared)")
+                    log(f"[diff profile] Fast path: DataFrame {path} equal ({len(df_a.columns)} cols compared)")
+        else:
+            # No profiling: just compare columns
+            for i in range(len(df_a.columns)):
+                if not self._fast_series_equal(df_a.iloc[:, i], df_b.iloc[:, i]):
+                    return False
 
         return True
 
