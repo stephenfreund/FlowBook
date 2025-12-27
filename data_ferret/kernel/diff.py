@@ -40,6 +40,7 @@ import math
 from data_ferret.kernel.deepcopy import _IMMUTABLE_INFERRED_KINDS
 
 from data_ferret.kernel.structural_tracking import StructuralTrackingMode
+from data_ferret.kernel import cudf_compat
 from data_ferret.kernel.types import (
     ValueComparison,
     CompoundDiff,
@@ -786,9 +787,11 @@ class Diff:
         log("[zzz] Comparing values", tb.__module__, tb.__name__)
 
         # Handle cudf objects by converting to pandas (all cudf logic in cudf_compat)
-        from . import cudf_compat
         if cudf_compat.are_both_cudf_same_type(val_a, val_b):
+            log("[zzz] Comparing cudf values", path)
             return cudf_compat.diff_cudf(val_a, val_b, path, self)
+
+        log("[zzz] Not comparing cudf values", path)
 
         # Skip pointer tracking for immutable atomic values
         # For these types, only value equality matters, not object identity
@@ -1829,9 +1832,9 @@ class Diff:
         # equality check before column-by-column comparison.
         # ======================================================================
 
-        log("[zzz] Comparing values", path, type(val_a).__qualname__, type(val_b).__qualname__)
+        log("[zzz] FP Comparing values", path, type(val_a).__qualname__, type(val_b).__qualname__)
 
-        log("[zzz] Comparing values", val_a.shape, val_b.shape)
+        log("[zzz] FP Comparing values", val_a.shape, val_b.shape)
         log("[zzz] Comparing values", val_a.columns.equals(val_b.columns), val_a.index.equals(val_b.index))
         log("[zzz] Comparing values", val_a.columns, val_b.columns)
         log("[zzz] Comparing values", val_a.index, val_b.index)
