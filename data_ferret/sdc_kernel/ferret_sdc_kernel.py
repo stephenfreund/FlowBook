@@ -782,7 +782,8 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 return result
 
             # Warn about non-deepcopyable objects after successful execution
-            self._warn_non_deepcopyable_objects()
+            with timer(key="warn_non_deepcopyable", message="Warn non-deepcopyable"):
+                self._warn_non_deepcopyable_objects()
 
             # Take post-execution snapshot
             with timer(key="sdc_post_checkpoint") as post_timer:
