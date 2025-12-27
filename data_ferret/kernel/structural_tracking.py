@@ -37,6 +37,32 @@ from contextlib import contextmanager
 from enum import Enum
 
 
+def _unwrap_cudf_proxy(obj: Any) -> Any:
+    """
+    Unwrap a cudf.pandas proxy object to get the underlying pandas object.
+
+    cudf.pandas creates proxy objects that wrap pandas objects. When calling
+    original pandas methods, we need the underlying pandas object, not the proxy.
+
+    The proxy stores the slow (pandas) object in _fsproxy_slow attribute.
+
+    Args:
+        obj: Any object, possibly a cudf proxy
+
+    Returns:
+        The underlying pandas object if obj is a cudf proxy, otherwise obj unchanged
+    """
+    # Check if this is a cudf proxy by looking for the _fsproxy_slow attribute
+    # This is the standard way cudf.pandas stores the underlying pandas object
+    if hasattr(obj, '_fsproxy_slow'):
+        slow_obj = obj._fsproxy_slow
+        # _fsproxy_slow can be a callable that returns the slow object
+        if callable(slow_obj):
+            return slow_obj()
+        return slow_obj
+    return obj
+
+
 # =============================================================================
 # Thread-local for structure-using methods
 # =============================================================================
@@ -666,7 +692,9 @@ class StructuralAccessTracker:
             def make_wrapper(orig):
                 def wrapper(obj, *args, **kwargs):
                     with _structure_using_context():
-                        return orig(obj, *args, **kwargs)
+                        # Unwrap cudf proxy to get underlying pandas object
+                        unwrapped = _unwrap_cudf_proxy(obj)
+                        return orig(unwrapped, *args, **kwargs)
                 return wrapper
 
             setattr(cls, method_name, make_wrapper(original))
@@ -702,7 +730,9 @@ class StructuralAccessTracker:
                 def make_wrapper(orig):
                     def wrapper(obj, *args, **kwargs):
                         with _structure_using_context():
-                            return orig(obj, *args, **kwargs)
+                            # Unwrap cudf proxy to get underlying pandas object
+                            unwrapped = _unwrap_cudf_proxy(obj)
+                            return orig(unwrapped, *args, **kwargs)
                     return wrapper
 
                 setattr(cls, method_name, make_wrapper(original))
@@ -775,7 +805,10 @@ class StructuralAccessTracker:
                 def make_wrapper(orig):
                     def wrapper(obj, *args, **kwargs):
                         with _structure_using_context():
-                            return orig(obj, *args, **kwargs)
+                            # Unwrap cudf proxy to get underlying pandas object
+                            # cudf.pandas proxies cause issues when passed to original pandas methods
+                            unwrapped = _unwrap_cudf_proxy(obj)
+                            return orig(unwrapped, *args, **kwargs)
                     return wrapper
 
                 setattr(cls, method_name, make_wrapper(original))
