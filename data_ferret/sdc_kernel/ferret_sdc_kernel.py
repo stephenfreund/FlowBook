@@ -346,6 +346,7 @@ from IPython.core.magic import Magics, line_magic, magics_class
 from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
 
+from data_ferret.kernel import extended_types
 from data_ferret.kernel.checkpoint import Checkpoint, Checkpoints, filter_user_namespace
 from data_ferret.kernel.deepcopyable import check_deepcopyable
 from data_ferret.kernel.display_helpers import DisplayHelper
@@ -741,16 +742,18 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 with timer(key="sdc_execute") as run_timer:
                     if isinstance(user_ns, TrackingDict):
                         with user_ns.track_execution():
-                            result = await super().do_execute(
-                                code,
-                                silent,
-                                store_history,
-                                user_expressions,
-                                allow_stdin,
-                                cell_meta=cell_meta,
-                                cell_id=self._cell_id,
-                            )
-                        tracking = user_ns.get_tracking_data()
+                            with timer(key="track_execution", message="Run cell code"):
+                                result = await super().do_execute(
+                                    code,
+                                    silent,
+                                    store_history,
+                                    user_expressions,
+                                    allow_stdin,
+                                    cell_meta=cell_meta,
+                                    cell_id=self._cell_id,
+                                )
+                        with timer(key="get_tracking_data", message="Get tracking data"):
+                            tracking = user_ns.get_tracking_data()
                     else:
                         result = await super().do_execute(
                             code,
@@ -782,8 +785,8 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 return result
 
             # Warn about non-deepcopyable objects after successful execution
-            with timer(key="warn_non_deepcopyable", message="Warn non-deepcopyable"):
-                self._warn_non_deepcopyable_objects()
+            # with timer(key="warn_non_deepcopyable", message="Warn non-deepcopyable"):
+            #     self._warn_non_deepcopyable_objects()
 
             # Take post-execution snapshot
             with timer(key="sdc_post_checkpoint") as post_timer:
@@ -992,9 +995,18 @@ class FerretSDCKernel(IPythonKernel, Magics):
         This is critical for correct operation with TrackingDict.
         """
         # Convert TrackingDict to regular dict for checkpointing
-        self._checkpoint.save(
+        saved, removed = self._checkpoint.save(
             checkpoint_name, dict(self.shell.user_ns), max_size_mb=None
         )
+
+        for k, v in removed.items():
+            message = f"The object {k} (type {v}) cannot be checkpointed"
+            log(message)
+            self._display.display_icon_and_text(
+                "\u26A0\uFE0F",
+                message
+            )
+
         return self._checkpoint.saved[checkpoint_name]
 
     async def _execute_without_sdc(

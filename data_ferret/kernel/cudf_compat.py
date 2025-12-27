@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
+from data_ferret.util.output import timer
+
 if TYPE_CHECKING:
     from data_ferret.kernel.column_tracking import ColumnAccessTracker
 
@@ -704,8 +706,9 @@ def diff_cudf(obj1: Any, obj2: Any, path: str, differ: Any) -> Optional[Any]:
     Returns None if equal, or a DiffNode if different.
     """
     # Convert both to pandas (uncached - we want fresh copies for comparison)
-    pdf1 = to_pandas(obj1)
-    pdf2 = to_pandas(obj2)
+    with timer(key="diff_cudf", message="Convert cuDF to pandas"):
+        pdf1 = to_pandas(obj1)
+        pdf2 = to_pandas(obj2)
 
     # Use the Diff instance's comparison methods
     if is_cudf_dataframe(obj1):

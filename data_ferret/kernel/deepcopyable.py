@@ -29,6 +29,7 @@ import datetime
 import decimal
 
 from data_ferret.kernel.opaque import OpaqueRegistry
+from data_ferret.util.output import log, timer
 
 
 def check_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> str | None:
@@ -259,9 +260,13 @@ def check_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> str | None:
         # Pandas DataFrame
         if isinstance(obj, pd.DataFrame):
             _seen.add(obj_id)
+
             # Use .iloc to avoid issues with MultiIndex columns
             for i in range(len(obj.columns)):
-                col_series = obj.iloc[:, i]
+                # print column name and dtype
+                log(f"Column: {obj.columns[i]}, Dtype: {obj.iloc[:, i].dtype}")
+                with timer(key=f"Checking column {obj.columns[i]}", message=f"Checking column {obj.columns[i]}"):
+                    col_series = obj.iloc[:, i]
                 if col_series.dtype == object:
                     for item in col_series:
                         reason = check_deepcopyable(item, _seen)

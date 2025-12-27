@@ -779,6 +779,12 @@ class Diff:
         Compare two values, dispatching to type-specific methods.
         Returns None if equal, otherwise returns DiffNode with differences.
         """
+
+        ta = type(val_a)
+        tb = type(val_b)
+        log("[zzz] Comparing values", path, ta.__module__, ta.__name__)
+        log("[zzz] Comparing values", tb.__module__, tb.__name__)
+
         # Handle cudf objects by converting to pandas (all cudf logic in cudf_compat)
         from . import cudf_compat
         if cudf_compat.are_both_cudf_same_type(val_a, val_b):
@@ -1814,6 +1820,14 @@ class Diff:
         # FAST PATH: If DataFrames are structurally identical, try vectorized
         # equality check before column-by-column comparison.
         # ======================================================================
+
+        log("[zzz] Comparing values", path, type(val_a).__qualname__, type(val_b).__qualname__)
+
+        log("[zzz] Comparing values", val_a.shape, val_b.shape)
+        log("[zzz] Comparing values", val_a.columns.equals(val_b.columns), val_a.index.equals(val_b.index))
+        log("[zzz] Comparing values", val_a.columns, val_b.columns)
+        log("[zzz] Comparing values", val_a.index, val_b.index)
+
         if (val_a.shape == val_b.shape and
             val_a.columns.equals(val_b.columns) and
             val_a.index.equals(val_b.index)):

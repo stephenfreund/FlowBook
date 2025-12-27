@@ -778,7 +778,7 @@ from data_ferret.util.output import log, timer
 pd.options.mode.copy_on_write = True
 
 # Infer string columns as StringDtype instead of object (for better performance)
-# pd.options.future.infer_string = True
+pd.options.future.infer_string = True
 
 
 # System variables to filter out from user namespace
