@@ -4345,3 +4345,94 @@ class TestDataFrameSeriesSubclasses:
         result = differ.diff({'gdf': gdf1}, {'gdf': gdf2})
         assert_no_diff(result)
 
+
+
+class TestDeferredKerasImport:
+    """Tests for deferred Keras import in diff module."""
+
+    def test_is_keras_model_detection_without_import(self):
+        """_is_keras_model should detect based on module name without importing Keras."""
+        from data_ferret.kernel.diff import _is_keras_model
+
+        # Regular objects should not be detected as Keras models
+        assert not _is_keras_model(42)
+        assert not _is_keras_model("string")
+        assert not _is_keras_model([1, 2, 3])
+        assert not _is_keras_model({'a': 1})
+        assert not _is_keras_model(pd.DataFrame({'x': [1, 2]}))
+        assert not _is_keras_model(np.array([1, 2, 3]))
+
+    def test_is_keras_model_with_mock_keras_class(self):
+        """_is_keras_model should detect classes with 'keras' in module and Model/Sequential in MRO."""
+        from data_ferret.kernel.diff import _is_keras_model
+
+        # Create a mock class that looks like a Keras model
+        class Model:
+            pass
+
+        class MockKerasModel(Model):
+            pass
+
+        # Set module to look like keras
+        MockKerasModel.__module__ = 'tensorflow.keras.models'
+
+        instance = MockKerasModel()
+        assert _is_keras_model(instance)
+
+    def test_is_keras_model_with_non_keras_model_class(self):
+        """Classes named Model but not from keras module should not be detected."""
+        from data_ferret.kernel.diff import _is_keras_model
+
+        class Model:
+            pass
+
+        class MyModel(Model):
+            pass
+
+        # Module is not keras
+        MyModel.__module__ = 'my_custom_module'
+
+        instance = MyModel()
+        assert not _is_keras_model(instance)
+
+    def test_diff_does_not_register_keras_for_non_keras_objects(self):
+        """Diffing non-Keras objects should not trigger Keras handler registration."""
+        from data_ferret.kernel import diff as diff_module
+
+        # Reset the registration flag to test fresh
+        original_flag = diff_module._keras_dispatch_registered
+        diff_module._keras_dispatch_registered = False
+
+        try:
+            differ = Diff()
+            a = {'x': 1, 'df': pd.DataFrame({'a': [1, 2, 3]})}
+            b = {'x': 1, 'df': pd.DataFrame({'a': [1, 2, 3]})}
+
+            differ.diff(a, b)
+
+            # Keras handlers should NOT have been registered
+            assert not diff_module._keras_dispatch_registered, \
+                "Keras handlers were registered for non-Keras objects"
+        finally:
+            # Restore original flag
+            diff_module._keras_dispatch_registered = original_flag
+
+    def test_keras_handler_registration_is_idempotent(self):
+        """Multiple calls to _register_keras_dispatch_if_needed should be safe."""
+        from data_ferret.kernel.diff import _register_keras_dispatch_if_needed
+        from data_ferret.kernel import diff as diff_module
+
+        # Save original state
+        original_flag = diff_module._keras_dispatch_registered
+
+        try:
+            # Force registration
+            diff_module._keras_dispatch_registered = False
+            _register_keras_dispatch_if_needed()
+            assert diff_module._keras_dispatch_registered
+
+            # Call again - should be idempotent
+            _register_keras_dispatch_if_needed()
+            assert diff_module._keras_dispatch_registered
+        finally:
+            diff_module._keras_dispatch_registered = original_flag

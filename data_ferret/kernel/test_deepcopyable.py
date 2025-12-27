@@ -579,3 +579,99 @@ class TestDecimalType:
         assert check_deepcopyable(Decimal("Infinity")) is None
         assert check_deepcopyable(Decimal("-Infinity")) is None
         assert check_deepcopyable(Decimal("NaN")) is None
+
+
+class TestDeferredKerasImportDeepCopy:
+    """Tests for deferred Keras import in deepcopy module."""
+
+    def test_is_keras_model_detection_without_import(self):
+        """_is_keras_model should detect based on module name without importing Keras."""
+        from data_ferret.kernel.deepcopy import _is_keras_model
+
+        # Regular objects should not be detected as Keras models
+        assert not _is_keras_model(42)
+        assert not _is_keras_model("string")
+        assert not _is_keras_model([1, 2, 3])
+        assert not _is_keras_model({'a': 1})
+        
+        import pandas as pd
+        import numpy as np
+        assert not _is_keras_model(pd.DataFrame({'x': [1, 2]}))
+        assert not _is_keras_model(np.array([1, 2, 3]))
+
+    def test_is_keras_model_with_mock_keras_class(self):
+        """_is_keras_model should detect classes with 'keras' in module and Model/Sequential in MRO."""
+        from data_ferret.kernel.deepcopy import _is_keras_model
+
+        # Create a mock class that looks like a Keras model
+        class Model:
+            pass
+
+        class MockKerasModel(Model):
+            pass
+
+        # Set module to look like keras
+        MockKerasModel.__module__ = 'tensorflow.keras.models'
+
+        instance = MockKerasModel()
+        assert _is_keras_model(instance)
+
+    def test_is_keras_model_with_non_keras_model_class(self):
+        """Classes named Model but not from keras module should not be detected."""
+        from data_ferret.kernel.deepcopy import _is_keras_model
+
+        class Model:
+            pass
+
+        class MyModel(Model):
+            pass
+
+        # Module is not keras
+        MyModel.__module__ = 'my_custom_module'
+
+        instance = MyModel()
+        assert not _is_keras_model(instance)
+
+    def test_deepcopy_does_not_register_keras_for_non_keras_objects(self):
+        """Deepcopy of non-Keras objects should not trigger Keras handler registration."""
+        from data_ferret.kernel import deepcopy as dc_module
+        from data_ferret.kernel.deepcopy import deepcopy
+
+        # Reset the registration flag to test fresh
+        original_flag = dc_module._keras_handlers_registered
+        dc_module._keras_handlers_registered = False
+
+        try:
+            import pandas as pd
+            
+            # Deepcopy various non-Keras objects
+            deepcopy([1, 2, 3])
+            deepcopy({'a': 1, 'b': 2})
+            deepcopy(pd.DataFrame({'x': [1, 2, 3]}))
+
+            # Keras handlers should NOT have been registered
+            assert not dc_module._keras_handlers_registered, \
+                "Keras handlers were registered for non-Keras objects"
+        finally:
+            # Restore original flag
+            dc_module._keras_handlers_registered = original_flag
+
+    def test_keras_handler_registration_is_idempotent(self):
+        """Multiple calls to _register_keras_handlers_if_needed should be safe."""
+        from data_ferret.kernel.deepcopy import _register_keras_handlers_if_needed
+        from data_ferret.kernel import deepcopy as dc_module
+
+        # Save original state
+        original_flag = dc_module._keras_handlers_registered
+
+        try:
+            # Force registration
+            dc_module._keras_handlers_registered = False
+            _register_keras_handlers_if_needed()
+            assert dc_module._keras_handlers_registered
+
+            # Call again - should be idempotent
+            _register_keras_handlers_if_needed()
+            assert dc_module._keras_handlers_registered
+        finally:
+            dc_module._keras_handlers_registered = original_flag
