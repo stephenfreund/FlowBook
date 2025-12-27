@@ -530,7 +530,21 @@ class CuDFCheckpointCache:
         if cached is not None:
             return cached
 
-        pandas_copy = obj.to_pandas()
+        # Handle cudf.pandas proxy objects
+        if is_cudf_proxy(obj):
+            if hasattr(obj, '_fsproxy_slow'):
+                slow_obj = obj._fsproxy_slow
+                if callable(slow_obj):
+                    slow_obj = slow_obj()
+                pandas_copy = slow_obj.copy() if hasattr(slow_obj, 'copy') else slow_obj
+            elif hasattr(obj, 'to_pandas'):
+                pandas_copy = obj.to_pandas()
+            else:
+                pandas_copy = obj
+        else:
+            # Native cudf object
+            pandas_copy = obj.to_pandas()
+
         self.cache(obj, pandas_copy)
         return pandas_copy
 
@@ -624,9 +638,28 @@ def to_pandas(obj: Any) -> Any:
     Convert cuDF object to pandas (uncached, always copies).
 
     If obj is not a cuDF object, returns it unchanged.
+    Handles both native cudf objects and cudf.pandas proxy objects.
     """
     if not is_cudf_object(obj):
         return obj
+
+    # For cudf.pandas proxy objects, get the underlying pandas object
+    if is_cudf_proxy(obj):
+        # Get the slow (pandas) object from the proxy
+        if hasattr(obj, '_fsproxy_slow'):
+            slow_obj = obj._fsproxy_slow
+            if callable(slow_obj):
+                slow_obj = slow_obj()
+            # Return a copy to ensure independence
+            if hasattr(slow_obj, 'copy'):
+                return slow_obj.copy()
+            return slow_obj
+        # Fallback: proxy might have to_pandas
+        if hasattr(obj, 'to_pandas'):
+            return obj.to_pandas()
+        return obj
+
+    # Native cudf object - use to_pandas()
     return obj.to_pandas()
 
 
