@@ -4229,3 +4229,119 @@ class TestFastPathPerformance:
         b = {f'df_{i}': pd.DataFrame({'a': [1, 2, 3]}) for i in range(50)}
         result = differ.diff(a, b)
         assert_no_diff(result)
+
+
+class TestDataFrameSeriesSubclasses:
+    """
+    Tests for DataFrame/Series subclass handling via isinstance fallbacks.
+
+    These tests verify that the isinstance fallbacks in _compare_value work
+    correctly for DataFrame/Series subclasses that don't match exact type
+    lookup in _COMPARE_DISPATCH (e.g., cudf.pandas proxy types).
+    """
+
+    def test_dataframe_subclass_equal(self):
+        """DataFrame subclass should use _compare_dataframe via isinstance fallback."""
+        class MyDataFrame(pd.DataFrame):
+            pass
+
+        differ = Diff()
+        df1 = MyDataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
+        df2 = MyDataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
+
+        result = differ.diff({'df': df1}, {'df': df2})
+        assert_no_diff(result)
+
+    def test_dataframe_subclass_different(self):
+        """DataFrame subclass differences should be detected."""
+        class MyDataFrame(pd.DataFrame):
+            pass
+
+        differ = Diff()
+        df1 = MyDataFrame({'a': [1, 2, 3]})
+        df2 = MyDataFrame({'a': [1, 2, 999]})
+
+        result = differ.diff({'df': df1}, {'df': df2})
+        assert_has_diff(result, 'df')
+
+    def test_series_subclass_equal(self):
+        """Series subclass should use _compare_series via isinstance fallback."""
+        class MySeries(pd.Series):
+            pass
+
+        differ = Diff()
+        s1 = MySeries([1, 2, 3], name='values')
+        s2 = MySeries([1, 2, 3], name='values')
+
+        result = differ.diff({'s': s1}, {'s': s2})
+        assert_no_diff(result)
+
+    def test_series_subclass_different(self):
+        """Series subclass differences should be detected."""
+        class MySeries(pd.Series):
+            pass
+
+        differ = Diff()
+        s1 = MySeries([1, 2, 3])
+        s2 = MySeries([1, 2, 999])
+
+        result = differ.diff({'s': s1}, {'s': s2})
+        assert_has_diff(result, 's')
+
+    def test_dispatch_cache_populated_for_subclass(self):
+        """isinstance fallback should cache the dispatch for subsequent lookups."""
+        from data_ferret.kernel.diff import _DISPATCH_CACHE
+
+        class CachedDataFrame(pd.DataFrame):
+            pass
+
+        # Clear any existing cache entry
+        df_type = CachedDataFrame
+        if df_type in _DISPATCH_CACHE:
+            del _DISPATCH_CACHE[df_type]
+
+        differ = Diff()
+        df1 = CachedDataFrame({'a': [1, 2, 3]})
+        df2 = CachedDataFrame({'a': [1, 2, 3]})
+
+        # First comparison - should populate cache
+        differ.diff({'df': df1}, {'df': df2})
+
+        # Verify cache was populated
+        assert df_type in _DISPATCH_CACHE
+        assert _DISPATCH_CACHE[df_type] == "_compare_dataframe"
+
+    def test_mixed_subclass_and_regular(self):
+        """Mix of regular and subclass DataFrames should both work."""
+        class MyDataFrame(pd.DataFrame):
+            pass
+
+        differ = Diff()
+        a = {
+            'regular': pd.DataFrame({'x': [1, 2]}),
+            'subclass': MyDataFrame({'y': [3, 4]})
+        }
+        b = {
+            'regular': pd.DataFrame({'x': [1, 2]}),
+            'subclass': MyDataFrame({'y': [3, 4]})
+        }
+
+        result = differ.diff(a, b)
+        assert_no_diff(result)
+
+    def test_geopandas_geodataframe_like(self):
+        """Simulate GeoPandas GeoDataFrame-like subclass handling."""
+        # This tests the pattern used by libraries like GeoPandas
+        class GeoDataFrame(pd.DataFrame):
+            """Mock GeoDataFrame-like class."""
+            @property
+            def _constructor(self):
+                return GeoDataFrame
+
+        differ = Diff()
+        gdf1 = GeoDataFrame({'name': ['A', 'B'], 'value': [1, 2]})
+        gdf2 = GeoDataFrame({'name': ['A', 'B'], 'value': [1, 2]})
+
+        result = differ.diff({'gdf': gdf1}, {'gdf': gdf2})
+        assert_no_diff(result)
+
