@@ -1702,7 +1702,7 @@ class Diff:
     # FAST PATH HELPERS: Vectorized equality checks for DataFrames and Series
     # ==========================================================================
 
-    def _fast_series_equal(self, s_a: pd.Series, s_b: pd.Series) -> bool:
+    def _fast_series_equal(self, s_a: pd.Series, s_b: pd.Series, path: str = "") -> bool:
         """
         Fast vectorized equality check for two Series.
 
@@ -1726,11 +1726,11 @@ class Diff:
             arr_b = s_b.values
             if arr_a is arr_b:
                 if _PROFILE_DIFF:
-                    log(f"[diff profile] Fast path: identity (same object)")
+                    log(f"[diff profile] Fast path: identity (same object) at {path}")
                 return True
             if np.shares_memory(arr_a, arr_b):
                 if _PROFILE_DIFF:
-                    log(f"[diff profile] Fast path: identity (shared memory)")
+                    log(f"[diff profile] Fast path: identity (shared memory) at {path}")
                 return True
         except (TypeError, ValueError):
             pass  # Some array types don't support shares_memory
@@ -1774,8 +1774,10 @@ class Diff:
 
             if _PROFILE_DIFF:
                 col_start = time.perf_counter()
-
-            is_equal = self._fast_series_equal(df_a.iloc[:, i], df_b.iloc[:, i])
+                path_col = f"{path}['{col_name}']" if path else col_name
+                is_equal = self._fast_series_equal(df_a.iloc[:, i], df_b.iloc[:, i], path_col)
+            else:
+                is_equal = self._fast_series_equal(df_a.iloc[:, i], df_b.iloc[:, i])
 
             if _PROFILE_DIFF:
                 col_elapsed = time.perf_counter() - col_start
