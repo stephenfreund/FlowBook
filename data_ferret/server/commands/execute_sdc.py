@@ -134,6 +134,7 @@ class ExecuteSDCCommand(NotebookCommand):
                     def _downsampled_read_csv(*args, **kwargs):
                         df = _original_read_csv(*args, **kwargs)
                         n_rows = int(len(df) * {downsample_csv})
+                        print(f"Downsampling CSV: keeping top", n_rows, "of", len(df), "rows")
                         return df.head(n_rows)
 
                     pd.read_csv = _downsampled_read_csv
