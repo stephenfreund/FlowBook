@@ -53,14 +53,16 @@ def _unwrap_cudf_proxy(obj: Any) -> Any:
         The underlying pandas object if obj is a cudf proxy, otherwise obj unchanged
     """
     # Check if this is a cudf proxy by looking for the _fsproxy_slow attribute
-    # This is the standard way cudf.pandas stores the underlying pandas object
-    if hasattr(obj, '_fsproxy_slow'):
-        slow_obj = obj._fsproxy_slow
+    # IMPORTANT: Use object.__getattribute__ to bypass our wrapped __getattribute__
+    # Otherwise hasattr() triggers our wrapper -> _unwrap_cudf_proxy -> infinite recursion
+    try:
+        slow_obj = object.__getattribute__(obj, '_fsproxy_slow')
         # _fsproxy_slow can be a callable that returns the slow object
         if callable(slow_obj):
             return slow_obj()
         return slow_obj
-    return obj
+    except AttributeError:
+        return obj
 
 
 # =============================================================================
