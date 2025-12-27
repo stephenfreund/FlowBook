@@ -987,6 +987,14 @@ class Diff:
                     # Handle Index subclasses like IntervalIndex, MultiIndex, etc.
                     _DISPATCH_CACHE[t] = "_compare_index"
                     result = self._compare_index(val_a, val_b, path)
+                elif isinstance(val_a, pd.DataFrame):
+                    # Handle DataFrame subclasses and cudf.pandas proxy types
+                    _DISPATCH_CACHE[t] = "_compare_dataframe"
+                    result = self._compare_dataframe(val_a, val_b, path)
+                elif isinstance(val_a, pd.Series):
+                    # Handle Series subclasses and cudf.pandas proxy types
+                    _DISPATCH_CACHE[t] = "_compare_series"
+                    result = self._compare_series(val_a, val_b, path)
                 elif callable(val_a):
                     # Don't cache callables - too many different types
                     result = self._compare_callable(val_a, val_b, path)
