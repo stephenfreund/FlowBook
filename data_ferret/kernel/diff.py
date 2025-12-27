@@ -166,8 +166,27 @@ except ImportError:
 _keras_dispatch_registered = False
 
 
+def _is_keras_model(x) -> bool:
+    """Check if x is a Keras model without importing Keras.
+
+    Uses module name checking to avoid the expensive Keras import (~3s).
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Check for tensorflow.keras or standalone keras
+    return 'keras' in module and any(
+        base.__name__ in ('Model', 'Sequential')
+        for base in cls.__mro__
+        if hasattr(base, '__name__')
+    )
+
+
 def _register_keras_dispatch_if_needed():
-    """Register Keras model types in dispatch table lazily."""
+    """Register Keras model types in dispatch table lazily.
+
+    IMPORTANT: This is expensive (~3s) due to Keras import. Only call when
+    we know we're dealing with a Keras model (use _is_keras_model first).
+    """
     global _keras_dispatch_registered
     if _keras_dispatch_registered:
         return
@@ -611,9 +630,6 @@ class Diff:
             The differences dict is empty if all variables are equal.
             The warnings list contains structural warnings when structural_mode is WARN.
         """
-        # Register Keras handlers lazily on first diff call
-        _register_keras_dispatch_if_needed()
-
         if keys_to_include is None:
             keys_to_include = set(a.keys()) | set(b.keys())
 
@@ -783,15 +799,10 @@ class Diff:
 
         ta = type(val_a)
         tb = type(val_b)
-        log("[zzz] Comparing values", path, ta.__module__, ta.__name__)
-        log("[zzz] Comparing values", tb.__module__, tb.__name__)
 
         # Handle cudf objects by converting to pandas (all cudf logic in cudf_compat)
         if cudf_compat.are_both_cudf_same_type(val_a, val_b):
-            log("[zzz] Comparing cudf values", path)
             return cudf_compat.diff_cudf(val_a, val_b, path, self)
-
-        log("[zzz] Not comparing cudf values", path)
 
         # Skip pointer tracking for immutable atomic values
         # For these types, only value equality matters, not object identity
@@ -998,6 +1009,17 @@ class Diff:
                     # Handle Series subclasses and cudf.pandas proxy types
                     _DISPATCH_CACHE[t] = "_compare_series"
                     result = self._compare_series(val_a, val_b, path)
+                elif _is_keras_model(val_a):
+                    # Keras model - register handler lazily to avoid expensive import
+                    _register_keras_dispatch_if_needed()
+                    # Retry dispatch after registration
+                    method_name = _COMPARE_DISPATCH.get(t)
+                    if method_name is not None:
+                        method = getattr(self, method_name)
+                        result = method(val_a, val_b, path)
+                    else:
+                        # Fallback to object comparison
+                        result = self._compare_object(val_a, val_b, path)
                 elif callable(val_a):
                     # Don't cache callables - too many different types
                     result = self._compare_callable(val_a, val_b, path)
@@ -1831,13 +1853,6 @@ class Diff:
         # FAST PATH: If DataFrames are structurally identical, try vectorized
         # equality check before column-by-column comparison.
         # ======================================================================
-
-        log("[zzz] FP Comparing values", path, type(val_a).__qualname__, type(val_b).__qualname__)
-
-        log("[zzz] FP Comparing values", val_a.shape, val_b.shape)
-        log("[zzz] Comparing values", val_a.columns.equals(val_b.columns), val_a.index.equals(val_b.index))
-        log("[zzz] Comparing values", val_a.columns, val_b.columns)
-        log("[zzz] Comparing values", val_a.index, val_b.index)
 
         if (val_a.shape == val_b.shape and
             val_a.columns.equals(val_b.columns) and

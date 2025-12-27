@@ -1370,20 +1370,27 @@ class Checkpoint:
         Returns:
             DiffResult: Structured diff tree with only differences
         """
-        from .structural_tracking import StructuralTrackingMode
-        if structural_mode is None:
-            structural_mode = StructuralTrackingMode.OFF
-        differ = Diff(
-            strict=False,
-            report_close=False,
-            atol=1e-5,
-            rtol=1e-5,
-            use_leq=use_leq,
-            column_rbw=column_rbw,
-            structural_reads=structural_reads or {},
-            structural_mode=structural_mode,
-        )
-        return differ.diff(a.user_ns, b.user_ns, keys_to_include)
+        with timer(key="checkpoint_diff_setup", message="[diff] Setup"):
+            from .structural_tracking import StructuralTrackingMode
+            if structural_mode is None:
+                structural_mode = StructuralTrackingMode.OFF
+
+        with timer(key="checkpoint_diff_create", message="[diff] Create Diff object"):
+            differ = Diff(
+                strict=False,
+                report_close=False,
+                atol=1e-5,
+                rtol=1e-5,
+                use_leq=use_leq,
+                column_rbw=column_rbw,
+                structural_reads=structural_reads or {},
+                structural_mode=structural_mode,
+            )
+
+        with timer(key="checkpoint_diff_compare", message="[diff] Compare namespaces"):
+            result = differ.diff(a.user_ns, b.user_ns, keys_to_include)
+
+        return result
 
 
 class Checkpoints:
