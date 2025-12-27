@@ -69,6 +69,7 @@ class TimerStats:
     min: float
     max: float
     std: float
+    p90: float
     p95: float
 
 
@@ -172,6 +173,7 @@ def calculate_stats(durations: list[float]) -> dict:
             'min': 0.0,
             'max': 0.0,
             'std': 0.0,
+            'p90': 0.0,
             'p95': 0.0,
         }
 
@@ -184,6 +186,7 @@ def calculate_stats(durations: list[float]) -> dict:
         'min': float(np.min(arr)),
         'max': float(np.max(arr)),
         'std': float(np.std(arr)),
+        'p90': float(np.percentile(arr, 90)),
         'p95': float(np.percentile(arr, 95)),
     }
 
@@ -298,7 +301,7 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
     lines.append(sep)
 
     # Column headers
-    header = f"{'Timer Key':<50} {'Count':>8} {'Mean':>14} {'Median':>14} {'Total':>14} {'Min':>14} {'Max':>14} {'Std Dev':>14} {'P95':>14}"
+    header = f"{'Timer Key':<50} {'Count':>8} {'Mean':>14} {'Median':>14} {'Total':>14} {'Min':>14} {'Max':>14} {'Std Dev':>14} {'P90':>14} {'P95':>14}"
     lines.append(header)
 
     # Data separator
@@ -315,6 +318,7 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
             f"{format_time(s.min, use_commas=True):>14} "
             f"{format_time(s.max, use_commas=True):>14} "
             f"{format_time(s.std, use_commas=True):>14} "
+            f"{format_time(s.p90, use_commas=True):>14} "
             f"{format_time(s.p95, use_commas=True):>14}"
         )
         lines.append(row)
@@ -438,10 +442,10 @@ def format_csv_single(stats: list[TimerStats]) -> str:
     Returns:
         CSV string
     """
-    lines = ["key,count,total,mean,median,min,max,std,p95"]
+    lines = ["key,count,total,mean,median,min,max,std,p90,p95"]
 
     for s in stats:
-        line = f"{s.key},{s.count},{s.total},{s.mean},{s.median},{s.min},{s.max},{s.std},{s.p95}"
+        line = f"{s.key},{s.count},{s.total},{s.mean},{s.median},{s.min},{s.max},{s.std},{s.p90},{s.p95}"
         lines.append(line)
 
     return "\n".join(lines)
@@ -461,17 +465,17 @@ def format_csv_multi(timings_by_file: dict[str, list[dict]],
     Returns:
         CSV string
     """
-    lines = ["file,key,count,total,mean,median,min,max,std,p95"]
+    lines = ["file,key,count,total,mean,median,min,max,std,p90,p95"]
 
     # Per-file stats
     for file_path, stats in stats_by_file.items():
         for s in stats:
-            line = f"{file_path},{s.key},{s.count},{s.total},{s.mean},{s.median},{s.min},{s.max},{s.std},{s.p95}"
+            line = f"{file_path},{s.key},{s.count},{s.total},{s.mean},{s.median},{s.min},{s.max},{s.std},{s.p90},{s.p95}"
             lines.append(line)
 
     # Combined stats
     for s in combined_stats:
-        line = f"COMBINED,{s.key},{s.count},{s.total},{s.mean},{s.median},{s.min},{s.max},{s.std},{s.p95}"
+        line = f"COMBINED,{s.key},{s.count},{s.total},{s.mean},{s.median},{s.min},{s.max},{s.std},{s.p90},{s.p95}"
         lines.append(line)
 
     return "\n".join(lines)
