@@ -705,5 +705,146 @@ class TestMixedPandasCudf:
             tracker.uninstall()
 
 
+# =============================================================================
+# Tests for structural tracking cudf proxy unwrapping
+# =============================================================================
+
+class TestStructuralTrackingProxyUnwrap:
+    """Test that structural tracking doesn't cause recursion with cudf proxies."""
+
+    def test_unwrap_cudf_proxy_returns_non_proxy_unchanged(self):
+        """_unwrap_cudf_proxy should return non-proxy objects unchanged."""
+        from data_ferret.kernel.structural_tracking import _unwrap_cudf_proxy
+
+        # Test with various non-proxy objects
+        assert _unwrap_cudf_proxy(None) is None
+        assert _unwrap_cudf_proxy("string") == "string"
+        assert _unwrap_cudf_proxy(123) == 123
+
+        df = pd.DataFrame({'a': [1, 2, 3]})
+        assert _unwrap_cudf_proxy(df) is df
+
+        series = pd.Series([1, 2, 3])
+        assert _unwrap_cudf_proxy(series) is series
+
+    def test_unwrap_cudf_proxy_with_mock_proxy(self):
+        """_unwrap_cudf_proxy should unwrap objects with _fsproxy_slow attribute."""
+        from data_ferret.kernel.structural_tracking import _unwrap_cudf_proxy
+
+        # Create a mock proxy object
+        underlying_df = pd.DataFrame({'a': [1, 2, 3]})
+
+        class MockProxy:
+            _fsproxy_slow = underlying_df
+
+        proxy = MockProxy()
+        result = _unwrap_cudf_proxy(proxy)
+        assert result is underlying_df
+
+    def test_unwrap_cudf_proxy_with_callable_fsproxy_slow(self):
+        """_unwrap_cudf_proxy should handle callable _fsproxy_slow."""
+        from data_ferret.kernel.structural_tracking import _unwrap_cudf_proxy
+
+        underlying_df = pd.DataFrame({'a': [1, 2, 3]})
+
+        class MockProxy:
+            def _fsproxy_slow(self):
+                return underlying_df
+
+        proxy = MockProxy()
+        result = _unwrap_cudf_proxy(proxy)
+        assert result is underlying_df
+
+    def test_structural_tracking_no_recursion_with_pandas(self):
+        """Structural tracking should work without recursion for pandas objects."""
+        from data_ferret.kernel.structural_tracking import StructuralAccessTracker
+
+        tracker = StructuralAccessTracker()
+        tracker.install()
+        try:
+            df = pd.DataFrame({'a': [1, 2], 'b': [3, 4]})
+            tracker.register(df, 'df')
+
+            # These operations should complete without recursion
+            _ = df.groupby('a')['b'].mean()
+            _ = df.loc[0]
+            _ = df.iloc[0]
+
+            # Verify no crash
+            reads = tracker.resolve_to_paths()
+            assert isinstance(reads, dict)
+        finally:
+            tracker.uninstall()
+
+    def test_structural_tracking_groupby_operations(self):
+        """GroupBy operations should work with structural tracking installed."""
+        from data_ferret.kernel.structural_tracking import StructuralAccessTracker
+
+        tracker = StructuralAccessTracker()
+        tracker.install()
+        try:
+            df = pd.DataFrame({
+                'category': ['A', 'B', 'A', 'B'],
+                'value': [10, 20, 30, 40]
+            })
+            tracker.register(df, 'df')
+
+            # Various groupby operations that previously could cause issues
+            result1 = df.groupby('category')['value'].sum()
+            result2 = df.groupby('category')[['value']].mean()
+            result3 = df.groupby('category').agg({'value': 'sum'})
+
+            assert len(result1) == 2
+            assert 'value' in result2.columns
+            assert 'value' in result3.columns
+        finally:
+            tracker.uninstall()
+
+
+@pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
+class TestCudfStructuralTracking:
+    """Test structural tracking with cudf objects."""
+
+    def test_cudf_structural_tracking_no_recursion(self):
+        """Structural tracking should not cause recursion with cudf."""
+        import cudf
+        from data_ferret.kernel.structural_tracking import StructuralAccessTracker
+
+        tracker = StructuralAccessTracker()
+        tracker.install()
+        try:
+            gdf = cudf.DataFrame({'a': [1, 2], 'b': [3, 4]})
+            tracker.register(gdf, 'gdf')
+
+            # These should complete without recursion
+            _ = gdf.groupby('a')['b'].mean()
+
+            reads = tracker.resolve_to_paths()
+            assert isinstance(reads, dict)
+        finally:
+            tracker.uninstall()
+
+    def test_cudf_groupby_list_selection_no_recursion(self):
+        """The specific pattern that was causing recursion should work."""
+        import cudf
+        from data_ferret.kernel.structural_tracking import StructuralAccessTracker
+
+        tracker = StructuralAccessTracker()
+        tracker.install()
+        try:
+            gdf = cudf.DataFrame({
+                'Weight Capacity (kg)': [10, 20, 10, 30],
+                'Price': [100, 200, 150, 300]
+            })
+            tracker.register(gdf, 'gdf')
+
+            # This exact pattern was causing RecursionError
+            result = gdf.groupby("Weight Capacity (kg)")[["Price"]].mean()
+
+            assert 'Price' in result.columns
+        finally:
+            tracker.uninstall()
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
