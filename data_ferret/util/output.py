@@ -158,6 +158,10 @@ class Output:
             json.dump(timings, open(self.timings_file, "w"), indent=2)
             log(f"Output timer data saved to {self.timings_file}")
 
+    def add_timing(self, key: str, duration: float):
+        with self.lock:
+            self.timings.append(Timing(key=key, duration=duration))
+
     def timing_context(self, *, key: str | None = None, message: str | None = None):
         return self.TimedOutputContext(
             self, key, message, color="cyan", start="[", end="]"

@@ -211,7 +211,7 @@ from .access_events import StructuralRead, VariableRead
 from .conflict_resolver import ConflictResolver
 from .conflict_rules import StructuralMode
 from .change_detector import detect_changes
-from data_ferret.util.output import timer
+from data_ferret.util.output import output, timer
 
 # Checkpoint naming constants
 PRE_CHECKPOINT_PREFIX = "_pre_"
@@ -387,29 +387,29 @@ class SDCEnforcer:
         current_diff = None
         typed_changes = []
         if my_position >= 0:
-            with timer(key="sdc_backward_mutation", message=f"[sdc] Backward mutation check for {cell_id}") as timer:
+            with timer(key="sdc_backward_mutation", message=f"[sdc] Backward mutation check for {cell_id}") as t:
                 violation, current_diff, typed_changes = self._check_backward_mutation(
                     cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
                 )
 
             if violation is not None:
-                self.output.add_timing("sdc_backward_mutation_violation", timer.duration())
+                output.add_timing("sdc_backward_mutation_violation", t.duration())
             else:
-                self.output.add_timing("sdc_backward_mutation_no_violation", timer.duration())
+                output.add_timing("sdc_backward_mutation_no_violation", t.duration())
 
 
         # Check forward dependency (reading from later cells that already executed)
         forward_violation = None
         if my_position >= 0:
-            with timer(key="sdc_forward_dependency", message=f"[sdc] Forward dependency check for {cell_id}") as timer:
+            with timer(key="sdc_forward_dependency", message=f"[sdc] Forward dependency check for {cell_id}") as t:
                 forward_violation = self._check_forward_dependency(
                     cell_id, my_position, tracking
                 )
 
             if forward_violation is not None:
-                self.output.add_timing("sdc_forward_dependency_violation", timer.duration())
+                output.add_timing("sdc_forward_dependency_violation", t.duration())
             else:
-                self.output.add_timing("sdc_forward_dependency_no_violation", timer.duration())
+                output.add_timing("sdc_forward_dependency_no_violation", t.duration())
 
         stale = []
         changed_vars = []

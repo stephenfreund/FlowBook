@@ -170,7 +170,7 @@ from data_ferret.kernel.types import (
     AttributeComponent,
     DataFrameLocation,
 )
-from data_ferret.util.output import log, timer
+from data_ferret.util.output import log, output, timer
 import time
 import os
 
@@ -407,6 +407,10 @@ class DiffProfileStats:
         )
 
         total_time = sum(s[0] for _, s in sorted_types)
+
+        for type_info, (total, count, max_t, max_path) in sorted_types:
+            type_name = type_info.split('(')[0].replace(' ', '_')
+            output.add_timing(f"diff_type_{type_name}", total)
 
         log(f"[diff profile] Total comparison time: {total_time*1000:.2f}ms")
         log(f"[diff profile] By type (top 10):")
