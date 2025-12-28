@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import termcolor
 
 
 def create_ascii_histogram(data, bins=20, width=80, bar_char='#'):
@@ -290,6 +291,11 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
     # Build table
     lines = []
 
+    # Calculate key column width (minimum of header width or max key length)
+    key_width = max(len("Timer Key"), max((len(s.key) for s in sorted_stats), default=0))
+    # Total row width: key + space + Count(8) + space + 9 numeric columns (14 each) + 8 spaces + " | " separator
+    row_width = key_width + 1 + 8 + 1 + 14 * 9 + 8 + 2
+
     # Title
     if title:
         lines.append(title)
@@ -297,34 +303,35 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
         lines.append("Timer Statistics (all times in ms)")
 
     # Header separator
-    sep = "=" * 145
-    lines.append(sep)
+    lines.append("=" * row_width)
 
     # Column headers
-    header = f"{'Timer Key':<50} {'Count':>8} {'Mean':>14} {'Median':>14} {'Total':>14} {'Min':>14} {'Max':>14} {'Std Dev':>14} {'P90':>14} {'P95':>14}"
+    header = f"{'Timer Key':<{key_width}} {'Count':>8} {'Mean':>14} {'Median':>14} {'Max':>14} | {'P90':>14} {'P95':>14} {'Min':>14} {'Total':>14} {'Std Dev':>14}"
     lines.append(header)
 
     # Data separator
-    lines.append("-" * 145)
+    lines.append("-" * row_width)
 
-    # Data rows
-    for s in sorted_stats:
+    # Data rows with alternating colors for readability
+    for i, s in enumerate(sorted_stats):
         row = (
-            f"{s.key:<50} "
+            f"{s.key:<{key_width}} "
             f"{s.count:>8} "
             f"{format_time(s.mean, use_commas=True):>14} "
             f"{format_time(s.median, use_commas=True):>14} "
-            f"{format_time(s.total, use_commas=True):>14} "
-            f"{format_time(s.min, use_commas=True):>14} "
-            f"{format_time(s.max, use_commas=True):>14} "
-            f"{format_time(s.std, use_commas=True):>14} "
+            f"{format_time(s.max, use_commas=True):>14} | "
             f"{format_time(s.p90, use_commas=True):>14} "
-            f"{format_time(s.p95, use_commas=True):>14}"
+            f"{format_time(s.p95, use_commas=True):>14} "
+            f"{format_time(s.min, use_commas=True):>14} "
+            f"{format_time(s.total, use_commas=True):>14} "
+            f"{format_time(s.std, use_commas=True):>14}"
         )
+        if (i // 2) % 2 == 1:
+            row = termcolor.colored(row, attrs=['dark'])
         lines.append(row)
 
     # Footer separator
-    lines.append("-" * 145)
+    lines.append("-" * row_width)
 
     # Total row
     total_count = sum(s.count for s in sorted_stats)
@@ -332,11 +339,15 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
     mean_time = total_time / total_count if total_count > 0 else 0
 
     footer = (
-        f"{'TOTAL':<50} "
+        f"{'TOTAL':<{key_width}} "
         f"{total_count:>8} "
         f"{format_time(mean_time, use_commas=True):>14} "
-        f"{'':>14} "
-        f"{format_time(total_time, use_commas=True):>14}"
+        f"{'':>14} "  # Median
+        f"{'':>14} | "  # Max
+        f"{'':>14} "  # P90
+        f"{'':>14} "  # P95
+        f"{'':>14} "  # Min
+        f"{format_time(total_time, use_commas=True):>14}"  # Total
     )
     lines.append(footer)
 
