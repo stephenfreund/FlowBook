@@ -326,8 +326,10 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
             f"{format_time(s.total, use_commas=True):>14} "
             f"{format_time(s.std, use_commas=True):>14}"
         )
-        if (i // 2) % 2 == 1:
-            row = termcolor.colored(row, attrs=['dark'])
+        if (i // 2) % 2 == 0:
+            row = termcolor.colored(row, 'yellow')
+        else:
+            row = termcolor.colored(row, 'white')
         lines.append(row)
 
     # Footer separator
