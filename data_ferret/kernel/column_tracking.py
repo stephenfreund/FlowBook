@@ -18,7 +18,7 @@ import pandas as pd
 from typing import Dict, Set, Iterable, Tuple, Optional, Generator, Any
 from collections import defaultdict
 
-from data_ferret.util.output import log, error
+from data_ferret.util.output import log, error, timer
 
 
 class ColumnAccessTracker:
@@ -47,7 +47,8 @@ class ColumnAccessTracker:
             return
         # Use class-level check to prevent double-patching across instances
         if not ColumnAccessTracker._patches_installed:
-            self._patch_dataframe_methods()
+            with timer(key="tracking:patch_dataframe_methods", message="Patch DataFrame methods"):
+                self._patch_dataframe_methods()
             ColumnAccessTracker._patches_installed = True
         else:
             # Patches already installed by another instance - just copy the originals
@@ -55,8 +56,9 @@ class ColumnAccessTracker:
         self._installed = True
 
         # Install cudf tracking if available (all cudf logic in cudf_compat)
-        from . import cudf_compat
-        cudf_compat.install_cudf_tracking(self)
+        with timer(key="tracking:cudf_install", message="Install cudf tracking"):
+            from . import cudf_compat
+            cudf_compat.install_cudf_tracking(self)
 
     def uninstall(self) -> None:
         """Restore original DataFrame methods."""

@@ -1568,6 +1568,7 @@ class Checkpoints:
         memo = {}
         failed = {}
 
+        loop_start = time.time()
         for k, v in variables.items():
             try:
                 start_time = time.time()
@@ -1575,15 +1576,15 @@ class Checkpoints:
                 copied[k] = deepcopy(v, memo)
 
                 end_time = time.time()
-                duration = end_time - start_time
+                duration_ms = (end_time - start_time) * 1000  # Convert to milliseconds
 
                 if _PROFILE_CHECKPOINT:
-                    # Record timing keyed by type name
+                    # Record timing keyed by type name (in milliseconds)
                     type_name = type(v).__name__
-                    output.add_timing(f"deepcopy:{type_name}", duration)
+                    output.add_timing(f"deepcopy:{type_name}", duration_ms)
 
-                if duration > 0.010:
-                    log(f"Deep copying variable {k} took {duration:.3f} seconds")
+                if duration_ms > 10:  # 10ms threshold
+                    log(f"Deep copying variable {k} took {duration_ms:.1f} ms")
             except Exception as e:
                 error_msg = f"Failed to deep copy variable {k}: {type(e).__name__}: {e}"
 
@@ -1602,6 +1603,10 @@ class Checkpoints:
                 log(error_msg)
                 # Track variables that failed to copy
                 failed[k] = e
+
+        if _PROFILE_CHECKPOINT:
+            loop_duration_ms = (time.time() - loop_start) * 1000
+            output.add_timing("deepcopy:loop_total", loop_duration_ms)
 
         return copied, memo, failed
 

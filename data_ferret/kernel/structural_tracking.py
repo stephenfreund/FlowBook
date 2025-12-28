@@ -36,6 +36,8 @@ from collections import defaultdict
 from contextlib import contextmanager
 from enum import Enum
 
+from data_ferret.util.output import timer
+
 
 def _unwrap_cudf_proxy(obj: Any) -> Any:
     """
@@ -523,12 +525,13 @@ class StructuralAccessTracker:
             return
         # Use class-level check to prevent double-patching across instances
         if not StructuralAccessTracker._patches_installed:
-            self._patch_dataframe()
-            self._patch_series()
-            self._patch_structure_using_methods()
-            self._patch_indexers()
-            self._patch_pandas_functions()
-            self._patch_groupby()
+            with timer(key="tracking:patch_structural", message="Patch structural methods"):
+                self._patch_dataframe()
+                self._patch_series()
+                self._patch_structure_using_methods()
+                self._patch_indexers()
+                self._patch_pandas_functions()
+                self._patch_groupby()
             # Save to class-level storage for other instances
             StructuralAccessTracker._class_original_methods = self._original_methods.copy()
             StructuralAccessTracker._patches_installed = True
