@@ -861,6 +861,10 @@ pd.options.mode.copy_on_write = True
 # Infer string columns as StringDtype instead of object (for better performance)
 pd.options.future.infer_string = True
 
+# Environment variable to enable detailed checkpoint profiling
+# Set FERRET_PROFILE_CHECKPOINT=1 to record deepcopy timings keyed by type
+_PROFILE_CHECKPOINT = os.environ.get("FERRET_PROFILE_CHECKPOINT", "0") == "1"
+
 
 # System variables to filter out from user namespace
 SYSTEM_VARIABLES = {
@@ -1575,6 +1579,12 @@ class Checkpoints:
 
                 end_time = time.time()
                 duration = end_time - start_time
+
+                if _PROFILE_CHECKPOINT:
+                    # Record timing keyed by type name
+                    type_name = type(v).__name__
+                    self.output.add_timing(f"deepcopy_{type_name}", duration)
+
                 if duration > 0.010:
                     log(f"Deep copying variable {k} took {duration:.3f} seconds")
             except Exception as e:
