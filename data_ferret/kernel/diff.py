@@ -800,8 +800,8 @@ class Diff:
                     var_start = time.perf_counter()
                     type_info = _get_value_shape_info(a[var])
 
-                    ta = type(a[var]).__name__
-                    tb = type(b[var]).__name__
+                    ta = type(a[var]).__module__ + "." + type(a[var]).__name__
+                    tb = type(b[var]).__module__ + "." + type(b[var]).__name__
                     with timer(key=f"diff:{ta}-{tb}", message=f"Comparing {var} ({ta} vs {tb})"):
                         diff_result = self._compare_values(a[var], b[var], path=var)
 

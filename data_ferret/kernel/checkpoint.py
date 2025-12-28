@@ -1580,8 +1580,9 @@ class Checkpoints:
 
                 if _PROFILE_CHECKPOINT:
                     # Record timing keyed by type name (in milliseconds)
+                    type_module = type(v).__module__
                     type_name = type(v).__name__
-                    output.add_timing(f"deepcopy:{type_name}", duration_ms)
+                    output.add_timing(f"deepcopy:{type_module}.{type_name}", duration_ms)
 
                 if duration_ms > 10:  # 10ms threshold
                     log(f"Deep copying variable {k} took {duration_ms:.1f} ms")
