@@ -387,18 +387,29 @@ class SDCEnforcer:
         current_diff = None
         typed_changes = []
         if my_position >= 0:
-            with timer(key="sdc_backward_mutation", message=f"[sdc] Backward mutation check for {cell_id}"):
+            with timer(key="sdc_backward_mutation", message=f"[sdc] Backward mutation check for {cell_id}") as timer:
                 violation, current_diff, typed_changes = self._check_backward_mutation(
                     cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
                 )
 
+            if violation is not None:
+                self.output.add_timing("sdc_backward_mutation_violation", timer.duration())
+            else:
+                self.output.add_timing("sdc_backward_mutation_no_violation", timer.duration())
+
+
         # Check forward dependency (reading from later cells that already executed)
         forward_violation = None
         if my_position >= 0:
-            with timer(key="sdc_forward_dependency", message=f"[sdc] Forward dependency check for {cell_id}"):
+            with timer(key="sdc_forward_dependency", message=f"[sdc] Forward dependency check for {cell_id}") as timer:
                 forward_violation = self._check_forward_dependency(
                     cell_id, my_position, tracking
                 )
+
+            if forward_violation is not None:
+                self.output.add_timing("sdc_forward_dependency_violation", timer.duration())
+            else:
+                self.output.add_timing("sdc_forward_dependency_no_violation", timer.duration())
 
         stale = []
         changed_vars = []
