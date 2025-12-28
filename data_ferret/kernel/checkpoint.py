@@ -1274,36 +1274,35 @@ class Checkpoint:
             self._id_to_paths = defaultdict(dict)
 
             total_ids_collected = 0
-            collect_time = 0.0
 
             # Phase 1: Collect all reachable IDs for each variable
             # Optimization: Only track paths when logging is enabled (saves ~30-50% time)
             track_paths = _LOG_DEEP_ALIASES
             slow_vars = []
 
-            for var_name, var_value in self.user_ns.items():
-                visited: Set[int] = set()
+            with timer(key="alias_index_collect", message="Collecting reachable IDs"):
+                for var_name, var_value in self.user_ns.items():
+                    visited: Set[int] = set()
 
-                t0 = time.perf_counter()
-                if track_paths:
-                    # Full path tracking for detailed alias logging
-                    id_to_path: Dict[int, str] = {}
-                    _collect_reachable_ids_with_paths(var_value, var_name, visited, id_to_path)
-                    # Store paths
-                    for obj_id, path in id_to_path.items():
-                        self._id_to_paths[obj_id][var_name] = path
-                else:
-                    # Fast path: no path tracking
-                    _collect_reachable_ids(var_value, visited)
-                var_collect_time = time.perf_counter() - t0
-                collect_time += var_collect_time
+                    t0 = time.perf_counter()
+                    if track_paths:
+                        # Full path tracking for detailed alias logging
+                        id_to_path: Dict[int, str] = {}
+                        _collect_reachable_ids_with_paths(var_value, var_name, visited, id_to_path)
+                        # Store paths
+                        for obj_id, path in id_to_path.items():
+                            self._id_to_paths[obj_id][var_name] = path
+                    else:
+                        # Fast path: no path tracking
+                        _collect_reachable_ids(var_value, visited)
+                    var_collect_time = time.perf_counter() - t0
 
-                self._reachable_ids[var_name] = visited
-                total_ids_collected += len(visited)
+                    self._reachable_ids[var_name] = visited
+                    total_ids_collected += len(visited)
 
-                # Track slow variables for warning
-                if len(visited) > _SLOW_OBJECT_DTYPE_THRESHOLD or var_collect_time > 0.005:
-                    slow_vars.append((var_name, len(visited), var_collect_time * 1000))
+                    # Track slow variables for warning
+                    if len(visited) > _SLOW_OBJECT_DTYPE_THRESHOLD or var_collect_time > 0.005:
+                        slow_vars.append((var_name, len(visited), var_collect_time * 1000))
 
             # Log warnings for slow variables
             for var_name, num_ids, time_ms in slow_vars:
@@ -1325,21 +1324,19 @@ class Checkpoint:
 
             # Phase 2: Build reverse index in one pass
             # This is O(total_ids) but we batch the set.add calls per variable
-            t0 = time.perf_counter()
-            for var_name, visited in self._reachable_ids.items():
-                for obj_id in visited:
-                    self._id_to_vars[obj_id].add(var_name)
-            reverse_index_time = time.perf_counter() - t0
+            with timer(key="alias_index_reverse", message="Building reverse index"):
+                for var_name, visited in self._reachable_ids.items():
+                    for obj_id in visited:
+                        self._id_to_vars[obj_id].add(var_name)
 
             # Convert defaultdicts to regular dicts
             self._id_to_vars = dict(self._id_to_vars)
             self._id_to_paths = dict(self._id_to_paths)
 
-            # Log detailed timing breakdown
+            # Log summary
             num_vars = len(self.user_ns)
             num_unique_ids = len(self._id_to_vars)
             log(f"[alias-index] {num_vars} vars, {total_ids_collected} total IDs, {num_unique_ids} unique IDs")
-            log(f"[alias-index] collect={collect_time*1000:.1f}ms, reverse_index={reverse_index_time*1000:.1f}ms")
 
             self._alias_index_built = True
 

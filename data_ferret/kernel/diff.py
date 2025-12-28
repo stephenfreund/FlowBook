@@ -792,21 +792,22 @@ class Diff:
 
         # Compare common variables - only add to differences if not equal
         common_vars = set(a.keys()) & set(b.keys())
-        for var in sorted(
-            common_vars & keys_to_include
-        ):  # Sort for deterministic output
-            if _PROFILE_DIFF:
-                var_start = time.perf_counter()
-                type_info = _get_value_shape_info(a[var])
+        with timer(key="diff_compare_loop", message=f"Comparing {len(common_vars & keys_to_include)} common variables"):
+            for var in sorted(
+                common_vars & keys_to_include
+            ):  # Sort for deterministic output
+                if _PROFILE_DIFF:
+                    var_start = time.perf_counter()
+                    type_info = _get_value_shape_info(a[var])
 
-            diff_result = self._compare_values(a[var], b[var], path=var)
+                diff_result = self._compare_values(a[var], b[var], path=var)
 
-            if _PROFILE_DIFF:
-                elapsed = time.perf_counter() - var_start
-                _profile_stats.record(type_info, elapsed, var)
+                if _PROFILE_DIFF:
+                    elapsed = time.perf_counter() - var_start
+                    _profile_stats.record(type_info, elapsed, var)
 
-            if diff_result:  # Only include if there are differences
-                differences[var] = diff_result
+                if diff_result:  # Only include if there are differences
+                    differences[var] = diff_result
 
         # Log profiling summary if enabled
         if _PROFILE_DIFF:
