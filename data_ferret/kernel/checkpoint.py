@@ -852,7 +852,7 @@ from data_ferret.kernel.diff import Diff
 from data_ferret.kernel.opaque import OpaqueRegistry
 from pandas.api.types import infer_dtype
 from data_ferret.kernel.extended_types import TypeModel, get_type_model
-from data_ferret.util.output import log, timer
+from data_ferret.util.output import log, output, timer
 
 
 # Enable copy-on-write mode for better performance with DataFrame copies
@@ -1583,7 +1583,7 @@ class Checkpoints:
                 if _PROFILE_CHECKPOINT:
                     # Record timing keyed by type name
                     type_name = type(v).__name__
-                    self.output.add_timing(f"deepcopy_{type_name}", duration)
+                    output.add_timing(f"deepcopy_type_{type_name}", duration)
 
                 if duration > 0.010:
                     log(f"Deep copying variable {k} took {duration:.3f} seconds")
