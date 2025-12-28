@@ -420,7 +420,7 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
         lines.append("=" * 80)
         lines.append("HISTOGRAMS (all times in ms)")
         lines.append("=" * 80)
-        for s in sorted_stats:
+        for s in all_stats_flat:
             if s.key in grouped_timings:
                 durations = grouped_timings[s.key]
                 if len(durations) > 1:  # Need at least 2 points for a histogram
