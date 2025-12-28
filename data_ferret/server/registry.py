@@ -31,7 +31,7 @@ class CommandRegistry:
         import os
         from data_ferret.server import commands
 
-        with timer(key="register_commands", message="Registering commands"):
+        with timer(key="server:register_commands", message="Registering commands"):
             commands_dir = os.path.dirname(commands.__file__)
             for _, module_name, is_pkg in pkgutil.iter_modules([commands_dir]):
                 if is_pkg:

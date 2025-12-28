@@ -197,7 +197,7 @@ class SplitCommand(NotebookCommand):
             ProcessingResult with modified notebook and metadata
         """
         with self.timing_context() as get_elapsed:
-            with timer(key="split_cells_total", message="Splitting cells"):
+            with timer(key="split:cells_total", message="Splitting cells"):
                 log("Starting cell splitting process")
 
                 # Get configuration

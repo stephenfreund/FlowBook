@@ -141,7 +141,7 @@ class MonotonicityEnforcer:
         structural_reads = tracking_data.structural_reads
 
         # Compare pre and post states
-        with timer(key="monotone_diff", message="[monotone] Computing diff"):
+        with timer(key="monotone:diff", message="[monotone] Computing diff"):
             pre = self._checkpoints.get(self._pre_checkpoint_name)
             post = Checkpoint("_monotone_post", self._user_ns, {})
             diff_result = Checkpoint.diff(
@@ -161,7 +161,7 @@ class MonotonicityEnforcer:
 
         if diff_result.differences:
             log("[monotone] FAILED - reverting state")
-            with timer(key="monotone_restore", message="[monotone] Restoring checkpoint"):
+            with timer(key="monotone:restore", message="[monotone] Restoring checkpoint"):
                 self._checkpoints.restore(self._pre_checkpoint_name, self._user_ns)
             self._cleanup()
 

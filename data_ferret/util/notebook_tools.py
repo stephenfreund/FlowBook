@@ -64,12 +64,12 @@ class NotebookTools(LspSession):
 
 
     def run_analysis(self):
-        with timer(key="run_analysis", message="run_analysis()"):
+        with timer(key="tool:run_analysis", message="run_analysis()"):
             self.dependencies = analyze_notebook(self.notebook)
             return self.dependencies
 
     def get_dependencies(self, cell_id: str) -> CellDependencies:
-        with timer(key="tool_get_dependencies", message=f"get_dependencies({cell_id})"):
+        with timer(key="tool:get_dependencies", message=f"get_dependencies({cell_id})"):
             if cell_id not in self.dependencies:
                 raise ValueError(f"Cell {cell_id} not found")
             return self.dependencies[cell_id]
@@ -86,7 +86,7 @@ class NotebookTools(LspSession):
             """
             Returns the source code of the cell with the given id.
             """
-            with timer(key="tool_get_source", message=f"get_source({cell_id})"):
+            with timer(key="tool:get_source", message=f"get_source({cell_id})"):
                 result = self.get_source(cell_id)
                 if result is None:
                     raise ValueError(f"Cell {cell_id} not found")
@@ -97,7 +97,7 @@ class NotebookTools(LspSession):
             """
             Sets the source code of the cell with the given id.
             """
-            with timer(key="tool_set_source", message=f"set_source({cell_id}, {repr(source)[:20]}...)"):
+            with timer(key="tool:set_source", message=f"set_source({cell_id}, {repr(source)[:20]}...)"):
                 source = source.rstrip()
                 result = self.set_source(cell_id, source)
                 if result is None:
@@ -110,7 +110,7 @@ class NotebookTools(LspSession):
             """
             Returns the source for the cell containing the definition of the given symbol access in the given cell.
             """
-            with timer(key="tool_get_cells_for_definition", message=f"get_cells_for_definition({cell_id}, {symbol})"):
+            with timer(key="tool:get_cells_for_definition", message=f"get_cells_for_definition({cell_id}, {symbol})"):
                 result = self.get_cells_for_definition(cell_id, symbol)
                 if result is None:
                     raise ValueError(f"Definition of {symbol} not found")
@@ -122,7 +122,7 @@ class NotebookTools(LspSession):
         @function_tool
         def get_profile(cell_id: str) -> ProfileData:
             """Get the Scalene profile report for a cell."""
-            with timer(key="tool_get_profile", message=f"get_profile({cell_id})"):
+            with timer(key="tool:get_profile", message=f"get_profile({cell_id})"):
                 cell = self.get_cell_by_id(cell_id)
                 if cell is None:
                     raise ValueError(f"Cell {cell_id} not found")
@@ -136,7 +136,7 @@ class NotebookTools(LspSession):
             """Get the optimization potential for a cell, including the highest priority
             concrete suggestions for how to optimize the cell.
             """
-            with timer(key="tool_get_optimization_potential", message=f"get_optimization_potential({cell_id})"):
+            with timer(key="tool:get_optimization_potential", message=f"get_optimization_potential({cell_id})"):
                 cell = self.get_cell_by_id(cell_id)
                 if cell is None:
                     raise ValueError(f"Cell {cell_id} not found")
@@ -148,7 +148,7 @@ class NotebookTools(LspSession):
         @function_tool
         def get_input_variables(cell_id: str) -> Dict[str, str]:
             """Get the input variables and their types for a cell."""
-            with timer(key="tool_get_input_variables", message=f"get_input_variables({cell_id})"):
+            with timer(key="tool:get_input_variables", message=f"get_input_variables({cell_id})"):
                 cell = self.get_cell_by_id(cell_id)
                 if cell is None:
                     raise ValueError(f"Cell {cell_id} not found")

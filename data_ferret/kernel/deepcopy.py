@@ -311,7 +311,7 @@ def _object_column_is_all_immutable(series: pd.Series, col_name: str = None) -> 
     col_label = f" ({col_name})" if col_name else ""
     n_rows = len(series)
 
-    with timer(key="immutability_check", message=f"[deepcopy] Immutability check{col_label} ({n_rows} rows)"):
+    with timer(key="deepcopy:immutability_check", message=f"[deepcopy] Immutability check{col_label} ({n_rows} rows)"):
         # FAST PATH: infer_dtype tells us the homogeneous type - O(1)
         kind = infer_dtype(series, skipna=True)
         if kind in _IMMUTABLE_INFERRED_KINDS:

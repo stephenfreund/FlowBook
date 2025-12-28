@@ -169,13 +169,13 @@ class ValidateChangeCommand(NotebookCommand):
             total_processed = 0
 
             # Analyze dependencies for the entire notebook once
-            with timer(key="analyze_dependencies", message="Analyzing notebook dependencies"):
+            with timer(key="validate:analyze_deps", message="Analyzing notebook dependencies"):
                 dependencies_dict = analyze_notebook(notebook_content)
 
             log(f"Validating {len(selected_cell_ids)} selected cell(s)...")
 
             # Process each cell
-            with timer(key="validate_cells", message="Validating cells"):
+            with timer(key="validate:cells", message="Validating cells"):
                 for idx, cell in enumerate(cells):
                     cell_id = cell.get("id")
 
@@ -187,7 +187,7 @@ class ValidateChangeCommand(NotebookCommand):
                     if cell_id not in selected_cell_ids:
                         continue
 
-                    with timer(key=f"validate_cell_{idx}", message=f"Validating cell {idx}:{cell_id}"):
+                    with timer(key=f"validate:cell_{idx}", message=f"Validating cell {idx}:{cell_id}"):
                         # Get current cell source
                         source = cell.get("source", "")
                         if isinstance(source, list):

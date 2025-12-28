@@ -98,13 +98,13 @@ class ExecuteAllCommand(NotebookCommand):
             if downsample_csv is not None:
                 KernelHelper.inject_csv_downsampling(kernel_client, downsample_csv)
 
-            with timer(key="execute_all", message="Executing all cells"):
+            with timer(key="execute:all", message="Executing all cells"):
                 for idx, cell in enumerate(cells):
                     if cell.get("cell_type") == "code":
                         if selected_cell_ids and cell.get("id") not in selected_cell_ids:
                             continue
 
-                        with timer(key="execute_cell", message=f"Executing cell {idx}:{cell.get('id')}"):
+                        with timer(key="execute:cell", message=f"Executing cell {idx}:{cell.get('id')}"):
                             source = cell.get("source", "")
                             if isinstance(source, list):
                                 source = "".join(source)

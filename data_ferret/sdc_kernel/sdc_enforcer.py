@@ -387,29 +387,29 @@ class SDCEnforcer:
         current_diff = None
         typed_changes = []
         if my_position >= 0:
-            with timer(key="sdc_backward_mutation", message=f"[sdc] Backward mutation check for {cell_id}") as t:
+            with timer(key="sdc:backward_mutation", message=f"[sdc] Backward mutation check for {cell_id}") as t:
                 violation, current_diff, typed_changes = self._check_backward_mutation(
                     cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
                 )
 
             if violation is not None:
-                output.add_timing("sdc_backward_mutation_violation", t.duration())
+                output.add_timing("sdc:backward_mutation_violation", t.duration())
             else:
-                output.add_timing("sdc_backward_mutation_no_violation", t.duration())
+                output.add_timing("sdc:backward_mutation_no_violation", t.duration())
 
 
         # Check forward dependency (reading from later cells that already executed)
         forward_violation = None
         if my_position >= 0:
-            with timer(key="sdc_forward_dependency", message=f"[sdc] Forward dependency check for {cell_id}") as t:
+            with timer(key="sdc:forward_dependency", message=f"[sdc] Forward dependency check for {cell_id}") as t:
                 forward_violation = self._check_forward_dependency(
                     cell_id, my_position, tracking
                 )
 
             if forward_violation is not None:
-                output.add_timing("sdc_forward_dependency_violation", t.duration())
+                output.add_timing("sdc:forward_dependency_violation", t.duration())
             else:
-                output.add_timing("sdc_forward_dependency_no_violation", t.duration())
+                output.add_timing("sdc:forward_dependency_no_violation", t.duration())
 
         stale = []
         changed_vars = []
@@ -461,7 +461,7 @@ class SDCEnforcer:
             # Check if diff was truncated - if so, return violation
             truncated_vars = _check_for_truncation(current_diff)
             if truncated_vars:
-                with timer(key="violation_truncation_check", message=f"[violation] Building truncation violation (check)"):
+                with timer(key="violation:truncation_check", message=f"[violation] Building truncation violation (check)"):
                     formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
                     mutating_alpha = self._cell_id_to_alpha(cell_id)
                     return SDCResult(
@@ -486,7 +486,7 @@ class SDCEnforcer:
 
             # Update staleness INCREMENTALLY (only check cells below that might have become stale)
             # Also captures structural warnings from affected cells
-            with timer(key="sdc_staleness", message=f"[sdc] Staleness update for {cell_id}"):
+            with timer(key="sdc:staleness", message=f"[sdc] Staleness update for {cell_id}"):
                 stale, staleness_warnings = self._update_staleness_incremental(
                     post_checkpoint, set(changed_vars), column_changed, cell_id, my_position
                 )
@@ -527,7 +527,7 @@ class SDCEnforcer:
         """
         # Compute what THIS cell actually modified
         # For diff detection, check all accessed columns (read OR written)
-        with timer(key="bwm_prepare_columns", message=f"[bwm] Prepare accessed columns"):
+        with timer(key="bwm:prepare_columns", message=f"[bwm] Prepare accessed columns"):
             all_accessed_columns = {}
             for var, cols in tracking.column_reads_before_writes.items():
                 all_accessed_columns[var] = set(cols)
@@ -552,7 +552,7 @@ class SDCEnforcer:
         # ======================================================================
         keys_to_include: Optional[Set[str]] = None
         if OPT_ACCESSED_VARS_ONLY:
-            with timer(key="bwm_expand_aliases", message=f"[bwm] OPT expand accessed vars with DEEP aliases"):
+            with timer(key="bwm:expand_aliases", message=f"[bwm] OPT expand accessed vars with DEEP aliases"):
                 # Get variables this cell accessed (reads + writes)
                 # Note: reads_before_writes is a Set[str], writes is also Set[str]
                 accessed_vars = set(tracking.reads_before_writes) | set(tracking.writes)
@@ -573,7 +573,7 @@ class SDCEnforcer:
                 log(f"[bwm]   deep_aliases_added={sorted(set(expanded_sorted) - set(accessed_sorted))}")
         # ======================================================================
 
-        with timer(key="bwm_checkpoint_diff", message=f"[bwm] Checkpoint.diff (pre vs post)"):
+        with timer(key="bwm:checkpoint_diff", message=f"[bwm] Checkpoint.diff (pre vs post)"):
             current_diff = Checkpoint.diff(
                 pre_checkpoint,
                 post_checkpoint,
@@ -585,10 +585,10 @@ class SDCEnforcer:
             )
 
         # Check if diff was truncated - if so, return violation
-        with timer(key="bwm_check_truncation", message=f"[bwm] Check truncation"):
+        with timer(key="bwm:check_truncation", message=f"[bwm] Check truncation"):
             truncated_vars = _check_for_truncation(current_diff)
         if truncated_vars:
-            with timer(key="violation_truncation", message=f"[violation] Building truncation violation"):
+            with timer(key="violation:truncation", message=f"[violation] Building truncation violation"):
                 formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
                 mutating_alpha = self._cell_id_to_alpha(cell_id)
                 return (
@@ -608,12 +608,12 @@ class SDCEnforcer:
             return (None, current_diff, [])
 
         # Column-level modifications (for DataFrames)
-        with timer(key="bwm_extract_columns", message=f"[bwm] Extract column changes"):
+        with timer(key="bwm:extract_columns", message=f"[bwm] Extract column changes"):
             modified_columns = _extract_column_changes(current_diff, tracking)
 
         # Convert diff to typed Changes for conflict detection
         # These are also cached in the record for forward dependency checks
-        with timer(key="bwm_detect_changes", message=f"[bwm] detect_changes (diff -> typed)"):
+        with timer(key="bwm:detect_changes", message=f"[bwm] detect_changes (diff -> typed)"):
             typed_changes = detect_changes(current_diff)
         if not typed_changes:
             return (None, current_diff, [])
@@ -624,7 +624,7 @@ class SDCEnforcer:
         # overlap between changed variables and prior cell reads.
         # ======================================================================
         if OPT_CONFLICT_LOOP_SKIP:
-            with timer(key="bwm_opt_skip_check", message=f"[bwm] OPT skip check ({my_position} prior cells)"):
+            with timer(key="bwm:opt_skip_check", message=f"[bwm] OPT skip check ({my_position} prior cells)"):
                 changed_var_names = {c.variable for c in typed_changes}
                 all_prior_var_reads: Set[str] = set()
                 for prior_cell_id_check in self._cell_order[:my_position]:
@@ -640,7 +640,7 @@ class SDCEnforcer:
         # ======================================================================
 
         # Check if any earlier cell reads something we modified
-        with timer(key="bwm_conflict_loop", message=f"[bwm] Conflict detection loop ({my_position} prior cells)"):
+        with timer(key="bwm:conflict_loop", message=f"[bwm] Conflict detection loop ({my_position} prior cells)"):
             conflict_checks = 0
             for prior_cell_id in self._cell_order[:my_position]:
                 prior_record = self.records.get(prior_cell_id)
@@ -676,7 +676,7 @@ class SDCEnforcer:
                 conflicts = sorted(set(conflicts))
 
                 if conflicts:
-                    with timer(key="violation_backward_mutation", message=f"[violation] Building backward mutation violation"):
+                    with timer(key="violation:backward_mutation", message=f"[violation] Building backward mutation violation"):
                         mutating_alpha = self._cell_id_to_alpha(cell_id)
                         affected_alpha = self._cell_id_to_alpha(prior_cell_id)
 
@@ -769,7 +769,7 @@ class SDCEnforcer:
             conflicts = sorted(set(conflicts))
 
             if conflicts:
-                with timer(key="violation_forward_dependency", message=f"[violation] Building forward dependency violation"):
+                with timer(key="violation:forward_dependency", message=f"[violation] Building forward dependency violation"):
                     reading_alpha = self._cell_id_to_alpha(cell_id)
                     writing_alpha = self._cell_id_to_alpha(later_cell_id)
 
@@ -847,7 +847,7 @@ class SDCEnforcer:
                 continue
 
             diffs_performed += 1
-            with timer(key="staleness_diff", message=f"[staleness] Diff for cell {cell_id}"):
+            with timer(key="sdc:staleness_diff", message=f"[staleness] Diff for cell {cell_id}"):
                 diff_result = Checkpoint.diff(
                     pre_checkpoint,
                     current_checkpoint,

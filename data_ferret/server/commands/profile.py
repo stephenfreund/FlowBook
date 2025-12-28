@@ -68,16 +68,16 @@ class ProfileCommand(NotebookCommand):
             total_executed = 0
             status = "success"
 
-            with timer(key="enable_scalene", message="Enabling scalene"):
+            with timer(key="profile:enable_scalene", message="Enabling scalene"):
                 kernel_client.execute("%enable_scalene")
 
-            with timer(key="profile", message="Profiling cells"):
+            with timer(key="profile:run", message="Profiling cells"):
                 for idx, cell in enumerate(cells):
                     if cell.get("cell_type") == "code":
                         if selected_cell_ids and cell.get("id") not in selected_cell_ids:
                             continue
 
-                        with timer(key="profile_cell", message=f"Profiling cell {idx}:{cell.get('id')}"):
+                        with timer(key="profile:cell", message=f"Profiling cell {idx}:{cell.get('id')}"):
                             source = cell.get("source", "")
                             if isinstance(source, list):
                                 source = "".join(source)

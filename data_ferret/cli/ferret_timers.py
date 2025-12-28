@@ -272,27 +272,72 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
     if not stats:
         return "No timing data available\n"
 
-    # Sort by specified field
-    if sort_by == 'count':
-        sorted_stats = sorted(stats, key=lambda s: s.count, reverse=True)
-    elif sort_by == 'mean':
-        sorted_stats = sorted(stats, key=lambda s: s.mean, reverse=True)
-    elif sort_by == 'max':
-        sorted_stats = sorted(stats, key=lambda s: s.max, reverse=True)
-    elif sort_by == 'key':
-        sorted_stats = sorted(stats, key=lambda s: s.key, reverse=False)
-    else:  # total (default)
-        sorted_stats = sorted(stats, key=lambda s: s.total, reverse=True)
+    # Parse GROUP:KEY format and group stats
+    from collections import defaultdict
 
-    # Apply top N filter if specified
+    def parse_key(key: str) -> tuple[str, str]:
+        """Parse timer key into (group, subkey)."""
+        if ':' in key:
+            group, subkey = key.split(':', 1)
+            return group, subkey
+        return '', key  # No group
+
+    # Group stats by group prefix
+    grouped: dict[str, list[TimerStats]] = defaultdict(list)
+    for s in stats:
+        group, _ = parse_key(s.key)
+        grouped[group].append(s)
+
+    # Sort groups: empty group first, then alphabetically
+    group_order = sorted(grouped.keys(), key=lambda g: (g != '', g))
+
+    # Sort within each group by the specified field
+    def sort_key(s: TimerStats):
+        if sort_by == 'count':
+            return -s.count
+        elif sort_by == 'mean':
+            return -s.mean
+        elif sort_by == 'max':
+            return -s.max
+        elif sort_by == 'key':
+            return s.key
+        else:  # total (default)
+            return -s.total
+
+    for group in grouped:
+        grouped[group] = sorted(grouped[group], key=sort_key)
+
+    # Apply top N filter if specified (after grouping)
     if top is not None and top > 0:
-        sorted_stats = sorted_stats[:top]
+        # Flatten, sort, take top N, then re-group
+        all_stats = []
+        for group in group_order:
+            all_stats.extend(grouped[group])
+        all_stats = sorted(all_stats, key=sort_key)[:top]
+        grouped = defaultdict(list)
+        for s in all_stats:
+            group, _ = parse_key(s.key)
+            grouped[group].append(s)
+        group_order = sorted(grouped.keys(), key=lambda g: (g != '', g))
+        for group in grouped:
+            grouped[group] = sorted(grouped[group], key=sort_key)
 
     # Build table
     lines = []
 
-    # Calculate key column width (minimum of header width or max key length)
-    key_width = max(len("Timer Key"), max((len(s.key) for s in sorted_stats), default=0))
+    # Calculate key column width - use subkey length + 4 for indent, or full key for ungrouped
+    max_subkey_len = 0
+    for s in stats:
+        group, subkey = parse_key(s.key)
+        if group:
+            max_subkey_len = max(max_subkey_len, len(subkey) + 4)  # 4 spaces indent
+        else:
+            max_subkey_len = max(max_subkey_len, len(s.key))
+    # Also consider group names as headers
+    for group in grouped:
+        if group:
+            max_subkey_len = max(max_subkey_len, len(group))
+    key_width = max(len("Timer Key"), max_subkey_len)
     # Total row width: key + space + Count(8) + space + 9 numeric columns (14 each) + 8 spaces + " | " separator
     row_width = key_width + 1 + 8 + 1 + 14 * 9 + 8 + 2
 
@@ -313,31 +358,47 @@ def format_table(stats: list[TimerStats], sort_by: str = 'total',
     lines.append("-" * row_width)
 
     # Data rows with alternating colors for readability
-    for i, s in enumerate(sorted_stats):
-        row = (
-            f"{s.key:<{key_width}} "
-            f"{s.count:>8} "
-            f"{format_time(s.mean, use_commas=True):>14} "
-            f"{format_time(s.median, use_commas=True):>14} "
-            f"{format_time(s.max, use_commas=True):>14} | "
-            f"{format_time(s.p90, use_commas=True):>14} "
-            f"{format_time(s.p95, use_commas=True):>14} "
-            f"{format_time(s.min, use_commas=True):>14} "
-            f"{format_time(s.total, use_commas=True):>14} "
-            f"{format_time(s.std, use_commas=True):>14}"
-        )
-        if (i // 2) % 2 == 0:
-            row = termcolor.colored(row, 'yellow')
-        else:
-            row = termcolor.colored(row, 'white')
-        lines.append(row)
+    row_idx = 0
+    for group in group_order:
+        group_stats = grouped[group]
+
+        # Group header row (if group is not empty)
+        if group:
+            # Empty stats row with just the group name
+            group_header = f"{group:<{key_width}} {'':>8} {'':>14} {'':>14} {'':>14} | {'':>14} {'':>14} {'':>14} {'':>14} {'':>14}"
+            lines.append(termcolor.colored(group_header, 'cyan', attrs=['bold']))
+
+        for s in group_stats:
+            group_name, subkey = parse_key(s.key)
+            # Indent subkeys if they have a group
+            display_key = f"    {subkey}" if group_name else s.key
+
+            row = (
+                f"{display_key:<{key_width}} "
+                f"{s.count:>8} "
+                f"{format_time(s.mean, use_commas=True):>14} "
+                f"{format_time(s.median, use_commas=True):>14} "
+                f"{format_time(s.max, use_commas=True):>14} | "
+                f"{format_time(s.p90, use_commas=True):>14} "
+                f"{format_time(s.p95, use_commas=True):>14} "
+                f"{format_time(s.min, use_commas=True):>14} "
+                f"{format_time(s.total, use_commas=True):>14} "
+                f"{format_time(s.std, use_commas=True):>14}"
+            )
+            if row_idx % 2 == 0:
+                row = termcolor.colored(row, 'yellow')
+            else:
+                row = termcolor.colored(row, 'white')
+            lines.append(row)
+            row_idx += 1
 
     # Footer separator
     lines.append("-" * row_width)
 
     # Total row
-    total_count = sum(s.count for s in sorted_stats)
-    total_time = sum(s.total for s in sorted_stats)
+    all_stats_flat = [s for group in grouped.values() for s in group]
+    total_count = sum(s.count for s in all_stats_flat)
+    total_time = sum(s.total for s in all_stats_flat)
     mean_time = total_time / total_count if total_count > 0 else 0
 
     footer = (

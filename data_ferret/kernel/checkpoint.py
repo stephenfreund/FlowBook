@@ -777,11 +777,11 @@ This is implemented in both deepcopy.py and diff.py.
 ---------------------------
 Checkpoint.diff() includes timing for debugging performance issues:
 
-  with timer(key="checkpoint_diff_setup", message="[diff] Setup"):
+  with timer(key="checkpoint_diff:setup", message="[diff] Setup"):
       # Import and mode initialization
-  with timer(key="checkpoint_diff_create", message="[diff] Create Diff object"):
+  with timer(key="checkpoint_diff:create", message="[diff] Create Diff object"):
       # Diff constructor
-  with timer(key="checkpoint_diff_compare", message="[diff] Compare namespaces"):
+  with timer(key="checkpoint_diff:compare", message="[diff] Compare namespaces"):
       # Actual comparison
 
 Additional profiling available via FERRET_PROFILE_DIFF=1 environment variable.
@@ -1268,7 +1268,7 @@ class Checkpoint:
         """
         from collections import defaultdict
 
-        with timer(key="build_alias_index", message=f"Building alias index for checkpoint '{self.name}'"):
+        with timer(key="alias:build_index", message=f"Building alias index for checkpoint '{self.name}'"):
             self._reachable_ids = {}
             self._id_to_vars = defaultdict(set)
             self._id_to_paths = defaultdict(dict)
@@ -1280,7 +1280,7 @@ class Checkpoint:
             track_paths = _LOG_DEEP_ALIASES
             slow_vars = []
 
-            with timer(key="alias_index_collect", message="Collecting reachable IDs"):
+            with timer(key="alias:collect", message="Collecting reachable IDs"):
                 for var_name, var_value in self.user_ns.items():
                     visited: Set[int] = set()
 
@@ -1324,7 +1324,7 @@ class Checkpoint:
 
             # Phase 2: Build reverse index in one pass
             # This is O(total_ids) but we batch the set.add calls per variable
-            with timer(key="alias_index_reverse", message="Building reverse index"):
+            with timer(key="alias:reverse", message="Building reverse index"):
                 for var_name, visited in self._reachable_ids.items():
                     for obj_id in visited:
                         self._id_to_vars[obj_id].add(var_name)
@@ -1452,12 +1452,12 @@ class Checkpoint:
         Returns:
             DiffResult: Structured diff tree with only differences
         """
-        with timer(key="checkpoint_diff_setup", message="[diff] Setup"):
+        with timer(key="checkpoint_diff:setup", message="[diff] Setup"):
             from .structural_tracking import StructuralTrackingMode
             if structural_mode is None:
                 structural_mode = StructuralTrackingMode.OFF
 
-        with timer(key="checkpoint_diff_create", message="[diff] Create Diff object"):
+        with timer(key="checkpoint_diff:create", message="[diff] Create Diff object"):
             differ = Diff(
                 strict=False,
                 report_close=False,
@@ -1469,7 +1469,7 @@ class Checkpoint:
                 structural_mode=structural_mode,
             )
 
-        with timer(key="checkpoint_diff_compare", message="[diff] Compare namespaces"):
+        with timer(key="checkpoint_diff:compare", message="[diff] Compare namespaces"):
             result = differ.diff(a.user_ns, b.user_ns, keys_to_include)
 
         return result
@@ -1580,7 +1580,7 @@ class Checkpoints:
                 if _PROFILE_CHECKPOINT:
                     # Record timing keyed by type name
                     type_name = type(v).__name__
-                    output.add_timing(f"deepcopy_type_{type_name}", duration)
+                    output.add_timing(f"deepcopy:{type_name}", duration)
 
                 if duration > 0.010:
                     log(f"Deep copying variable {k} took {duration:.3f} seconds")
@@ -1741,11 +1741,11 @@ class Checkpoints:
                     log(f"         Class variables (mutable class attributes) will NOT be properly restored")
                     log(f"         Only instance attributes will be checkpointed. See documentation section 8.4")
 
-        with timer(key="deep_copy_user_ns", message="Deep copying user namespace"):
+        with timer(key="checkpoint:deep_copy", message="Deep copying user namespace"):
             saved = {}
             removed = {}
 
-            with timer(key="checkpoint_filter_vars", message="Filtering variables"):
+            with timer(key="checkpoint:filter_vars", message="Filtering variables"):
                 checkpointable_vars = self.checkpointable_vars(user_ns)
                 checkpointable_values = self.checkpointable_values(checkpointable_vars)
 
@@ -1753,18 +1753,18 @@ class Checkpoints:
                 removed[k] = get_type_model(user_ns[k])
 
             # Record cudf origins before deep copy (cudf objects become pandas)
-            with timer(key="checkpoint_cudf_origins", message="Recording cudf origins"):
+            with timer(key="checkpoint:cudf_origins", message="Recording cudf origins"):
                 from . import cudf_compat
                 cudf_origins = cudf_compat.CuDFOriginTracker()
                 for k, v in checkpointable_values.items():
                     cudf_origins.record(k, v)
 
             # Use helper to deep copy all variables
-            with timer(key="checkpoint_deepcopy", message="Deep copying variables"):
+            with timer(key="checkpoint:deepcopy", message="Deep copying variables"):
                 cp, memo, failed = self._deep_copy_user_ns(checkpointable_values)
 
             # Track successfully copied variables
-            with timer(key="checkpoint_type_models", message="Generating type models"):
+            with timer(key="checkpoint:type_models", message="Generating type models"):
                 for k in cp:
                     saved[k] = get_type_model(checkpointable_values[k])
 
@@ -1775,7 +1775,7 @@ class Checkpoints:
             self.saved[name] = Checkpoint(name, cp, memo, cudf_origins)
 
         if self.sanity_check:
-            with timer(key="sanity_check", message="Running sanity check"):
+            with timer(key="checkpoint:sanity_check", message="Running sanity check"):
                 original = {k: v for k, v in checkpointable_values.items() if k in saved}
                 differ = Diff(strict=False, report_close=False, atol=1e-5, rtol=1e-5)
                 diff_result = differ.diff(original, cp)

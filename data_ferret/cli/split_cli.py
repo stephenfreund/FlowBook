@@ -34,7 +34,7 @@ async def split_notebook(
         output_path: Path to save split notebook (default: input_split.ipynb)
         model: LLM model to use for splitting (optional)
     """
-    with timer(key="split_cli_total", message="Split notebook CLI"):
+    with timer(key="cli:split_total", message="Split notebook CLI"):
         # Load notebook
         log(f"Loading notebook: {input_path}")
         try:

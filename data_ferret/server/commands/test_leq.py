@@ -284,13 +284,13 @@ class TestLeqCommand(NotebookCommand):
             kernel_command_client = KernelCommandClient(kernel_client, timeout=60, retries=3)
 
             # Step 1: Enable dynamic tracking
-            with timer(key="enable_tracking", message="Enabling dynamic tracking"):
+            with timer(key="test_leq:enable_tracking", message="Enabling dynamic tracking"):
                 kernel_client.execute("%enable_global_tracking", store_history=False)
 
             # Enable Scalene for profiling
             kernel_client.execute("%enable_scalene", store_history=False)
 
-            with timer(key="execute_and_test_leq", message="Executing cells and testing leq"):
+            with timer(key="test_leq:execute_and_test", message="Executing cells and testing leq"):
                 for idx, cell in enumerate(cells):
                     if cell.get("cell_type") != "code":
                         continue
@@ -307,14 +307,14 @@ class TestLeqCommand(NotebookCommand):
                     if not source.strip():
                         continue
 
-                    with timer(key="test_leq_cell", message=f"Testing leq for cell {idx}:{cell_id}"):
+                    with timer(key="test_leq:cell", message=f"Testing leq for cell {idx}:{cell_id}"):
                         metadata = cell.get("metadata", {}).copy()
                         metadata['cell_id'] = cell_id
 
                         try:
                             # Step 2a: Save pre-execution checkpoint
                             pre_checkpoint_name = f"pre_{cell_id}"
-                            with timer(key="save_pre_checkpoint", message=f"Saving pre checkpoint {pre_checkpoint_name}"):
+                            with timer(key="test_leq:save_pre_checkpoint", message=f"Saving pre checkpoint {pre_checkpoint_name}"):
                                 kernel_command_client.checkpoint_save(pre_checkpoint_name)
 
                             # Step 2b: Execute the cell
@@ -375,7 +375,7 @@ class TestLeqCommand(NotebookCommand):
 
                             # Step 2d: Save post-execution checkpoint
                             post_checkpoint_name = f"post_{cell_id}"
-                            with timer(key="save_post_checkpoint", message=f"Saving post checkpoint {post_checkpoint_name}"):
+                            with timer(key="test_leq:save_post_checkpoint", message=f"Saving post checkpoint {post_checkpoint_name}"):
                                 kernel_command_client.checkpoint_save(post_checkpoint_name)
 
                             # Step 2e: Compare using leq if we have RBW variables
@@ -384,7 +384,7 @@ class TestLeqCommand(NotebookCommand):
 
                             if rbw_set:
                                 total_tested += 1
-                                with timer(key="compare_leq", message=f"Comparing leq for {cell_id}"):
+                                with timer(key="test_leq:compare", message=f"Comparing leq for {cell_id}"):
                                     compare_response = kernel_command_client.checkpoint_compare_leq(
                                         pre_checkpoint_name,
                                         post_checkpoint_name,
@@ -441,7 +441,7 @@ class TestLeqCommand(NotebookCommand):
                                 cell["outputs"].append(pass_output)
 
                             # Step 2g: Cleanup checkpoints
-                            with timer(key="cleanup_checkpoints", message=f"Cleaning up checkpoints for {cell_id}"):
+                            with timer(key="test_leq:cleanup_checkpoints", message=f"Cleaning up checkpoints for {cell_id}"):
                                 try:
                                     kernel_command_client.checkpoint_delete(pre_checkpoint_name)
                                 except Exception as e:
@@ -487,7 +487,7 @@ class TestLeqCommand(NotebookCommand):
                             break  # Stop on exception
 
             # Step 3: Disable dynamic tracking
-            with timer(key="disable_tracking", message="Disabling dynamic tracking"):
+            with timer(key="test_leq:disable_tracking", message="Disabling dynamic tracking"):
                 kernel_client.execute("%disable_global_tracking", store_history=False)
 
             # Determine overall verdict

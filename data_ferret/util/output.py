@@ -468,7 +468,7 @@ def quiet():
     Example:
         with quiet():
             log("This will not be shown")
-            with timer(key="test", message="Test"):
+            with timer(key="test:timer", message="Test"):
                 # Timer message and data collection suppressed
                 pass
             error("This WILL be shown")

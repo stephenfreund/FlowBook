@@ -455,7 +455,7 @@ async def run_split_preprocessing(
             raise RuntimeError("Split command not available")
 
         # Execute split command
-        with timer(key="split_preprocessing", message="Split preprocessing"):
+        with timer(key="cli:split_preprocessing", message="Split preprocessing"):
             split_result = await split_cmd.process(
                 notebook_content=notebook_content,
                 kernel_client=None,  # Split doesn't need kernel

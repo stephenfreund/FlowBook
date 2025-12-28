@@ -649,7 +649,7 @@ class TestDependenciesCommand(NotebookCommand):
 
         with self.timing_context() as get_elapsed:
             # Step 1: Compute static dependencies for the entire notebook
-            with timer(key="static_analysis", message="Computing static dependencies"):
+            with timer(key="test_deps:static_analysis", message="Computing static dependencies"):
                 static_dependencies = analyze_notebook(notebook_content)
 
             new_notebook = copy.deepcopy(notebook_content)
@@ -666,13 +666,13 @@ class TestDependenciesCommand(NotebookCommand):
             cells_with_critical_issues = []
 
             # Step 2: Enable dynamic tracking BEFORE execution
-            with timer(key="enable_tracking", message="Enabling dynamic tracking"):
+            with timer(key="test_deps:enable_tracking", message="Enabling dynamic tracking"):
                 kernel_client.execute("%enable_global_tracking", store_history=False)
 
             # Step 3: Enable Scalene (for consistency with ExecuteAllCommand)
             kernel_client.execute("%enable_scalene", store_history=False)
 
-            with timer(key="execute_and_test", message="Executing cells and testing dependencies"):
+            with timer(key="test_deps:execute_and_test", message="Executing cells and testing dependencies"):
                 for idx, cell in enumerate(cells):
                     if cell.get("cell_type") == "code":
                         cell_id = cell.get("id")
@@ -680,7 +680,7 @@ class TestDependenciesCommand(NotebookCommand):
                         if selected_cell_ids and cell_id not in selected_cell_ids:
                             continue
 
-                        with timer(key="execute_cell", message=f"Executing cell {idx}:{cell_id}"):
+                        with timer(key="execute:cell", message=f"Executing cell {idx}:{cell_id}"):
                             source = cell.get("source", "")
                             if isinstance(source, list):
                                 source = "".join(source)
@@ -792,7 +792,7 @@ class TestDependenciesCommand(NotebookCommand):
                                     break  # Stop on exception
 
             # Step 4: Disable dynamic tracking AFTER execution
-            with timer(key="disable_tracking", message="Disabling dynamic tracking"):
+            with timer(key="test_deps:disable_tracking", message="Disabling dynamic tracking"):
                 kernel_client.execute("%disable_global_tracking", store_history=False)
 
             # Determine overall verdict

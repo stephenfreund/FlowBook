@@ -266,7 +266,7 @@ class CodeExecutionOrchestrator:
             self.cmd_client.checkpoint_restore(env_checkpoint_name)
 
             # Step 5: Execute modified code with crash handling
-            with timer(key="execute_modified_code", message="Execute modified code"):
+            with timer(key="optimize:execute_modified", message="Execute modified code"):
                 modified_duration, modified_error = self._execute_code_safely(
                     modified_code
                 )
@@ -1127,9 +1127,9 @@ class OptimizeCommand(NotebookCommand):
                     original_snippets, current_snippets, cell_map, cell["id"]
                 )
 
-                with timer(key="original_code", message="Original code"):
+                with timer(key="optimize:original_code", message="Original code"):
                     log(original_code)
-                with timer(key="optimized_code", message="Optimized code"):
+                with timer(key="optimize:optimized_code", message="Optimized code"):
                     log(optimized_code)
 
                 # Validate
@@ -1648,7 +1648,7 @@ class OptimizeCommand(NotebookCommand):
             )
 
             # Run LLM optimization
-            with timer(key="agent_optimization", message="Running LLM optimization"):
+            with timer(key="optimize:agent", message="Running LLM optimization"):
                 # Need to get cell_source for the optimization
                 cell_source, _, _ = CodeExtractor.extract_optimization_target(
                     target_cell, step
@@ -1726,7 +1726,7 @@ class OptimizeCommand(NotebookCommand):
             message=f"Processing {len(optimization_plan)} optimization steps in batch",
         ):
             # Step 1: Extract all original snippets
-            with timer(key="extract_snippets", message="Extracting original snippets"):
+            with timer(key="optimize:extract_snippets", message="Extracting original snippets"):
                 try:
                     original_snippets = await self._extract_original_snippets_from_plan(
                         optimization_plan, cells
@@ -1756,7 +1756,7 @@ class OptimizeCommand(NotebookCommand):
             )
 
             # Step 5: Call LLM with batch optimization
-            with timer(key="batch_llm_call", message="Running batch LLM optimization"):
+            with timer(key="optimize:batch_llm", message="Running batch LLM optimization"):
                 try:
                     batch_response, stats = await self._run_batch_llm_optimization(
                         formatted_snippets,
@@ -2263,7 +2263,7 @@ class OptimizeCommand(NotebookCommand):
         Returns:
             Tuple of (modified_notebook, total_cost, cell_timing)
         """
-        with timer(key="optimize_cells_total", message="Optimizing cells"):
+        with timer(key="optimize:total", message="Optimizing cells"):
             log("=" * 60)
             log("# Optimizing Cells")
             log("=" * 60)
@@ -2281,7 +2281,7 @@ class OptimizeCommand(NotebookCommand):
             new_nb: nbformat.NotebookNode = copy.deepcopy(nb)
 
             # Identify cells to optimize
-            with timer(key="identify_cells", message="Identifying cells to optimize"):
+            with timer(key="optimize:identify_cells", message="Identifying cells to optimize"):
                 cells_to_process = self._identify_cells_to_optimize(new_nb, cell_ids)
 
             if not cells_to_process:

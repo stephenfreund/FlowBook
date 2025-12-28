@@ -224,18 +224,18 @@ class TrackingDict(dict):
         """
         # Ensure clean state before tracking (guards against leaked state from
         # previous cells if patches remained installed due to exceptions)
-        with timer(key="track_reset", message="Track reset"):
+        with timer(key="tracking:reset", message="Track reset"):
             self._column_tracker.reset()
             self._structural_tracker.reset()
         # Register all existing DataFrames with their paths (for column tracking)
-        with timer(key="walk_dataframes", message="Walk dataframes"):
+        with timer(key="tracking:walk_dataframes", message="Walk dataframes"):
             for path, df in walk_dataframes(self._real_ns):
                 self._column_tracker.register_df(df, path)
         # Register all pandas objects (DataFrames AND Series) for structural tracking
-        with timer(key="walk_pandas_objects", message="Walk pandas objects"):
+        with timer(key="tracking:walk_pandas_objects", message="Walk pandas objects"):
             for path, obj in walk_pandas_objects(self._real_ns):
                 self._structural_tracker.register(obj, path)
-        with timer(key="install_trackers", message="Install trackers"):
+        with timer(key="tracking:install_trackers", message="Install trackers"):
             self._column_tracker.install()
             self._structural_tracker.install()
 
@@ -246,14 +246,14 @@ class TrackingDict(dict):
         resolves tracking data, and restores original DataFrame methods.
         """
         # Re-register DataFrames (new DFs may have been created during execution)
-        with timer(key="walk_dataframes_post", message="Walk dataframes (post)"):
+        with timer(key="tracking:walk_dataframes_post", message="Walk dataframes (post)"):
             for path, df in walk_dataframes(self._real_ns):
                 self._column_tracker.register_df(df, path)
         # Re-register all pandas objects for structural tracking
-        with timer(key="walk_pandas_objects_post", message="Walk pandas objects (post)"):
+        with timer(key="tracking:walk_pandas_objects_post", message="Walk pandas objects (post)"):
             for path, obj in walk_pandas_objects(self._real_ns):
                 self._structural_tracker.register(obj, path)
-        with timer(key="uninstall_trackers", message="Uninstall trackers"):
+        with timer(key="tracking:uninstall_trackers", message="Uninstall trackers"):
             self._column_tracker.uninstall()
             self._structural_tracker.uninstall()
 

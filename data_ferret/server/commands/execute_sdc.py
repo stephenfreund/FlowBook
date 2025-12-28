@@ -120,14 +120,14 @@ class ExecuteSDCCommand(NotebookCommand):
             total_executed = 0
             status = "success"
 
-            with timer(key="execute_magic", message="Executing magic %continue_after_violation on"):
+            with timer(key="execute:magic", message="Executing magic %continue_after_violation on"):
                 kernel_client.execute("%continue_after_violation on")
 
             # Inject CSV downsampling monkey-patch if requested
             if downsample_csv is not None:
                 KernelHelper.inject_csv_downsampling(kernel_client, downsample_csv)
 
-            with timer(key="execute_sdc", message="Executing all cells with SDC"):
+            with timer(key="execute:sdc", message="Executing all cells with SDC"):
                 for idx, cell in enumerate(cells):
                     if cell.get("cell_type") != "code":
                         continue
@@ -144,7 +144,7 @@ class ExecuteSDCCommand(NotebookCommand):
                         continue
 
                     with timer(
-                        key="execute_cell", message=f"Executing cell {idx}:{cell_id}"
+                        key="execute:cell", message=f"Executing cell {idx}:{cell_id}"
                     ):
                         # Build metadata with cell_id and cell_order
                         cell_metadata = cell.get("metadata", {}).copy()

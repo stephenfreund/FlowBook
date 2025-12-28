@@ -140,7 +140,7 @@ def load_notebook(notebook_path: str) -> Dict[str, Any]:
     """
     from data_ferret.util.cell_ids import normalize_notebook
 
-    with timer(key="load_notebook", message=f"Loading notebook: {notebook_path}"):
+    with timer(key="cli:load_notebook", message=f"Loading notebook: {notebook_path}"):
         with open(notebook_path, "r", encoding="utf-8") as f:
             notebook_content = json.load(f)
 
@@ -175,9 +175,9 @@ def setup_kernel(
 
     if connection_file:
         # Connect to existing kernel using connection file
-        with timer(key="connect_kernel", message="Connecting to existing kernel"):
+        with timer(key="cli:connect_kernel", message="Connecting to existing kernel"):
             try:
-                with timer(key="read_connection_file", message=f"Reading connection file: {connection_file}"):
+                with timer(key="cli:read_connection_file", message=f"Reading connection file: {connection_file}"):
                     # Read connection file
                     with open(connection_file, "r", encoding="utf-8") as f:
                         connection_info = json.load(f)
@@ -209,7 +209,7 @@ def setup_kernel(
         kernel_manager = None
         kernel_client = None
 
-        with timer(key="start_kernel", message=f"Starting new kernel: {kernel_name}"):
+        with timer(key="cli:start_kernel", message=f"Starting new kernel: {kernel_name}"):
             for attempt in range(max_attempts):
                 try:
                     # Clean up any previous failed attempt

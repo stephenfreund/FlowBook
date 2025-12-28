@@ -306,7 +306,7 @@ def cli_main():
         if metadata_data is None or metadata_data.get("status") == "error":
             return 1
 
-        with timer(key="cli_main_exit", message="CLI main exit"):
+        with timer(key="cli:main_exit", message="CLI main exit"):
             return 0
 
     except FileNotFoundError as e:

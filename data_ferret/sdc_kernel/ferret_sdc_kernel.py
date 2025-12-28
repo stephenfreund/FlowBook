@@ -739,7 +739,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
             # Take pre-execution snapshot
             user_ns = self.shell.user_ns
-            with timer(key="sdc_pre_checkpoint") as pre_timer:
+            with timer(key="sdc_kernel:pre_checkpoint") as pre_timer:
                 pre_checkpoint = self._take_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
 
             # Reset tracking for this execution
@@ -759,10 +759,10 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
             try:
                 # Execute with tracking
-                with timer(key="sdc_execute") as run_timer:
+                with timer(key="sdc_kernel:execute") as run_timer:
                     if isinstance(user_ns, TrackingDict):
                         with user_ns.track_execution():
-                            with timer(key="track_execution", message="Run cell code"):
+                            with timer(key="sdc_kernel:track_execution", message="Run cell code"):
                                 result = await super().do_execute(
                                     code,
                                     silent,
@@ -772,7 +772,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
                                     cell_meta=cell_meta,
                                     cell_id=self._cell_id,
                                 )
-                        with timer(key="get_tracking_data", message="Get tracking data"):
+                        with timer(key="sdc_kernel:get_tracking_data", message="Get tracking data"):
                             tracking = user_ns.get_tracking_data()
                     else:
                         result = await super().do_execute(
@@ -809,12 +809,12 @@ class FerretSDCKernel(IPythonKernel, Magics):
             #     self._warn_non_deepcopyable_objects()
 
             # Take post-execution snapshot
-            with timer(key="sdc_post_checkpoint") as post_timer:
+            with timer(key="sdc_kernel:post_checkpoint") as post_timer:
                 post_checkpoint = self._take_checkpoint(f"{POST_CHECKPOINT_PREFIX}{self._cell_id}")
 
             # Run SDC check if we have tracking data and cell_id
             if tracking and self._cell_id:
-                with timer(key="sdc_check") as check_timer:
+                with timer(key="sdc_kernel:check") as check_timer:
                     sdc_result = self._sdc.check(
                         cell_id=self._cell_id,
                         pre_checkpoint=pre_checkpoint,

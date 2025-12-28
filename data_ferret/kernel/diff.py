@@ -408,9 +408,9 @@ class DiffProfileStats:
 
         total_time = sum(s[0] for _, s in sorted_types)
 
-        for type_info, (total, count, max_t, max_path) in sorted_types:
-            type_name = type_info.split('(')[0].replace(' ', '_')
-            output.add_timing(f"diff_type_{type_name}", total)
+        # for type_info, (total, count, max_t, max_path) in sorted_types:
+        #     type_name = type_info.split('(')[0].replace(' ', '_')
+        #     output.add_timing(f"diff:{type_name}", total)
 
         log(f"[diff profile] Total comparison time: {total_time*1000:.2f}ms")
         log(f"[diff profile] By type (top 10):")
@@ -792,7 +792,7 @@ class Diff:
 
         # Compare common variables - only add to differences if not equal
         common_vars = set(a.keys()) & set(b.keys())
-        with timer(key="diff_compare_loop", message=f"Comparing {len(common_vars & keys_to_include)} common variables"):
+        with timer(key="diff:compare_loop", message=f"Comparing {len(common_vars & keys_to_include)} common variables"):
             for var in sorted(
                 common_vars & keys_to_include
             ):  # Sort for deterministic output
@@ -800,11 +800,17 @@ class Diff:
                     var_start = time.perf_counter()
                     type_info = _get_value_shape_info(a[var])
 
-                diff_result = self._compare_values(a[var], b[var], path=var)
+                    ta = type(a[var]).__name__
+                    tb = type(b[var]).__name__
+                    with timer(key=f"diff:{ta}-{tb}", message=f"Comparing {var} ({ta} vs {tb})"):
+                        diff_result = self._compare_values(a[var], b[var], path=var)
 
-                if _PROFILE_DIFF:
                     elapsed = time.perf_counter() - var_start
                     _profile_stats.record(type_info, elapsed, var)
+
+                else:
+
+                    diff_result = self._compare_values(a[var], b[var], path=var)
 
                 if diff_result:  # Only include if there are differences
                     differences[var] = diff_result
@@ -1820,7 +1826,7 @@ class Diff:
                 if val_a_cmp.dtype == object and len(diff_indices) > 0:
                     kind = infer_dtype(val_a_cmp, skipna=True)
                     if kind in _IMMUTABLE_INFERRED_KINDS:
-                        with timer(key="diff_series_immutable_fast_path", message=f"[diff] Series immutable fast path ({kind}, {len(diff_indices)} diffs)"):
+                        with timer(key="diff:series_immutable_fast_path", message=f"[diff] Series immutable fast path ({kind}, {len(diff_indices)} diffs)"):
                             # Direct recording without dispatch - much faster for large diffs
                             truncated = len(diff_indices) > self.max_diffs_per_container
                             for i in diff_indices[:self.max_diffs_per_container]:
@@ -1932,7 +1938,7 @@ class Diff:
 
         # Use iloc to avoid issues with MultiIndex columns
         if _PROFILE_DIFF:
-            with timer(key="diff_fast_dataframe_equal", message=f"[diff] Fast path DataFrame equal ({len(df_a.columns)} cols compared)"):
+            with timer(key="diff:fast_dataframe_equal", message=f"[diff] Fast path DataFrame equal ({len(df_a.columns)} cols compared)"):
                 # Profiling enabled: collect timing, pass path names
                 for i in range(len(df_a.columns)):
                     col_name = str(df_a.columns[i])

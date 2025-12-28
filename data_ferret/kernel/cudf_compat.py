@@ -949,7 +949,7 @@ def diff_cudf(obj1: Any, obj2: Any, path: str, differ: Any) -> Optional[Any]:
     Returns None if equal, or a DiffNode if different.
     """
     # Convert both to pandas (uncached - we want fresh copies for comparison)
-    with timer(key="diff_cudf", message="Convert cuDF to pandas"):
+    with timer(key="cudf:diff", message="Convert cuDF to pandas"):
         pdf1 = to_pandas(obj1)
         pdf2 = to_pandas(obj2)
 
