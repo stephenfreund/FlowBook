@@ -670,14 +670,14 @@ def process_multiple_files(file_paths: list[str], args):
     first_error = True
     for file_path, valid_records in timings_by_file.items():
         # Look for a cli_main_exit key
-        cli_main_exit = [t for t in valid_records if t['key'] == 'cli_main_exit']
+        cli_main_exit = [t for t in valid_records if t['key'] == 'cli:main_exit']
         if len(cli_main_exit) > 1:
             if first_error:
                 print("=" * 60)
                 print("WARNINGS")
                 print("=" * 60)
-            print(f"Warning: Multiple cli_main_exit keys found in {file_path}", file=sys.stderr)
-            print(f"Warning: {len(cli_main_exit)} cli_main_exit keys found in {file_path}", file=sys.stderr)
+            print(f"Warning: Multiple cli:main_exit keys found in {file_path}", file=sys.stderr)
+            print(f"Warning: {len(cli_main_exit)} cli:main_exit keys found in {file_path}", file=sys.stderr)
             print(f"Warning: {cli_main_exit}", file=sys.stderr)
             first_error = False
         elif len(cli_main_exit) == 0:
@@ -685,7 +685,7 @@ def process_multiple_files(file_paths: list[str], args):
                 print("=" * 60)
                 print("WARNINGS")
                 print("=" * 60)
-            print(f"Warning: No cli_main_exit key found in {file_path}", file=sys.stderr)
+            print(f"Warning: No cli:main_exit key found in {file_path}", file=sys.stderr)
             first_error = False
     if not first_error:
         print("=" * 60)
