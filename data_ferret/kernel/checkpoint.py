@@ -1748,36 +1748,32 @@ class Checkpoints:
             saved = {}
             removed = {}
 
-            t0 = time.time()
-            checkpointable_vars = self.checkpointable_vars(user_ns)
-            checkpointable_values = self.checkpointable_values(checkpointable_vars)
-            output.add_timing("checkpoint_filter_vars", time.time() - t0)
+            with timer(key="checkpoint_filter_vars", message="Filtering variables"):
+                checkpointable_vars = self.checkpointable_vars(user_ns)
+                checkpointable_values = self.checkpointable_values(checkpointable_vars)
 
             for k in checkpointable_vars.keys() - checkpointable_values.keys():
                 removed[k] = get_type_model(user_ns[k])
 
             # Record cudf origins before deep copy (cudf objects become pandas)
-            t0 = time.time()
-            from . import cudf_compat
-            cudf_origins = cudf_compat.CuDFOriginTracker()
-            for k, v in checkpointable_values.items():
-                cudf_origins.record(k, v)
-            output.add_timing("checkpoint_cudf_origins", time.time() - t0)
+            with timer(key="checkpoint_cudf_origins", message="Recording cudf origins"):
+                from . import cudf_compat
+                cudf_origins = cudf_compat.CuDFOriginTracker()
+                for k, v in checkpointable_values.items():
+                    cudf_origins.record(k, v)
 
             # Use helper to deep copy all variables
-            t0 = time.time()
-            cp, memo, failed = self._deep_copy_user_ns(checkpointable_values)
-            output.add_timing("checkpoint_deepcopy", time.time() - t0)
+            with timer(key="checkpoint_deepcopy", message="Deep copying variables"):
+                cp, memo, failed = self._deep_copy_user_ns(checkpointable_values)
 
             # Track successfully copied variables
-            t0 = time.time()
-            for k in cp:
-                saved[k] = get_type_model(checkpointable_values[k])
+            with timer(key="checkpoint_type_models", message="Generating type models"):
+                for k in cp:
+                    saved[k] = get_type_model(checkpointable_values[k])
 
-            # Track variables that failed to copy
-            for k in failed:
-                removed[k] = get_type_model(checkpointable_values[k])
-            output.add_timing("checkpoint_type_models", time.time() - t0)
+                # Track variables that failed to copy
+                for k in failed:
+                    removed[k] = get_type_model(checkpointable_values[k])
 
             self.saved[name] = Checkpoint(name, cp, memo, cudf_origins)
 
