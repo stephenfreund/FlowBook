@@ -22,38 +22,6 @@ Timing = TypedDict("Timing", {"key": str, "duration": float})
 Timings = List[Timing]
 
 
-def truncate_timer_key(key: str, max_length: int = 50) -> str:
-    """
-    Truncate a timer key to a maximum length.
-
-    If the key is longer than max_length, it's truncated to show
-    prefix and suffix separated by '...'.
-
-    Args:
-        key: The timer key to potentially truncate
-        max_length: Maximum length (default: 50)
-
-    Returns:
-        Truncated key in format "abc...xyz" if too long, otherwise original key
-
-    Examples:
-        >>> truncate_timer_key("short_key")
-        'short_key'
-        >>> truncate_timer_key("a" * 100, max_length=50)
-        'aaaaaaaaaaaaaaaaaaaaaaa...aaaaaaaaaaaaaaaaaaaaaa'
-    """
-    if len(key) <= max_length:
-        return key
-
-    # Reserve 3 characters for '...'
-    available = max_length - 3
-    # Split remaining space between prefix and suffix
-    prefix_len = available // 2
-    suffix_len = available - prefix_len
-
-    return f"{key[:prefix_len]}...{key[-suffix_len:]}"
-
-
 class SocketStream:
     """
     File-like object that writes to a Unix domain socket.
@@ -192,8 +160,7 @@ class Output:
 
     def add_timing(self, key: str, duration: float):
         with self.lock:
-            truncated_key = truncate_timer_key(key)
-            self.timings.append(Timing(key=truncated_key, duration=duration))
+            self.timings.append(Timing(key=key, duration=duration))
 
     def timing_context(self, *, key: str | None = None, message: str | None = None):
         return self.TimedOutputContext(
@@ -243,8 +210,7 @@ class Output:
                 if self.suppressed:
                     return
                 if self.key is not None:
-                    truncated_key = truncate_timer_key(self.key)
-                    self.outer.timings.append(Timing(key=truncated_key, duration=duration))
+                    self.outer.timings.append(Timing(key=self.key, duration=duration))
                 if self.message is not None:
                     self.outer.contexts.pop()
                     message = f"{termcolor.colored(f'{int(duration)} ms', self.color)}"
