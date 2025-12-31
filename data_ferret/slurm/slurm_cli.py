@@ -125,15 +125,22 @@ def get_current_conda_env() -> str:
     return "base"
 
 
-def check_environment_exists(env_name: str) -> bool:
+def check_environment_exists(env_name: str, env_dir: Optional[Path] = None) -> bool:
     """Check if a conda environment exists.
 
     Args:
         env_name: Name of the conda environment to check
+        env_dir: Optional directory containing the environment (for path-based envs)
 
     Returns:
         True if the environment exists, False otherwise
     """
+    # For path-based environments, check if the directory exists
+    if env_dir is not None:
+        env_path = env_dir / env_name
+        return env_path.is_dir()
+
+    # For named environments, check conda env list
     try:
         result = subprocess.run(
             ["conda", "env", "list"],
@@ -224,7 +231,7 @@ def validate_work_item_environments(work_items: List[WorkItem]) -> None:
 
     for item in work_items:
         if item.requires_env_check:
-            if not check_environment_exists(item.env_name):
+            if not check_environment_exists(item.env_name, item.env_dir):
                 missing_envs[item.env_dir] = item.env_name
 
     if missing_envs:
@@ -265,12 +272,14 @@ def create_environments(work_items: List[WorkItem], ferret_source: Path) -> bool
     print()
 
     for (env_name, env_dir), notebooks in unique_envs.items():
+        env_path = env_dir / env_name
         print(f"[ENV] Setting up '{env_name}' in {env_dir}")
+        print(f"[ENV]   Full path: {env_path}")
         print(f"[ENV]   Used by {len(notebooks)} notebook(s)")
         requirements_file = env_dir / "requirements.txt"
 
-        if not setup_environment(env_name, ferret_source, requirements_file):
-            print(f"[ERROR] Failed to create environment '{env_name}' in {env_dir}")
+        if not setup_environment(env_path, ferret_source, requirements_file):
+            print(f"[ERROR] Failed to create environment at {env_path}")
             return False
 
         print()
@@ -521,12 +530,12 @@ def wait_for_jobs(
 
 
 def setup_environment(
-    env_name: str, ferret_source: Path, requirements_file: Path
+    env_path: Path, ferret_source: Path, requirements_file: Path
 ) -> bool:
     """Create/recreate a conda environment with DataFerret and requirements.
 
     Args:
-        env_name: Name of the conda environment to create
+        env_path: Full path to the conda environment directory (e.g., /path/to/_env)
         ferret_source: Path to DataFerret source directory (for pip install -e .)
         requirements_file: Path to requirements.txt
 
@@ -534,16 +543,16 @@ def setup_environment(
         True if successful, False otherwise
     """
     # 1. Remove existing environment if it exists
-    print(f"[ENV] Removing existing environment '{env_name}' if present...")
+    print(f"[ENV] Removing existing environment at '{env_path}' if present...")
     subprocess.run(
-        ["conda", "env", "remove", "-n", env_name, "-y"],
+        ["conda", "env", "remove", "-p", str(env_path), "-y"],
         capture_output=True,
     )
 
     # 2. Create new environment with Python 3.11
-    print(f"[ENV] Creating new environment '{env_name}' with Python 3.11...")
+    print(f"[ENV] Creating new environment at '{env_path}' with Python 3.11...")
     result = subprocess.run(
-        ["conda", "create", "-n", env_name, "python=3.11", "-y"],
+        ["conda", "create", "-p", str(env_path), "python=3.11", "-y"],
         capture_output=True,
         text=True,
     )
@@ -558,8 +567,8 @@ def setup_environment(
             [
                 "conda",
                 "run",
-                "-n",
-                env_name,
+                "-p",
+                str(env_path),
                 "pip",
                 "install",
                 "-r",
@@ -577,7 +586,7 @@ def setup_environment(
     # 4. Install DataFerret from source -- do after requirements to avoid conflicts
     print(f"[ENV] Installing DataFerret from {ferret_source}...")
     result = subprocess.run(
-        ["conda", "run", "-n", env_name, "pip", "install", "-e", str(ferret_source)],
+        ["conda", "run", "-p", str(env_path), "pip", "install", "-e", str(ferret_source)],
         capture_output=True,
         text=True,
     )
@@ -585,7 +594,7 @@ def setup_environment(
         print(f"[ERROR] Failed to install DataFerret: {result.stderr}")
         return False
 
-    print(f"[ENV] Environment '{env_name}' setup complete")
+    print(f"[ENV] Environment setup complete at {env_path}")
     return True
 
 
@@ -895,6 +904,14 @@ def run_local_job(work_item: WorkItem, args: argparse.Namespace) -> bool:
 
     # Build the shell script to run
     command_str = shlex.join(command_tokens)
+
+    # Determine environment activation command (use full path if env_dir is set)
+    if work_item.env_dir is not None:
+        env_path = work_item.env_dir / work_item.env_name
+        env_activate = f"conda activate {shlex.quote(str(env_path))}"
+    else:
+        env_activate = f"conda activate {shlex.quote(work_item.env_name)}"
+
     inner_cmd = textwrap.dedent(
         f"""
         set -x
@@ -916,7 +933,7 @@ def run_local_job(work_item: WorkItem, args: argparse.Namespace) -> bool:
 
         # ---- Conda environment ----
         source ~/.bashrc || true
-        conda activate {shlex.quote(work_item.env_name)} || echo "Warning: Failed to activate conda env {shlex.quote(work_item.env_name)}"
+        {env_activate} || echo "Warning: Failed to activate conda environment"
 
         conda info
 
@@ -1010,6 +1027,13 @@ def submit_single_job(work_item: WorkItem, args: argparse.Namespace) -> Optional
     command_tokens = build_command_tokens(context, args)
     command_str = shlex.join(command_tokens)
 
+    # Determine environment activation command (use full path if env_dir is set)
+    if work_item.env_dir is not None:
+        env_path = work_item.env_dir / work_item.env_name
+        env_activate = f"conda activate {shlex.quote(str(env_path))}"
+    else:
+        env_activate = f"conda activate {shlex.quote(work_item.env_name)}"
+
     inner_cmd = textwrap.dedent(
         f"""
         set -euo pipefail
@@ -1042,7 +1066,7 @@ def submit_single_job(work_item: WorkItem, args: argparse.Namespace) -> Optional
 
         # ---- Conda environment ----
         source ~/.bashrc
-        conda activate {shlex.quote(work_item.env_name)}
+        {env_activate}
 
         # cd {shlex.quote(str(work_dir))}
 
