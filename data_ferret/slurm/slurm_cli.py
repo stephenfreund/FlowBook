@@ -195,7 +195,7 @@ def resolve_environment(
         return WorkItem(
             notebook_path=notebook_path,
             env_name="_env",
-            env_dir=source_file.parent,
+            env_dir=source_file.parent.resolve(),
             requires_env_check=True,
         )
 
@@ -205,7 +205,7 @@ def resolve_environment(
         return WorkItem(
             notebook_path=notebook_path,
             env_name="_env",
-            env_dir=notebook_path.parent.parent.parent,
+            env_dir=notebook_path.parent.parent.parent.resolve(),
             requires_env_check=True,
         )
 
@@ -935,9 +935,8 @@ def run_local_job(work_item: WorkItem, args: argparse.Namespace) -> bool:
 
     # Determine environment activation command (use full path if env_dir is set)
     if work_item.env_dir is not None:
-        env_path = Path(
-            os.path.relpath(work_item.env_dir / work_item.env_name, Path.cwd())
-        )
+        env_path = work_item.env_dir / work_item.env_name
+        print(f"[ENV] Activating environment at {env_path}")
         env_activate = f"conda activate ./{shlex.quote(str(env_path))}"
     else:
         env_activate = f"conda activate {shlex.quote(work_item.env_name)}"
@@ -1059,9 +1058,8 @@ def submit_single_job(work_item: WorkItem, args: argparse.Namespace) -> Optional
 
     # Determine environment activation command (use full path if env_dir is set)
     if work_item.env_dir is not None:
-        env_path = Path(
-            os.path.relpath(work_item.env_dir / work_item.env_name, Path.cwd())
-        )
+        env_path = work_item.env_dir / work_item.env_name
+        print(f"[ENV] Activating environment at {env_path}")
         env_activate = f"conda activate ./{shlex.quote(str(env_path))}"
     else:
         env_activate = f"conda activate {shlex.quote(work_item.env_name)}"
