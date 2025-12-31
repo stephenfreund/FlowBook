@@ -937,7 +937,7 @@ def run_local_job(work_item: WorkItem, args: argparse.Namespace) -> bool:
     if work_item.env_dir is not None:
         env_path = work_item.env_dir / work_item.env_name
         print(f"[ENV] Activating environment at {env_path}")
-        env_activate = f"conda activate ./{shlex.quote(str(env_path))}"
+        env_activate = f"conda activate {shlex.quote(str(env_path))}"
     else:
         env_activate = f"conda activate {shlex.quote(work_item.env_name)}"
 
@@ -1060,7 +1060,7 @@ def submit_single_job(work_item: WorkItem, args: argparse.Namespace) -> Optional
     if work_item.env_dir is not None:
         env_path = work_item.env_dir / work_item.env_name
         print(f"[ENV] Activating environment at {env_path}")
-        env_activate = f"conda activate ./{shlex.quote(str(env_path))}"
+        env_activate = f"conda activate {shlex.quote(str(env_path))}"
     else:
         env_activate = f"conda activate {shlex.quote(work_item.env_name)}"
 
