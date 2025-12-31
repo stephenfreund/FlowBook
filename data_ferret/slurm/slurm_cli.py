@@ -9,7 +9,8 @@ command that follows the `--` separator.
 Environment Resolution (4 rules, in priority order):
     1. --env flag: Use specified environment for ALL notebooks (assumes it exists)
     2. .txt file: Use '_env' from same directory as the .txt file (must exist or use --make-env)
-    3. Direct .ipynb: Use '_env' from notebook's directory (must exist or use --make-env)
+    3. Direct .ipynb: Use '_env' from great-grandparent directory (must exist or use --make-env)
+       Example: user/notebook-slug/notebook.ipynb -> looks for _env in parent of 'user/' dir
     4. Fallback: Use currently active conda environment
 
 Examples:
@@ -22,11 +23,12 @@ Examples:
     # Create _env before running (rule 2 + --make-env)
     python slurm_cli.py batch1.txt --make-env -- info
 
-    # Direct notebook with _env in notebook's directory (rule 3, must exist)
-    python slurm_cli.py path/to/notebook.ipynb -- execute_all
+    # Direct notebook with _env in great-grandparent dir (rule 3, must exist)
+    # For user/notebook-slug/notebook.ipynb -> looks for _env in parent of 'user/' dir
+    python slurm_cli.py user/notebook-slug/notebook.ipynb -- execute_all
 
-    # Create _env in notebook's directory before running (rule 3 + --make-env)
-    python slurm_cli.py path/to/notebook.ipynb --make-env -- info
+    # Create _env in great-grandparent dir before running (rule 3 + --make-env)
+    python slurm_cli.py user/notebook-slug/notebook.ipynb --make-env -- info
 
     # Multiple files with different _env locations (all must exist)
     python slurm_cli.py batch1.txt batch2.txt notebook.ipynb -- execute_all
@@ -160,7 +162,8 @@ def resolve_environment(
     Rules (in priority order):
     1. CLI --env flag overrides everything (assumes env exists)
     2. .txt file -> use _env from same directory as the file
-    3. Direct .ipynb -> use _env from notebook's directory
+    3. Direct .ipynb -> use _env from great-grandparent directory
+       (notebook.ipynb -> parent -> grandparent -> great-grandparent)
     4. Fallback -> use current active conda environment
 
     Args:
@@ -189,12 +192,13 @@ def resolve_environment(
             requires_env_check=True,
         )
 
-    # Rule 3: Direct .ipynb -> use _env from notebook's directory
+    # Rule 3: Direct .ipynb -> use _env from great-grandparent directory
+    # (notebook.ipynb -> parent -> grandparent -> great-grandparent)
     if source_file is None:
         return WorkItem(
             notebook_path=notebook_path,
             env_name="_env",
-            env_dir=notebook_path.parent,
+            env_dir=notebook_path.parent.parent.parent,
             requires_env_check=True,
         )
 
