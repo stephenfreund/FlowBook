@@ -551,9 +551,11 @@ def setup_environment(
 
     # 2. Create new environment with Python 3.11
     print(f"[ENV] Creating new environment at '{env_path}' with Python 3.11...")
-    print(f"[ENV] Running: conda create -p {env_path} python=3.11 -y")
+    print(f"[ENV] Running: conda create -p {env_path} python=3.11 -y", flush=True)
     result = subprocess.run(
         ["conda", "create", "-p", str(env_path), "python=3.11", "-y"],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
     )
     if result.returncode != 0:
         print(f"[ERROR] Failed to create environment (exit code: {result.returncode})")
@@ -562,7 +564,7 @@ def setup_environment(
     # 3. Install requirements if file exists
     if requirements_file.exists():
         print(f"[ENV] Installing requirements from {requirements_file}...")
-        print(f"[ENV] Running: conda run -p {env_path} pip install -r {requirements_file}")
+        print(f"[ENV] Running: conda run -p {env_path} pip install -r {requirements_file}", flush=True)
         result = subprocess.run(
             [
                 "conda",
@@ -574,6 +576,8 @@ def setup_environment(
                 "-r",
                 str(requirements_file),
             ],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
         )
         if result.returncode != 0:
             print(f"[ERROR] Failed to install requirements (exit code: {result.returncode})")
@@ -583,9 +587,11 @@ def setup_environment(
 
     # 4. Install DataFerret from source -- do after requirements to avoid conflicts
     print(f"[ENV] Installing DataFerret from {ferret_source}...")
-    print(f"[ENV] Running: conda run -p {env_path} pip install -e {ferret_source}")
+    print(f"[ENV] Running: conda run -p {env_path} pip install -e {ferret_source}", flush=True)
     result = subprocess.run(
         ["conda", "run", "-p", str(env_path), "pip", "install", "-e", str(ferret_source)],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
     )
     if result.returncode != 0:
         print(f"[ERROR] Failed to install DataFerret (exit code: {result.returncode})")
