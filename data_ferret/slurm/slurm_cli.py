@@ -1,32 +1,48 @@
 #!/usr/bin/env python3
-"""Submit DataFerret CLI jobs to Slurm.
+"""Submit DataFerret CLI jobs to Slurm with per-notebook conda environment support.
 
-Accepts any number of input files: .txt files (one work item per line) or .ipynb
-files (treated as individual jobs). For each work item, launches a separate
-`sbatch` job using the command that follows the `--` separator. Every job
-activates a Conda environment, prints node diagnostics, changes into the
-notebook's directory, and runs the requested CLI on the notebook filename.
+Accepts any number of input files: .txt files (one notebook path per line) or
+.ipynb files (treated as individual jobs). For each work item, resolves the
+appropriate conda environment and launches a separate `sbatch` job using the
+command that follows the `--` separator.
+
+Environment Resolution (4 rules, in priority order):
+    1. --env flag: Use specified environment for ALL notebooks (assumes it exists)
+    2. .txt file: Use '_env' from same directory as the .txt file (must exist or use --make-env)
+    3. Direct .ipynb: Use '_env' from notebook's directory (must exist or use --make-env)
+    4. Fallback: Use currently active conda environment
 
 Examples:
-    # Single text file with list of notebooks
-    python slurm_cli.py notebooks.txt --env=ferret -- data_ferret info
+    # Use existing 'myenv' for all notebooks (rule 1)
+    python slurm_cli.py notebooks.txt --env=myenv -- info
 
-    # Multiple text files
-    python slurm_cli.py batch1.txt batch2.txt --env=ferret -- data_ferret info
+    # Use _env from same directory as notebooks.txt (rule 2, must exist)
+    python slurm_cli.py batch1.txt -- execute_all
 
-    # Direct notebook files as jobs
-    python slurm_cli.py notebook1.ipynb notebook2.ipynb -- data_ferret info
+    # Create _env before running (rule 2 + --make-env)
+    python slurm_cli.py batch1.txt --make-env -- info
 
-    # Mixed: text files and notebooks
-    python slurm_cli.py notebooks.txt extra.ipynb -- data_ferret info
+    # Direct notebook with _env in notebook's directory (rule 3, must exist)
+    python slurm_cli.py path/to/notebook.ipynb -- execute_all
 
-    # Run optimize without automatically appending the notebook filename
-    python slurm_cli.py notebooks.txt --env=moo --no-append-target -- \
-        data_ferret_optimize --plan-only --config configs/opt.json
+    # Create _env in notebook's directory before running (rule 3 + --make-env)
+    python slurm_cli.py path/to/notebook.ipynb --make-env -- info
 
-    # Collect timing stats for every work item
-    python slurm_cli.py notebooks.txt --partition=gpu --env=perf -- \
-        data_ferret_timers --summary
+    # Multiple files with different _env locations (all must exist)
+    python slurm_cli.py batch1.txt batch2.txt notebook.ipynb -- execute_all
+
+    # Create all discovered _env environments before running
+    python slurm_cli.py batch1.txt batch2.txt --make-env -- info
+
+    # Run a different DataFerret command (optimize) without auto-appending notebook
+    python slurm_cli.py notebooks.txt --no-append-target -- \
+        optimize --plan-only --config configs/opt.json
+
+    # Use GPU partition for compute-intensive operations
+    python slurm_cli.py notebooks.txt --partition=gpu -- execute_all
+
+Note: The 'data_ferret' command with --timings-file and --metadata-file flags
+      is automatically prepended to your command. Just specify the subcommand.
 """
 
 from __future__ import annotations
@@ -40,10 +56,28 @@ import subprocess
 import sys
 import textwrap
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 SUBMITTED_RE = re.compile(r"Submitted batch job (\d+)")
+
+
+@dataclass
+class WorkItem:
+    """A notebook to process and the conda environment to use.
+
+    Attributes:
+        notebook_path: Path to the notebook file to process
+        env_name: Name of the conda environment to use for execution
+        env_dir: Directory containing the _env (for --make-env setup), None if not applicable
+        requires_env_check: True if this uses _env discovery (rules 2-3), False otherwise
+    """
+
+    notebook_path: Path
+    env_name: str
+    env_dir: Optional[Path] = None
+    requires_env_check: bool = False
 
 
 def get_ferret_env_exports() -> str:
@@ -57,6 +91,188 @@ def get_ferret_env_exports() -> str:
         if var.startswith("FERRET_"):
             exports.append(f"export {var}={shlex.quote(value)}")
     return "\n".join(exports)
+
+
+def get_current_conda_env() -> str:
+    """Get the name of the currently active conda environment.
+
+    Returns:
+        Name of the active conda environment, defaults to "base" if not in a conda env
+    """
+    # Try environment variable first (most reliable)
+    env_name = os.environ.get("CONDA_DEFAULT_ENV")
+    if env_name:
+        return env_name
+
+    # Fallback: try conda info --json
+    try:
+        result = subprocess.run(
+            ["conda", "info", "--json"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        info = json.loads(result.stdout)
+        env_name = info.get("active_prefix_name")
+        if env_name:
+            return env_name
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError):
+        pass
+
+    # Final fallback
+    return "base"
+
+
+def check_environment_exists(env_name: str) -> bool:
+    """Check if a conda environment exists.
+
+    Args:
+        env_name: Name of the conda environment to check
+
+    Returns:
+        True if the environment exists, False otherwise
+    """
+    try:
+        result = subprocess.run(
+            ["conda", "env", "list"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        # Look for env_name as a word boundary (to avoid partial matches)
+        # conda env list format: "env_name   /path/to/env"
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if parts and parts[0] == env_name:
+                return True
+        return False
+    except subprocess.CalledProcessError:
+        return False
+
+
+def resolve_environment(
+    notebook_path: Path,
+    source_file: Optional[Path],
+    cli_env: Optional[str],
+) -> WorkItem:
+    """Resolve the conda environment for a notebook using the 4-rule hierarchy.
+
+    Rules (in priority order):
+    1. CLI --env flag overrides everything (assumes env exists)
+    2. .txt file -> use _env from same directory as the file
+    3. Direct .ipynb -> use _env from notebook's directory
+    4. Fallback -> use current active conda environment
+
+    Args:
+        notebook_path: Path to the notebook file
+        source_file: Optional path to .txt file that contained this notebook
+        cli_env: Optional environment name from --env CLI flag
+
+    Returns:
+        WorkItem with resolved environment and metadata
+    """
+    # Rule 1: CLI override
+    if cli_env is not None:
+        return WorkItem(
+            notebook_path=notebook_path,
+            env_name=cli_env,
+            env_dir=None,
+            requires_env_check=False,
+        )
+
+    # Rule 2: .txt file -> use _env from source file's directory
+    if source_file is not None and source_file.suffix.lower() == ".txt":
+        return WorkItem(
+            notebook_path=notebook_path,
+            env_name="_env",
+            env_dir=source_file.parent,
+            requires_env_check=True,
+        )
+
+    # Rule 3: Direct .ipynb -> use _env from notebook's directory
+    if source_file is None:
+        return WorkItem(
+            notebook_path=notebook_path,
+            env_name="_env",
+            env_dir=notebook_path.parent,
+            requires_env_check=True,
+        )
+
+    # Rule 4: Fallback to current conda environment
+    return WorkItem(
+        notebook_path=notebook_path,
+        env_name=get_current_conda_env(),
+        env_dir=None,
+        requires_env_check=False,
+    )
+
+
+def validate_work_item_environments(work_items: List[WorkItem]) -> None:
+    """Validate that all required _env environments exist.
+
+    Args:
+        work_items: List of work items to validate
+
+    Raises:
+        SystemExit: If any required _env is missing
+    """
+    missing_envs: Dict[Path, str] = {}
+
+    for item in work_items:
+        if item.requires_env_check:
+            if not check_environment_exists(item.env_name):
+                missing_envs[item.env_dir] = item.env_name
+
+    if missing_envs:
+        print("[ERROR] Required conda environments not found:")
+        for env_dir, env_name in missing_envs.items():
+            print(f"  - '{env_name}' in directory: {env_dir}")
+        print()
+        print("Solutions:")
+        print("  1. Use --make-env to create the missing environments")
+        print("  2. Use --env=<existing_env> to override with an existing environment")
+        sys.exit(1)
+
+
+def create_environments(work_items: List[WorkItem], ferret_source: Path) -> bool:
+    """Create all discovered _env environments.
+
+    Args:
+        work_items: List of work items (only those with requires_env_check=True are processed)
+        ferret_source: Path to DataFerret source directory (for pip install -e .)
+
+    Returns:
+        True if all environments were created successfully, False otherwise
+    """
+    # Collect unique (env_name, env_dir) pairs that need creation
+    unique_envs: Dict[Tuple[str, Path], List[Path]] = {}
+    for item in work_items:
+        if item.requires_env_check and item.env_dir is not None:
+            key = (item.env_name, item.env_dir)
+            if key not in unique_envs:
+                unique_envs[key] = []
+            unique_envs[key].append(item.notebook_path)
+
+    if not unique_envs:
+        print("[INFO] No _env environments to create (using CLI --env or current env)")
+        return True
+
+    print(f"[ENV] Creating {len(unique_envs)} environment(s)...")
+    print()
+
+    for (env_name, env_dir), notebooks in unique_envs.items():
+        print(f"[ENV] Setting up '{env_name}' in {env_dir}")
+        print(f"[ENV]   Used by {len(notebooks)} notebook(s)")
+        requirements_file = env_dir / "requirements.txt"
+
+        if not setup_environment(env_name, ferret_source, requirements_file):
+            print(f"[ERROR] Failed to create environment '{env_name}' in {env_dir}")
+            return False
+
+        print()
+
+    print(f"[ENV] All {len(unique_envs)} environment(s) created successfully")
+    return True
 
 
 def parse_time_limit(time_str: str) -> int:
@@ -261,9 +477,13 @@ def wait_for_jobs(
                 else:
                     # Warning case - dump output file for debugging
                     if count == 0:
-                        print(f"[WARNING] Job {job_id} -> FINISHED (cli_main_exit=0) {target}")
+                        print(
+                            f"[WARNING] Job {job_id} -> FINISHED (cli_main_exit=0) {target}"
+                        )
                     elif count > 1:
-                        print(f"[WARNING] Job {job_id} -> FINISHED (cli_main_exit={count}) {target}")
+                        print(
+                            f"[WARNING] Job {job_id} -> FINISHED (cli_main_exit={count}) {target}"
+                        )
                     else:
                         print(f"[WARNING] Job {job_id} -> FINISHED ({status}) {target}")
                     # Dump the .out file contents for debugging
@@ -282,7 +502,9 @@ def wait_for_jobs(
 
             if pending:
                 elapsed = format_elapsed(time.time() - start_time)
-                print(f"[WAIT] {len(pending)} jobs still running... (elapsed: {elapsed})")
+                print(
+                    f"[WAIT] {len(pending)} jobs still running... (elapsed: {elapsed})"
+                )
                 time.sleep(poll_interval)
 
     except KeyboardInterrupt:
@@ -294,7 +516,9 @@ def wait_for_jobs(
     return results
 
 
-def setup_environment(env_name: str, ferret_source: Path, requirements_file: Path) -> bool:
+def setup_environment(
+    env_name: str, ferret_source: Path, requirements_file: Path
+) -> bool:
     """Create/recreate a conda environment with DataFerret and requirements.
 
     Args:
@@ -323,18 +547,7 @@ def setup_environment(env_name: str, ferret_source: Path, requirements_file: Pat
         print(f"[ERROR] Failed to create environment: {result.stderr}")
         return False
 
-    # 3. Install DataFerret from source
-    print(f"[ENV] Installing DataFerret from {ferret_source}...")
-    result = subprocess.run(
-        ["conda", "run", "-n", env_name, "pip", "install", "-e", str(ferret_source)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(f"[ERROR] Failed to install DataFerret: {result.stderr}")
-        return False
-
-    # 4. Install requirements if file exists
+    # 3. Install requirements if file exists
     if requirements_file.exists():
         print(f"[ENV] Installing requirements from {requirements_file}...")
         result = subprocess.run(
@@ -356,6 +569,17 @@ def setup_environment(env_name: str, ferret_source: Path, requirements_file: Pat
             return False
     else:
         print(f"[ENV] No requirements file found at {requirements_file}, skipping")
+
+    # 4. Install DataFerret from source -- do after requirements to avoid conflicts
+    print(f"[ENV] Installing DataFerret from {ferret_source}...")
+    result = subprocess.run(
+        ["conda", "run", "-n", env_name, "pip", "install", "-e", str(ferret_source)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"[ERROR] Failed to install DataFerret: {result.stderr}")
+        return False
 
     print(f"[ENV] Environment '{env_name}' setup complete")
     return True
@@ -437,13 +661,20 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     slurm_args, command_template = split_cli_sections(list(argv))
     parser = argparse.ArgumentParser(
         description=(
-            "Submit one Slurm job per path listed in the work file. "
-            "Provide the command to run after a literal `--` separator."
+            "Submit one Slurm job per notebook with per-notebook conda environments. "
+            "Specify the DataFerret subcommand after a literal `--` separator. "
+            "The 'data_ferret' command with --timings-file and --metadata-file is "
+            "automatically prepended."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent(
             """\
-            Formatting tokens for commands supplied after `--`:
+            Example commands (after `--`):
+              info                   -> runs: data_ferret --timings-file=... --metadata-file=... info <notebook>
+              execute_all            -> runs: data_ferret --timings-file=... --metadata-file=... execute_all <notebook>
+              optimize --plan-only   -> runs: data_ferret --timings-file=... --metadata-file=... optimize --plan-only <notebook>
+
+            Formatting tokens available in your command:
               {target}               -> absolute path to the notebook file
               {target_dir}           -> absolute directory containing the notebook
               {target_name}          -> filename with extension (no directory)
@@ -477,18 +708,13 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--env",
-        default="ferret",
-        help="Conda environment to activate inside each job (default: ferret)",
-    )
-    parser.add_argument(
-        "--reset-env",
-        action="store_true",
-        help="Create/recreate the conda environment before submitting jobs",
-    )
-    parser.add_argument(
-        "--requirements",
         default=None,
-        help="Path to requirements.txt (default: requirements.txt in work_file directory)",
+        help="Conda environment to use for ALL notebooks (overrides _env discovery)",
+    )
+    parser.add_argument(
+        "--make-env",
+        action="store_true",
+        help="Create/recreate _env environments in discovered locations before submitting jobs",
     )
     parser.add_argument(
         "--dry-run",
@@ -508,8 +734,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--poll-interval",
         type=int,
-        default=5,
-        help="Seconds between SLURM status checks when waiting (default: 5)",
+        default=1,
+        help="Seconds between SLURM status checks when waiting (default: 1)",
     )
     parser.add_argument(
         "--log-dir",
@@ -541,26 +767,47 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return args
 
 
-def load_work_items(work_file: Path) -> List[Path]:
-    """Return cleaned work items, ignoring comments and blank lines."""
+def load_work_items(work_file: Path, cli_env: Optional[str]) -> List[WorkItem]:
+    """Return work items from a .txt file, ignoring comments and blank lines.
+
+    Args:
+        work_file: Path to .txt file containing notebook paths (one per line)
+        cli_env: Optional environment name from --env CLI flag
+
+    Returns:
+        List of WorkItem objects with resolved environments
+    """
     if not work_file.is_file():
         raise FileNotFoundError(f"File not found: {work_file}")
-    items: List[Path] = []
+    items: List[WorkItem] = []
     for raw in work_file.read_text().splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        items.append(Path(line))
+        notebook_path = work_file.parent / line
+        # Resolve environment for this notebook (source_file is the .txt file)
+        work_item = resolve_environment(notebook_path, work_file, cli_env)
+        items.append(work_item)
     return items
 
 
-def collect_work_items(input_files: List[str]) -> List[Path]:
-    """Collect work items from multiple input files.
+def collect_work_items(
+    input_files: List[str], cli_env: Optional[str]
+) -> List[WorkItem]:
+    """Collect work items from multiple input files with resolved environments.
 
-    - .txt files: read line-by-line (existing behavior)
-    - .ipynb files: treated as single work items
+    Args:
+        input_files: List of input file paths (.txt or .ipynb files)
+        cli_env: Optional environment name from --env CLI flag
+
+    Returns:
+        List of WorkItem objects with resolved environments
+
+    Behavior:
+        - .txt files: read line-by-line, each line is a notebook path
+        - .ipynb files: treated as single work items
     """
-    items: List[Path] = []
+    items: List[WorkItem] = []
     for file_str in input_files:
         file_path = Path(file_str)
         if not file_path.is_file():
@@ -568,11 +815,12 @@ def collect_work_items(input_files: List[str]) -> List[Path]:
 
         suffix = file_path.suffix.lower()
         if suffix == ".txt":
-            # Existing behavior: each line is a work item
-            items.extend(load_work_items(file_path))
+            # Load notebooks from text file with environment resolution
+            items.extend(load_work_items(file_path, cli_env))
         elif suffix == ".ipynb":
-            # Notebook files are direct work items
-            items.append(file_path)
+            # Direct notebook file (source_file is None for direct .ipynb)
+            work_item = resolve_environment(file_path, None, cli_env)
+            items.append(work_item)
         else:
             raise ValueError(
                 f"Unsupported file type: {file_path} (expected .txt or .ipynb)"
@@ -583,20 +831,41 @@ def collect_work_items(input_files: List[str]) -> List[Path]:
 def build_command_tokens(
     context: dict[str, str], args: argparse.Namespace
 ) -> List[str]:
-    """Create the concrete command tokens for the given target context."""
-    cmd_tokens = [token.format(**context) for token in args.command_template]
+    """Create the concrete command tokens for the given target context.
+
+    Automatically prepends the standard data_ferret command with timings and metadata flags.
+
+    Args:
+        context: Dictionary with formatting variables (target, log_dir, job_id, etc.)
+        args: Command-line arguments
+
+    Returns:
+        List of command tokens ready for execution
+    """
+    # Prepend standard data_ferret command with timings and metadata
+    cmd_tokens = [
+        "data_ferret",
+        f"--timings-file={context['log_dir']}/{context['job_id']}.timers.json",
+        f"--metadata-file={context['log_dir']}/{context['job_id']}.metadata.json",
+    ]
+    # Add user-provided command tokens
+    cmd_tokens.extend([token.format(**context) for token in args.command_template])
     if args.append_target:
         cmd_tokens.append(context["target_name"])
     return cmd_tokens
 
 
-def run_local_job(target: Path, args: argparse.Namespace) -> bool:
+def run_local_job(work_item: WorkItem, args: argparse.Namespace) -> bool:
     """Run the job locally in a subprocess with timeout.
+
+    Args:
+        work_item: WorkItem containing notebook path and environment info
+        args: Command-line arguments
 
     Returns:
         True if the job completed successfully, False otherwise.
     """
-    abs_target = target.expanduser()
+    abs_target = work_item.notebook_path.expanduser()
     if not abs_target.is_absolute():
         abs_target = abs_target.resolve(strict=False)
     work_dir = abs_target.parent
@@ -643,7 +912,7 @@ def run_local_job(target: Path, args: argparse.Namespace) -> bool:
 
         # ---- Conda environment ----
         source ~/.bashrc || true
-        conda activate {shlex.quote(args.env or 'base')} || echo "Warning: Failed to activate conda env {shlex.quote(args.env or 'base')}"
+        conda activate {shlex.quote(work_item.env_name)} || echo "Warning: Failed to activate conda env {shlex.quote(work_item.env_name)}"
 
         conda info
 
@@ -705,9 +974,17 @@ def run_local_job(target: Path, args: argparse.Namespace) -> bool:
         return False
 
 
-def submit_single_job(target: Path, args: argparse.Namespace) -> Optional[int]:
-    """Submit the sbatch job for one work item."""
-    abs_target = target.expanduser()
+def submit_single_job(work_item: WorkItem, args: argparse.Namespace) -> Optional[int]:
+    """Submit the sbatch job for one work item.
+
+    Args:
+        work_item: WorkItem containing notebook path and environment info
+        args: Command-line arguments
+
+    Returns:
+        SLURM job ID if successful, None otherwise
+    """
+    abs_target = work_item.notebook_path.expanduser()
     if not abs_target.is_absolute():
         abs_target = abs_target.resolve(strict=False)
     work_dir = abs_target.parent
@@ -761,7 +1038,7 @@ def submit_single_job(target: Path, args: argparse.Namespace) -> Optional[int]:
 
         # ---- Conda environment ----
         source ~/.bashrc
-        conda activate {shlex.quote(args.env or 'base')}
+        conda activate {shlex.quote(work_item.env_name)}
 
         # cd {shlex.quote(str(work_dir))}
 
@@ -816,51 +1093,43 @@ def submit_single_job(target: Path, args: argparse.Namespace) -> Optional[int]:
 def main() -> None:
     """Script entry point."""
     args = parse_args(sys.argv[1:])
-    targets = collect_work_items(args.input_files)
-    if not targets:
-        print("[INFO] No valid targets found. Nothing to submit.")
+    work_items = collect_work_items(args.input_files, args.env)
+    if not work_items:
+        print("[INFO] No valid work items found. Nothing to submit.")
         return
 
-    # Handle --reset-env: create/recreate conda environment before submitting jobs
-    if args.reset_env:
-        # DataFerret source is the repo root (parent of data_ferret/slurm/)
-        ferret_source = Path(__file__).parent.parent.parent
-        # Use CWD for default requirements.txt (since we now accept multiple input files)
-        work_dir = Path.cwd()
-        requirements_file = (
-            Path(args.requirements)
-            if args.requirements
-            else work_dir / "requirements.txt"
-        )
+    # DataFerret source is the repo root (parent of data_ferret/slurm/)
+    ferret_source = Path(__file__).parent.parent.parent
 
-        print(f"[ENV] Setting up environment '{args.env}'...")
-        print(f"[ENV] DataFerret source: {ferret_source}")
-        print(f"[ENV] Requirements file: {requirements_file}")
+    # Handle --make-env: create/recreate _env environments before submitting jobs
+    if args.make_env:
+        if not create_environments(work_items, ferret_source):
+            print("[ERROR] Environment creation failed, aborting")
+            sys.exit(1)
         print()
-
-        if not setup_environment(args.env, ferret_source, requirements_file):
-            print("[ERROR] Environment setup failed, aborting")
-            return
-
-        print()
+    else:
+        # Validate that all required _env environments exist
+        validate_work_item_environments(work_items)
 
     if args.local:
         # Local execution mode
-        print(f"[LOCAL MODE] Running {len(targets)} jobs sequentially...")
+        print(f"[LOCAL MODE] Running {len(work_items)} jobs sequentially...")
         print()
         succeeded = 0
         failed = 0
-        for i, target_path in enumerate(targets, 1):
-            print(f"[{i}/{len(targets)}] {target_path}")
+        for i, work_item in enumerate(work_items, 1):
+            print(
+                f"[{i}/{len(work_items)}] {work_item.notebook_path} (env: {work_item.env_name})"
+            )
             print("-" * 60)
-            if run_local_job(target=target_path, args=args):
+            if run_local_job(work_item=work_item, args=args):
                 succeeded += 1
             else:
                 failed += 1
             print()
 
         print("=" * 60)
-        print(f"[SUMMARY] Completed {succeeded + failed}/{len(targets)} jobs")
+        print(f"[SUMMARY] Completed {succeeded + failed}/{len(work_items)} jobs")
         print(f"[SUMMARY] ✓ Succeeded: {succeeded}")
         print(f"[SUMMARY] ✗ Failed: {failed}")
     else:
@@ -870,16 +1139,16 @@ def main() -> None:
         job_timings_files: Dict[int, Optional[str]] = {}
         log_dir = Path(args.log_dir).resolve()
 
-        for target_path in targets:
-            print(target_path)
+        for work_item in work_items:
+            print(f"{work_item.notebook_path} (env: {work_item.env_name})")
             print("-----------------------")
-            job_id = submit_single_job(target=target_path, args=args)
+            job_id = submit_single_job(work_item=work_item, args=args)
             if job_id is not None:
                 submitted.append(job_id)
-                job_targets[job_id] = target_path
+                job_targets[job_id] = work_item.notebook_path
 
                 # Build context and command tokens to extract timings file
-                abs_target = target_path.expanduser()
+                abs_target = work_item.notebook_path.expanduser()
                 if not abs_target.is_absolute():
                     abs_target = abs_target.resolve(strict=False)
                 context = {
@@ -891,11 +1160,13 @@ def main() -> None:
                     "job_id": build_job_id(abs_target),
                 }
                 cmd_tokens = build_command_tokens(context, args)
-                job_timings_files[job_id] = extract_timings_file_from_command(cmd_tokens)
+                job_timings_files[job_id] = extract_timings_file_from_command(
+                    cmd_tokens
+                )
             print()
 
         if submitted:
-            print(f"[OK] Submitted {len(submitted)}/{len(targets)} jobs.")
+            print(f"[OK] Submitted {len(submitted)}/{len(work_items)} jobs.")
             print("Job IDs:", " ".join(str(job) for job in submitted))
         else:
             print("[WARN] No jobs submitted.")
