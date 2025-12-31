@@ -546,23 +546,23 @@ def setup_environment(
     print(f"[ENV] Removing existing environment at '{env_path}' if present...")
     subprocess.run(
         ["conda", "env", "remove", "-p", str(env_path), "-y"],
-        capture_output=True,
+        stderr=subprocess.DEVNULL,
     )
 
     # 2. Create new environment with Python 3.11
     print(f"[ENV] Creating new environment at '{env_path}' with Python 3.11...")
+    print(f"[ENV] Running: conda create -p {env_path} python=3.11 -y")
     result = subprocess.run(
         ["conda", "create", "-p", str(env_path), "python=3.11", "-y"],
-        capture_output=True,
-        text=True,
     )
     if result.returncode != 0:
-        print(f"[ERROR] Failed to create environment: {result.stderr}")
+        print(f"[ERROR] Failed to create environment (exit code: {result.returncode})")
         return False
 
     # 3. Install requirements if file exists
     if requirements_file.exists():
         print(f"[ENV] Installing requirements from {requirements_file}...")
+        print(f"[ENV] Running: conda run -p {env_path} pip install -r {requirements_file}")
         result = subprocess.run(
             [
                 "conda",
@@ -574,24 +574,21 @@ def setup_environment(
                 "-r",
                 str(requirements_file),
             ],
-            capture_output=True,
-            text=True,
         )
         if result.returncode != 0:
-            print(f"[ERROR] Failed to install requirements: {result.stderr}")
+            print(f"[ERROR] Failed to install requirements (exit code: {result.returncode})")
             return False
     else:
         print(f"[ENV] No requirements file found at {requirements_file}, skipping")
 
     # 4. Install DataFerret from source -- do after requirements to avoid conflicts
     print(f"[ENV] Installing DataFerret from {ferret_source}...")
+    print(f"[ENV] Running: conda run -p {env_path} pip install -e {ferret_source}")
     result = subprocess.run(
         ["conda", "run", "-p", str(env_path), "pip", "install", "-e", str(ferret_source)],
-        capture_output=True,
-        text=True,
     )
     if result.returncode != 0:
-        print(f"[ERROR] Failed to install DataFerret: {result.stderr}")
+        print(f"[ERROR] Failed to install DataFerret (exit code: {result.returncode})")
         return False
 
     print(f"[ENV] Environment setup complete at {env_path}")
