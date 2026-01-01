@@ -354,7 +354,7 @@ def get_timer_count(timings_file_path: Optional[str]) -> Tuple[int, str]:
     if not isinstance(timings, list):
         return (-1, "invalid timings format")
 
-    count = sum(1 for t in timings if t.get("key") == "cli_main_exit")
+    count = sum(1 for t in timings if t.get("key") == "cli:main_exit")
     return (count, "ok" if count == 1 else f"count={count}")
 
 
@@ -491,11 +491,11 @@ def wait_for_jobs(
                     # Warning case - dump output file for debugging
                     if count == 0:
                         print(
-                            f"[WARNING] Job {job_id} -> FINISHED (cli_main_exit=0) {target}"
+                            f"[WARNING] Job {job_id} -> FINISHED (cli:main_exit=0) {target}"
                         )
                     elif count > 1:
                         print(
-                            f"[WARNING] Job {job_id} -> FINISHED (cli_main_exit={count}) {target}"
+                            f"[WARNING] Job {job_id} -> FINISHED (cli:main_exit={count}) {target}"
                         )
                     else:
                         print(f"[WARNING] Job {job_id} -> FINISHED ({status}) {target}")
@@ -648,7 +648,7 @@ def extract_timings_file_from_command(cmd_tokens: List[str]) -> Optional[str]:
 def check_job_timers(timings_file_path: Optional[str]) -> Tuple[bool, str]:
     """Check if a job finished normally by examining its timers file.
 
-    A job is considered to have finished normally if cli_main_exit was
+    A job is considered to have finished normally if cli:main_exit was
     triggered exactly once.
 
     Args:
@@ -676,15 +676,15 @@ def check_job_timers(timings_file_path: Optional[str]) -> Tuple[bool, str]:
     if not isinstance(timings, list):
         return (False, "timings file is not a list")
 
-    # Count occurrences of cli_main_exit
-    exit_count = sum(1 for t in timings if t.get("key") == "cli_main_exit")
+    # Count occurrences of cli:main_exit
+    exit_count = sum(1 for t in timings if t.get("key") == "cli:main_exit")
 
     if exit_count == 1:
-        return (True, "completed normally (cli_main_exit triggered once)")
+        return (True, "completed normally (cli:main_exit triggered once)")
     elif exit_count == 0:
-        return (False, "cli_main_exit not found in timings")
+        return (False, "cli:main_exit not found in timings")
     else:
-        return (False, f"cli_main_exit triggered {exit_count} times (expected 1)")
+        return (False, f"cli:main_exit triggered {exit_count} times (expected 1)")
 
 
 def split_cli_sections(argv: Sequence[str]) -> tuple[List[str], List[str]]:
