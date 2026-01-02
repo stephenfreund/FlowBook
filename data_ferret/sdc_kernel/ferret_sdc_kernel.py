@@ -466,9 +466,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 f"writes={sorted(record.writes)}, seq={record.execution_seq}"
             )
 
-        self._display.display_icon_and_text(
-            "ℹ️", "SDC Status", "\n".join(status_lines)
-        )
+        self._display.display_icon_and_text("ℹ️", "SDC Status", "\n".join(status_lines))
 
     @line_magic
     def continue_after_violation(self, line: str) -> None:
@@ -485,15 +483,21 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
         if arg == "?":
             status = "on" if self._continue_after_violation else "off"
-            self._display.display_icon_and_text("ℹ️", f"Continue after violation: {status}")
+            self._display.display_icon_and_text(
+                "ℹ️", f"Continue after violation: {status}"
+            )
             return
 
         if not arg or arg in ("on", "true", "1", "enable"):
             self._continue_after_violation = True
-            self._display.display_icon_and_text("ℹ️", "Continue after violation: enabled")
+            self._display.display_icon_and_text(
+                "ℹ️", "Continue after violation: enabled"
+            )
         elif arg in ("off", "false", "0", "disable"):
             self._continue_after_violation = False
-            self._display.display_icon_and_text("ℹ️", "Continue after violation: disabled")
+            self._display.display_icon_and_text(
+                "ℹ️", "Continue after violation: disabled"
+            )
         else:
             self._display.display_icon_and_text(
                 "⚠️", f"Invalid: '{arg}'. Use 'on', 'off', or '?'"
@@ -521,7 +525,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
             except (ValueError, IndexError):
                 stale_refs.append(cell_id)
 
-        self._display.display_icon_and_text("⚠️", f"Stale cells: {', '.join(stale_refs)}")
+        self._display.display_icon_and_text(
+            "⚠️", f"Stale cells: {', '.join(stale_refs)}"
+        )
 
     @line_magic
     def structural_tracking(self, line: str) -> None:
@@ -544,10 +550,11 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
         # Suspend tracking during magic execution to avoid recording infrastructure reads
         tracking = self._tracking
-        if tracking is not None and hasattr(tracking, 'suspended'):
+        if tracking is not None and hasattr(tracking, "suspended"):
             ctx = tracking.suspended()
         else:
             from contextlib import nullcontext
+
             ctx = nullcontext()
 
         with ctx:
@@ -557,8 +564,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 # Show current mode
                 current_mode = self._sdc.structural_mode.value
                 self._display.display_icon_and_text(
-                    "🔍",
-                    f"Structural tracking mode: {current_mode}"
+                    "🔍", f"Structural tracking mode: {current_mode}"
                 )
                 return
 
@@ -566,8 +572,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 mode = StructuralTrackingMode(mode_str)
             except ValueError:
                 self._display.display_icon_and_text(
-                    "❌",
-                    f"Invalid mode: {mode_str}. Use 'off', 'warn', or 'enforce'"
+                    "❌", f"Invalid mode: {mode_str}. Use 'off', 'warn', or 'enforce'"
                 )
                 return
 
@@ -579,8 +584,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 tracking.set_structural_tracking_mode(mode_str)
 
             self._display.display_icon_and_text(
-                "✅",
-                f"Structural tracking mode set to: {mode.value}"
+                "✅", f"Structural tracking mode set to: {mode.value}"
             )
 
     # =========================================================================
@@ -590,17 +594,23 @@ class FerretSDCKernel(IPythonKernel, Magics):
     @line_magic
     def scalene(self, line: str) -> None:
         """Stub for Scalene profiling (not supported in SDC kernel)."""
-        self._display.display_icon_and_text("ℹ️", "Scalene profiling not supported in SDC kernel")
+        self._display.display_icon_and_text(
+            "ℹ️", "Scalene profiling not supported in SDC kernel"
+        )
 
     @line_magic
     def tracking(self, line: str) -> None:
         """Stub for global tracking (always on in SDC kernel)."""
-        self._display.display_icon_and_text("ℹ️", "Global tracking is always enabled in SDC kernel")
+        self._display.display_icon_and_text(
+            "ℹ️", "Global tracking is always enabled in SDC kernel"
+        )
 
     @line_magic
     def monotone(self, line: str) -> None:
         """Stub for monotone enforcement (use SDC rules instead)."""
-        self._display.display_icon_and_text("ℹ️", "SDC kernel uses SDC rules instead of monotone enforcement")
+        self._display.display_icon_and_text(
+            "ℹ️", "SDC kernel uses SDC rules instead of monotone enforcement"
+        )
 
     @line_magic
     def force_checkpoints(self, line: str) -> None:
@@ -610,7 +620,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
     @line_magic
     def checkpoint(self, line: str) -> None:
         """Stub for checkpoint magic (not supported in SDC kernel)."""
-        self._display.display_icon_and_text("ℹ️", "Manual checkpoints not supported in SDC kernel")
+        self._display.display_icon_and_text(
+            "ℹ️", "Manual checkpoints not supported in SDC kernel"
+        )
 
     @line_magic
     def restore(self, line: str) -> None:
@@ -620,7 +632,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
     @line_magic
     def list_checkpoints(self, line: str) -> None:
         """Stub for list checkpoints magic (not supported in SDC kernel)."""
-        self._display.display_icon_and_text("ℹ️", "List checkpoints not supported in SDC kernel")
+        self._display.display_icon_and_text(
+            "ℹ️", "List checkpoints not supported in SDC kernel"
+        )
 
     # =========================================================================
     # Tracking Initialization
@@ -739,8 +753,10 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
             # Take pre-execution snapshot
             user_ns = self.shell.user_ns
-            with timer(key="sdc_kernel:pre_checkpoint") as pre_timer:
-                pre_checkpoint = self._take_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
+            with timer(key="sdc_kernel:checkpoint") as pre_timer:
+                pre_checkpoint = self._take_checkpoint(
+                    f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
+                )
 
             # Reset tracking for this execution
             if isinstance(user_ns, TrackingDict):
@@ -762,7 +778,10 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 with timer(key="sdc_kernel:execute") as run_timer:
                     if isinstance(user_ns, TrackingDict):
                         with user_ns.track_execution():
-                            with timer(key="sdc_kernel:track_execution", message="Run cell code"):
+                            with timer(
+                                key="sdc_kernel:track_execution",
+                                message="Run cell code",
+                            ):
                                 result = await super().do_execute(
                                     code,
                                     silent,
@@ -772,7 +791,10 @@ class FerretSDCKernel(IPythonKernel, Magics):
                                     cell_meta=cell_meta,
                                     cell_id=self._cell_id,
                                 )
-                        with timer(key="sdc_kernel:get_tracking_data", message="Get tracking data"):
+                        with timer(
+                            key="sdc_kernel:get_tracking_data",
+                            message="Get tracking data",
+                        ):
                             tracking = user_ns.get_tracking_data()
                     else:
                         result = await super().do_execute(
@@ -809,8 +831,10 @@ class FerretSDCKernel(IPythonKernel, Magics):
             #     self._warn_non_deepcopyable_objects()
 
             # Take post-execution snapshot
-            with timer(key="sdc_kernel:post_checkpoint") as post_timer:
-                post_checkpoint = self._take_checkpoint(f"{POST_CHECKPOINT_PREFIX}{self._cell_id}")
+            with timer(key="sdc_kernel:checkpoint") as post_timer:
+                post_checkpoint = self._take_checkpoint(
+                    f"{POST_CHECKPOINT_PREFIX}{self._cell_id}"
+                )
 
             # Run SDC check if we have tracking data and cell_id
             if tracking and self._cell_id:
@@ -834,27 +858,40 @@ class FerretSDCKernel(IPythonKernel, Magics):
                         if has_backward:
                             if sdc_result.violation.truncation_details:
                                 error(f"SDC truncation: {sdc_result.violation.message}")
-                                self._send_truncation_details(sdc_result.violation.truncation_details)
-                            error(f"SDC violation (continuing): {sdc_result.violation.message}")
+                                self._send_truncation_details(
+                                    sdc_result.violation.truncation_details
+                                )
+                            error(
+                                f"SDC violation (continuing): {sdc_result.violation.message}"
+                            )
                             self._send_violation_warning(sdc_result.violation)
                         if has_forward:
-                            error(f"Forward dependency (continuing): {sdc_result.forward_violation.message}")
+                            error(
+                                f"Forward dependency (continuing): {sdc_result.forward_violation.message}"
+                            )
                             self._send_violation_warning(sdc_result.forward_violation)
                     else:
                         # Block on violation - backward takes precedence
-                        primary = sdc_result.violation if has_backward else sdc_result.forward_violation
+                        primary = (
+                            sdc_result.violation
+                            if has_backward
+                            else sdc_result.forward_violation
+                        )
 
                         # Log truncation issues to terminal (for backward mutations)
                         if has_backward and sdc_result.violation.truncation_details:
                             error(f"SDC truncation: {sdc_result.violation.message}")
-                            self._send_truncation_details(sdc_result.violation.truncation_details)
+                            self._send_truncation_details(
+                                sdc_result.violation.truncation_details
+                            )
 
                         error(f"SDC violation: {primary.message}")
 
                         # Only rollback for backward mutations (forward deps didn't change anything)
                         if has_backward:
                             self._sdc.checkpoints.restore(
-                                f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
+                                f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}",
+                                self.shell.user_ns,
                             )
 
                         self._send_violation_error(primary)
@@ -866,7 +903,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
                         return self._make_error_result(primary)
 
                 # Display results (skip if silent, error, or violation with rollback)
-                skip_display = (has_backward or has_forward) and not self._continue_after_violation
+                skip_display = (
+                    has_backward or has_forward
+                ) and not self._continue_after_violation
                 if not silent and result.get("status") != "error" and not skip_display:
                     state_ms = pre_timer.duration() + post_timer.duration()
                     self._display_execution_result(
@@ -977,7 +1016,11 @@ class FerretSDCKernel(IPythonKernel, Magics):
         self.send_response(
             self.iopub_socket,
             "error",
-            {"ename": "TimeoutError", "evalue": timeout_msg, "traceback": [timeout_msg]},
+            {
+                "ename": "TimeoutError",
+                "evalue": timeout_msg,
+                "traceback": [timeout_msg],
+            },
         )
         return {
             "status": "error",
@@ -1000,12 +1043,11 @@ class FerretSDCKernel(IPythonKernel, Magics):
 
         if non_copyable:
             for k, typ, reason in non_copyable:
-                message = f"The object {k} (type {typ}) cannot be checkpointed: {reason}"
-                log(message)
-                self._display.display_icon_and_text(
-                    "\u26A0\uFE0F",
-                    message
+                message = (
+                    f"The object {k} (type {typ}) cannot be checkpointed: {reason}"
                 )
+                log(message)
+                self._display.display_icon_and_text("\u26a0\ufe0f", message)
 
     def _take_checkpoint(self, checkpoint_name: str) -> Checkpoint:
         """
@@ -1022,10 +1064,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
         for k, v in removed.items():
             message = f"The object {k} (type {v}) cannot be checkpointed"
             log(message)
-            self._display.display_icon_and_text(
-                "\u26A0\uFE0F",
-                message
-            )
+            self._display.display_icon_and_text("\u26a0\ufe0f", message)
 
         return self._checkpoint.saved[checkpoint_name]
 
@@ -1111,18 +1150,20 @@ class FerretSDCKernel(IPythonKernel, Magics):
     ) -> None:
         """Display execution timing and SDC metadata."""
         # Build metadata for display
-        structural_warnings = (
-            sdc_result.structural_warnings if sdc_result else []
-        )
+        structural_warnings = sdc_result.structural_warnings if sdc_result else []
 
         # Use TrackingData.to_json_friendly() for clean serialization
-        tracking_json = tracking.to_json_friendly() if tracking else {
-            "reads": [],
-            "writes": [],
-            "column_reads": {},
-            "column_writes": {},
-            "structural_reads": {},
-        }
+        tracking_json = (
+            tracking.to_json_friendly()
+            if tracking
+            else {
+                "reads": [],
+                "writes": [],
+                "column_reads": {},
+                "column_writes": {},
+                "structural_reads": {},
+            }
+        )
 
         metadata = SDCMetadata(
             cell_id=self._cell_id or "",
@@ -1161,7 +1202,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
         ]
         if tracking_json["reads"] or tracking_json["column_reads"]:
             # Combine variable-level reads with column-level read variables
-            read_vars = set(tracking_json["reads"]) | set(tracking_json["column_reads"].keys())
+            read_vars = set(tracking_json["reads"]) | set(
+                tracking_json["column_reads"].keys()
+            )
             if read_vars:
                 reads_preview = [
                     self._format_var_with_columns(v, tracking_json["column_reads"], {})
@@ -1169,7 +1212,9 @@ class FerretSDCKernel(IPythonKernel, Magics):
                 ]
                 parts.append(f"Reads: {','.join(reads_preview)}")
         # Show writes if there are variable-level writes OR column-level writes
-        write_vars = set(tracking_json["writes"]) | set(tracking_json["column_writes"].keys())
+        write_vars = set(tracking_json["writes"]) | set(
+            tracking_json["column_writes"].keys()
+        )
         if write_vars:
             writes_preview = [
                 self._format_var_with_columns(v, {}, tracking_json["column_writes"])
