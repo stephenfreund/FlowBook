@@ -452,6 +452,7 @@ def wait_for_jobs(
         while pending:
             job_list = ",".join(str(j) for j in pending)
             still_in_queue: set[int] = set()
+            job_states: Dict[int, str] = {}  # Track state of each job
 
             try:
                 # squeue shows jobs that are still running or pending
@@ -471,7 +472,10 @@ def wait_for_jobs(
                     parts = line.split("|")
                     if len(parts) >= 1:
                         try:
-                            still_in_queue.add(int(parts[0].strip()))
+                            jid = int(parts[0].strip())
+                            still_in_queue.add(jid)
+                            if len(parts) >= 2:
+                                job_states[jid] = parts[1].strip()
                         except ValueError:
                             continue
             except subprocess.CalledProcessError:
@@ -526,7 +530,9 @@ def wait_for_jobs(
                     print("[WAIT] Notebooks still running:")
                     for job_id in sorted(pending):
                         target, _ = job_info.get(job_id, (Path("unknown"), None))
-                        print(f"[WAIT]   - Job {job_id}: {target}")
+                        state = job_states.get(job_id, "UNKNOWN")
+                        marker = "*" if state == "RUNNING" else " "
+                        print(f"[WAIT]   {marker} Job {job_id} [{state}]: {target}")
                     last_detail_time = current_time
 
                 time.sleep(poll_interval)
