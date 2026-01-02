@@ -292,6 +292,9 @@ def _is_keras_model(x) -> bool:
     """
     cls = type(x)
     module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string (can be getset_descriptor for some C types)
+    if not isinstance(module, str):
+        return False
     # Check for tensorflow.keras or standalone keras
     return 'keras' in module and any(
         base.__name__ in ('Model', 'Sequential')
@@ -800,8 +803,10 @@ class Diff:
                     var_start = time.perf_counter()
                     type_info = _get_value_shape_info(a[var])
 
-                    ta = type(a[var]).__module__ + "." + type(a[var]).__name__
-                    tb = type(b[var]).__module__ + "." + type(b[var]).__name__
+                    mod_a = type(a[var]).__module__
+                    mod_b = type(b[var]).__module__
+                    ta = (mod_a if isinstance(mod_a, str) else '<unknown>') + "." + type(a[var]).__name__
+                    tb = (mod_b if isinstance(mod_b, str) else '<unknown>') + "." + type(b[var]).__name__
                     with timer(key=f"diff:{ta}-{tb}", message=f"Comparing {var} ({ta} vs {tb})"):
                         diff_result = self._compare_values(a[var], b[var], path=var)
 
