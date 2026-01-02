@@ -446,6 +446,7 @@ def wait_for_jobs(
     results: Dict[int, str] = {}
     pending = set(job_ids)
     start_time = time.time()
+    last_detail_time = start_time  # Track when we last printed detailed notebook list
 
     try:
         while pending:
@@ -514,10 +515,20 @@ def wait_for_jobs(
                                 print(f"[WARNING]   (failed to read: {e})")
 
             if pending:
-                elapsed = format_elapsed(time.time() - start_time)
+                current_time = time.time()
+                elapsed = format_elapsed(current_time - start_time)
                 print(
                     f"[WAIT] {len(pending)} jobs still running... (elapsed: {elapsed})"
                 )
+
+                # Print detailed list of running notebooks every 60 seconds
+                if current_time - last_detail_time >= 60:
+                    print("[WAIT] Notebooks still running:")
+                    for job_id in sorted(pending):
+                        target, _ = job_info.get(job_id, (Path("unknown"), None))
+                        print(f"[WAIT]   - Job {job_id}: {target}")
+                    last_detail_time = current_time
+
                 time.sleep(poll_interval)
 
     except KeyboardInterrupt:
@@ -1083,14 +1094,36 @@ def submit_single_job(work_item: WorkItem, args: argparse.Namespace) -> Optional
         nvidia-smi || true
         echo "====================="
 
-        # ---- OpenMP/BLAS/MKL/NumExpr threads ----
+        # ---- Threading Environment Variables ----
+        # ---- Standard BLAS/OpenMP ----
         export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
         export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
         export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
         export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
         export VECLIB_MAXIMUM_THREADS=$SLURM_CPUS_PER_TASK
-        export LOKY_MAX_CPU_COUNT=$SLURM_CPUS_PER_TASK
 
+        # ---- Python parallelism ----
+        export LOKY_MAX_CPU_COUNT=$SLURM_CPUS_PER_TASK
+        export NUMBA_NUM_THREADS=$SLURM_CPUS_PER_TASK
+        export NUMBA_THREADING_LAYER=omp
+
+        # ---- Deep Learning ----
+        export TF_NUM_INTEROP_THREADS=$SLURM_CPUS_PER_TASK
+        export TF_NUM_INTRAOP_THREADS=$SLURM_CPUS_PER_TASK
+        export TORCH_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+        # ---- DataFrames ----
+        export POLARS_MAX_THREADS=$SLURM_CPUS_PER_TASK
+        export MODIN_CPUS=$SLURM_CPUS_PER_TASK
+
+        # ---- Distributed/Other ----
+        export RAY_NUM_CPUS=$SLURM_CPUS_PER_TASK
+        export THINC_NUM_THREADS=$SLURM_CPUS_PER_TASK
+        export JULIA_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+
+
+        
         # ---- FERRET environment variables ----
         {get_ferret_env_exports()}
 
