@@ -210,7 +210,9 @@ def check_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> str | None:
                     for item in obj.flat:
                         reason = check_deepcopyable(item, _seen)
                         if reason:
-                            return f"numpy array contains non-copyable element: {reason}"
+                            return (
+                                f"numpy array contains non-copyable element: {reason}"
+                            )
                     return None
                 except (TypeError, ValueError):
                     # If we can't iterate, be conservative
@@ -264,9 +266,9 @@ def check_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> str | None:
             # Use .iloc to avoid issues with MultiIndex columns
             for i in range(len(obj.columns)):
                 # print column name and dtype
-                log(f"Column: {obj.columns[i]}, Dtype: {obj.iloc[:, i].dtype}")
-                with timer(key=f"Checking column {obj.columns[i]}", message=f"Checking column {obj.columns[i]}"):
-                    col_series = obj.iloc[:, i]
+                # log(f"Column: {obj.columns[i]}, Dtype: {obj.iloc[:, i].dtype}")
+                # with timer(key=f"Checking column {obj.columns[i]}", message=f"Checking column {obj.columns[i]}"):
+                col_series = obj.iloc[:, i]
                 if col_series.dtype == object:
                     for item in col_series:
                         reason = check_deepcopyable(item, _seen)
