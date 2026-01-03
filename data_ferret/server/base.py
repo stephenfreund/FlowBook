@@ -15,12 +15,18 @@ from data_ferret.server.kernel_manager import FerretKernelClient
 from data_ferret.server.config import FerretConfig
 from jupyter_server.serverapp import ServerApp
 
+
 class ProcessingResult(BaseModel):
     """Result of a notebook processing command."""
+
     notebook: Dict[str, Any] = Field(description="The new/modified notebook")
-    metadata: Dict[str, Any] = Field(description="JSON metadata object with processing results")
+    metadata: Dict[str, Any] = Field(
+        description="JSON metadata object with processing results"
+    )
     total_cost: float = Field(default=0.0, description="Total cost of the command")
-    total_time: float = Field(default=0.0, description="Total time taken to execute the command")
+    total_time: float = Field(
+        default=0.0, description="Total time taken to execute the command"
+    )
 
 
 class NotebookCommand(ABC):
@@ -33,7 +39,7 @@ class NotebookCommand(ABC):
         kernel_client: Optional[FerretKernelClient] = None,
         selected_cell_ids: Optional[List[str]] = None,
         config: Optional[FerretConfig] = None,
-        **kwargs
+        **kwargs,
     ) -> ProcessingResult:
         """
         Process the notebook content and return a ProcessingResult.
@@ -131,7 +137,7 @@ class NotebookCommand(ABC):
     @property
     def timeout(self) -> int:
         """Return the timeout for this command."""
-        return 5 * 60 * 60  # 5 hours
+        return 8 * 60 * 60  # 8 hours
 
     @staticmethod
     def config_from_serverapp(serverapp: ServerApp) -> FerretConfig:
