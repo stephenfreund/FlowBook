@@ -724,7 +724,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
         """
         Execute code with SDC tracking and enforcement.
         """
-        start_time = time.perf_counter()
+        start_time = time.perf_counter() * 1000
         execution_time = None
         try:
             # Ensure tracking is initialized (done lazily on first execution)
@@ -925,9 +925,10 @@ class FerretSDCKernel(IPythonKernel, Magics):
             error(f"SDC error in cell {self._cell_id}: {e}\n{traceback.format_exc()}")
             raise
         finally:
-            end_time = time.perf_counter()
+            end_time = time.perf_counter() * 1000
             if execution_time is not None:
                 duration = end_time - start_time
+                log(f"Duration: {duration}, Execution time: {execution_time}")
                 output.add_timing(
                     key="sdc_kernel:checking_total_time",
                     duration=duration - execution_time,
