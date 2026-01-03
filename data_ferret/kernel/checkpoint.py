@@ -674,6 +674,19 @@ The alias index is built LAZILY on first query and stored in Checkpoint:
   - Immutable atomics: None, bool, int, float, str, bytes
       Can't be mutated in-place, no aliasing concern.
 
+  - Singleton types: type, FunctionType, ModuleType, etc.
+      Class objects, functions, and modules are singletons in Python.
+      Finding them in multiple variables doesn't indicate meaningful aliasing.
+
+      Example: If user creates `base = LGBMRegressor(...)`, the instance
+      `base` contains references to the `LGBMRegressor` class object. The
+      class object is the same singleton everywhere. Without skipping types,
+      we'd falsely mark `base` as aliasing with `LGBMRegressor` and every
+      other ML class that shares internal type machinery.
+
+      This was causing 24-minute diff times when a 1-variable diff expanded
+      to 47 variables due to false class aliases.
+
   - Temporary objects: .values, .data properties
       These create temporary arrays/memoryviews whose id() can be reused
       by Python's memory allocator after garbage collection.
@@ -951,6 +964,32 @@ def filter_user_namespace(user_ns: dict[str, Any]) -> dict[str, Any]:
 # Immutable types that don't need alias tracking (can't be mutated in-place)
 _IMMUTABLE_ATOMIC_TYPES = (type(None), bool, int, float, complex, str, bytes)
 
+# Singleton types that should be SKIPPED for alias tracking.
+# These are shared objects - finding them in multiple variables does NOT
+# indicate meaningful aliasing that could cause backward mutation issues.
+#
+# Key insight: A user creating `base = LGBMRegressor(...)` will have `base`
+# contain references to the class `LGBMRegressor` (through __class__, methods,
+# etc.). The `LGBMRegressor` class object is a singleton - it's the same object
+# everywhere. If we track its id(), we'll incorrectly mark `base` as aliasing
+# with `LGBMRegressor`, `CatBoostClassifier`, and any other class that shares
+# internal type machinery.
+#
+# This caused 24-minute diff times when ML model classes were falsely detected
+# as aliases, expanding a 1-variable diff to 47 variables.
+_SINGLETON_TYPES = (
+    type,  # Class objects (LGBMRegressor, pd.DataFrame, etc.)
+    types.FunctionType,  # User-defined functions
+    types.BuiltinFunctionType,  # Built-in functions like len, print
+    types.BuiltinMethodType,  # Built-in methods
+    types.MethodType,  # Bound methods
+    types.ModuleType,  # Imported modules
+    types.MethodDescriptorType,  # Method descriptors on types
+    types.WrapperDescriptorType,  # Wrapper descriptors on types
+    types.GetSetDescriptorType,  # getset descriptors
+    types.MemberDescriptorType,  # Member descriptors
+)
+
 # Environment variable to control deep alias logging
 _LOG_DEEP_ALIASES = os.environ.get("FERRET_LOG_DEEP_ALIASES", "").lower() in ("1", "true", "yes", "on")
 
@@ -987,6 +1026,12 @@ def _collect_reachable_ids_with_paths(
 
     # Skip numpy scalar types
     if isinstance(obj, (np.integer, np.floating, np.complexfloating, np.bool_)):
+        return
+
+    # Skip singleton types (classes, functions, modules, etc.)
+    # These are shared objects - finding them in multiple variables doesn't
+    # indicate meaningful aliasing. See _SINGLETON_TYPES comment for details.
+    if isinstance(obj, _SINGLETON_TYPES):
         return
 
     # Skip opaque objects (e.g., Keras models) - treat as atomic, don't traverse internals
@@ -1106,6 +1151,12 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
 
     # Skip numpy scalar types
     if isinstance(obj, (np.integer, np.floating, np.complexfloating, np.bool_)):
+        return
+
+    # Skip singleton types (classes, functions, modules, etc.)
+    # These are shared objects - finding them in multiple variables doesn't
+    # indicate meaningful aliasing. See _SINGLETON_TYPES comment for details.
+    if isinstance(obj, _SINGLETON_TYPES):
         return
 
     # Skip opaque objects (e.g., Keras models) - treat as atomic, don't traverse internals

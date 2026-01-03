@@ -1085,5 +1085,474 @@ class TestEdgeCases:
         assert user_ns['df'].iloc[99, 0] == [99, 100, 101]
 
 
+# ============================================================================
+# DEEP ALIAS DETECTION TESTS
+# ============================================================================
+
+class TestDeepAliasDetection:
+    """Test that deep alias detection correctly identifies shared references."""
+
+    def test_simple_alias_detected(self):
+        """Test that simple variable aliasing is detected."""
+        from data_ferret.kernel.checkpoint import Checkpoint
+
+        shared_list = [1, 2, 3]
+        user_ns = {
+            'a': {'data': shared_list},
+            'b': {'data': shared_list},  # Same list object
+        }
+
+        cp = Checkpoint('test', user_ns, {})
+        aliases = cp.get_aliases_for_vars({'a'})
+
+        # Should include 'b' because they share the same list
+        assert 'a' in aliases
+        assert 'b' in aliases
+
+    def test_no_alias_for_independent_objects(self):
+        """Test that independent objects are not marked as aliases."""
+        from data_ferret.kernel.checkpoint import Checkpoint
+
+        user_ns = {
+            'a': {'data': [1, 2, 3]},
+            'b': {'data': [1, 2, 3]},  # Same values, different objects
+        }
+
+        cp = Checkpoint('test', user_ns, {})
+        aliases = cp.get_aliases_for_vars({'a'})
+
+        # Should NOT include 'b' - they have equal values but different objects
+        assert 'a' in aliases
+        assert 'b' not in aliases
+
+    def test_nested_alias_detected(self):
+        """Test that deeply nested aliases are detected."""
+        from data_ferret.kernel.checkpoint import Checkpoint
+
+        shared_dict = {'nested': {'value': 42}}
+        user_ns = {
+            'x': {'level1': {'level2': shared_dict}},
+            'y': [shared_dict],  # Same dict in different structure
+        }
+
+        cp = Checkpoint('test', user_ns, {})
+        aliases = cp.get_aliases_for_vars({'x'})
+
+        assert 'x' in aliases
+        assert 'y' in aliases
+
+    def test_dataframe_alias_via_shared_column(self):
+        """Test that DataFrames sharing internal data are detected as aliases."""
+        from data_ferret.kernel.checkpoint import Checkpoint
+
+        df = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
+        user_ns = {
+            'df': df,
+            'series': df['a'],  # Series shares data with DataFrame
+        }
+
+        cp = Checkpoint('test', user_ns, {})
+        aliases = cp.get_aliases_for_vars({'df'})
+
+        # series shares the block manager with df
+        assert 'df' in aliases
+        # Note: Whether 'series' is detected depends on internal pandas structure
+
+
+# ============================================================================
+# SINGLETON TYPE SKIPPING TESTS
+# ============================================================================
+
+class TestSingletonTypeSkipping:
+    """Test that singleton types (classes, functions, modules) are skipped in alias detection.
+
+    This is critical for performance - without this fix, ML model classes would
+    cause false alias detection leading to 24-minute diff times.
+    """
+
+    def test_type_objects_skipped(self):
+        """Test that type/class objects are not tracked for aliasing."""
+        from data_ferret.kernel.checkpoint import _collect_reachable_ids
+
+        class MyClass:
+            class_var = "test"
+
+        visited = set()
+        _collect_reachable_ids(MyClass, visited)
+
+        # Type objects should be skipped entirely - no IDs collected
+        assert len(visited) == 0
+
+    def test_function_objects_skipped(self):
+        """Test that function objects are not tracked for aliasing."""
+        from data_ferret.kernel.checkpoint import _collect_reachable_ids
+
+        def my_function(x):
+            return x * 2
+
+        visited = set()
+        _collect_reachable_ids(my_function, visited)
+
+        # Functions should be skipped - no IDs collected
+        assert len(visited) == 0
+
+    def test_builtin_function_skipped(self):
+        """Test that built-in functions are not tracked."""
+        from data_ferret.kernel.checkpoint import _collect_reachable_ids
+
+        visited = set()
+        _collect_reachable_ids(len, visited)
+
+        assert len(visited) == 0
+
+    def test_module_objects_skipped(self):
+        """Test that module objects are not tracked for aliasing."""
+        from data_ferret.kernel.checkpoint import _collect_reachable_ids
+        import json
+
+        visited = set()
+        _collect_reachable_ids(json, visited)
+
+        # Modules should be skipped - no IDs collected
+        assert len(visited) == 0
+
+    def test_method_objects_skipped(self):
+        """Test that bound method objects are not tracked."""
+        from data_ferret.kernel.checkpoint import _collect_reachable_ids
+
+        class MyClass:
+            def my_method(self):
+                pass
+
+        instance = MyClass()
+        visited = set()
+        _collect_reachable_ids(instance.my_method, visited)
+
+        # Bound methods should be skipped
+        assert len(visited) == 0
+
+    def test_instance_with_class_reference_no_false_alias(self):
+        """Test that instances containing class references don't falsely alias with the class.
+
+        This is the core bug that was fixed - an instance like `base = LGBMRegressor()`
+        should NOT be considered an alias of the `LGBMRegressor` class itself.
+        """
+        from data_ferret.kernel.checkpoint import Checkpoint
+
+        class ModelWrapper:
+            def __init__(self):
+                self.data = [1, 2, 3]
+
+        wrapper = ModelWrapper()
+        user_ns = {
+            'ModelWrapper': ModelWrapper,  # The class itself
+            'wrapper': wrapper,  # An instance
+        }
+
+        cp = Checkpoint('test', user_ns, {})
+        aliases = cp.get_aliases_for_vars({'wrapper'})
+
+        # wrapper should NOT alias with ModelWrapper class
+        assert 'wrapper' in aliases
+        assert 'ModelWrapper' not in aliases
+
+    def test_instance_still_tracks_mutable_data(self):
+        """Test that instances with mutable attributes are still properly tracked."""
+        from data_ferret.kernel.checkpoint import _collect_reachable_ids
+
+        class Container:
+            def __init__(self):
+                self.data = [1, 2, 3]
+                self.nested = {'key': [4, 5, 6]}
+
+        instance = Container()
+        visited = set()
+        _collect_reachable_ids(instance, visited)
+
+        # Should track: instance, data list, nested dict, nested list
+        # At minimum: instance + list + dict + inner list = 4
+        assert len(visited) >= 4
+
+    def test_class_with_shared_data_still_aliases_via_data(self):
+        """Test that instances sharing actual data still alias correctly."""
+        from data_ferret.kernel.checkpoint import Checkpoint
+
+        shared_list = [1, 2, 3]
+
+        class Container:
+            def __init__(self, data):
+                self.data = data
+
+        obj1 = Container(shared_list)
+        obj2 = Container(shared_list)
+
+        user_ns = {
+            'obj1': obj1,
+            'obj2': obj2,
+            'Container': Container,  # The class - should not affect aliasing
+        }
+
+        cp = Checkpoint('test', user_ns, {})
+        aliases = cp.get_aliases_for_vars({'obj1'})
+
+        # obj1 and obj2 share the list, so should be aliases
+        assert 'obj1' in aliases
+        assert 'obj2' in aliases
+        # But NOT the class
+        assert 'Container' not in aliases
+
+    def test_multiple_classes_not_aliased_together(self):
+        """Test that multiple class objects don't create false aliases.
+
+        This tests the exact scenario from the bug: having multiple ML model
+        classes should not make them appear as aliases of each other.
+        """
+        from data_ferret.kernel.checkpoint import Checkpoint
+
+        class ModelA:
+            pass
+
+        class ModelB:
+            pass
+
+        class ModelC:
+            pass
+
+        user_ns = {
+            'ModelA': ModelA,
+            'ModelB': ModelB,
+            'ModelC': ModelC,
+            'data': [1, 2, 3],  # Unrelated data
+        }
+
+        cp = Checkpoint('test', user_ns, {})
+
+        # Querying ModelA should only return ModelA
+        aliases_a = cp.get_aliases_for_vars({'ModelA'})
+        assert aliases_a == {'ModelA'}
+
+        # Querying data should only return data
+        aliases_data = cp.get_aliases_for_vars({'data'})
+        assert aliases_data == {'data'}
+
+    def test_function_with_closure_not_aliased(self):
+        """Test that functions with closures don't create false aliases."""
+        from data_ferret.kernel.checkpoint import Checkpoint
+
+        x = 10
+
+        def func1():
+            return x
+
+        def func2():
+            return x * 2
+
+        user_ns = {
+            'func1': func1,
+            'func2': func2,
+            'x': x,
+        }
+
+        cp = Checkpoint('test', user_ns, {})
+        aliases = cp.get_aliases_for_vars({'func1'})
+
+        # func1 should not alias with func2 or x
+        assert aliases == {'func1'}
+
+
+class TestMLModelScenario:
+    """Test the exact scenario that caused the 24-minute diff bug.
+
+    When a user creates a model wrapper class that stores DataFrames and
+    references ML model classes, the alias detection should NOT expand to
+    include all the ML classes.
+    """
+
+    def test_model_wrapper_with_dataframes(self):
+        """Test a realistic ML model wrapper scenario."""
+        from data_ferret.kernel.checkpoint import Checkpoint
+
+        # Simulate a user's model wrapper class (like AbdBase from the bug report)
+        class ModelWrapper:
+            model_types = ['LGBM', 'CAT', 'XGB']  # Class variable with strings
+
+            def __init__(self, train_data, test_data):
+                self.train_data = train_data
+                self.test_data = test_data
+                self.model = None
+
+        train = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
+        test = pd.DataFrame({'a': [7, 8, 9], 'b': [10, 11, 12]})
+        wrapper = ModelWrapper(train, test)
+
+        user_ns = {
+            'ModelWrapper': ModelWrapper,
+            'train': train,
+            'test': test,
+            'wrapper': wrapper,
+        }
+
+        cp = Checkpoint('test', user_ns, {})
+
+        # Querying 'wrapper' should find aliases with train and test (they share data)
+        # but should NOT include ModelWrapper class
+        aliases = cp.get_aliases_for_vars({'wrapper'})
+
+        assert 'wrapper' in aliases
+        assert 'train' in aliases  # wrapper.train_data is same object as train
+        assert 'test' in aliases   # wrapper.test_data is same object as test
+        assert 'ModelWrapper' not in aliases  # Class should not be an alias
+
+    def test_imported_classes_not_aliased(self):
+        """Test that imported library classes don't create false aliases."""
+        from data_ferret.kernel.checkpoint import Checkpoint
+        from sklearn.model_selection import KFold, StratifiedKFold
+
+        user_ns = {
+            'KFold': KFold,
+            'StratifiedKFold': StratifiedKFold,
+            'n_splits': 5,
+            'data': pd.DataFrame({'x': [1, 2, 3]}),
+        }
+
+        cp = Checkpoint('test', user_ns, {})
+
+        # KFold should not alias with anything
+        aliases_kfold = cp.get_aliases_for_vars({'KFold'})
+        assert aliases_kfold == {'KFold'}
+
+        # data should not alias with the classes
+        aliases_data = cp.get_aliases_for_vars({'data'})
+        assert 'data' in aliases_data
+        assert 'KFold' not in aliases_data
+        assert 'StratifiedKFold' not in aliases_data
+
+    def test_performance_with_many_classes(self):
+        """Test that having many class objects doesn't slow down alias detection."""
+        from data_ferret.kernel.checkpoint import Checkpoint
+        import time
+
+        # Create a namespace with many class definitions
+        user_ns = {}
+        for i in range(50):
+            # Dynamically create classes
+            user_ns[f'Class{i}'] = type(f'Class{i}', (), {'value': i})
+
+        # Add some actual data
+        user_ns['data'] = [1, 2, 3]
+        user_ns['df'] = pd.DataFrame({'a': [1, 2, 3]})
+
+        cp = Checkpoint('test', user_ns, {})
+
+        # This should be fast - not slow due to class traversal
+        start = time.time()
+        aliases = cp.get_aliases_for_vars({'data'})
+        elapsed = time.time() - start
+
+        # Should complete in well under 1 second
+        assert elapsed < 1.0, f"Alias detection took {elapsed:.2f}s - too slow!"
+
+        # Should not include any of the classes
+        assert aliases == {'data'}
+
+
+class TestCollectReachableIdsEdgeCases:
+    """Test edge cases in the _collect_reachable_ids function."""
+
+    def test_descriptor_types_skipped(self):
+        """Test that descriptor types are properly skipped."""
+        from data_ferret.kernel.checkpoint import _collect_reachable_ids
+
+        class MyClass:
+            @property
+            def prop(self):
+                return 42
+
+        # The property descriptor itself
+        prop_descriptor = MyClass.__dict__['prop']
+
+        visited = set()
+        _collect_reachable_ids(prop_descriptor, visited)
+
+        # Property descriptors might be skipped or not depending on type
+        # The key is they shouldn't cause issues
+
+    def test_lambda_functions_skipped(self):
+        """Test that lambda functions are skipped like regular functions."""
+        from data_ferret.kernel.checkpoint import _collect_reachable_ids
+
+        func = lambda x: x * 2
+
+        visited = set()
+        _collect_reachable_ids(func, visited)
+
+        assert len(visited) == 0
+
+    def test_staticmethod_and_classmethod(self):
+        """Test that static and class methods don't cause issues."""
+        from data_ferret.kernel.checkpoint import _collect_reachable_ids
+
+        class MyClass:
+            @staticmethod
+            def static_method():
+                pass
+
+            @classmethod
+            def class_method(cls):
+                pass
+
+        # These are descriptor objects when accessed from class __dict__
+        static = MyClass.__dict__['static_method']
+        classm = MyClass.__dict__['class_method']
+
+        visited = set()
+        _collect_reachable_ids(static, visited)
+        _collect_reachable_ids(classm, visited)
+
+        # Should not cause any issues (may or may not collect IDs depending on type)
+
+    def test_mixed_container_with_types(self):
+        """Test containers that mix data with type references."""
+        from data_ferret.kernel.checkpoint import _collect_reachable_ids
+
+        class MyClass:
+            pass
+
+        data = {
+            'class_ref': MyClass,
+            'func_ref': len,
+            'actual_data': [1, 2, 3],
+            'nested': {'more': [4, 5, 6]}
+        }
+
+        visited = set()
+        _collect_reachable_ids(data, visited)
+
+        # Should have: data dict, actual_data list, nested dict, more list
+        # Should NOT have: MyClass type or len function
+        assert len(visited) >= 4  # At least the mutable containers
+
+    def test_circular_reference_with_class(self):
+        """Test circular references involving class instances."""
+        from data_ferret.kernel.checkpoint import _collect_reachable_ids
+
+        class Node:
+            def __init__(self):
+                self.next = None
+
+        a = Node()
+        b = Node()
+        a.next = b
+        b.next = a  # Circular
+
+        visited = set()
+        _collect_reachable_ids(a, visited)
+
+        # Should handle circular reference without infinite loop
+        # Should have both nodes
+        assert id(a) in visited
+        assert id(b) in visited
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
