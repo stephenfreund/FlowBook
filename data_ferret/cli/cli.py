@@ -271,10 +271,17 @@ def cli_main():
         print(f"Processed notebook written to {output_path}")
 
         # Display execution summary
+        status = metadata_data.get("status", "unknown") if metadata_data else "unknown"
+        error_msg = metadata_data.get("error_message") if metadata_data else None
+        error_cell_id = metadata_data.get("error_cell_id") if metadata_data else None
         print("\n" + "=" * 60)
         print("COMMAND EXECUTION SUMMARY")
         print("=" * 60)
         print(f"Command:     {args.command}")
+        print(f"Status:      {status.upper()}")
+        if error_msg:
+            print(f"Cell ID:     {error_cell_id}")
+            print(f"Error:       {error_msg}")
         print(f"Total Cost:  ${total_cost:.4f}")
         print(f"Total Time:  {total_time:.2f}s")
         print("=" * 60)
@@ -301,9 +308,9 @@ def cli_main():
         except Exception as e:
             error(f"Warning: Could not save metadata file: {e}")
 
-        # if any of the metadata has a status of error, return 1
+        # if any of the metadata has a status of error or timeout, return 1
 
-        if metadata_data is None or metadata_data.get("status") == "error":
+        if metadata_data is None or metadata_data.get("status") in ("error", "timeout"):
             return 1
 
         with timer(key="cli:main_exit", message="CLI main exit"):

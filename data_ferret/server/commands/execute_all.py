@@ -91,6 +91,8 @@ class ExecuteAllCommand(NotebookCommand):
             execution_results = []
             total_executed = 0
             status = "success"  # Track actual execution status
+            error_message = None
+            error_cell_id = None
 
             KernelHelper.execute_code(kernel_client, "%scalene on", store_history=False)
 
@@ -127,10 +129,11 @@ class ExecuteAllCommand(NotebookCommand):
                                     cell["execution_count"] = result["execution_count"]
                                     cell["outputs"] = result["outputs"]
 
-                                    # Check for execution errors
-                                    if result["status"] == "error":
-                                        status = "error"
+                                    # Check for execution errors or timeouts
+                                    if result["status"] in ("error", "timeout"):
+                                        status = result["status"]
                                         error_message = result["error_message"]
+                                        error_cell_id = cell.get("id")
                                         print()
                                         print(f"--------------------------------")
                                         print(f"{error_message}")
@@ -138,13 +141,14 @@ class ExecuteAllCommand(NotebookCommand):
                                         execution_results.append(
                                             {
                                                 "cell_index": idx,
-                                                "status": "error",
+                                                "cell_id": error_cell_id,
+                                                "status": status,
                                                 "execution_count": result["execution_count"],
                                                 "error_message": error_message,
                                                 "execution_time": cell_get_elapsed() * 1000,
                                             }
                                         )
-                                        break  # Stop on first error
+                                        break  # Stop on first error or timeout
 
                                     # Extract all metadata types using generic extractor
                                     extract_and_set_metadata(cell, result["outputs"])
@@ -204,6 +208,8 @@ class ExecuteAllCommand(NotebookCommand):
 
             metadata = {
                 "status": status,  # Use tracked status instead of hardcoded "success"
+                "error_message": error_message,
+                "error_cell_id": error_cell_id,
                 "command": self.command_name,
                 "execution": {
                     "total_executed": total_executed,

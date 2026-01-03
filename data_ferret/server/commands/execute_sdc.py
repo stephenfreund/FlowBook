@@ -119,6 +119,8 @@ class ExecuteSDCCommand(NotebookCommand):
             violations: List[Dict[str, Any]] = []
             total_executed = 0
             status = "success"
+            error_message = None
+            error_cell_id = None
 
             with timer(key="execute:magic", message="Executing magic %continue_after_violation on"):
                 kernel_client.execute("%continue_after_violation on")
@@ -182,12 +184,13 @@ class ExecuteSDCCommand(NotebookCommand):
                                 if sdc_meta.get("violation"):
                                     violations.append(sdc_meta["violation"])
 
-                            # Check for execution errors
-                            if result["status"] == "error":
-                                status = "error"
+                            # Check for execution errors or timeouts
+                            if result["status"] in ("error", "timeout"):
+                                status = result["status"]
                                 error_message = result.get(
                                     "error_message", "Unknown error"
                                 )
+                                error_cell_id = cell_id
                                 print()
                                 print("--------------------------------")
                                 print(f"{error_message}")
@@ -197,13 +200,13 @@ class ExecuteSDCCommand(NotebookCommand):
                                     {
                                         "cell_index": idx,
                                         "cell_id": cell_id,
-                                        "status": "error",
+                                        "status": status,
                                         "execution_count": result["execution_count"],
                                         "error_message": error_message,
                                         "execution_time": cell_get_elapsed() * 1000,
                                     }
                                 )
-                                break  # Stop on first error
+                                break  # Stop on first error or timeout
 
                             # Extract all metadata types using generic extractor
                             extract_and_set_metadata(cell, result["outputs"])
@@ -275,6 +278,8 @@ class ExecuteSDCCommand(NotebookCommand):
 
             metadata = {
                 "status": status,
+                "error_message": error_message,
+                "error_cell_id": error_cell_id,
                 "command": self.command_name,
                 "sdc_enabled": True,
                 "cell_order": cell_order,
