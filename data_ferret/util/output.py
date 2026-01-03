@@ -198,13 +198,13 @@ class Output:
                             self.message, start=self.start, end=self.end
                         )
                         self.outer.contexts += [self]
-                self.start_time = time.time()
+                self.start_time = time.perf_counter()
                 self._duration_ms = None
             return self
 
         def __exit__(self, exc_type, exc_value, traceback):
             with self.outer.lock:
-                end_time = time.time()
+                end_time = time.perf_counter()
                 duration = (end_time - self.start_time) * 1000
                 self._duration_ms = duration
                 if self.suppressed:

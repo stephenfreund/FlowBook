@@ -928,7 +928,6 @@ class FerretSDCKernel(IPythonKernel, Magics):
             end_time = time.perf_counter() * 1000
             if execution_time is not None:
                 duration = end_time - start_time
-                log(f"Duration: {duration}, Execution time: {execution_time}")
                 output.add_timing(
                     key="sdc_kernel:checking_total_time",
                     duration=duration - execution_time,
