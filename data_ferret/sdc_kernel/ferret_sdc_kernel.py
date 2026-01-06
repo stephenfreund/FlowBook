@@ -1037,7 +1037,7 @@ class FerretSDCKernel(IPythonKernel, Magics):
             },
         )
         return {
-            "status": "error",
+            "status": "timeout",
             "execution_count": self.execution_count,
             "ename": "TimeoutError",
             "evalue": timeout_msg,
