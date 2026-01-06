@@ -332,6 +332,45 @@ def _register_keras_dispatch_if_needed():
         pass
 
 
+# PyTorch models - add to dispatch table if available
+# We register lazily to avoid import-time side effects
+_pytorch_dispatch_registered = False
+
+
+def _is_pytorch_model(x) -> bool:
+    """Check if x is a PyTorch nn.Module without importing torch.
+
+    Uses module name and MRO checking to avoid the PyTorch import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    if not module.startswith('torch'):
+        return False
+    # Check MRO for nn.Module base class
+    for base in cls.__mro__:
+        base_module = getattr(base, '__module__', '') or ''
+        if base.__name__ == 'Module' and 'torch.nn' in base_module:
+            return True
+    return False
+
+
+def _register_pytorch_dispatch_if_needed():
+    """Register PyTorch model types in dispatch table lazily."""
+    global _pytorch_dispatch_registered
+    if _pytorch_dispatch_registered:
+        return
+    _pytorch_dispatch_registered = True
+
+    try:
+        import torch.nn as nn
+        _COMPARE_DISPATCH[nn.Module] = "_compare_pytorch_model"
+    except ImportError:
+        pass
+
+
 # Cache for subclass dispatch lookups
 _DISPATCH_CACHE: Dict[type, Optional[str]] = {}
 
@@ -1155,6 +1194,16 @@ class Diff:
                     else:
                         # Fallback to object comparison
                         result = self._compare_object(val_a, val_b, path)
+                elif _is_pytorch_model(val_a):
+                    # PyTorch model - call comparison directly since subclasses
+                    # (nn.Linear, nn.Sequential, etc.) won't match nn.Module in dispatch
+                    _register_pytorch_dispatch_if_needed()
+                    _DISPATCH_CACHE[t] = "_compare_pytorch_model"
+                    result = self._compare_pytorch_model(val_a, val_b, path)
+                elif isinstance(val_a, dict):
+                    # Handle dict subclasses (OrderedDict, Counter, defaultdict, etc.)
+                    _DISPATCH_CACHE[t] = "_compare_dict"
+                    result = self._compare_dict(val_a, val_b, path)
                 elif callable(val_a):
                     # Don't cache callables - too many different types
                     result = self._compare_callable(val_a, val_b, path)
@@ -1837,6 +1886,16 @@ class Diff:
                             for i in diff_indices[:self.max_diffs_per_container]:
                                 idx_label = index[i]
                                 v1, v2 = arr_a[i], arr_b[i]
+
+                                # Check if both values are floats - apply tolerance
+                                if isinstance(v1, (float, np.floating)) and isinstance(v2, (float, np.floating)):
+                                    # Handle NaN equality
+                                    if math.isnan(v1) and math.isnan(v2):
+                                        continue  # Both NaN - consider equal
+                                    # Apply tolerance comparison
+                                    if math.isclose(v1, v2, rel_tol=self.rtol, abs_tol=self.atol):
+                                        continue  # Within tolerance - consider equal
+
                                 children[f"[{repr(idx_label)}]"] = ValueComparison(
                                     status="different",
                                     value1=v1,
@@ -2548,6 +2607,125 @@ class Diff:
 
         if children:
             return CompoundDiff(source_type="keras_model", children=children, truncated=False)
+        return None
+
+    def _compare_pytorch_model(
+        self, val_a, val_b, path: str
+    ) -> Optional[DiffNode]:
+        """
+        Compare PyTorch nn.Module objects by their state_dict and structure.
+
+        Models are compared by:
+        - Module structure (named_modules keys)
+        - State dict (parameters and buffers)
+        - Training mode
+
+        Returns None if models are equal, CompoundDiff with differences otherwise.
+        """
+        import torch
+
+        children: Dict[str, DiffNode] = {}
+
+        # Compare module structure
+        modules_a = dict(val_a.named_modules())
+        modules_b = dict(val_b.named_modules())
+
+        keys_a = set(modules_a.keys())
+        keys_b = set(modules_b.keys())
+
+        if keys_a != keys_b:
+            only_in_a = keys_a - keys_b
+            only_in_b = keys_b - keys_a
+            if only_in_a or only_in_b:
+                children["_structure"] = ValueComparison(
+                    status="different",
+                    value1=sorted(keys_a),
+                    value2=sorted(keys_b),
+                    message=f"Module structure mismatch at {path}: "
+                            f"only in first: {sorted(only_in_a)}, only in second: {sorted(only_in_b)}",
+                )
+
+        # Compare state_dicts (parameters and buffers)
+        try:
+            sd_a = val_a.state_dict()
+            sd_b = val_b.state_dict()
+
+            keys_sd_a = set(sd_a.keys())
+            keys_sd_b = set(sd_b.keys())
+
+            # Check for missing keys
+            only_in_sd_a = keys_sd_a - keys_sd_b
+            only_in_sd_b = keys_sd_b - keys_sd_a
+
+            for key in only_in_sd_a:
+                children[f"_param_{key}"] = ValueComparison(
+                    status="different",
+                    value1=f"<tensor shape={tuple(sd_a[key].shape)}>",
+                    value2="<missing>",
+                    message=f"Parameter missing in second model at {path}.{key}",
+                )
+
+            for key in only_in_sd_b:
+                children[f"_param_{key}"] = ValueComparison(
+                    status="different",
+                    value1="<missing>",
+                    value2=f"<tensor shape={tuple(sd_b[key].shape)}>",
+                    message=f"Parameter missing in first model at {path}.{key}",
+                )
+
+            # Compare common keys
+            for key in keys_sd_a & keys_sd_b:
+                t_a, t_b = sd_a[key], sd_b[key]
+
+                # Shape mismatch
+                if t_a.shape != t_b.shape:
+                    children[f"_param_{key}"] = ValueComparison(
+                        status="different",
+                        value1=f"<tensor shape={tuple(t_a.shape)}>",
+                        value2=f"<tensor shape={tuple(t_b.shape)}>",
+                        message=f"Parameter shape mismatch at {path}.{key}: {tuple(t_a.shape)} vs {tuple(t_b.shape)}",
+                    )
+                    continue
+
+                # Value comparison using torch.allclose for numerical stability
+                # Convert to float for comparison (handles int tensors)
+                try:
+                    if not torch.allclose(t_a.float(), t_b.float(), rtol=1e-5, atol=1e-8):
+                        # Find max difference for debugging
+                        max_diff = (t_a.float() - t_b.float()).abs().max().item()
+                        children[f"_param_{key}"] = ValueComparison(
+                            status="different",
+                            value1=f"<tensor shape={tuple(t_a.shape)}>",
+                            value2=f"<tensor shape={tuple(t_b.shape)}>",
+                            message=f"Parameter values differ at {path}.{key}: max_diff={max_diff:.6e}",
+                        )
+                except Exception as e:
+                    children[f"_param_{key}"] = ValueComparison(
+                        status="different",
+                        value1=str(t_a),
+                        value2=str(t_b),
+                        message=f"Could not compare parameter at {path}.{key}: {e}",
+                    )
+
+        except Exception as e:
+            children["_state_dict_error"] = ValueComparison(
+                status="different",
+                value1=str(e),
+                value2=None,
+                message=f"Could not compare state_dict at {path}: {e}",
+            )
+
+        # Compare training mode
+        if val_a.training != val_b.training:
+            children["_training"] = ValueComparison(
+                status="different",
+                value1=val_a.training,
+                value2=val_b.training,
+                message=f"Training mode mismatch at {path}: {val_a.training} vs {val_b.training}",
+            )
+
+        if children:
+            return CompoundDiff(source_type="pytorch_model", children=children, truncated=False)
         return None
 
     def _compare_groupby(self, val_a, val_b, path: str) -> Optional[ValueComparison]:

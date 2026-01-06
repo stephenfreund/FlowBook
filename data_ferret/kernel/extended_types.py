@@ -5,6 +5,8 @@ from pydantic import BaseModel
 import numpy as np
 import pandas as pd
 import inspect
+import itertools
+from collections import deque
 from collections.abc import Mapping, Sequence, Set
 
 # ─── Type Models ───────────────────────────────────────────────────────────────
@@ -79,7 +81,7 @@ class DictType(BaseModel, frozen=True):
 
 
 class SequenceType(BaseModel, frozen=True):
-    kind: Literal["List", "Tuple"]
+    kind: Literal["List", "Tuple", "Deque"]
     element_types: List[TypeModel]
 
     def __str__(self) -> str:
@@ -201,7 +203,26 @@ def _make_union(models: List[TypeModel]) -> TypeModel:
 # ─── Main Logic ────────────────────────────────────────────────────────────────
 
 
-def get_type_model(obj: Any) -> TypeModel:
+def get_type_model(obj: Any, _seen: Optional[set] = None) -> TypeModel:
+    """
+    Get structured type model for any Python object.
+
+    Args:
+        obj: The object to analyze
+        _seen: Internal parameter for cycle detection (do not pass externally)
+    """
+    # Initialize seen set on first call
+    if _seen is None:
+        _seen = set()
+
+    # Check for circular reference in mutable containers
+    obj_id = id(obj)
+    if isinstance(obj, (list, dict, set)):
+        if obj_id in _seen:
+            # Circular reference - return basic type without recursing
+            return FallbackType(kind="Class", class_name=type(obj).__name__)
+        _seen = _seen | {obj_id}  # Copy to avoid mutation across branches
+
     # --- Type annotations passed directly (e.g., from inspect) ---
     if isinstance(obj, type):
         # numpy scalar classes
@@ -240,17 +261,27 @@ def get_type_model(obj: Any) -> TypeModel:
     # --- mappings ---
     if isinstance(obj, Mapping):
         key_models = (
-            [_make_union([get_type_model(k) for k in obj.keys()])] if obj else []
+            [_make_union([get_type_model(k, _seen) for k in obj.keys()])] if obj else []
         )
         val_models = (
-            [_make_union([get_type_model(v) for v in obj.values()])] if obj else []
+            [_make_union([get_type_model(v, _seen) for v in obj.values()])] if obj else []
         )
         return DictType(kind="Dict", key_types=key_models, value_types=val_models)
+
+    # --- deque (must come before Sequence - deque doesn't support slicing) ---
+    if isinstance(obj, deque):
+        elems = [get_type_model(e, _seen) for e in itertools.islice(obj, INSPECTION_LIMIT)]
+        elem_union = (
+            _make_union(elems)
+            if elems
+            else FallbackType(kind="Class", class_name="Unknown")
+        )
+        return SequenceType(kind="Deque", element_types=[elem_union])
 
     # --- sequences (not str/bytes) ---
     if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes)):
         kind = "List" if isinstance(obj, list) else "Tuple"
-        elems = [get_type_model(e) for e in obj[:INSPECTION_LIMIT]]
+        elems = [get_type_model(e, _seen) for e in obj[:INSPECTION_LIMIT]]
         elem_union = (
             _make_union(elems)
             if elems
@@ -261,7 +292,7 @@ def get_type_model(obj: Any) -> TypeModel:
     # --- sets ---
     if isinstance(obj, Set) and not isinstance(obj, (str, bytes)):
         # Sets don't support slicing, so convert to list first
-        elems = [get_type_model(e) for e in list(obj)[:INSPECTION_LIMIT]]
+        elems = [get_type_model(e, _seen) for e in list(obj)[:INSPECTION_LIMIT]]
         elem_union = (
             _make_union(elems)
             if elems
@@ -276,7 +307,7 @@ def get_type_model(obj: Any) -> TypeModel:
         params = []
         for name, param in sig.parameters.items():
             ann = hints.get(name)
-            ann_model = get_type_model(ann) if ann is not None else None
+            ann_model = get_type_model(ann, _seen) if ann is not None else None
             default = (
                 param.default if param.default is not inspect.Parameter.empty else None
             )
@@ -284,7 +315,7 @@ def get_type_model(obj: Any) -> TypeModel:
                 ParameterModel(name=name, annotation=ann_model, default=default)
             )
         ret_hint = hints.get("return")
-        ret_model = get_type_model(ret_hint) if ret_hint is not None else None
+        ret_model = get_type_model(ret_hint, _seen) if ret_hint is not None else None
         return FunctionType(
             kind="Function", name=obj.__name__, parameters=params, return_type=ret_model
         )

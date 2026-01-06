@@ -279,14 +279,13 @@ class TestCheckpointManagementEdgeCases:
     """Test edge cases in checkpoint management operations."""
 
     def test_checkpoint_with_empty_name(self):
-        """Test that empty checkpoint names are handled."""
+        """Test that empty checkpoint names are rejected."""
         checkpoints = Checkpoints()
         user_ns = {"x": 42}
 
-        # Empty string as checkpoint name
-        checkpoints.save("", user_ns)
-        checkpoint = checkpoints.get("")
-        assert checkpoint.user_ns["x"] == 42
+        # Empty string as checkpoint name should raise ValueError
+        with pytest.raises(ValueError, match="empty or whitespace"):
+            checkpoints.save("", user_ns)
 
     def test_checkpoint_with_special_characters_in_name(self):
         """Test checkpoint names with special characters."""
@@ -546,48 +545,6 @@ class TestSpecialDataTypes:
         assert isinstance(restored_s.dtype, pd.PeriodDtype)
 
 
-class TestConversionWithFlagDisabled:
-    """Test that conversion can be properly disabled."""
-
-    def test_all_object_types_remain_with_flag_disabled(self):
-        """Test that all object dtypes remain unchanged when conversion disabled."""
-        df = pd.DataFrame({
-            "integers": pd.Series([1, 2, 3], dtype=object),
-            "floats": pd.Series([1.5, 2.5, 3.5], dtype=object),
-            "strings": pd.Series(["a", "b", "c"], dtype=object),
-            "bools": pd.Series([True, False, True], dtype=object),
-        })
-
-        checkpoints = Checkpoints(convert_object_to_specialized=False)
-        user_ns = {"df": df}
-        checkpoints.save("test", user_ns)
-
-        # Verify original DataFrame still has object dtypes
-        assert df["integers"].dtype == object
-        assert df["floats"].dtype == object
-        assert df["strings"].dtype == object
-        assert df["bools"].dtype == object
-
-        # Verify checkpoint also has object dtypes
-        checkpoint = checkpoints.get("test")
-        restored_df = checkpoint.user_ns["df"]
-        assert restored_df["integers"].dtype == object
-        assert restored_df["floats"].dtype == object
-
-    def test_series_remains_object_with_flag_disabled(self):
-        """Test that Series remains object dtype when conversion disabled."""
-        s = pd.Series([1, 2, 3, None, 5], dtype=object)
-
-        checkpoints = Checkpoints(convert_object_to_specialized=False)
-        user_ns = {"s": s}
-        checkpoints.save("test", user_ns)
-
-        assert s.dtype == object
-
-        checkpoint = checkpoints.get("test")
-        assert checkpoint.user_ns["s"].dtype == object
-
-
 class TestCheckpointWithDifferentTypes:
     """Test checkpointing with various Python types."""
 
@@ -750,7 +707,7 @@ class TestErrorRecovery:
 
         s = pd.Series([WeirdObject(1), WeirdObject(2)], dtype=object)
 
-        checkpoints = Checkpoints(convert_object_to_specialized=True)
+        checkpoints = Checkpoints()
         user_ns = {"s": s}
 
         # Should not raise an error, conversion should gracefully fail

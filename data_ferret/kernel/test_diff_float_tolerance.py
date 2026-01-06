@@ -1,9 +1,8 @@
 """
-Test cases for float tolerance bug in diff.py.
+Test cases for float tolerance in diff.py with object dtype.
 
-The bug: When a pandas Series has object dtype but contains float values,
-the comparison logic doesn't apply rtol/atol tolerance because it only checks
-the Series dtype, not the individual value types.
+Previously there was a bug where Series with object dtype but containing float
+values would use exact comparison instead of tolerance. This has been fixed.
 """
 
 import pytest
@@ -13,13 +12,11 @@ from data_ferret.kernel.diff import Diff
 from data_ferret.kernel.types import ValueComparison
 
 
-class TestFloatToleranceBug:
-    """Test cases for the float tolerance bug."""
+class TestFloatToleranceObjectDtype:
+    """Test cases for float tolerance with object dtype Series/DataFrames."""
 
     def test_series_float_dtype_uses_tolerance(self):
-        """
-        PASSING TEST: Series with float64 dtype correctly applies tolerance.
-        """
+        """Series with float64 dtype correctly applies tolerance."""
         # Create series with explicit float dtype
         s1 = pd.Series([251.42894439346296], index=[94309], dtype=np.float64)
         s2 = pd.Series([251.42894439346298], index=[94309], dtype=np.float64)
@@ -35,13 +32,8 @@ class TestFloatToleranceBug:
                     # Should be 'close', not 'different'
                     assert comp.status == 'close', f"Expected 'close' but got '{comp.status}': {comp.message}"
 
-    def test_series_object_dtype_with_floats_BUG(self):
-        """
-        FAILING TEST: Series with object dtype containing floats fails to apply tolerance.
-
-        This reproduces the bug from the stack trace where a Series containing
-        float values but with object dtype uses != comparison instead of tolerance.
-        """
+    def test_series_object_dtype_with_floats(self):
+        """Series with object dtype containing floats correctly applies tolerance."""
         # Create series with object dtype but float values
         s1 = pd.Series([251.42894439346296], index=[94309], dtype=object)
         s2 = pd.Series([251.42894439346298], index=[94309], dtype=object)
@@ -53,23 +45,12 @@ class TestFloatToleranceBug:
         differ = Diff(rtol=1e-5, atol=1e-5)
         result = differ._compare_series(s1, s2, path="test")
 
-        # BUG: result will show 'different' even though values are within tolerance
-        if result is not None:
-            assert isinstance(result, dict)
-            for key, comp in result.items():
-                if isinstance(comp, ValueComparison):
-                    # BUG: This will be 'different' when it should be 'close' or None
-                    print(f"Status: {comp.status}")
-                    print(f"Message: {comp.message}")
-                    if comp.status == 'different':
-                        pytest.fail(f"BUG DETECTED: Float values within tolerance marked as 'different':\n{comp.message}")
+        # After fix: values within tolerance should NOT show as different
+        # Result should be None (considered equal)
+        assert result is None, f"Expected None (equal within tolerance), got: {result}"
 
-    def test_dataframe_object_column_with_floats_BUG(self):
-        """
-        FAILING TEST: DataFrame with object dtype column containing floats.
-
-        This is the exact scenario from the stack trace.
-        """
+    def test_dataframe_object_column_with_floats(self):
+        """DataFrame with object dtype column containing floats applies tolerance."""
         # Create DataFrame where the column has object dtype but contains floats
         df1 = pd.DataFrame({'ratio': pd.Series([251.42894439346296], index=[94309], dtype=object)})
         df2 = pd.DataFrame({'ratio': pd.Series([251.42894439346298], index=[94309], dtype=object)})
@@ -85,40 +66,23 @@ class TestFloatToleranceBug:
         differ = Diff(rtol=1e-5, atol=1e-5)
         result = differ._compare_dataframe(df1, df2, path="df")
 
-        # BUG: result will show 'different' even though values are within tolerance
-        if result is not None:
-            assert isinstance(result, dict)
-            has_bug = False
-            for key, comp in result.items():
-                if isinstance(comp, ValueComparison):
-                    if comp.status == 'different' and 'TOLERANCE BUG DETECTED' in comp.message:
-                        has_bug = True
-                        print(f"\nBUG DETECTED in key '{key}':")
-                        print(comp.message)
-
-            if has_bug:
-                pytest.fail("Float tolerance bug detected in DataFrame comparison")
+        # After fix: values within tolerance should NOT show as different
+        # Result should be None (considered equal)
+        assert result is None, f"Expected None (equal within tolerance), got: {result}"
 
     def test_mixed_types_in_object_series(self):
-        """
-        Test Series with mixed types (some floats, some ints, some strings).
-
-        This tests whether the fix handles mixed-type object Series correctly.
-        """
+        """Series with mixed types (some floats, some ints, some strings) applies tolerance to floats."""
         s1 = pd.Series([1.0000001, 2, "hello"], dtype=object)
         s2 = pd.Series([1.0000002, 2, "hello"], dtype=object)
 
         differ = Diff(rtol=1e-5, atol=1e-5)
         result = differ._compare_series(s1, s2, path="test")
 
-        # First element: floats within tolerance (should be close or None)
-        # Second element: ints, should be equal
-        # Third element: strings, should be equal
-        if result is not None:
-            print(f"Result keys: {result.keys()}")
-            for key, comp in result.items():
-                if isinstance(comp, ValueComparison):
-                    print(f"  {key}: status={comp.status}, message={comp.message[:100]}")
+        # First element: floats within tolerance - should be equal
+        # Second element: ints - should be equal
+        # Third element: strings - should be equal
+        # After fix: all should be equal, result should be None
+        assert result is None, f"Expected None (all elements equal), got: {result}"
 
     def test_dtype_not_float_but_values_are_floats(self):
         """
@@ -217,13 +181,13 @@ class TestFloatToleranceBug:
 
 def run_diagnostic():
     """
-    Run diagnostic to understand the bug.
+    Run diagnostic to verify float tolerance works with object dtype.
     """
     print("\n" + "="*80)
-    print("DIAGNOSTIC: Float Tolerance Bug in diff.py")
+    print("DIAGNOSTIC: Float Tolerance with Object Dtype")
     print("="*80)
 
-    # Create the problematic scenario
+    # Create the test scenario
     s1 = pd.Series([251.42894439346296], index=[94309], dtype=object)
     s2 = pd.Series([251.42894439346298], index=[94309], dtype=object)
 
@@ -245,21 +209,13 @@ def run_diagnostic():
     print(f"Threshold (rtol=1e-5, atol=1e-5): {threshold:.2e}")
     print(f"Within tolerance: {diff <= threshold}")
 
-    print("\nTesting _compare_series logic path:")
+    print("\nTesting _compare_series:")
     differ = Diff(rtol=1e-5, atol=1e-5)
-
-    # Check which branch the code takes
-    if pd.api.types.is_float_dtype(s1.dtype):
-        print("  -> Takes FLOAT branch (line 908-956)")
-        print("  -> Uses np.allclose with tolerance")
-    else:
-        print("  -> Takes NON-FLOAT branch (line 957-975)")
-        print("  -> Uses direct != comparison (BUG!)")
 
     result = differ._compare_series(s1, s2, path="df['ratio']")
 
     if result is None:
-        print("\nResult: None (series considered equal)")
+        print("\nResult: None (series considered equal) - CORRECT!")
     else:
         print(f"\nResult: {type(result)}")
         for key, comp in result.items():
@@ -267,8 +223,6 @@ def run_diagnostic():
                 print(f"  Key: {key}")
                 print(f"  Status: {comp.status}")
                 print(f"  Message preview: {comp.message[:200]}")
-                if 'TOLERANCE BUG DETECTED' in comp.message:
-                    print("\n  *** BUG CONFIRMED ***")
 
 
 if __name__ == "__main__":

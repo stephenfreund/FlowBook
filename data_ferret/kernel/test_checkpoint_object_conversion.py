@@ -105,8 +105,8 @@ def test_convert_dataframe():
 
 
 def test_checkpoint_with_conversion():
-    """Test that Checkpoints applies conversion when enabled."""
-    checkpoints = Checkpoints(convert_object_to_specialized=True)
+    """Test that Checkpoints applies object dtype conversion."""
+    checkpoints = Checkpoints()
 
     # Create test data with object dtypes
     user_ns = {
@@ -131,32 +131,9 @@ def test_checkpoint_with_conversion():
     print("✓ Checkpoint conversion test passed")
 
 
-def test_checkpoint_without_conversion():
-    """Test that conversion can be disabled."""
-    checkpoints = Checkpoints(convert_object_to_specialized=False)
-
-    # Create test data with object dtypes
-    user_ns = {
-        "df": pd.DataFrame({
-            "ints": pd.Series([1, 2, 3], dtype=object),
-        }),
-    }
-
-    # Save checkpoint
-    saved, removed = checkpoints.save("test", user_ns)
-
-    # Retrieve checkpoint
-    checkpoint = checkpoints.get("test")
-
-    # Check that no conversion happened (stays object)
-    assert checkpoint.user_ns["df"]["ints"].dtype == object
-
-    print("✓ Checkpoint no-conversion test passed")
-
-
 def test_in_place_modification():
-    """Test that conversion modifies the variables dict in-place."""
-    checkpoints = Checkpoints(convert_object_to_specialized=True)
+    """Test that conversion modifies DataFrame columns in-place."""
+    checkpoints = Checkpoints()
 
     # Create test data with object dtypes
     df_original = pd.DataFrame({
@@ -169,15 +146,16 @@ def test_in_place_modification():
     # Store the original DataFrame ID
     original_df_id = id(user_ns["df"])
 
-    # Save checkpoint (this should modify user_ns in-place)
+    # Save checkpoint (this modifies the DataFrame columns in-place)
     saved, removed = checkpoints.save("test", user_ns)
 
     # Check that the DataFrame in user_ns has been converted
     assert user_ns["df"]["ints"].dtype == pd.Int64Dtype()
     assert user_ns["df"]["strings"].dtype == pd.StringDtype()
 
-    # The DataFrame object itself should be replaced (different ID)
-    assert id(user_ns["df"]) != original_df_id
+    # The DataFrame object itself is modified in-place (same ID)
+    # Columns are converted on the original DataFrame
+    assert id(user_ns["df"]) == original_df_id
 
     print("✓ In-place modification test passed")
 
@@ -298,7 +276,6 @@ if __name__ == "__main__":
     test_convert_series_strings_to_string_dtype()
     test_convert_dataframe()
     test_checkpoint_with_conversion()
-    test_checkpoint_without_conversion()
     test_in_place_modification()
     test_convert_decimal()
     test_convert_complex()

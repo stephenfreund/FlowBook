@@ -379,6 +379,20 @@ def deepcopy(x, memo=None):
                     _keep_alive(x, memo)
                 return y
 
+        # Check if this is a PyTorch model - register handlers lazily
+        if _is_pytorch_model(x):
+            _register_pytorch_handlers_if_needed()
+            # Look up dispatch using MRO (dispatch is registered for nn.Module,
+            # but we may have nn.Linear, nn.Sequential, etc.)
+            for base in cls.__mro__:
+                copier = _deepcopy_dispatch.get(base)
+                if copier is not None:
+                    y = copier(x, memo)
+                    if y is not x:
+                        memo[d] = y
+                        _keep_alive(x, memo)
+                    return y
+
         if issubclass(cls, type):
             y = _deepcopy_atomic(x, memo)
         else:
@@ -957,6 +971,134 @@ def _register_keras_handlers_if_needed():
         _deepcopy_dispatch[KerasModel] = _deepcopy_keras_model
     except ImportError:
         pass  # Keras not installed
+
+
+def reset_keras_deepcopy_handler():
+    """Reset the Keras deepcopy handler registration. For testing."""
+    global _keras_handlers_registered
+    _keras_handlers_registered = False
+    # Also remove from dispatch table
+    try:
+        from tensorflow.keras.models import Sequential as TFSequential
+        from tensorflow.keras.models import Model as TFModel
+        if TFSequential in _deepcopy_dispatch:
+            del _deepcopy_dispatch[TFSequential]
+        if TFModel in _deepcopy_dispatch:
+            del _deepcopy_dispatch[TFModel]
+    except ImportError:
+        pass
+    try:
+        from keras.models import Sequential as KerasSequential
+        from keras.models import Model as KerasModel
+        if KerasSequential in _deepcopy_dispatch:
+            del _deepcopy_dispatch[KerasSequential]
+        if KerasModel in _deepcopy_dispatch:
+            del _deepcopy_dispatch[KerasModel]
+    except ImportError:
+        pass
+
+
+# PyTorch model handler - uses opaque handler pattern for efficient copying
+# NOTE: We don't import PyTorch at module load time to avoid unnecessary loading.
+
+def _deepcopy_pytorch_model(model, memo: dict[int, Any]):
+    """
+    Deep copy a PyTorch model using the opaque handler pattern.
+
+    For initialized models:
+    - Uses stdlib copy.deepcopy() for architecture cloning
+    - Restores state via state_dict()
+    - Preserves training mode and device placement
+    - Preserves custom attributes
+
+    For models with uninitialized lazy modules:
+    - Raises TypeError (cannot checkpoint uninitialized models)
+
+    Args:
+        model: PyTorch nn.Module
+        memo: Shared memo dict for tracking copied objects
+
+    Returns:
+        Independent copy of the model
+
+    Raises:
+        TypeError: If model has uninitialized lazy modules
+    """
+    obj_id = id(model)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    # Get the opaque handler for this model
+    handler = OpaqueRegistry.get_handler(model)
+    if handler is None:
+        # Fallback to stdlib deepcopy if no handler
+        import copy as stdlib_copy
+        model_copy = stdlib_copy.deepcopy(model)
+        memo[obj_id] = model_copy
+        return model_copy
+
+    # Check if model can be checkpointed (no uninitialized lazy modules)
+    can_cp, error = handler.is_checkpointable(model)
+    if not can_cp:
+        raise TypeError(f"Cannot checkpoint PyTorch model: {error}")
+
+    # Extract mutable state (state_dict, training mode, etc.) and create copy
+    state = handler.get_mutable_state(model)
+    model_copy = handler.copy_with_state(model, state, memo)
+
+    return model_copy
+
+
+# Flag to track if we've registered PyTorch handlers (done lazily on first use)
+_pytorch_handlers_registered = False
+
+
+def _is_pytorch_model(x) -> bool:
+    """Check if x is a PyTorch nn.Module without importing torch.
+
+    Uses module name and MRO checking to avoid the expensive PyTorch import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    if not module.startswith('torch'):
+        return False
+    # Check MRO for nn.Module base class
+    for base in cls.__mro__:
+        base_module = getattr(base, '__module__', '') or ''
+        if base.__name__ == 'Module' and 'torch.nn' in base_module:
+            return True
+    return False
+
+
+def _register_pytorch_handlers_if_needed():
+    """Register PyTorch model handlers lazily to avoid import-time side effects.
+
+    Less expensive than Keras import, but still deferred to avoid unnecessary
+    loading when PyTorch models aren't used.
+    """
+    global _pytorch_handlers_registered
+    if _pytorch_handlers_registered:
+        return
+    _pytorch_handlers_registered = True
+
+    try:
+        import torch.nn as nn
+        _deepcopy_dispatch[nn.Module] = _deepcopy_pytorch_model
+    except ImportError:
+        pass  # PyTorch not installed
+
+
+def reset_pytorch_deepcopy_handler():
+    """Reset the PyTorch deepcopy handler registration. For testing."""
+    global _pytorch_handlers_registered
+    _pytorch_handlers_registered = False
+    # Also remove from dispatch table
+    try:
+        import torch.nn as nn
+        if nn.Module in _deepcopy_dispatch:
+            del _deepcopy_dispatch[nn.Module]
+    except ImportError:
+        pass
 
 
 del d  # Clean up namespace

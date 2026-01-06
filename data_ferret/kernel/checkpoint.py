@@ -860,7 +860,12 @@ from typing import Any, Dict, List, Optional, Set
 import numpy as np
 import pandas as pd
 
-from data_ferret.kernel.deepcopy import deepcopy, _IMMUTABLE_INFERRED_KINDS
+from data_ferret.kernel.deepcopy import (
+    deepcopy,
+    _IMMUTABLE_INFERRED_KINDS,
+    _convert_object_column_dtype,
+    _has_mutable_defaults,
+)
 from data_ferret.kernel.diff import Diff
 from data_ferret.kernel.opaque import OpaqueRegistry
 from pandas.api.types import infer_dtype
@@ -894,6 +899,156 @@ SYSTEM_VARIABLES = {
     "_iii",
     "_dh",
 }
+
+
+# =============================================================================
+# OBJECT TYPE CONVERSION HELPERS
+# =============================================================================
+
+
+def convert_series_object_to_specialized(series: pd.Series) -> pd.Series:
+    """
+    Convert object dtype Series to appropriate dtypes when possible.
+
+    Handles: integers, floats, strings, decimals, complex, booleans,
+    datetimes, timedeltas, and categorical data. Does NOT parse strings to numbers.
+
+    Args:
+        series: Series to convert
+
+    Returns:
+        Converted Series (or original if no conversion possible)
+    """
+    return _convert_object_column_dtype(series)
+
+
+def convert_dataframe_object_to_specialized(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert object dtype columns in DataFrame to appropriate dtypes when possible.
+
+    Args:
+        df: DataFrame to convert
+
+    Returns:
+        DataFrame with converted columns
+    """
+    df2 = df.copy()
+    obj_cols = df2.select_dtypes(include=["object"]).columns
+
+    for col in obj_cols:
+        df2[col] = convert_series_object_to_specialized(df2[col])
+
+    return df2
+
+
+def _deep_copy_function(
+    func: types.FunctionType, memo: dict[int, Any], skip_immutable: bool = True
+) -> types.FunctionType:
+    """
+    Deep copy a function, including its closure contents.
+
+    Standard deepcopy doesn't copy closure cell contents, leaving the copied
+    function referencing the same objects as the original. This function
+    creates a true deep copy by:
+    1. Deep copying each cell's contents using the shared memo
+    2. Creating new cell objects with the copied contents
+    3. Building a new function with the new closure
+
+    Args:
+        func: Function to copy
+        memo: Shared memo dict for tracking copied objects
+        skip_immutable: If True, skip copying immutable objects in closure
+
+    Returns:
+        New function with deep-copied closure
+    """
+    # If no closure and no mutable defaults, return the same function
+    if func.__closure__ is None and not _has_mutable_defaults(func):
+        return func
+
+    # If no closure but has mutable defaults, need to copy defaults only
+    if func.__closure__ is None:
+        new_func = types.FunctionType(
+            func.__code__,
+            func.__globals__,
+            func.__name__,
+            func.__defaults__,
+            None,
+        )
+        memo[id(func)] = new_func
+
+        new_defaults = (
+            tuple(deepcopy(d, memo) for d in func.__defaults__)
+            if func.__defaults__
+            else None
+        )
+        new_kwdefaults = (
+            {k: deepcopy(v, memo) for k, v in func.__kwdefaults__.items()}
+            if func.__kwdefaults__
+            else None
+        )
+
+        new_func.__defaults__ = new_defaults
+        new_func.__kwdefaults__ = new_kwdefaults
+        new_func.__annotations__ = func.__annotations__.copy() if func.__annotations__ else {}
+        for k, v in func.__dict__.items():
+            new_func.__dict__[k] = deepcopy(v, memo)
+        new_func.__doc__ = func.__doc__
+
+        return new_func
+
+    # Create a temporary function and register in memo to handle circular refs
+    temp_func = types.FunctionType(
+        func.__code__,
+        func.__globals__,
+        func.__name__,
+        func.__defaults__,
+        func.__closure__,
+    )
+    memo[id(func)] = temp_func
+
+    # Deep copy closure contents
+    new_cells = []
+    for cell in func.__closure__:
+        try:
+            copied_contents = deepcopy(cell.cell_contents, memo)
+            new_cells.append(types.CellType(copied_contents))
+        except ValueError:
+            # Empty cell (variable referenced but not yet bound)
+            new_cells.append(types.CellType())
+
+    new_closure = tuple(new_cells)
+
+    # Deep copy defaults
+    new_defaults = (
+        tuple(deepcopy(d, memo) for d in func.__defaults__)
+        if func.__defaults__
+        else None
+    )
+    new_kwdefaults = (
+        {k: deepcopy(v, memo) for k, v in func.__kwdefaults__.items()}
+        if func.__kwdefaults__
+        else None
+    )
+
+    # Create the actual new function with deep-copied closure and defaults
+    new_func = types.FunctionType(
+        func.__code__,
+        func.__globals__,
+        func.__name__,
+        new_defaults,
+        new_closure,
+    )
+    new_func.__kwdefaults__ = new_kwdefaults
+    new_func.__annotations__ = func.__annotations__.copy() if func.__annotations__ else {}
+    for k, v in func.__dict__.items():
+        new_func.__dict__[k] = deepcopy(v, memo)
+    new_func.__doc__ = func.__doc__
+
+    # Update memo to point to the actual function
+    memo[id(func)] = new_func
+
+    return new_func
 
 
 def is_valid_variable_name(name: str) -> bool:
@@ -1034,12 +1189,26 @@ def _collect_reachable_ids_with_paths(
     if isinstance(obj, _SINGLETON_TYPES):
         return
 
-    # Skip opaque objects (e.g., Keras models) - treat as atomic, don't traverse internals
-    if OpaqueRegistry.is_opaque(obj):
+    # Handle opaque objects (e.g., Keras/PyTorch models) - treat internal structure as
+    # atomic, but DO traverse custom attributes for alias detection
+    handler = OpaqueRegistry.get_handler(obj)
+    if handler is not None:
         visited.add(obj_id)
         if obj_id not in id_to_path:
             id_to_path[obj_id] = path
-        return  # Don't recurse into opaque object internals
+
+        # Traverse custom attributes that we capture in get_mutable_state()
+        # These may contain aliased references to other notebook variables
+        try:
+            custom_attrs = handler.get_traversable_attrs(obj)
+            for attr_name, attr_value in custom_attrs.items():
+                _collect_reachable_ids_with_paths(
+                    attr_value, f"{path}.{attr_name}", visited, id_to_path
+                )
+        except Exception:
+            pass  # Best-effort traversal
+
+        return  # Don't recurse into internal opaque object structure
 
     visited.add(obj_id)
     # Record the first path to this object
@@ -1159,10 +1328,22 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
     if isinstance(obj, _SINGLETON_TYPES):
         return
 
-    # Skip opaque objects (e.g., Keras models) - treat as atomic, don't traverse internals
-    if OpaqueRegistry.is_opaque(obj):
+    # Handle opaque objects (e.g., Keras/PyTorch models) - treat internal structure as
+    # atomic, but DO traverse custom attributes for alias detection
+    handler = OpaqueRegistry.get_handler(obj)
+    if handler is not None:
         visited.add(obj_id)
-        return  # Don't recurse into opaque object internals
+
+        # Traverse custom attributes that we capture in get_mutable_state()
+        # These may contain aliased references to other notebook variables
+        try:
+            custom_attrs = handler.get_traversable_attrs(obj)
+            for attr_value in custom_attrs.values():
+                _collect_reachable_ids(attr_value, visited)
+        except Exception:
+            pass  # Best-effort traversal
+
+        return  # Don't recurse into internal opaque object structure
 
     visited.add(obj_id)
 
