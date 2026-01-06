@@ -326,3 +326,104 @@ class TestFunctionalModel:
         visited = set()
         _collect_reachable_ids(functional_model, visited)
         assert len(visited) == 1
+
+
+class TestKerasCustomAttributes:
+    """Tests for custom __dict__ attribute capture and restoration."""
+
+    def test_model_custom_int_preserved(self, built_model):
+        """Custom integer attribute should be preserved after copy."""
+        built_model.custom_epochs = 42
+        copy = ferret_deepcopy(built_model)
+
+        assert hasattr(copy, 'custom_epochs')
+        assert copy.custom_epochs == 42
+
+    def test_model_custom_list_preserved(self, built_model):
+        """Custom list attribute should be preserved after copy."""
+        built_model.loss_history = [0.5, 0.3, 0.1]
+        copy = ferret_deepcopy(built_model)
+
+        assert hasattr(copy, 'loss_history')
+        assert copy.loss_history == [0.5, 0.3, 0.1]
+        # Should be independent copy
+        assert copy.loss_history is not built_model.loss_history
+
+    def test_model_custom_dict_preserved(self, built_model):
+        """Custom dict attribute should be preserved after copy."""
+        built_model.config = {'lr': 0.01, 'batch_size': 32}
+        copy = ferret_deepcopy(built_model)
+
+        assert hasattr(copy, 'config')
+        assert copy.config == {'lr': 0.01, 'batch_size': 32}
+        # Should be independent copy
+        assert copy.config is not built_model.config
+
+    def test_layer_custom_attribute_preserved(self, built_model):
+        """Custom attribute on a layer should be preserved after copy."""
+        # Add custom attribute to the first Dense layer
+        built_model.layers[0].custom_scale = 2.5
+        copy = ferret_deepcopy(built_model)
+
+        assert hasattr(copy.layers[0], 'custom_scale')
+        assert copy.layers[0].custom_scale == 2.5
+
+    def test_keras_internals_not_captured_as_custom(self, built_model):
+        """Keras internal attributes should not be captured as custom attrs."""
+        handler = KerasModelHandler()
+        state = handler.get_mutable_state(built_model)
+
+        # These are Keras internals and should NOT be in model_dict
+        model_dict = state.get('model_dict', {})
+        assert 'layers' not in model_dict
+        assert 'optimizer' not in model_dict
+        assert 'built' not in model_dict
+        assert 'trainable' not in model_dict
+
+    def test_custom_attr_independent_after_copy(self, built_model):
+        """Modifying custom attr on original should not affect copy."""
+        built_model.my_list = [1, 2, 3]
+        copy = ferret_deepcopy(built_model)
+
+        # Modify original
+        built_model.my_list.append(4)
+
+        # Copy should be unchanged
+        assert copy.my_list == [1, 2, 3]
+
+    def test_custom_attr_aliased_for_tracking(self, built_model):
+        """Custom attributes should be traversed for alias detection."""
+        shared_list = [1, 2, 3]
+        built_model.custom_data = shared_list
+
+        visited = set()
+        _collect_reachable_ids(built_model, visited)
+
+        # Should find the shared_list since it's a custom attribute
+        assert id(shared_list) in visited
+
+    def test_state_includes_custom_attrs(self, built_model):
+        """get_mutable_state should include custom attributes."""
+        built_model.my_value = 100
+        built_model.my_dict = {'a': 1}
+
+        handler = KerasModelHandler()
+        state = handler.get_mutable_state(built_model)
+
+        assert 'model_dict' in state
+        assert state['model_dict'].get('my_value') == 100
+        assert state['model_dict'].get('my_dict') == {'a': 1}
+
+    def test_states_equal_considers_custom_attrs(self, built_model):
+        """states_equal should compare custom attributes."""
+        built_model.custom_value = 100
+
+        handler = KerasModelHandler()
+        state1 = handler.get_mutable_state(built_model)
+
+        # Modify and get new state
+        built_model.custom_value = 200
+        state2 = handler.get_mutable_state(built_model)
+
+        # States should not be equal due to custom attr difference
+        assert not handler.states_equal(state1, state2)

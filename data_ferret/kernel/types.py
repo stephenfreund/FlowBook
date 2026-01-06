@@ -176,6 +176,7 @@ DiffSourceType = Literal[
     "callable",   # Bound method (comparing __func__ and __self__)
     "catboost_pool",  # CatBoost Pool (ML dataset container)
     "keras_model",    # Keras/TensorFlow neural network model
+    "pytorch_model",  # PyTorch nn.Module neural network model
 ]
 
 

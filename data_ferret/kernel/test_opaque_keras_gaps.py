@@ -1,13 +1,17 @@
 """
-Tests demonstrating correctness gaps in Keras opaque object handling.
+Tests for Keras opaque object handling with custom attribute capture.
 
-These tests are EXPECTED TO FAIL - they document known limitations
-where checkpoint/restore produces incorrect or inconsistent behavior.
+HISTORY: These tests were originally written to demonstrate correctness gaps
+where custom __dict__ attributes were NOT preserved through checkpoint/restore.
 
-Gaps tested:
-1. Custom model state not in get_weights() or get_config()
-2. Hooks/callbacks that modify model behavior
-3. Custom layers without proper get_config()
+UPDATE: With the enhanced KerasModelHandler that captures custom __dict__
+attributes, most of these tests should now PASS. Tests that still fail
+document truly unfixable limitations (multi-GPU context, etc.).
+
+Categories:
+1. FIXED: Custom model/layer __dict__ attributes - NOW PRESERVED
+2. PARTIALLY FIXED: Some layer state restored via __dict__ capture
+3. STILL GAPS: Multi-GPU strategy context, device placement (external to model)
 """
 
 import pytest
@@ -30,8 +34,11 @@ def reset_registry():
 
 
 # =============================================================================
-# Gap 2: Custom State Outside Standard APIs
+# FIXED: Custom State Now Captured via __dict__
 # =============================================================================
+# These tests previously failed because custom __dict__ attributes were not
+# captured. Now they should PASS because KerasModelHandler captures and
+# restores custom model and layer __dict__ attributes.
 
 # Register all custom models at module level so Keras can find them
 @keras.saving.register_keras_serializable(package='test_gaps_models')
@@ -136,10 +143,12 @@ class ModelWithGradientScaling(keras.Model):
 
 class TestCustomStateGap:
     """
-    Tests for custom state that is NOT captured by get_weights() or get_config().
+    Tests for custom state captured via __dict__.
 
-    This is a CORRECTNESS issue: the model behaves differently after restore
-    because custom state is lost.
+    FIXED: These tests should now PASS because KerasModelHandler captures
+    custom __dict__ attributes on both models and layers.
+
+    Previously this was a CORRECTNESS issue - now it's fixed.
     """
 
     def test_subclassed_model_with_counter(self):
@@ -234,15 +243,18 @@ class TestCustomStateGap:
 
 
 # =============================================================================
-# Gap 4: Hooks / Custom Training Behavior
+# FIXED: Custom Training Behavior Attributes Now Captured
 # =============================================================================
 
 class TestHooksGap:
     """
-    Tests for hooks/callbacks that modify model behavior.
+    Tests for custom training behavior attributes.
 
-    This is a CORRECTNESS issue: model behavior changes after restore
-    because custom state is not preserved.
+    FIXED: Custom attributes like gradient_scale are now captured via __dict__.
+
+    Note: Actual Keras callbacks (like keras.callbacks.EarlyStopping) are
+    separate objects, not model attributes. They need to be checkpointed
+    separately if needed.
     """
 
     def test_model_with_gradient_scaling_attribute(self):
@@ -324,14 +336,19 @@ class TestHooksGap:
 
 
 # =============================================================================
-# Gap 6: Custom Layer Without Proper get_config()
+# PARTIALLY FIXED: Custom Layer Attributes via __dict__
 # =============================================================================
 
 class TestCustomLayerConfigGap:
     """
-    Tests for custom layers that don't properly implement get_config().
+    Tests for custom layer attributes not in get_config().
 
-    This is a CORRECTNESS issue: layer attributes are lost, changing behavior.
+    PARTIALLY FIXED: Layer custom __dict__ attributes are now captured.
+    However, attributes that rely on get_config() for clone_model() may
+    still have issues if the cloned architecture differs from original.
+
+    Best practice: Always include all attributes in get_config() AND
+    register with @keras.saving.register_keras_serializable.
     """
 
     def test_custom_layer_missing_config_attribute(self):
@@ -721,35 +738,42 @@ class TestWeightsArePreserved:
 
 
 # =============================================================================
-# Summary: Run this to see all gaps
+# Summary: Fixed vs Remaining Gaps
 # =============================================================================
 
 class TestSummary:
-    """Summary test that lists all gaps."""
+    """Summary of what's fixed and what remains as gaps."""
 
     def test_print_gap_summary(self):
-        """Print a summary of all correctness gaps."""
-        gaps = [
-            "Gap 1a: MirroredStrategy context may be lost after checkpoint",
-            "Gap 1b: Device placement may change after checkpoint",
-            "Gap 1c: Custom distribution state (gradient_accumulation_steps) is lost",
-            "Gap 2a: Subclassed model custom attributes (call_count) are lost",
-            "Gap 2b: Training history stored on model is lost",
-            "Gap 2c: Curriculum/adaptive learning state is lost",
-            "Gap 4a: Custom gradient scaling factors are lost",
-            "Gap 4b: Layer runtime statistics (activation tracking) are lost",
-            "Gap 6a: Custom layer attributes not in get_config() are lost",
-            "Gap 6b: Runtime-computed layer state (_initialization_timestamp) changes",
-            "Gap 6c: Unregistered custom layer state is lost",
+        """Print a summary of fixed items and remaining gaps."""
+        fixed = [
+            "FIXED: Subclassed model custom attributes (call_count, loss_history)",
+            "FIXED: Curriculum/adaptive learning state on model",
+            "FIXED: Custom gradient scaling factors on model",
+            "FIXED: Layer custom runtime statistics (activation tracking)",
+            "FIXED: Custom layer __dict__ attributes (even without get_config)",
+            "FIXED: Runtime-computed layer state preserved via __dict__",
+            "FIXED: Unregistered custom layer state (via __dict__ capture)",
+        ]
+
+        remaining_gaps = [
+            "GAP: MirroredStrategy context is external to model - not preserved",
+            "GAP: Device placement managed by TensorFlow - may change",
+            "GAP: Keras callbacks (EarlyStopping, etc.) are separate objects",
+            "GAP: Optimizer state requires separate handling",
         ]
 
         print("\n" + "=" * 70)
-        print("KERAS OPAQUE OBJECT CORRECTNESS GAPS")
+        print("KERAS OPAQUE OBJECT HANDLING STATUS")
         print("=" * 70)
-        for gap in gaps:
+        print("\nFIXED (via __dict__ capture):")
+        for item in fixed:
+            print(f"  + {item}")
+        print("\nREMAINING GAPS (external to model):")
+        for gap in remaining_gaps:
             print(f"  - {gap}")
         print("=" * 70)
-        print("\nThese gaps would also apply to PyTorch with similar patterns.")
+        print("\nPyTorch has similar fixed/remaining patterns.")
         print("=" * 70 + "\n")
 
         # This test always passes - it's just for documentation

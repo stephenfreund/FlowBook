@@ -185,6 +185,24 @@ def check_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> str | None:
                     return error  # Return the error message (e.g., "model not built")
             return None  # Fallback: assume copyable if no handler
 
+    # === 3b2. PyTorch models - use opaque handler to check for lazy modules ===
+    # PyTorch models are copyable via our opaque handler pattern, but only
+    # if all lazy modules are initialized. Uninitialized lazy modules cannot
+    # be checkpointed because their shapes aren't determined yet.
+    if module_name.startswith("torch"):
+        # Check MRO for nn.Module base class
+        for base in type(obj).__mro__:
+            base_module = getattr(base, '__module__', '') or ''
+            if base.__name__ == 'Module' and 'torch.nn' in base_module:
+                handler = OpaqueRegistry.get_handler(obj)
+                if handler is not None:
+                    can_cp, error = handler.is_checkpointable(obj)
+                    if can_cp:
+                        return None  # Copyable via opaque handler
+                    else:
+                        return error  # Return the error message (e.g., "lazy module not initialized")
+                return None  # Fallback: assume copyable if no handler
+
     # === 3c. CatBoost Pool - has custom deepcopy handler via slice workaround ===
     # CatBoost Pool explicitly blocks __deepcopy__, but our custom deepcopy
     # handles it via pool.slice() which creates an independent copy.
