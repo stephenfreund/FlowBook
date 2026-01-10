@@ -2,9 +2,9 @@
 Test script for StreamOutputContext and BroadcastStream with ANSI color support.
 """
 
-from data_ferret.server.message_broadcaster import MessageBroadcaster, BroadcastStream
-from data_ferret.util.output import stream_output, log, print as out_print
-from data_ferret.util.text import parse_ansi_text
+from flowbook.server.message_broadcaster import MessageBroadcaster, BroadcastStream
+from flowbook.util.output import stream_output, log, print as out_print
+from flowbook.util.text import parse_ansi_text
 import termcolor
 
 

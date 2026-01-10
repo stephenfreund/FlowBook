@@ -1,5 +1,5 @@
 /**
- * API Handler Helper for making requests to the ferret server extension
+ * API Handler Helper for making requests to the flowbook server extension
  */
 
 import { ServerConnection } from '@jupyterlab/services';
@@ -9,7 +9,7 @@ export async function requestAPI<T>(
   init: RequestInit = {}
 ): Promise<T> {
   const settings = ServerConnection.makeSettings();
-  const requestUrl = `${settings.baseUrl}ferret/${endPoint}`;
+  const requestUrl = `${settings.baseUrl}flowbook/${endPoint}`;
 
   let response: Response;
   try {

@@ -1,6 +1,6 @@
 # Using the CLI with Kernel Connection Files
 
-The DataFerret CLI automatically detects whether you're providing a notebook file or a kernel connection file.
+The FlowBook CLI automatically detects whether you're providing a notebook file or a kernel connection file.
 
 ## Overview
 
@@ -15,11 +15,11 @@ The CLI intelligently detects which files you provide based on their names and c
 ### Option 1: Notebook Only (Starts New Kernel)
 
 ```bash
-python -m data_ferret.server.cli <command> <notebook.ipynb>
+python -m flowbook.server.cli <command> <notebook.ipynb>
 ```
 
 This will:
-- Start a new ferret_kernel
+- Start a new flowbook_kernel
 - Execute the command
 - Shutdown the kernel when done
 
@@ -27,9 +27,9 @@ This will:
 
 ```bash
 # Order doesn't matter - CLI auto-detects which is which
-python -m data_ferret.server.cli <command> notebook.ipynb kernel-abc123.json
+python -m flowbook.server.cli <command> notebook.ipynb kernel-abc123.json
 # or
-python -m data_ferret.server.cli <command> kernel-abc123.json notebook.ipynb
+python -m flowbook.server.cli <command> kernel-abc123.json notebook.ipynb
 ```
 
 This will:
@@ -53,7 +53,7 @@ This will:
 #    (copies something like: /Users/user/Library/Jupyter/runtime/kernel-abc123.json)
 
 # 2. Run CLI command with both files (order doesn't matter)
-python -m data_ferret.server.cli inspect \
+python -m flowbook.server.cli inspect \
   examples/Example.ipynb \
   /Users/user/Library/Jupyter/runtime/kernel-abc123.json
 ```
@@ -72,7 +72,7 @@ The CLI detects file types by:
 - `paths` - Required. One or more paths (notebook and/or connection file)
 
 **Options:**
-- `--kernel-name` - Optional. Kernel name if starting new kernel (default: ferret_kernel)
+- `--kernel-name` - Optional. Kernel name if starting new kernel (default: flowbook_kernel)
 - `--output`, `-o` - Optional. Output file path (default: adds _processed suffix)
 - `--model` - Optional. AI model to use (default: gpt-4o)
 - `--fast-model` - Optional. Fast AI model (default: gpt-4o-mini)
@@ -96,13 +96,13 @@ Use `#N` where N is a 1-based index of code cells only (markdown cells are skipp
 
 ```bash
 # Process first code cell
-python -m data_ferret.server.cli inspect notebook.ipynb --cell-ids #1
+python -m flowbook.server.cli inspect notebook.ipynb --cell-ids #1
 
 # Process first and third code cells
-python -m data_ferret.server.cli validate notebook.ipynb --cell-ids #1 #3
+python -m flowbook.server.cli validate notebook.ipynb --cell-ids #1 #3
 
 # Process cells 2 through 4
-python -m data_ferret.server.cli optimize notebook.ipynb --cell-ids #2 #3 #4
+python -m flowbook.server.cli optimize notebook.ipynb --cell-ids #2 #3 #4
 ```
 
 **Important:** The index refers to code cells only. If your notebook has:
@@ -116,7 +116,7 @@ python -m data_ferret.server.cli optimize notebook.ipynb --cell-ids #2 #3 #4
 Use the actual cell ID (UUID) from the notebook JSON.
 
 ```bash
-python -m data_ferret.server.cli inspect notebook.ipynb \
+python -m flowbook.server.cli inspect notebook.ipynb \
   --cell-ids 6268e917-94eb-4f4f-9f09-3c988ae84e96
 ```
 
@@ -124,7 +124,7 @@ python -m data_ferret.server.cli inspect notebook.ipynb \
 You can mix both formats in the same command.
 
 ```bash
-python -m data_ferret.server.cli validate notebook.ipynb \
+python -m flowbook.server.cli validate notebook.ipynb \
   --cell-ids #1 6268e917-94eb-4f4f-9f09-3c988ae84e96 #3
 ```
 
@@ -132,24 +132,24 @@ python -m data_ferret.server.cli validate notebook.ipynb \
 
 ```bash
 # Just notebook (starts new kernel)
-python -m data_ferret.server.cli inspect notebook.ipynb
+python -m flowbook.server.cli inspect notebook.ipynb
 
 # Notebook + connection file (uses existing kernel)
-python -m data_ferret.server.cli inspect notebook.ipynb kernel-abc.json
+python -m flowbook.server.cli inspect notebook.ipynb kernel-abc.json
 
 # Connection file first (order doesn't matter)
-python -m data_ferret.server.cli inspect kernel-abc.json notebook.ipynb
+python -m flowbook.server.cli inspect kernel-abc.json notebook.ipynb
 
 # With output file
-python -m data_ferret.server.cli optimize notebook.ipynb kernel-abc.json -o optimized.ipynb
+python -m flowbook.server.cli optimize notebook.ipynb kernel-abc.json -o optimized.ipynb
 
 # With specific cells using index notation
-python -m data_ferret.server.cli validate notebook.ipynb --cell-ids #1 #2
+python -m flowbook.server.cli validate notebook.ipynb --cell-ids #1 #2
 
 # With specific cells using UUID notation
-python -m data_ferret.server.cli validate notebook.ipynb --cell-ids cell-id-1 cell-id-2
+python -m flowbook.server.cli validate notebook.ipynb --cell-ids cell-id-1 cell-id-2
 
 # Mixed cell ID formats
-python -m data_ferret.server.cli inspect notebook.ipynb \
+python -m flowbook.server.cli inspect notebook.ipynb \
   --cell-ids #1 actual-uuid-here #3
 ```

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The DataFerret extension now uses the modern JupyterLab 4.0+ `IToolbarWidgetRegistry` approach for managing toolbar buttons. Commands appear in two locations:
+The FlowBook extension now uses the modern JupyterLab 4.0+ `IToolbarWidgetRegistry` approach for managing toolbar buttons. Commands appear in two locations:
 
 1. **Notebook Toolbar** - Buttons at the top of each notebook
 2. **Cell Toolbar** - Buttons in the cell toolbar (shown when cells are selected)
@@ -82,12 +82,12 @@ new CellToolbarExtension(manager, tracker);
 ### Notebook Toolbar Flow
 
 1. **Extension Activation**
-   - Plugin loads and creates `FerretCommandsManager`
-   - Commands loaded from server via `/ferret/list`
+   - Plugin loads and creates `FlowbookCommandsManager`
+   - Commands loaded from server via `/flowbook/list`
 
 2. **Registration**
    - `registerNotebookToolbarItems()` registers factories with `IToolbarWidgetRegistry`
-   - Each command gets a factory: `Notebook` → `ferret-{command_id}`
+   - Each command gets a factory: `Notebook` → `flowbook-{command_id}`
 
 3. **Direct Insertion**
    - `NotebookToolbarExtension.createNew()` called for each new notebook
@@ -198,15 +198,15 @@ Extensions can provide default configurations:
 ```json
 {
   "toolbar": [
-    { "name": "ferret-analyze", "rank": 100 },
-    { "name": "ferret-validate", "rank": 101 }
+    { "name": "flowbook-analyze", "rank": 100 },
+    { "name": "flowbook-validate", "rank": 101 }
   ]
 }
 ```
 
 ## Command Registration
 
-Commands registered in `FerretCommandsManager.registerCommands()`:
+Commands registered in `FlowbookCommandsManager.registerCommands()`:
 
 ```typescript
 this.app.commands.addCommand(`ferret:${cmdInfo.id}`, {
@@ -226,7 +226,7 @@ this.app.commands.addCommand(`ferret:${cmdInfo.id}`, {
 1. User clicks button
 2. `CommandToolbarButton` executes command via `app.commands`
 3. Command handler gets current notebook from tracker
-4. `executeCommand()` sends request to `/ferret/execute`
+4. `executeCommand()` sends request to `/flowbook/execute`
 5. Server processes command and returns results
 6. Notebook updated with results
 
@@ -264,7 +264,7 @@ window.jupyterapp.commands.listCommands().filter(c => c.startsWith('ferret:'));
 
 ```bash
 # Check available commands
-curl http://localhost:8888/ferret/list
+curl http://localhost:8888/flowbook/list
 ```
 
 ### Common Issues
@@ -285,7 +285,7 @@ curl http://localhost:8888/ferret/list
 **Commands not executing:**
 
 1. Verify command registered: check `app.commands`
-2. Check server `/ferret/execute` endpoint
+2. Check server `/flowbook/execute` endpoint
 3. Look for errors in browser/server console
 4. Verify notebook tracker has current widget
 

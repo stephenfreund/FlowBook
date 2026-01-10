@@ -8,8 +8,8 @@ to ensure progress messages are received and logged.
 
 import asyncio
 import sys
-from data_ferret.server.registry import CommandRegistry
-from data_ferret.server.kernel_manager import KernelConnectionManager
+from flowbook.server.registry import CommandRegistry
+from flowbook.server.kernel_manager import KernelConnectionManager
 from jupyter_server.serverapp import ServerApp
 
 
@@ -34,8 +34,8 @@ async def main():
     print("\n[3] Setting up kernel connection...")
     kernel_manager = KernelConnectionManager(app)
 
-    # Start a ferret_kernel specifically
-    kernel_id = await app.kernel_manager.start_kernel(kernel_name='ferret_kernel')
+    # Start a flowbook_kernel specifically
+    kernel_id = await app.kernel_manager.start_kernel(kernel_name='flowbook_kernel')
     print(f"    Started kernel: {kernel_id}")
 
     # Get kernel client

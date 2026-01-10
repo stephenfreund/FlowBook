@@ -3,37 +3,37 @@
   "jupyter.lab.toolbars": {
     "Cell": [
       {
-        "name": "ferret-profile",
+        "name": "flowbook-profile",
         "rank": 0
       },
       {
-        "name": "ferret-inspect",
+        "name": "flowbook-inspect",
         "rank": 1
       },
       {
-        "name": "ferret-document",
+        "name": "flowbook-document",
         "rank": 2
       },
       {
-        "name": "ferret-cleanup",
+        "name": "flowbook-cleanup",
         "rank": 3
       },
       {
-        "name": "ferret-optimize",
+        "name": "flowbook-optimize",
         "rank": 4
       },
       {
-        "name": "ferret-generate",
+        "name": "flowbook-generate",
         "rank": 5
       },
       {
-        "name": "ferret-test",
+        "name": "flowbook-test",
         "rank": 6
       }
     ]
   },
-  "title": "data_ferret",
-  "description": "data_ferret settings.",
+  "title": "flowbook",
+  "description": "flowbook settings.",
   "type": "object",
   "properties": {},
   "additionalProperties": false

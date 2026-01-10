@@ -6,7 +6,7 @@ Successfully refactored `DiffResult` from a simple type alias (`Dict[str, DiffNo
 
 ## What Was Changed
 
-### 1. Core Type System (`data_ferret/kernel/types.py`)
+### 1. Core Type System (`flowbook/kernel/types.py`)
 
 **Before:**
 ```python
@@ -24,11 +24,11 @@ class DiffResult(BaseModel):
     # Comparison with dicts via __eq__
 ```
 
-### 2. Diff Engine (`data_ferret/kernel/diff.py`)
+### 2. Diff Engine (`flowbook/kernel/diff.py`)
 
 **Changed:** `diff()` method now returns `DiffResult(differences=...)` instead of plain dict
 
-### 3. Tests (`data_ferret/kernel/test_diff.py`)
+### 3. Tests (`flowbook/kernel/test_diff.py`)
 
 **Changed:** One test updated to check `isinstance(result, DiffResult)` instead of `isinstance(result, dict)`
 
@@ -78,7 +78,7 @@ result == {'x': ...}      # Partial comparison
 
 ### All 141 Tests Pass ✅
 ```bash
-pytest data_ferret/kernel/test_diff.py
+pytest flowbook/kernel/test_diff.py
 # 141 passed, 2 warnings in 2.42s
 ```
 
@@ -202,9 +202,9 @@ No performance impact:
 
 ## Files Modified
 
-1. `data_ferret/kernel/types.py` - DiffResult class definition
-2. `data_ferret/kernel/diff.py` - Return `DiffResult(differences=...)`
-3. `data_ferret/kernel/test_diff.py` - One isinstance check updated
+1. `flowbook/kernel/types.py` - DiffResult class definition
+2. `flowbook/kernel/diff.py` - Return `DiffResult(differences=...)`
+3. `flowbook/kernel/test_diff.py` - One isinstance check updated
 
 ## Files Created
 

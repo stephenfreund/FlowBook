@@ -165,7 +165,7 @@ export class CellIndexManager {
    */
   private createOverlay(index: number): HTMLElement {
     const overlay = document.createElement('div');
-    overlay.className = 'ferret-cell-index-overlay';
+    overlay.className = 'flowbook-cell-index-overlay';
     overlay.textContent = indexToAlpha(index);
     return overlay;
   }

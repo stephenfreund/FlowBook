@@ -2,7 +2,7 @@
 Test that the optimization prompt correctly includes env section.
 """
 
-from data_ferret.util.prompts import get_prompt
+from flowbook.util.prompts import get_prompt
 
 
 def test_optimization_prompt_with_env():

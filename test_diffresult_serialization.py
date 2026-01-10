@@ -1,8 +1,8 @@
 """Test DiffResult serialization and deserialization."""
 
 import json
-from data_ferret.kernel.diff import Diff
-from data_ferret.kernel.types import DiffResult, ValueComparison
+from flowbook.kernel.diff import Diff
+from flowbook.kernel.types import DiffResult, ValueComparison
 
 
 def test_basic_serialization():

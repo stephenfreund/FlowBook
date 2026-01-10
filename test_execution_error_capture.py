@@ -10,8 +10,8 @@ Run with: python -m pytest test_execution_error_capture.py -v -s
 import pytest
 import time
 from unittest.mock import Mock, MagicMock, patch
-from data_ferret.server.commands.optimize import CodeExecutionOrchestrator
-from data_ferret.kernel.types import ExecutionError
+from flowbook.server.commands.optimize import CodeExecutionOrchestrator
+from flowbook.kernel.types import ExecutionError
 
 
 class MockKernelClient:
@@ -494,7 +494,7 @@ class TestRealWorldScenarios:
 
 
 class TestActualKernelClient:
-    """Tests using actual FerretKernelClient (requires running kernel)."""
+    """Tests using actual FlowbookKernelClient (requires running kernel)."""
 
     @pytest.mark.skip(reason="Requires running Jupyter kernel - use for manual testing")
     def test_with_real_kernel_name_error(self):

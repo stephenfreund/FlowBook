@@ -5,14 +5,14 @@ These tests verify that the optimization validation correctly uses
 keys_to_include to only check live/output variables for equivalence.
 
 To run these tests:
-    pytest data_ferret/server/commands/test_optimize_keys_to_include.py -v
+    pytest flowbook/server/commands/test_optimize_keys_to_include.py -v
 """
 
 import pytest
 from unittest.mock import Mock, MagicMock, patch
 
-from data_ferret.server.commands.optimize import CodeExecutionOrchestrator
-from data_ferret.kernel.types import TestCodeSuccess, DiffResult
+from flowbook.server.commands.optimize import CodeExecutionOrchestrator
+from flowbook.kernel.types import TestCodeSuccess, DiffResult
 
 
 class TestCodeExecutionOrchestratorKeysToInclude:
@@ -20,7 +20,7 @@ class TestCodeExecutionOrchestratorKeysToInclude:
 
     @pytest.fixture
     def mock_kernel_client(self):
-        """Create a mock FerretKernelClient."""
+        """Create a mock FlowbookKernelClient."""
         client = Mock()
         client.execute = Mock(return_value="msg_id_123")
         client.get_iopub_msg = Mock()
@@ -154,12 +154,12 @@ class TestValidationHelperKeysToInclude:
 
     def test_validate_optimization_uses_modified_globals(self):
         """Test that validate_optimization passes modified_globals as output_variables."""
-        from data_ferret.server.commands.optimize import ValidationHelper
+        from flowbook.server.commands.optimize import ValidationHelper
 
         mock_kernel_client = Mock()
 
         # Mock CodeExecutionOrchestrator
-        with patch('data_ferret.server.commands.optimize.CodeExecutionOrchestrator') as mock_orch_class:
+        with patch('flowbook.server.commands.optimize.CodeExecutionOrchestrator') as mock_orch_class:
             mock_orch = Mock()
             mock_orch_class.return_value = mock_orch
 
@@ -188,7 +188,7 @@ class TestValidationHelperKeysToInclude:
 
     def test_validate_optimization_no_globals_skips_test(self):
         """Test that validation is skipped when modified_globals is empty."""
-        from data_ferret.server.commands.optimize import ValidationHelper
+        from flowbook.server.commands.optimize import ValidationHelper
 
         mock_kernel_client = Mock()
 

@@ -1,21 +1,21 @@
 /**
- * DataFerret JupyterLab Extension
+ * FlowBook JupyterLab Extension
  *
  * Provides two kernel-specific plugins:
- * - data_ferret:plugin - For ferret_kernel (AI-powered commands)
- * - data_ferret:sdc - For ferret_sdc_kernel (SDC enforcement)
+ * - flowbook:plugin - For flowbook_kernel (AI-powered commands)
+ * - flowbook:sdc - For flowbook_sdc_kernel (SDC enforcement)
  */
 
 import { JupyterFrontEndPlugin } from '@jupyterlab/application';
 
-import { ferretPlugin } from './ferret/plugin';
+import { flowbookPlugin } from './flowbook/plugin';
 import { sdcPlugin } from './sdc/plugin';
 
 /**
  * Export both plugins as an array
  */
 const plugins: JupyterFrontEndPlugin<void>[] = [
-  ferretPlugin,
+  flowbookPlugin,
   sdcPlugin
 ];
 

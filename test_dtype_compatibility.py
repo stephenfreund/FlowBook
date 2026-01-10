@@ -3,7 +3,7 @@ Test dtype compatibility in diff.py
 """
 import numpy as np
 import pandas as pd
-from data_ferret.kernel.diff import Diff
+from flowbook.kernel.diff import Diff
 
 def test_integer_dtypes():
     """Test that different integer dtypes are considered equal."""

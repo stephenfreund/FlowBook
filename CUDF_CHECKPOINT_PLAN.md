@@ -251,7 +251,7 @@ def test_cudf_groupby_getitem():
 
 ---
 
-## New File: `data_ferret/kernel/cudf_compat.py`
+## New File: `flowbook/kernel/cudf_compat.py`
 
 This module contains **all** cuDF-specific logic:
 
@@ -675,7 +675,7 @@ def are_both_cudf_same_type(obj1: Any, obj2: Any) -> bool:
 
 ## Changes to Core Modules
 
-### 1. `data_ferret/kernel/deepcopy.py`
+### 1. `flowbook/kernel/deepcopy.py`
 
 **Minimal change** - add cuDF check at dispatch point:
 
@@ -702,7 +702,7 @@ def ferret_deepcopy(obj, memo=None, ...):
 
 That's it. One `if` statement. All cuDF logic stays in `cudf_compat.py`.
 
-### 2. `data_ferret/kernel/diff.py`
+### 2. `flowbook/kernel/diff.py`
 
 **Minimal change** - add cuDF check before type dispatch:
 
@@ -719,7 +719,7 @@ def _compare_values(val1, val2, ...):
     # ... rest of existing dispatch logic ...
 ```
 
-### 3. `data_ferret/kernel/checkpoint.py`
+### 3. `flowbook/kernel/checkpoint.py`
 
 **Add origin tracking** to Checkpoint class:
 
@@ -757,7 +757,7 @@ class Checkpoint:
         self._cudf_origins = cudf_compat.CuDFOriginTracker.from_dict(origins_dict)
 ```
 
-### 4. `data_ferret/kernel/deepcopyable.py`
+### 4. `flowbook/kernel/deepcopyable.py`
 
 **Add cuDF to checkpointable types** (if this file has type checks):
 
@@ -780,11 +780,11 @@ def is_checkpointable(obj):
 
 ### Phase 0: Fix GroupBy Proxy Recursion ✅ COMPLETE
 
-1. Create `data_ferret/kernel/cudf_compat.py` with:
+1. Create `flowbook/kernel/cudf_compat.py` with:
    - `has_cudf()`, `is_cudf_proxy()`, `is_cudf_groupby()`
    - `unwrap_cudf_proxy()`, `call_native_groupby_getitem()`
 
-2. Modify `data_ferret/kernel/column_tracking.py`:
+2. Modify `flowbook/kernel/column_tracking.py`:
    - In `tracked_gb_getitem`: detect cudf proxy/groupby and bypass wrapper
    - Call `cudf_compat.call_native_groupby_getitem()` for cudf objects
 
@@ -792,7 +792,7 @@ def is_checkpointable(obj):
 
 ### Phase 1: Core Checkpoint Support ✅ COMPLETE
 
-1. Extend `data_ferret/kernel/cudf_compat.py` with:
+1. Extend `flowbook/kernel/cudf_compat.py` with:
    - Type detection: `is_cudf_dataframe()`, `is_cudf_series()`, `is_cudf_object()`
    - `CuDFCheckpointCache` with hash-based caching
    - `CuDFOriginTracker` for restore
@@ -804,7 +804,7 @@ def is_checkpointable(obj):
    - `diff.py`: Add one `if cudf_compat.are_both_cudf_same_type()` check
    - `checkpoint.py`: Add origin tracking
 
-3. Write tests in `data_ferret/kernel/test_cudf_checkpoint.py`
+3. Write tests in `flowbook/kernel/test_cudf_checkpoint.py`
 
 ### Phase 2: Alias Detection ✅ COMPLETE
 
@@ -930,7 +930,7 @@ class GPUCheckpoint:
 
 ```python
 import pytest
-from data_ferret.kernel.cudf_compat import has_cudf
+from flowbook.kernel.cudf_compat import has_cudf
 
 pytestmark = pytest.mark.skipif(not has_cudf(), reason="cuDF not installed")
 
@@ -951,7 +951,7 @@ class TestCuDFDetection:
 class TestCuDFCache:
     def test_cache_hit(self):
         import cudf
-        from data_ferret.kernel.cudf_compat import CuDFCheckpointCache
+        from flowbook.kernel.cudf_compat import CuDFCheckpointCache
 
         cache = CuDFCheckpointCache()
         gdf = cudf.DataFrame({'a': [1, 2, 3]})
@@ -966,7 +966,7 @@ class TestCuDFCache:
 
     def test_cache_invalidation_on_mutation(self):
         import cudf
-        from data_ferret.kernel.cudf_compat import CuDFCheckpointCache
+        from flowbook.kernel.cudf_compat import CuDFCheckpointCache
 
         cache = CuDFCheckpointCache()
         gdf = cudf.DataFrame({'a': [1, 2, 3]})
@@ -984,7 +984,7 @@ class TestCuDFCache:
     def test_cache_cleanup_on_gc(self):
         import cudf
         import gc
-        from data_ferret.kernel.cudf_compat import CuDFCheckpointCache
+        from flowbook.kernel.cudf_compat import CuDFCheckpointCache
 
         cache = CuDFCheckpointCache()
 
@@ -1003,7 +1003,7 @@ class TestCuDFCache:
 class TestCuDFCheckpoint:
     def test_checkpoint_cudf_dataframe(self):
         import cudf
-        from data_ferret.kernel.checkpoint import Checkpoint
+        from flowbook.kernel.checkpoint import Checkpoint
 
         gdf = cudf.DataFrame({'a': [1, 2, 3], 'b': [4.0, 5.0, 6.0]})
         cp = Checkpoint({'gdf': gdf})
@@ -1013,7 +1013,7 @@ class TestCuDFCheckpoint:
 
     def test_restore_cudf_dataframe(self):
         import cudf
-        from data_ferret.kernel.checkpoint import Checkpoint
+        from flowbook.kernel.checkpoint import Checkpoint
 
         gdf = cudf.DataFrame({'a': [1, 2, 3]})
         cp = Checkpoint({'gdf': gdf})
@@ -1027,7 +1027,7 @@ class TestCuDFCheckpoint:
 
     def test_mixed_pandas_cudf(self):
         import cudf
-        from data_ferret.kernel.checkpoint import Checkpoint
+        from flowbook.kernel.checkpoint import Checkpoint
 
         gdf = cudf.DataFrame({'a': [1, 2, 3]})
         pdf = pd.DataFrame({'b': [4, 5, 6]})
@@ -1044,7 +1044,7 @@ class TestCuDFCheckpoint:
 class TestCuDFDiff:
     def test_diff_cudf_equal(self):
         import cudf
-        from data_ferret.kernel.diff import diff
+        from flowbook.kernel.diff import diff
 
         gdf1 = cudf.DataFrame({'a': [1, 2, 3]})
         gdf2 = cudf.DataFrame({'a': [1, 2, 3]})
@@ -1054,7 +1054,7 @@ class TestCuDFDiff:
 
     def test_diff_cudf_different(self):
         import cudf
-        from data_ferret.kernel.diff import diff
+        from flowbook.kernel.diff import diff
 
         gdf1 = cudf.DataFrame({'a': [1, 2, 3]})
         gdf2 = cudf.DataFrame({'a': [1, 2, 4]})
@@ -1066,7 +1066,7 @@ class TestCuDFDiff:
 class TestCuDFOriginTracker:
     def test_serialization(self):
         import cudf
-        from data_ferret.kernel.cudf_compat import CuDFOriginTracker
+        from flowbook.kernel.cudf_compat import CuDFOriginTracker
 
         tracker = CuDFOriginTracker()
         gdf = cudf.DataFrame({'a': [1]})

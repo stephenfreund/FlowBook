@@ -1,6 +1,6 @@
 # Message Panel Usage Guide
 
-The DataFerret extension now includes a real-time message streaming system that allows server-side commands to send messages to a client-side panel displayed on the right side of JupyterLab.
+The FlowBook extension now includes a real-time message streaming system that allows server-side commands to send messages to a client-side panel displayed on the right side of JupyterLab.
 
 ## Overview
 
@@ -21,7 +21,7 @@ The messaging system consists of three main components:
 ### Client Side
 
 - **`panel.ts`** - Contains the `MessagePanel` widget
-- Connects to `/ferret/stream` endpoint via EventSource API
+- Connects to `/flowbook/stream` endpoint via EventSource API
 - Automatically reconnects on connection loss
 - Auto-scrolls to show latest messages
 
@@ -32,7 +32,7 @@ The messaging system consists of three main components:
 In any command that extends `NotebookCommand`, you can send messages to the client panel:
 
 ```python
-from data_ferret.server.message_broadcaster import get_broadcaster
+from flowbook.server.message_broadcaster import get_broadcaster
 
 class MyCommand(NotebookCommand):
     def process(self, notebook_content, kernel_client=None, **kwargs):
@@ -118,7 +118,7 @@ Note: Client IDs are automatically generated and sent when clients connect to th
 For more control, you can send custom `Message` objects:
 
 ```python
-from data_ferret.server.message_broadcaster import (
+from flowbook.server.message_broadcaster import (
     get_broadcaster,
     Message,
     MessageType
@@ -145,11 +145,11 @@ broadcaster.send_message(msg)
 
 ## Example Command
 
-See `data_ferret/server/example_message_command.py` for a complete working example:
+See `flowbook/server/example_message_command.py` for a complete working example:
 
 ```python
-from data_ferret.server.base import NotebookCommand
-from data_ferret.server.message_broadcaster import get_broadcaster
+from flowbook.server.base import NotebookCommand
+from flowbook.server.message_broadcaster import get_broadcaster
 
 class ExampleMessageCommand(NotebookCommand):
     @property
@@ -217,7 +217,7 @@ The system uses SSE instead of WebSockets because:
 
 ### Connection Management
 
-- Clients connect to `/ferret/stream`
+- Clients connect to `/flowbook/stream`
 - Connection authenticated via Jupyter's authentication
 - Keepalive comments sent every 30 seconds
 - Automatic reconnection after 5 seconds on error
@@ -228,7 +228,7 @@ The system uses SSE instead of WebSockets because:
 
 1. Check that the message panel is visible in the right sidebar
 2. Check browser console for connection errors
-3. Verify the `/ferret/stream` endpoint is accessible
+3. Verify the `/flowbook/stream` endpoint is accessible
 4. Check server logs for SSE handler errors
 
 ### Connection issues

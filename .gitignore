@@ -16,9 +16,9 @@ node_modules/
 *.egg-info/
 .ipynb_checkpoints
 *.tsbuildinfo
-data_ferret/labextension
+flowbook/labextension
 # Version file is handled by hatchling
-data_ferret/_version.py
+flowbook/_version.py
 
 # Created by https://www.gitignore.io/api/python
 # Edit at https://www.gitignore.io/?templates=python

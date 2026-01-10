@@ -5,8 +5,8 @@ This script demonstrates how the markdown formatter produces human-readable
 output for various types of differences.
 """
 
-from data_ferret.kernel.diff import Diff
-from data_ferret.kernel.types import format_diff_as_markdown
+from flowbook.kernel.diff import Diff
+from flowbook.kernel.types import format_diff_as_markdown
 
 
 def demo():

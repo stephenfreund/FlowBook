@@ -3,8 +3,8 @@ Test that environment data from profile metadata is included in generate prompts
 """
 
 import nbformat
-from data_ferret.util.ferret_metadata import FerretMetadata, ProfileData, set_profile_ferret_metadata
-from data_ferret.util.prompts import get_prompt
+from flowbook.util.flowbook_metadata import FlowbookMetadata, ProfileData, set_profile_flowbook_metadata
+from flowbook.util.prompts import get_prompt
 
 
 def test_generate_prompt_with_env():
@@ -85,7 +85,7 @@ def test_env_tracking_in_notebook():
         env={},
         env_after={"pd": "module", "df": "DataFrame"}
     )
-    set_profile_ferret_metadata(cell1, profile1)
+    set_profile_flowbook_metadata(cell1, profile1)
 
     # Cell 2: Has profile data (environment grows)
     cell2 = nbformat.v4.new_code_cell(source="result = df.shape[0]")
@@ -96,7 +96,7 @@ def test_env_tracking_in_notebook():
         env={"pd": "module", "df": "DataFrame"},
         env_after={"pd": "module", "df": "DataFrame", "result": "int"}
     )
-    set_profile_ferret_metadata(cell2, profile2)
+    set_profile_flowbook_metadata(cell2, profile2)
 
     # Cell 3: String spec cell (would be processed by generate)
     cell3 = nbformat.v4.new_code_cell(source='"Filter the dataframe to only positive results"')
@@ -108,8 +108,8 @@ def test_env_tracking_in_notebook():
     current_env = None
     for cell in nb["cells"]:
         if cell["cell_type"] == "code" and cell["source"].strip():
-            ferret_metadata = FerretMetadata.from_cell(cell)
-            profile = ferret_metadata.get_profile()
+            flowbook_metadata = FlowbookMetadata.from_cell(cell)
+            profile = flowbook_metadata.get_profile()
             if profile and profile.env_after:
                 current_env = profile.env_after
 

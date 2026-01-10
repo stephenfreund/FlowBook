@@ -1,7 +1,7 @@
 import * as React from 'react';
 
 /**
- * Shared message handling components and utilities for DataFerret
+ * Shared message handling components and utilities for FlowBook
  * Used by both MessagePanel and CommandExecutionDialog
  */
 
@@ -57,13 +57,13 @@ export const MessageDisplay: React.FC<IMessageDisplayProps> = ({ segments }) => 
   }, [segments]);
 
   return (
-    <div className='ferret-message-display' ref={contentRef}>
-      <pre className='ferret-message-content'>
+    <div className='flowbook-message-display' ref={contentRef}>
+      <pre className='flowbook-message-content'>
         {segments.map((segment, index) => {
           const style: React.CSSProperties = {};
 
           if (segment.color) {
-            style.color = `var(--ferret-color-${segment.color}, inherit)`;
+            style.color = `var(--flowbook-color-${segment.color}, inherit)`;
           }
           if (segment.bold) {
             style.fontWeight = 'bold';

@@ -1,14 +1,14 @@
 /**
- * API client for communicating with the Ferret server extension
+ * API client for communicating with the FlowBook server extension
  */
 
 import { requestAPI } from './handler';
-import { CommandResult, ExecuteCommandRequest } from './ferret/types';
+import { CommandResult, ExecuteCommandRequest } from './flowbook/types';
 
 /**
- * Ferret API client for server communication
+ * FlowBook API client for server communication
  */
-export class FerretAPI {
+export class FlowbookAPI {
   /**
    * Execute a command on the server
    */

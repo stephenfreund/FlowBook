@@ -6,8 +6,8 @@ Test script for the test_comm command.
 import asyncio
 import json
 from jupyter_client import KernelManager
-from data_ferret.server.registry import CommandRegistry
-from data_ferret.server.kernel_manager import FerretKernelClient
+from flowbook.server.registry import CommandRegistry
+from flowbook.server.kernel_manager import FlowbookKernelClient
 
 
 async def main():
@@ -31,16 +31,16 @@ async def main():
 
     # Start a kernel
     print("\n[1] Starting kernel...")
-    km = KernelManager(kernel_name='ferret_kernel')
+    km = KernelManager(kernel_name='flowbook_kernel')
     km.start_kernel()
 
     try:
-        # Create a FerretKernelClient
+        # Create a FlowbookKernelClient
         print("[2] Creating kernel client...")
-        ferret_client = FerretKernelClient(kernel_id="test_kernel")
-        ferret_client.load_connection_info(km.get_connection_info())
-        ferret_client.start_channels()
-        ferret_client.wait_for_ready(timeout=30)
+        flowbook_client = FlowbookKernelClient(kernel_id="test_kernel")
+        flowbook_client.load_connection_info(km.get_connection_info())
+        flowbook_client.start_channels()
+        flowbook_client.wait_for_ready(timeout=30)
 
         # Get the test_comm command
         print("[3] Getting test_comm command...")
@@ -51,7 +51,7 @@ async def main():
         print("[4] Executing test_comm command...")
         result = await test_comm_cmd.process(
             notebook_content=notebook,
-            kernel_client=ferret_client
+            kernel_client=flowbook_client
         )
 
         # Print the results
@@ -73,7 +73,7 @@ async def main():
     finally:
         # Clean up
         print("\n[5] Cleaning up...")
-        ferret_client.stop_channels()
+        flowbook_client.stop_channels()
         km.shutdown_kernel()
         print("Done!")
 

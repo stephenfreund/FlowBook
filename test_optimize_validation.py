@@ -3,10 +3,10 @@ Test validation in optimize command.
 """
 
 import nbformat
-from data_ferret.server.commands.optimize import OptimizeCommand
-from data_ferret.util.ferret_metadata import CodeSnippet
-from data_ferret.util.dependencies import analyze_notebook, CellDependencies
-from data_ferret.util.notebook_analysis import NotebookAnalysis
+from flowbook.server.commands.optimize import OptimizeCommand
+from flowbook.util.flowbook_metadata import CodeSnippet
+from flowbook.util.dependencies import analyze_notebook, CellDependencies
+from flowbook.util.notebook_analysis import NotebookAnalysis
 
 
 def test_get_modified_globals_for_cell():
@@ -26,7 +26,7 @@ def test_get_modified_globals_for_cell():
     analysis = NotebookAnalysis(nb)
 
     # Test the helper function
-    from data_ferret.server.commands.optimize import ValidationHelper
+    from flowbook.server.commands.optimize import ValidationHelper
 
     # Cell 1: Validation vars = live_out after cell1
     # live_out includes: result (used by cell2), x (used by cell1->result), y (used by cell1->result)
@@ -53,7 +53,7 @@ def test_get_modified_globals_for_cell():
 
 def test_build_optimized_code_for_validation():
     """Test building optimized code for validation."""
-    from data_ferret.server.commands.optimize import ValidationHelper
+    from flowbook.server.commands.optimize import ValidationHelper
 
     # Create snippets
     original_snippets = [
@@ -101,7 +101,7 @@ def test_build_optimized_code_for_validation():
 
 def test_build_optimized_code_with_dependencies():
     """Test building optimized code when dependencies are modified."""
-    from data_ferret.server.commands.optimize import ValidationHelper
+    from flowbook.server.commands.optimize import ValidationHelper
 
     # Scenario: Cell 2 calls a function from Cell 1
     # Optimization modifies the function in Cell 1 and uses it in Cell 2

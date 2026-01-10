@@ -6,9 +6,9 @@ author_name: Stephen Freund
 has_binder: false
 has_settings: true
 kind: frontend-and-server
-labextension_name: data_ferret
+labextension_name: flowbook
 project_short_description: A JupyterLab extension.
-python_name: data_ferret
+python_name: flowbook
 repository: ''
 test: false
 

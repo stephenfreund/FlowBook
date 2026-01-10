@@ -1,4 +1,4 @@
-# Making a new release of data_ferret
+# Making a new release of flowbook
 
 The extension can be published to `PyPI` and `npm` manually or using the [Jupyter Releaser](https://github.com/jupyter-server/jupyter_releaser).
 

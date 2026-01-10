@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `MessagePanel` is a JupyterLab panel that displays real-time messages from the DataFerret server's message broadcaster. It appears on the right side of the JupyterLab interface and shows output from commands as they execute.
+The `MessagePanel` is a JupyterLab panel that displays real-time messages from the FlowBook server's message broadcaster. It appears on the right side of the JupyterLab interface and shows output from commands as they execute.
 
 ## Architecture
 
@@ -12,7 +12,7 @@ The `MessagePanel` is a JupyterLab panel that displays real-time messages from t
 
 The `MessagePanel` class extends Lumino's `Widget` and uses React for rendering. It:
 
-1. Connects to the server's SSE (Server-Sent Events) stream at `/ferret/stream`
+1. Connects to the server's SSE (Server-Sent Events) stream at `/flowbook/stream`
 2. Receives messages in real-time as commands execute
 3. Displays messages in a scrollable, auto-updating panel
 4. Automatically reconnects if the connection is lost
@@ -28,8 +28,8 @@ The `MessagePanel` class extends Lumino's `Widget` and uses React for rendering.
 
 **Files**:
 
-- `data_ferret/server/message_broadcaster.py` - Singleton broadcaster
-- `data_ferret/server/handlers.py` - SSE handler at `/ferret/stream`
+- `flowbook/server/message_broadcaster.py` - Singleton broadcaster
+- `flowbook/server/handlers.py` - SSE handler at `/flowbook/stream`
 
 The `MessageBroadcaster` uses async queues to broadcast messages to all connected clients via Server-Sent Events.
 
@@ -40,8 +40,8 @@ The `MessageBroadcaster` uses async queues to broadcast messages to all connecte
 Commands can use the broadcaster to send real-time updates:
 
 ```python
-from data_ferret.server.base import NotebookCommand
-from data_ferret.server.message_broadcaster import get_broadcaster
+from flowbook.server.base import NotebookCommand
+from flowbook.server.message_broadcaster import get_broadcaster
 
 class MyCommand(NotebookCommand):
     def process(self, notebook_content: dict, kernel_client=None, **kwargs) -> dict:
@@ -115,7 +115,7 @@ The extension includes an example command that demonstrates the message panel:
 2. Click the "Example Message Stream" button in the toolbar
 3. Watch the MessagePanel on the right side update in real-time
 
-The example command is defined in `data_ferret/server/example_message_command.py`.
+The example command is defined in `flowbook/server/example_message_command.py`.
 
 ## Panel Integration
 
@@ -132,9 +132,9 @@ This adds the panel to the right sidebar with a rank of 500 (controls stacking o
 
 The panel is styled in `style/base.css` with classes:
 
-- `.ferret-message-panel` - The panel container
-- `.ferret-message-display` - The scrollable message display area
-- `.ferret-message-content` - The pre-formatted text content
+- `.flowbook-message-panel` - The panel container
+- `.flowbook-message-display` - The scrollable message display area
+- `.flowbook-message-content` - The pre-formatted text content
 
 The styles use JupyterLab's CSS variables for theming:
 
@@ -205,6 +205,6 @@ Example command completed successfully!
 If the panel shows disconnection errors:
 
 1. Check that the Jupyter server is running
-2. Verify `/ferret/stream` endpoint is registered
+2. Verify `/flowbook/stream` endpoint is registered
 3. Look for CORS or authentication issues in browser console
 4. Check firewall/proxy settings that might block SSE

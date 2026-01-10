@@ -47,16 +47,16 @@ const DialogContent: React.FC<IDialogContentProps> = ({
   onOkClick
 }) => {
   return (
-    <div className='ferret-execution-dialog-content'>
-      <div className='ferret-execution-dialog-header'>
-        <span className='ferret-execution-dialog-title'>
+    <div className='flowbook-execution-dialog-content'>
+      <div className='flowbook-execution-dialog-header'>
+        <span className='flowbook-execution-dialog-title'>
           Executing: {commandLabel}
         </span>
       </div>
-      <div className='ferret-execution-dialog-body'>
+      <div className='flowbook-execution-dialog-body'>
         <MessageDisplay segments={segments} />
       </div>
-      <div className='ferret-execution-dialog-footer'>
+      <div className='flowbook-execution-dialog-footer'>
         {state.isComplete && (
           <button
             className='jp-Dialog-button jp-mod-accept'
@@ -94,7 +94,7 @@ export class CommandExecutionDialog extends Widget {
       isSuccess: false
     };
 
-    this.addClass('ferret-execution-dialog');
+    this.addClass('flowbook-execution-dialog');
     this.render();
   }
 
@@ -105,7 +105,7 @@ export class CommandExecutionDialog extends Widget {
   public show(): Promise<void> {
     // Create modal overlay
     this._overlay = document.createElement('div');
-    this._overlay.className = 'ferret-execution-dialog-overlay';
+    this._overlay.className = 'flowbook-execution-dialog-overlay';
 
     // Add overlay to body first
     document.body.appendChild(this._overlay);
@@ -182,7 +182,7 @@ export class CommandExecutionDialog extends Widget {
   private connectToStream(): void {
     try {
       const settings = ServerConnection.makeSettings();
-      const streamUrl = `${settings.baseUrl}ferret/stream`;
+      const streamUrl = `${settings.baseUrl}flowbook/stream`;
 
       this._eventSource = new EventSource(streamUrl);
 

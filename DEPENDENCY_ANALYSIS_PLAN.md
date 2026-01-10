@@ -25,9 +25,9 @@ module now provides the following guarantee:
 
 ### Files Modified
 
-- `data_ferret/util/dependencies.py` - Core implementation + documentation
-- `data_ferret/util/test_dependencies.py` - 54 new tests for warning cases
-- `data_ferret/util/dependencies_backup.py` - Backup of original file
+- `flowbook/util/dependencies.py` - Core implementation + documentation
+- `flowbook/util/test_dependencies.py` - 54 new tests for warning cases
+- `flowbook/util/dependencies_backup.py` - Backup of original file
 
 ---
 
@@ -39,7 +39,7 @@ Provide a **guarantee**: the computed dependencies include all real dependencies
 
 ## Missing Cases to Address
 
-From the documented under-approximations in `data_ferret/util/dependencies.py` (lines 91-128):
+From the documented under-approximations in `flowbook/util/dependencies.py` (lines 91-128):
 
 | # | Case | Description |
 |---|------|-------------|
@@ -439,7 +439,7 @@ self.attributes_assigned: Set[str] = set()  # For tracking obj.attr = value
 
 ## Files to Modify
 
-1. **`data_ferret/util/dependencies.py`**:
+1. **`flowbook/util/dependencies.py`**:
    - Add `warnings: List[str]` and `attributes_assigned: Set[str]` to `CellDependencies` dataclass
    - Add `self.warnings: List[str] = []` and `self.attributes_assigned: Set[str] = set()` to `GlobalAccessAnalyzer.__init__`
    - Modify `visit_Call` for cases 1, 2, 7a-d
@@ -455,7 +455,7 @@ self.attributes_assigned: Set[str] = set()  # For tracking obj.attr = value
    - Update `to_dict()` to include new fields
    - Update CLI `__main__` section to display warnings
 
-2. **`data_ferret/util/test_dependencies.py`**:
+2. **`flowbook/util/test_dependencies.py`**:
    - Add tests for each warning case
 
 ---

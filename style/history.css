@@ -2,14 +2,14 @@
  * History Panel Styles
  */
 
-.ferret-history-widget {
+.flowbook-history-widget {
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
 }
 
-.ferret-history-panel {
+.flowbook-history-panel {
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -17,7 +17,7 @@
   background: var(--jp-layout-color1);
 }
 
-.ferret-history-empty {
+.flowbook-history-empty {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -26,7 +26,7 @@
   font-style: italic;
 }
 
-.ferret-history-controls {
+.flowbook-history-controls {
   display: flex;
   gap: 8px;
   margin-bottom: 12px;
@@ -34,7 +34,7 @@
   border-bottom: 1px solid var(--jp-border-color1);
 }
 
-.ferret-history-button {
+.flowbook-history-button {
   flex: 1;
   padding: 6px 12px;
   background: var(--jp-layout-color2);
@@ -46,17 +46,17 @@
   transition: all 0.1s ease;
 }
 
-.ferret-history-button:disabled {
+.flowbook-history-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.ferret-history-button:hover:not(:disabled) {
+.flowbook-history-button:hover:not(:disabled) {
   background: var(--jp-layout-color3);
   border-color: var(--jp-brand-color1);
 }
 
-.ferret-history-list {
+.flowbook-history-list {
   flex: 1;
   overflow-y: auto;
   display: flex;
@@ -64,7 +64,7 @@
   gap: 4px;
 }
 
-.ferret-history-entry {
+.flowbook-history-entry {
   display: flex;
   gap: 8px;
   padding: 8px;
@@ -75,23 +75,23 @@
   transition: all 0.15s ease;
 }
 
-.ferret-history-entry.current {
+.flowbook-history-entry.current {
   background: var(--jp-brand-color1);
   color: var(--jp-ui-inverse-font-color1);
   border-color: var(--jp-brand-color1);
   font-weight: 600;
 }
 
-.ferret-history-entry.future {
+.flowbook-history-entry.future {
   opacity: 0.5;
 }
 
-.ferret-history-entry:not(.current):hover {
+.flowbook-history-entry:not(.current):hover {
   background: var(--jp-layout-color3);
   border-color: var(--jp-brand-color1);
 }
 
-.ferret-history-entry-icon {
+.flowbook-history-entry-icon {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -100,16 +100,16 @@
   flex-shrink: 0;
 }
 
-.ferret-history-icon {
+.flowbook-history-icon {
   width: 16px;
   height: 16px;
 }
 
-.ferret-history-entry.current .ferret-history-icon {
+.flowbook-history-entry.current .flowbook-history-icon {
   filter: brightness(0) invert(1);
 }
 
-.ferret-history-entry-content {
+.flowbook-history-entry-content {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -117,7 +117,7 @@
   gap: 2px;
 }
 
-.ferret-history-entry-label {
+.flowbook-history-entry-label {
   font-size: var(--jp-ui-font-size1);
   font-weight: 500;
   white-space: nowrap;
@@ -125,7 +125,7 @@
   text-overflow: ellipsis;
 }
 
-.ferret-history-entry-description {
+.flowbook-history-entry-description {
   font-size: var(--jp-ui-font-size0);
   color: var(--jp-ui-font-color2);
   white-space: nowrap;
@@ -133,16 +133,16 @@
   text-overflow: ellipsis;
 }
 
-.ferret-history-entry.current .ferret-history-entry-description {
+.flowbook-history-entry.current .flowbook-history-entry-description {
   color: var(--jp-ui-inverse-font-color2);
 }
 
-.ferret-history-entry-summary {
+.flowbook-history-entry-summary {
   font-size: var(--jp-ui-font-size0);
   color: var(--jp-ui-font-color3);
   font-family: var(--jp-code-font-family);
 }
 
-.ferret-history-entry.current .ferret-history-entry-summary {
+.flowbook-history-entry.current .flowbook-history-entry-summary {
   color: var(--jp-ui-inverse-font-color2);
 }

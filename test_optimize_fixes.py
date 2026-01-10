@@ -5,9 +5,9 @@ Test fixes for optimize command:
 """
 
 import pytest
-from data_ferret.server.commands.optimize import OptimizeCommand, TestCodeResponse
-from data_ferret.kernel.types import DiffResult, ValueComparison
-from data_ferret.server.kernel_manager import FerretKernelClient
+from flowbook.server.commands.optimize import OptimizeCommand, TestCodeResponse
+from flowbook.kernel.types import DiffResult, ValueComparison
+from flowbook.server.kernel_manager import FlowbookKernelClient
 
 
 def test_diff_result_empty_differences():
@@ -62,7 +62,7 @@ def test_validate_cell_optimization_all_equal():
     # We'll directly test the logic with a DiffResult
 
     # Create a mock result with empty differences (all equal)
-    from data_ferret.server.kernel_manager import TestCodeData
+    from flowbook.server.kernel_manager import TestCodeData
     mock_result = TestCodeData(
         ok=True,
         result=DiffResult(differences={})
@@ -89,7 +89,7 @@ def test_validate_cell_optimization_with_differences():
     cmd = OptimizeCommand()
 
     # Create a mock result with differences
-    from data_ferret.server.kernel_manager import TestCodeData
+    from flowbook.server.kernel_manager import TestCodeData
     mock_result = TestCodeData(
         ok=True,
         result=DiffResult(differences={

@@ -3,7 +3,7 @@ Test that environment data from profile metadata is included in optimization pro
 """
 
 import nbformat
-from data_ferret.util.ferret_metadata import FerretMetadata, ProfileData, set_profile_ferret_metadata
+from flowbook.util.flowbook_metadata import FlowbookMetadata, ProfileData, set_profile_flowbook_metadata
 
 
 def test_env_extraction_from_profile():
@@ -19,11 +19,11 @@ def test_env_extraction_from_profile():
         env={"x": "int", "y": "str", "data": "DataFrame"},
         env_after={"x": "int", "y": "str", "data": "DataFrame", "result": "float"}
     )
-    set_profile_ferret_metadata(cell, profile_data)
+    set_profile_flowbook_metadata(cell, profile_data)
 
     # Extract the metadata
-    ferret_metadata = FerretMetadata.from_cell(cell)
-    profile = ferret_metadata.get_profile()
+    flowbook_metadata = FlowbookMetadata.from_cell(cell)
+    profile = flowbook_metadata.get_profile()
 
     # Verify we can access env
     assert profile is not None
@@ -66,8 +66,8 @@ def test_no_profile_metadata():
     cell["id"] = "test-cell-456"
 
     # Extract metadata
-    ferret_metadata = FerretMetadata.from_cell(cell)
-    profile = ferret_metadata.get_profile()
+    flowbook_metadata = FlowbookMetadata.from_cell(cell)
+    profile = flowbook_metadata.get_profile()
 
     # Should be None
     assert profile is None

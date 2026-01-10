@@ -8,12 +8,12 @@ The MessagePanel now supports ANSI color codes from the server output. Instead o
 
 ### Server-Side (Python)
 
-1. **ANSI Parsing** (`data_ferret/util/text.py`)
+1. **ANSI Parsing** (`flowbook/util/text.py`)
    - `parse_ansi_text(text)` - Extracts ANSI codes and returns stripped text + metadata
    - Recognizes 16 standard ANSI colors (black, red, green, yellow, blue, magenta, cyan, white + bright variants)
    - Detects bold formatting (`\x1B[1m`)
 
-2. **BroadcastStream** (`data_ferret/server/message_broadcaster.py`)
+2. **BroadcastStream** (`flowbook/server/message_broadcaster.py`)
    - `write()` method parses ANSI codes from incoming text
    - Creates `Message` objects with color/bold metadata
    - Sends styled messages to all connected clients
@@ -26,11 +26,11 @@ The MessagePanel now supports ANSI color codes from the server output. Instead o
 
 2. **React Rendering**
    - Each segment rendered as `<span>` with inline styles
-   - Colors mapped to CSS variables: `var(--ferret-color-{color})`
+   - Colors mapped to CSS variables: `var(--flowbook-color-{color})`
    - Bold applied via `fontWeight: 'bold'`
 
 3. **CSS Variables** (`style/base.css`)
-   - 16 ANSI colors defined as CSS variables on `.ferret-message-panel`
+   - 16 ANSI colors defined as CSS variables on `.flowbook-message-panel`
    - Colors chosen for good visibility in JupyterLab themes
 
 ## Supported Colors
@@ -66,7 +66,7 @@ Bold text is rendered with `font-weight: bold`.
 ### Python (Server)
 
 ```python
-from data_ferret.util.output import log
+from flowbook.util.output import log
 import termcolor
 
 # Using termcolor (recommended)
@@ -85,9 +85,9 @@ log("\x1B[1;32mBold green\x1B[0m")   # Bold green text
 The color support works automatically with the existing output system:
 
 ```python
-from data_ferret.util.output import log, error, print as out_print
-from data_ferret.server.message_broadcaster import get_broadcast_stream
-from data_ferret.util.output import stream_output
+from flowbook.util.output import log, error, print as out_print
+from flowbook.server.message_broadcaster import get_broadcast_stream
+from flowbook.util.output import stream_output
 
 with stream_output(get_broadcast_stream()):
     # These automatically preserve ANSI colors
@@ -99,8 +99,8 @@ with stream_output(get_broadcast_stream()):
 ### In Commands
 
 ```python
-from data_ferret.server.base import NotebookCommand
-from data_ferret.util.output import log
+from flowbook.server.base import NotebookCommand
+from flowbook.util.output import log
 import termcolor
 
 class MyCommand(NotebookCommand):
@@ -157,29 +157,29 @@ class MyCommand(NotebookCommand):
 
 6. **Panel renders colored span**
    ```tsx
-   <span style={{ color: 'var(--ferret-color-cyan)' }}>Processing</span>
+   <span style={{ color: 'var(--flowbook-color-cyan)' }}>Processing</span>
    ```
 
 ## ANSI Code Mapping
 
 | ANSI Code  | Color Name     | CSS Variable                    |
 | ---------- | -------------- | ------------------------------- |
-| `\x1B[30m` | black          | `--ferret-color-black`          |
-| `\x1B[31m` | red            | `--ferret-color-red`            |
-| `\x1B[32m` | green          | `--ferret-color-green`          |
-| `\x1B[33m` | yellow         | `--ferret-color-yellow`         |
-| `\x1B[34m` | blue           | `--ferret-color-blue`           |
-| `\x1B[35m` | magenta        | `--ferret-color-magenta`        |
-| `\x1B[36m` | cyan           | `--ferret-color-cyan`           |
-| `\x1B[37m` | white          | `--ferret-color-white`          |
-| `\x1B[90m` | bright-black   | `--ferret-color-bright-black`   |
-| `\x1B[91m` | bright-red     | `--ferret-color-bright-red`     |
-| `\x1B[92m` | bright-green   | `--ferret-color-bright-green`   |
-| `\x1B[93m` | bright-yellow  | `--ferret-color-bright-yellow`  |
-| `\x1B[94m` | bright-blue    | `--ferret-color-bright-blue`    |
-| `\x1B[95m` | bright-magenta | `--ferret-color-bright-magenta` |
-| `\x1B[96m` | bright-cyan    | `--ferret-color-bright-cyan`    |
-| `\x1B[97m` | bright-white   | `--ferret-color-bright-white`   |
+| `\x1B[30m` | black          | `--flowbook-color-black`          |
+| `\x1B[31m` | red            | `--flowbook-color-red`            |
+| `\x1B[32m` | green          | `--flowbook-color-green`          |
+| `\x1B[33m` | yellow         | `--flowbook-color-yellow`         |
+| `\x1B[34m` | blue           | `--flowbook-color-blue`           |
+| `\x1B[35m` | magenta        | `--flowbook-color-magenta`        |
+| `\x1B[36m` | cyan           | `--flowbook-color-cyan`           |
+| `\x1B[37m` | white          | `--flowbook-color-white`          |
+| `\x1B[90m` | bright-black   | `--flowbook-color-bright-black`   |
+| `\x1B[91m` | bright-red     | `--flowbook-color-bright-red`     |
+| `\x1B[92m` | bright-green   | `--flowbook-color-bright-green`   |
+| `\x1B[93m` | bright-yellow  | `--flowbook-color-bright-yellow`  |
+| `\x1B[94m` | bright-blue    | `--flowbook-color-bright-blue`    |
+| `\x1B[95m` | bright-magenta | `--flowbook-color-bright-magenta` |
+| `\x1B[96m` | bright-cyan    | `--flowbook-color-bright-cyan`    |
+| `\x1B[97m` | bright-white   | `--flowbook-color-bright-white`   |
 | `\x1B[1m`  | bold           | `fontWeight: bold`              |
 | `\x1B[0m`  | reset          | (clears styling)                |
 
@@ -255,16 +255,16 @@ All tests verify that:
 Edit the CSS variables in `style/base.css`:
 
 ```css
-.ferret-message-panel {
-  --ferret-color-red: #ff0000; /* Bright red */
-  --ferret-color-green: #00ff00; /* Bright green */
+.flowbook-message-panel {
+  --flowbook-color-red: #ff0000; /* Bright red */
+  --flowbook-color-green: #00ff00; /* Bright green */
   /* ... etc ... */
 }
 ```
 
 ### Adding New Colors
 
-1. Add to ANSI_COLORS mapping in `data_ferret/util/text.py`:
+1. Add to ANSI_COLORS mapping in `flowbook/util/text.py`:
 
    ```python
    ANSI_COLORS = {
@@ -276,8 +276,8 @@ Edit the CSS variables in `style/base.css`:
 2. Add CSS variable in `style/base.css`:
 
    ```css
-   .ferret-message-panel {
-     --ferret-color-orange: #ffa500;
+   .flowbook-message-panel {
+     --flowbook-color-orange: #ffa500;
    }
    ```
 
@@ -324,9 +324,9 @@ Possible improvements:
 
 ### Wrong colors
 
-1. Check ANSI code mapping in `data_ferret/util/text.py`
+1. Check ANSI code mapping in `flowbook/util/text.py`
 2. Verify CSS variable values in browser dev tools
-3. Ensure CSS variables are scoped to `.ferret-message-panel`
+3. Ensure CSS variables are scoped to `.flowbook-message-panel`
 
 ### Colors stripped instead of displayed
 

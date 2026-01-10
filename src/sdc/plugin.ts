@@ -1,5 +1,5 @@
 /**
- * SDC Kernel Plugin - Activates only for ferret_sdc_kernel
+ * SDC Kernel Plugin - Activates only for flowbook_sdc_kernel
  */
 
 import {
@@ -40,9 +40,9 @@ class SDCActivationManager {
   private _setupKernelChangeListener(): void {
     this._kernelDetector.kernelChanged.connect((_, info) => {
       console.log(`SDC Plugin: Kernel changed from ${info.previousKernel} to ${info.currentKernel}`);
-      if (info.currentKernel === 'ferret_sdc_kernel') {
+      if (info.currentKernel === 'flowbook_sdc_kernel') {
         this._activate();
-      } else if (info.previousKernel === 'ferret_sdc_kernel') {
+      } else if (info.previousKernel === 'flowbook_sdc_kernel') {
         this._deactivate();
       }
     });
@@ -80,7 +80,7 @@ class SDCActivationManager {
       return;
     }
 
-    console.log('SDC Plugin: Activating for ferret_sdc_kernel');
+    console.log('SDC Plugin: Activating for flowbook_sdc_kernel');
 
     // Create panel
     this._panel = new SDCMetadataPanel();
@@ -138,11 +138,11 @@ class SDCActivationManager {
  * SDC Plugin definition
  */
 export const sdcPlugin: JupyterFrontEndPlugin<void> = {
-  id: 'data_ferret:sdc',
+  id: 'flowbook:sdc',
   autoStart: true,
   requires: [INotebookTracker],
   activate: (app: JupyterFrontEnd, tracker: INotebookTracker) => {
-    console.log('SDC Plugin: Extension registered (will activate when ferret_sdc_kernel is used)');
+    console.log('SDC Plugin: Extension registered (will activate when flowbook_sdc_kernel is used)');
     new SDCActivationManager(app, tracker);
   }
 };

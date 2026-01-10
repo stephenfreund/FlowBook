@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-DataFerret is a JupyterLab 4.0+ extension that combines a TypeScript frontend with a Python server extension and a custom IPython kernel. The extension provides notebook analysis, validation, execution, and AI-powered capabilities through a command-based architecture.
+FlowBook is a JupyterLab 4.0+ extension that combines a TypeScript frontend with a Python server extension and a custom IPython kernel. The extension provides notebook analysis, validation, execution, and AI-powered capabilities through a command-based architecture.
 
 ## Development Commands
 
@@ -18,7 +18,7 @@ pip install -e "."
 jupyter labextension develop . --overwrite
 
 # Enable server extension
-jupyter server extension enable data_ferret
+jupyter server extension enable flowbook
 ```
 
 ### Building
@@ -65,10 +65,10 @@ jlpm lint:check
 
 ```bash
 # Run Python tests
-pytest data_ferret/
+pytest flowbook/
 
 # Run specific test file
-pytest data_ferret/kernel/test_diff.py
+pytest flowbook/kernel/test_diff.py
 ```
 
 ### Verification
@@ -86,10 +86,10 @@ jupyter labextension list
 ### Three-Tier Structure
 
 1. **Frontend (TypeScript)**: `src/` - JupyterLab UI components with two kernel-specific plugins
-2. **Server Extension (Python)**: `data_ferret/server/` - HTTP handlers and command processing
+2. **Server Extension (Python)**: `flowbook/server/` - HTTP handlers and command processing
 3. **Custom Kernels**: Two enhanced IPython kernels for different use cases
-   - `data_ferret/kernel/` - Full-featured kernel with AI commands, profiling, checkpointing
-   - `data_ferret/sdc_kernel/` - SDC-focused kernel with always-on dataflow tracking
+   - `flowbook/kernel/` - Full-featured kernel with AI commands, profiling, checkpointing
+   - `flowbook/sdc_kernel/` - SDC-focused kernel with always-on dataflow tracking
 
 ### Frontend Components (`src/`)
 
@@ -97,13 +97,13 @@ The frontend exports **two JupyterLab plugins** that activate based on the kerne
 
 ```
 src/
-├── index.ts                 # Exports [ferretPlugin, sdcPlugin]
+├── index.ts                 # Exports [flowbookPlugin, sdcPlugin]
 ├── shared/                  # Shared utilities
 │   ├── kerneldetection.ts   # KernelDetector class for kernel type detection
 │   └── types.ts             # Shared type definitions
-├── ferret/                  # Ferret kernel plugin (AI commands)
+├── flowbook/                # FlowBook kernel plugin (AI commands)
 │   ├── plugin.ts            # Plugin activation with kernel gating
-│   ├── manager.ts           # FerretCommandsManager orchestrates commands
+│   ├── manager.ts           # FlowbookCommandsManager orchestrates commands
 │   ├── types.ts             # TypeScript interfaces
 │   ├── toolbar.ts           # Notebook toolbar buttons
 │   ├── celltoolbar.ts       # Cell-level toolbar buttons
@@ -120,48 +120,48 @@ src/
 │   ├── stalenessmanager.ts  # Tracks stale cells per notebook
 │   ├── metadatapanel.tsx    # SDC metadata panel (reads, writes, stale cells)
 │   ├── cellhighlighter.ts   # Red highlighting for stale cells
-│   └── executionhook.ts     # Extract ferret_sdc metadata from outputs
-├── api.ts                   # Shared FerretAPI for HTTP communication
+│   └── executionhook.ts     # Extract flowbook_sdc metadata from outputs
+├── api.ts                   # Shared FlowbookAPI for HTTP communication
 ├── kernel.ts                # Shared KernelUtils
 └── [other shared files]     # panel.tsx, executiondialog.tsx, etc.
 ```
 
 **Plugin Activation**:
-- `data_ferret:plugin` - Activates UI only when kernel is `ferret_kernel`
-- `data_ferret:sdc` - Activates UI only when kernel is `ferret_sdc_kernel`
+- `flowbook:plugin` - Activates UI only when kernel is `flowbook_kernel`
+- `flowbook:sdc` - Activates UI only when kernel is `flowbook_sdc_kernel`
 
-**Data Flow**: User clicks button → `executeCommand()` → `FerretAPI.executeCommand()` → POST to `/ferret/execute` → Backend processes → Notebook updated
+**Data Flow**: User clicks button → `executeCommand()` → `FlowbookAPI.executeCommand()` → POST to `/flowbook/execute` → Backend processes → Notebook updated
 
-### Server Extension (`data_ferret/server/`)
+### Server Extension (`flowbook/server/`)
 
 The server uses the modern **ExtensionApp** pattern (not legacy extension points).
 
-- `__init__.py` - `DataFerretExtension(ExtensionApp)` class with `initialize_handlers()` method
+- `__init__.py` - `FlowBookExtension(ExtensionApp)` class with `initialize_handlers()` method
 - `handlers.py` - HTTP request handlers:
-  - `POST /ferret/execute` - Execute a command (FerretCommandHandler)
-  - `GET /ferret/list` - List available commands (CommandListHandler)
+  - `POST /flowbook/execute` - Execute a command (FlowbookCommandHandler)
+  - `GET /flowbook/list` - List available commands (CommandListHandler)
 - `base.py` - `NotebookCommand` abstract base class
 - `registry.py` - `CommandRegistry` singleton managing available commands
 - `commands.py` - Built-in command implementations:
   - `AnalyzeNotebookCommand` - Notebook structure analysis
   - `ValidateNotebookCommand` - Syntax validation
-  - `ExecuteAllCommand` - Run all cells (requires kernel)
+  - `ExecuteBaseCommand` - Run all cells (requires kernel)
   - `InspectVariablesCommand` - Kernel namespace inspection
-- `kernel_manager.py` - `KernelConnectionManager` and `FerretKernelClient` for kernel communication
+- `kernel_manager.py` - `KernelConnectionManager` and `FlowbookKernelClient` for kernel communication
 - `cli.py` - Command-line interface entry point
 
-### Ferret Kernel (`data_ferret/kernel/`)
+### FlowBook Kernel (`flowbook/kernel/`)
 
 Full-featured kernel extending IPython with advanced features:
 
-- `ferret_kernel.py` - Main kernel implementation
-- `ferret_client.py` - Enhanced `BlockingKernelClient` that includes `cell_id` and `cell_metadata` in execution messages
+- `flowbook_kernel.py` - Main kernel implementation
+- `flowbook_client.py` - Enhanced `BlockingKernelClient` that includes `cell_id` and `cell_metadata` in execution messages
 - `checkpoint.py` - State snapshots (save/restore kernel state)
 - `diff.py` - Namespace diffing to track variable changes between executions
 - `equality.py` - Deep equality checking for various Python types
 - `tracking.py` - `TrackingDict` for optional variable access tracking
 - `magics.py` - IPython magic commands (`%enable_scalene`, `%checkpoint`, etc.)
-- `ferret_pdb.py` - Debugger integration
+- `flowbook_pdb.py` - Debugger integration
 
 **Features** (all optional, toggled via magic commands):
 - Scalene profiling for CPU/memory analysis
@@ -169,12 +169,12 @@ Full-featured kernel extending IPython with advanced features:
 - Variable tracking for read-before-write analysis
 - Monotonicity enforcement
 
-### SDC Kernel (`data_ferret/sdc_kernel/`)
+### SDC Kernel (`flowbook/sdc_kernel/`)
 
 Simplified kernel focused on Sequential Dataflow Consistency (SDC):
 
-- `ferret_sdc_kernel.py` - SDC-focused kernel implementation
-- `ferret_sdc_client.py` - Client with `cell_order` injection for SDC checks
+- `flowbook_sdc_kernel.py` - SDC-focused kernel implementation
+- `flowbook_sdc_client.py` - Client with `cell_order` injection for SDC checks
 - `sdc_enforcer.py` - Implements SDC rules (staleness propagation, backward mutation detection)
 - `models.py` - `SDCMetadata`, `SDCViolation`, `SDCResult` data classes
 
@@ -187,7 +187,7 @@ Simplified kernel focused on Sequential Dataflow Consistency (SDC):
 **SDC Metadata Format** (sent via `display_data` output):
 ```python
 {
-  "ferret_sdc": {
+  "flowbook_sdc": {
     "cell_id": str,
     "execution_seq": int,
     "reads": List[str],
@@ -200,7 +200,7 @@ Simplified kernel focused on Sequential Dataflow Consistency (SDC):
 }
 ```
 
-**Key Feature**: Both `FerretKernelClient` and `FerretSDCKernelClient` inject `cell_id` and metadata into kernel messages, enabling cell-level tracking.
+**Key Feature**: Both `FlowbookKernelClient` and `FlowbookSDCKernelClient` inject `cell_id` and metadata into kernel messages, enabling cell-level tracking.
 
 ### Command Pattern
 
@@ -225,11 +225,11 @@ class SomeCommand(NotebookCommand):
         return {"notebook": modified_notebook, "metadata": {...}}
 ```
 
-Register in `data_ferret/server/__init__.py` or `commands.py`.
+Register in `flowbook/server/__init__.py` or `commands.py`.
 
-### Agent Integration (`data_ferret/agent/`)
+### Agent Integration (`flowbook/agent/`)
 
-- `agent.py` - `FerretAgent` uses `openai-agents` framework with litellm backend
+- `agent.py` - `FlowbookAgent` uses `openai-agents` framework with litellm backend
 - `llm_cost.py` - Tracks API costs for LLM usage
 - Configured with OpenAI API for AI-powered notebook analysis
 
@@ -244,9 +244,9 @@ All notebooks entering the system (via CLI or server) are automatically normaliz
 - **Source normalization**: Cell sources are converted from list to string format
 
 This normalization happens transparently at entry points:
-- **CLI**: `load_notebook()` in `data_ferret/cli/helpers.py`
-- **Server**: `FerretCommandHandler.post()` in `data_ferret/server/handlers.py`
-- **Core function**: `normalize_notebook()` in `data_ferret/util/cell_ids.py`
+- **CLI**: `load_notebook()` in `flowbook/cli/helpers.py`
+- **Server**: `FlowbookCommandHandler.post()` in `flowbook/server/handlers.py`
+- **Core function**: `normalize_notebook()` in `flowbook/util/cell_ids.py`
 
 ### Why 4-character IDs?
 
@@ -277,34 +277,34 @@ This normalization happens transparently at entry points:
 - `pyproject.toml` - Python package config, dependencies, build system (hatchling)
 - `package.json` - NPM package config, scripts, linting rules
 - `tsconfig.json` - TypeScript compiler settings (ES2020, strict mode)
-- `jupyter-config/server-config/data_ferret.json` - Jupyter server extension registration
+- `jupyter-config/server-config/flowbook.json` - Jupyter server extension registration
 
 ### Build Artifacts
 
 - `lib/` - Compiled TypeScript output (gitignored)
-- `data_ferret/labextension/` - JupyterLab extension bundle (auto-generated)
-- `data_ferret/_version.py` - Auto-generated from package.json version
+- `flowbook/labextension/` - JupyterLab extension bundle (auto-generated)
+- `flowbook/_version.py` - Auto-generated from package.json version
 
 ## Extension Points
 
 ### Adding a New Command
 
-1. Create class in `data_ferret/server/commands.py` inheriting `NotebookCommand`
+1. Create class in `flowbook/server/commands.py` inheriting `NotebookCommand`
 2. Implement required properties: `command_name`, `display_name`, `icon_name`, `requires_kernel`
 3. Implement `process()` method
 4. Register in `CommandRegistry` (typically auto-registered via import)
-5. Frontend automatically discovers via `GET /ferret/list`
+5. Frontend automatically discovers via `GET /flowbook/list`
 
 ### Modifying Kernel Behavior
 
-**Ferret Kernel**:
-- Kernel spec: `data_ferret/kernel/kernelspec/`
-- Main kernel class: `data_ferret/kernel/ferret_kernel.py`
+**FlowBook Kernel**:
+- Kernel spec: `flowbook/kernel/kernelspec/`
+- Main kernel class: `flowbook/kernel/flowbook_kernel.py`
 
 **SDC Kernel**:
-- Kernel spec: `data_ferret/sdc_kernel/kernelspec/`
-- Main kernel class: `data_ferret/sdc_kernel/ferret_sdc_kernel.py`
-- SDC logic: `data_ferret/sdc_kernel/sdc_enforcer.py`
+- Kernel spec: `flowbook/sdc_kernel/kernelspec/`
+- Main kernel class: `flowbook/sdc_kernel/flowbook_sdc_kernel.py`
+- SDC logic: `flowbook/sdc_kernel/sdc_enforcer.py`
 
 **Frontend**:
 - Shared kernel utilities: `src/kernel.ts`
@@ -336,11 +336,11 @@ This normalization happens transparently at entry points:
 ```bash
 # Check server extension
 jupyter server extension list
-# Should show "data_ferret" as enabled
+# Should show "flowbook" as enabled
 
 # Check frontend extension
 jupyter labextension list
-# Should show "data_ferret" in enabled extensions
+# Should show "flowbook" in enabled extensions
 ```
 
 ### Build Issues
@@ -364,5 +364,5 @@ jupyter labextension develop . --overwrite
 
 - The extension uses **modern ExtensionApp** architecture (not legacy `_load_jupyter_server_extension`)
 - Kernel installation happens automatically on import via `make_kernels()` in `__init__.py`
-- Timer utilities (`data_ferret/util/output.py`) provide performance instrumentation throughout
-- Cell metadata tracking requires `FerretKernelClient` for proper `cell_id` propagation
+- Timer utilities (`flowbook/util/output.py`) provide performance instrumentation throughout
+- Cell metadata tracking requires `FlowbookKernelClient` for proper `cell_id` propagation

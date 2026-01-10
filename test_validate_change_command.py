@@ -8,8 +8,8 @@ the ValidateChangeCommand processes them correctly using a mock kernel client.
 
 import asyncio
 from unittest.mock import MagicMock
-from data_ferret.server.registry import CommandRegistry
-from data_ferret.server.kernel_manager import TestCodeData
+from flowbook.server.registry import CommandRegistry
+from flowbook.server.kernel_manager import TestCodeData
 
 
 async def main():
@@ -193,7 +193,7 @@ async def main():
     print("\n[8] Test Case 6: Verify output variables filtering...")
 
     # We need to analyze the notebook first to get dependencies
-    from data_ferret.util.dependencies import analyze_notebook
+    from flowbook.util.dependencies import analyze_notebook
 
     deps_dict = analyze_notebook(notebook)
 

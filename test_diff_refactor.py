@@ -2,8 +2,8 @@
 Test script to validate diff.py refactoring works correctly.
 """
 
-from data_ferret.kernel.diff import Diff
-from data_ferret.kernel.types import ValueComparison, DiffResult
+from flowbook.kernel.diff import Diff
+from flowbook.kernel.types import ValueComparison, DiffResult
 
 def test_basic_types():
     """Test basic type comparisons return ValueComparison."""

@@ -3,8 +3,8 @@ Tests for the optimize command functionality.
 """
 
 import pytest
-from data_ferret.server.commands.optimize import extract_function, replace_function
-from data_ferret.util.ferret_metadata import CodeSnippet, OptimizedCodeResponse
+from flowbook.server.commands.optimize import extract_function, replace_function
+from flowbook.util.flowbook_metadata import CodeSnippet, OptimizedCodeResponse
 
 
 class TestExtractFunction:

@@ -48,8 +48,8 @@ assert result1 != {}                       # Empty comparison
 ### Basic Serialization
 
 ```python
-from data_ferret.kernel.diff import Diff
-from data_ferret.kernel.types import DiffResult
+from flowbook.kernel.diff import Diff
+from flowbook.kernel.types import DiffResult
 
 differ = Diff()
 result = differ.diff({'x': 1}, {'x': 2})
@@ -198,7 +198,7 @@ Run the comprehensive test suite:
 
 ```bash
 # Original 141 tests (all pass)
-pytest data_ferret/kernel/test_diff.py
+pytest flowbook/kernel/test_diff.py
 
 # Serialization tests
 python test_diffresult_serialization.py
@@ -216,8 +216,8 @@ python test_diffresult_serialization.py
 ## Example: Complete Workflow
 
 ```python
-from data_ferret.kernel.diff import Diff
-from data_ferret.kernel.types import DiffResult, format_diff_as_markdown
+from flowbook.kernel.diff import Diff
+from flowbook.kernel.types import DiffResult, format_diff_as_markdown
 
 # 1. Create diff
 differ = Diff()

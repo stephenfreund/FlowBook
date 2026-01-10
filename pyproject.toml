@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [project]
-name = "data_ferret"
+name = "flowbook"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
@@ -61,14 +61,14 @@ dependencies = [
 dynamic = ["version", "description", "authors", "urls", "keywords"]
 
 [project.scripts]
-data_ferret = "data_ferret.cli.cli:cli_main"
-data_ferret_optimize = "data_ferret.cli.optimize_cli:optimize_cli_main"
-data_ferret_split = "data_ferret.cli.split_cli:split_cli_main"
-data_ferret_stats = "data_ferret.cli.stats_cli:stats_cli_main"
-data_ferret_timers = "data_ferret.cli.ferret_timers:main"
-data_ferret_metadata = "data_ferret.cli.metadata_cli:metadata_cli_main"
-data_ferret_slurm = "data_ferret.slurm.slurm_cli:main"
-ferret_lab = "data_ferret.cli.lab_cli:lab_main"
+flowbook = "flowbook.cli.cli:cli_main"
+flowbook_optimize = "flowbook.cli.optimize_cli:optimize_cli_main"
+flowbook_split = "flowbook.cli.split_cli:split_cli_main"
+flowbook_stats = "flowbook.cli.stats_cli:stats_cli_main"
+flowbook_timers = "flowbook.cli.flowbook_timers:main"
+flowbook_metadata = "flowbook.cli.metadata_cli:metadata_cli_main"
+flowbook_slurm = "flowbook.slurm.slurm_cli:main"
+flowlab = "flowbook.cli.lab_cli:lab_main"
 
 [tool.hatch.version]
 source = "nodejs"
@@ -77,25 +77,25 @@ source = "nodejs"
 fields = ["description", "authors", "urls", "keywords"]
 
 [tool.hatch.build.targets.sdist]
-artifacts = ["data_ferret/labextension"]
+artifacts = ["flowbook/labextension"]
 exclude = [".github", "binder"]
 
 [tool.hatch.build.targets.wheel.shared-data]
-"data_ferret/labextension" = "share/jupyter/labextensions/data_ferret"
-"install.json" = "share/jupyter/labextensions/data_ferret/install.json"
+"flowbook/labextension" = "share/jupyter/labextensions/flowbook"
+"install.json" = "share/jupyter/labextensions/flowbook/install.json"
 "jupyter-config/server-config" = "etc/jupyter/jupyter_server_config.d"
 
 [tool.hatch.build.hooks.version]
-path = "data_ferret/_version.py"
+path = "flowbook/_version.py"
 
 [tool.hatch.build.hooks.jupyter-builder]
 dependencies = ["hatch-jupyter-builder>=0.5"]
 build-function = "hatch_jupyter_builder.npm_builder"
 ensured-targets = [
-    "data_ferret/labextension/static/style.js",
-    "data_ferret/labextension/package.json",
+    "flowbook/labextension/static/style.js",
+    "flowbook/labextension/package.json",
 ]
-skip-if-exists = ["data_ferret/labextension/static/style.js"]
+skip-if-exists = ["flowbook/labextension/static/style.js"]
 
 [tool.hatch.build.hooks.jupyter-builder.build-kwargs]
 build_cmd = "build:prod"
@@ -105,7 +105,7 @@ npm = ["jlpm"]
 build_cmd = "install:extension"
 npm = ["jlpm"]
 source_dir = "src"
-build_dir = "data_ferret/labextension"
+build_dir = "flowbook/labextension"
 
 [tool.jupyter-releaser.options]
 version_cmd = "hatch version"

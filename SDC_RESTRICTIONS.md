@@ -1,6 +1,6 @@
 # SDC Programming Model Restrictions
 
-This document describes the restrictions and limitations of the Sequential Dataflow Consistency (SDC) enforcement system in DataFerret.
+This document describes the restrictions and limitations of the Sequential Dataflow Consistency (SDC) enforcement system in FlowBook.
 
 ## 1. Checkpointable Objects Only
 

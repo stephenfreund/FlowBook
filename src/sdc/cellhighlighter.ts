@@ -83,7 +83,7 @@ export class SDCCellHighlighter {
 
     if (cell && cell.model.type === 'code') {
       const metadata = cell.model.metadata as any;
-      const sdcMetadata = metadata?.ferret_sdc as ISDCMetadata | undefined;
+      const sdcMetadata = metadata?.flowbook_sdc as ISDCMetadata | undefined;
       const cellId = cell.model.id;
       const currentCellOrder = this._getCurrentCellOrder(notebook);
 
@@ -117,7 +117,7 @@ export class SDCCellHighlighter {
     }
 
     const metadata = activeCell.model.metadata as any;
-    const sdcMetadata = metadata?.ferret_sdc as ISDCMetadata | undefined;
+    const sdcMetadata = metadata?.flowbook_sdc as ISDCMetadata | undefined;
 
     if (sdcMetadata) {
       const cellId = activeCell.model.id;
@@ -157,7 +157,7 @@ export class SDCCellHighlighter {
     // Update panel if this is the active cell
     if (this._tracker.activeCell === cell) {
       const metadata = cell.model.metadata as any;
-      const sdcMetadata = metadata?.ferret_sdc as ISDCMetadata | undefined;
+      const sdcMetadata = metadata?.flowbook_sdc as ISDCMetadata | undefined;
       const notebook = this._tracker.currentWidget;
 
       if (sdcMetadata && notebook) {

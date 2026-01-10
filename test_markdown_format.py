@@ -1,7 +1,7 @@
 """Test the format_diff_as_markdown function."""
 
-from data_ferret.kernel.types import ValueComparison, format_diff_as_markdown
-from data_ferret.kernel.diff import Diff
+from flowbook.kernel.types import ValueComparison, format_diff_as_markdown
+from flowbook.kernel.diff import Diff
 
 
 def test_empty_diff():

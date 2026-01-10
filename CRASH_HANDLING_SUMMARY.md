@@ -5,7 +5,7 @@ Extended the `test_code` functionality to properly capture and communicate crash
 
 ## Changes Made
 
-### 1. New BaseModels (`data_ferret/kernel/types.py`)
+### 1. New BaseModels (`flowbook/kernel/types.py`)
 
 #### ExecutionError
 ```python
@@ -53,7 +53,7 @@ TestCodeResult = Annotated[
 
 The `status` field is used as a discriminator for Pydantic to automatically deserialize to the correct type.
 
-### 2. Kernel Changes (`data_ferret/kernel/ferret_kernel.py`)
+### 2. Kernel Changes (`flowbook/kernel/flowbook_kernel.py`)
 
 #### Updated `test_code()` method (lines 365-463)
 - Wraps original code execution in try-except
@@ -72,7 +72,7 @@ The `status` field is used as a discriminator for Pydantic to automatically dese
 
 ### 3. Server Changes
 
-#### `data_ferret/server/commands/optimize.py`
+#### `flowbook/server/commands/optimize.py`
 
 **Updated imports** (lines 27-30):
 - Added `TestCodeSuccess`, `TestCodeOriginalCrash`, `TestCodeModifiedCrash`
@@ -84,7 +84,7 @@ The `status` field is used as a discriminator for Pydantic to automatically dese
 - Returns detailed error messages with exception type, message, and formatted traceback
 - Clearly distinguishes between "cannot optimize broken code" vs "optimization introduced a bug"
 
-#### `data_ferret/server/commands/validate_change.py`
+#### `flowbook/server/commands/validate_change.py`
 
 **Updated imports** (lines 14-17):
 - Added new crash types for type checking
@@ -94,7 +94,7 @@ The `status` field is used as a discriminator for Pydantic to automatically dese
 - Logs appropriate message for each result type
 - Extracts and displays error information for crash cases
 
-### 4. Tests (`data_ferret/kernel/test_test_code_crashes.py`)
+### 4. Tests (`flowbook/kernel/test_test_code_crashes.py`)
 
 Created comprehensive test suite with 11 tests:
 
@@ -188,8 +188,8 @@ elif isinstance(result.result, TestCodeModifiedCrash):
 
 ## Files Modified
 
-1. `data_ferret/kernel/types.py` - Added 4 new models + union type
-2. `data_ferret/kernel/ferret_kernel.py` - Updated test_code() and _test_code_comm_open()
-3. `data_ferret/server/commands/optimize.py` - Updated validation logic
-4. `data_ferret/server/commands/validate_change.py` - Updated result logging
-5. `data_ferret/kernel/test_test_code_crashes.py` - New test file (11 tests)
+1. `flowbook/kernel/types.py` - Added 4 new models + union type
+2. `flowbook/kernel/flowbook_kernel.py` - Updated test_code() and _test_code_comm_open()
+3. `flowbook/server/commands/optimize.py` - Updated validation logic
+4. `flowbook/server/commands/validate_change.py` - Updated result logging
+5. `flowbook/kernel/test_test_code_crashes.py` - New test file (11 tests)

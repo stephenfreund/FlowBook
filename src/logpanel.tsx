@@ -21,11 +21,11 @@ export class MessagePanel extends Widget {
 
   constructor() {
     super();
-    this.id = 'ferret-message-panel';
-    this.addClass('ferret-message-panel');
-    this.title.label = 'Ferret Output';
+    this.id = 'flowbook-message-panel';
+    this.addClass('flowbook-message-panel');
+    this.title.label = 'FlowBook Output';
     this.title.closable = true;
-    this.title.caption = 'DataFerret command output';
+    this.title.caption = 'FlowBook command output';
 
     this.render();
     this.connectToStream();
@@ -44,7 +44,7 @@ export class MessagePanel extends Widget {
   private connectToStream(): void {
     try {
       const settings = ServerConnection.makeSettings();
-      const streamUrl = `${settings.baseUrl}ferret/stream`;
+      const streamUrl = `${settings.baseUrl}flowbook/stream`;
 
       this._eventSource = new EventSource(streamUrl);
 

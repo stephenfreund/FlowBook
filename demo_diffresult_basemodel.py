@@ -6,8 +6,8 @@ of the new DiffResult BaseModel.
 """
 
 import json
-from data_ferret.kernel.diff import Diff
-from data_ferret.kernel.types import DiffResult, format_diff_as_markdown
+from flowbook.kernel.diff import Diff
+from flowbook.kernel.types import DiffResult, format_diff_as_markdown
 
 
 def demo():

@@ -13,8 +13,8 @@ Run with: python -m pytest test_partial_execution_bug.py -v -s
 
 import pytest
 from unittest.mock import Mock, MagicMock, patch
-from data_ferret.server.commands.optimize import CodeExecutionOrchestrator
-from data_ferret.kernel.types import (
+from flowbook.server.commands.optimize import CodeExecutionOrchestrator
+from flowbook.kernel.types import (
     TestCodeSuccess,
     TestCodeModifiedCrash,
     ExecutionError
@@ -188,7 +188,7 @@ class TestTestCodeWithPartialExecution:
         mock.checkpoint_restore = Mock()
 
         # Mock checkpoint comparison
-        from data_ferret.kernel.types import DiffResult, CompareCheckpointsResponse
+        from flowbook.kernel.types import DiffResult, CompareCheckpointsResponse
         mock.checkpoint_compare = Mock(return_value=CompareCheckpointsResponse(
             diff=DiffResult(differences={})
         ))
@@ -202,7 +202,7 @@ class TestTestCodeWithPartialExecution:
         client = MockKernelClientWithPartialExecution(error_msg_has_wrong_parent_id=False)
 
         # Patch the KernelCommandClient initialization
-        with patch('data_ferret.server.commands.optimize.KernelCommandClient', return_value=mock_cmd_client):
+        with patch('flowbook.server.commands.optimize.KernelCommandClient', return_value=mock_cmd_client):
             orchestrator = CodeExecutionOrchestrator(client)
 
             original_code = "df['ratio'] = base_ratio"
@@ -229,7 +229,7 @@ class TestTestCodeWithPartialExecution:
         client = MockKernelClientWithPartialExecution(error_msg_has_wrong_parent_id=True)
 
         # Patch the KernelCommandClient initialization
-        with patch('data_ferret.server.commands.optimize.KernelCommandClient', return_value=mock_cmd_client):
+        with patch('flowbook.server.commands.optimize.KernelCommandClient', return_value=mock_cmd_client):
             orchestrator = CodeExecutionOrchestrator(client)
 
             original_code = "df['ratio'] = base_ratio"
@@ -242,7 +242,7 @@ df['new_years_factor'] = new_years_model.predict(df)
 
             # Mock checkpoint comparison to show df changed
             # (simulating partial execution that modified df before error)
-            from data_ferret.kernel.types import DiffResult, CompareCheckpointsResponse
+            from flowbook.kernel.types import DiffResult, CompareCheckpointsResponse
             mock_cmd_client.checkpoint_compare.return_value = CompareCheckpointsResponse(
                 diff=DiffResult(differences={
                     'df': {

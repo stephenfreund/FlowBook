@@ -7,8 +7,8 @@ The `format_diff_as_markdown()` function converts a `DiffResult` into a human-re
 ## Usage
 
 ```python
-from data_ferret.kernel.diff import Diff
-from data_ferret.kernel.types import format_diff_as_markdown
+from flowbook.kernel.diff import Diff
+from flowbook.kernel.types import format_diff_as_markdown
 
 # Create a diff
 differ = Diff()
@@ -97,7 +97,7 @@ Convert a DiffResult to a human-readable markdown list.
 
 **Example:**
 ```python
-from data_ferret.kernel.types import format_diff_as_markdown
+from flowbook.kernel.types import format_diff_as_markdown
 
 markdown = format_diff_as_markdown(result)
 ```

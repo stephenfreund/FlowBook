@@ -5,12 +5,12 @@
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
 import { ISignal, Signal } from '@lumino/signaling';
 
-export type FerretKernelType = 'ferret_kernel' | 'ferret_sdc_kernel' | 'other' | 'none';
+export type FlowbookKernelType = 'flowbook_kernel' | 'flowbook_sdc_kernel' | 'other' | 'none';
 
 export interface IKernelChangeInfo {
   notebook: NotebookPanel;
-  previousKernel: FerretKernelType;
-  currentKernel: FerretKernelType;
+  previousKernel: FlowbookKernelType;
+  currentKernel: FlowbookKernelType;
 }
 
 /**
@@ -19,7 +19,7 @@ export interface IKernelChangeInfo {
 export class KernelDetector {
   private _tracker: INotebookTracker;
   private _kernelChanged = new Signal<this, IKernelChangeInfo>(this);
-  private _notebookKernels = new Map<string, FerretKernelType>();
+  private _notebookKernels = new Map<string, FlowbookKernelType>();
 
   constructor(tracker: INotebookTracker) {
     this._tracker = tracker;
@@ -33,34 +33,34 @@ export class KernelDetector {
   /**
    * Get the kernel type for a notebook
    */
-  getKernelType(notebook: NotebookPanel): FerretKernelType {
+  getKernelType(notebook: NotebookPanel): FlowbookKernelType {
     const kernelName = notebook.sessionContext.session?.kernel?.name;
     return this._classifyKernel(kernelName);
   }
 
   /**
-   * Check if notebook is using ferret_kernel
+   * Check if notebook is using flowbook_kernel
    */
-  isFerretKernel(notebook: NotebookPanel): boolean {
-    return this.getKernelType(notebook) === 'ferret_kernel';
+  isFlowbookKernel(notebook: NotebookPanel): boolean {
+    return this.getKernelType(notebook) === 'flowbook_kernel';
   }
 
   /**
-   * Check if notebook is using ferret_sdc_kernel
+   * Check if notebook is using flowbook_sdc_kernel
    */
   isSDCKernel(notebook: NotebookPanel): boolean {
-    return this.getKernelType(notebook) === 'ferret_sdc_kernel';
+    return this.getKernelType(notebook) === 'flowbook_sdc_kernel';
   }
 
-  private _classifyKernel(kernelName: string | undefined): FerretKernelType {
+  private _classifyKernel(kernelName: string | undefined): FlowbookKernelType {
     if (!kernelName) {
       return 'none';
     }
-    if (kernelName === 'ferret_kernel') {
-      return 'ferret_kernel';
+    if (kernelName === 'flowbook_kernel') {
+      return 'flowbook_kernel';
     }
-    if (kernelName === 'ferret_sdc_kernel') {
-      return 'ferret_sdc_kernel';
+    if (kernelName === 'flowbook_sdc_kernel') {
+      return 'flowbook_sdc_kernel';
     }
     return 'other';
   }

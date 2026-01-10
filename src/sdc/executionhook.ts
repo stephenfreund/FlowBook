@@ -1,5 +1,5 @@
 /**
- * Execution hook for SDC kernel - extracts ferret_sdc metadata
+ * Execution hook for SDC kernel - extracts flowbook_sdc metadata
  */
 
 import { JupyterFrontEnd } from '@jupyterlab/application';
@@ -64,7 +64,7 @@ export class SDCExecutionHookManager {
   }
 
   private _extractSDCMetadata(outputs: IOutput[]): ISDCMetadata | null {
-    console.log(`SDCExecutionHook: Checking ${outputs.length} outputs for ferret_sdc metadata`);
+    console.log(`SDCExecutionHook: Checking ${outputs.length} outputs for flowbook_sdc metadata`);
 
     for (const output of outputs) {
       console.log(`SDCExecutionHook: Output type = ${output.output_type}`);
@@ -76,15 +76,15 @@ export class SDCExecutionHookManager {
       const metadata = (output as any).metadata;
       console.log('SDCExecutionHook: display_data metadata =', metadata);
 
-      if (!metadata?.ferret_sdc) {
-        console.log('SDCExecutionHook: No ferret_sdc in metadata');
+      if (!metadata?.flowbook_sdc) {
+        console.log('SDCExecutionHook: No flowbook_sdc in metadata');
         continue;
       }
 
-      console.log('SDCExecutionHook: Found ferret_sdc metadata!', metadata.ferret_sdc);
-      return metadata.ferret_sdc as ISDCMetadata;
+      console.log('SDCExecutionHook: Found flowbook_sdc metadata!', metadata.flowbook_sdc);
+      return metadata.flowbook_sdc as ISDCMetadata;
     }
-    console.log('SDCExecutionHook: No ferret_sdc metadata found in any output');
+    console.log('SDCExecutionHook: No flowbook_sdc metadata found in any output');
     return null;
   }
 
@@ -115,7 +115,7 @@ export class SDCExecutionHookManager {
     }
 
     // Store metadata on cell
-    cell.model.setMetadata('ferret_sdc', sdcMetadata);
+    cell.model.setMetadata('flowbook_sdc', sdcMetadata);
 
     // Update staleness manager
     const stalenessManager = this._highlighter.getStalenessManager(panel);

@@ -2,11 +2,11 @@
 
 ## Overview
 
-The `StreamOutputContext` captures all output from the DataFerret output system and broadcasts it to connected clients in real-time through the MessagePanel.
+The `StreamOutputContext` captures all output from the FlowBook output system and broadcasts it to connected clients in real-time through the MessagePanel.
 
 ## Components
 
-### 1. StreamOutputContext (`data_ferret/util/output.py`)
+### 1. StreamOutputContext (`flowbook/util/output.py`)
 
 A new output context class that redirects output to any file-like object with `write()` and `flush()` methods.
 
@@ -20,7 +20,7 @@ A new output context class that redirects output to any file-like object with `w
 **Usage:**
 
 ```python
-from data_ferret.util.output import stream_output
+from flowbook.util.output import stream_output
 
 # Any file-like object with write() and flush()
 with stream_output(my_stream):
@@ -28,7 +28,7 @@ with stream_output(my_stream):
     print("This too!")
 ```
 
-### 2. BroadcastStream (`data_ferret/server/message_broadcaster.py`)
+### 2. BroadcastStream (`flowbook/server/message_broadcaster.py`)
 
 A file-like wrapper around `MessageBroadcaster` that provides the standard `write()/flush()` interface.
 
@@ -42,7 +42,7 @@ A file-like wrapper around `MessageBroadcaster` that provides the standard `writ
 **Example:**
 
 ```python
-from data_ferret.server.message_broadcaster import get_broadcast_stream
+from flowbook.server.message_broadcaster import get_broadcast_stream
 
 stream = get_broadcast_stream()
 stream.write("Hello")
@@ -50,9 +50,9 @@ stream.write(" World")
 stream.write("\n")  # Sends: APPEND "Hello", APPEND " World", NEWLINE
 ```
 
-### 3. Handler Integration (`data_ferret/server/handlers.py`)
+### 3. Handler Integration (`flowbook/server/handlers.py`)
 
-The `FerretCommandHandler` now wraps command execution with `stream_output()`:
+The `FlowbookCommandHandler` now wraps command execution with `stream_output()`:
 
 ```python
 # Execute command with output streaming to clients
@@ -188,7 +188,7 @@ Creates an output context that redirects to a file-like stream.
 **Example:**
 
 ```python
-from data_ferret.util.output import stream_output, log
+from flowbook.util.output import stream_output, log
 
 class MyStream:
     def write(self, text):
@@ -217,7 +217,7 @@ File-like wrapper for MessageBroadcaster.
 **Example:**
 
 ```python
-from data_ferret.server.message_broadcaster import BroadcastStream
+from flowbook.server.message_broadcaster import BroadcastStream
 
 stream = BroadcastStream()
 stream.write("Hello\nWorld\n")
@@ -235,8 +235,8 @@ Convenience function to get a BroadcastStream connected to the global broadcaste
 **Example:**
 
 ```python
-from data_ferret.server.message_broadcaster import get_broadcast_stream
-from data_ferret.util.output import stream_output, log
+from flowbook.server.message_broadcaster import get_broadcast_stream
+from flowbook.util.output import stream_output, log
 
 with stream_output(get_broadcast_stream()):
     log("Broadcast to all clients")

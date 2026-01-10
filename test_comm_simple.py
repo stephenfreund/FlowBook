@@ -6,8 +6,8 @@ Simple test to verify comm messages work.
 import time
 from jupyter_client import KernelManager
 
-# Start a ferret_kernel
-km = KernelManager(kernel_name='ferret_kernel')
+# Start a flowbook_kernel
+km = KernelManager(kernel_name='flowbook_kernel')
 km.start_kernel()
 kc = km.client()
 kc.start_channels()

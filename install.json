@@ -1,5 +1,5 @@
 {
   "packageManager": "python",
-  "packageName": "data_ferret",
-  "uninstallInstructions": "Use your Python package manager (pip, conda, etc.) to uninstall the package data_ferret"
+  "packageName": "flowbook",
+  "uninstallInstructions": "Use your Python package manager (pip, conda, etc.) to uninstall the package flowbook"
 }

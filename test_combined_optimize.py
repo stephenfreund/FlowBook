@@ -11,21 +11,21 @@ from typing import Any, Dict, List, Optional
 import nbformat
 from nbformat.v4 import new_notebook, new_code_cell
 
-from data_ferret.server.commands.optimize import (
+from flowbook.server.commands.optimize import (
     OptimizeCommand,
     CombinedOptimizedCodeResponse,
     OptimizationResultAndStats,
     CodeSnippet,
 )
-from data_ferret.util.ferret_metadata import (
-    FerretMetadata,
+from flowbook.util.flowbook_metadata import (
+    FlowbookMetadata,
     OptimizationPotential,
     OptimizationStep,
     ProfileData,
 )
-from data_ferret.agent.agent import FerretStats
-from data_ferret.util.dependencies import CellDependencies
-from data_ferret.kernel.types import TestCodeSuccess, DiffResult
+from flowbook.agent.agent import FlowbookStats
+from flowbook.util.dependencies import CellDependencies
+from flowbook.kernel.types import TestCodeSuccess, DiffResult
 from agents import Usage
 
 
@@ -69,11 +69,11 @@ def sample_notebook_with_optimization_plan():
         env={"x": "numpy.ndarray", "y": "numpy.ndarray"},
         env_after={"x": "numpy.ndarray", "y": "numpy.ndarray", "result": "list"}
     )
-    metadata = FerretMetadata(
+    metadata = FlowbookMetadata(
         optimization_potential=opt_plan,
         profile=profile
     )
-    cell1["metadata"]["ferret"] = metadata.model_dump()
+    cell1["metadata"]["flowbook"] = metadata.model_dump()
 
     # Cell 2: Main code (uses the helper)
     cell2 = new_code_cell(
@@ -144,11 +144,11 @@ distances = pairwise_distance(normalized, normalized)""",
         env={"data": "numpy.ndarray"},
         env_after={"data": "numpy.ndarray", "normalized": "list", "distances": "list"}
     )
-    metadata = FerretMetadata(
+    metadata = FlowbookMetadata(
         optimization_potential=opt_plan,
         profile=profile
     )
-    cell2["metadata"]["ferret"] = metadata.model_dump()
+    cell2["metadata"]["flowbook"] = metadata.model_dump()
 
     nb["cells"] = [cell1, cell2]
     return nb
@@ -172,9 +172,9 @@ def mock_dependencies_dict():
 
 
 @pytest.fixture
-def mock_ferret_stats():
-    """Create mock FerretStats."""
-    return FerretStats(
+def mock_flowbook_stats():
+    """Create mock FlowbookStats."""
+    return FlowbookStats(
         model="gpt-4",
         time=2.5,
         usage=Usage(input_tokens=1000, output_tokens=500),
@@ -604,7 +604,7 @@ class TestCombinedOptimization:
         self,
         sample_notebook_with_optimization_plan,
         mock_dependencies_dict,
-        mock_ferret_stats
+        mock_flowbook_stats
     ):
         """Test combined LLM optimization with single function."""
         cmd = OptimizeCommand()
@@ -619,24 +619,24 @@ class TestCombinedOptimization:
             )
         ]
 
-        # Mock the FerretAgent
-        with patch('data_ferret.server.commands.optimize.FerretAgent') as MockAgent:
+        # Mock the FlowbookAgent
+        with patch('flowbook.server.commands.optimize.FlowbookAgent') as MockAgent:
             # Create mock agent instance (regular Mock with AsyncMock run method)
             mock_agent_instance = Mock()
             mock_agent_instance.run = AsyncMock(
-                return_value=(get_single_function_optimization_response(), mock_ferret_stats)
+                return_value=(get_single_function_optimization_response(), mock_flowbook_stats)
             )
             MockAgent.__getitem__.return_value = MockAgent
             MockAgent.return_value = mock_agent_instance
 
             # Mock NotebookTools
-            with patch('data_ferret.server.commands.optimize.NotebookTools') as MockTools:
+            with patch('flowbook.server.commands.optimize.NotebookTools') as MockTools:
                 mock_tools = Mock()
                 mock_tools.tools = Mock(return_value=[])
                 MockTools.return_value.__enter__ = Mock(return_value=mock_tools)
                 MockTools.return_value.__exit__ = Mock(return_value=False)
 
-                from data_ferret.server.commands.optimize import StatsAggregator
+                from flowbook.server.commands.optimize import StatsAggregator
                 stats_agg = StatsAggregator(model="gpt-4")
 
                 original_snippets, optimized_snippets = await cmd._run_combined_llm_optimization(
@@ -664,7 +664,7 @@ class TestCombinedOptimization:
     async def test_run_combined_llm_optimization_multiple_functions(
         self,
         sample_notebook_with_multiple_optimizations,
-        mock_ferret_stats
+        mock_flowbook_stats
     ):
         """Test combined LLM optimization with multiple functions."""
         cmd = OptimizeCommand()
@@ -697,22 +697,22 @@ class TestCombinedOptimization:
             )
         }
 
-        # Mock the FerretAgent
-        with patch('data_ferret.server.commands.optimize.FerretAgent') as MockAgent:
+        # Mock the FlowbookAgent
+        with patch('flowbook.server.commands.optimize.FlowbookAgent') as MockAgent:
             mock_agent_instance = Mock()
             mock_agent_instance.run = AsyncMock(
-                return_value=(get_multiple_function_optimization_response(), mock_ferret_stats)
+                return_value=(get_multiple_function_optimization_response(), mock_flowbook_stats)
             )
             MockAgent.__getitem__.return_value = MockAgent
             MockAgent.return_value = mock_agent_instance
 
-            with patch('data_ferret.server.commands.optimize.NotebookTools') as MockTools:
+            with patch('flowbook.server.commands.optimize.NotebookTools') as MockTools:
                 mock_tools = Mock()
                 mock_tools.tools = Mock(return_value=[])
                 MockTools.return_value.__enter__ = Mock(return_value=mock_tools)
                 MockTools.return_value.__exit__ = Mock(return_value=False)
 
-                from data_ferret.server.commands.optimize import StatsAggregator
+                from flowbook.server.commands.optimize import StatsAggregator
                 stats_agg = StatsAggregator(model="gpt-4")
 
                 original_snippets, optimized_snippets = await cmd._run_combined_llm_optimization(
@@ -753,7 +753,7 @@ class TestValidationAndRetry:
         sample_notebook_with_optimization_plan,
         mock_kernel_client_success,
         mock_dependencies_dict,
-        mock_ferret_stats
+        mock_flowbook_stats
     ):
         """Test successful validation."""
         cmd = OptimizeCommand()
@@ -777,7 +777,7 @@ class TestValidationAndRetry:
             )
         ]
 
-        with patch('data_ferret.server.commands.optimize.NotebookTools') as MockTools:
+        with patch('flowbook.server.commands.optimize.NotebookTools') as MockTools:
             mock_tools = Mock()
             mock_tools.tools = Mock(return_value=[])
             MockTools.return_value.__enter__ = Mock(return_value=mock_tools)
@@ -785,17 +785,17 @@ class TestValidationAndRetry:
 
             # Mock the test_code call
             with patch.object(cmd, '_send_test_code_comm') as mock_test:
-                from data_ferret.kernel.types import TestCodeSuccess, DiffResult
+                from flowbook.kernel.types import TestCodeSuccess, DiffResult
                 test_result = TestCodeSuccess(
                     diff=DiffResult(differences={}),
                     original_duration=1.0,
                     modified_duration=0.5,
                     speedup=2.0
                 )
-                from data_ferret.server.kernel_manager import TestCodeData
+                from flowbook.server.kernel_manager import TestCodeData
                 mock_test.return_value = TestCodeData(ok=True, result=test_result)
 
-                from data_ferret.server.commands.optimize import StatsAggregator
+                from flowbook.server.commands.optimize import StatsAggregator
                 stats_agg = StatsAggregator(model="gpt-4")
 
                 is_valid, validated_snippets, timing_data = await cmd._validate_optimization_with_retry(
@@ -820,7 +820,7 @@ class TestValidationAndRetry:
         self,
         sample_notebook_with_optimization_plan,
         mock_dependencies_dict,
-        mock_ferret_stats
+        mock_flowbook_stats
     ):
         """Test validation fails, then repair succeeds."""
         cmd = OptimizeCommand()
@@ -849,8 +849,8 @@ class TestValidationAndRetry:
 
         def mock_test_code(*args, **kwargs):
             call_count[0] += 1
-            from data_ferret.kernel.types import TestCodeSuccess, DiffResult
-            from data_ferret.server.kernel_manager import TestCodeData
+            from flowbook.kernel.types import TestCodeSuccess, DiffResult
+            from flowbook.server.kernel_manager import TestCodeData
 
             if call_count[0] == 1:
                 # First call: validation fails (type mismatch)
@@ -875,7 +875,7 @@ class TestValidationAndRetry:
                 )
                 return TestCodeData(ok=True, result=test_result)
 
-        with patch('data_ferret.server.commands.optimize.NotebookTools') as MockTools:
+        with patch('flowbook.server.commands.optimize.NotebookTools') as MockTools:
             mock_tools = Mock()
             mock_tools.tools = Mock(return_value=[])
             MockTools.return_value.__enter__ = Mock(return_value=mock_tools)
@@ -893,7 +893,7 @@ class TestValidationAndRetry:
                     ]
                     mock_repair.return_value = repaired_snippets
 
-                    from data_ferret.server.commands.optimize import StatsAggregator
+                    from flowbook.server.commands.optimize import StatsAggregator
                     stats_agg = StatsAggregator(model="gpt-4")
 
                     mock_kernel = Mock()
@@ -926,7 +926,7 @@ class TestRepairLogic:
     async def test_repair_optimization_combined_format(
         self,
         sample_notebook_with_optimization_plan,
-        mock_ferret_stats
+        mock_flowbook_stats
     ):
         """Test repair using combined format."""
         cmd = OptimizeCommand()
@@ -952,22 +952,22 @@ class TestRepairLogic:
 
         validation_error = "Type mismatch: expected list, got ndarray"
 
-        # Mock the FerretAgent for repair
-        with patch('data_ferret.server.commands.optimize.FerretAgent') as MockAgent:
+        # Mock the FlowbookAgent for repair
+        with patch('flowbook.server.commands.optimize.FlowbookAgent') as MockAgent:
             mock_agent_instance = Mock()
             mock_agent_instance.run = AsyncMock(
-                return_value=(get_repair_response(), mock_ferret_stats)
+                return_value=(get_repair_response(), mock_flowbook_stats)
             )
             MockAgent.__getitem__.return_value = MockAgent
             MockAgent.return_value = mock_agent_instance
 
-            with patch('data_ferret.server.commands.optimize.NotebookTools') as MockTools:
+            with patch('flowbook.server.commands.optimize.NotebookTools') as MockTools:
                 mock_tools = Mock()
                 mock_tools.tools = Mock(return_value=[])
                 MockTools.return_value.__enter__ = Mock(return_value=mock_tools)
                 MockTools.return_value.__exit__ = Mock(return_value=False)
 
-                from data_ferret.server.commands.optimize import StatsAggregator
+                from flowbook.server.commands.optimize import StatsAggregator
                 stats_agg = StatsAggregator(model="gpt-4")
 
                 repaired = await cmd._repair_optimization(
@@ -998,22 +998,22 @@ class TestEndToEndOptimization:
         self,
         sample_notebook_with_optimization_plan,
         mock_dependencies_dict,
-        mock_ferret_stats
+        mock_flowbook_stats
     ):
         """Test complete optimize_cell flow with mocked LLM."""
         cmd = OptimizeCommand()
         nb = sample_notebook_with_optimization_plan
 
-        # Mock the FerretAgent
-        with patch('data_ferret.server.commands.optimize.FerretAgent') as MockAgent:
+        # Mock the FlowbookAgent
+        with patch('flowbook.server.commands.optimize.FlowbookAgent') as MockAgent:
             mock_agent_instance = Mock()
             mock_agent_instance.run = AsyncMock(
-                return_value=(get_single_function_optimization_response(), mock_ferret_stats)
+                return_value=(get_single_function_optimization_response(), mock_flowbook_stats)
             )
             MockAgent.__getitem__.return_value = MockAgent
             MockAgent.return_value = mock_agent_instance
 
-            with patch('data_ferret.server.commands.optimize.NotebookTools') as MockTools:
+            with patch('flowbook.server.commands.optimize.NotebookTools') as MockTools:
                 mock_tools = Mock()
                 mock_tools.tools = Mock(return_value=[])
                 MockTools.return_value.__enter__ = Mock(return_value=mock_tools)
@@ -1021,8 +1021,8 @@ class TestEndToEndOptimization:
 
                 # Mock successful validation
                 with patch.object(cmd, '_send_test_code_comm') as mock_test:
-                    from data_ferret.kernel.types import TestCodeSuccess, DiffResult
-                    from data_ferret.server.kernel_manager import TestCodeData
+                    from flowbook.kernel.types import TestCodeSuccess, DiffResult
+                    from flowbook.server.kernel_manager import TestCodeData
                     test_result = TestCodeSuccess(
                         diff=DiffResult(differences={}),
                         original_duration=1.0,
@@ -1054,7 +1054,7 @@ class TestEndToEndOptimization:
     async def test_optimize_cells_multiple_cells(
         self,
         sample_notebook_with_multiple_optimizations,
-        mock_ferret_stats
+        mock_flowbook_stats
     ):
         """Test optimizing multiple cells in a notebook."""
         cmd = OptimizeCommand()
@@ -1073,16 +1073,16 @@ class TestEndToEndOptimization:
             )
         }
 
-        # Mock the FerretAgent
-        with patch('data_ferret.server.commands.optimize.FerretAgent') as MockAgent:
+        # Mock the FlowbookAgent
+        with patch('flowbook.server.commands.optimize.FlowbookAgent') as MockAgent:
             mock_agent_instance = Mock()
             mock_agent_instance.run = AsyncMock(
-                return_value=(get_multiple_function_optimization_response(), mock_ferret_stats)
+                return_value=(get_multiple_function_optimization_response(), mock_flowbook_stats)
             )
             MockAgent.__getitem__.return_value = MockAgent
             MockAgent.return_value = mock_agent_instance
 
-            with patch('data_ferret.server.commands.optimize.NotebookTools') as MockTools:
+            with patch('flowbook.server.commands.optimize.NotebookTools') as MockTools:
                 mock_tools = Mock()
                 mock_tools.tools = Mock(return_value=[])
                 MockTools.return_value.__enter__ = Mock(return_value=mock_tools)
@@ -1090,8 +1090,8 @@ class TestEndToEndOptimization:
 
                 # Mock successful validation
                 with patch.object(cmd, '_send_test_code_comm') as mock_test:
-                    from data_ferret.kernel.types import TestCodeSuccess, DiffResult
-                    from data_ferret.server.kernel_manager import TestCodeData
+                    from flowbook.kernel.types import TestCodeSuccess, DiffResult
+                    from flowbook.server.kernel_manager import TestCodeData
                     test_result = TestCodeSuccess(
                         diff=DiffResult(differences={}),
                         original_duration=2.0,
@@ -1103,7 +1103,7 @@ class TestEndToEndOptimization:
                     mock_kernel = Mock()
 
                     # Mock analyze_notebook
-                    with patch('data_ferret.server.commands.optimize.analyze_notebook', return_value=dependencies_dict):
+                    with patch('flowbook.server.commands.optimize.analyze_notebook', return_value=dependencies_dict):
                         new_nb, total_cost, cell_timing = await cmd.optimize_cells(
                             nb=nb,
                             model="gpt-4",
@@ -1191,8 +1191,8 @@ class TestEdgeCases:
 
         # Remove profile metadata
         cell = nb["cells"][0]
-        if "ferret" in cell["metadata"]:
-            del cell["metadata"]["ferret"]["profile"]
+        if "flowbook" in cell["metadata"]:
+            del cell["metadata"]["flowbook"]["profile"]
 
         cells = nb["cells"]
         cell_map = {c["id"]: c for c in cells}

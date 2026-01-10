@@ -6,7 +6,7 @@ The Validate Change command validates selected cells by comparing their code wit
 
 ## Files Created/Modified
 
-### 1. Command Implementation: `data_ferret/server/commands/validate_change.py`
+### 1. Command Implementation: `flowbook/server/commands/validate_change.py`
 
 The `ValidateChangeCommand` class:
 - Processes **selected cells only** - if no cells are selected, no work is done
@@ -29,7 +29,7 @@ The `ValidateChangeCommand` class:
 - `_get_next_cell_source()`: Safely gets the next cell's code
 - `_get_cell_output_variables()`: Filters output variables from dependency analysis
 
-### 2. Updated: `data_ferret/server/kernel_manager.py`
+### 2. Updated: `flowbook/server/kernel_manager.py`
 
 Retained the `TestCodeData` dataclass for type safety:
 ```python
@@ -41,11 +41,11 @@ class TestCodeData:
 
 The `test_code()` method was removed - its logic now lives in the `ValidateChangeCommand` class.
 
-### 3. Updated: `data_ferret/server/commands/__init__.py`
+### 3. Updated: `flowbook/server/commands/__init__.py`
 
 Added `ValidateChangeCommand` to the exports:
 ```python
-from data_ferret.server.commands.validate_change import ValidateChangeCommand
+from flowbook.server.commands.validate_change import ValidateChangeCommand
 ```
 
 ### 4. Frontend Integration
@@ -86,7 +86,7 @@ The command only processes selected cells. If no cells are selected, no work is 
 ### Via CLI
 
 ```bash
-python -m data_ferret.server.cli validate_change <notebook.ipynb>
+python -m flowbook.server.cli validate_change <notebook.ipynb>
 ```
 
 Note: CLI version processes all cells. For selected cells, use the JupyterLab UI.
@@ -94,8 +94,8 @@ Note: CLI version processes all cells. For selected cells, use the JupyterLab UI
 ### Via Python API
 
 ```python
-from data_ferret.server.registry import CommandRegistry
-from data_ferret.server.kernel_manager import FerretKernelClient
+from flowbook.server.registry import CommandRegistry
+from flowbook.server.kernel_manager import FlowbookKernelClient
 
 # Get the command
 registry = CommandRegistry()
@@ -143,7 +143,7 @@ for cell_id, cell_result in metadata['results'].items():
    - Waits for the `comm_msg` response from the kernel
    - Returns a `TestCodeData` object with `ok` and `result` fields
 
-5. **Kernel Processing**: The kernel's `FerretKernel` has a registered comm handler (`_test_code_comm_open`) that:
+5. **Kernel Processing**: The kernel's `FlowbookKernel` has a registered comm handler (`_test_code_comm_open`) that:
    - Executes the original code
    - Captures output variables
    - Executes the modified code
@@ -248,7 +248,7 @@ Output variables are filtered to exclude:
 
 ## Notes
 
-- The command requires a running `ferret_kernel`
-- The comm mechanism is implemented in the kernel (`data_ferret/kernel/ferret_kernel.py`)
+- The command requires a running `flowbook_kernel`
+- The comm mechanism is implemented in the kernel (`flowbook/kernel/flowbook_kernel.py`)
 - The command follows the same pattern as `ProfileCommand` for selected cell processing
 - Frontend integration uses the same approach as other commands with selection awareness

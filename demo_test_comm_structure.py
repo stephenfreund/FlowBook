@@ -6,8 +6,8 @@ This doesn't actually run the kernel but shows the command is registered and cal
 
 from unittest.mock import Mock, MagicMock
 import asyncio
-from data_ferret.server.registry import CommandRegistry
-from data_ferret.server.kernel_manager import TestCodeData
+from flowbook.server.registry import CommandRegistry
+from flowbook.server.kernel_manager import TestCodeData
 
 
 async def main():
