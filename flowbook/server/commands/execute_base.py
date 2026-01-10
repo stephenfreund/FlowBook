@@ -94,7 +94,8 @@ class ExecuteBaseCommand(NotebookCommand):
             error_message = None
             error_cell_id = None
 
-            KernelHelper.execute_code(kernel_client, "%scalene on", store_history=False)
+            # No scalene for base runs
+            # KernelHelper.execute_code(kernel_client, "%scalene on", store_history=False)
 
             # Inject CSV downsampling monkey-patch if requested
             if downsample_csv is not None:
