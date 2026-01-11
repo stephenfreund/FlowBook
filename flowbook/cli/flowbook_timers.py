@@ -9,14 +9,25 @@ Supports single or multiple files with combined statistics.
 """
 
 import argparse
+import glob
+import hashlib
 import json
+import os
+import re
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
+import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import termcolor
+
+# Base directory for cached remote files
+CACHE_BASE_DIR = "/tmp/flowbook_timers"
 
 
 def truncate_timer_key(key: str, max_length: int = 50) -> str:
@@ -49,6 +60,351 @@ def truncate_timer_key(key: str, max_length: int = 50) -> str:
     suffix_len = available - prefix_len
 
     return f"{key[:prefix_len]}...{key[-suffix_len:]}"
+
+
+def parse_remote_path(path: str) -> tuple[bool, str, str, str]:
+    """
+    Parse a path to detect if it's a remote path.
+
+    Args:
+        path: File path that may be local or remote
+
+    Returns:
+        Tuple of (is_remote, user, host, remote_path)
+        For local paths, returns (False, '', '', path)
+    """
+    # Pattern: [user@]host:path
+    # Must have a colon, and the part before colon must look like a host
+    # (not a Windows drive letter like C:)
+    match = re.match(r'^(?:([^@:]+)@)?([^:/]+):(.+)$', path)
+    if match:
+        user = match.group(1) or ''
+        host = match.group(2)
+        remote_path = match.group(3)
+        # Exclude Windows drive letters (single letter before colon)
+        if len(host) == 1 and host.isalpha():
+            return (False, '', '', path)
+        return (True, user, host, remote_path)
+    return (False, '', '', path)
+
+
+def get_cache_dir(remote_spec: str) -> str:
+    """
+    Get the deterministic cache directory for a remote path.
+
+    Args:
+        remote_spec: The full remote specification (e.g., "user@host:/path/*.json")
+
+    Returns:
+        Path to the cache directory (e.g., "/tmp/flowbook_timers/a1b2c3d4")
+    """
+    # Create a hash of the remote spec
+    hash_val = hashlib.md5(remote_spec.encode()).hexdigest()[:8]
+    return os.path.join(CACHE_BASE_DIR, hash_val)
+
+
+def rsync_remote_files(
+    remote_spec: str,
+    force_download: bool = False
+) -> tuple[list[str], str]:
+    """
+    Rsync files from a remote location to local cache.
+
+    Args:
+        remote_spec: Remote path specification (e.g., "user@host:/path/*.json")
+        force_download: If True, re-download even if cache exists
+
+    Returns:
+        Tuple of (list of local file paths, cache directory path)
+    """
+    is_remote, user, host, remote_path = parse_remote_path(remote_spec)
+    if not is_remote:
+        raise ValueError(f"Not a remote path: {remote_spec}")
+
+    cache_dir = get_cache_dir(remote_spec)
+    remote_host = f"{user}@{host}" if user else host
+
+    # Check if cache exists
+    cache_exists = os.path.exists(cache_dir) and os.listdir(cache_dir)
+
+    print(f"Remote: {remote_spec}", file=sys.stderr)
+    print(f"Cache:  {cache_dir}/", file=sys.stderr)
+
+    if cache_exists and not force_download:
+        print("Status: Using cached files (use --force-download to refresh)", file=sys.stderr)
+    else:
+        if force_download and cache_exists:
+            print("Status: Force downloading (clearing cache)...", file=sys.stderr)
+            shutil.rmtree(cache_dir)
+        else:
+            print("Status: Downloading...", file=sys.stderr)
+
+        # Create cache directory
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # Build rsync command
+        # For wildcards, we need to handle them specially
+        if '*' in remote_path or '?' in remote_path:
+            # Get the directory containing the pattern
+            remote_dir = os.path.dirname(remote_path)
+            pattern = os.path.basename(remote_path)
+
+            # Rsync the directory with include pattern
+            rsync_cmd = [
+                'rsync', '-avz',
+                '--include', pattern,
+                '--exclude', '*',
+                f"{remote_host}:{remote_dir}/",
+                cache_dir + "/"
+            ]
+        else:
+            # Simple file or directory
+            rsync_cmd = [
+                'rsync', '-avz',
+                f"{remote_host}:{remote_path}",
+                cache_dir + "/"
+            ]
+
+        try:
+            result = subprocess.run(
+                rsync_cmd,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            if result.stdout:
+                # Show files transferred (but not verbose rsync output)
+                lines = result.stdout.strip().split('\n')
+                file_lines = [l for l in lines if l and not l.startswith(('sending', 'sent', 'total', 'receiving'))]
+                if file_lines:
+                    print(f"Files:  {len(file_lines)} file(s) synced", file=sys.stderr)
+        except subprocess.CalledProcessError as e:
+            print(f"Error: rsync failed: {e.stderr}", file=sys.stderr)
+            raise
+
+    print("", file=sys.stderr)  # Blank line for readability
+
+    # Find the local files matching the pattern
+    if '*' in remote_path or '?' in remote_path:
+        pattern = os.path.basename(remote_path)
+        local_files = glob.glob(os.path.join(cache_dir, pattern))
+    else:
+        # Single file
+        filename = os.path.basename(remote_path)
+        local_path = os.path.join(cache_dir, filename)
+        local_files = [local_path] if os.path.exists(local_path) else []
+
+    return sorted(local_files), cache_dir
+
+
+def resolve_file_paths(
+    file_paths: list[str],
+    force_download: bool = False
+) -> list[str]:
+    """
+    Resolve file paths, downloading remote files as needed.
+
+    Args:
+        file_paths: List of local or remote file paths
+        force_download: If True, re-download remote files even if cached
+
+    Returns:
+        List of local file paths (remote files are replaced with cached copies)
+    """
+    resolved = []
+
+    for path in file_paths:
+        is_remote, _, _, _ = parse_remote_path(path)
+
+        if is_remote:
+            local_files, _ = rsync_remote_files(path, force_download)
+            resolved.extend(local_files)
+        else:
+            # Handle local wildcards
+            if '*' in path or '?' in path:
+                matched = glob.glob(path)
+                resolved.extend(sorted(matched))
+            else:
+                resolved.append(path)
+
+    return resolved
+
+
+def clear_cache() -> None:
+    """Remove all cached remote files."""
+    if os.path.exists(CACHE_BASE_DIR):
+        shutil.rmtree(CACHE_BASE_DIR)
+        print(f"Cleared cache: {CACHE_BASE_DIR}", file=sys.stderr)
+    else:
+        print(f"Cache directory does not exist: {CACHE_BASE_DIR}", file=sys.stderr)
+
+
+def sanitize_filename(key: str) -> str:
+    """
+    Sanitize a timer key for use as a filename.
+
+    Args:
+        key: Timer key (e.g., "diff:compute")
+
+    Returns:
+        Sanitized filename (e.g., "diff_compute")
+    """
+    # Replace problematic characters with underscores
+    sanitized = re.sub(r'[:/\\<>"|?*\s]', '_', key)
+    # Remove leading/trailing underscores and collapse multiple underscores
+    sanitized = re.sub(r'_+', '_', sanitized).strip('_')
+    return sanitized
+
+
+def create_histogram_pdf(
+    durations: list[float],
+    key: str,
+    output_dir: str = '.'
+) -> str:
+    """
+    Create a seaborn-styled histogram and save as PDF.
+
+    For highly skewed data, clips the x-axis to P99 for better visualization
+    while still showing the full statistics.
+
+    Args:
+        durations: List of timing values
+        key: Timer key name (used in title and filename)
+        output_dir: Directory to save PDF
+
+    Returns:
+        Path to created PDF file
+    """
+    # Calculate statistics on full data
+    p90 = np.percentile(durations, 90)
+    p95 = np.percentile(durations, 95)
+    p99 = np.percentile(durations, 99)
+    max_val = np.max(durations)
+    min_val = np.min(durations)
+    mean_val = np.mean(durations)
+    median_val = np.median(durations)
+    std_val = np.std(durations)
+
+    # Check if data is highly skewed (max >> P99)
+    # If so, clip to P99 for better visualization
+    is_clipped = max_val > p99 * 2 and p99 > 0
+    if is_clipped:
+        plot_durations = [d for d in durations if d <= p99]
+        clip_note = f"\n(showing up to P99, {len(durations) - len(plot_durations)} outliers clipped)"
+    else:
+        plot_durations = durations
+        clip_note = ""
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Set seaborn style
+    sns.set_style("whitegrid")
+
+    # Create histogram (percentage on y-axis)
+    sns.histplot(plot_durations, kde=False, ax=ax, color='steelblue', edgecolor='white', stat='percent')
+
+    # Add vertical lines for P90, P95 (only if within plot range)
+    if p90 <= (p99 if is_clipped else max_val):
+        ax.axvline(p90, color='orange', linestyle='--', linewidth=2, label=f'P90: {p90:.2f}')
+    if p95 <= (p99 if is_clipped else max_val):
+        ax.axvline(p95, color='red', linestyle='--', linewidth=2, label=f'P95: {p95:.2f}')
+    if not is_clipped:
+        ax.axvline(max_val, color='darkred', linestyle='-', linewidth=2, label=f'Max: {max_val:.2f}')
+
+    # Add legend for the lines
+    ax.legend(loc='upper right', fontsize=10)
+
+    # Labels and title
+    ax.set_xlabel('Duration (ms)', fontsize=12)
+    ax.set_ylabel('Percent', fontsize=12)
+    ax.set_title(f'Distribution of {key}\n(n={len(durations)}){clip_note}', fontsize=14)
+
+    # Add statistics annotation (always show full stats)
+    stats_text = (
+        f"Mean: {mean_val:.2f} ms\n"
+        f"Median: {median_val:.2f} ms\n"
+        f"Std: {std_val:.2f} ms\n"
+        f"Min: {min_val:.2f} ms\n"
+        f"P90: {p90:.2f} ms\n"
+        f"P95: {p95:.2f} ms\n"
+        f"P99: {p99:.2f} ms\n"
+        f"Max: {max_val:.2f} ms"
+    )
+    ax.text(0.95, 0.65, stats_text, transform=ax.transAxes,
+            verticalalignment='top', horizontalalignment='right',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+            fontsize=10, family='monospace')
+
+    plt.tight_layout()
+
+    # Save to PDF
+    filename = f"{sanitize_filename(key)}.pdf"
+    filepath = os.path.join(output_dir, filename)
+    fig.savefig(filepath, format='pdf', bbox_inches='tight')
+    plt.close(fig)
+
+    return filepath
+
+
+def create_scatterplot_pdf(
+    durations_x: list[float],
+    durations_y: list[float],
+    key_x: str,
+    key_y: str,
+    output_dir: str = '.'
+) -> str:
+    """
+    Create a seaborn-styled scatter plot and save as PDF.
+
+    NOTE: Points are paired by index position. This is only meaningful if
+    the two timer keys are always recorded together in the same order
+    during each event (e.g., both measured for every cell execution).
+
+    Args:
+        durations_x: X-axis timing values
+        durations_y: Y-axis timing values
+        key_x: X-axis timer key name
+        key_y: Y-axis timer key name
+        output_dir: Directory to save PDF
+
+    Returns:
+        Path to created PDF file
+    """
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    # Set seaborn style
+    sns.set_style("whitegrid")
+
+    # Create scatter plot with regression line
+    sns.regplot(x=durations_x, y=durations_y, ax=ax,
+                scatter_kws={'alpha': 0.6, 's': 50},
+                line_kws={'color': 'red', 'linewidth': 1.5})
+
+    # Labels and title
+    ax.set_xlabel(f'{key_x} (ms)', fontsize=12)
+    ax.set_ylabel(f'{key_y} (ms)', fontsize=12)
+    ax.set_title(f'{key_x} vs {key_y}\n(n={len(durations_x)})', fontsize=14)
+
+    # Calculate and display correlation
+    if len(durations_x) > 1:
+        correlation = np.corrcoef(durations_x, durations_y)[0, 1]
+        ax.text(0.05, 0.95, f'r = {correlation:.3f}', transform=ax.transAxes,
+                verticalalignment='top', fontsize=12,
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # Add warning note
+    ax.text(0.5, -0.12, 'Note: Points paired by index. Only meaningful if keys are recorded in lockstep.',
+            transform=ax.transAxes, fontsize=9, ha='center', style='italic', color='gray')
+
+    plt.tight_layout()
+
+    # Save to PDF
+    filename = f"{sanitize_filename(key_x)}_{sanitize_filename(key_y)}.pdf"
+    filepath = os.path.join(output_dir, filename)
+    fig.savefig(filepath, format='pdf', bbox_inches='tight')
+    plt.close(fig)
+
+    return filepath
 
 
 def create_ascii_histogram(data, bins=20, width=80, bar_char="#"):
@@ -767,6 +1123,69 @@ def process_multiple_files(file_paths: list[str], args):
         print()
 
 
+def generate_plots(grouped_timings: dict[str, list[float]], args) -> None:
+    """
+    Generate histogram and scatter plot PDFs based on CLI arguments.
+
+    Args:
+        grouped_timings: Dict mapping timer key -> list of durations
+        args: Command line arguments with histplot, scatterplot, output_dir
+    """
+    output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Generate histograms
+    if args.histplot:
+        for key in args.histplot:
+            if key not in grouped_timings:
+                print(f"Warning: Key '{key}' not found in timing data", file=sys.stderr)
+                continue
+            durations = grouped_timings[key]
+            if len(durations) < 2:
+                print(f"Warning: Key '{key}' has only {len(durations)} data point(s), skipping histogram", file=sys.stderr)
+                continue
+            filepath = create_histogram_pdf(durations, key, output_dir)
+            print(f"Created histogram: {filepath}")
+
+    # Generate scatter plots
+    if args.scatterplot:
+        print("Note: Scatter plots pair points by index. Only meaningful if keys are recorded in lockstep.", file=sys.stderr)
+        for spec in args.scatterplot:
+            if '%' not in spec:
+                print(f"Warning: Invalid scatterplot format '{spec}' (expected key1%key2)", file=sys.stderr)
+                continue
+            parts = spec.split('%', 1)
+            if len(parts) != 2:
+                print(f"Warning: Invalid scatterplot format '{spec}' (expected key1%key2)", file=sys.stderr)
+                continue
+            key_x, key_y = parts
+
+            if key_x not in grouped_timings:
+                print(f"Warning: Key '{key_x}' not found in timing data", file=sys.stderr)
+                continue
+            if key_y not in grouped_timings:
+                print(f"Warning: Key '{key_y}' not found in timing data", file=sys.stderr)
+                continue
+
+            durations_x = grouped_timings[key_x]
+            durations_y = grouped_timings[key_y]
+
+            if len(durations_x) != len(durations_y):
+                print(f"Warning: Keys '{key_x}' ({len(durations_x)} points) and '{key_y}' ({len(durations_y)} points) have different counts", file=sys.stderr)
+                # Use the minimum length
+                min_len = min(len(durations_x), len(durations_y))
+                durations_x = durations_x[:min_len]
+                durations_y = durations_y[:min_len]
+                print(f"  Using first {min_len} points from each", file=sys.stderr)
+
+            if len(durations_x) < 2:
+                print(f"Warning: Not enough data points for scatter plot, skipping", file=sys.stderr)
+                continue
+
+            filepath = create_scatterplot_pdf(durations_x, durations_y, key_x, key_y, output_dir)
+            print(f"Created scatter plot: {filepath}")
+
+
 def main():
     """Main entry point for the CLI tool."""
     parser = argparse.ArgumentParser(
@@ -783,6 +1202,15 @@ Examples:
   # Analyze multiple files
   flowbook_timers run1.json run2.json run3.json
 
+  # Remote files (cached after first download)
+  flowbook_timers user@server:/data/runs/*.json
+
+  # Force re-download remote files
+  flowbook_timers user@server:/data/*.json --force-download
+
+  # Clear all cached remote files
+  flowbook_timers --clear-cache
+
   # Sort by mean time, show top 10
   flowbook_timers --sort-by mean --top 10
 
@@ -791,6 +1219,12 @@ Examples:
 
   # Show histograms for top 5 timers
   flowbook_timers --top 5 --histograms
+
+  # Create histogram PDF for a specific timer
+  flowbook_timers timings.json --histplot=diff:compute
+
+  # Create scatter plot PDF comparing two timers
+  flowbook_timers timings.json --scatterplot=diff:compute%checkpoint:create
 
   # Output as JSON
   flowbook_timers --format json
@@ -801,7 +1235,7 @@ Examples:
         "files",
         nargs="*",
         default=["flowbook-times.json"],
-        help="Timing JSON files to analyze (default: flowbook-times.json)",
+        help="Timing JSON files to analyze (local or remote, supports wildcards)",
     )
 
     parser.add_argument(
@@ -830,7 +1264,56 @@ Examples:
         help="Show ASCII histograms for each timer (table mode only)",
     )
 
+    # Remote file options
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Force re-download of remote files even if cached",
+    )
+
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Clear all cached remote files and exit",
+    )
+
+    # Plot options
+    parser.add_argument(
+        "--histplot",
+        action="append",
+        metavar="KEY",
+        help="Create histogram PDF for specified timer key (can be used multiple times)",
+    )
+
+    parser.add_argument(
+        "--scatterplot",
+        action="append",
+        metavar="KEY%KEY",
+        help="Create scatter plot PDF for two keys (format: key1%%key2, can be used multiple times)",
+    )
+
+    parser.add_argument(
+        "--output-dir",
+        default=".",
+        help="Directory for plot output files (default: current directory)",
+    )
+
     args = parser.parse_args()
+
+    # Handle --clear-cache
+    if args.clear_cache:
+        clear_cache()
+        sys.exit(0)
+
+    # Resolve file paths (download remote files if needed)
+    resolved_files = resolve_file_paths(args.files, args.force_download)
+
+    if not resolved_files:
+        print("Error: No files found", file=sys.stderr)
+        sys.exit(1)
+
+    # Update args.files with resolved paths
+    args.files = resolved_files
 
     # Single or multi-file mode?
     if len(args.files) == 1:
@@ -855,9 +1338,21 @@ Examples:
             print(format_json_single(stats, timings))
         elif args.format == "csv":
             print(format_csv_single(stats))
+
+        # Generate plots if requested
+        if args.histplot or args.scatterplot:
+            generate_plots(grouped, args)
     else:
         # Multi-file mode
         process_multiple_files(args.files, args)
+
+        # For plots in multi-file mode, we need combined timings
+        if args.histplot or args.scatterplot:
+            # Reload and combine timings for plotting
+            timings_by_file = load_multiple_timings(args.files)
+            combined_timings = combine_timings(timings_by_file)
+            combined_grouped = group_by_key(combined_timings)
+            generate_plots(combined_grouped, args)
 
 
 if __name__ == "__main__":
