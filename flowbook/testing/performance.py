@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
+import numpy as np
+import pandas as pd
+
 from flowbook.kernel.checkpoint import Checkpoint, Checkpoints
 from flowbook.kernel.models import TrackingData
 from flowbook.sdc_kernel.sdc_enforcer import (
@@ -44,6 +47,186 @@ class PerformanceResult:
     stale_cells: List[str]  # Cells marked stale after check
     has_violation: bool
     timestamp: datetime = field(default_factory=datetime.now)
+
+
+def _mutate_value(val: Any) -> Any:
+    """
+    Mutate a single value to something different.
+
+    Handles various scalar types and ensures the result is different from input.
+    """
+    # Check for NA/NaN first (before numeric checks)
+    try:
+        if pd.isna(val):
+            return 0  # Replace NA with a value
+    except (TypeError, ValueError):
+        pass  # Some types don't support isna check
+
+    if isinstance(val, (bool, np.bool_)):
+        return not val
+    elif isinstance(val, (int, np.integer)):
+        return int(val) + random.randint(1, 100)
+    elif isinstance(val, (float, np.floating)):
+        return float(val) + random.random() * 100
+    elif isinstance(val, str):
+        return val + "_x"
+    else:
+        # Fallback: convert to string and append
+        return str(val) + "_modified"
+
+
+def _modify_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Modify a single cell in a DataFrame.
+
+    Picks a random row and column, then mutates that cell's value.
+    """
+    if df.empty:
+        # Can't modify empty DataFrame, add a column instead
+        result = df.copy()
+        result["__test_modified__"] = 1
+        return result
+
+    result = df.copy()
+    row_idx = random.randint(0, len(df) - 1)
+    col_idx = random.randint(0, len(df.columns) - 1)
+
+    try:
+        current = result.iloc[row_idx, col_idx]
+        result.iloc[row_idx, col_idx] = _mutate_value(current)
+    except Exception:
+        # Fallback: add a column
+        result["__test_modified__"] = 1
+
+    return result
+
+
+def _modify_ndarray(arr: np.ndarray) -> np.ndarray:
+    """
+    Modify a single element in a numpy array.
+
+    Picks a random index and mutates that element.
+    """
+    if arr.size == 0:
+        return arr
+
+    result = arr.copy()
+    flat_idx = random.randint(0, arr.size - 1)
+    multi_idx = np.unravel_index(flat_idx, arr.shape)
+
+    try:
+        current = result[multi_idx]
+        result[multi_idx] = _mutate_value(current)
+    except Exception:
+        # Some arrays may not be writable; return as-is
+        pass
+
+    return result
+
+
+def _modify_series(s: pd.Series) -> pd.Series:
+    """
+    Modify a single element in a Series.
+
+    Picks a random index and mutates that element.
+    """
+    if len(s) == 0:
+        return s
+
+    result = s.copy()
+    idx = random.randint(0, len(s) - 1)
+
+    try:
+        current = result.iloc[idx]
+        result.iloc[idx] = _mutate_value(current)
+    except Exception:
+        pass
+
+    return result
+
+
+def _modify_list(lst: list) -> list:
+    """
+    Modify a single element in a list.
+
+    Picks a random index and mutates that element.
+    """
+    if not lst:
+        return lst + ["__modified__"]
+
+    result = lst.copy()
+    idx = random.randint(0, len(lst) - 1)
+    result[idx] = _mutate_value(result[idx])
+    return result
+
+
+def _modify_dict(d: dict) -> dict:
+    """
+    Modify a value of an existing key in a dict.
+
+    Picks a random key and mutates its value.
+    """
+    if not d:
+        return {**d, "__modified__": True}
+
+    result = d.copy()
+    key = random.choice(list(d.keys()))
+    result[key] = _mutate_value(result[key])
+    return result
+
+
+def _modify_object_field(obj: Any) -> Any:
+    """
+    Modify a field of an object that contains modifiable data.
+
+    Looks for attributes that are DataFrames, arrays, lists, dicts, or Series,
+    and applies the appropriate modification.
+    """
+    # First, make a deep copy to avoid modifying the original
+    try:
+        obj_copy = copy.deepcopy(obj)
+    except Exception:
+        return obj
+
+    # Find modifiable attributes
+    modifiable_attrs = []
+    for attr in dir(obj_copy):
+        if attr.startswith('_'):
+            continue
+        try:
+            val = getattr(obj_copy, attr)
+            if callable(val):
+                continue
+            if isinstance(val, (pd.DataFrame, pd.Series, np.ndarray, list, dict)):
+                modifiable_attrs.append((attr, val))
+        except Exception:
+            continue
+
+    if not modifiable_attrs:
+        return obj_copy
+
+    # Pick a random attribute to modify
+    attr, val = random.choice(modifiable_attrs)
+
+    try:
+        if isinstance(val, pd.DataFrame):
+            new_val = _modify_dataframe(val)
+        elif isinstance(val, pd.Series):
+            new_val = _modify_series(val)
+        elif isinstance(val, np.ndarray):
+            new_val = _modify_ndarray(val)
+        elif isinstance(val, list):
+            new_val = _modify_list(val)
+        elif isinstance(val, dict):
+            new_val = _modify_dict(val)
+        else:
+            new_val = val
+
+        setattr(obj_copy, attr, new_val)
+    except Exception:
+        pass
+
+    return obj_copy
 
 
 def _randomly_modify_namespace(
@@ -82,29 +265,25 @@ def _randomly_modify_namespace(
 
     for name in to_modify:
         value = namespace[name]
-        # Modify based on type
-        if isinstance(value, (int, float)):
-            namespace[name] = value + random.random() * 100
+
+        # Type-specific modification using helper functions
+        if isinstance(value, pd.DataFrame):
+            namespace[name] = _modify_dataframe(value)
+        elif isinstance(value, pd.Series):
+            namespace[name] = _modify_series(value)
+        elif isinstance(value, np.ndarray):
+            namespace[name] = _modify_ndarray(value)
+        elif isinstance(value, list):
+            namespace[name] = _modify_list(value)
+        elif isinstance(value, dict):
+            namespace[name] = _modify_dict(value)
+        elif isinstance(value, (int, float, np.integer, np.floating)):
+            namespace[name] = _mutate_value(value)
         elif isinstance(value, str):
             namespace[name] = value + "_modified"
-        elif isinstance(value, list):
-            namespace[name] = value + ["__modified__"]
-        elif isinstance(value, dict):
-            namespace[name] = {**value, "__modified__": True}
-        elif hasattr(value, "copy"):
-            # For pandas DataFrames, Series, etc.
-            try:
-                new_val = value.copy()
-                if hasattr(new_val, "__setitem__"):
-                    # Add a marker column or modify first column
-                    if hasattr(new_val, "columns"):  # DataFrame
-                        new_val["__test_modified__"] = 1
-                    elif hasattr(new_val, "iloc"):  # Series
-                        if len(new_val) > 0:
-                            new_val.iloc[0] = new_val.iloc[0] + 1 if isinstance(new_val.iloc[0], (int, float)) else "__mod__"
-                namespace[name] = new_val
-            except Exception:
-                pass
+        elif hasattr(value, "__dict__"):
+            # Try to modify an attribute of the object
+            namespace[name] = _modify_object_field(value)
 
     return to_modify
 
