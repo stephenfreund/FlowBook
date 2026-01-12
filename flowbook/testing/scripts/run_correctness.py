@@ -9,7 +9,6 @@ Options:
     -n, --iterations N     Number of iterations (default: 10)
     -s, --seed SEED        Random seed for reproducibility
     -o, --output DIR       Output directory (default: ./test_results)
-    -v, --verbose          Verbose output
 """
 
 import argparse
@@ -20,6 +19,7 @@ from flowbook.testing.notebook_loader import load_notebook
 from flowbook.testing.runner import SDCSimulator
 from flowbook.testing.correctness import run_correctness_test
 from flowbook.testing.results import ResultLogger, TestConfig
+from flowbook.util.output import log, timer
 
 
 def main():
@@ -44,11 +44,6 @@ def main():
         default="./test_results",
         help="Output directory (default: ./test_results)"
     )
-    parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Verbose output"
-    )
 
     args = parser.parse_args()
 
@@ -59,29 +54,29 @@ def main():
         sys.exit(1)
 
     # Load and execute notebook
-    print(f"Loading notebook: {args.notebook}")
-    cells = load_notebook(args.notebook)
-    print(f"Found {len(cells)} code cells")
+    with timer(key="script:load_notebook", message=f"Loading notebook {args.notebook}"):
+        cells = load_notebook(args.notebook)
 
-    print("Executing notebook...")
-    simulator = SDCSimulator(verbose=args.verbose)
-    simulator.execute_notebook(cells)
+    log(f"Found {len(cells)} code cells")
+
+    with timer(key="script:execute_notebook", message="Executing notebook"):
+        simulator = SDCSimulator()
+        simulator.execute_notebook(cells)
 
     # Check for execution errors
     errors = [r for r in simulator.cell_records.values() if r.error]
     if errors:
-        print(f"\nWarning: {len(errors)} cell(s) had execution errors")
+        log(f"Warning: {len(errors)} cell(s) had execution errors")
         for record in errors[:3]:
-            print(f"  Cell {record.cell_id}: {record.error}")
+            log(f"  Cell {record.cell_id}: {record.error}")
 
     # Run correctness tests
-    print(f"\nRunning {args.iterations} correctness tests...")
-    results = run_correctness_test(
-        simulator,
-        n_iterations=args.iterations,
-        seed=args.seed,
-        verbose=args.verbose,
-    )
+    with timer(key="script:run_tests", message=f"Running {args.iterations} correctness tests"):
+        results = run_correctness_test(
+            simulator,
+            n_iterations=args.iterations,
+            seed=args.seed,
+        )
 
     # Log results
     test_name = f"correctness_{notebook_path.stem}"

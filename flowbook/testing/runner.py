@@ -7,13 +7,14 @@ a running Jupyter kernel.
 """
 
 import random
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
+import time
 
 import numpy as np
 
 from flowbook.kernel.checkpoint import Checkpoint, Checkpoints
+from flowbook.util.output import log, timer
 from flowbook.kernel.models import TrackingData
 from flowbook.kernel.tracking import TrackingDict
 from flowbook.sdc_kernel.sdc_enforcer import (
@@ -70,20 +71,14 @@ class SDCSimulator:
         record = simulator.cell_records["cell_a"]
     """
 
-    def __init__(self, verbose: bool = False):
-        """
-        Initialize the SDC simulator.
-
-        Args:
-            verbose: If True, print execution progress
-        """
+    def __init__(self):
+        """Initialize the SDC simulator."""
         self.checkpoints = Checkpoints(sanity_check=False, warn_classes=False)
         self.enforcer = SDCEnforcer(self.checkpoints)
         self.namespace: Dict[str, Any] = {}
         self.cell_records: Dict[str, CellRecord] = {}
         self.cells: List[Cell] = []
         self.execution_log: List[ExecutionLog] = []
-        self.verbose = verbose
         self._tracking_dict: Optional[TrackingDict] = None
 
     def execute_notebook(self, cells: List[Cell]) -> None:
@@ -134,51 +129,53 @@ class SDCSimulator:
         if self._tracking_dict is None:
             self._tracking_dict = TrackingDict(self.namespace)
 
-        start_time = time.perf_counter()
-        self._log("execute_start", cell.cell_id)
+        with timer(key="sim:execute_cell", message=f"Execute cell {cell.cell_id}") as t_total:
+            self._log("execute_start", cell.cell_id)
 
-        # 1. Save pre-checkpoint
-        checkpoint_start = time.perf_counter()
-        pre_name = f"{PRE_CHECKPOINT_PREFIX}{cell.cell_id}"
-        self.checkpoints.save(pre_name, self.namespace, max_size_mb=None)
-        pre_checkpoint = self.checkpoints.saved[pre_name]
+            # 1. Save pre-checkpoint
+            with timer(key="sim:pre_checkpoint") as t_pre:
+                pre_name = f"{PRE_CHECKPOINT_PREFIX}{cell.cell_id}"
+                self.checkpoints.save(pre_name, self.namespace, max_size_mb=None)
+                pre_checkpoint = self.checkpoints.saved[pre_name]
 
-        # 2. Set random seeds based on cell index for deterministic execution
-        self._set_random_seeds(cell.index)
+            # 2. Set random seeds based on cell index for deterministic execution
+            self._set_random_seeds(cell.index)
 
-        # 3. Execute code with tracking
-        exec_start = time.perf_counter()
-        error = None
-        with self._tracking_dict.track_execution():
-            try:
-                exec(cell.source, self._tracking_dict)
-            except Exception as e:
-                error = str(e)
+            # 3. Execute code with tracking
+            with timer(key="sim:exec") as t_exec:
+                error = None
+                with self._tracking_dict.track_execution():
+                    try:
+                        exec(cell.source, self._tracking_dict)
+                    except Exception as e:
+                        error = str(e)
 
-        exec_time = (time.perf_counter() - exec_start) * 1000
+            exec_time = t_exec.duration()
 
-        # 4. Get tracking data
-        tracking = self._tracking_dict.get_tracking_data()
+            # 4. Get tracking data
+            tracking = self._tracking_dict.get_tracking_data()
 
-        # 5. Save post-checkpoint
-        post_name = f"{POST_CHECKPOINT_PREFIX}{cell.cell_id}"
-        self.checkpoints.save(post_name, self.namespace, max_size_mb=None)
-        post_checkpoint = self.checkpoints.saved[post_name]
-        checkpoint_time = (time.perf_counter() - checkpoint_start) * 1000 - exec_time
+            # 5. Save post-checkpoint
+            with timer(key="sim:post_checkpoint") as t_post:
+                post_name = f"{POST_CHECKPOINT_PREFIX}{cell.cell_id}"
+                self.checkpoints.save(post_name, self.namespace, max_size_mb=None)
+                post_checkpoint = self.checkpoints.saved[post_name]
 
-        # 6. Run SDC check
-        check_start = time.perf_counter()
-        sdc_result = self.enforcer.check(
-            cell_id=cell.cell_id,
-            pre_checkpoint=pre_checkpoint,
-            post_checkpoint=post_checkpoint,
-            tracking=tracking,
-            continue_on_violation=True,  # Continue to compute staleness
-            namespace=self.namespace,
-        )
-        check_time = (time.perf_counter() - check_start) * 1000
+            checkpoint_time = t_pre.duration() + t_post.duration()
 
-        total_time = (time.perf_counter() - start_time) * 1000
+            # 6. Run SDC check
+            with timer(key="sim:sdc_check") as t_check:
+                sdc_result = self.enforcer.check(
+                    cell_id=cell.cell_id,
+                    pre_checkpoint=pre_checkpoint,
+                    post_checkpoint=post_checkpoint,
+                    tracking=tracking,
+                    continue_on_violation=True,  # Continue to compute staleness
+                    namespace=self.namespace,
+                )
+            check_time = t_check.duration()
+
+        total_time = t_total.duration()
 
         # Create record
         record = CellRecord(
@@ -210,9 +207,8 @@ class SDCSimulator:
             },
         )
 
-        if self.verbose:
-            status = "ERROR" if error else ("VIOLATION" if sdc_result.violation else "OK")
-            print(f"  [{status}] {cell.cell_id}: {total_time:.2f}ms")
+        status = "ERROR" if error else ("VIOLATION" if sdc_result.violation else "OK")
+        log(f"[{status}] {cell.cell_id}: {total_time:.2f}ms")
 
         return record
 

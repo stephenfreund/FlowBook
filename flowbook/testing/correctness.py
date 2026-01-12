@@ -6,12 +6,12 @@ original execution.
 """
 
 import random
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
 from flowbook.kernel.checkpoint import Checkpoint
+from flowbook.util.output import log, timer
 
 from .runner import SDCSimulator, CellRecord
 from .notebook_loader import Cell, load_notebook
@@ -76,7 +76,6 @@ def run_correctness_test(
     simulator: SDCSimulator,
     n_iterations: int = 10,
     seed: Optional[int] = None,
-    verbose: bool = False,
 ) -> List[CorrectnessResult]:
     """
     Run correctness tests on an already-executed simulator.
@@ -91,7 +90,6 @@ def run_correctness_test(
         simulator: SDCSimulator that has already executed a notebook
         n_iterations: Number of test iterations
         seed: Random seed for reproducibility
-        verbose: If True, print progress
 
     Returns:
         List of CorrectnessResult objects
@@ -113,8 +111,7 @@ def run_correctness_test(
         if cell is None:
             continue
 
-        if verbose:
-            print(f"  Iteration {i + 1}/{n_iterations}: Testing cell {cell_id}")
+        log(f"Iteration {i + 1}/{n_iterations}: Testing cell {cell_id}")
 
         # Get original record and post-checkpoint
         original_record = simulator.cell_records.get(cell_id)
@@ -126,19 +123,20 @@ def run_correctness_test(
 
         # Restore pre-checkpoint and re-execute
         try:
-            start_time = time.perf_counter()
-            simulator.restore_pre_checkpoint(cell_id)
-            new_record = simulator.execute_cell(cell)
-            re_exec_time = (time.perf_counter() - start_time) * 1000
+            with timer(key="correct:re_execute", message=f"Re-execute {cell_id}") as t:
+                simulator.restore_pre_checkpoint(cell_id)
+                new_record = simulator.execute_cell(cell)
+            re_exec_time = t.duration()
 
             # Get the actual post state
             actual_post = simulator.get_post_checkpoint(cell_id)
             actual_changes = set(new_record.sdc_result.changed_variables)
 
             # Compare checkpoints
-            passed, unexpected_diffs, missing_changes, extra_changes = _compare_checkpoints(
-                expected_post, actual_post, expected_changes
-            )
+            with timer(key="correct:compare_checkpoints"):
+                passed, unexpected_diffs, missing_changes, extra_changes = _compare_checkpoints(
+                    expected_post, actual_post, expected_changes
+                )
 
             # Also check for execution errors
             if new_record.error and not original_record.error:
@@ -175,9 +173,8 @@ def run_correctness_test(
 
         results.append(result)
 
-        if verbose:
-            status = "PASS" if result.passed else "FAIL"
-            print(f"    [{status}] {len(result.unexpected_diffs)} diffs")
+        status = "PASS" if result.passed else "FAIL"
+        log(f"  [{status}] {len(result.unexpected_diffs)} diffs")
 
     return results
 
@@ -186,7 +183,6 @@ def run_correctness_test_from_notebook(
     notebook_path: str,
     n_iterations: int = 10,
     seed: Optional[int] = None,
-    verbose: bool = False,
 ) -> tuple:
     """
     Run correctness tests on a notebook file.
@@ -200,31 +196,26 @@ def run_correctness_test_from_notebook(
         notebook_path: Path to .ipynb file
         n_iterations: Number of test iterations
         seed: Random seed for reproducibility
-        verbose: If True, print progress
 
     Returns:
         Tuple of (simulator, results)
     """
-    if verbose:
-        print(f"Loading notebook: {notebook_path}")
+    with timer(key="correct:load_notebook", message=f"Loading notebook {notebook_path}"):
+        cells = load_notebook(notebook_path)
 
-    cells = load_notebook(notebook_path)
+    log(f"Found {len(cells)} code cells")
 
-    if verbose:
-        print(f"Found {len(cells)} code cells")
-        print("Executing notebook...")
+    with timer(key="correct:execute_notebook", message="Executing notebook"):
+        simulator = SDCSimulator()
+        simulator.execute_notebook(cells)
 
-    simulator = SDCSimulator(verbose=verbose)
-    simulator.execute_notebook(cells)
+    log(f"Running {n_iterations} correctness tests")
 
-    if verbose:
-        print(f"\nRunning {n_iterations} correctness tests...")
-
-    results = run_correctness_test(
-        simulator,
-        n_iterations=n_iterations,
-        seed=seed,
-        verbose=verbose,
-    )
+    with timer(key="correct:run_tests", message=f"Running {n_iterations} correctness tests"):
+        results = run_correctness_test(
+            simulator,
+            n_iterations=n_iterations,
+            seed=seed,
+        )
 
     return simulator, results

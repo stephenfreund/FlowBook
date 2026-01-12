@@ -8,7 +8,6 @@ Measures SDC checking overhead in various scenarios:
 
 import copy
 import random
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
@@ -17,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from flowbook.kernel.checkpoint import Checkpoint, Checkpoints
+from flowbook.util.output import log, timer
 from flowbook.kernel.models import TrackingData
 from flowbook.sdc_kernel.sdc_enforcer import (
     SDCEnforcer,
@@ -310,23 +310,24 @@ def _measure_sdc_check(
     # For measurement, we use the same namespace for both (no change scenario)
     # or modified namespace (change scenario)
 
-    checkpoints.save(pre_name, namespace, max_size_mb=None)
-    pre_checkpoint = checkpoints.saved[pre_name]
+    with timer(key="perf:save_pre_checkpoint"):
+        checkpoints.save(pre_name, namespace, max_size_mb=None)
+        pre_checkpoint = checkpoints.saved[pre_name]
 
-    # For post, we just use the same namespace (this simulates re-running)
-    checkpoints.save(post_name, namespace, max_size_mb=None)
-    post_checkpoint = checkpoints.saved[post_name]
+    with timer(key="perf:save_post_checkpoint"):
+        checkpoints.save(post_name, namespace, max_size_mb=None)
+        post_checkpoint = checkpoints.saved[post_name]
 
-    start = time.perf_counter()
-    result = enforcer.check(
-        cell_id=cell_id,
-        pre_checkpoint=pre_checkpoint,
-        post_checkpoint=post_checkpoint,
-        tracking=tracking,
-        continue_on_violation=True,
-        namespace=namespace,
-    )
-    check_time = (time.perf_counter() - start) * 1000
+    with timer(key="perf:sdc_check", message=f"SDC check {cell_id}") as t:
+        result = enforcer.check(
+            cell_id=cell_id,
+            pre_checkpoint=pre_checkpoint,
+            post_checkpoint=post_checkpoint,
+            tracking=tracking,
+            continue_on_violation=True,
+            namespace=namespace,
+        )
+    check_time = t.duration()
 
     # Clean up temporary checkpoints
     checkpoints.delete(pre_name)
@@ -340,7 +341,6 @@ def run_performance_test(
     n_iterations: int = 10,
     seed: Optional[int] = None,
     modifications_per_test: int = 3,
-    verbose: bool = False,
 ) -> List[PerformanceResult]:
     """
     Run performance tests on an already-executed simulator.
@@ -355,7 +355,6 @@ def run_performance_test(
         n_iterations: Number of test iterations
         seed: Random seed for reproducibility
         modifications_per_test: Number of variables to modify in modified scenario
-        verbose: If True, print progress
 
     Returns:
         List of PerformanceResult objects
@@ -373,8 +372,7 @@ def run_performance_test(
         # Pick a random cell
         cell_id = random.choice(cell_ids)
 
-        if verbose:
-            print(f"  Iteration {i + 1}/{n_iterations}: Testing cell {cell_id}")
+        log(f"Iteration {i + 1}/{n_iterations}: Testing cell {cell_id}")
 
         # Get original record
         original_record = simulator.cell_records.get(cell_id)
@@ -384,19 +382,19 @@ def run_performance_test(
         tracking = original_record.tracking
 
         # ===== CLEAN SCENARIO =====
-        # Restore pre-checkpoint and measure check time
-        start_total = time.perf_counter()
-        simulator.restore_pre_checkpoint(cell_id)
-        namespace_copy = simulator.get_current_namespace()
+        with timer(key="perf:clean_scenario", message=f"Clean scenario {cell_id}") as t_clean:
+            with timer(key="perf:restore_pre"):
+                simulator.restore_pre_checkpoint(cell_id)
+                namespace_copy = simulator.get_current_namespace()
 
-        check_time, sdc_result = _measure_sdc_check(
-            simulator.enforcer,
-            simulator.checkpoints,
-            cell_id,
-            namespace_copy,
-            tracking,
-        )
-        total_time = (time.perf_counter() - start_total) * 1000
+            check_time, sdc_result = _measure_sdc_check(
+                simulator.enforcer,
+                simulator.checkpoints,
+                cell_id,
+                namespace_copy,
+                tracking,
+            )
+        total_time = t_clean.duration()
 
         clean_result = PerformanceResult(
             cell_id=cell_id,
@@ -416,30 +414,63 @@ def run_performance_test(
         )
         results.append(clean_result)
 
-        if verbose:
-            print(f"    [CLEAN] check: {check_time:.3f}ms, total: {total_time:.3f}ms")
+        log(f"  [CLEAN] check: {check_time:.3f}ms, total: {total_time:.3f}ms")
 
         # ===== MODIFIED SCENARIO =====
-        # Copy post state and randomly modify variables
-        start_total = time.perf_counter()
-        simulator.restore_post_checkpoint(cell_id)
-        namespace_copy = simulator.get_current_namespace()
+        with timer(key="perf:modified_scenario", message=f"Modified scenario {cell_id}") as t_mod:
+            with timer(key="perf:restore_post"):
+                simulator.restore_post_checkpoint(cell_id)
+                namespace_copy = simulator.get_current_namespace()
 
-        # Modify some variables
-        modified_vars = _randomly_modify_namespace(
-            namespace_copy,
-            modifications_per_test,
-            exclude={"__builtins__", "__name__", "__doc__"},
-        )
+            # Save pre-modification checkpoint
+            pre_mod_name = f"_perf_pre_mod_{cell_id}"
+            with timer(key="perf:save_pre_mod"):
+                simulator.checkpoints.save(pre_mod_name, namespace_copy, max_size_mb=None)
+                pre_mod_checkpoint = simulator.checkpoints.saved[pre_mod_name]
 
-        check_time, sdc_result = _measure_sdc_check(
-            simulator.enforcer,
-            simulator.checkpoints,
-            cell_id,
-            namespace_copy,
-            tracking,
-        )
-        total_time = (time.perf_counter() - start_total) * 1000
+            with timer(key="perf:modify_namespace"):
+                modified_vars = _randomly_modify_namespace(
+                    namespace_copy,
+                    modifications_per_test,
+                    exclude={"__builtins__", "__name__", "__doc__"},
+                )
+
+            # Save post-modification checkpoint and measure diff time
+            post_mod_name = f"_perf_post_mod_{cell_id}"
+            with timer(key="perf:save_post_mod"):
+                simulator.checkpoints.save(post_mod_name, namespace_copy, max_size_mb=None)
+                post_mod_checkpoint = simulator.checkpoints.saved[post_mod_name]
+
+            with timer(key="perf:sdc_check", message=f"SDC check {cell_id}") as t_check:
+                sdc_result = simulator.enforcer.check(
+                    cell_id=cell_id,
+                    pre_checkpoint=pre_mod_checkpoint,
+                    post_checkpoint=post_mod_checkpoint,
+                    tracking=tracking,
+                    continue_on_violation=True,
+                    namespace=namespace_copy,
+                )
+            check_time = t_check.duration()
+
+            # Clean up temporary checkpoints
+            simulator.checkpoints.delete(pre_mod_name)
+            simulator.checkpoints.delete(post_mod_name)
+
+            # Verify that diff detected changes for modified variables
+            # Only check variables that are tracked by this cell (reads or writes)
+            if modified_vars:
+                tracked_vars = tracking.reads_before_writes | tracking.writes
+                modified_and_tracked = set(modified_vars) & tracked_vars
+                if modified_and_tracked:
+                    detected = set(sdc_result.changed_variables)
+                    if not detected.intersection(modified_and_tracked):
+                        raise AssertionError(
+                            f"Diff failed to detect modifications! "
+                            f"Modified (tracked): {sorted(modified_and_tracked)}, "
+                            f"Detected: {sdc_result.changed_variables}"
+                        )
+
+        total_time = t_mod.duration()
 
         modified_result = PerformanceResult(
             cell_id=cell_id,
@@ -459,8 +490,7 @@ def run_performance_test(
         )
         results.append(modified_result)
 
-        if verbose:
-            print(f"    [MODIFIED] check: {check_time:.3f}ms, modified: {modified_vars}")
+        log(f"  [MODIFIED] check: {check_time:.3f}ms, modified: {modified_vars}")
 
     return results
 
@@ -470,7 +500,6 @@ def run_performance_test_from_notebook(
     n_iterations: int = 10,
     seed: Optional[int] = None,
     modifications_per_test: int = 3,
-    verbose: bool = False,
 ) -> tuple:
     """
     Run performance tests on a notebook file.
@@ -485,33 +514,28 @@ def run_performance_test_from_notebook(
         n_iterations: Number of test iterations
         seed: Random seed for reproducibility
         modifications_per_test: Number of variables to modify per test
-        verbose: If True, print progress
 
     Returns:
         Tuple of (simulator, results)
     """
-    if verbose:
-        print(f"Loading notebook: {notebook_path}")
+    with timer(key="perf:load_notebook", message=f"Loading notebook {notebook_path}"):
+        cells = load_notebook(notebook_path)
 
-    cells = load_notebook(notebook_path)
+    log(f"Found {len(cells)} code cells")
 
-    if verbose:
-        print(f"Found {len(cells)} code cells")
-        print("Executing notebook...")
+    with timer(key="perf:execute_notebook", message="Executing notebook"):
+        simulator = SDCSimulator()
+        simulator.execute_notebook(cells)
 
-    simulator = SDCSimulator(verbose=verbose)
-    simulator.execute_notebook(cells)
+    log(f"Running {n_iterations} performance tests")
 
-    if verbose:
-        print(f"\nRunning {n_iterations} performance tests...")
-
-    results = run_performance_test(
-        simulator,
-        n_iterations=n_iterations,
-        seed=seed,
-        modifications_per_test=modifications_per_test,
-        verbose=verbose,
-    )
+    with timer(key="perf:run_tests", message=f"Running {n_iterations} performance tests"):
+        results = run_performance_test(
+            simulator,
+            n_iterations=n_iterations,
+            seed=seed,
+            modifications_per_test=modifications_per_test,
+        )
 
     return simulator, results
 
@@ -540,6 +564,26 @@ def summarize_performance_results(results: List[PerformanceResult]) -> Dict[str,
             "median": sorted_vals[len(sorted_vals) // 2],
         }
 
+    # Per-cell breakdown
+    per_cell: Dict[str, Dict[str, Any]] = {}
+    for r in results:
+        if r.cell_id not in per_cell:
+            per_cell[r.cell_id] = {
+                "clean_times": [],
+                "modified_times": [],
+            }
+        if r.scenario == "clean":
+            per_cell[r.cell_id]["clean_times"].append(r.check_time_ms)
+        else:
+            per_cell[r.cell_id]["modified_times"].append(r.check_time_ms)
+
+    # Compute stats for each cell
+    for cell_id, cell_data in per_cell.items():
+        # Each experiment runs both clean and modified, so count = number of clean runs
+        cell_data["count"] = len(cell_data["clean_times"])
+        cell_data["clean_check_time_ms"] = stats(cell_data.pop("clean_times"))
+        cell_data["modified_check_time_ms"] = stats(cell_data.pop("modified_times"))
+
     return {
         "total_tests": len(results),
         "clean": {
@@ -553,4 +597,5 @@ def summarize_performance_results(results: List[PerformanceResult]) -> Dict[str,
             "total_time_ms": stats([r.total_time_ms for r in modified_results]),
             "avg_modifications": sum(r.num_modifications for r in modified_results) / len(modified_results) if modified_results else 0,
         },
+        "per_cell": per_cell,
     }
