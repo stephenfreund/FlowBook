@@ -100,8 +100,24 @@ class SDCSimulator:
         # Create tracking dict wrapping namespace
         self._tracking_dict = TrackingDict(self.namespace)
 
+        # Initialize matplotlib inline mode (equivalent to %matplotlib inline)
+        self._init_matplotlib()
+
         for cell in cells:
             self.execute_cell(cell)
+
+    def _init_matplotlib(self) -> None:
+        """Initialize matplotlib with inline/agg backend for non-interactive use."""
+        init_code = """
+import matplotlib
+matplotlib.use('agg')
+import matplotlib.pyplot as plt
+plt.ioff()
+"""
+        try:
+            exec(init_code, self.namespace)
+        except Exception:
+            pass  # matplotlib may not be installed
 
     def _set_random_seeds(self, cell_index: int) -> None:
         """
