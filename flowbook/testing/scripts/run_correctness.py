@@ -6,7 +6,7 @@ Usage:
     python -m flowbook.testing.scripts.run_correctness notebook.ipynb [options]
 
 Options:
-    -n, --iterations N     Number of iterations (default: 10)
+    -n, --iterations N     Number of iterations per cell (default: 10)
     -s, --seed SEED        Random seed for reproducibility
     -o, --output DIR       Output directory (default: ./test_results)
 """
@@ -31,7 +31,7 @@ def main():
         "-n", "--iterations",
         type=int,
         default=10,
-        help="Number of test iterations (default: 10)"
+        help="Number of iterations per cell (default: 10)"
     )
     parser.add_argument(
         "-s", "--seed",
@@ -71,10 +71,11 @@ def main():
             log(f"  Cell {record.cell_id}: {record.error}")
 
     # Run correctness tests
-    with timer(key="script:run_tests", message=f"Running {args.iterations} correctness tests"):
+    total_iterations = len(cells) * args.iterations
+    with timer(key="script:run_tests", message=f"Running {total_iterations} correctness tests"):
         results = run_correctness_test(
             simulator,
-            n_iterations=args.iterations,
+            iterations_per_cell=args.iterations,
             seed=args.seed,
         )
 
@@ -82,7 +83,7 @@ def main():
     test_name = f"correctness_{notebook_path.stem}"
     logger = ResultLogger(args.output, test_name, test_type="correctness")
     logger.set_config(TestConfig(
-        n_iterations=args.iterations,
+        n_iterations=total_iterations,
         seed=args.seed,
         notebook=args.notebook,
     ))
@@ -100,7 +101,7 @@ def main():
     print(f"CORRECTNESS TEST RESULTS")
     print(f"{'=' * 60}")
     print(f"Notebook: {args.notebook}")
-    print(f"Cells: {len(cells)} | Iterations: {args.iterations} | Seed: {args.seed}")
+    print(f"Cells: {len(cells)} | Iterations/cell: {args.iterations} | Total: {total_iterations} | Seed: {args.seed}")
     print(f"{'=' * 60}")
     print(f"Total Tests: {len(results)}")
     print(f"Passed: {passed} ({100*passed/len(results):.1f}%)")

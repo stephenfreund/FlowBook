@@ -74,21 +74,20 @@ def _compare_checkpoints(
 
 def run_correctness_test(
     simulator: SDCSimulator,
-    n_iterations: int = 10,
+    iterations_per_cell: int = 10,
     seed: Optional[int] = None,
 ) -> List[CorrectnessResult]:
     """
     Run correctness tests on an already-executed simulator.
 
-    For each iteration:
-    1. Pick a random cell
-    2. Restore its pre-checkpoint
-    3. Re-execute the cell
-    4. Compare the resulting state to the original post-checkpoint
+    For each cell, runs the specified number of iterations:
+    1. Restore its pre-checkpoint
+    2. Re-execute the cell
+    3. Compare the resulting state to the original post-checkpoint
 
     Args:
         simulator: SDCSimulator that has already executed a notebook
-        n_iterations: Number of test iterations
+        iterations_per_cell: Number of test iterations per cell
         seed: Random seed for reproducibility
 
     Returns:
@@ -98,20 +97,16 @@ def run_correctness_test(
         random.seed(seed)
 
     results: List[CorrectnessResult] = []
-    cell_ids = simulator.get_cell_ids()
+    cells = simulator.cells
 
-    if not cell_ids:
+    if not cells:
         raise ValueError("No cells to test - execute a notebook first")
 
-    for i in range(n_iterations):
-        # Pick a random cell
-        cell_id = random.choice(cell_ids)
-        cell = simulator.get_cell(cell_id)
+    total_iterations = len(cells) * iterations_per_cell
+    iteration = 0
 
-        if cell is None:
-            continue
-
-        log(f"Iteration {i + 1}/{n_iterations}: Testing cell {cell_id}")
+    for cell in cells:
+        cell_id = cell.cell_id
 
         # Get original record and post-checkpoint
         original_record = simulator.cell_records.get(cell_id)
@@ -121,67 +116,71 @@ def run_correctness_test(
         expected_post = simulator.get_post_checkpoint(cell_id)
         expected_changes = set(original_record.sdc_result.changed_variables)
 
-        # Restore pre-checkpoint and re-execute
-        try:
-            with timer(key="correct:re_execute", message=f"Re-execute {cell_id}") as t:
-                simulator.restore_pre_checkpoint(cell_id)
-                new_record = simulator.execute_cell(cell)
-            re_exec_time = t.duration()
+        for i in range(iterations_per_cell):
+            iteration += 1
+            log(f"Iteration {iteration}/{total_iterations}: Cell {cell_id} ({i + 1}/{iterations_per_cell})")
 
-            # Get the actual post state
-            actual_post = simulator.get_post_checkpoint(cell_id)
-            actual_changes = set(new_record.sdc_result.changed_variables)
+            # Restore pre-checkpoint and re-execute
+            try:
+                with timer(key="correct:re_execute", message=f"Re-execute {cell_id}") as t:
+                    simulator.restore_pre_checkpoint(cell_id)
+                    new_record = simulator.execute_cell(cell)
+                re_exec_time = t.duration()
 
-            # Compare checkpoints
-            with timer(key="correct:compare_checkpoints"):
-                passed, unexpected_diffs, missing_changes, extra_changes = _compare_checkpoints(
-                    expected_post, actual_post, expected_changes
+                # Get the actual post state
+                actual_post = simulator.get_post_checkpoint(cell_id)
+                actual_changes = set(new_record.sdc_result.changed_variables)
+
+                # Compare checkpoints
+                with timer(key="correct:compare_checkpoints"):
+                    passed, unexpected_diffs, missing_changes, extra_changes = _compare_checkpoints(
+                        expected_post, actual_post, expected_changes
+                    )
+
+                # Also check for execution errors
+                if new_record.error and not original_record.error:
+                    passed = False
+                    unexpected_diffs["__execution_error__"] = new_record.error
+
+                result = CorrectnessResult(
+                    cell_id=cell_id,
+                    iteration=i + 1,
+                    passed=passed,
+                    expected_changes=list(expected_changes),
+                    actual_changes=list(actual_changes),
+                    unexpected_diffs=unexpected_diffs,
+                    missing_changes=missing_changes,
+                    extra_changes=extra_changes,
+                    execution_time_ms=original_record.execution_time_ms,
+                    re_execution_time_ms=re_exec_time,
                 )
 
-            # Also check for execution errors
-            if new_record.error and not original_record.error:
-                passed = False
-                unexpected_diffs["__execution_error__"] = new_record.error
+            except Exception as e:
+                result = CorrectnessResult(
+                    cell_id=cell_id,
+                    iteration=i + 1,
+                    passed=False,
+                    expected_changes=list(expected_changes),
+                    actual_changes=[],
+                    unexpected_diffs={},
+                    missing_changes=[],
+                    extra_changes=[],
+                    execution_time_ms=original_record.execution_time_ms if original_record else 0,
+                    re_execution_time_ms=0,
+                    error=str(e),
+                )
 
-            result = CorrectnessResult(
-                cell_id=cell_id,
-                iteration=i + 1,
-                passed=passed,
-                expected_changes=list(expected_changes),
-                actual_changes=list(actual_changes),
-                unexpected_diffs=unexpected_diffs,
-                missing_changes=missing_changes,
-                extra_changes=extra_changes,
-                execution_time_ms=original_record.execution_time_ms,
-                re_execution_time_ms=re_exec_time,
-            )
+            results.append(result)
 
-        except Exception as e:
-            result = CorrectnessResult(
-                cell_id=cell_id,
-                iteration=i + 1,
-                passed=False,
-                expected_changes=list(expected_changes),
-                actual_changes=[],
-                unexpected_diffs={},
-                missing_changes=[],
-                extra_changes=[],
-                execution_time_ms=original_record.execution_time_ms if original_record else 0,
-                re_execution_time_ms=0,
-                error=str(e),
-            )
-
-        results.append(result)
-
-        status = "PASS" if result.passed else "FAIL"
-        log(f"  [{status}] {len(result.unexpected_diffs)} diffs")
+            status = "PASS" if result.passed else "FAIL"
+            log(f"  [{status}] {len(result.unexpected_diffs)} diffs")
 
     return results
 
 
 def run_correctness_test_from_notebook(
     notebook_path: str,
-    n_iterations: int = 10,
+    iterations_per_cell: int = 10,
     seed: Optional[int] = None,
 ) -> tuple:
     """
@@ -194,7 +193,7 @@ def run_correctness_test_from_notebook(
 
     Args:
         notebook_path: Path to .ipynb file
-        n_iterations: Number of test iterations
+        iterations_per_cell: Number of test iterations per cell
         seed: Random seed for reproducibility
 
     Returns:
@@ -209,12 +208,13 @@ def run_correctness_test_from_notebook(
         simulator = SDCSimulator()
         simulator.execute_notebook(cells)
 
-    log(f"Running {n_iterations} correctness tests")
+    total_iterations = len(cells) * iterations_per_cell
+    log(f"Running {iterations_per_cell} iterations per cell ({total_iterations} total)")
 
-    with timer(key="correct:run_tests", message=f"Running {n_iterations} correctness tests"):
+    with timer(key="correct:run_tests", message=f"Running {total_iterations} correctness tests"):
         results = run_correctness_test(
             simulator,
-            n_iterations=n_iterations,
+            iterations_per_cell=iterations_per_cell,
             seed=seed,
         )
 
