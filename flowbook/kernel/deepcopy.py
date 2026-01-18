@@ -145,6 +145,48 @@ _IMMUTABLE_INFERRED_KINDS: Set of pandas inferred_dtype values that are immutabl
     Used by diff module for fast-path column comparisons.
 
 ================================================================================
+LARGE IMMUTABLE LIST CACHING
+================================================================================
+
+For large lists (>= 1000 elements) containing only immutable values, we cache
+the checkpoint copy and reuse it on subsequent checkpoints if the list hasn't
+changed. This optimization avoids O(n) deep copy overhead for repeated
+checkpoints of unchanged data.
+
+How It Works
+------------
+1. When a large list is first checkpointed:
+   - Check if all elements are immutable (is_immutable check)
+   - If yes, compute content hash via hash(tuple(list))
+   - Create shallow copy (safe since elements are immutable)
+   - Cache: (original_list_ref, cached_copy, content_hash)
+
+2. On subsequent checkpoints of the same list:
+   - Check if list is still the same object (identity check)
+   - Compute current content hash
+   - If hash matches cached hash → reuse cached copy (cache hit)
+   - If hash differs → create new copy and update cache (cache miss)
+
+Cache Management
+----------------
+- _large_list_cache: Dict mapping id(list) -> cache entry
+- Cache is cleared when checkpoints are deleted/cleared (via clear_list_cache())
+- Cache is pruned when it exceeds _MAX_LIST_CACHE_SIZE entries
+- Stale entries (id reuse after GC) are detected via identity check
+
+Performance Characteristics
+---------------------------
+- Threshold: _LARGE_LIST_THRESHOLD = 1000 elements
+- First checkpoint: O(n) for immutability check + O(n) for hash + O(n) for copy
+- Subsequent unchanged: O(n) for hash only (copy is skipped)
+- Lists with mutable elements: No overhead beyond immutability check
+
+API
+---
+- clear_list_cache(): Clear all cached list copies (called by checkpoint.py)
+- _list_is_all_immutable(lst): Check if list contains only immutable elements
+
+================================================================================
 USAGE
 ================================================================================
 
@@ -188,6 +230,150 @@ from flowbook.kernel.opaque import OpaqueRegistry
 _nil = []
 
 _convert_object_dtypes = True
+
+
+# =============================================================================
+# Large Immutable List Caching
+# =============================================================================
+# For large lists containing only immutable values, we cache the checkpoint
+# copy and reuse it if the list hasn't changed. This avoids O(n) deep copy
+# on repeated checkpoints of unchanged data.
+#
+# See documentation section "LARGE IMMUTABLE LIST CACHING" above for details.
+# =============================================================================
+
+from typing import Dict, Tuple
+
+# Threshold for "large" list optimization (number of elements).
+# Lists smaller than this use standard deep copy without caching.
+# Rationale: At 1000 elements, hash cost (~0.1ms) is negligible compared
+# to deep copy cost (~1-10ms), and the cache lookup overhead is justified.
+_LARGE_LIST_THRESHOLD = 1000
+
+# Maximum number of lists to cache to prevent unbounded memory growth.
+# When exceeded, stale entries are pruned; if still too large, cache is cleared.
+_MAX_LIST_CACHE_SIZE = 100
+
+# Cache structure: id(original_list) -> (original_list_ref, cached_copy, content_hash)
+# - original_list_ref: Strong reference to detect id reuse after GC
+# - cached_copy: The shallow copy we return on cache hits
+# - content_hash: hash(tuple(list)) for change detection
+_large_list_cache: Dict[int, Tuple[list, list, int]] = {}
+
+
+def clear_list_cache() -> None:
+    """
+    Clear the large list checkpoint cache.
+
+    Called by checkpoint.py when checkpoints are deleted or cleared to:
+    1. Free memory held by cached list copies
+    2. Prevent stale cache entries from being used
+
+    This should be called when:
+    - All checkpoints are cleared (Checkpoints.clear())
+    - The last checkpoint is deleted (Checkpoints.delete())
+    """
+    _large_list_cache.clear()
+
+
+def get_list_cache_stats() -> Dict[str, int]:
+    """
+    Get statistics about the large list cache.
+
+    Returns:
+        Dict with 'size' (number of cached lists) and 'threshold' (min list size)
+    """
+    return {
+        'size': len(_large_list_cache),
+        'threshold': _LARGE_LIST_THRESHOLD,
+        'max_size': _MAX_LIST_CACHE_SIZE,
+    }
+
+
+def _prune_list_cache() -> None:
+    """
+    Remove stale entries from the list cache.
+
+    Stale entries occur when:
+    - A list is garbage collected and its id is reused for a different object
+    - We detect this by checking if the stored reference still has the same id
+
+    This is called automatically when the cache grows too large.
+    """
+    stale_ids = []
+    for lst_id, (cached_list, _, _) in _large_list_cache.items():
+        # If the reference's current id doesn't match the key, the original
+        # list was GC'd and the id was reused for a different object
+        if id(cached_list) != lst_id:
+            stale_ids.append(lst_id)
+
+    for lst_id in stale_ids:
+        del _large_list_cache[lst_id]
+
+    if stale_ids:
+        log(f"[deepcopy] Pruned {len(stale_ids)} stale entries from list cache")
+
+
+def _maybe_prune_list_cache() -> None:
+    """
+    Prune the list cache if it exceeds the maximum size.
+
+    Strategy:
+    1. First, remove stale entries (lists that were GC'd)
+    2. If still too large, clear the entire cache (simple but effective)
+
+    A more sophisticated LRU strategy could be implemented if needed,
+    but for typical notebook usage, full clear is acceptable.
+    """
+    if len(_large_list_cache) > _MAX_LIST_CACHE_SIZE:
+        _prune_list_cache()
+        # If still too large after pruning stale entries, clear everything
+        if len(_large_list_cache) > _MAX_LIST_CACHE_SIZE:
+            log(f"[deepcopy] List cache exceeded {_MAX_LIST_CACHE_SIZE} entries, clearing")
+            _large_list_cache.clear()
+
+
+def _list_is_all_immutable(lst: list) -> bool:
+    """
+    Check if all elements in a list are immutable (safe to shallow copy).
+
+    For very large lists (>10000 elements), uses sampling to quickly reject
+    lists with mutable elements before doing a full scan.
+
+    Args:
+        lst: List to check
+
+    Returns:
+        True if all elements are definitely immutable, False otherwise.
+        Returns False conservatively if unable to determine.
+    """
+    if not lst:
+        return True
+
+    n = len(lst)
+
+    # For very large lists, sample first to quickly reject mutable lists
+    # This avoids O(n) scan when the list clearly has mutable elements
+    if n > 10000:
+        # Sample: first 10, last 10, and 10 evenly spaced in middle
+        sample_indices = (
+            list(range(min(10, n))) +
+            list(range(max(0, n - 10), n)) +
+            [n * i // 12 for i in range(1, 11)]
+        )
+        # Deduplicate and bound
+        sample_indices = sorted(set(i for i in sample_indices if 0 <= i < n))
+
+        for i in sample_indices:
+            if not is_immutable(lst[i]):
+                return False
+
+    # Full check - required for correctness
+    for item in lst:
+        if not is_immutable(item):
+            return False
+
+    return True
 
 
 # ============================================================================
@@ -450,9 +636,74 @@ d[property] = _deepcopy_atomic
 
 
 def _deepcopy_list(x, memo):
-    """Deep copy a list."""
+    """
+    Deep copy a list with optimization for large immutable-content lists.
+
+    For lists with >= _LARGE_LIST_THRESHOLD elements containing only immutable
+    values, we cache the copy and reuse it on subsequent checkpoints if the
+    content hash matches. This avoids O(n) deep copy on repeated checkpoints
+    of unchanged data.
+
+    Optimization flow for large lists:
+    1. Check if already in memo (handles circular references)
+    2. Check if all elements are immutable
+    3. If immutable: compute hash, check cache, return cached or create new
+    4. If mutable: fall through to standard deep copy
+
+    Args:
+        x: List to deep copy
+        memo: Shared memo dict for tracking copied objects
+
+    Returns:
+        Deep copy of the list (or cached copy for large immutable lists)
+    """
+    obj_id = id(x)
+
+    # Already copied in this deepcopy operation (handles circular references)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    n = len(x)
+
+    # Optimization for large lists with immutable contents
+    if n >= _LARGE_LIST_THRESHOLD:
+        # Check if all elements are immutable (safe to shallow copy)
+        if _list_is_all_immutable(x):
+            try:
+                # Compute content hash for change detection
+                content_hash = hash(tuple(x))
+
+                # Check cache for existing copy
+                if obj_id in _large_list_cache:
+                    cached_list, cached_copy, cached_hash = _large_list_cache[obj_id]
+                    # Verify it's the same list object (not id reuse after GC)
+                    # and the contents haven't changed
+                    if cached_list is x and cached_hash == content_hash:
+                        # Cache hit! Reuse the same copy
+                        log(f"[deepcopy] Cache hit for immutable list ({n:,} elements)")
+                        memo[obj_id] = cached_copy
+                        return cached_copy
+
+                # Cache miss or stale entry - create new shallow copy
+                log(f"[deepcopy] Caching immutable list ({n:,} elements)")
+
+                # Prune cache if needed before adding new entry
+                _maybe_prune_list_cache()
+
+                # Shallow copy is safe since all elements are immutable
+                y = x.copy()
+                _large_list_cache[obj_id] = (x, y, content_hash)
+                memo[obj_id] = y
+                return y
+
+            except TypeError:
+                # Unhashable elements despite passing immutability check
+                # (shouldn't happen, but be safe)
+                log(f"[deepcopy] List has unhashable elements, using standard copy")
+
+    # Standard deep copy for small lists or lists with mutable contents
     y = []
-    memo[id(x)] = y
+    memo[obj_id] = y
     append = y.append
     for a in x:
         append(deepcopy(a, memo))

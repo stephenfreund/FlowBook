@@ -467,6 +467,37 @@ Disabling this may be useful for debugging but hurts performance.
 The current strategy (shallow + selective deep) balances both.
 
 
+9.4 Large Immutable List Caching
+--------------------------------
+For large lists (>= 1000 elements) containing only immutable values (int,
+float, str, bool, None, tuples of immutables, etc.), the deepcopy module
+caches the checkpoint copy and reuses it on subsequent checkpoints if the
+list hasn't changed.
+
+How it works:
+  1. First checkpoint: O(n) immutability check + O(n) hash + O(n) shallow copy
+  2. Subsequent checkpoints (unchanged): O(n) hash check only → cache hit
+  3. If list modified: O(n) hash detects change → new copy created
+
+Benefits:
+  - Repeated checkpoints of unchanged large lists are much faster
+  - Common in data science: large lists of feature names, column indices, etc.
+
+Cache management:
+  - Cache cleared when all checkpoints are deleted (Checkpoints.clear())
+  - Cache cleared when last checkpoint is deleted (Checkpoints.delete())
+  - Cache auto-prunes when it exceeds 100 entries
+  - Cache entries keyed by list id + content hash for change detection
+
+Configuration (in flowbook.kernel.deepcopy):
+  - _LARGE_LIST_THRESHOLD = 1000 (minimum list size for caching)
+  - _MAX_LIST_CACHE_SIZE = 100 (maximum cached lists)
+
+Diagnostics:
+  - get_list_cache_stats() returns cache size and configuration
+  - Log messages show cache hits/misses when FLOWBOOK_LOG=1
+
+
 10. USAGE EXAMPLES
 ------------------
 
@@ -2070,11 +2101,19 @@ class Checkpoints:
         """
         Delete a checkpoint by name.
 
+        Also clears the large list cache when the last checkpoint is deleted,
+        since cached list copies may reference data from deleted checkpoints.
+
         Args:
             name: Name of checkpoint to delete (no-op if doesn't exist)
         """
         if name in self.saved:
             del self.saved[name]
+            # Clear list cache when last checkpoint is deleted to free memory
+            # and avoid stale references
+            if not self.saved:
+                from flowbook.kernel.deepcopy import clear_list_cache
+                clear_list_cache()
 
     def list(self) -> list[str]:
         """
@@ -2086,8 +2125,16 @@ class Checkpoints:
         return list(self.saved.keys())
 
     def clear(self) -> None:
-        """Delete all checkpoints."""
+        """
+        Delete all checkpoints.
+
+        Also clears the large list cache to free memory and avoid stale
+        references to data from deleted checkpoints.
+        """
         self.saved.clear()
+        # Clear list cache to free memory held by cached list copies
+        from flowbook.kernel.deepcopy import clear_list_cache
+        clear_list_cache()
 
     def get(self, name: str) -> Checkpoint:
         """
