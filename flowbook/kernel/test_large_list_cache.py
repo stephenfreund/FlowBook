@@ -1,17 +1,21 @@
 """
-Tests for large immutable list caching optimization in deepcopy.
+Tests for large primitive list caching optimization in deepcopy.
 
 This module tests the optimization that caches checkpoint copies of large lists
-containing only immutable values, reusing them on subsequent checkpoints if the
-list hasn't changed.
+containing only PRIMITIVE immutable types (None, bool, int, float, complex,
+str, bytes), reusing them on subsequent checkpoints if the list hasn't changed.
+
+IMPORTANT: Only primitive types are cached - NOT tuples, frozensets, etc.
 
 Test categories:
-1. Cache hit/miss behavior
-2. Immutability detection
-3. Change detection via content hash
-4. Cache management (pruning, clearing)
-5. Integration with checkpoint system
-6. Edge cases and corner cases
+1. Primitive type detection (_list_has_only_primitives)
+2. General immutability detection (_list_is_all_immutable)
+3. Cache hit/miss behavior
+4. Change detection via content hash
+5. Cache management (pruning, clearing)
+6. Integration with checkpoint system
+7. Alias traversal optimization
+8. Edge cases and corner cases
 """
 
 import gc
@@ -23,8 +27,11 @@ from flowbook.kernel.deepcopy import (
     get_list_cache_stats,
     _large_list_cache,
     _list_is_all_immutable,
+    _list_has_only_primitives,
+    is_list_in_immutable_cache,
     _LARGE_LIST_THRESHOLD,
     _MAX_LIST_CACHE_SIZE,
+    _PRIMITIVE_IMMUTABLE_TYPES,
 )
 from flowbook.kernel.checkpoint import Checkpoints
 
@@ -90,6 +97,82 @@ class TestListIsAllImmutable:
         """Ensure mutable elements in middle are detected."""
         large_list = list(range(5000)) + [[1, 2, 3]] + list(range(5000))
         assert _list_is_all_immutable(large_list) is False
+
+
+class TestListHasOnlyPrimitives:
+    """Tests for _list_has_only_primitives() function.
+
+    This function is stricter than _list_is_all_immutable() - it only
+    returns True for primitive types (None, bool, int, float, complex,
+    str, bytes) and does NOT recurse into containers like tuples.
+    """
+
+    def test_empty_list(self):
+        assert _list_has_only_primitives([]) is True
+
+    def test_list_of_ints(self):
+        assert _list_has_only_primitives([1, 2, 3, 4, 5]) is True
+
+    def test_list_of_floats(self):
+        assert _list_has_only_primitives([1.1, 2.2, 3.3]) is True
+
+    def test_list_of_strings(self):
+        assert _list_has_only_primitives(['a', 'b', 'c']) is True
+
+    def test_list_of_none(self):
+        assert _list_has_only_primitives([None, None, None]) is True
+
+    def test_list_of_bools(self):
+        assert _list_has_only_primitives([True, False, True]) is True
+
+    def test_list_of_complex(self):
+        assert _list_has_only_primitives([1+2j, 3+4j]) is True
+
+    def test_list_of_bytes(self):
+        assert _list_has_only_primitives([b'a', b'b', b'c']) is True
+
+    def test_mixed_primitive_types(self):
+        assert _list_has_only_primitives([1, 'a', 3.14, None, True, b'x']) is True
+
+    # IMPORTANT: Tuples and frozensets are NOT primitives
+    def test_list_of_tuples_not_primitive(self):
+        """Tuples are NOT primitives - should return False."""
+        assert _list_has_only_primitives([(1, 2), (3, 4)]) is False
+
+    def test_list_of_frozensets_not_primitive(self):
+        """Frozensets are NOT primitives - should return False."""
+        assert _list_has_only_primitives([frozenset([1]), frozenset([2])]) is False
+
+    def test_list_of_empty_tuples_not_primitive(self):
+        """Even empty tuples are NOT primitives."""
+        assert _list_has_only_primitives([(), ()]) is False
+
+    def test_nested_tuples_not_primitive(self):
+        """Nested tuples are NOT primitives."""
+        assert _list_has_only_primitives([(1, (2, 3))]) is False
+
+    # Mutable types are not primitives either
+    def test_list_with_list_not_primitive(self):
+        assert _list_has_only_primitives([1, [2, 3]]) is False
+
+    def test_list_with_dict_not_primitive(self):
+        assert _list_has_only_primitives([1, {'a': 1}]) is False
+
+    def test_list_with_set_not_primitive(self):
+        assert _list_has_only_primitives([1, {1, 2, 3}]) is False
+
+    def test_primitive_types_constant(self):
+        """Verify the _PRIMITIVE_IMMUTABLE_TYPES constant contains expected types."""
+        assert type(None) in _PRIMITIVE_IMMUTABLE_TYPES
+        assert bool in _PRIMITIVE_IMMUTABLE_TYPES
+        assert int in _PRIMITIVE_IMMUTABLE_TYPES
+        assert float in _PRIMITIVE_IMMUTABLE_TYPES
+        assert complex in _PRIMITIVE_IMMUTABLE_TYPES
+        assert str in _PRIMITIVE_IMMUTABLE_TYPES
+        assert bytes in _PRIMITIVE_IMMUTABLE_TYPES
+        # NOT in the set:
+        assert tuple not in _PRIMITIVE_IMMUTABLE_TYPES
+        assert frozenset not in _PRIMITIVE_IMMUTABLE_TYPES
 
 
 class TestLargeListCacheBasics:
@@ -365,17 +448,17 @@ class TestEdgeCases:
         deepcopy(large_list, {})
         assert len(_large_list_cache) == 1
 
-    def test_list_of_empty_tuples(self):
-        """List of empty tuples should be cached."""
+    def test_list_of_empty_tuples_not_cached(self):
+        """List of tuples should NOT be cached (only primitives cached)."""
         large_list = [()] * (_LARGE_LIST_THRESHOLD + 100)
         deepcopy(large_list, {})
-        assert len(_large_list_cache) == 1
+        assert len(_large_list_cache) == 0  # NOT cached
 
-    def test_list_of_frozensets(self):
-        """List of frozensets should be cached."""
+    def test_list_of_frozensets_not_cached(self):
+        """List of frozensets should NOT be cached (only primitives cached)."""
         large_list = [frozenset([i]) for i in range(_LARGE_LIST_THRESHOLD + 100)]
         deepcopy(large_list, {})
-        assert len(_large_list_cache) == 1
+        assert len(_large_list_cache) == 0  # NOT cached
 
     def test_copy_is_independent(self):
         """Cached copy should be independent from original."""
@@ -478,8 +561,8 @@ class TestMixedTypes:
         deepcopy(large_list, {})
         assert len(_large_list_cache) == 1
 
-    def test_nested_immutable_structures(self):
-        """List with nested tuples and frozensets should be cached."""
+    def test_nested_immutable_structures_not_cached(self):
+        """List with tuples and frozensets should NOT be cached (only primitives)."""
         large_list = []
         for i in range(_LARGE_LIST_THRESHOLD + 100):
             if i % 2 == 0:
@@ -488,7 +571,7 @@ class TestMixedTypes:
                 large_list.append(frozenset([i]))
 
         deepcopy(large_list, {})
-        assert len(_large_list_cache) == 1
+        assert len(_large_list_cache) == 0  # NOT cached - contains tuples/frozensets
 
 
 class TestPerformanceCharacteristics:
@@ -521,3 +604,116 @@ class TestPerformanceCharacteristics:
         assert copy1 is not copy2
         # Deep copy means nested lists are also different
         assert copy1[0] is not copy2[0]
+
+
+class TestIsListInImmutableCache:
+    """Tests for is_list_in_immutable_cache() function."""
+
+    def setup_method(self):
+        clear_list_cache()
+
+    def teardown_method(self):
+        clear_list_cache()
+
+    def test_uncached_list_returns_false(self):
+        """List not in cache should return False."""
+        large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
+        assert is_list_in_immutable_cache(large_list) is False
+
+    def test_cached_list_returns_true(self):
+        """List in cache with matching hash should return True."""
+        large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
+        deepcopy(large_list, {})  # This caches the list
+        assert is_list_in_immutable_cache(large_list) is True
+
+    def test_modified_list_returns_false(self):
+        """Cached list with modified contents should return False."""
+        large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
+        deepcopy(large_list, {})  # Cache it
+        large_list[0] = 999  # Modify it
+        assert is_list_in_immutable_cache(large_list) is False
+
+    def test_small_list_never_cached(self):
+        """Small lists are never cached, so always return False."""
+        small_list = list(range(100))
+        deepcopy(small_list, {})  # Try to cache it
+        assert is_list_in_immutable_cache(small_list) is False
+
+    def test_non_primitive_list_not_cached(self):
+        """Lists with non-primitive types are not cached."""
+        large_list = [(i,) for i in range(_LARGE_LIST_THRESHOLD + 100)]
+        deepcopy(large_list, {})  # Won't be cached (contains tuples)
+        assert is_list_in_immutable_cache(large_list) is False
+
+    def test_different_list_same_content(self):
+        """Different list object with same content should return False."""
+        list1 = list(range(_LARGE_LIST_THRESHOLD + 100))
+        list2 = list(range(_LARGE_LIST_THRESHOLD + 100))
+        deepcopy(list1, {})  # Cache list1
+        # list2 is a different object, so not in cache
+        assert is_list_in_immutable_cache(list2) is False
+
+
+class TestAliasTraversalOptimization:
+    """Tests for alias traversal optimization using the cache."""
+
+    def setup_method(self):
+        clear_list_cache()
+
+    def teardown_method(self):
+        clear_list_cache()
+
+    def test_primitive_list_cached_during_checkpoint(self):
+        """Large primitive lists should be cached during checkpoint."""
+        cp = Checkpoints()
+        large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
+        user_ns = {'large_list': large_list}
+
+        cp.save('test', user_ns)
+
+        # List should be in cache
+        assert is_list_in_immutable_cache(large_list) is True
+
+    def test_non_primitive_list_not_cached_during_checkpoint(self):
+        """Large non-primitive lists should NOT be cached during checkpoint."""
+        cp = Checkpoints()
+        large_list = [(i,) for i in range(_LARGE_LIST_THRESHOLD + 100)]
+        user_ns = {'large_list': large_list}
+
+        cp.save('test', user_ns)
+
+        # List should NOT be in cache (contains tuples)
+        assert is_list_in_immutable_cache(large_list) is False
+
+    def test_checkpoint_with_shared_primitive_list(self):
+        """Checkpoint should handle shared references to primitive lists."""
+        cp = Checkpoints()
+        shared_list = list(range(_LARGE_LIST_THRESHOLD + 100))
+        user_ns = {
+            'a': shared_list,
+            'b': shared_list,  # Same object
+        }
+
+        cp.save('test', user_ns)
+
+        # Both should point to the same cached copy
+        checkpoint = cp.get('test')
+        assert checkpoint.user_ns['a'] is checkpoint.user_ns['b']
+
+    def test_alias_detection_correctness_with_cache(self):
+        """Alias detection should still work correctly with cache optimization."""
+        cp = Checkpoints()
+        # Create a structure with potential aliases
+        shared_obj = {'key': 'value'}
+        large_primitive_list = list(range(_LARGE_LIST_THRESHOLD + 100))
+        user_ns = {
+            'shared': shared_obj,
+            'ref1': {'nested': shared_obj},  # Alias to shared_obj
+            'big_list': large_primitive_list,
+        }
+
+        # Save should succeed and detect aliases correctly
+        saved, removed = cp.save('test', user_ns)
+        assert 'shared' in saved
+        assert 'ref1' in saved
+        assert 'big_list' in saved

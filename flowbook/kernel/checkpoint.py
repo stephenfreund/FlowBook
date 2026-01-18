@@ -467,21 +467,31 @@ Disabling this may be useful for debugging but hurts performance.
 The current strategy (shallow + selective deep) balances both.
 
 
-9.4 Large Immutable List Caching
+9.4 Large Primitive List Caching
 --------------------------------
-For large lists (>= 1000 elements) containing only immutable values (int,
-float, str, bool, None, tuples of immutables, etc.), the deepcopy module
-caches the checkpoint copy and reuses it on subsequent checkpoints if the
-list hasn't changed.
+For large lists (>= 1000 elements) containing only PRIMITIVE immutable types
+(None, bool, int, float, complex, str, bytes), the deepcopy module caches
+the checkpoint copy and reuses it on subsequent checkpoints if the list
+hasn't changed.
+
+IMPORTANT: Only primitive types are cached - NOT tuples, frozensets, etc.
+This keeps the eligibility check very fast (O(n) type checks, no recursion).
 
 How it works:
-  1. First checkpoint: O(n) immutability check + O(n) hash + O(n) shallow copy
+  1. First checkpoint: O(n) primitive check + O(n) hash + O(n) shallow copy
   2. Subsequent checkpoints (unchanged): O(n) hash check only → cache hit
   3. If list modified: O(n) hash detects change → new copy created
 
+Alias traversal optimization:
+  The cache is also used by alias detection (_collect_reachable_ids):
+  - Cached lists contain only primitives → no nested mutable references
+  - Alias detection skips element-by-element traversal for cached lists
+  - This turns O(n) traversal into O(1) cache lookup + O(n) hash
+
 Benefits:
   - Repeated checkpoints of unchanged large lists are much faster
-  - Common in data science: large lists of feature names, column indices, etc.
+  - Alias detection is faster for large primitive lists
+  - Common in data science: large lists of indices, feature names, etc.
 
 Cache management:
   - Cache cleared when all checkpoints are deleted (Checkpoints.clear())
@@ -896,6 +906,8 @@ from flowbook.kernel.deepcopy import (
     _IMMUTABLE_INFERRED_KINDS,
     _convert_object_column_dtype,
     _has_mutable_defaults,
+    is_list_in_immutable_cache,
+    _LARGE_LIST_THRESHOLD,
 )
 from flowbook.kernel.diff import Diff
 from flowbook.kernel.opaque import OpaqueRegistry
@@ -1253,6 +1265,13 @@ def _collect_reachable_ids_with_paths(
                 key_repr = repr(k) if not isinstance(k, str) else f"'{k}'"
                 _collect_reachable_ids_with_paths(v, f"{path}[{key_repr}]", visited, id_to_path)
         elif isinstance(obj, (list, tuple)):
+            # OPTIMIZATION: Skip large lists known to contain only primitive immutables.
+            # These are cached during deepcopy and have no nested mutable references.
+            if (isinstance(obj, list) and
+                len(obj) >= _LARGE_LIST_THRESHOLD and
+                is_list_in_immutable_cache(obj)):
+                # List is cached as primitive-only, no nested refs to traverse
+                return
             for i, item in enumerate(obj):
                 _collect_reachable_ids_with_paths(item, f"{path}[{i}]", visited, id_to_path)
         elif isinstance(obj, (set, frozenset)):
@@ -1384,6 +1403,13 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
             for v in obj.values():
                 _collect_reachable_ids(v, visited)
         elif isinstance(obj, (list, tuple)):
+            # OPTIMIZATION: Skip large lists known to contain only primitive immutables.
+            # These are cached during deepcopy and have no nested mutable references.
+            if (isinstance(obj, list) and
+                len(obj) >= _LARGE_LIST_THRESHOLD and
+                is_list_in_immutable_cache(obj)):
+                # List is cached as primitive-only, no nested refs to traverse
+                return
             for item in obj:
                 _collect_reachable_ids(item, visited)
         elif isinstance(obj, (set, frozenset)):
