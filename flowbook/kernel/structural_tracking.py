@@ -455,6 +455,10 @@ PANDAS_FUNCTIONS_TO_WRAP = [
 ]
 
 
+# Thread-local storage for the active structural tracker
+_structural_thread_local = threading.local()
+
+
 class StructuralAccessTracker:
     """
     Tracks structural attribute/method access via monkey-patching.
@@ -462,18 +466,22 @@ class StructuralAccessTracker:
     Similar to ColumnAccessTracker, but for structural attributes and methods
     like .columns, .shape, .describe(), etc.
 
+    Uses an always-on pattern for performance:
+    - Patches are installed once at first use (class-level)
+    - activate()/deactivate() control which tracker instance receives events
+    - Lazy registration: pandas objects are registered when accessed from namespace
+
     Attributes:
         mode: Current tracking mode ("off", "warn", "enforce")
 
     Usage:
         tracker = StructuralAccessTracker(mode=StructuralTrackingMode.WARN)
-        tracker.register(df, 'df')
-        tracker.install()
+        tracker.activate()
 
         # ... execute user code ...
         _ = df.columns  # Tracked!
 
-        tracker.uninstall()
+        tracker.deactivate()
         result = tracker.resolve_to_paths()
         # result = {'df': {'columns'}}
     """
@@ -485,18 +493,32 @@ class StructuralAccessTracker:
     _patches_installed = False
     _class_original_methods: Dict[str, Any] = {}
 
-    def __init__(self, mode: StructuralTrackingMode = StructuralTrackingMode.WARN):
+    @classmethod
+    def _get_active_tracker(cls) -> Optional['StructuralAccessTracker']:
+        """Get the currently active tracker (if any)."""
+        return getattr(_structural_thread_local, 'structural_tracker', None)
+
+    @classmethod
+    def _set_active_tracker(cls, tracker: Optional['StructuralAccessTracker']) -> None:
+        """Set the currently active tracker."""
+        _structural_thread_local.structural_tracker = tracker
+
+    def __init__(self, mode: StructuralTrackingMode = StructuralTrackingMode.WARN,
+                 namespace_ref: Optional[dict] = None):
         """
         Initialize the tracker.
 
         Args:
             mode: Tracking mode - OFF, WARN, or ENFORCE
+            namespace_ref: Reference to namespace for lazy fallback walks
         """
         self._mode = mode
         self._reads_by_id: Dict[int, Set[str]] = defaultdict(set)
         self._id_to_path: Dict[int, str] = {}
         self._original_methods: Dict[str, Any] = {}
         self._installed = False
+        # Reference to namespace for lazy fallback walk in resolve_to_paths()
+        self._namespace_ref = namespace_ref
 
     @property
     def mode(self) -> StructuralTrackingMode:
@@ -517,8 +539,50 @@ class StructuralAccessTracker:
         """
         self._mode = StructuralTrackingMode(mode.lower())
 
+    def set_namespace_ref(self, namespace_ref: dict) -> None:
+        """Set the namespace reference for lazy fallback walks."""
+        self._namespace_ref = namespace_ref
+
+    def _ensure_patches_installed(self) -> None:
+        """Ensure patches are installed (idempotent, first call only)."""
+        if StructuralAccessTracker._patches_installed:
+            return
+        with timer(key="tracking:patch_structural", message="Patch structural methods"):
+            self._patch_dataframe()
+            self._patch_series()
+            self._patch_structure_using_methods()
+            self._patch_indexers()
+            self._patch_pandas_functions()
+            self._patch_groupby()
+        # Save to class-level storage for other instances
+        StructuralAccessTracker._class_original_methods = self._original_methods.copy()
+        StructuralAccessTracker._patches_installed = True
+
+    def activate(self) -> None:
+        """Activate this tracker instance for the current thread.
+
+        This makes this tracker the active one that receives structural access events.
+        Very fast (~0.1µs) - just sets a thread-local pointer.
+        """
+        if self._mode == StructuralTrackingMode.OFF:
+            return
+        self._ensure_patches_installed()
+        StructuralAccessTracker._set_active_tracker(self)
+
+    def deactivate(self) -> None:
+        """Deactivate this tracker instance.
+
+        Very fast (~0.1µs) - just clears the thread-local pointer.
+        Does NOT uninstall patches (they stay installed for next cell).
+        """
+        if StructuralAccessTracker._get_active_tracker() is self:
+            StructuralAccessTracker._set_active_tracker(None)
+
     def install(self) -> None:
-        """Monkey-patch DataFrame and Series to track structural access."""
+        """Monkey-patch DataFrame and Series to track structural access.
+
+        For backward compatibility. Prefer activate() for new code.
+        """
         if self._installed:
             return
         if self._mode == StructuralTrackingMode.OFF:
@@ -539,11 +603,21 @@ class StructuralAccessTracker:
             # Patches already installed by another instance - just copy the originals
             self._original_methods = StructuralAccessTracker._class_original_methods.copy()
         self._installed = True
+        # Also activate this tracker
+        StructuralAccessTracker._set_active_tracker(self)
 
     def uninstall(self) -> None:
-        """Restore original methods."""
+        """Restore original methods.
+
+        NOTE: In normal operation, patches are never uninstalled (they persist
+        across cells for performance). This method is primarily for testing.
+        """
         if not self._installed:
             return
+
+        # Deactivate this tracker
+        self.deactivate()
+
         # Only restore if we have the original methods stored
         if self._original_methods:
             self._restore_all()
@@ -585,9 +659,26 @@ class StructuralAccessTracker:
         Returns:
             Dict mapping variable paths to sets of structural attrs accessed.
             e.g., {'df': {'columns', 'shape'}, 'data["train"]': {'describe'}}
+
+        If there are unregistered object IDs (e.g., nested pandas objects not
+        accessed via namespace), performs a lazy walk to resolve their paths.
         """
         if self._mode == StructuralTrackingMode.OFF:
             return {}
+
+        # Import here to avoid circular dependency
+        from .column_tracking import walk_pandas_objects
+
+        # Check if any IDs are unregistered
+        all_obj_ids = set(self._reads_by_id.keys())
+        unregistered_ids = all_obj_ids - set(self._id_to_path.keys())
+        if unregistered_ids and self._namespace_ref is not None:
+            # Lazy walk to find paths for unregistered pandas objects
+            # This happens rarely (only for nested objects not accessed via namespace)
+            for path, obj in walk_pandas_objects(self._namespace_ref):
+                if id(obj) in unregistered_ids:
+                    self._id_to_path[id(obj)] = path
+
         result: Dict[str, Set[str]] = {}
         for obj_id, attrs in self._reads_by_id.items():
             if obj_id in self._id_to_path:
@@ -601,8 +692,15 @@ class StructuralAccessTracker:
         self._id_to_path.clear()
 
     def _patch_dataframe(self) -> None:
-        """Patch DataFrame to track structural attribute and method access."""
-        tracker = self
+        """Patch DataFrame to track structural attribute and method access.
+
+        IMPORTANT: These patches use StructuralAccessTracker._get_active_tracker() to
+        look up the active tracker from thread-local storage. This allows the patches
+        to stay installed permanently while different tracker instances are activated
+        for different cell executions.
+        """
+        # Note: We don't use `self` for tracking in wrappers - instead we look up
+        # the active tracker dynamically. This enables the always-on pattern.
 
         # --- Patch __getattribute__ for attribute access ---
         original_getattr = pd.DataFrame.__getattribute__
@@ -610,12 +708,14 @@ class StructuralAccessTracker:
 
         def tracked_getattribute(df, name):
             result = original_getattr(df, name)
-            # Track structural attributes
-            if name in DATAFRAME_STRUCTURAL_ATTRS:
-                tracker.record_structural_read(id(df), name)
-            # Track when structural methods are accessed
-            elif name in DATAFRAME_STRUCTURAL_METHODS:
-                tracker.record_structural_read(id(df), name)
+            tracker = StructuralAccessTracker._get_active_tracker()
+            if tracker is not None:
+                # Track structural attributes
+                if name in DATAFRAME_STRUCTURAL_ATTRS:
+                    tracker.record_structural_read(id(df), name)
+                # Track when structural methods are accessed
+                elif name in DATAFRAME_STRUCTURAL_METHODS:
+                    tracker.record_structural_read(id(df), name)
             return result
 
         pd.DataFrame.__getattribute__ = tracked_getattribute
@@ -625,7 +725,9 @@ class StructuralAccessTracker:
         self._original_methods['DataFrame.__len__'] = original_len
 
         def tracked_len(df):
-            tracker.record_structural_read(id(df), 'len')
+            tracker = StructuralAccessTracker._get_active_tracker()
+            if tracker is not None:
+                tracker.record_structural_read(id(df), 'len')
             return original_len(df)
 
         pd.DataFrame.__len__ = tracked_len
@@ -635,14 +737,23 @@ class StructuralAccessTracker:
         self._original_methods['DataFrame.__iter__'] = original_iter
 
         def tracked_iter(df):
-            tracker.record_structural_read(id(df), 'iter')
+            tracker = StructuralAccessTracker._get_active_tracker()
+            if tracker is not None:
+                tracker.record_structural_read(id(df), 'iter')
             return original_iter(df)
 
         pd.DataFrame.__iter__ = tracked_iter
 
     def _patch_series(self) -> None:
-        """Patch Series to track structural attribute and method access."""
-        tracker = self
+        """Patch Series to track structural attribute and method access.
+
+        IMPORTANT: These patches use StructuralAccessTracker._get_active_tracker() to
+        look up the active tracker from thread-local storage. This allows the patches
+        to stay installed permanently while different tracker instances are activated
+        for different cell executions.
+        """
+        # Note: We don't use `self` for tracking in wrappers - instead we look up
+        # the active tracker dynamically. This enables the always-on pattern.
 
         # --- Patch __getattribute__ for attribute access ---
         original_getattr = pd.Series.__getattribute__
@@ -650,10 +761,12 @@ class StructuralAccessTracker:
 
         def tracked_getattribute(s, name):
             result = original_getattr(s, name)
-            if name in SERIES_STRUCTURAL_ATTRS:
-                tracker.record_structural_read(id(s), name)
-            elif name in SERIES_STRUCTURAL_METHODS:
-                tracker.record_structural_read(id(s), name)
+            tracker = StructuralAccessTracker._get_active_tracker()
+            if tracker is not None:
+                if name in SERIES_STRUCTURAL_ATTRS:
+                    tracker.record_structural_read(id(s), name)
+                elif name in SERIES_STRUCTURAL_METHODS:
+                    tracker.record_structural_read(id(s), name)
             return result
 
         pd.Series.__getattribute__ = tracked_getattribute
@@ -663,7 +776,9 @@ class StructuralAccessTracker:
         self._original_methods['Series.__len__'] = original_len
 
         def tracked_len(s):
-            tracker.record_structural_read(id(s), 'len')
+            tracker = StructuralAccessTracker._get_active_tracker()
+            if tracker is not None:
+                tracker.record_structural_read(id(s), 'len')
             return original_len(s)
 
         pd.Series.__len__ = tracked_len
@@ -673,7 +788,9 @@ class StructuralAccessTracker:
         self._original_methods['Series.__iter__'] = original_iter
 
         def tracked_iter(s):
-            tracker.record_structural_read(id(s), 'iter')
+            tracker = StructuralAccessTracker._get_active_tracker()
+            if tracker is not None:
+                tracker.record_structural_read(id(s), 'iter')
             return original_iter(s)
 
         pd.Series.__iter__ = tracked_iter
