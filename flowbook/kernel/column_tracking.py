@@ -20,6 +20,38 @@ from collections import defaultdict
 
 from flowbook.util.output import log, error, timer
 
+# Threshold for skipping large primitive lists/tuples during dataframe walks.
+# Below this size, the overhead of checking isn't worth it.
+_LARGE_CONTAINER_THRESHOLD = 1000
+
+# Primitive immutable types - lists/tuples containing only these cannot
+# contain DataFrames or Series, so we can skip iterating through them.
+_PRIMITIVE_TYPES = frozenset({
+    type(None),
+    bool,
+    int,
+    float,
+    complex,
+    str,
+    bytes,
+})
+
+
+def _is_primitive_list(lst: list) -> bool:
+    """Check if all elements in a list are primitive types."""
+    for item in lst:
+        if type(item) not in _PRIMITIVE_TYPES:
+            return False
+    return True
+
+
+def _is_primitive_tuple(t: tuple) -> bool:
+    """Check if all elements in a tuple are primitive types."""
+    for item in t:
+        if type(item) not in _PRIMITIVE_TYPES:
+            return False
+    return True
+
 
 class ColumnAccessTracker:
     """Tracks DataFrame column access via monkey-patching."""
@@ -598,6 +630,13 @@ def walk_dataframes(
         elif isinstance(val, dict):
             yield from walk_dataframes(val, path, visited)
         elif isinstance(val, (list, tuple)):
+            # OPTIMIZATION: Skip large lists/tuples that contain only primitives
+            # They cannot contain DataFrames, so no point iterating through them
+            if len(val) >= _LARGE_CONTAINER_THRESHOLD:
+                if isinstance(val, list) and _is_primitive_list(val):
+                    continue
+                if isinstance(val, tuple) and _is_primitive_tuple(val):
+                    continue
             for i, item in enumerate(val):
                 item_id = id(item)
                 if item_id in visited:
@@ -661,6 +700,12 @@ def _walk_object_attrs(
         elif isinstance(attr_val, dict):
             yield from walk_dataframes(attr_val, path, visited)
         elif isinstance(attr_val, (list, tuple)):
+            # OPTIMIZATION: Skip large lists/tuples that contain only primitives
+            if len(attr_val) >= _LARGE_CONTAINER_THRESHOLD:
+                if isinstance(attr_val, list) and _is_primitive_list(attr_val):
+                    continue
+                if isinstance(attr_val, tuple) and _is_primitive_tuple(attr_val):
+                    continue
             for i, item in enumerate(attr_val):
                 item_id = id(item)
                 if item_id in visited:
@@ -737,6 +782,13 @@ def walk_pandas_objects(
         elif isinstance(val, dict):
             yield from walk_pandas_objects(val, path, visited)
         elif isinstance(val, (list, tuple)):
+            # OPTIMIZATION: Skip large lists/tuples that contain only primitives
+            # They cannot contain DataFrames/Series, so no point iterating through them
+            if len(val) >= _LARGE_CONTAINER_THRESHOLD:
+                if isinstance(val, list) and _is_primitive_list(val):
+                    continue
+                if isinstance(val, tuple) and _is_primitive_tuple(val):
+                    continue
             for i, item in enumerate(val):
                 item_id = id(item)
                 if item_id in visited:
@@ -804,6 +856,12 @@ def _walk_object_attrs_pandas(
         elif isinstance(attr_val, dict):
             yield from walk_pandas_objects(attr_val, path, visited)
         elif isinstance(attr_val, (list, tuple)):
+            # OPTIMIZATION: Skip large lists/tuples that contain only primitives
+            if len(attr_val) >= _LARGE_CONTAINER_THRESHOLD:
+                if isinstance(attr_val, list) and _is_primitive_list(attr_val):
+                    continue
+                if isinstance(attr_val, tuple) and _is_primitive_tuple(attr_val):
+                    continue
             for i, item in enumerate(attr_val):
                 item_id = id(item)
                 if item_id in visited:

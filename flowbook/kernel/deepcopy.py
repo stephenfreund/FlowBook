@@ -145,51 +145,70 @@ _IMMUTABLE_INFERRED_KINDS: Set of pandas inferred_dtype values that are immutabl
     Used by diff module for fast-path column comparisons.
 
 ================================================================================
-LARGE PRIMITIVE LIST CACHING
+LARGE PRIMITIVE CONTAINER CACHING
 ================================================================================
 
-For large lists (>= 1000 elements) containing only primitive immutable types
-(None, bool, int, float, complex, str, bytes), we cache the checkpoint copy
-and reuse it on subsequent checkpoints if the list hasn't changed.
+For large containers (>= 1000 elements) containing only primitive immutable
+types (None, bool, int, float, complex, str, bytes), we cache checkpoint copies
+and reuse them on subsequent checkpoints if the container hasn't changed.
 
-IMPORTANT: Only primitive types are cached - NOT tuples or frozensets.
-This keeps the eligibility check O(n) with very low constant factor (just
-type membership checks, no recursion).
+Supported container types:
+- list: cache shallow copy if all elements are primitive
+- set: cache shallow copy if all elements are primitive
+- dict: cache shallow copy if all VALUES are primitive (keys always immutable)
+- tuple: return original immediately if all elements are primitive (no copy needed)
+
+This optimization also enables alias traversal to skip these containers since
+they contain no nested mutable references.
 
 How It Works
 ------------
-1. When a large list is first checkpointed:
-   - Check if all elements are primitive types (_list_has_only_primitives)
-   - If yes, compute content hash via hash(tuple(list))
-   - Create shallow copy (safe since elements are immutable primitives)
-   - Cache: (original_list_ref, cached_copy, content_hash)
+1. When a large container is first checkpointed:
+   - Check if all elements/values are primitive types (O(n) type checks)
+   - If yes, compute content hash for change detection
+   - Create shallow copy (or return original for tuples)
+   - Cache: (original_ref, cached_copy, content_hash, length)
+   - Track copy in _primitive_*_copies dict for O(1) lookup
 
-2. On subsequent checkpoints of the same list:
-   - Check if list is still the same object (identity check)
-   - Compute current content hash
-   - If hash matches cached hash → reuse cached copy (cache hit)
-   - If hash differs → create new copy and update cache (cache miss)
+2. On subsequent checkpoints (cache-first optimization):
+   - Check cache by id FIRST (O(1)) before any O(n) operations
+   - If found, verify identity and length (O(1) fast rejection)
+   - Only then compute hash to verify content unchanged (O(n))
+   - If hash matches → reuse cached copy (cache hit)
+   - If not in cache → check primitives and create new entry
 
 3. Alias traversal optimization (checkpoint.py):
-   - is_list_in_immutable_cache() checks if a list is cached
-   - Cached lists contain only primitives → no nested mutable refs
-   - Alias detection can skip element-by-element traversal for cached lists
+   - is_primitive_container() checks if a container is cached/primitive
+   - Cached containers have no nested mutable refs
+   - Alias detection skips element-by-element traversal for these
 
-Primitive Types (cached)
+4. Diff optimization (diff.py):
+   - are_primitive_containers_equal(a, b) checks if two containers match via cache
+   - If original and its cached copy are being compared, skip element-wise diff
+   - Enables O(1) equality check for unchanged large containers
+
+Content Hash Computation
 ------------------------
+- list: hash(tuple(lst))
+- set: hash(frozenset(s))
+- dict: hash(tuple(sorted(d.items())))
+- tuple: _tuple_has_only_primitives() check (no hash needed)
+
+Primitive Types
+---------------
 None, bool, int, float, complex, str, bytes
 
 NOT Cached (even if immutable)
 ------------------------------
-Tuples, frozensets, datetime objects, numpy scalars, pandas types, etc.
+Nested tuples, frozensets, datetime objects, numpy scalars, pandas types.
 These are still correctly deep-copied, just not cached.
 
 Cache Management
 ----------------
-- _large_list_cache: Dict mapping id(list) -> cache entry
-- Cache is cleared when checkpoints are deleted/cleared (via clear_list_cache())
-- Cache is pruned when it exceeds _MAX_LIST_CACHE_SIZE entries
-- Stale entries (id reuse after GC) are detected via identity check
+- _large_list_cache, _large_set_cache, _large_dict_cache: Main caches
+- _primitive_list_copies, _primitive_set_copies, _primitive_dict_copies: Copy tracking
+- Caches cleared via clear_container_cache() when checkpoints deleted
+- Pruning when exceeding _MAX_CONTAINER_CACHE_SIZE entries
 
 Performance Characteristics
 ---------------------------
@@ -197,14 +216,18 @@ Performance Characteristics
 - Eligibility check: O(n) with very low constant (type(x) in set)
 - First checkpoint: O(n) type check + O(n) hash + O(n) copy
 - Subsequent unchanged: O(n) hash only (copy is skipped)
-- Alias traversal: O(1) cache lookup + O(n) hash (skips O(n) traversal)
+- Alias traversal on copies: O(1) dict lookup
+- Alias traversal on originals: O(1) cache lookup + O(n) hash
 
 API
 ---
-- clear_list_cache(): Clear all cached list copies (called by checkpoint.py)
-- is_list_in_immutable_cache(lst): Check if list is cached (for alias optimization)
-- _list_has_only_primitives(lst): Check if list contains only primitive types
-- _list_is_all_immutable(lst): Check if list contains any immutable types (general)
+- clear_container_cache(): Clear all container caches
+- is_primitive_container(obj): Check if list/set/dict/tuple is cached/primitive
+- are_primitive_containers_equal(a, b): Check if two containers are equal via cache
+- _list_has_only_primitives(lst): Check if list has only primitive elements
+- _set_has_only_primitives(s): Check if set has only primitive elements
+- _dict_has_only_primitive_values(d): Check if dict has only primitive values
+- _tuple_has_only_primitives(t): Check if tuple has only primitive elements
 
 ================================================================================
 USAGE
@@ -270,18 +293,12 @@ from typing import Dict, Tuple
 # to deep copy cost (~1-10ms), and the cache lookup overhead is justified.
 _LARGE_LIST_THRESHOLD = 1000
 
-# Maximum number of lists to cache to prevent unbounded memory growth.
+# Maximum number of containers to cache (per type) to prevent unbounded memory growth.
 # When exceeded, stale entries are pruned; if still too large, cache is cleared.
-_MAX_LIST_CACHE_SIZE = 100
-
-# Cache structure: id(original_list) -> (original_list_ref, cached_copy, content_hash)
-# - original_list_ref: Strong reference to detect id reuse after GC
-# - cached_copy: The shallow copy we return on cache hits
-# - content_hash: hash(tuple(list)) for change detection
-_large_list_cache: Dict[int, Tuple[list, list, int]] = {}
+_MAX_CONTAINER_CACHE_SIZE = 100
 
 # Primitive immutable types for cache eligibility.
-# Only lists containing ONLY these types are cached.
+# Only containers with ONLY these types are cached.
 # This keeps the cache check O(n) with very low constant factor (just type checks).
 # We intentionally exclude tuples/frozensets to avoid recursion.
 _PRIMITIVE_IMMUTABLE_TYPES = frozenset({
@@ -294,13 +311,39 @@ _PRIMITIVE_IMMUTABLE_TYPES = frozenset({
     bytes,
 })
 
+# =============================================================================
+# List caching
+# =============================================================================
+# Cache structure: id(original) -> (original_ref, cached_copy, content_hash)
+_large_list_cache: Dict[int, Tuple[list, list, int]] = {}
+# Dict mapping id(copy) -> copy for recognizing copies during alias traversal
+_primitive_list_copies: Dict[int, list] = {}
 
-def clear_list_cache() -> None:
+# =============================================================================
+# Set caching
+# =============================================================================
+# Cache structure: id(original) -> (original_ref, cached_copy, content_hash)
+# content_hash computed via hash(frozenset(s))
+_large_set_cache: Dict[int, Tuple[set, set, int]] = {}
+# Dict mapping id(copy) -> copy for recognizing copies during alias traversal
+_primitive_set_copies: Dict[int, set] = {}
+
+# =============================================================================
+# Dict caching
+# =============================================================================
+# Cache structure: id(original) -> (original_ref, cached_copy, content_hash)
+# content_hash computed via hash(tuple(sorted(d.items())))
+_large_dict_cache: Dict[int, Tuple[dict, dict, int]] = {}
+# Dict mapping id(copy) -> copy for recognizing copies during alias traversal
+_primitive_dict_copies: Dict[int, dict] = {}
+
+
+def clear_container_cache() -> None:
     """
-    Clear the large list checkpoint cache.
+    Clear all primitive container caches (lists, sets, dicts).
 
     Called by checkpoint.py when checkpoints are deleted or cleared to:
-    1. Free memory held by cached list copies
+    1. Free memory held by cached copies
     2. Prevent stale cache entries from being used
 
     This should be called when:
@@ -308,19 +351,40 @@ def clear_list_cache() -> None:
     - The last checkpoint is deleted (Checkpoints.delete())
     """
     _large_list_cache.clear()
+    _primitive_list_copies.clear()
+    _large_set_cache.clear()
+    _primitive_set_copies.clear()
+    _large_dict_cache.clear()
+    _primitive_dict_copies.clear()
 
 
-def get_list_cache_stats() -> Dict[str, int]:
+# Backwards compatibility alias
+clear_list_cache = clear_container_cache
+
+
+def get_container_cache_stats() -> Dict[str, Any]:
     """
-    Get statistics about the large list cache.
+    Get statistics about the primitive container caches.
 
     Returns:
-        Dict with 'size' (number of cached lists) and 'threshold' (min list size)
+        Dict with cache sizes for lists, sets, dicts and threshold info.
     """
+    return {
+        'list_cache_size': len(_large_list_cache),
+        'set_cache_size': len(_large_set_cache),
+        'dict_cache_size': len(_large_dict_cache),
+        'threshold': _LARGE_LIST_THRESHOLD,
+        'max_size': _MAX_CONTAINER_CACHE_SIZE,
+    }
+
+
+# Backwards compatibility alias
+def get_list_cache_stats() -> Dict[str, int]:
+    """Get statistics about the large list cache (deprecated, use get_container_cache_stats)."""
     return {
         'size': len(_large_list_cache),
         'threshold': _LARGE_LIST_THRESHOLD,
-        'max_size': _MAX_LIST_CACHE_SIZE,
+        'max_size': _MAX_CONTAINER_CACHE_SIZE,
     }
 
 
@@ -335,7 +399,7 @@ def _prune_list_cache() -> None:
     This is called automatically when the cache grows too large.
     """
     stale_ids = []
-    for lst_id, (cached_list, _, _) in _large_list_cache.items():
+    for lst_id, (cached_list, _, _, _) in _large_list_cache.items():
         # If the reference's current id doesn't match the key, the original
         # list was GC'd and the id was reused for a different object
         if id(cached_list) != lst_id:
@@ -359,11 +423,11 @@ def _maybe_prune_list_cache() -> None:
     A more sophisticated LRU strategy could be implemented if needed,
     but for typical notebook usage, full clear is acceptable.
     """
-    if len(_large_list_cache) > _MAX_LIST_CACHE_SIZE:
+    if len(_large_list_cache) > _MAX_CONTAINER_CACHE_SIZE:
         _prune_list_cache()
         # If still too large after pruning stale entries, clear everything
-        if len(_large_list_cache) > _MAX_LIST_CACHE_SIZE:
-            log(f"[deepcopy] List cache exceeded {_MAX_LIST_CACHE_SIZE} entries, clearing")
+        if len(_large_list_cache) > _MAX_CONTAINER_CACHE_SIZE:
+            log(f"[deepcopy] List cache exceeded {_MAX_CONTAINER_CACHE_SIZE} entries, clearing")
             _large_list_cache.clear()
 
 
@@ -438,44 +502,304 @@ def _list_has_only_primitives(lst: list) -> bool:
     return True
 
 
-def is_list_in_immutable_cache(lst: list) -> bool:
+def _set_has_only_primitives(s: set) -> bool:
     """
-    Check if a list is in the immutable list cache with matching content.
+    Check if all elements in a set are primitive immutable types.
 
-    Used by checkpoint.py to skip alias traversal for lists known to
-    contain only immutable primitives. Since the cache only stores lists
-    that pass _list_has_only_primitives(), cached lists are guaranteed
-    to contain no nested mutable references.
+    Only checks for: None, bool, int, float, complex, str, bytes.
+    This is O(n) with very low constant factor (just type membership checks).
 
-    Returns True if:
-    1. List is in cache (was identified as primitive-only during deepcopy)
-    2. Identity matches (not a stale entry from GC id reuse)
-    3. Content hash matches (list hasn't been modified)
-
-    Performance: O(n) for hash computation, but this allows skipping
-    O(n) alias traversal which is more expensive per-element.
+    Used to determine cache eligibility for the large set optimization.
 
     Args:
-        lst: List to check
+        s: Set to check
 
     Returns:
-        True if list is cached and unchanged, False otherwise.
+        True if all elements are primitive immutable types, False otherwise.
     """
-    obj_id = id(lst)
-    if obj_id not in _large_list_cache:
+    for item in s:
+        if type(item) not in _PRIMITIVE_IMMUTABLE_TYPES:
+            return False
+    return True
+
+
+def _dict_has_only_primitive_values(d: dict) -> bool:
+    """
+    Check if all VALUES in a dict are primitive immutable types.
+
+    Keys are always immutable (dict requirement), so we only check values.
+    Only checks for: None, bool, int, float, complex, str, bytes.
+    This is O(n) with very low constant factor (just type membership checks).
+
+    Used to determine cache eligibility for the large dict optimization.
+
+    Args:
+        d: Dict to check
+
+    Returns:
+        True if all values are primitive immutable types, False otherwise.
+    """
+    for value in d.values():
+        if type(value) not in _PRIMITIVE_IMMUTABLE_TYPES:
+            return False
+    return True
+
+
+def _tuple_has_only_primitives(t: tuple) -> bool:
+    """
+    Check if all elements in a tuple are primitive immutable types.
+
+    Only checks for: None, bool, int, float, complex, str, bytes.
+    This is O(n) with very low constant factor (just type membership checks).
+
+    Used to short-circuit tuple deepcopy and skip alias traversal.
+
+    Args:
+        t: Tuple to check
+
+    Returns:
+        True if all elements are primitive immutable types, False otherwise.
+    """
+    for item in t:
+        if type(item) not in _PRIMITIVE_IMMUTABLE_TYPES:
+            return False
+    return True
+
+
+def is_primitive_container(obj) -> bool:
+    """
+    Check if a container is known to contain only primitive immutable types.
+
+    Used by checkpoint.py to skip alias traversal for containers known to
+    contain only immutable primitives (no nested mutable references).
+
+    Supports: list, set, dict, tuple
+
+    For lists, sets, dicts:
+    - Checks the copies dict first (O(1) - for checkpoint copies)
+    - Then checks the main cache with length check before expensive hash
+
+    For tuples:
+    - No caching needed (tuples are immutable)
+    - Just checks if all elements are primitive types
+
+    Args:
+        obj: Container to check (list, set, dict, or tuple)
+
+    Returns:
+        True if container is known to contain only primitives, False otherwise.
+    """
+    obj_id = id(obj)
+
+    if isinstance(obj, list):
+        # Fast path: check if this is a known primitive copy
+        if obj_id in _primitive_list_copies:
+            if _primitive_list_copies[obj_id] is obj:
+                return True
+            del _primitive_list_copies[obj_id]
+
+        # Check main cache for original (with length check before hash)
+        if obj_id in _large_list_cache:
+            cached, cached_copy, cached_hash, cached_len = _large_list_cache[obj_id]
+            if cached is obj and len(obj) == cached_len:
+                try:
+                    return hash(tuple(obj)) == cached_hash
+                except TypeError:
+                    pass
         return False
 
-    cached_list, cached_copy, cached_hash = _large_list_cache[obj_id]
+    elif isinstance(obj, set):
+        # Fast path: check if this is a known primitive copy
+        if obj_id in _primitive_set_copies:
+            if _primitive_set_copies[obj_id] is obj:
+                return True
+            del _primitive_set_copies[obj_id]
 
-    # Verify identity (detect GC id reuse)
-    if cached_list is not lst:
+        # Check main cache for original (with length check before hash)
+        if obj_id in _large_set_cache:
+            cached, cached_copy, cached_hash, cached_len = _large_set_cache[obj_id]
+            if cached is obj and len(obj) == cached_len:
+                try:
+                    return hash(frozenset(obj)) == cached_hash
+                except TypeError:
+                    pass
         return False
 
-    # Verify content unchanged
-    try:
-        return hash(tuple(lst)) == cached_hash
-    except TypeError:
+    elif isinstance(obj, dict):
+        # Fast path: check if this is a known primitive copy
+        if obj_id in _primitive_dict_copies:
+            if _primitive_dict_copies[obj_id] is obj:
+                return True
+            del _primitive_dict_copies[obj_id]
+
+        # Check main cache for original (with length check before hash)
+        if obj_id in _large_dict_cache:
+            cached, cached_copy, cached_hash, cached_len = _large_dict_cache[obj_id]
+            if cached is obj and len(obj) == cached_len:
+                try:
+                    return hash(tuple(sorted(obj.items()))) == cached_hash
+                except TypeError:
+                    pass
         return False
+
+    elif isinstance(obj, tuple):
+        # Tuples don't need caching - just check if primitive
+        # Only do this for large tuples to avoid overhead on small ones
+        if len(obj) >= _LARGE_LIST_THRESHOLD:
+            return _tuple_has_only_primitives(obj)
+        return False
+
+    return False
+
+
+# Backwards compatibility alias
+def is_list_in_immutable_cache(lst: list) -> bool:
+    """Check if list is cached (deprecated, use is_primitive_container)."""
+    return is_primitive_container(lst)
+
+
+def are_primitive_containers_equal(a, b) -> bool:
+    """
+    Check if two containers are equal via the primitive container cache.
+
+    Used by diff.py to short-circuit comparison of large primitive containers.
+    If one is an original in the cache and the other is its copy (or vice versa),
+    and the content hash still matches, they must be equal.
+
+    This avoids O(n) element-by-element comparison for large primitive lists/sets/dicts.
+
+    Args:
+        a: First container (list, set, or dict)
+        b: Second container (list, set, or dict)
+
+    Returns:
+        True if containers are known equal via cache, False if unknown (need full comparison)
+    """
+    if type(a) is not type(b):
+        return False
+
+    id_a, id_b = id(a), id(b)
+
+    # Same object - trivially equal (but this should be caught by identity check in diff)
+    if id_a == id_b:
+        return True
+
+    if isinstance(a, list):
+        # Quick length check
+        if len(a) != len(b):
+            return False
+
+        # Check if a is a known copy
+        a_is_copy = id_a in _primitive_list_copies and _primitive_list_copies[id_a] is a
+        # Check if b is a known copy
+        b_is_copy = id_b in _primitive_list_copies and _primitive_list_copies[id_b] is b
+        # Check if a is an original in cache
+        a_is_original = id_a in _large_list_cache and _large_list_cache[id_a][0] is a
+        # Check if b is an original in cache
+        b_is_original = id_b in _large_list_cache and _large_list_cache[id_b][0] is b
+
+        # If neither is in the cache system, we can't short-circuit
+        if not (a_is_copy or a_is_original or b_is_copy or b_is_original):
+            return False
+
+        # Get content hashes
+        hash_a = hash_b = None
+
+        if a_is_original:
+            _, _, hash_a, _ = _large_list_cache[id_a]
+        elif a_is_copy:
+            # Find original that a is a copy of
+            for orig_id, (orig, copy, h, _) in _large_list_cache.items():
+                if copy is a:
+                    hash_a = h
+                    break
+
+        if b_is_original:
+            _, _, hash_b, _ = _large_list_cache[id_b]
+        elif b_is_copy:
+            # Find original that b is a copy of
+            for orig_id, (orig, copy, h, _) in _large_list_cache.items():
+                if copy is b:
+                    hash_b = h
+                    break
+
+        # If we have both hashes and they match, containers are equal
+        if hash_a is not None and hash_b is not None and hash_a == hash_b:
+            return True
+
+        return False
+
+    elif isinstance(a, set):
+        if len(a) != len(b):
+            return False
+
+        a_is_copy = id_a in _primitive_set_copies and _primitive_set_copies[id_a] is a
+        b_is_copy = id_b in _primitive_set_copies and _primitive_set_copies[id_b] is b
+        a_is_original = id_a in _large_set_cache and _large_set_cache[id_a][0] is a
+        b_is_original = id_b in _large_set_cache and _large_set_cache[id_b][0] is b
+
+        if not (a_is_copy or a_is_original or b_is_copy or b_is_original):
+            return False
+
+        hash_a = hash_b = None
+
+        if a_is_original:
+            _, _, hash_a, _ = _large_set_cache[id_a]
+        elif a_is_copy:
+            for orig_id, (orig, copy, h, _) in _large_set_cache.items():
+                if copy is a:
+                    hash_a = h
+                    break
+
+        if b_is_original:
+            _, _, hash_b, _ = _large_set_cache[id_b]
+        elif b_is_copy:
+            for orig_id, (orig, copy, h, _) in _large_set_cache.items():
+                if copy is b:
+                    hash_b = h
+                    break
+
+        if hash_a is not None and hash_b is not None and hash_a == hash_b:
+            return True
+
+        return False
+
+    elif isinstance(a, dict):
+        if len(a) != len(b):
+            return False
+
+        a_is_copy = id_a in _primitive_dict_copies and _primitive_dict_copies[id_a] is a
+        b_is_copy = id_b in _primitive_dict_copies and _primitive_dict_copies[id_b] is b
+        a_is_original = id_a in _large_dict_cache and _large_dict_cache[id_a][0] is a
+        b_is_original = id_b in _large_dict_cache and _large_dict_cache[id_b][0] is b
+
+        if not (a_is_copy or a_is_original or b_is_copy or b_is_original):
+            return False
+
+        hash_a = hash_b = None
+
+        if a_is_original:
+            _, _, hash_a, _ = _large_dict_cache[id_a]
+        elif a_is_copy:
+            for orig_id, (orig, copy, h, _) in _large_dict_cache.items():
+                if copy is a:
+                    hash_a = h
+                    break
+
+        if b_is_original:
+            _, _, hash_b, _ = _large_dict_cache[id_b]
+        elif b_is_copy:
+            for orig_id, (orig, copy, h, _) in _large_dict_cache.items():
+                if copy is b:
+                    hash_b = h
+                    break
+
+        if hash_a is not None and hash_b is not None and hash_a == hash_b:
+            return True
+
+        return False
+
+    return False
 
 
 # ============================================================================
@@ -772,22 +1096,25 @@ def _deepcopy_list(x, memo):
 
     # Optimization for large lists with primitive immutable contents
     if n >= _LARGE_LIST_THRESHOLD:
-        # Check if all elements are primitive types (fast O(n) type check)
-        if _list_has_only_primitives(x):
-            try:
-                # Compute content hash for change detection
-                content_hash = hash(tuple(x))
-
-                # Check cache for existing copy
-                if obj_id in _large_list_cache:
-                    cached_list, cached_copy, cached_hash = _large_list_cache[obj_id]
-                    # Verify it's the same list object (not id reuse after GC)
-                    # and the contents haven't changed
-                    if cached_list is x and cached_hash == content_hash:
+        # Check cache FIRST by id (O(1)) before expensive O(n) operations
+        if obj_id in _large_list_cache:
+            cached_list, cached_copy, cached_hash, cached_len = _large_list_cache[obj_id]
+            # Check identity (O(1)) and length (O(1)) before expensive hash
+            if cached_list is x and cached_len == n:
+                try:
+                    if hash(tuple(x)) == cached_hash:
                         # Cache hit! Reuse the same copy
                         log(f"[deepcopy] Cache hit for primitive list ({n:,} elements)")
                         memo[obj_id] = cached_copy
                         return cached_copy
+                except TypeError:
+                    pass  # List became unhashable, fall through
+
+        # No cache hit - check if eligible for caching
+        if _list_has_only_primitives(x):
+            try:
+                # Compute content hash for change detection
+                content_hash = hash(tuple(x))
 
                 # Cache miss or stale entry - create new shallow copy
                 log(f"[deepcopy] Caching primitive list ({n:,} elements)")
@@ -797,7 +1124,9 @@ def _deepcopy_list(x, memo):
 
                 # Shallow copy is safe since all elements are immutable
                 y = x.copy()
-                _large_list_cache[obj_id] = (x, y, content_hash)
+                _large_list_cache[obj_id] = (x, y, content_hash, n)
+                # Track copy so alias traversal can recognize it (keyed by copy's id)
+                _primitive_list_copies[id(y)] = y
                 memo[obj_id] = y
                 return y
 
@@ -819,7 +1148,25 @@ d[list] = _deepcopy_list
 
 
 def _deepcopy_tuple(x, memo):
-    """Deep copy a tuple (or return original if contents unchanged)."""
+    """
+    Deep copy a tuple (or return original if contents unchanged).
+
+    Optimization for large tuples:
+    - If all elements are primitive types, return original immediately
+    - No need to iterate through elements since tuples are immutable
+    - Alias traversal can also skip these tuples
+    """
+    n = len(x)
+
+    # Optimization for large tuples with primitive contents
+    if n >= _LARGE_LIST_THRESHOLD:
+        if _tuple_has_only_primitives(x):
+            # Tuple is immutable and contains only primitives
+            # No need to iterate - just return original
+            log(f"[deepcopy] Primitive tuple ({n:,} elements) - returning original")
+            return x
+
+    # Standard tuple deepcopy - iterate through elements
     y = [deepcopy(a, memo) for a in x]
     # We're not going to put the tuple in the memo, but it's still important we
     # check for it, in case the tuple contains recursive mutable structures.
@@ -839,10 +1186,123 @@ def _deepcopy_tuple(x, memo):
 d[tuple] = _deepcopy_tuple
 
 
+def _deepcopy_set(x, memo):
+    """
+    Deep copy a set with optimization for large primitive-content sets.
+
+    For sets with >= _LARGE_LIST_THRESHOLD elements containing only primitive
+    immutable types, we cache the copy and reuse it on subsequent checkpoints
+    if the content hash matches.
+    """
+    obj_id = id(x)
+
+    # Already copied in this deepcopy operation (handles circular references)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    n = len(x)
+
+    # Optimization for large sets with primitive immutable contents
+    if n >= _LARGE_LIST_THRESHOLD:
+        # Check cache FIRST by id (O(1)) before expensive O(n) operations
+        if obj_id in _large_set_cache:
+            cached_set, cached_copy, cached_hash, cached_len = _large_set_cache[obj_id]
+            # Check identity (O(1)) and length (O(1)) before expensive hash
+            if cached_set is x and cached_len == n:
+                try:
+                    if hash(frozenset(x)) == cached_hash:
+                        # Cache hit! Reuse the same copy
+                        log(f"[deepcopy] Cache hit for primitive set ({n:,} elements)")
+                        memo[obj_id] = cached_copy
+                        return cached_copy
+                except TypeError:
+                    pass  # Set became unhashable, fall through
+
+        # No cache hit - check if eligible for caching
+        if _set_has_only_primitives(x):
+            try:
+                # Compute content hash for change detection
+                content_hash = hash(frozenset(x))
+
+                # Cache miss or stale entry - create new shallow copy
+                log(f"[deepcopy] Caching primitive set ({n:,} elements)")
+
+                # Shallow copy is safe since all elements are immutable
+                y = x.copy()
+                _large_set_cache[obj_id] = (x, y, content_hash, n)
+                _primitive_set_copies[id(y)] = y
+                memo[obj_id] = y
+                return y
+
+            except TypeError:
+                log(f"[deepcopy] Set has unhashable elements, using standard copy")
+
+    # Standard deep copy for small sets or sets with mutable contents
+    y = set()
+    memo[obj_id] = y
+    for a in x:
+        y.add(deepcopy(a, memo))
+    return y
+
+
+d[set] = _deepcopy_set
+
+
 def _deepcopy_dict(x, memo):
-    """Deep copy a dictionary."""
+    """
+    Deep copy a dictionary with optimization for large primitive-value dicts.
+
+    For dicts with >= _LARGE_LIST_THRESHOLD items where all VALUES are primitive
+    immutable types, we cache the copy and reuse it on subsequent checkpoints
+    if the content hash matches.
+    """
+    obj_id = id(x)
+
+    # Already copied in this deepcopy operation (handles circular references)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    n = len(x)
+
+    # Optimization for large dicts with primitive immutable values
+    if n >= _LARGE_LIST_THRESHOLD:
+        # Check cache FIRST by id (O(1)) before expensive O(n) operations
+        if obj_id in _large_dict_cache:
+            cached_dict, cached_copy, cached_hash, cached_len = _large_dict_cache[obj_id]
+            # Check identity (O(1)) and length (O(1)) before expensive hash
+            if cached_dict is x and cached_len == n:
+                try:
+                    if hash(tuple(sorted(x.items()))) == cached_hash:
+                        # Cache hit! Reuse the same copy
+                        log(f"[deepcopy] Cache hit for primitive dict ({n:,} items)")
+                        memo[obj_id] = cached_copy
+                        return cached_copy
+                except TypeError:
+                    pass  # Dict became unhashable, fall through
+
+        # No cache hit - check if eligible for caching
+        if _dict_has_only_primitive_values(x):
+            try:
+                # Compute content hash for change detection
+                # Keys are always immutable, values are primitives
+                content_hash = hash(tuple(sorted(x.items())))
+
+                # Cache miss or stale entry - create new shallow copy
+                log(f"[deepcopy] Caching primitive dict ({n:,} items)")
+
+                # Shallow copy is safe since all values are immutable
+                y = x.copy()
+                _large_dict_cache[obj_id] = (x, y, content_hash, n)
+                _primitive_dict_copies[id(y)] = y
+                memo[obj_id] = y
+                return y
+
+            except TypeError:
+                log(f"[deepcopy] Dict has unhashable keys, using standard copy")
+
+    # Standard deep copy for small dicts or dicts with mutable values
     y = {}
-    memo[id(x)] = y
+    memo[obj_id] = y
     for key, value in x.items():
         y[deepcopy(key, memo)] = deepcopy(value, memo)
     return y
@@ -1177,10 +1637,11 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
             else:
                 # Has mutable objects - need element-wise deepcopy
                 num_rows = len(series_copy)
+                name_str = f" '{series_copy.name}'" if series_copy.name else ""
                 if num_rows > 10000:
-                    log(f"Deep copying large object Series with {num_rows:,} rows...")
+                    log(f"Deep copying large object Series{name_str} with {num_rows:,} rows...")
                 else:
-                    log(f"Deep copying object Series")
+                    log(f"Deep copying object Series{name_str} ({num_rows:,} rows)")
 
                 # Apply deep copy and explicitly preserve object dtype
                 result = series_copy.apply(lambda x: deepcopy(x, memo))

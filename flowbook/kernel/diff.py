@@ -106,6 +106,16 @@ The differ tracks object identity to detect aliasing:
 - If same object appears multiple times, only compared once
 - Detects pointer structure mismatches (a[0] is a[1] but b[0] is not b[1])
 
+Primitive Container Cache Integration
+-------------------------------------
+For large lists, sets, and dicts containing only primitive types (int, float,
+str, etc.), the diff leverages deepcopy's container cache to short-circuit
+comparisons:
+- are_primitive_containers_equal(a, b) checks if containers match via cache
+- If comparing an original container to its cached checkpoint copy, O(1) check
+- Avoids O(n) or O(n²) element-wise comparison for unchanged containers
+- Used in _compare_list(), _compare_set(), _compare_dict()
+
 Profiling
 ---------
 Set FLOWBOOK_PROFILE_DIFF=1 to enable detailed timing:
@@ -156,7 +166,7 @@ from typing import Any, Dict, List, Set, Tuple, Optional
 import math
 
 # Import immutable kinds for fast path in object column comparison
-from flowbook.kernel.deepcopy import _IMMUTABLE_INFERRED_KINDS
+from flowbook.kernel.deepcopy import _IMMUTABLE_INFERRED_KINDS, are_primitive_containers_equal
 
 from flowbook.kernel.structural_tracking import StructuralTrackingMode
 from flowbook.kernel import cudf_compat
@@ -2857,6 +2867,10 @@ class Diff:
 
     def _compare_list(self, val_a: list, val_b: list, path: str) -> Optional[DiffNode]:
         """Compare lists, recording length mismatch but comparing common elements."""
+        # Fast path: check if both are from the same cached primitive list
+        if are_primitive_containers_equal(val_a, val_b):
+            return None
+
         children: Dict[str, DiffNode] = {}
         truncated = False
 
@@ -2929,6 +2943,10 @@ class Diff:
         This properly handles pointer structure within sets.
         Records size mismatch but continues to find unmatched elements.
         """
+        # Fast path: check if both are from the same cached primitive set
+        if are_primitive_containers_equal(val_a, val_b):
+            return None
+
         children: Dict[str, DiffNode] = {}
         truncated = False
 
@@ -3077,6 +3095,10 @@ class Diff:
         return None
 
     def _compare_dict(self, val_a: dict, val_b: dict, path: str) -> Optional[DiffNode]:
+        # Fast path: check if both are from the same cached primitive dict
+        if are_primitive_containers_equal(val_a, val_b):
+            return None
+
         children: Dict[str, DiffNode] = {}
         truncated = False
         keys_a = set(val_a.keys())

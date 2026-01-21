@@ -734,6 +734,13 @@ The alias index is built LAZILY on first query and stored in Checkpoint:
 
   - Circular references: Handled via visited set to prevent infinite loops.
 
+  - Large primitive containers: lists, sets, dicts with >= 1000 elements
+      containing only primitive types (None, bool, int, float, str, bytes).
+      These are detected via deepcopy's is_primitive_container() function.
+      Since primitives can't contain nested mutable refs, element-by-element
+      traversal is skipped entirely. This optimization applies to both
+      original containers and their cached checkpoint copies.
+
 12.5 Usage
 ~~~~~~~~~~
   checkpoint = Checkpoint(name, user_ns, memo)
@@ -906,7 +913,7 @@ from flowbook.kernel.deepcopy import (
     _IMMUTABLE_INFERRED_KINDS,
     _convert_object_column_dtype,
     _has_mutable_defaults,
-    is_list_in_immutable_cache,
+    is_primitive_container,
     _LARGE_LIST_THRESHOLD,
 )
 from flowbook.kernel.diff import Diff
@@ -1261,21 +1268,22 @@ def _collect_reachable_ids_with_paths(
     # Recurse into containers
     try:
         if isinstance(obj, dict):
+            # OPTIMIZATION: Skip large dicts with only primitive values.
+            if len(obj) >= _LARGE_LIST_THRESHOLD and is_primitive_container(obj):
+                return
             for k, v in obj.items():
                 key_repr = repr(k) if not isinstance(k, str) else f"'{k}'"
                 _collect_reachable_ids_with_paths(v, f"{path}[{key_repr}]", visited, id_to_path)
         elif isinstance(obj, (list, tuple)):
-            # OPTIMIZATION: Skip large lists known to contain only primitive immutables.
-            # These are cached during deepcopy and have no nested mutable references.
-            if (isinstance(obj, list) and
-                len(obj) >= _LARGE_LIST_THRESHOLD and
-                is_list_in_immutable_cache(obj)):
-                # List is cached as primitive-only, no nested refs to traverse
+            # OPTIMIZATION: Skip large lists/tuples known to contain only primitives.
+            if len(obj) >= _LARGE_LIST_THRESHOLD and is_primitive_container(obj):
                 return
             for i, item in enumerate(obj):
                 _collect_reachable_ids_with_paths(item, f"{path}[{i}]", visited, id_to_path)
         elif isinstance(obj, (set, frozenset)):
-            # Sets don't have indexable paths, just mark as <set>
+            # OPTIMIZATION: Skip large sets with only primitive elements.
+            if isinstance(obj, set) and len(obj) >= _LARGE_LIST_THRESHOLD and is_primitive_container(obj):
+                return
             for item in obj:
                 _collect_reachable_ids_with_paths(item, f"{path}<set>", visited, id_to_path)
         elif isinstance(obj, pd.DataFrame):
@@ -1400,19 +1408,21 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
     # Recurse into containers
     try:
         if isinstance(obj, dict):
+            # OPTIMIZATION: Skip large dicts with only primitive values.
+            if len(obj) >= _LARGE_LIST_THRESHOLD and is_primitive_container(obj):
+                return
             for v in obj.values():
                 _collect_reachable_ids(v, visited)
         elif isinstance(obj, (list, tuple)):
-            # OPTIMIZATION: Skip large lists known to contain only primitive immutables.
-            # These are cached during deepcopy and have no nested mutable references.
-            if (isinstance(obj, list) and
-                len(obj) >= _LARGE_LIST_THRESHOLD and
-                is_list_in_immutable_cache(obj)):
-                # List is cached as primitive-only, no nested refs to traverse
+            # OPTIMIZATION: Skip large lists/tuples known to contain only primitives.
+            if len(obj) >= _LARGE_LIST_THRESHOLD and is_primitive_container(obj):
                 return
             for item in obj:
                 _collect_reachable_ids(item, visited)
         elif isinstance(obj, (set, frozenset)):
+            # OPTIMIZATION: Skip large sets with only primitive elements.
+            if isinstance(obj, set) and len(obj) >= _LARGE_LIST_THRESHOLD and is_primitive_container(obj):
+                return
             for item in obj:
                 _collect_reachable_ids(item, visited)
         elif isinstance(obj, pd.DataFrame):
@@ -1609,7 +1619,7 @@ class Checkpoint:
                     cause = f" (Series with {len(var_value)} object-dtype elements)"
                 elif isinstance(var_value, np.ndarray) and var_value.dtype == object:
                     cause = f" (ndarray with {var_value.size} object-dtype elements)"
-                log(f"[alias-index] WARNING: slow var '{var_name}': {num_ids} IDs in {time_ms:.1f}ms{cause}")
+                log(f"[alias-index] WARNING: slow var '{var_name}' (type={type(var_value).__name__}): {num_ids} IDs in {time_ms:.1f}ms{cause}")
 
             # Phase 2: Build reverse index in one pass
             # This is O(total_ids) but we batch the set.add calls per variable
@@ -1873,7 +1883,7 @@ class Checkpoints:
                     type_name = type(v).__name__
                     output.add_timing(f"deepcopy:{type_module}.{type_name}", duration_ms)
 
-                if duration_ms > 10:  # 10ms threshold
+                if duration_ms > 10 or _PROFILE_CHECKPOINT:  # 10ms threshold
                     log(f"Deep copying variable {k} took {duration_ms:.1f} ms")
             except Exception as e:
                 error_msg = f"Failed to deep copy variable {k}: {type(e).__name__}: {e}"

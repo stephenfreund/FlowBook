@@ -8,48 +8,56 @@
  * Convert 0-based index to Excel-style alpha notation.
  *
  * @param index - 0-based cell index
- * @returns Excel-style alpha string with @ prefix (e.g., @A, @B, @AA, @AB)
+ * @param cellId - Optional cell ID; if provided, last 4 chars are appended
+ * @returns Excel-style alpha string with @ prefix (e.g., @A, @AB / abcd)
  *
  * @example
- * indexToAlpha(0)   // "@A"
- * indexToAlpha(25)  // "@Z"
- * indexToAlpha(26)  // "@AA"
- * indexToAlpha(51)  // "@AZ"
- * indexToAlpha(52)  // "@BA"
- * indexToAlpha(701) // "@ZZ"
- * indexToAlpha(702) // "@AAA"
+ * indexToAlpha(0)              // "@A"
+ * indexToAlpha(25)             // "@Z"
+ * indexToAlpha(26)             // "@AA"
+ * indexToAlpha(0, 'abcd1234')  // "@A / 1234"
+ * indexToAlpha(26, 'wxyz')     // "@AA / wxyz"
  *
  * @throws {Error} If index is negative or too large
  */
-export function indexToAlpha(index: number): string {
+export function indexToAlpha(index: number, cellId?: string): string {
   if (index < 0) {
     throw new Error(`Index must be non-negative (got: ${index})`);
   }
 
+  let alpha: string;
+
   // Handle single letter (0-25): A-Z
   if (index < 26) {
-    return '@' + String.fromCharCode('A'.charCodeAt(0) + index);
+    alpha = '@' + String.fromCharCode('A'.charCodeAt(0) + index);
   }
-
   // Handle two letters (26-701): AA-ZZ
-  if (index < 26 + 26 * 26) {
+  else if (index < 26 + 26 * 26) {
     const offset = index - 26;
     const first = String.fromCharCode('A'.charCodeAt(0) + Math.floor(offset / 26));
     const second = String.fromCharCode('A'.charCodeAt(0) + (offset % 26));
-    return '@' + first + second;
+    alpha = '@' + first + second;
   }
-
   // Handle three letters (702-18277): AAA-ZZZ
-  if (index < 26 + 26 * 26 + 26 * 26 * 26) {
+  else if (index < 26 + 26 * 26 + 26 * 26 * 26) {
     const offset = index - (26 + 26 * 26);
     const first = String.fromCharCode('A'.charCodeAt(0) + Math.floor(offset / (26 * 26)));
     const second = String.fromCharCode('A'.charCodeAt(0) + Math.floor((offset / 26) % 26));
     const third = String.fromCharCode('A'.charCodeAt(0) + (offset % 26));
-    return '@' + first + second + third;
+    alpha = '@' + first + second + third;
+  }
+  // Index too large
+  else {
+    throw new Error(`Index ${index} is too large (max supported: 18277 for @ZZZ)`);
   }
 
-  // Index too large
-  throw new Error(`Index ${index} is too large (max supported: 18277 for @ZZZ)`);
+  // Append cell ID suffix if provided
+  if (cellId) {
+    const suffix = cellId.slice(-4);
+    return `${alpha} / ${suffix}`;
+  }
+
+  return alpha;
 }
 
 /**

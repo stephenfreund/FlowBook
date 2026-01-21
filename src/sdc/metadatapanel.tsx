@@ -27,7 +27,7 @@ function cellIdToReference(cellId: string, cellOrder: string[]): string {
     return cellId;
   }
   try {
-    return indexToAlpha(index);
+    return indexToAlpha(index, cellId);
   } catch (e) {
     // Fallback to ID if conversion fails
     return cellId;

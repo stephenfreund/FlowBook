@@ -408,9 +408,9 @@ export class NotebookHistoryManager {
 
     // Add cell indices if available
     if (notebook && affectedCells && affectedCells.length > 0) {
-      const indices = this.getCellIndices(notebook, affectedCells);
-      if (indices.length > 0) {
-        description += ` [${indices.map(i => indexToAlpha(i)).join(', ')}]`;
+      const refs = this.getCellReferences(notebook, affectedCells);
+      if (refs.length > 0) {
+        description += ` [${refs.join(', ')}]`;
       }
     }
 
@@ -418,28 +418,29 @@ export class NotebookHistoryManager {
   }
 
   /**
-   * Get 0-based cell indices from cell IDs
+   * Get formatted cell references (e.g., "@A / abcd") from cell IDs
    */
-  private getCellIndices(notebook: any, cellIds: string[]): number[] {
+  private getCellReferences(notebook: any, cellIds: string[]): string[] {
     if (!notebook || !notebook.cells || !cellIds) {
       return [];
     }
 
-    const indices: number[] = [];
     const cellIdToIndex = new Map<string, number>();
-
     notebook.cells.forEach((cell: any, index: number) => {
-      cellIdToIndex.set(cell.id, index); // 0-based indexing
+      cellIdToIndex.set(cell.id, index);
     });
 
+    // Collect index-cellId pairs, then sort by index
+    const pairs: Array<{ index: number; cellId: string }> = [];
     cellIds.forEach(cellId => {
       const index = cellIdToIndex.get(cellId);
       if (index !== undefined) {
-        indices.push(index);
+        pairs.push({ index, cellId });
       }
     });
+    pairs.sort((a, b) => a.index - b.index);
 
-    return indices.sort((a, b) => a - b);
+    return pairs.map(p => indexToAlpha(p.index, p.cellId));
   }
 
   /**
@@ -510,12 +511,11 @@ export class NotebookHistoryManager {
     // For command entries, show affected cells if available
     if (entry.type === 'command') {
       if (entry.affectedCells && entry.affectedCells.length > 0) {
-        const indices = this.getCellIndices(currentNotebook, entry.affectedCells);
-        if (indices.length > 0) {
-          const indexStr = indices.map(i => indexToAlpha(i)).join(', ');
+        const refs = this.getCellReferences(currentNotebook, entry.affectedCells);
+        if (refs.length > 0) {
           // Get the base description without any existing cell information
           const baseDesc = entry.description.split(/\[.*?\]|\(.*?\)/)[0].trim();
-          return `${baseDesc} ${indexStr}`;
+          return `${baseDesc} ${refs.join(', ')}`;
         }
       }
       return entry.description;
@@ -526,10 +526,9 @@ export class NotebookHistoryManager {
 
     // Added cells
     if (entry.addedCells && entry.addedCells.length > 0) {
-      const indices = this.getCellIndices(currentNotebook, entry.addedCells);
-      if (indices.length > 0) {
-        const indexStr = indices.map(i => indexToAlpha(i)).join(', ');
-        parts.push(`added ${indexStr}`);
+      const refs = this.getCellReferences(currentNotebook, entry.addedCells);
+      if (refs.length > 0) {
+        parts.push(`added ${refs.join(', ')}`);
       } else if (entry.editSummary?.cellsAdded) {
         parts.push(`added ${entry.editSummary.cellsAdded} cell${entry.editSummary.cellsAdded > 1 ? 's' : ''}`);
       }
@@ -537,10 +536,9 @@ export class NotebookHistoryManager {
 
     // Modified cells
     if (entry.modifiedCells && entry.modifiedCells.length > 0) {
-      const indices = this.getCellIndices(currentNotebook, entry.modifiedCells);
-      if (indices.length > 0) {
-        const indexStr = indices.map(i => indexToAlpha(i)).join(', ');
-        parts.push(`edited ${indexStr}`);
+      const refs = this.getCellReferences(currentNotebook, entry.modifiedCells);
+      if (refs.length > 0) {
+        parts.push(`edited ${refs.join(', ')}`);
       } else if (entry.editSummary?.cellsModified) {
         parts.push(`edited ${entry.editSummary.cellsModified} cell${entry.editSummary.cellsModified > 1 ? 's' : ''}`);
       }
