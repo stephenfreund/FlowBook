@@ -7,7 +7,7 @@ import time
 
 from flowbook.server.base import NotebookCommand, ProcessingResult
 from flowbook.server.kernel_manager import FlowbookKernelClient
-from flowbook.kernel.kernel_command_client import KernelCommandClient
+from flowbook.kernel_support.kernel_command_client import KernelCommandClient
 
 
 class RunTestCommand(NotebookCommand):

@@ -1,0 +1,14 @@
+{
+    "argv": [
+        "python",
+        "-m",
+        "flowbook.checkpoint_kernel",
+        "-f",
+        "{connection_file}"
+    ],
+    "display_name": "Checkpoint Kernel",
+    "language": "python",
+    "metadata": {
+        "debugger": false
+    }
+}

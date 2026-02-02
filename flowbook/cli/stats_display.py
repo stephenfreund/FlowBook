@@ -7,7 +7,7 @@ and stats_cli.py (to display results from notebook metadata).
 
 from typing import Optional
 
-from .optimization_metadata import (
+from flowbook.cli.optimization_metadata import (
     FlowbookOptimizationMetadata,
     LLMCostSummary,
     OptimizationResultsSummary,

@@ -1,7 +1,7 @@
 """
-Performance testing framework for SDC kernel.
+Performance testing framework for reproducibility kernel.
 
-Measures SDC checking overhead in various scenarios:
+Measures reproducibility checking overhead in various scenarios:
 - Clean: No modifications (best case)
 - Modified: Variables randomly modified to trigger checking
 """
@@ -15,17 +15,17 @@ from typing import Any, Dict, List, Optional, Set
 import numpy as np
 import pandas as pd
 
-from flowbook.kernel.checkpoint import Checkpoint, Checkpoints
+from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
 from flowbook.util.output import log, timer
-from flowbook.kernel.models import TrackingData
-from flowbook.sdc_kernel.sdc_enforcer import (
-    SDCEnforcer,
+from flowbook.kernel_support.models import TrackingData
+from flowbook.kernel.reproducibility_enforcer import (
+    ReproducibilityEnforcer,
     PRE_CHECKPOINT_PREFIX,
     POST_CHECKPOINT_PREFIX,
 )
 
-from .runner import SDCSimulator, CellRecord
-from .notebook_loader import Cell, load_notebook
+from flowbook.testing.runner import ReproducibilitySimulator, CellRecord
+from flowbook.testing.notebook_loader import Cell, load_notebook
 
 
 @dataclass
@@ -308,14 +308,14 @@ def _randomly_modify_namespace(
 
 
 def _measure_sdc_check(
-    enforcer: SDCEnforcer,
+    enforcer: ReproducibilityEnforcer,
     checkpoints: Checkpoints,
     cell_id: str,
     namespace: Dict[str, Any],
     tracking: TrackingData,
 ) -> tuple:
     """
-    Measure the time for a single SDC check.
+    Measure the time for a single reproducibility check.
 
     Returns:
         Tuple of (check_time_ms, sdc_result)
@@ -337,7 +337,7 @@ def _measure_sdc_check(
         checkpoints.save(post_name, namespace, max_size_mb=None)
         post_checkpoint = checkpoints.saved[post_name]
 
-    with timer(key="perf:sdc_check", message=f"SDC check {cell_id}") as t:
+    with timer(key="perf:reproducibility_check", message=f"reproducibility check {cell_id}") as t:
         result = enforcer.check(
             cell_id=cell_id,
             pre_checkpoint=pre_checkpoint,
@@ -356,7 +356,7 @@ def _measure_sdc_check(
 
 
 def run_performance_test(
-    simulator: SDCSimulator,
+    simulator: ReproducibilitySimulator,
     iterations_per_cell: int = 10,
     seed: Optional[int] = None,
     modifications_per_test: int = 3,
@@ -369,7 +369,7 @@ def run_performance_test(
     2. MODIFIED scenario: Copy state, randomly modify variables, measure check time
 
     Args:
-        simulator: SDCSimulator that has already executed a notebook
+        simulator: ReproducibilitySimulator that has already executed a notebook
         iterations_per_cell: Number of test iterations per cell
         seed: Random seed for reproducibility
         modifications_per_test: Number of variables to modify in modified scenario
@@ -463,7 +463,7 @@ def run_performance_test(
                     simulator.checkpoints.save(post_mod_name, namespace_copy, max_size_mb=None)
                     post_mod_checkpoint = simulator.checkpoints.saved[post_mod_name]
 
-                with timer(key="perf:sdc_check", message=f"SDC check {cell_id}") as t_check:
+                with timer(key="perf:reproducibility_check", message=f"reproducibility check {cell_id}") as t_check:
                     sdc_result = simulator.enforcer.check(
                         cell_id=cell_id,
                         pre_checkpoint=pre_mod_checkpoint,
@@ -546,7 +546,7 @@ def run_performance_test_from_notebook(
     log(f"Found {len(cells)} code cells")
 
     with timer(key="perf:execute_notebook", message="Executing notebook"):
-        simulator = SDCSimulator()
+        simulator = ReproducibilitySimulator()
         simulator.execute_notebook(cells)
 
     total_iterations = len(cells) * iterations_per_cell

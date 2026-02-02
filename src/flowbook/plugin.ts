@@ -1,228 +1,148 @@
 /**
- * FlowBook Kernel Plugin - Activates only for flowbook_kernel
+ * SDC Kernel Plugin - Activates only for flowbook_sdc_kernel
  */
 
 import {
   JupyterFrontEnd,
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
-import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
-import { ICommandPalette, IToolbarWidgetRegistry } from '@jupyterlab/apputils';
+import { INotebookTracker } from '@jupyterlab/notebook';
 
 import { KernelDetector } from '../shared/kerneldetection';
-import { FlowbookCommandsManager } from './manager';
-import { NotebookToolbarExtension } from './toolbar';
-import { CellToolbarExtension } from './celltoolbar';
-import { MessagePanel } from '../logpanel';
-import { FlowbookMetadataPanel } from './metadatapanel';
-import { UnitTestPanel } from './unittestpanel';
-import { UnitTestPanelTracker } from './unittesttracker';
-import { CellMetadataHighlighter } from './cellhighlighter';
-import { ExecutionHookManager } from './executionhook';
-import { NotebookHistoryManager } from './history';
-import { HistoryPanel } from './historypanel';
+import { SDCMetadataPanel } from './metadatapanel';
+import { SDCCellHighlighter } from './cellhighlighter';
+import { SDCExecutionHookManager } from './executionhook';
 import { CellIndexManager } from '../cellindex';
 
 /**
- * Track activation state and manage UI components
+ * Track activation state per notebook
  */
-class FlowbookActivationManager {
+class SDCActivationManager {
   private _app: JupyterFrontEnd;
   private _tracker: INotebookTracker;
-  private _palette: ICommandPalette | null;
   private _kernelDetector: KernelDetector;
-
-  // Shared managers (always active)
-  private _historyManager: NotebookHistoryManager;
+  private _panel: SDCMetadataPanel | null = null;
+  private _highlighter: SDCCellHighlighter | null = null;
   private _cellIndexManager: CellIndexManager;
-  private _manager: FlowbookCommandsManager;
+  private _isActive = false;
+  private _activeNotebookPath: string | null = null;
 
-  // UI components (created/destroyed based on kernel)
-  private _messagePanel: MessagePanel | null = null;
-  private _metadataPanel: FlowbookMetadataPanel | null = null;
-  private _historyPanel: HistoryPanel | null = null;
-  private _unitTestPanel: UnitTestPanel | null = null;
-
-  private _isUIActive = false;
-
-  constructor(
-    app: JupyterFrontEnd,
-    tracker: INotebookTracker,
-    palette: ICommandPalette | null,
-    toolbarRegistry: IToolbarWidgetRegistry | null
-  ) {
+  constructor(app: JupyterFrontEnd, tracker: INotebookTracker) {
     this._app = app;
     this._tracker = tracker;
-    this._palette = palette;
     this._kernelDetector = new KernelDetector(tracker);
-
-    // Initialize shared managers
-    this._historyManager = new NotebookHistoryManager();
     this._cellIndexManager = new CellIndexManager();
-    this._manager = new FlowbookCommandsManager(app, tracker, this._historyManager);
-
-    // Register commands (they will check kernel before executing)
-    this._manager.registerCommands();
-
-    // Add toolbar extension (always registered, but buttons check kernel)
-    const toolbarExtension = new NotebookToolbarExtension(this._manager);
-    app.docRegistry.addWidgetExtension('Notebook', toolbarExtension);
-
-    // Add cell toolbar buttons if registry available
-    if (toolbarRegistry) {
-      new CellToolbarExtension(this._manager, tracker, toolbarRegistry);
-    }
 
     this._setupKernelChangeListener();
-    this._setupNotebookMonitoring();
     this._checkCurrentNotebook();
   }
 
   private _setupKernelChangeListener(): void {
     this._kernelDetector.kernelChanged.connect((_, info) => {
-      if (info.currentKernel === 'flowbook_kernel') {
-        this._activateUI();
-      } else if (info.previousKernel === 'flowbook_kernel') {
-        this._deactivateUI();
+      console.log(`SDC Plugin: Kernel changed from ${info.previousKernel} to ${info.currentKernel}`);
+      if (info.currentKernel === 'flowbook_sdc_kernel') {
+        this._activate();
+      } else if (info.previousKernel === 'flowbook_sdc_kernel') {
+        this._deactivate();
       }
     });
 
     // Also check when current widget changes
     this._tracker.currentChanged.connect(() => {
+      console.log('SDC Plugin: Current notebook changed, checking kernel...');
       this._checkCurrentNotebook();
-    });
-  }
-
-  private _setupNotebookMonitoring(): void {
-    // Monitor notebooks for history and cell index
-    this._tracker.widgetAdded.connect((_, widget: NotebookPanel) => {
-      widget.context.ready.then(() => {
-        this._historyManager.startMonitoring(widget.context.path, widget);
-        this._cellIndexManager.startMonitoring(widget.context.path, widget);
-      });
-
-      widget.disposed.connect(() => {
-        this._historyManager.stopMonitoring(widget.context.path);
-        this._cellIndexManager.stopMonitoring(widget.context.path);
-      });
-    });
-
-    // Start monitoring any already open notebooks
-    this._tracker.forEach((widget: NotebookPanel) => {
-      widget.context.ready.then(() => {
-        this._historyManager.startMonitoring(widget.context.path, widget);
-        this._cellIndexManager.startMonitoring(widget.context.path, widget);
-      });
-
-      widget.disposed.connect(() => {
-        this._historyManager.stopMonitoring(widget.context.path);
-        this._cellIndexManager.stopMonitoring(widget.context.path);
-      });
     });
   }
 
   private _checkCurrentNotebook(): void {
     const notebook = this._tracker.currentWidget;
     if (notebook) {
+      const kernelName = notebook.sessionContext.session?.kernel?.name;
+      console.log(`SDC Plugin: Checking notebook, kernel = ${kernelName}`);
+
+      // Wait for session to be ready
       notebook.sessionContext.ready.then(() => {
-        if (this._kernelDetector.isFlowbookKernel(notebook)) {
-          this._activateUI();
+        const isSDC = this._kernelDetector.isSDCKernel(notebook);
+        const currentKernelName = notebook.sessionContext.session?.kernel?.name;
+        console.log(`SDC Plugin: Session ready, kernel = ${currentKernelName}, isSDC = ${isSDC}`);
+
+        if (isSDC) {
+          this._activate();
         } else {
-          this._deactivateUI();
+          this._deactivate();
         }
       });
     }
   }
 
-  private _activateUI(): void {
-    if (this._isUIActive) {
+  private _activate(): void {
+    if (this._isActive) {
       return;
     }
 
-    console.log('FlowBook Plugin: Activating UI for flowbook_kernel');
+    console.log('SDC Plugin: Activating for flowbook_sdc_kernel');
 
-    // Add to command palette if available
-    if (this._palette) {
-      this._manager.addToPalette(this._palette);
+    // Create panel
+    this._panel = new SDCMetadataPanel();
+    this._app.shell.add(this._panel, 'right', { rank: 510 });
+
+    // Create highlighter
+    this._highlighter = new SDCCellHighlighter(this._tracker, this._panel);
+
+    // Create execution hook
+    new SDCExecutionHookManager(
+      this._app,
+      this._tracker,
+      this._highlighter
+    );
+
+    // Start cell index overlays for current notebook
+    const widget = this._tracker.currentWidget;
+    if (widget) {
+      this._activeNotebookPath = widget.context.path;
+      this._cellIndexManager.startMonitoring(this._activeNotebookPath, widget);
     }
 
-    // Add to context menu
-    this._manager.addToContextMenu(this._tracker);
-
-    // Create and add the message panel to the right area
-    this._messagePanel = new MessagePanel();
-    this._app.shell.add(this._messagePanel, 'right', { rank: 500 });
-
-    // Create and add the metadata panel to the right area
-    this._metadataPanel = new FlowbookMetadataPanel();
-    this._app.shell.add(this._metadataPanel, 'right', { rank: 501 });
-
-    // Create and add the history panel to the right area
-    this._historyPanel = new HistoryPanel(this._tracker, this._historyManager);
-    this._app.shell.add(this._historyPanel, 'right', { rank: 502 });
-
-    // Create and add the unit test panel to the right area
-    this._unitTestPanel = new UnitTestPanel(this._app, this._tracker);
-    this._app.shell.add(this._unitTestPanel, 'right', { rank: 503 });
-
-    // Create cell metadata highlighter for visual indicators
-    new CellMetadataHighlighter(this._tracker, this._metadataPanel);
-
-    // Create unit test panel tracker for monitoring cell selection
-    new UnitTestPanelTracker(this._tracker, this._unitTestPanel);
-
-    // Create execution hook manager for auto-generating code from string specs
-    new ExecutionHookManager(this._app, this._tracker, this._manager);
-
-    this._isUIActive = true;
-    console.log('FlowBook Plugin: UI activated');
+    this._isActive = true;
+    console.log('SDC Plugin: Activated');
   }
 
-  private _deactivateUI(): void {
-    if (!this._isUIActive) {
+  private _deactivate(): void {
+    if (!this._isActive) {
       return;
     }
 
-    console.log('FlowBook Plugin: Deactivating UI');
+    console.log('SDC Plugin: Deactivating');
 
-    // Remove panels
-    if (this._messagePanel) {
-      this._messagePanel.dispose();
-      this._messagePanel = null;
-    }
-    if (this._metadataPanel) {
-      this._metadataPanel.dispose();
-      this._metadataPanel = null;
-    }
-    if (this._historyPanel) {
-      this._historyPanel.dispose();
-      this._historyPanel = null;
-    }
-    if (this._unitTestPanel) {
-      this._unitTestPanel.dispose();
-      this._unitTestPanel = null;
+    // Stop cell index overlays
+    if (this._activeNotebookPath) {
+      this._cellIndexManager.stopMonitoring(this._activeNotebookPath);
+      this._activeNotebookPath = null;
     }
 
-    this._isUIActive = false;
-    console.log('FlowBook Plugin: UI deactivated');
+    // Remove panel
+    if (this._panel) {
+      this._panel.dispose();
+      this._panel = null;
+    }
+
+    // Highlighter cleanup
+    this._highlighter = null;
+
+    this._isActive = false;
+    console.log('SDC Plugin: Deactivated');
   }
 }
 
 /**
- * FlowBook Plugin definition
+ * SDC Plugin definition
  */
-export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
-  id: 'flowbook:plugin',
+export const sdcPlugin: JupyterFrontEndPlugin<void> = {
+  id: 'flowbook:sdc',
   autoStart: true,
   requires: [INotebookTracker],
-  optional: [ICommandPalette, IToolbarWidgetRegistry],
-  activate: (
-    app: JupyterFrontEnd,
-    tracker: INotebookTracker,
-    palette: ICommandPalette | null,
-    toolbarRegistry: IToolbarWidgetRegistry | null
-  ) => {
-    console.log('FlowBook Plugin: Extension registered (will activate UI when flowbook_kernel is used)');
-    new FlowbookActivationManager(app, tracker, palette, toolbarRegistry);
+  activate: (app: JupyterFrontEnd, tracker: INotebookTracker) => {
+    console.log('SDC Plugin: Extension registered (will activate when flowbook_sdc_kernel is used)');
+    new SDCActivationManager(app, tracker);
   }
 };

@@ -70,12 +70,12 @@ def make_kernels():
     from flowbook.util.kernel_installer import install_kernel_spec
     from pathlib import Path
 
-    # Install SDC kernel
+    # Install FlowBook kernel
     install_kernel_spec(
-        "flowbook_sdc_kernel", Path(__file__).parent / "sdc_kernel" / "kernelspec"
+        "flowbook_kernel", Path(__file__).parent / "kernel" / "kernelspec"
     )
 
     # Install checkpoint kernel
     install_kernel_spec(
-        "flowbook_checkpoint_kernel", Path(__file__).parent / "checkpoint_kernel" / "kernelspec"
+        "checkpoint_kernel", Path(__file__).parent / "checkpoint_kernel" / "kernelspec"
     )

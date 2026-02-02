@@ -1,7 +1,7 @@
 """
-Simulated SDC execution engine.
+Simulated reproducibility execution engine.
 
-Provides SDCSimulator class that executes notebook cells with full SDC
+Provides ReproducibilitySimulator class that executes notebook cells with full reproducibility
 tracking (checkpoints, read/write tracking, enforcement) without requiring
 a running Jupyter kernel.
 """
@@ -13,18 +13,18 @@ import time
 
 import numpy as np
 
-from flowbook.kernel.checkpoint import Checkpoint, Checkpoints
+from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
 from flowbook.util.output import log, timer
-from flowbook.kernel.models import TrackingData
-from flowbook.kernel.tracking import TrackingDict
-from flowbook.sdc_kernel.sdc_enforcer import (
-    SDCEnforcer,
+from flowbook.kernel_support.models import TrackingData
+from flowbook.kernel_support.tracking import TrackingDict
+from flowbook.kernel.reproducibility_enforcer import (
+    ReproducibilityEnforcer,
     PRE_CHECKPOINT_PREFIX,
     POST_CHECKPOINT_PREFIX,
 )
-from flowbook.sdc_kernel.models import SDCResult
+from flowbook.kernel.models import ReproducibilityResult
 
-from .notebook_loader import Cell
+from flowbook.testing.notebook_loader import Cell
 
 
 @dataclass
@@ -34,7 +34,7 @@ class CellRecord:
     cell_id: str
     source: str
     tracking: TrackingData
-    sdc_result: SDCResult
+    sdc_result: ReproducibilityResult
     execution_time_ms: float
     checkpoint_time_ms: float
     check_time_ms: float
@@ -52,16 +52,16 @@ class ExecutionLog:
     details: Dict[str, Any] = field(default_factory=dict)
 
 
-class SDCSimulator:
+class ReproducibilitySimulator:
     """
-    Simulates SDC kernel execution for testing.
+    Simulates reproducibility kernel execution for testing.
 
     This class executes notebook cells using Python's exec() while maintaining
-    full SDC infrastructure: checkpoints, read/write tracking, and enforcement.
-    It mimics the behavior of the real SDC kernel without requiring Jupyter.
+    full reproducibility infrastructure: checkpoints, read/write tracking, and enforcement.
+    It mimics the behavior of the real reproducibility kernel without requiring Jupyter.
 
     Usage:
-        simulator = SDCSimulator()
+        simulator = ReproducibilitySimulator()
         cells = load_notebook("notebook.ipynb")
         simulator.execute_notebook(cells)
 
@@ -72,9 +72,9 @@ class SDCSimulator:
     """
 
     def __init__(self):
-        """Initialize the SDC simulator."""
+        """Initialize the reproducibility simulator."""
         self.checkpoints = Checkpoints(sanity_check=False, warn_classes=False)
-        self.enforcer = SDCEnforcer(self.checkpoints)
+        self.enforcer = ReproducibilityEnforcer(self.checkpoints)
         self.namespace: Dict[str, Any] = {}
         self.cell_records: Dict[str, CellRecord] = {}
         self.cells: List[Cell] = []
@@ -93,7 +93,7 @@ class SDCSimulator:
         self.cell_records = {}
         self.execution_log = []
 
-        # Set cell order for SDC enforcement
+        # Set cell order for reproducibility enforcement
         cell_order = [c.cell_id for c in cells]
         self.enforcer.set_cell_order(cell_order)
 
@@ -134,7 +134,7 @@ plt.ioff()
 
     def execute_cell(self, cell: Cell) -> CellRecord:
         """
-        Execute a single cell with full SDC tracking.
+        Execute a single cell with full reproducibility tracking.
 
         Args:
             cell: Cell to execute

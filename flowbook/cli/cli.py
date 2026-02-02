@@ -17,7 +17,7 @@ from flowbook.server.config import FlowbookConfig
 from flowbook.util.output import error, log, output, timer
 from flowbook.util.socket_receiver import setup_socket_receiver
 
-from .helpers import (
+from flowbook.cli.helpers import (
     load_notebook,
     setup_kernel,
     save_notebook,
@@ -219,7 +219,7 @@ def cli_main():
 
             # Enable force checkpoints if requested
             if args.force_checkpoints:
-                from flowbook.kernel.kernel_command_client import KernelCommandClient
+                from flowbook.kernel_support.kernel_command_client import KernelCommandClient
 
                 command_client = KernelCommandClient(kernel_client, timeout=30)
                 command_client.force_checkpoints(enabled=True)

@@ -11,7 +11,7 @@ import nbformat
 from flowbook.server.base import NotebookCommand, ProcessingResult
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.server.kernel_helper import KernelHelper
-from flowbook.kernel.kernel_command_client import KernelCommandClient
+from flowbook.kernel_support.kernel_command_client import KernelCommandClient
 from flowbook.util.flowbook_metadata import FlowbookMetadata, UnitTest
 from flowbook.util.output import indent, log, print, timer
 

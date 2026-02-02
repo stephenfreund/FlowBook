@@ -48,7 +48,7 @@ def main():
     parser.add_argument(
         "--skip-flowbook",
         action="store_true",
-        help="Skip flowbook_sdc_kernel"
+        help="Skip flowbook_kernel"
     )
     parser.add_argument(
         "--skip-kishu",

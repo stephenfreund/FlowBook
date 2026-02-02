@@ -4,7 +4,7 @@ from flowbook.util.output import timer
 import argparse
 import asyncio
 from pathlib import Path
-from flowbook.kernel.flowbook_client import FlowbookClient
+from flowbook.kernel_support.flowbook_client import FlowbookClient
 
 
 async def handle_time(args):

@@ -3,7 +3,7 @@ Kernel comparison testing - Compare notebook execution times across kernel types
 
 This module provides utilities for comparing execution performance across:
 - Base: Standard python3 kernel (baseline)
-- FlowBook: flowbook_sdc_kernel (with SDC tracking overhead)
+- FlowBook: flowbook_kernel (with reproducibility tracking overhead)
 - Kishu: python3 kernel with Kishu extension enabled
 """
 
@@ -23,7 +23,7 @@ from flowbook.util.output import log, timer
 class KernelType(Enum):
     """Types of kernels to compare."""
     BASE = "base"           # python3 kernel
-    FLOWBOOK = "flowbook"   # flowbook_sdc_kernel
+    FLOWBOOK = "flowbook"   # flowbook_kernel
     KISHU = "kishu"         # python3 + Kishu extension
 
 
@@ -61,7 +61,7 @@ def create_kernel(kernel_name: str) -> Tuple[KernelManager, FlowbookKernelClient
     retry logic and wait_for_ready.
 
     Args:
-        kernel_name: Name of kernel to start (e.g., 'python3', 'flowbook_sdc_kernel')
+        kernel_name: Name of kernel to start (e.g., 'python3', 'flowbook_kernel')
 
     Returns:
         Tuple of (KernelManager, FlowbookKernelClient)
@@ -280,7 +280,7 @@ def run_kernel_execution(
     """
     # Determine kernel name
     if kernel_type == KernelType.FLOWBOOK:
-        kernel_name = 'flowbook_sdc_kernel'
+        kernel_name = 'flowbook_kernel'
     else:
         kernel_name = 'python3'
 

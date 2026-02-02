@@ -1,5 +1,5 @@
 """
-Correctness testing framework for SDC kernel.
+Correctness testing framework for reproducibility kernel.
 
 Verifies that re-executing cells produces the same state changes as the
 original execution.
@@ -10,11 +10,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
-from flowbook.kernel.checkpoint import Checkpoint
+from flowbook.kernel_support.checkpoint import Checkpoint
 from flowbook.util.output import log, timer
 
-from .runner import SDCSimulator, CellRecord
-from .notebook_loader import Cell, load_notebook
+from flowbook.testing.runner import ReproducibilitySimulator, CellRecord
+from flowbook.testing.notebook_loader import Cell, load_notebook
 
 
 @dataclass
@@ -73,7 +73,7 @@ def _compare_checkpoints(
 
 
 def run_correctness_test(
-    simulator: SDCSimulator,
+    simulator: ReproducibilitySimulator,
     iterations_per_cell: int = 10,
     seed: Optional[int] = None,
 ) -> List[CorrectnessResult]:
@@ -86,7 +86,7 @@ def run_correctness_test(
     3. Compare the resulting state to the original post-checkpoint
 
     Args:
-        simulator: SDCSimulator that has already executed a notebook
+        simulator: ReproducibilitySimulator that has already executed a notebook
         iterations_per_cell: Number of test iterations per cell
         seed: Random seed for reproducibility
 
@@ -205,7 +205,7 @@ def run_correctness_test_from_notebook(
     log(f"Found {len(cells)} code cells")
 
     with timer(key="correct:execute_notebook", message="Executing notebook"):
-        simulator = SDCSimulator()
+        simulator = ReproducibilitySimulator()
         simulator.execute_notebook(cells)
 
     total_iterations = len(cells) * iterations_per_cell

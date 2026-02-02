@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from flowbook.testing.notebook_loader import load_notebook
-from flowbook.testing.runner import SDCSimulator
+from flowbook.testing.runner import ReproducibilitySimulator
 from flowbook.testing.correctness import run_correctness_test
 from flowbook.testing.results import ResultLogger, TestConfig
 from flowbook.util.output import log, timer
@@ -60,7 +60,7 @@ def main():
     log(f"Found {len(cells)} code cells")
 
     with timer(key="script:execute_notebook", message="Executing notebook"):
-        simulator = SDCSimulator()
+        simulator = ReproducibilitySimulator()
         simulator.execute_notebook(cells)
 
     # Check for execution errors

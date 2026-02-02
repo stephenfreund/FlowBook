@@ -1,5 +1,5 @@
 """
-Result logging utilities for SDC testing framework.
+Result logging utilities for reproducibility testing framework.
 
 Provides JSON and CSV output for test results.
 """

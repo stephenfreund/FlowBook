@@ -18,8 +18,8 @@ from typing import Any, Dict, List, Optional, Set
 from flowbook.server.base import NotebookCommand, ProcessingResult
 from flowbook.server.kernel_helper import KernelHelper
 from flowbook.server.kernel_manager import FlowbookKernelClient
-from flowbook.kernel.kernel_command_client import KernelCommandClient
-from flowbook.kernel.types import DiffResult, format_diff_as_markdown
+from flowbook.kernel_support.kernel_command_client import KernelCommandClient
+from flowbook.kernel_support.types import DiffResult, format_diff_as_markdown
 from flowbook.util.flowbook_metadata import FlowbookMetadata
 from flowbook.util.metadata_extractor import extract_and_set_metadata
 from flowbook.util.output import log, timer, error as log_error
@@ -54,7 +54,7 @@ def format_diff_detail(var_name: str, node: Any, path: str = "") -> List[str]:
     Returns:
         List of formatted strings describing the differences
     """
-    from flowbook.kernel.types import ValueComparison
+    from flowbook.kernel_support.types import ValueComparison
 
     lines = []
     full_path = f"{var_name}{path}" if path else var_name

@@ -14,7 +14,7 @@ import nbformat
 from pydantic import BaseModel, Field
 
 from flowbook.agent.agent import FlowbookAgent, FlowbookStats
-from flowbook.kernel.checkpoint import is_valid_variable_name
+from flowbook.kernel_support.checkpoint import is_valid_variable_name
 from flowbook.server.base import NotebookCommand, ProcessingResult
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.util.dependencies import analyze_notebook

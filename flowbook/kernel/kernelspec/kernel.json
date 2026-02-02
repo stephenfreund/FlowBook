@@ -1,12 +1,14 @@
 {
     "argv": [
-      "{python}",
-      "-m",
-      "flowbook.kernel",
-      "-f",
-      "{connection_file}"
+        "python",
+        "-m",
+        "flowbook.kernel",
+        "-f",
+        "{connection_file}"
     ],
     "display_name": "FlowBook Kernel",
-    "language": "python"
-  }
-  
+    "language": "python",
+    "metadata": {
+        "debugger": false
+    }
+}

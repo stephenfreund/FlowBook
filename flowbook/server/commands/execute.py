@@ -18,7 +18,7 @@ class ExecuteCommand(NotebookCommand):
     """
     Execute notebook cells with Sequential Dataflow Consistency enforcement.
 
-    Uses FlowbookSDCKernel to track variable dependencies and enforce
+    Uses FlowbookKernel to track variable dependencies and enforce
     that cells don't modify state read by earlier cells.
     """
 
@@ -28,7 +28,7 @@ class ExecuteCommand(NotebookCommand):
 
     @property
     def display_name(self) -> str:
-        return "Execute with SDC"
+        return "Execute with Reproducibility"
 
     @property
     def icon_name(self) -> str:
@@ -44,7 +44,7 @@ class ExecuteCommand(NotebookCommand):
 
     @property
     def kernel_name(self) -> str:
-        return "flowbook_sdc_kernel"
+        return "flowbook_kernel"
 
     def make_subparser(
         self, subparsers: argparse._SubParsersAction
@@ -75,11 +75,11 @@ class ExecuteCommand(NotebookCommand):
         **kwargs,
     ) -> ProcessingResult:
         """
-        Execute notebook with SDC enforcement.
+        Execute notebook with reproducibility enforcement.
 
         Args:
             notebook_content: Notebook JSON
-            kernel_client: FlowbookKernelClient instance (or FlowbookSDCKernelClient)
+            kernel_client: FlowbookKernelClient instance (or FlowbookKernelClient)
             selected_cell_ids: Optional list of cell IDs to execute
             config: Optional configuration
             **kwargs: Additional arguments
@@ -87,7 +87,7 @@ class ExecuteCommand(NotebookCommand):
         Returns:
             ProcessingResult with:
                 - notebook: Updated notebook with outputs
-                - metadata: Execution metadata including SDC info
+                - metadata: Execution metadata including reproducibility info
         """
         if kernel_client is None:
             return ProcessingResult(
@@ -307,11 +307,11 @@ class ExecuteCommand(NotebookCommand):
         """
         Extract SDC metadata from cell outputs.
 
-        Looks for display_data outputs with flowbook_sdc in metadata.
+        Looks for display_data outputs with flowbook in metadata.
         """
         for output in outputs:
             if output.get("output_type") == "display_data":
                 output_meta = output.get("metadata", {})
-                if "flowbook_sdc" in output_meta:
-                    return output_meta["flowbook_sdc"]
+                if "flowbook" in output_meta:
+                    return output_meta["flowbook"]
         return None

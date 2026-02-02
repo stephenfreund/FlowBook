@@ -1,0 +1,11 @@
+{
+    "argv": [
+      "{python}",
+      "-m",
+      "flowbook.kernel_support",
+      "-f",
+      "{connection_file}"
+    ],
+    "display_name": "Experimental Kernel",
+    "language": "python"
+}

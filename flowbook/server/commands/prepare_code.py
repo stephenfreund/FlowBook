@@ -155,7 +155,7 @@ class PrepareCodeForFlowbookCommand(NotebookCommand):
     def tooltip(self) -> str:
         return "Transform chained assignments to prevent pandas errors"
 
-    async def process(
+    def process(
         self,
         notebook_content: Dict[str, Any],
         kernel_client: Optional[FlowbookKernelClient] = None,

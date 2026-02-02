@@ -1,1 +1,1 @@
-"""CLI scripts for SDC testing framework."""
+"""CLI scripts for reproducibility testing framework."""

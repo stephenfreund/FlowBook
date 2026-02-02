@@ -21,20 +21,20 @@ from flowbook.util.output import error, indent, log, timer, quiet, print, output
 from flowbook.util.flowbook_metadata import FlowbookMetadata, OptimizationPotential
 from flowbook.util.text import wrap_markdown
 
-from .helpers import (
+from flowbook.cli.helpers import (
     load_notebook,
     setup_kernel,
     save_notebook,
     cleanup_kernel,
 )
-from .optimization_metadata import (
+from flowbook.cli.optimization_metadata import (
     FlowbookOptimizationMetadata,
     SplitResultsSummary,
     OptimizationResultsSummary,
     CellOptimizationResult,
     LLMCostSummary,
 )
-from .stats_display import (
+from flowbook.cli.stats_display import (
     render_split_results_table,
     render_optimization_results_table,
     render_llm_cost_summary_table,
@@ -196,7 +196,7 @@ async def optimize_cell(
         with indent(message=f"* Profiling..."):
 
             # Save environment BEFORE profiling
-            from flowbook.kernel.kernel_command_client import KernelCommandClient
+            from flowbook.kernel_support.kernel_command_client import KernelCommandClient
 
             cmd_client = KernelCommandClient(kernel_client)
 

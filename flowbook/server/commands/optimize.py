@@ -8,8 +8,8 @@ import time
 import traceback
 from typing import Any, Dict, Optional, List, Tuple, Set, Literal
 
-from flowbook.kernel.checkpoint import is_valid_variable_name
-from flowbook.kernel.kernel_command_client import KernelCommandClient
+from flowbook.kernel_support.checkpoint import is_valid_variable_name
+from flowbook.kernel_support.kernel_command_client import KernelCommandClient
 from flowbook.server.base import NotebookCommand, ProcessingResult
 from flowbook.util.notebook_tools import NotebookTools
 from flowbook.server.kernel_manager import FlowbookKernelClient
@@ -29,7 +29,7 @@ from flowbook.agent.agent import FlowbookAgent, FlowbookStats
 from flowbook.util.prompts import get_prompt
 from flowbook.util.dependencies import analyze_notebook, CellDependencies
 from flowbook.util.notebook_analysis import NotebookAnalysis
-from flowbook.kernel.types import (
+from flowbook.kernel_support.types import (
     DiffResult,
     TestCodeResult,
     TestCodeSuccess,

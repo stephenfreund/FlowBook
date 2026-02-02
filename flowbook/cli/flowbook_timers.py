@@ -590,8 +590,8 @@ def compute_synthetic_metrics(grouped: dict[str, list[float]]) -> dict[str, list
     Compute synthetic metrics from grouped timing data.
 
     Currently computes:
-    - Computed:Slowdown = sum(execute:sdc) / sum(sdc_kernel:execute)
-    - Computed:CheckpointSlowdown = sum(sdc_kernel:checkpoint) / sum(sdc_kernel:execute)
+    - Computed:Slowdown = sum(execute:reproducibility) / sum(kernel:execute)
+    - Computed:CheckpointSlowdown = sum(kernel:checkpoint) / sum(kernel:execute)
 
     Args:
         grouped: Dict mapping timer key -> list of durations
@@ -599,21 +599,21 @@ def compute_synthetic_metrics(grouped: dict[str, list[float]]) -> dict[str, list
     Returns:
         Updated dict with synthetic metrics added
     """
-    sdc_kernel_execute_key = "sdc_kernel:execute"
-    total_sdc_kernel_execute = sum(grouped.get(sdc_kernel_execute_key, []))
+    kernel_execute_key = "kernel:execute"
+    total_kernel_execute = sum(grouped.get(kernel_execute_key, []))
 
-    # Compute Slowdown: execute:sdc / sdc_kernel:execute
-    execute_sdc_key = "execute:sdc"
-    if execute_sdc_key in grouped and total_sdc_kernel_execute > 0:
-        total_execute_sdc = sum(grouped[execute_sdc_key])
-        slowdown = total_execute_sdc / total_sdc_kernel_execute
+    # Compute Slowdown: execute:reproducibility / kernel:execute
+    execute_key = "execute:reproducibility"
+    if execute_key in grouped and total_kernel_execute > 0:
+        total_execute = sum(grouped[execute_key])
+        slowdown = total_execute / total_kernel_execute
         grouped["Computed:Slowdown"] = [slowdown]
 
-    # Compute CheckpointSlowdown: 1 + sdc_kernel:checkpoint / sdc_kernel:execute
-    checkpoint_key = "sdc_kernel:checkpoint"
-    if checkpoint_key in grouped and total_sdc_kernel_execute > 0:
+    # Compute CheckpointSlowdown: 1 + kernel:checkpoint / kernel:execute
+    checkpoint_key = "kernel:checkpoint"
+    if checkpoint_key in grouped and total_kernel_execute > 0:
         total_checkpoint = sum(grouped[checkpoint_key])
-        checkpoint_slowdown = 1 + total_checkpoint / total_sdc_kernel_execute
+        checkpoint_slowdown = 1 + total_checkpoint / total_kernel_execute
         grouped["Computed:CheckpointSlowdown"] = [checkpoint_slowdown]
 
     return grouped
