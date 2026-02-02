@@ -1,5 +1,5 @@
 /**
- * SDC Kernel Plugin - Activates only for flowbook_sdc_kernel
+ * FlowBook Kernel Plugin - Activates only for flowbook_kernel (reproducibility)
  */
 
 import {
@@ -9,20 +9,20 @@ import {
 import { INotebookTracker } from '@jupyterlab/notebook';
 
 import { KernelDetector } from '../shared/kerneldetection';
-import { SDCMetadataPanel } from './metadatapanel';
-import { SDCCellHighlighter } from './cellhighlighter';
-import { SDCExecutionHookManager } from './executionhook';
+import { ReproducibilityMetadataPanel } from './metadatapanel';
+import { ReproducibilityCellHighlighter } from './cellhighlighter';
+import { ReproducibilityExecutionHookManager } from './executionhook';
 import { CellIndexManager } from '../cellindex';
 
 /**
  * Track activation state per notebook
  */
-class SDCActivationManager {
+class FlowbookActivationManager {
   private _app: JupyterFrontEnd;
   private _tracker: INotebookTracker;
   private _kernelDetector: KernelDetector;
-  private _panel: SDCMetadataPanel | null = null;
-  private _highlighter: SDCCellHighlighter | null = null;
+  private _panel: ReproducibilityMetadataPanel | null = null;
+  private _highlighter: ReproducibilityCellHighlighter | null = null;
   private _cellIndexManager: CellIndexManager;
   private _isActive = false;
   private _activeNotebookPath: string | null = null;
@@ -39,17 +39,17 @@ class SDCActivationManager {
 
   private _setupKernelChangeListener(): void {
     this._kernelDetector.kernelChanged.connect((_, info) => {
-      console.log(`SDC Plugin: Kernel changed from ${info.previousKernel} to ${info.currentKernel}`);
-      if (info.currentKernel === 'flowbook_sdc_kernel') {
+      console.log(`FlowBook Plugin: Kernel changed from ${info.previousKernel} to ${info.currentKernel}`);
+      if (info.currentKernel === 'flowbook_kernel') {
         this._activate();
-      } else if (info.previousKernel === 'flowbook_sdc_kernel') {
+      } else if (info.previousKernel === 'flowbook_kernel') {
         this._deactivate();
       }
     });
 
     // Also check when current widget changes
     this._tracker.currentChanged.connect(() => {
-      console.log('SDC Plugin: Current notebook changed, checking kernel...');
+      console.log('FlowBook Plugin: Current notebook changed, checking kernel...');
       this._checkCurrentNotebook();
     });
   }
@@ -58,15 +58,15 @@ class SDCActivationManager {
     const notebook = this._tracker.currentWidget;
     if (notebook) {
       const kernelName = notebook.sessionContext.session?.kernel?.name;
-      console.log(`SDC Plugin: Checking notebook, kernel = ${kernelName}`);
+      console.log(`FlowBook Plugin: Checking notebook, kernel = ${kernelName}`);
 
       // Wait for session to be ready
       notebook.sessionContext.ready.then(() => {
-        const isSDC = this._kernelDetector.isSDCKernel(notebook);
+        const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
         const currentKernelName = notebook.sessionContext.session?.kernel?.name;
-        console.log(`SDC Plugin: Session ready, kernel = ${currentKernelName}, isSDC = ${isSDC}`);
+        console.log(`FlowBook Plugin: Session ready, kernel = ${currentKernelName}, isFlowbook = ${isFlowbook}`);
 
-        if (isSDC) {
+        if (isFlowbook) {
           this._activate();
         } else {
           this._deactivate();
@@ -80,17 +80,17 @@ class SDCActivationManager {
       return;
     }
 
-    console.log('SDC Plugin: Activating for flowbook_sdc_kernel');
+    console.log('FlowBook Plugin: Activating for flowbook_kernel');
 
     // Create panel
-    this._panel = new SDCMetadataPanel();
+    this._panel = new ReproducibilityMetadataPanel();
     this._app.shell.add(this._panel, 'right', { rank: 510 });
 
     // Create highlighter
-    this._highlighter = new SDCCellHighlighter(this._tracker, this._panel);
+    this._highlighter = new ReproducibilityCellHighlighter(this._tracker, this._panel);
 
     // Create execution hook
-    new SDCExecutionHookManager(
+    new ReproducibilityExecutionHookManager(
       this._app,
       this._tracker,
       this._highlighter
@@ -104,7 +104,7 @@ class SDCActivationManager {
     }
 
     this._isActive = true;
-    console.log('SDC Plugin: Activated');
+    console.log('FlowBook Plugin: Activated');
   }
 
   private _deactivate(): void {
@@ -112,7 +112,7 @@ class SDCActivationManager {
       return;
     }
 
-    console.log('SDC Plugin: Deactivating');
+    console.log('FlowBook Plugin: Deactivating');
 
     // Stop cell index overlays
     if (this._activeNotebookPath) {
@@ -130,19 +130,19 @@ class SDCActivationManager {
     this._highlighter = null;
 
     this._isActive = false;
-    console.log('SDC Plugin: Deactivated');
+    console.log('FlowBook Plugin: Deactivated');
   }
 }
 
 /**
- * SDC Plugin definition
+ * FlowBook Plugin definition
  */
-export const sdcPlugin: JupyterFrontEndPlugin<void> = {
-  id: 'flowbook:sdc',
+export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
+  id: 'flowbook:plugin',
   autoStart: true,
   requires: [INotebookTracker],
   activate: (app: JupyterFrontEnd, tracker: INotebookTracker) => {
-    console.log('SDC Plugin: Extension registered (will activate when flowbook_sdc_kernel is used)');
-    new SDCActivationManager(app, tracker);
+    console.log('FlowBook Plugin: Extension registered (will activate when flowbook_kernel is used)');
+    new FlowbookActivationManager(app, tracker);
   }
 };

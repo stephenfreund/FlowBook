@@ -33,15 +33,15 @@ export class NotebookToolbarExtension
     const buttons: ToolbarButton[] = [];
     const commands = this.manager.getCommands();
 
-    // Function to check if current kernel is flowbook_kernel
-    const isFlowbookKernel = () => {
+    // Function to check if current kernel is experimental_kernel
+    const isExperimentalKernel = () => {
       const kernelName = panel.sessionContext.session?.kernel?.name;
-      return kernelName === 'flowbook_kernel';
+      return kernelName === 'experimental_kernel';
     };
 
     // Function to update button visibility
     const updateButtonVisibility = () => {
-      const shouldShow = isFlowbookKernel();
+      const shouldShow = isExperimentalKernel();
       buttons.forEach(btn => {
         btn.node.style.display = shouldShow ? '' : 'none';
       });

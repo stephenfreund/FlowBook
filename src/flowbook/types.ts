@@ -1,8 +1,8 @@
 /**
- * Type definitions for SDC kernel extension
+ * Type definitions for FlowBook kernel extension (reproducibility)
  */
 
-export interface ISDCViolation {
+export interface IReproducibilityViolation {
   mutating_cell: string;
   affected_cell: string;
   variables: string[];
@@ -10,14 +10,14 @@ export interface ISDCViolation {
   violation_type?: 'backward_mutation' | 'forward_dependency';
 }
 
-export interface ISDCMetadata {
+export interface IReproducibilityMetadata {
   cell_id: string;
   execution_seq: number;
   reads: string[];
   writes: string[];
   changed_variables: string[];
   stale_cells: string[];
-  violation: ISDCViolation | null;
+  violation: IReproducibilityViolation | null;
   cell_order: string[];
   column_reads?: { [key: string]: string[] };
   column_writes?: { [key: string]: string[] };
@@ -30,7 +30,7 @@ export interface ISDCMetadata {
   check_duration_ms?: number;
 }
 
-export interface ISDCCellState {
+export interface IReproducibilityCellState {
   cellId: string;
   executionSeq: number;
   reads: string[];

@@ -1,5 +1,5 @@
 /**
- * FlowBook Kernel Plugin - Activates only for flowbook_kernel
+ * Experimental Kernel Plugin - Activates only for experimental_kernel
  */
 
 import {
@@ -26,7 +26,7 @@ import { CellIndexManager } from '../cellindex';
 /**
  * Track activation state and manage UI components
  */
-class FlowbookActivationManager {
+class ExperimentalActivationManager {
   private _app: JupyterFrontEnd;
   private _tracker: INotebookTracker;
   private _palette: ICommandPalette | null;
@@ -80,9 +80,9 @@ class FlowbookActivationManager {
 
   private _setupKernelChangeListener(): void {
     this._kernelDetector.kernelChanged.connect((_, info) => {
-      if (info.currentKernel === 'flowbook_kernel') {
+      if (info.currentKernel === 'experimental_kernel') {
         this._activateUI();
-      } else if (info.previousKernel === 'flowbook_kernel') {
+      } else if (info.previousKernel === 'experimental_kernel') {
         this._deactivateUI();
       }
     });
@@ -125,7 +125,7 @@ class FlowbookActivationManager {
     const notebook = this._tracker.currentWidget;
     if (notebook) {
       notebook.sessionContext.ready.then(() => {
-        if (this._kernelDetector.isFlowbookKernel(notebook)) {
+        if (this._kernelDetector.isExperimentalKernel(notebook)) {
           this._activateUI();
         } else {
           this._deactivateUI();
@@ -139,7 +139,7 @@ class FlowbookActivationManager {
       return;
     }
 
-    console.log('FlowBook Plugin: Activating UI for flowbook_kernel');
+    console.log('Experimental Plugin: Activating UI for experimental_kernel');
 
     // Add to command palette if available
     if (this._palette) {
@@ -175,7 +175,7 @@ class FlowbookActivationManager {
     new ExecutionHookManager(this._app, this._tracker, this._manager);
 
     this._isUIActive = true;
-    console.log('FlowBook Plugin: UI activated');
+    console.log('Experimental Plugin: UI activated');
   }
 
   private _deactivateUI(): void {
@@ -183,7 +183,7 @@ class FlowbookActivationManager {
       return;
     }
 
-    console.log('FlowBook Plugin: Deactivating UI');
+    console.log('Experimental Plugin: Deactivating UI');
 
     // Remove panels
     if (this._messagePanel) {
@@ -204,15 +204,15 @@ class FlowbookActivationManager {
     }
 
     this._isUIActive = false;
-    console.log('FlowBook Plugin: UI deactivated');
+    console.log('Experimental Plugin: UI deactivated');
   }
 }
 
 /**
- * FlowBook Plugin definition
+ * Experimental Plugin definition
  */
-export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
-  id: 'flowbook:plugin',
+export const experimentalPlugin: JupyterFrontEndPlugin<void> = {
+  id: 'flowbook:experimental',
   autoStart: true,
   requires: [INotebookTracker],
   optional: [ICommandPalette, IToolbarWidgetRegistry],
@@ -222,7 +222,7 @@ export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
     palette: ICommandPalette | null,
     toolbarRegistry: IToolbarWidgetRegistry | null
   ) => {
-    console.log('FlowBook Plugin: Extension registered (will activate UI when flowbook_kernel is used)');
-    new FlowbookActivationManager(app, tracker, palette, toolbarRegistry);
+    console.log('Experimental Plugin: Extension registered (will activate UI when experimental_kernel is used)');
+    new ExperimentalActivationManager(app, tracker, palette, toolbarRegistry);
   }
 };

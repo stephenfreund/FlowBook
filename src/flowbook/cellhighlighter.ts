@@ -1,19 +1,19 @@
 /**
- * Cell highlighter for SDC staleness visualization
+ * Cell highlighter for reproducibility staleness visualization
  */
 
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
 import { Cell } from '@jupyterlab/cells';
 import { StalenessManager } from './stalenessmanager';
-import { SDCMetadataPanel } from './metadatapanel';
-import { ISDCMetadata } from './types';
+import { ReproducibilityMetadataPanel } from './metadatapanel';
+import { IReproducibilityMetadata } from './types';
 
-export class SDCCellHighlighter {
+export class ReproducibilityCellHighlighter {
   private _tracker: INotebookTracker;
-  private _panel: SDCMetadataPanel;
+  private _panel: ReproducibilityMetadataPanel;
   private _stalenessManagers = new Map<string, StalenessManager>();
 
-  constructor(tracker: INotebookTracker, panel: SDCMetadataPanel) {
+  constructor(tracker: INotebookTracker, panel: ReproducibilityMetadataPanel) {
     this._tracker = tracker;
     this._panel = panel;
     this._initialize();
@@ -83,12 +83,12 @@ export class SDCCellHighlighter {
 
     if (cell && cell.model.type === 'code') {
       const metadata = cell.model.metadata as any;
-      const sdcMetadata = metadata?.flowbook_sdc as ISDCMetadata | undefined;
+      const reproducibilityMetadata = metadata?.flowbook as IReproducibilityMetadata | undefined;
       const cellId = cell.model.id;
       const currentCellOrder = this._getCurrentCellOrder(notebook);
 
-      if (sdcMetadata) {
-        this._panel.updateMetadata(sdcMetadata, cellId, currentCellOrder);
+      if (reproducibilityMetadata) {
+        this._panel.updateMetadata(reproducibilityMetadata, cellId, currentCellOrder);
       } else {
         this._panel.clear();
       }
@@ -117,12 +117,12 @@ export class SDCCellHighlighter {
     }
 
     const metadata = activeCell.model.metadata as any;
-    const sdcMetadata = metadata?.flowbook_sdc as ISDCMetadata | undefined;
+    const reproducibilityMetadata = metadata?.flowbook as IReproducibilityMetadata | undefined;
 
-    if (sdcMetadata) {
+    if (reproducibilityMetadata) {
       const cellId = activeCell.model.id;
       const currentCellOrder = this._getCurrentCellOrder(notebook);
-      this._panel.updateMetadata(sdcMetadata, cellId, currentCellOrder);
+      this._panel.updateMetadata(reproducibilityMetadata, cellId, currentCellOrder);
     }
   }
 
@@ -144,25 +144,25 @@ export class SDCCellHighlighter {
     console.log(`CellHighlighter: Updating cell ${cellId}, isStale=${isStale}`);
 
     // Remove existing stale class
-    cell.node.classList.remove('sdc-cell-stale');
+    cell.node.classList.remove('flowbook-cell-stale');
 
     // Add stale class if needed
     if (isStale) {
-      cell.node.classList.add('sdc-cell-stale');
-      console.log(`CellHighlighter: Added .sdc-cell-stale class to cell ${cellId}`);
+      cell.node.classList.add('flowbook-cell-stale');
+      console.log(`CellHighlighter: Added .flowbook-cell-stale class to cell ${cellId}`);
     } else {
-      console.log(`CellHighlighter: Removed .sdc-cell-stale class from cell ${cellId}`);
+      console.log(`CellHighlighter: Removed .flowbook-cell-stale class from cell ${cellId}`);
     }
 
     // Update panel if this is the active cell
     if (this._tracker.activeCell === cell) {
       const metadata = cell.model.metadata as any;
-      const sdcMetadata = metadata?.flowbook_sdc as ISDCMetadata | undefined;
+      const reproducibilityMetadata = metadata?.flowbook as IReproducibilityMetadata | undefined;
       const notebook = this._tracker.currentWidget;
 
-      if (sdcMetadata && notebook) {
+      if (reproducibilityMetadata && notebook) {
         const currentCellOrder = this._getCurrentCellOrder(notebook);
-        this._panel.updateMetadata(sdcMetadata, cellId, currentCellOrder);
+        this._panel.updateMetadata(reproducibilityMetadata, cellId, currentCellOrder);
       }
     }
   }

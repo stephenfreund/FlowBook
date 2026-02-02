@@ -5,7 +5,7 @@
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
 import { ISignal, Signal } from '@lumino/signaling';
 
-export type FlowbookKernelType = 'flowbook_kernel' | 'flowbook_sdc_kernel' | 'other' | 'none';
+export type FlowbookKernelType = 'flowbook_kernel' | 'experimental_kernel' | 'other' | 'none';
 
 export interface IKernelChangeInfo {
   notebook: NotebookPanel;
@@ -39,17 +39,17 @@ export class KernelDetector {
   }
 
   /**
-   * Check if notebook is using flowbook_kernel
+   * Check if notebook is using flowbook_kernel (reproducibility)
    */
   isFlowbookKernel(notebook: NotebookPanel): boolean {
     return this.getKernelType(notebook) === 'flowbook_kernel';
   }
 
   /**
-   * Check if notebook is using flowbook_sdc_kernel
+   * Check if notebook is using experimental_kernel
    */
-  isSDCKernel(notebook: NotebookPanel): boolean {
-    return this.getKernelType(notebook) === 'flowbook_sdc_kernel';
+  isExperimentalKernel(notebook: NotebookPanel): boolean {
+    return this.getKernelType(notebook) === 'experimental_kernel';
   }
 
   private _classifyKernel(kernelName: string | undefined): FlowbookKernelType {
@@ -59,8 +59,8 @@ export class KernelDetector {
     if (kernelName === 'flowbook_kernel') {
       return 'flowbook_kernel';
     }
-    if (kernelName === 'flowbook_sdc_kernel') {
-      return 'flowbook_sdc_kernel';
+    if (kernelName === 'experimental_kernel') {
+      return 'experimental_kernel';
     }
     return 'other';
   }

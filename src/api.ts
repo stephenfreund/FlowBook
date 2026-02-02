@@ -3,7 +3,7 @@
  */
 
 import { requestAPI } from './handler';
-import { CommandResult, ExecuteCommandRequest } from './flowbook/types';
+import { CommandResult, ExecuteCommandRequest } from './experimental/types';
 
 /**
  * FlowBook API client for server communication

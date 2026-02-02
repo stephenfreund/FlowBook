@@ -43,7 +43,7 @@ export class CellToolbarExtension {
         'Cell',
         `flowbook-${cmdInfo.id}`,
         (cell: Cell) => {
-          // Check if current kernel is flowbook_kernel
+          // Check if current kernel is experimental_kernel
           const panel = this.tracker.currentWidget;
           const kernelName = panel?.sessionContext.session?.kernel?.name;
 
@@ -68,8 +68,8 @@ export class CellToolbarExtension {
             }
           });
 
-          // Initially hide if not flowbook_kernel
-          if (kernelName !== 'flowbook_kernel') {
+          // Initially hide if not experimental_kernel
+          if (kernelName !== 'experimental_kernel') {
             button.node.style.display = 'none';
           }
 
@@ -77,7 +77,7 @@ export class CellToolbarExtension {
           if (panel) {
             panel.sessionContext.kernelChanged.connect(() => {
               const newKernelName = panel.sessionContext.session?.kernel?.name;
-              button.node.style.display = newKernelName === 'flowbook_kernel' ? '' : 'none';
+              button.node.style.display = newKernelName === 'experimental_kernel' ? '' : 'none';
             });
           }
 

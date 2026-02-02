@@ -1,22 +1,22 @@
 /**
- * Execution hook for SDC kernel - extracts flowbook_sdc metadata
+ * Execution hook for FlowBook kernel - extracts reproducibility metadata
  */
 
 import { JupyterFrontEnd } from '@jupyterlab/application';
 import { INotebookTracker, Notebook, NotebookActions } from '@jupyterlab/notebook';
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { IOutput } from '@jupyterlab/nbformat';
-import { SDCCellHighlighter } from './cellhighlighter';
-import { ISDCMetadata } from './types';
+import { ReproducibilityCellHighlighter } from './cellhighlighter';
+import { IReproducibilityMetadata } from './types';
 
-export class SDCExecutionHookManager {
+export class ReproducibilityExecutionHookManager {
   private _tracker: INotebookTracker;
-  private _highlighter: SDCCellHighlighter;
+  private _highlighter: ReproducibilityCellHighlighter;
 
   constructor(
     _app: JupyterFrontEnd,
     tracker: INotebookTracker,
-    highlighter: SDCCellHighlighter
+    highlighter: ReproducibilityCellHighlighter
   ) {
     this._tracker = tracker;
     this._highlighter = highlighter;
@@ -30,7 +30,7 @@ export class SDCExecutionHookManager {
     // Listen for cell execution start to set cell_order via magic
     NotebookActions.executionScheduled.connect(this._onExecutionScheduled, this);
 
-    console.log('SDCExecutionHookManager: Execution hooks installed');
+    console.log('ReproducibilityExecutionHookManager: Execution hooks installed');
   }
 
   /**
@@ -59,32 +59,32 @@ export class SDCExecutionHookManager {
     if (session && session.kernel && cellOrder.length > 0) {
       const magicCommand = `%notebook_structure ${cellOrder.join(' ')}`;
       session.kernel.requestExecute({ code: magicCommand, silent: true, store_history: false });
-      console.log(`SDCExecutionHook: Sent notebook_structure with ${cellOrder.length} cells`);
+      console.log(`ReproducibilityExecutionHook: Sent notebook_structure with ${cellOrder.length} cells`);
     }
   }
 
-  private _extractSDCMetadata(outputs: IOutput[]): ISDCMetadata | null {
-    console.log(`SDCExecutionHook: Checking ${outputs.length} outputs for flowbook_sdc metadata`);
+  private _extractReproducibilityMetadata(outputs: IOutput[]): IReproducibilityMetadata | null {
+    console.log(`ReproducibilityExecutionHook: Checking ${outputs.length} outputs for flowbook metadata`);
 
     for (const output of outputs) {
-      console.log(`SDCExecutionHook: Output type = ${output.output_type}`);
+      console.log(`ReproducibilityExecutionHook: Output type = ${output.output_type}`);
 
       if (output.output_type !== 'display_data') {
         continue;
       }
 
       const metadata = (output as any).metadata;
-      console.log('SDCExecutionHook: display_data metadata =', metadata);
+      console.log('ReproducibilityExecutionHook: display_data metadata =', metadata);
 
-      if (!metadata?.flowbook_sdc) {
-        console.log('SDCExecutionHook: No flowbook_sdc in metadata');
+      if (!metadata?.flowbook) {
+        console.log('ReproducibilityExecutionHook: No flowbook in metadata');
         continue;
       }
 
-      console.log('SDCExecutionHook: Found flowbook_sdc metadata!', metadata.flowbook_sdc);
-      return metadata.flowbook_sdc as ISDCMetadata;
+      console.log('ReproducibilityExecutionHook: Found flowbook metadata!', metadata.flowbook);
+      return metadata.flowbook as IReproducibilityMetadata;
     }
-    console.log('SDCExecutionHook: No flowbook_sdc metadata found in any output');
+    console.log('ReproducibilityExecutionHook: No flowbook metadata found in any output');
     return null;
   }
 
@@ -108,19 +108,19 @@ export class SDCExecutionHookManager {
       outputs.push(codeModel.outputs.get(i).toJSON() as IOutput);
     }
 
-    // Extract SDC metadata
-    const sdcMetadata = this._extractSDCMetadata(outputs);
-    if (!sdcMetadata) {
+    // Extract reproducibility metadata
+    const reproducibilityMetadata = this._extractReproducibilityMetadata(outputs);
+    if (!reproducibilityMetadata) {
       return;
     }
 
     // Store metadata on cell
-    cell.model.setMetadata('flowbook_sdc', sdcMetadata);
+    cell.model.setMetadata('flowbook', reproducibilityMetadata);
 
     // Update staleness manager
     const stalenessManager = this._highlighter.getStalenessManager(panel);
-    stalenessManager.updateFromMetadata(sdcMetadata);
+    stalenessManager.updateFromMetadata(reproducibilityMetadata);
 
-    console.log(`SDCExecutionHook: Extracted metadata for cell ${cell.model.id}:`, sdcMetadata);
+    console.log(`ReproducibilityExecutionHook: Extracted metadata for cell ${cell.model.id}:`, reproducibilityMetadata);
   }
 }

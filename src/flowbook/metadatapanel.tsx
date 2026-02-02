@@ -1,15 +1,15 @@
 /**
- * SDC Metadata Panel - Shows SDC-specific cell metadata
+ * Reproducibility Panel - Shows reproducibility-specific cell metadata
  */
 
 import { Widget } from '@lumino/widgets';
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
-import { ISDCMetadata } from './types';
+import { IReproducibilityMetadata } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
-interface ISDCMetadataDisplayProps {
-  metadata: ISDCMetadata | null;
+interface IReproducibilityMetadataDisplayProps {
+  metadata: IReproducibilityMetadata | null;
   cellId: string | null;
   currentCellOrder: string[];  // Current cell order from notebook (not historical)
 }
@@ -69,11 +69,11 @@ function flattenColumnTracking(
   return result;
 }
 
-const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cellId, currentCellOrder }) => {
+const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayProps> = ({ metadata, cellId, currentCellOrder }) => {
   if (!metadata) {
     return (
-      <div className="sdc-metadata-empty">
-        <p>No SDC metadata available.</p>
+      <div className="flowbook-metadata-empty">
+        <p>No reproducibility metadata available.</p>
         <p>Execute a cell to see dependency tracking.</p>
       </div>
     );
@@ -83,24 +83,24 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
   const hasStale = metadata.stale_cells.length > 0;
 
   return (
-    <div className="sdc-metadata-content">
+    <div className="flowbook-metadata-content">
       {/* Cell ID Header */}
       {cellId && (
         <>
-          <div className="sdc-metadata-header">Cell: {cellIdToReference(cellId, currentCellOrder)}</div>
-          <div className="sdc-metadata-section">
-            <div className="sdc-metadata-item">
+          <div className="flowbook-metadata-header">Cell: {cellIdToReference(cellId, currentCellOrder)}</div>
+          <div className="flowbook-metadata-section">
+            <div className="flowbook-metadata-item">
               <span style={{ fontSize: '0.85em', color: '#666' }}>Id: </span>
               <code style={{ fontSize: '0.85em', color: '#666' }}>{cellId}</code>
             </div>
           </div>
-          <div className="sdc-metadata-divider" />
+          <div className="flowbook-metadata-divider" />
         </>
       )}
 
       {/* Execution Info */}
-      <div className="sdc-metadata-section">
-        <div className="sdc-metadata-item">
+      <div className="flowbook-metadata-section">
+        <div className="flowbook-metadata-item">
           <strong>Execution #:</strong> {metadata.execution_seq}
         </div>
       </div>
@@ -110,11 +110,11 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
         metadata.state_duration_ms !== undefined ||
         metadata.check_duration_ms !== undefined) && (
         <>
-          <div className="sdc-metadata-divider" />
-          <div className="sdc-metadata-section">
-            <div className="sdc-metadata-item">
+          <div className="flowbook-metadata-divider" />
+          <div className="flowbook-metadata-section">
+            <div className="flowbook-metadata-item">
               <strong>Timing:</strong>
-              <ul className="sdc-timing-list">
+              <ul className="flowbook-timing-list">
                 {metadata.run_duration_ms !== undefined && (
                   <li>Run: <code>{metadata.run_duration_ms.toFixed(0)} ms</code></li>
                 )}
@@ -131,9 +131,9 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
       )}
 
       {/* Reads */}
-      <div className="sdc-metadata-divider" />
-      <div className="sdc-metadata-section">
-        <div className="sdc-metadata-item">
+      <div className="flowbook-metadata-divider" />
+      <div className="flowbook-metadata-section">
+        <div className="flowbook-metadata-item">
           <strong>Variables Read:</strong>
           {(() => {
             // Include variables with either variable-level OR column-level reads
@@ -147,11 +147,11 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
               {}
             );
             return flatReads.length > 0 ? (
-              <ul className="sdc-variable-list">
+              <ul className="flowbook-variable-list">
                 {flatReads.map((v, i) => <li key={i}><code>{v}</code></li>)}
               </ul>
             ) : (
-              <span className="sdc-none"> None</span>
+              <span className="flowbook-none"> None</span>
             );
           })()}
         </div>
@@ -160,11 +160,11 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
       {/* Structural Reads */}
       {metadata.structural_reads && Object.keys(metadata.structural_reads).length > 0 && (
         <>
-          <div className="sdc-metadata-divider" />
-          <div className="sdc-metadata-section">
-            <div className="sdc-metadata-item">
+          <div className="flowbook-metadata-divider" />
+          <div className="flowbook-metadata-section">
+            <div className="flowbook-metadata-item">
               <strong>Structural Reads:</strong>
-              <ul className="sdc-variable-list sdc-structural">
+              <ul className="flowbook-variable-list flowbook-structural">
                 {Object.entries(metadata.structural_reads).flatMap(([varName, attrs]) =>
                   attrs.map((attr, i) => (
                     <li key={`${varName}.${attr}`}><code>{varName}.{attr}</code></li>
@@ -177,9 +177,9 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
       )}
 
       {/* Writes */}
-      <div className="sdc-metadata-divider" />
-      <div className="sdc-metadata-section">
-        <div className="sdc-metadata-item">
+      <div className="flowbook-metadata-divider" />
+      <div className="flowbook-metadata-section">
+        <div className="flowbook-metadata-item">
           <strong>Variables Written:</strong>
           {(() => {
             // Include variables with either variable-level OR column-level writes
@@ -193,11 +193,11 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
               metadata.column_writes
             );
             return flatWrites.length > 0 ? (
-              <ul className="sdc-variable-list">
+              <ul className="flowbook-variable-list">
                 {flatWrites.map((v, i) => <li key={i}><code>{v}</code></li>)}
               </ul>
             ) : (
-              <span className="sdc-none"> None</span>
+              <span className="flowbook-none"> None</span>
             );
           })()}
         </div>
@@ -217,11 +217,11 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
         );
         return flatChanged.length > 0 && (
           <>
-            <div className="sdc-metadata-divider" />
-            <div className="sdc-metadata-section">
-              <div className="sdc-metadata-item">
+            <div className="flowbook-metadata-divider" />
+            <div className="flowbook-metadata-section">
+              <div className="flowbook-metadata-item">
                 <strong>Changed:</strong>
-                <ul className="sdc-variable-list sdc-changed">
+                <ul className="flowbook-variable-list flowbook-changed">
                   {flatChanged.map((v, i) => <li key={i}><code>{v}</code></li>)}
                 </ul>
               </div>
@@ -233,11 +233,11 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
       {/* Stale Cells */}
       {hasStale && (
         <>
-          <div className="sdc-metadata-divider" />
-          <div className="sdc-metadata-section sdc-stale-section">
-            <div className="sdc-metadata-item">
+          <div className="flowbook-metadata-divider" />
+          <div className="flowbook-metadata-section flowbook-stale-section">
+            <div className="flowbook-metadata-item">
               <strong>Stale Cells:</strong>
-              <ul className="sdc-cell-list sdc-stale">
+              <ul className="flowbook-cell-list flowbook-stale">
                 {metadata.stale_cells.map((id, i) => (
                   <li key={i}><code>{cellIdToReference(id, currentCellOrder)}</code></li>
                 ))}
@@ -250,11 +250,11 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
       {/* Structural Warnings */}
       {metadata.structural_warnings && metadata.structural_warnings.length > 0 && (
         <>
-          <div className="sdc-metadata-divider" />
-          <div className="sdc-metadata-section sdc-warning-section">
-            <div className="sdc-warning-header">Structural Warnings</div>
-            <div className="sdc-warning-content">
-              <ul className="sdc-warning-list">
+          <div className="flowbook-metadata-divider" />
+          <div className="flowbook-metadata-section flowbook-warning-section">
+            <div className="flowbook-warning-header">Structural Warnings</div>
+            <div className="flowbook-warning-content">
+              <ul className="flowbook-warning-list">
                 {metadata.structural_warnings.map((warning, i) => (
                   <li key={i}>{warning}</li>
                 ))}
@@ -267,24 +267,24 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
       {/* Violation */}
       {hasViolation && metadata.violation && (
         <>
-          <div className="sdc-metadata-divider" />
-          <div className={`sdc-metadata-section ${
+          <div className="flowbook-metadata-divider" />
+          <div className={`flowbook-metadata-section ${
             metadata.violation.violation_type === 'forward_dependency'
-              ? 'sdc-forward-dep-section'
-              : 'sdc-violation-section'
+              ? 'flowbook-forward-dep-section'
+              : 'flowbook-violation-section'
           }`}>
             <div className={
               metadata.violation.violation_type === 'forward_dependency'
-                ? 'sdc-forward-dep-header'
-                : 'sdc-violation-header'
+                ? 'flowbook-forward-dep-header'
+                : 'flowbook-violation-header'
             }>
               {metadata.violation.violation_type === 'forward_dependency'
                 ? 'Forward Dependency'
-                : 'SDC Violation'}
+                : 'Reproducibility Violation'}
             </div>
-            <div className="sdc-violation-content">
+            <div className="flowbook-violation-content">
               <p>{metadata.violation.message}</p>
-              <div className="sdc-violation-details">
+              <div className="flowbook-violation-details">
                 <strong>{metadata.violation.violation_type === 'forward_dependency' ? 'Writing Cell:' : 'Mutating Cell:'}</strong> <code>{cellIdToReference(metadata.violation.mutating_cell, currentCellOrder)}</code><br />
                 <strong>{metadata.violation.violation_type === 'forward_dependency' ? 'Reading Cell:' : 'Affected Cell:'}</strong> <code>{cellIdToReference(metadata.violation.affected_cell, currentCellOrder)}</code><br />
                 <strong>Variables:</strong> {metadata.violation.variables.join(', ')}
@@ -297,24 +297,24 @@ const SDCMetadataDisplay: React.FC<ISDCMetadataDisplayProps> = ({ metadata, cell
   );
 };
 
-export class SDCMetadataPanel extends Widget {
-  private _metadata: ISDCMetadata | null = null;
+export class ReproducibilityMetadataPanel extends Widget {
+  private _metadata: IReproducibilityMetadata | null = null;
   private _cellId: string | null = null;
   private _currentCellOrder: string[] = [];
 
   constructor() {
     super();
-    this.id = 'sdc-metadata-panel';
-    this.addClass('sdc-metadata-panel');
-    this.title.label = 'SDC Metadata';
+    this.id = 'flowbook-metadata-panel';
+    this.addClass('flowbook-metadata-panel');
+    this.title.label = 'Reproducibility';
     this.title.closable = true;
-    this.title.caption = 'Sequential Dataflow Consistency cell metadata';
+    this.title.caption = 'Reproducibility cell metadata';
     this.render();
   }
 
   private render(): void {
     ReactDOM.render(
-      <SDCMetadataDisplay
+      <ReproducibilityMetadataDisplay
         metadata={this._metadata}
         cellId={this._cellId}
         currentCellOrder={this._currentCellOrder}
@@ -323,7 +323,7 @@ export class SDCMetadataPanel extends Widget {
     );
   }
 
-  public updateMetadata(metadata: ISDCMetadata | null, cellId: string | null, currentCellOrder: string[]): void {
+  public updateMetadata(metadata: IReproducibilityMetadata | null, cellId: string | null, currentCellOrder: string[]): void {
     this._metadata = metadata;
     this._cellId = cellId;
     this._currentCellOrder = currentCellOrder;

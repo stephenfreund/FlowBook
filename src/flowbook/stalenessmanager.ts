@@ -1,10 +1,10 @@
 /**
- * Manages staleness state across a notebook for SDC kernel
+ * Manages staleness state across a notebook for FlowBook kernel
  */
 
 import { NotebookPanel } from '@jupyterlab/notebook';
 import { ISignal, Signal } from '@lumino/signaling';
-import { ISDCMetadata } from './types';
+import { IReproducibilityMetadata } from './types';
 
 export interface IStalenessChange {
   added: string[];
@@ -38,23 +38,23 @@ export class StalenessManager {
   }
 
   /**
-   * Update staleness from SDC metadata
+   * Update staleness from reproducibility metadata
    *
    * The metadata contains the ABSOLUTE set of all currently stale cells
    * as computed by the kernel. We replace our entire set with this truth.
    */
-  updateFromMetadata(sdcMetadata: ISDCMetadata): void {
+  updateFromMetadata(reproducibilityMetadata: IReproducibilityMetadata): void {
     console.log('StalenessManager: Before update, stale cells =', [...this._staleCells]);
-    console.log('StalenessManager: Metadata stale_cells =', sdcMetadata.stale_cells);
+    console.log('StalenessManager: Metadata stale_cells =', reproducibilityMetadata.stale_cells);
 
     // Track previous state for diff
     const previousStale = new Set(this._staleCells);
 
     // Replace entire set with kernel's absolute truth
-    this._staleCells = new Set(sdcMetadata.stale_cells);
+    this._staleCells = new Set(reproducibilityMetadata.stale_cells);
 
     // Compute diff for event
-    const currentStale = new Set(sdcMetadata.stale_cells);
+    const currentStale = new Set(reproducibilityMetadata.stale_cells);
     const added = [...currentStale].filter(id => !previousStale.has(id));
     const removed = [...previousStale].filter(id => !currentStale.has(id));
 

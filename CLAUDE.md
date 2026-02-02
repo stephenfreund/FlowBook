@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-FlowBook is a JupyterLab 4.0+ extension that combines a TypeScript frontend with a Python server extension and a custom IPython kernel. The extension provides notebook analysis, validation, execution, and AI-powered capabilities through a command-based architecture.
+FlowBook is a JupyterLab 4.0+ extension that combines a TypeScript frontend with a Python server extension and custom IPython kernels. The extension provides notebook analysis, validation, execution, reproducibility enforcement, and AI-powered capabilities through a command-based architecture.
 
 ## Development Commands
 
@@ -68,8 +68,10 @@ jlpm lint:check
 pytest flowbook/
 
 # Run specific test file
-pytest flowbook/kernel/test_diff.py
+pytest flowbook/kernel/tests/test_reproducibility_enforcer.py
 ```
+
+Test files (`test_*.py`) must be placed in a `tests/` subdirectory of the package they test. For example, tests for `flowbook/kernel/` go in `flowbook/kernel/tests/`. Each `tests/` directory must contain an `__init__.py` file.
 
 ### Verification
 
@@ -87,9 +89,10 @@ jupyter labextension list
 
 1. **Frontend (TypeScript)**: `src/` - JupyterLab UI components with two kernel-specific plugins
 2. **Server Extension (Python)**: `flowbook/server/` - HTTP handlers and command processing
-3. **Custom Kernels**: Two enhanced IPython kernels for different use cases
-   - `flowbook/kernel/` - Full-featured kernel with AI commands, profiling, checkpointing
-   - `flowbook/sdc_kernel/` - SDC-focused kernel with always-on dataflow tracking
+3. **Custom Kernels**: Three IPython kernels for different use cases
+   - `flowbook/kernel/` - FlowBook kernel with always-on reproducibility tracking
+   - `flowbook/kernel_support/` - Experimental kernel with AI commands, profiling, checkpointing
+   - `flowbook/checkpoint_kernel/` - Checkpoint kernel for timing/benchmarking
 
 ### Frontend Components (`src/`)
 
@@ -97,11 +100,11 @@ The frontend exports **two JupyterLab plugins** that activate based on the kerne
 
 ```
 src/
-├── index.ts                 # Exports [flowbookPlugin, sdcPlugin]
+├── index.ts                 # Exports [flowbookPlugin, experimentalPlugin]
 ├── shared/                  # Shared utilities
 │   ├── kerneldetection.ts   # KernelDetector class for kernel type detection
 │   └── types.ts             # Shared type definitions
-├── flowbook/                # FlowBook kernel plugin (AI commands)
+├── experimental/            # Experimental kernel plugin (AI commands)
 │   ├── plugin.ts            # Plugin activation with kernel gating
 │   ├── manager.ts           # FlowbookCommandsManager orchestrates commands
 │   ├── types.ts             # TypeScript interfaces
@@ -114,13 +117,13 @@ src/
 │   ├── historypanel.tsx     # History panel UI
 │   ├── unittestpanel.tsx    # Unit test panel
 │   └── unittesttracker.ts   # Unit test cell tracking
-├── sdc/                     # SDC kernel plugin (staleness tracking)
+├── flowbook/                # FlowBook kernel plugin (reproducibility tracking)
 │   ├── plugin.ts            # Plugin activation with kernel gating
-│   ├── types.ts             # ISDCMetadata, ISDCViolation interfaces
+│   ├── types.ts             # IReproducibilityMetadata, IReproducibilityViolation interfaces
 │   ├── stalenessmanager.ts  # Tracks stale cells per notebook
-│   ├── metadatapanel.tsx    # SDC metadata panel (reads, writes, stale cells)
+│   ├── metadatapanel.tsx    # Reproducibility metadata panel (reads, writes, stale cells)
 │   ├── cellhighlighter.ts   # Red highlighting for stale cells
-│   └── executionhook.ts     # Extract flowbook_sdc metadata from outputs
+│   └── executionhook.ts     # Extract flowbook metadata from outputs
 ├── api.ts                   # Shared FlowbookAPI for HTTP communication
 ├── kernel.ts                # Shared KernelUtils
 └── [other shared files]     # panel.tsx, executiondialog.tsx, etc.
@@ -128,7 +131,7 @@ src/
 
 **Plugin Activation**:
 - `flowbook:plugin` - Activates UI only when kernel is `flowbook_kernel`
-- `flowbook:sdc` - Activates UI only when kernel is `flowbook_sdc_kernel`
+- `flowbook:experimental` - Activates UI only when kernel is `experimental_kernel`
 
 **Data Flow**: User clicks button → `executeCommand()` → `FlowbookAPI.executeCommand()` → POST to `/flowbook/execute` → Backend processes → Notebook updated
 
@@ -152,42 +155,23 @@ The server uses the modern **ExtensionApp** pattern (not legacy extension points
 
 ### FlowBook Kernel (`flowbook/kernel/`)
 
-Full-featured kernel extending IPython with advanced features:
+The primary kernel with always-on reproducibility enforcement:
 
-- `flowbook_kernel.py` - Main kernel implementation
-- `flowbook_client.py` - Enhanced `BlockingKernelClient` that includes `cell_id` and `cell_metadata` in execution messages
-- `checkpoint.py` - State snapshots (save/restore kernel state)
-- `diff.py` - Namespace diffing to track variable changes between executions
-- `equality.py` - Deep equality checking for various Python types
-- `tracking.py` - `TrackingDict` for optional variable access tracking
-- `magics.py` - IPython magic commands (`%enable_scalene`, `%checkpoint`, etc.)
-- `flowbook_pdb.py` - Debugger integration
-
-**Features** (all optional, toggled via magic commands):
-- Scalene profiling for CPU/memory analysis
-- Checkpointing for save/restore kernel state
-- Variable tracking for read-before-write analysis
-- Monotonicity enforcement
-
-### SDC Kernel (`flowbook/sdc_kernel/`)
-
-Simplified kernel focused on Sequential Dataflow Consistency (SDC):
-
-- `flowbook_sdc_kernel.py` - SDC-focused kernel implementation
-- `flowbook_sdc_client.py` - Client with `cell_order` injection for SDC checks
-- `sdc_enforcer.py` - Implements SDC rules (staleness propagation, backward mutation detection)
-- `models.py` - `SDCMetadata`, `SDCViolation`, `SDCResult` data classes
+- `flowbook_kernel.py` - Main `FlowbookKernel` implementation
+- `flowbook_client.py` - `FlowbookKernelClient` with `cell_order` injection for reproducibility checks
+- `reproducibility_enforcer.py` - `ReproducibilityEnforcer` implements reproducibility rules (staleness propagation, backward mutation detection)
+- `models.py` - `ReproducibilityMetadata`, `ReproducibilityViolation`, `ReproducibilityResult` data classes
 
 **Features** (always enabled):
 - Variable tracking for all executions
 - Staleness computation (which cells need re-execution)
-- Backward mutation detection (Rule 3 violations)
-- Automatic rollback on SDC violations
+- Backward mutation detection
+- Automatic rollback on reproducibility violations
 
-**SDC Metadata Format** (sent via `display_data` output):
+**Metadata Format** (sent via `display_data` output):
 ```python
 {
-  "flowbook_sdc": {
+  "flowbook": {
     "cell_id": str,
     "execution_seq": int,
     "reads": List[str],
@@ -200,7 +184,30 @@ Simplified kernel focused on Sequential Dataflow Consistency (SDC):
 }
 ```
 
-**Key Feature**: Both `FlowbookKernelClient` and `FlowbookSDCKernelClient` inject `cell_id` and metadata into kernel messages, enabling cell-level tracking.
+### Experimental Kernel (`flowbook/kernel_support/`)
+
+Full-featured kernel extending IPython with advanced features:
+
+- `experimental_kernel.py` - Main `ExperimentalKernel` implementation
+- `experimental_client.py` - Enhanced `BlockingKernelClient` that includes `cell_id` and `cell_metadata` in execution messages
+- `checkpoint.py` - State snapshots (save/restore kernel state)
+- `diff.py` - Namespace diffing to track variable changes between executions
+- `tracking.py` - `TrackingDict` for optional variable access tracking
+- `magics.py` - IPython magic commands (`%enable_scalene`, `%checkpoint`, etc.)
+- `flowbook_pdb.py` - Debugger integration
+
+**Features** (all optional, toggled via magic commands):
+- Scalene profiling for CPU/memory analysis
+- Checkpointing for save/restore kernel state
+- Variable tracking for read-before-write analysis
+- Monotonicity enforcement
+
+### Checkpoint Kernel (`flowbook/checkpoint_kernel/`)
+
+- `checkpoint_kernel.py` - `CheckpointKernel` for timing and benchmarking
+- `checkpoint_client.py` - `CheckpointKernelClient`
+
+**Key Feature**: Both `FlowbookKernelClient` and `ExperimentalKernelClient` inject `cell_id` and metadata into kernel messages, enabling cell-level tracking.
 
 ### Command Pattern
 
@@ -256,6 +263,14 @@ This normalization happens transparently at entry points:
 
 ## Code Style
 
+### Python
+
+- Follow standard Python conventions
+- Use type hints where applicable
+- Abstract base classes for extensibility (e.g., `NotebookCommand`)
+- **No relative imports**: All imports must use absolute paths (e.g., `from flowbook.kernel.models import ...`, not `from .models import ...`)
+- Test files go in `tests/` subdirectories with `__init__.py` files
+
 ### TypeScript
 
 - **Interfaces**: Must start with `I` and use PascalCase (e.g., `ICommandInfo`)
@@ -263,12 +278,6 @@ This normalization happens transparently at entry points:
 - **Equality**: Use strict equality (`===`)
 - **Callbacks**: Prefer arrow functions
 - **Curly braces**: Always use for control structures
-
-### Python
-
-- Follow standard Python conventions
-- Use type hints where applicable
-- Abstract base classes for extensibility (e.g., `NotebookCommand`)
 
 ## Important Files
 
@@ -297,14 +306,18 @@ This normalization happens transparently at entry points:
 
 ### Modifying Kernel Behavior
 
-**FlowBook Kernel**:
+**FlowBook Kernel** (reproducibility):
 - Kernel spec: `flowbook/kernel/kernelspec/`
 - Main kernel class: `flowbook/kernel/flowbook_kernel.py`
+- Reproducibility logic: `flowbook/kernel/reproducibility_enforcer.py`
 
-**SDC Kernel**:
-- Kernel spec: `flowbook/sdc_kernel/kernelspec/`
-- Main kernel class: `flowbook/sdc_kernel/flowbook_sdc_kernel.py`
-- SDC logic: `flowbook/sdc_kernel/sdc_enforcer.py`
+**Experimental Kernel** (AI commands, profiling):
+- Kernel spec: `flowbook/kernel_support/kernelspec/`
+- Main kernel class: `flowbook/kernel_support/experimental_kernel.py`
+
+**Checkpoint Kernel** (benchmarking):
+- Kernel spec: `flowbook/checkpoint_kernel/kernelspec/`
+- Main kernel class: `flowbook/checkpoint_kernel/checkpoint_kernel.py`
 
 **Frontend**:
 - Shared kernel utilities: `src/kernel.ts`

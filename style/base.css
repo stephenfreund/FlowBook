@@ -797,22 +797,22 @@
 }
 
 /* ========================================
-   SDC Extension Styles
+   FlowBook Reproducibility Styles
    ======================================== */
 
 /* Stale cell highlighting */
-.jp-Cell.sdc-cell-stale {
+.jp-Cell.flowbook-cell-stale {
   border-left: 4px solid #ffc107;
   background-color: rgba(255, 193, 7, 0.12);
 }
 
-.jp-Cell.sdc-cell-stale .jp-InputArea-editor {
+.jp-Cell.flowbook-cell-stale .jp-InputArea-editor {
   background-color: rgba(255, 193, 7, 0.08);
 }
 
-/* SDC Metadata Panel Styles */
+/* FlowBook Metadata Panel Styles */
 
-.sdc-metadata-panel {
+.flowbook-metadata-panel {
   display: flex;
   flex-direction: column;
   min-width: 250px;
@@ -820,7 +820,7 @@
   background-color: var(--jp-layout-color1);
 }
 
-.sdc-metadata-content {
+.flowbook-metadata-content {
   padding: 16px;
   font-family: var(--jp-ui-font-family);
   font-size: var(--jp-ui-font-size1);
@@ -828,7 +828,7 @@
   overflow-y: auto;
 }
 
-.sdc-metadata-empty {
+.flowbook-metadata-empty {
   padding: 16px;
   font-family: var(--jp-ui-font-family);
   font-size: var(--jp-ui-font-size1);
@@ -836,11 +836,11 @@
   text-align: center;
 }
 
-.sdc-metadata-empty p {
+.flowbook-metadata-empty p {
   margin: 8px 0;
 }
 
-.sdc-metadata-header {
+.flowbook-metadata-header {
   font-weight: bold;
   font-size: var(--jp-ui-font-size2);
   margin-bottom: 12px;
@@ -849,33 +849,33 @@
   padding-bottom: 8px;
 }
 
-.sdc-metadata-divider {
+.flowbook-metadata-divider {
   height: 1px;
   background: var(--jp-border-color2);
   margin: 12px 0;
 }
 
-.sdc-metadata-section {
+.flowbook-metadata-section {
   margin-bottom: 8px;
 }
 
-.sdc-metadata-item {
+.flowbook-metadata-item {
   margin: 6px 0;
   line-height: 1.6;
 }
 
-.sdc-variable-list {
+.flowbook-variable-list {
   margin: 8px 0 0 0;
   padding-left: 20px;
   list-style-type: disc;
 }
 
-.sdc-variable-list li {
+.flowbook-variable-list li {
   margin: 4px 0;
 }
 
-.sdc-variable-list code,
-.sdc-cell-list code {
+.flowbook-variable-list code,
+.flowbook-cell-list code {
   background-color: var(--jp-layout-color2);
   padding: 2px 6px;
   border-radius: 3px;
@@ -883,37 +883,37 @@
   font-size: 0.9em;
 }
 
-.sdc-none {
+.flowbook-none {
   font-style: italic;
   color: var(--jp-ui-font-color2);
 }
 
-.sdc-changed code {
+.flowbook-changed code {
   color: var(--jp-warn-color1);
 }
 
-.sdc-cell-list {
+.flowbook-cell-list {
   margin: 8px 0 0 0;
   padding-left: 20px;
   list-style-type: disc;
 }
 
-.sdc-cell-list li {
+.flowbook-cell-list li {
   margin: 4px 0;
 }
 
-.sdc-stale-section {
+.flowbook-stale-section {
   background-color: rgba(255, 193, 7, 0.15);
   padding: 8px;
   border-radius: 4px;
   margin: 8px -8px;
 }
 
-.sdc-stale code {
+.flowbook-stale code {
   color: #f57c00;
 }
 
-.sdc-violation-section {
+.flowbook-violation-section {
   background-color: rgba(244, 67, 54, 0.1);
   padding: 12px;
   border-radius: 4px;
@@ -921,27 +921,27 @@
   border: 1px solid var(--jp-error-color1);
 }
 
-.sdc-violation-header {
+.flowbook-violation-header {
   font-weight: bold;
   color: var(--jp-error-color1);
   margin-bottom: 8px;
 }
 
-.sdc-violation-content {
+.flowbook-violation-content {
   font-size: var(--jp-ui-font-size1);
 }
 
-.sdc-violation-content p {
+.flowbook-violation-content p {
   margin: 0 0 8px 0;
 }
 
-.sdc-violation-details {
+.flowbook-violation-details {
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--jp-border-color1);
 }
 
-.sdc-violation-details code {
+.flowbook-violation-details code {
   background-color: var(--jp-layout-color2);
   padding: 2px 6px;
   border-radius: 3px;
@@ -949,7 +949,7 @@
 }
 
 /* Forward Dependency Styles */
-.sdc-forward-dep-section {
+.flowbook-forward-dep-section {
   background-color: rgba(255, 152, 0, 0.15);
   padding: 12px;
   border-radius: 4px;
@@ -957,37 +957,37 @@
   border: 1px solid #ff9800;
 }
 
-.sdc-forward-dep-header {
+.flowbook-forward-dep-header {
   font-weight: bold;
   color: #e65100;
   margin-bottom: 8px;
 }
 
 /* Structural Warning Styles */
-.sdc-warning-section {
+.flowbook-warning-section {
   background-color: rgba(255, 193, 7, 0.1);
   border-left: 3px solid #ffc107;
   padding: 8px;
   border-radius: 4px;
 }
 
-.sdc-warning-header {
+.flowbook-warning-header {
   font-weight: bold;
   color: #856404;
   margin-bottom: 8px;
 }
 
-.sdc-warning-content {
+.flowbook-warning-content {
   font-size: 0.9em;
 }
 
-.sdc-warning-list {
+.flowbook-warning-list {
   margin: 0;
   padding-left: 20px;
   list-style-type: disc;
 }
 
-.sdc-warning-list li {
+.flowbook-warning-list li {
   margin: 4px 0;
   color: #856404;
 }
