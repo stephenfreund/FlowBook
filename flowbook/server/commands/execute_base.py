@@ -39,6 +39,17 @@ class ExecuteBaseCommand(NotebookCommand):
     def requires_kernel(self) -> bool:
         return True
 
+    @property
+    def kernel_name(self) -> str:
+        """
+        Return the kernel name to use for this command.
+
+        Override this property to specify a different kernel.
+        Default is 'flowbook_kernel'.
+        """
+        return "python3"
+
+
     def make_subparser(
         self, subparsers: argparse._SubParsersAction
     ) -> argparse.ArgumentParser:

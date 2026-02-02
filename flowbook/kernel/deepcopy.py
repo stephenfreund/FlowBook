@@ -295,7 +295,7 @@ _LARGE_LIST_THRESHOLD = 1000
 
 # Maximum number of containers to cache (per type) to prevent unbounded memory growth.
 # When exceeded, stale entries are pruned; if still too large, cache is cleared.
-_MAX_CONTAINER_CACHE_SIZE = 100
+_MAX_CONTAINER_CACHE_SIZE = 10000
 
 # Primitive immutable types for cache eligibility.
 # Only containers with ONLY these types are cached.

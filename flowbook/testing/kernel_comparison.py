@@ -320,14 +320,14 @@ def run_kernel_execution(
         num_errors = 0
 
         for i, cell in enumerate(cells):
-            log(f"Executing cell {i+1}/{len(cells)} ({cell.cell_id})...")
-            timing = execute_cell_timed(kernel_client, cell, cell_timeout)
-            cell_timings.append(timing)
-            total_time_ms += timing.time_ms
+            with timer(message=f"Executing cell {i+1}/{len(cells)} ({cell.cell_id})"):
+                timing = execute_cell_timed(kernel_client, cell, cell_timeout)
+                cell_timings.append(timing)
+                total_time_ms += timing.time_ms
 
-            if timing.status != 'ok':
-                num_errors += 1
-                log(f"Cell {cell.cell_id} {timing.status}: {timing.error_message[:100] if timing.error_message else 'unknown'}")
+                if timing.status != 'ok':
+                    num_errors += 1
+                    log(f"Cell {cell.cell_id} {timing.status}: {timing.error_message[:100] if timing.error_message else 'unknown'}")
 
         return KernelResult(
             kernel_type=kernel_type,

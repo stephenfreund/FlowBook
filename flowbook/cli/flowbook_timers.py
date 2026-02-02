@@ -259,7 +259,8 @@ def sanitize_filename(key: str) -> str:
 def create_histogram_pdf(
     durations: list[float],
     key: str,
-    output_dir: str = '.'
+    output_dir: str = '.',
+    clip_percentile: Optional[float] = None
 ) -> str:
     """
     Create a seaborn-styled histogram and save as PDF.
@@ -271,6 +272,7 @@ def create_histogram_pdf(
         durations: List of timing values
         key: Timer key name (used in title and filename)
         output_dir: Directory to save PDF
+        clip_percentile: If specified, clip values above this percentile (e.g., 99)
 
     Returns:
         Path to created PDF file
@@ -285,15 +287,24 @@ def create_histogram_pdf(
     median_val = np.median(durations)
     std_val = np.std(durations)
 
-    # Check if data is highly skewed (max >> P99)
-    # If so, clip to P99 for better visualization
-    is_clipped = max_val > p99 * 2 and p99 > 0
-    if is_clipped:
-        plot_durations = [d for d in durations if d <= p99]
-        clip_note = f"\n(showing up to P99, {len(durations) - len(plot_durations)} outliers clipped)"
+    # Determine clipping behavior
+    if clip_percentile is not None:
+        # User-specified clip percentile
+        clip_threshold = np.percentile(durations, clip_percentile)
+        plot_durations = [d for d in durations if d <= clip_threshold]
+        clipped_count = len(durations) - len(plot_durations)
+        is_clipped = clipped_count > 0
+        clip_note = f"\n(clipped to P{clip_percentile:.0f}, {clipped_count} values removed)" if is_clipped else ""
     else:
-        plot_durations = durations
-        clip_note = ""
+        # Auto-clip: Check if data is highly skewed (max >> P99)
+        # If so, clip to P99 for better visualization
+        is_clipped = max_val > p99 * 2 and p99 > 0
+        if is_clipped:
+            plot_durations = [d for d in durations if d <= p99]
+            clip_note = f"\n(showing up to P99, {len(durations) - len(plot_durations)} outliers clipped)"
+        else:
+            plot_durations = durations
+            clip_note = ""
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -407,12 +418,32 @@ def create_scatterplot_pdf(
     return filepath
 
 
-def create_ascii_histogram(data, bins=20, width=80, bar_char="#"):
+def create_ascii_histogram(data, bins=20, width=80, bar_char="#", clip_percentile=None):
     """
     Generates an ASCII histogram for the given data.
+
+    Args:
+        data: List of values to histogram
+        bins: Number of bins
+        width: Width of the bars
+        bar_char: Character to use for bars
+        clip_percentile: If specified, clip values above this percentile
+
+    Returns:
+        ASCII histogram string
     """
     if not data:
         return ""
+
+    # Apply clipping if specified
+    clipped_count = 0
+    if clip_percentile is not None:
+        clip_threshold = np.percentile(data, clip_percentile)
+        original_len = len(data)
+        data = [d for d in data if d <= clip_threshold]
+        clipped_count = original_len - len(data)
+        if not data:
+            return f"All {original_len} values clipped at P{clip_percentile:.0f}"
 
     # 1. Determine the range of the data
     min_val = min(data)
@@ -446,7 +477,10 @@ def create_ascii_histogram(data, bins=20, width=80, bar_char="#"):
             f"{bin_start:7.3f} - {bin_end:7.3f} | {bar_char * bar_length} ({percent:.1f}%)"
         )
 
-    return "\n".join(chart)
+    result = "\n".join(chart)
+    if clipped_count > 0:
+        result += f"\n[{clipped_count} values clipped above P{clip_percentile:.0f}]"
+    return result
 
 
 @dataclass
@@ -551,6 +585,73 @@ def group_by_key(timings: list[dict]) -> dict[str, list[float]]:
     return grouped
 
 
+def compute_synthetic_metrics(grouped: dict[str, list[float]]) -> dict[str, list[float]]:
+    """
+    Compute synthetic metrics from grouped timing data.
+
+    Currently computes:
+    - Computed:Slowdown = sum(execute:sdc) / sum(sdc_kernel:execute)
+    - Computed:CheckpointSlowdown = sum(sdc_kernel:checkpoint) / sum(sdc_kernel:execute)
+
+    Args:
+        grouped: Dict mapping timer key -> list of durations
+
+    Returns:
+        Updated dict with synthetic metrics added
+    """
+    sdc_kernel_execute_key = "sdc_kernel:execute"
+    total_sdc_kernel_execute = sum(grouped.get(sdc_kernel_execute_key, []))
+
+    # Compute Slowdown: execute:sdc / sdc_kernel:execute
+    execute_sdc_key = "execute:sdc"
+    if execute_sdc_key in grouped and total_sdc_kernel_execute > 0:
+        total_execute_sdc = sum(grouped[execute_sdc_key])
+        slowdown = total_execute_sdc / total_sdc_kernel_execute
+        grouped["Computed:Slowdown"] = [slowdown]
+
+    # Compute CheckpointSlowdown: 1 + sdc_kernel:checkpoint / sdc_kernel:execute
+    checkpoint_key = "sdc_kernel:checkpoint"
+    if checkpoint_key in grouped and total_sdc_kernel_execute > 0:
+        total_checkpoint = sum(grouped[checkpoint_key])
+        checkpoint_slowdown = 1 + total_checkpoint / total_sdc_kernel_execute
+        grouped["Computed:CheckpointSlowdown"] = [checkpoint_slowdown]
+
+    return grouped
+
+
+# List of all synthetic metric keys
+SYNTHETIC_METRIC_KEYS = ["Computed:Slowdown", "Computed:CheckpointSlowdown"]
+
+
+def collect_synthetic_metrics(
+    grouped_by_file: dict[str, dict[str, list[float]]],
+    combined_grouped: dict[str, list[float]]
+) -> dict[str, list[float]]:
+    """
+    Collect per-file synthetic metrics into combined grouped data.
+
+    Instead of computing synthetic metrics from combined totals, this collects
+    the individual per-file values so statistics reflect the distribution across files.
+
+    Args:
+        grouped_by_file: Dict mapping file_path -> grouped timing data (with synthetic metrics)
+        combined_grouped: Combined grouped timing data (without synthetic metrics yet)
+
+    Returns:
+        Updated combined_grouped with synthetic metrics collected from each file
+    """
+    # Collect all synthetic metrics from each file
+    for key in SYNTHETIC_METRIC_KEYS:
+        values = []
+        for file_path, grouped in grouped_by_file.items():
+            if key in grouped:
+                values.extend(grouped[key])
+        if values:
+            combined_grouped[key] = values
+
+    return combined_grouped
+
+
 def calculate_stats(durations: list[float]) -> dict:
     """
     Calculate statistics for a list of durations.
@@ -588,12 +689,18 @@ def calculate_stats(durations: list[float]) -> dict:
     }
 
 
-def build_stats_table(timings: list[dict]) -> list[TimerStats]:
+def build_stats_table(
+    timings: list[dict],
+    compute_synthetic: bool = True
+) -> list[TimerStats]:
     """
     Build statistics table from timing data.
 
     Args:
         timings: List of timing records
+        compute_synthetic: Whether to compute synthetic metrics (default True).
+            Set to False when combining multiple files to avoid computing from
+            combined totals instead of per-file values.
 
     Returns:
         List of TimerStats objects
@@ -602,6 +709,8 @@ def build_stats_table(timings: list[dict]) -> list[TimerStats]:
         return []
 
     grouped = group_by_key(timings)
+    if compute_synthetic:
+        grouped = compute_synthetic_metrics(grouped)
     stats_list = []
 
     for key, durations in grouped.items():
@@ -651,6 +760,7 @@ def format_table(
     top: Optional[int] = None,
     grouped_timings: Optional[dict[str, list[float]]] = None,
     show_histograms: bool = False,
+    clip_percentile: Optional[float] = None,
 ) -> str:
     """
     Format statistics as a table.
@@ -662,6 +772,7 @@ def format_table(
         top: Optional limit to show only top N timers
         grouped_timings: Optional dict mapping key -> list of durations (for histograms)
         show_histograms: Whether to show histograms for each key (requires grouped_timings)
+        clip_percentile: Optional percentile to clip histogram values at
 
     Returns:
         Formatted table string
@@ -831,7 +942,7 @@ def format_table(
                     lines.append("")
                     truncated_key = truncate_timer_key(s.key, max_length=50)
                     lines.append(f"--- {truncated_key} (n={len(durations)}) ---")
-                    hist = create_ascii_histogram(durations, bar_char="█")
+                    hist = create_ascii_histogram(durations, bar_char="█", clip_percentile=clip_percentile)
                     lines.append(hist)
 
     return "\n".join(lines)
@@ -989,6 +1100,7 @@ def process_single_file(
         timings = [t for t in timings if t["key"] in keys_set]
 
     grouped = group_by_key(timings)
+    grouped = compute_synthetic_metrics(grouped)
     stats = build_stats_table(timings)
 
     # Sort stats
@@ -1039,14 +1151,23 @@ def process_multiple_files(file_paths: list[str], args):
     stats_by_file = {}
     grouped_by_file = {}
     for file_path, timings in timings_by_file.items():
-        grouped_by_file[file_path] = group_by_key(timings)
+        grouped = group_by_key(timings)
+        grouped = compute_synthetic_metrics(grouped)
+        grouped_by_file[file_path] = grouped
         stats = build_stats_table(timings)
         stats_by_file[file_path] = stats
 
-    # Build combined stats
+    # Build combined stats (skip synthetic metrics - we'll collect per-file values)
     combined_timings = combine_timings(timings_by_file)
     combined_grouped = group_by_key(combined_timings)
-    combined_stats = build_stats_table(combined_timings)
+    # For synthetic metrics, collect per-file values instead of computing from combined totals
+    combined_grouped = collect_synthetic_metrics(grouped_by_file, combined_grouped)
+    combined_stats = build_stats_table(combined_timings, compute_synthetic=False)
+    # Add synthetic metrics to combined stats from per-file values
+    for key in SYNTHETIC_METRIC_KEYS:
+        if key in combined_grouped:
+            stats = calculate_stats(combined_grouped[key])
+            combined_stats.append(TimerStats(key=key, **stats))
 
     # Output based on format
     if args.format == "table":
@@ -1063,6 +1184,7 @@ def process_multiple_files(file_paths: list[str], args):
                     args.top,
                     grouped_timings=grouped,
                     show_histograms=args.histograms,
+                    clip_percentile=args.clip,
                 )
             )
             print()  # Blank line between tables
@@ -1078,6 +1200,7 @@ def process_multiple_files(file_paths: list[str], args):
                 args.top,
                 grouped_timings=combined_grouped,
                 show_histograms=args.histograms,
+                clip_percentile=args.clip,
             )
         )
 
@@ -1135,6 +1258,7 @@ def generate_plots(grouped_timings: dict[str, list[float]], args) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     # Generate histograms
+    clip_percentile = getattr(args, 'clip', None)
     if args.histplot:
         for key in args.histplot:
             if key not in grouped_timings:
@@ -1144,7 +1268,7 @@ def generate_plots(grouped_timings: dict[str, list[float]], args) -> None:
             if len(durations) < 2:
                 print(f"Warning: Key '{key}' has only {len(durations)} data point(s), skipping histogram", file=sys.stderr)
                 continue
-            filepath = create_histogram_pdf(durations, key, output_dir)
+            filepath = create_histogram_pdf(durations, key, output_dir, clip_percentile=clip_percentile)
             print(f"Created histogram: {filepath}")
 
     # Generate scatter plots
@@ -1223,6 +1347,9 @@ Examples:
   # Create histogram PDF for a specific timer
   flowbook_timers timings.json --histplot=diff:compute
 
+  # Create histogram with top 1% outliers clipped
+  flowbook_timers timings.json --histplot=diff:compute --clip 99
+
   # Create scatter plot PDF comparing two timers
   flowbook_timers timings.json --scatterplot=diff:compute%checkpoint:create
 
@@ -1298,6 +1425,13 @@ Examples:
         help="Directory for plot output files (default: current directory)",
     )
 
+    parser.add_argument(
+        "--clip",
+        type=float,
+        metavar="PERCENTILE",
+        help="Clip histogram values above this percentile (e.g., 99). Reports how many values were clipped.",
+    )
+
     args = parser.parse_args()
 
     # Handle --clear-cache
@@ -1332,6 +1466,7 @@ Examples:
                     top=args.top,
                     grouped_timings=grouped,
                     show_histograms=args.histograms,
+                    clip_percentile=args.clip,
                 )
             )
         elif args.format == "json":
@@ -1350,8 +1485,16 @@ Examples:
         if args.histplot or args.scatterplot:
             # Reload and combine timings for plotting
             timings_by_file = load_multiple_timings(args.files)
+            # Compute per-file synthetic metrics first
+            grouped_by_file = {}
+            for file_path, timings in timings_by_file.items():
+                grouped = group_by_key(timings)
+                grouped = compute_synthetic_metrics(grouped)
+                grouped_by_file[file_path] = grouped
+            # Combine and collect per-file synthetic metrics
             combined_timings = combine_timings(timings_by_file)
             combined_grouped = group_by_key(combined_timings)
+            combined_grouped = collect_synthetic_metrics(grouped_by_file, combined_grouped)
             generate_plots(combined_grouped, args)
 
 

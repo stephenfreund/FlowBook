@@ -24,13 +24,24 @@ import pytest
 from flowbook.kernel.deepcopy import (
     deepcopy,
     clear_list_cache,
+    clear_container_cache,
     get_list_cache_stats,
+    get_container_cache_stats,
     _large_list_cache,
+    _large_set_cache,
+    _large_dict_cache,
+    _primitive_list_copies,
+    _primitive_set_copies,
+    _primitive_dict_copies,
     _list_is_all_immutable,
     _list_has_only_primitives,
+    _set_has_only_primitives,
+    _dict_has_only_primitive_values,
+    _tuple_has_only_primitives,
     is_list_in_immutable_cache,
+    is_primitive_container,
     _LARGE_LIST_THRESHOLD,
-    _MAX_LIST_CACHE_SIZE,
+    _MAX_CONTAINER_CACHE_SIZE,
     _PRIMITIVE_IMMUTABLE_TYPES,
 )
 from flowbook.kernel.checkpoint import Checkpoints
@@ -298,7 +309,7 @@ class TestCacheManagement:
         assert 'threshold' in stats
         assert 'max_size' in stats
         assert stats['threshold'] == _LARGE_LIST_THRESHOLD
-        assert stats['max_size'] == _MAX_LIST_CACHE_SIZE
+        assert stats['max_size'] == _MAX_CONTAINER_CACHE_SIZE
 
     def test_get_list_cache_stats_reflects_cache_size(self):
         """Stats should reflect current cache size."""
@@ -337,17 +348,17 @@ class TestCachePruning:
         assert len(_large_list_cache) >= 1
 
     def test_cache_respects_max_size(self):
-        """Cache should not grow beyond _MAX_LIST_CACHE_SIZE."""
+        """Cache should not grow beyond _MAX_CONTAINER_CACHE_SIZE."""
         # Create many different large lists
         lists = []
-        for i in range(_MAX_LIST_CACHE_SIZE + 50):
+        for i in range(_MAX_CONTAINER_CACHE_SIZE + 50):
             large_list = list(range(_LARGE_LIST_THRESHOLD + i))
             lists.append(large_list)  # Keep reference to prevent GC
             deepcopy(large_list, {})
 
-        # Cache should be at most _MAX_LIST_CACHE_SIZE
+        # Cache should be at most _MAX_CONTAINER_CACHE_SIZE
         # (may be less if pruning cleared it)
-        assert len(_large_list_cache) <= _MAX_LIST_CACHE_SIZE
+        assert len(_large_list_cache) <= _MAX_CONTAINER_CACHE_SIZE
 
 
 class TestCheckpointIntegration:
@@ -621,10 +632,25 @@ class TestIsListInImmutableCache:
         assert is_list_in_immutable_cache(large_list) is False
 
     def test_cached_list_returns_true(self):
-        """List in cache with matching hash should return True."""
+        """Original list in cache with matching hash should return True."""
         large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
         deepcopy(large_list, {})  # This caches the list
         assert is_list_in_immutable_cache(large_list) is True
+
+    def test_copy_tracked_in_copies_dict(self):
+        """Copy should be tracked in _primitive_list_copies dict."""
+        large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
+        copy = deepcopy(large_list, {})
+        # Copy should be in the dict (keyed by its id)
+        assert id(copy) in _primitive_list_copies
+        assert _primitive_list_copies[id(copy)] is copy
+
+    def test_copy_recognized_by_cache_check(self):
+        """is_list_in_immutable_cache should return True for copies."""
+        large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
+        copy = deepcopy(large_list, {})
+        # The COPY should also be recognized (this is the key fix!)
+        assert is_list_in_immutable_cache(copy) is True
 
     def test_modified_list_returns_false(self):
         """Cached list with modified contents should return False."""
@@ -671,8 +697,32 @@ class TestAliasTraversalOptimization:
 
         cp.save('test', user_ns)
 
-        # List should be in cache
+        # Original list should be in cache
         assert is_list_in_immutable_cache(large_list) is True
+
+    def test_checkpoint_copy_recognized_by_cache(self):
+        """Copy stored in checkpoint should be recognized by cache check.
+
+        This is the key test for the fix: alias traversal runs on the COPIES
+        stored in checkpoints, not the originals. The cache check must
+        recognize these copies to skip traversal.
+        """
+        cp = Checkpoints()
+        large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
+        user_ns = {'large_list': large_list}
+
+        cp.save('test', user_ns)
+
+        # Get the COPY stored in the checkpoint
+        checkpoint = cp.get('test')
+        copy_in_checkpoint = checkpoint.user_ns['large_list']
+
+        # The copy should be different from the original
+        assert copy_in_checkpoint is not large_list
+
+        # The copy should be recognized by the cache check!
+        # This is what enables alias traversal optimization.
+        assert is_list_in_immutable_cache(copy_in_checkpoint) is True
 
     def test_non_primitive_list_not_cached_during_checkpoint(self):
         """Large non-primitive lists should NOT be cached during checkpoint."""
@@ -717,3 +767,264 @@ class TestAliasTraversalOptimization:
         assert 'shared' in saved
         assert 'ref1' in saved
         assert 'big_list' in saved
+
+
+# =============================================================================
+# Tests for Set Caching
+# =============================================================================
+
+class TestSetHasOnlyPrimitives:
+    """Tests for _set_has_only_primitives() function."""
+
+    def test_empty_set(self):
+        assert _set_has_only_primitives(set()) is True
+
+    def test_set_of_ints(self):
+        assert _set_has_only_primitives({1, 2, 3, 4, 5}) is True
+
+    def test_set_of_strings(self):
+        assert _set_has_only_primitives({'a', 'b', 'c'}) is True
+
+    def test_set_of_mixed_primitives(self):
+        assert _set_has_only_primitives({1, 'a', 3.14, None, True}) is True
+
+    def test_set_with_tuple_not_primitive(self):
+        """Tuples are NOT primitives - should return False."""
+        assert _set_has_only_primitives({(1, 2), (3, 4)}) is False
+
+    def test_set_with_frozenset_not_primitive(self):
+        """Frozensets are NOT primitives - should return False."""
+        assert _set_has_only_primitives({frozenset([1]), frozenset([2])}) is False
+
+
+class TestSetCaching:
+    """Tests for set caching behavior."""
+
+    def setup_method(self):
+        clear_container_cache()
+
+    def teardown_method(self):
+        clear_container_cache()
+
+    def test_large_primitive_set_cached(self):
+        """Large set of primitives should be cached."""
+        large_set = set(range(_LARGE_LIST_THRESHOLD + 100))
+        deepcopy(large_set, {})
+        assert len(_large_set_cache) == 1
+
+    def test_small_set_not_cached(self):
+        """Small set should not be cached."""
+        small_set = {1, 2, 3}
+        deepcopy(small_set, {})
+        assert len(_large_set_cache) == 0
+
+    def test_set_copy_recognized(self):
+        """Set copy should be recognized by is_primitive_container."""
+        large_set = set(range(_LARGE_LIST_THRESHOLD + 100))
+        copy = deepcopy(large_set, {})
+        assert is_primitive_container(copy) is True
+        assert copy in _primitive_set_copies.values()
+
+    def test_set_cache_hit(self):
+        """Repeated deepcopy should return cached copy."""
+        large_set = set(range(_LARGE_LIST_THRESHOLD + 100))
+        copy1 = deepcopy(large_set, {})
+        copy2 = deepcopy(large_set, {})
+        assert copy1 is copy2  # Same cached copy
+
+    def test_set_with_mutable_element_not_cached(self):
+        """Set with non-primitive elements should not be cached."""
+        # Sets can't contain lists/dicts, but can contain tuples
+        large_set = {(i,) for i in range(_LARGE_LIST_THRESHOLD + 100)}
+        deepcopy(large_set, {})
+        assert len(_large_set_cache) == 0  # Tuples are not primitives
+
+
+# =============================================================================
+# Tests for Dict Caching
+# =============================================================================
+
+class TestDictHasOnlyPrimitiveValues:
+    """Tests for _dict_has_only_primitive_values() function."""
+
+    def test_empty_dict(self):
+        assert _dict_has_only_primitive_values({}) is True
+
+    def test_dict_with_int_values(self):
+        assert _dict_has_only_primitive_values({'a': 1, 'b': 2}) is True
+
+    def test_dict_with_string_values(self):
+        assert _dict_has_only_primitive_values({'a': 'x', 'b': 'y'}) is True
+
+    def test_dict_with_mixed_primitive_values(self):
+        assert _dict_has_only_primitive_values({'a': 1, 'b': 'x', 'c': None}) is True
+
+    def test_dict_with_list_value_not_primitive(self):
+        assert _dict_has_only_primitive_values({'a': [1, 2, 3]}) is False
+
+    def test_dict_with_dict_value_not_primitive(self):
+        assert _dict_has_only_primitive_values({'a': {'nested': 1}}) is False
+
+    def test_dict_with_tuple_value_not_primitive(self):
+        """Tuples are NOT primitives."""
+        assert _dict_has_only_primitive_values({'a': (1, 2)}) is False
+
+
+class TestDictCaching:
+    """Tests for dict caching behavior."""
+
+    def setup_method(self):
+        clear_container_cache()
+
+    def teardown_method(self):
+        clear_container_cache()
+
+    def test_large_primitive_dict_cached(self):
+        """Large dict with primitive values should be cached."""
+        large_dict = {str(i): i for i in range(_LARGE_LIST_THRESHOLD + 100)}
+        deepcopy(large_dict, {})
+        assert len(_large_dict_cache) == 1
+
+    def test_small_dict_not_cached(self):
+        """Small dict should not be cached."""
+        small_dict = {'a': 1, 'b': 2}
+        deepcopy(small_dict, {})
+        assert len(_large_dict_cache) == 0
+
+    def test_dict_copy_recognized(self):
+        """Dict copy should be recognized by is_primitive_container."""
+        large_dict = {str(i): i for i in range(_LARGE_LIST_THRESHOLD + 100)}
+        copy = deepcopy(large_dict, {})
+        assert is_primitive_container(copy) is True
+        assert copy in _primitive_dict_copies.values()
+
+    def test_dict_cache_hit(self):
+        """Repeated deepcopy should return cached copy."""
+        large_dict = {str(i): i for i in range(_LARGE_LIST_THRESHOLD + 100)}
+        copy1 = deepcopy(large_dict, {})
+        copy2 = deepcopy(large_dict, {})
+        assert copy1 is copy2  # Same cached copy
+
+    def test_dict_with_mutable_value_not_cached(self):
+        """Dict with non-primitive values should not be cached."""
+        large_dict = {str(i): [i] for i in range(_LARGE_LIST_THRESHOLD + 100)}
+        deepcopy(large_dict, {})
+        assert len(_large_dict_cache) == 0
+
+
+# =============================================================================
+# Tests for Tuple Optimization
+# =============================================================================
+
+class TestTupleHasOnlyPrimitives:
+    """Tests for _tuple_has_only_primitives() function."""
+
+    def test_empty_tuple(self):
+        assert _tuple_has_only_primitives(()) is True
+
+    def test_tuple_of_ints(self):
+        assert _tuple_has_only_primitives((1, 2, 3, 4, 5)) is True
+
+    def test_tuple_of_strings(self):
+        assert _tuple_has_only_primitives(('a', 'b', 'c')) is True
+
+    def test_tuple_of_mixed_primitives(self):
+        assert _tuple_has_only_primitives((1, 'a', 3.14, None, True)) is True
+
+    def test_tuple_with_list_not_primitive(self):
+        assert _tuple_has_only_primitives((1, [2, 3])) is False
+
+    def test_tuple_with_nested_tuple_not_primitive(self):
+        """Nested tuples are NOT primitives."""
+        assert _tuple_has_only_primitives((1, (2, 3))) is False
+
+
+class TestTupleOptimization:
+    """Tests for tuple deepcopy optimization."""
+
+    def setup_method(self):
+        clear_container_cache()
+
+    def teardown_method(self):
+        clear_container_cache()
+
+    def test_large_primitive_tuple_returns_original(self):
+        """Large primitive tuple should return original (no copy)."""
+        large_tuple = tuple(range(_LARGE_LIST_THRESHOLD + 100))
+        result = deepcopy(large_tuple, {})
+        assert result is large_tuple  # Same object!
+
+    def test_small_tuple_may_return_original(self):
+        """Small tuples also return original if contents unchanged."""
+        small_tuple = (1, 2, 3)
+        result = deepcopy(small_tuple, {})
+        assert result is small_tuple  # Standard tuple behavior
+
+    def test_tuple_with_mutable_contents_copied(self):
+        """Tuple containing mutable objects should be deep copied."""
+        tuple_with_list = ([1, 2], [3, 4])
+        result = deepcopy(tuple_with_list, {})
+        assert result is not tuple_with_list
+        assert result[0] is not tuple_with_list[0]  # List was deep copied
+
+    def test_large_primitive_tuple_recognized(self):
+        """Large primitive tuple should be recognized by is_primitive_container."""
+        large_tuple = tuple(range(_LARGE_LIST_THRESHOLD + 100))
+        assert is_primitive_container(large_tuple) is True
+
+    def test_small_tuple_not_checked(self):
+        """Small tuples are not checked by is_primitive_container (too small)."""
+        small_tuple = (1, 2, 3)
+        assert is_primitive_container(small_tuple) is False
+
+
+# =============================================================================
+# Tests for Container Cache Stats
+# =============================================================================
+
+class TestContainerCacheStats:
+    """Tests for get_container_cache_stats() function."""
+
+    def setup_method(self):
+        clear_container_cache()
+
+    def teardown_method(self):
+        clear_container_cache()
+
+    def test_empty_cache_stats(self):
+        stats = get_container_cache_stats()
+        assert stats['list_cache_size'] == 0
+        assert stats['set_cache_size'] == 0
+        assert stats['dict_cache_size'] == 0
+
+    def test_stats_after_caching(self):
+        """Stats should reflect cached containers."""
+        large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
+        large_set = set(range(_LARGE_LIST_THRESHOLD + 100))
+        large_dict = {str(i): i for i in range(_LARGE_LIST_THRESHOLD + 100)}
+
+        deepcopy(large_list, {})
+        deepcopy(large_set, {})
+        deepcopy(large_dict, {})
+
+        stats = get_container_cache_stats()
+        assert stats['list_cache_size'] == 1
+        assert stats['set_cache_size'] == 1
+        assert stats['dict_cache_size'] == 1
+
+    def test_clear_container_cache_clears_all(self):
+        """clear_container_cache should clear all caches."""
+        large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
+        large_set = set(range(_LARGE_LIST_THRESHOLD + 100))
+        large_dict = {str(i): i for i in range(_LARGE_LIST_THRESHOLD + 100)}
+
+        deepcopy(large_list, {})
+        deepcopy(large_set, {})
+        deepcopy(large_dict, {})
+
+        clear_container_cache()
+
+        stats = get_container_cache_stats()
+        assert stats['list_cache_size'] == 0
+        assert stats['set_cache_size'] == 0
+        assert stats['dict_cache_size'] == 0

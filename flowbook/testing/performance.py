@@ -266,8 +266,16 @@ def _randomly_modify_namespace(
     for name in to_modify:
         value = namespace[name]
 
-        # Type-specific modification using helper functions
-        if isinstance(value, pd.DataFrame):
+        # Type-specific modification
+        if isinstance(value, bool):
+            namespace[name] = not value
+        elif isinstance(value, (int, np.integer)):
+            namespace[name] = value + 42
+        elif isinstance(value, (float, np.floating)):
+            namespace[name] = value + 3.14
+        elif isinstance(value, str):
+            namespace[name] = "moo"
+        elif isinstance(value, pd.DataFrame):
             namespace[name] = _modify_dataframe(value)
         elif isinstance(value, pd.Series):
             namespace[name] = _modify_series(value)
@@ -277,13 +285,24 @@ def _randomly_modify_namespace(
             namespace[name] = _modify_list(value)
         elif isinstance(value, dict):
             namespace[name] = _modify_dict(value)
-        elif isinstance(value, (int, float, np.integer, np.floating)):
-            namespace[name] = _mutate_value(value)
-        elif isinstance(value, str):
-            namespace[name] = value + "_modified"
+        elif isinstance(value, tuple):
+            namespace[name] = ("moo",) + value
+        elif isinstance(value, set):
+            namespace[name] = value | {"moo"}
+        elif isinstance(value, frozenset):
+            namespace[name] = value | frozenset({"moo"})
+        elif isinstance(value, bytes):
+            namespace[name] = b"moo"
+        elif isinstance(value, complex):
+            namespace[name] = value + (1 + 1j)
+        elif value is None:
+            namespace[name] = 0
         elif hasattr(value, "__dict__"):
             # Try to modify an attribute of the object
             namespace[name] = _modify_object_field(value)
+        else:
+            # Fallback: wrap in a list
+            namespace[name] = [value, "modified"]
 
     return to_modify
 

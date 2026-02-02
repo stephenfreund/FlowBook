@@ -726,214 +726,218 @@ class FlowbookSDCKernel(IPythonKernel, Magics):
         """
         start_time = time.perf_counter() * 1000
         execution_time = None
-        try:
-            # Ensure tracking is initialized (done lazily on first execution)
-            self._ensure_tracking_initialized()
 
-            # Extract cell context
-            self._cell_id = self._extract_cell_id(cell_id, cell_meta)
+        # Extract cell context
+        self._cell_id = self._extract_cell_id(cell_id, cell_meta)
 
-            # Update cell order if provided in metadata
-            if cell_meta and "cell_order" in cell_meta:
-                self._sdc.set_cell_order(cell_meta["cell_order"])
-
-            # Check for notebook_structure magic (parse and remove if present)
-            code = self._process_structure_magic(code)
-
-            # Extract timeout from code directive or cell_meta
-            code, timeout = self._extract_timeout(code, cell_meta)
-
-            # Skip SDC for empty code or pure magic
-            if not code.strip() or self._is_pure_magic(code):
-                return await self._execute_without_sdc(
-                    code,
-                    silent,
-                    store_history,
-                    user_expressions,
-                    allow_stdin,
-                    cell_meta,
-                )
-
-            # Take pre-execution snapshot
-            user_ns = self.shell.user_ns
-            with timer(key="sdc_kernel:checkpoint") as pre_timer:
-                pre_checkpoint = self._take_checkpoint(
-                    f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
-                )
-
-            # Reset tracking for this execution
-            if isinstance(user_ns, TrackingDict):
-                user_ns.reset_tracking()
-
-            # Setup timeout handler
-            timeout_handler = CellTimeoutHandler(
-                timeout=timeout,
-                post_kb_grace=self._post_kb_grace,
-                kill_timeout=self._kill_timeout,
-                verbose=self._verbose,
-                max_passes=self._max_passes,
-            )
-            timeout_handler.start()
-            normal_exit = False
-
+        with timer(message = f"do_execute: {self._cell_id}"):
             try:
-                # Execute with tracking
-                with timer(key="sdc_kernel:execute") as run_timer:
+                # Ensure tracking is initialized (done lazily on first execution)
+                self._ensure_tracking_initialized()
+
+                # Update cell order if provided in metadata
+                if cell_meta and "cell_order" in cell_meta:
+                    self._sdc.set_cell_order(cell_meta["cell_order"])
+
+                # Check for notebook_structure magic (parse and remove if present)
+                code = self._process_structure_magic(code)
+
+                # Extract timeout from code directive or cell_meta
+                code, timeout = self._extract_timeout(code, cell_meta)
+
+                # Skip SDC for empty code or pure magic
+                if not code.strip() or self._is_pure_magic(code):
+                    return await self._execute_without_sdc(
+                        code,
+                        silent,
+                        store_history,
+                        user_expressions,
+                        allow_stdin,
+                        cell_meta,
+                    )
+
+                # Take pre-execution snapshot
+                user_ns = self.shell.user_ns
+                with timer(key="sdc_kernel:checkpoint") as pre_timer:
+                    pre_checkpoint = self._take_checkpoint(
+                        f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
+                    )
+
+                # Reset tracking for this execution
+                if isinstance(user_ns, TrackingDict):
+                    user_ns.reset_tracking()
+
+                # Setup timeout handler
+                timeout_handler = CellTimeoutHandler(
+                    timeout=timeout,
+                    post_kb_grace=self._post_kb_grace,
+                    kill_timeout=self._kill_timeout,
+                    verbose=self._verbose,
+                    max_passes=self._max_passes,
+                )
+                timeout_handler.start()
+                normal_exit = False
+
+                try:
+                    # Execute with tracking
                     if isinstance(user_ns, TrackingDict):
                         with user_ns.track_execution():
                             with timer(
                                 key="sdc_kernel:track_execution",
                                 message="Run cell code",
                             ):
-                                result = await super().do_execute(
-                                    code,
-                                    silent,
-                                    store_history,
-                                    user_expressions,
-                                    allow_stdin,
-                                    cell_meta=cell_meta,
-                                    cell_id=self._cell_id,
-                                )
+                                with timer(key="sdc_kernel:execute") as run_timer:
+                                    result = await super().do_execute(
+                                        code,
+                                        silent,
+                                        store_history,
+                                        user_expressions,
+                                        allow_stdin,
+                                        cell_meta=cell_meta,
+                                        cell_id=self._cell_id,
+                                    )
+                                execution_time = run_timer.duration()
                         with timer(
                             key="sdc_kernel:get_tracking_data",
                             message="Get tracking data",
                         ):
                             tracking = user_ns.get_tracking_data()
                     else:
-                        result = await super().do_execute(
-                            code,
-                            silent,
-                            store_history,
-                            user_expressions,
-                            allow_stdin,
-                            cell_meta=cell_meta,
-                            cell_id=self._cell_id,
-                        )
+                        with timer(key="sdc_kernel:execute") as run_timer:
+                            result = await super().do_execute(
+                                code,
+                                silent,
+                                store_history,
+                                user_expressions,
+                                allow_stdin,
+                                cell_meta=cell_meta,
+                                cell_id=self._cell_id,
+                            )
+                        execution_time = run_timer.duration()
                         tracking = None
-                execution_time = run_timer.duration()
-                normal_exit = True
-            except KeyboardInterrupt:
-                # Timeout occurred - restore pre-state
-                self._sdc.checkpoints.restore(
-                    f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
-                )
-                return self._handle_timeout_error(timeout)
-            finally:
-                timeout_handler.cancel()
-                if not normal_exit:
-                    await timeout_handler.cleanup_on_error()
+                    normal_exit = True
+                except KeyboardInterrupt:
+                    # Timeout occurred - restore pre-state
+                    self._sdc.checkpoints.restore(
+                        f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
+                    )
+                    return self._handle_timeout_error(timeout)
+                finally:
+                    timeout_handler.cancel()
+                    if not normal_exit:
+                        await timeout_handler.cleanup_on_error()
 
-            # If execution had an error, restore pre-state and skip SDC checks
-            if result.get("status") == "error":
-                self._sdc.checkpoints.restore(
-                    f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
-                )
-                return result
+                # If execution had an error, restore pre-state and skip SDC checks
+                if result.get("status") == "error":
+                    self._sdc.checkpoints.restore(
+                        f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
+                    )
+                    return result
 
-            # Warn about non-deepcopyable objects after successful execution
-            # with timer(key="warn_non_deepcopyable", message="Warn non-deepcopyable"):
-            #     self._warn_non_deepcopyable_objects()
+                # Warn about non-deepcopyable objects after successful execution
+                # with timer(key="warn_non_deepcopyable", message="Warn non-deepcopyable"):
+                #     self._warn_non_deepcopyable_objects()
 
-            # Take post-execution snapshot
-            with timer(key="sdc_kernel:checkpoint") as post_timer:
-                post_checkpoint = self._take_checkpoint(
-                    f"{POST_CHECKPOINT_PREFIX}{self._cell_id}"
-                )
-
-            # Run SDC check if we have tracking data and cell_id
-            if tracking and self._cell_id:
-                with timer(key="sdc_kernel:check") as check_timer:
-                    sdc_result = self._sdc.check(
-                        cell_id=self._cell_id,
-                        pre_checkpoint=pre_checkpoint,
-                        post_checkpoint=post_checkpoint,
-                        tracking=tracking,
-                        continue_on_violation=self._continue_after_violation,
-                        namespace=self.shell.user_ns,  # For capturing structural read values
+                # Take post-execution snapshot
+                with timer(key="sdc_kernel:checkpoint") as post_timer:
+                    post_checkpoint = self._take_checkpoint(
+                        f"{POST_CHECKPOINT_PREFIX}{self._cell_id}"
                     )
 
-                # Handle violations (backward mutation and/or forward dependency)
-                has_backward = sdc_result and sdc_result.violation
-                has_forward = sdc_result and sdc_result.forward_violation
+                # Run SDC check if we have tracking data and cell_id
+                if tracking and self._cell_id:
+                    with timer(key="sdc_kernel:check") as check_timer:
+                        sdc_result = self._sdc.check(
+                            cell_id=self._cell_id,
+                            pre_checkpoint=pre_checkpoint,
+                            post_checkpoint=post_checkpoint,
+                            tracking=tracking,
+                            continue_on_violation=self._continue_after_violation,
+                            namespace=self.shell.user_ns,  # For capturing structural read values
+                        )
 
-                if has_backward or has_forward:
-                    if self._continue_after_violation:
-                        # Warn about both violations but continue
-                        if has_backward:
-                            if sdc_result.violation.truncation_details:
+                    # Handle violations (backward mutation and/or forward dependency)
+                    has_backward = sdc_result and sdc_result.violation
+                    has_forward = sdc_result and sdc_result.forward_violation
+
+                    if has_backward or has_forward:
+                        if self._continue_after_violation:
+                            # Warn about both violations but continue
+                            if has_backward:
+                                if sdc_result.violation.truncation_details:
+                                    error(f"SDC truncation: {sdc_result.violation.message}")
+                                    self._send_truncation_details(
+                                        sdc_result.violation.truncation_details
+                                    )
+                                error(
+                                    f"SDC violation (continuing): {sdc_result.violation.message}"
+                                )
+                                self._send_violation_warning(sdc_result.violation)
+                            if has_forward:
+                                error(
+                                    f"Forward dependency (continuing): {sdc_result.forward_violation.message}"
+                                )
+                                self._send_violation_warning(sdc_result.forward_violation)
+                        else:
+                            # Block on violation - backward takes precedence
+                            primary = (
+                                sdc_result.violation
+                                if has_backward
+                                else sdc_result.forward_violation
+                            )
+
+                            # Log truncation issues to terminal (for backward mutations)
+                            if has_backward and sdc_result.violation.truncation_details:
                                 error(f"SDC truncation: {sdc_result.violation.message}")
                                 self._send_truncation_details(
                                     sdc_result.violation.truncation_details
                                 )
-                            error(
-                                f"SDC violation (continuing): {sdc_result.violation.message}"
-                            )
-                            self._send_violation_warning(sdc_result.violation)
-                        if has_forward:
-                            error(
-                                f"Forward dependency (continuing): {sdc_result.forward_violation.message}"
-                            )
-                            self._send_violation_warning(sdc_result.forward_violation)
-                    else:
-                        # Block on violation - backward takes precedence
-                        primary = (
-                            sdc_result.violation
-                            if has_backward
-                            else sdc_result.forward_violation
+
+                            error(f"SDC violation: {primary.message}")
+
+                            # Only rollback for backward mutations (forward deps didn't change anything)
+                            if has_backward:
+                                self._sdc.checkpoints.restore(
+                                    f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}",
+                                    self.shell.user_ns,
+                                )
+
+                            self._send_violation_error(primary)
+
+                            # Also report forward violation if both exist
+                            if has_backward and has_forward:
+                                self._send_violation_warning(sdc_result.forward_violation)
+
+                            return self._make_error_result(primary)
+
+                    # Display results (skip if silent, error, or violation with rollback)
+                    skip_display = (
+                        has_backward or has_forward
+                    ) and not self._continue_after_violation
+                    if not silent and result.get("status") != "error" and not skip_display:
+                        state_ms = pre_timer.duration() + post_timer.duration()
+                        self._display_execution_result(
+                            execution_time,
+                            state_ms,
+                            check_timer.duration(),
+                            tracking,
+                            sdc_result,
                         )
 
-                        # Log truncation issues to terminal (for backward mutations)
-                        if has_backward and sdc_result.violation.truncation_details:
-                            error(f"SDC truncation: {sdc_result.violation.message}")
-                            self._send_truncation_details(
-                                sdc_result.violation.truncation_details
-                            )
-
-                        error(f"SDC violation: {primary.message}")
-
-                        # Only rollback for backward mutations (forward deps didn't change anything)
-                        if has_backward:
-                            self._sdc.checkpoints.restore(
-                                f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}",
-                                self.shell.user_ns,
-                            )
-
-                        self._send_violation_error(primary)
-
-                        # Also report forward violation if both exist
-                        if has_backward and has_forward:
-                            self._send_violation_warning(sdc_result.forward_violation)
-
-                        return self._make_error_result(primary)
-
-                # Display results (skip if silent, error, or violation with rollback)
-                skip_display = (
-                    has_backward or has_forward
-                ) and not self._continue_after_violation
-                if not silent and result.get("status") != "error" and not skip_display:
-                    state_ms = pre_timer.duration() + post_timer.duration()
-                    self._display_execution_result(
-                        run_timer.duration(),
-                        state_ms,
-                        check_timer.duration(),
-                        tracking,
-                        sdc_result,
+                return result
+            except Exception as e:
+                error(f"SDC error in cell {self._cell_id}: {e}\n{traceback.format_exc()}")
+                raise
+            finally:
+                end_time = time.perf_counter() * 1000
+                if execution_time is not None:
+                    duration = end_time - start_time
+                    output.add_timing(
+                        key="sdc_kernel:checking_total_time",
+                        duration=duration - execution_time,
                     )
-
-            return result
-        except Exception as e:
-            error(f"SDC error in cell {self._cell_id}: {e}\n{traceback.format_exc()}")
-            raise
-        finally:
-            end_time = time.perf_counter() * 1000
-            if execution_time is not None:
-                duration = end_time - start_time
-                output.add_timing(
-                    key="sdc_kernel:checking_total_time",
-                    duration=duration - execution_time,
-                )
-                slowdown = duration / execution_time
-                output.add_timing(key="sdc_kernel:slowdown", duration=slowdown)
+                    slowdown = duration / execution_time
+                    output.add_timing(key="sdc_kernel:slowdown", duration=slowdown)
 
     # =========================================================================
     # Helpers
