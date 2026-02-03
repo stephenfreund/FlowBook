@@ -194,6 +194,8 @@ class TestToJsonFriendly:
             "column_reads": {},
             "column_writes": {},
             "structural_reads": {},
+            "file_reads": [],
+            "file_writes": [],
         }
 
     def test_converts_sets_to_sorted_lists(self):

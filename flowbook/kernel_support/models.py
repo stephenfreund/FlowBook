@@ -14,6 +14,7 @@ These models ensure type safety and provide automatic serialization/deserializat
 for communication between kernel components and the frontend.
 """
 
+import os
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 from pydantic import BaseModel, Field
 
@@ -77,6 +78,14 @@ class TrackingData(BaseModel):
             "equality for these variables, not just column value equality. "
             "e.g., {'df': {'columns', 'shape'}, 'data[\"train\"]': {'describe'}}"
         ),
+    )
+    file_reads_before_writes: Set[str] = Field(
+        default_factory=set,
+        description="Absolute file paths read before being written in this cell",
+    )
+    file_writes: Set[str] = Field(
+        default_factory=set,
+        description="Absolute file paths written during cell execution",
     )
 
     def get_rbw_vars(self) -> Set[str]:
@@ -218,6 +227,8 @@ class TrackingData(BaseModel):
             "column_reads": {k: sorted(v) for k, v in sorted(self.column_reads_before_writes.items())},
             "column_writes": {k: sorted(v) for k, v in sorted(self.column_writes.items())},
             "structural_reads": {k: sorted(v) for k, v in sorted(self.structural_reads.items())},
+            "file_reads": sorted(os.path.relpath(p) for p in self.file_reads_before_writes),
+            "file_writes": sorted(os.path.relpath(p) for p in self.file_writes),
         }
 
     def get_read_variables(self) -> Set[str]:

@@ -203,6 +203,36 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
         </div>
       </div>
 
+      {/* File Reads */}
+      {metadata.file_reads && metadata.file_reads.length > 0 && (
+        <>
+          <div className="flowbook-metadata-divider" />
+          <div className="flowbook-metadata-section">
+            <div className="flowbook-metadata-item">
+              <strong>Files Read:</strong>
+              <ul className="flowbook-variable-list">
+                {metadata.file_reads.map((f, i) => <li key={i}><code>{f}</code></li>)}
+              </ul>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* File Writes */}
+      {metadata.file_writes && metadata.file_writes.length > 0 && (
+        <>
+          <div className="flowbook-metadata-divider" />
+          <div className="flowbook-metadata-section">
+            <div className="flowbook-metadata-item">
+              <strong>Files Written:</strong>
+              <ul className="flowbook-variable-list">
+                {metadata.file_writes.map((f, i) => <li key={i}><code>{f}</code></li>)}
+              </ul>
+            </div>
+          </div>
+        </>
+      )}
+
       {/* Changed Variables */}
       {(() => {
         // Include variables with either variable-level OR column-level changes

@@ -714,6 +714,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
         with timer(message = f"do_execute: {self._cell_id}"):
             try:
+                # Ensure filesystem magics are registered
+                self._ensure_fs_magics()
+
                 # Ensure tracking is initialized (done lazily on first execution)
                 self._ensure_tracking_initialized()
 
@@ -748,6 +751,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 # Reset tracking for this execution
                 if isinstance(user_ns, TrackingDict):
                     user_ns.reset_tracking()
+                # Reset VFS per-cell tracking
+                self._vfs.reset_cell_tracking()
 
                 # Setup timeout handler
                 timeout_handler = CellTimeoutHandler(
@@ -798,10 +803,16 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         execution_time = run_timer.duration()
                         tracking = None
                     normal_exit = True
+
+                    # Merge VFS file tracking into TrackingData
+                    if tracking is not None and (self._vfs.enabled or self._vfs.tracking_only):
+                        file_tracking = self._vfs.get_cell_file_tracking()
+                        tracking.file_reads_before_writes = file_tracking.file_reads_before_writes
+                        tracking.file_writes = file_tracking.file_writes
                 except KeyboardInterrupt:
                     # Timeout occurred - restore pre-state
-                    self._sdc.checkpoints.restore(
-                        f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
+                    self._restore_checkpoint(
+                        f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
                     )
                     return self._handle_timeout_error(timeout)
                 finally:
@@ -811,8 +822,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
                 # If execution had an error, restore pre-state and skip Reproducibility checks
                 if result.get("status") == "error":
-                    self._sdc.checkpoints.restore(
-                        f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}", self.shell.user_ns
+                    self._restore_checkpoint(
+                        f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
                     )
                     return result
 
@@ -879,9 +890,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
                             # Only rollback for backward mutations (forward deps didn't change anything)
                             if has_backward:
-                                self._sdc.checkpoints.restore(
-                                    f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}",
-                                    self.shell.user_ns,
+                                self._restore_checkpoint(
+                                    f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
                                 )
 
                             self._send_violation_error(primary)
@@ -1145,6 +1155,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             column_changed=sdc_result.column_changed if sdc_result else {},
             structural_reads=tracking_json["structural_reads"],
             structural_warnings=structural_warnings,
+            file_reads=tracking_json.get("file_reads", []),
+            file_writes=tracking_json.get("file_writes", []),
             run_duration_ms=run_duration,
             state_duration_ms=state_duration,
             check_duration_ms=check_duration,

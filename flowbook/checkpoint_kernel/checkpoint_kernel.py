@@ -52,6 +52,8 @@ class CheckpointKernel(BaseFlowbookKernel):
         """
         Execute code and measure timing.
         """
+        self._ensure_fs_magics()
+
         # For empty code or pure magic, still report timing (with 0 values)
         is_trivial = not code.strip() or self._is_pure_magic(code)
 

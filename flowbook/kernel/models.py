@@ -99,6 +99,8 @@ class ReproducibilityMetadata:
     column_changed: Dict[str, List[str]] = field(default_factory=dict)  # var -> [changed columns]
     structural_reads: Dict[str, List[str]] = field(default_factory=dict)  # var -> [structural attrs read]
     structural_warnings: List[str] = field(default_factory=list)  # warnings from WARN mode
+    file_reads: List[str] = field(default_factory=list)  # absolute file paths read
+    file_writes: List[str] = field(default_factory=list)  # absolute file paths written
     # Timing information (in milliseconds)
     run_duration_ms: float = 0.0  # Code execution time
     state_duration_ms: float = 0.0  # Checkpoint time (pre + post)
@@ -121,6 +123,8 @@ class ReproducibilityMetadata:
                 "column_changed": self.column_changed,
                 "structural_reads": self.structural_reads,
                 "structural_warnings": self.structural_warnings,
+                "file_reads": self.file_reads,
+                "file_writes": self.file_writes,
                 "run_duration_ms": self.run_duration_ms,
                 "state_duration_ms": self.state_duration_ms,
                 "check_duration_ms": self.check_duration_ms,

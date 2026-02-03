@@ -201,6 +201,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
 from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
+from flowbook.kernel_support.total_checkpoint import TotalCheckpoint, TotalDiffResult
 from flowbook.kernel_support.types import DiffResult, DiffNode, ValueComparison, CompoundDiff
 from flowbook.util.cell_index import index_to_alpha
 
@@ -241,7 +242,7 @@ OPT_ACCESSED_VARS_ONLY = _env_flag("FLOWBOOK_OPT_ACCESSED_VARS_ONLY", default=Tr
 
 def _expand_with_deep_aliases(
     accessed_vars: Set[str],
-    pre_checkpoint: Checkpoint,
+    pre_checkpoint,
     log_aliases: bool = True,
 ) -> Set[str]:
     """
@@ -264,13 +265,14 @@ def _expand_with_deep_aliases(
 
     Args:
         accessed_vars: Set of variable names the cell accessed (reads + writes)
-        pre_checkpoint: The pre-execution checkpoint (has precomputed alias index)
+        pre_checkpoint: The pre-execution checkpoint (Checkpoint or TotalCheckpoint)
         log_aliases: If True, log discovered alias relationships
 
     Returns:
         Expanded set including accessed_vars plus all their deep aliases
     """
     # Use the checkpoint's precomputed deep alias index
+    # TotalCheckpoint delegates get_aliases_for_vars to its memory checkpoint
     return pre_checkpoint.get_aliases_for_vars(accessed_vars, log_aliases=log_aliases)
 
 
@@ -353,8 +355,8 @@ class ReproducibilityEnforcer:
     def check(
         self,
         cell_id: str,
-        pre_checkpoint: Checkpoint,
-        post_checkpoint: Checkpoint,
+        pre_checkpoint,
+        post_checkpoint,
         tracking: TrackingData,
         continue_on_violation: bool = False,
         namespace: Optional[dict] = None,
@@ -364,8 +366,8 @@ class ReproducibilityEnforcer:
 
         Args:
             cell_id: ID of the cell that just executed
-            pre_checkpoint: Snapshot of namespace before execution
-            post_checkpoint: Snapshot of namespace after execution
+            pre_checkpoint: Snapshot before execution (Checkpoint or TotalCheckpoint)
+            post_checkpoint: Snapshot after execution (Checkpoint or TotalCheckpoint)
             tracking: TrackingData with reads/writes
             continue_on_violation: If True, compute staleness even when violation detected
             namespace: Optional user namespace for capturing structural read values
@@ -449,9 +451,12 @@ class ReproducibilityEnforcer:
                 # Note: Don't pass current cell's structural_reads - intra-cell
                 # structural reads are not backward mutations. Structural warnings
                 # for prior cells are handled in staleness computation.
+                # Extract memory checkpoints if we have TotalCheckpoints
+                _pre_mem = pre_checkpoint.memory if isinstance(pre_checkpoint, TotalCheckpoint) else pre_checkpoint
+                _post_mem = post_checkpoint.memory if isinstance(post_checkpoint, TotalCheckpoint) else post_checkpoint
                 current_diff = Checkpoint.diff(
-                    pre_checkpoint,
-                    post_checkpoint,
+                    _pre_mem,
+                    _post_mem,
                     use_leq=True,
                     column_rbw=tracking.column_reads_before_writes,
                     structural_reads={},  # Empty - no intra-cell structural warnings
@@ -485,10 +490,32 @@ class ReproducibilityEnforcer:
             column_changed = _extract_column_changes(current_diff, tracking)
 
             # Update staleness INCREMENTALLY (only check cells below that might have become stale)
+            # Extract changed file paths from the diff (if available)
+            _changed_file_paths = None
+            if current_diff is not None:
+                # Check if we have a total_diff from backward mutation check
+                # If pre_checkpoint is TotalCheckpoint, we computed total_diff there
+                _is_total_cp = isinstance(pre_checkpoint, TotalCheckpoint)
+                if _is_total_cp and hasattr(pre_checkpoint, 'file') and pre_checkpoint.file is not None:
+                    # Re-diff files for staleness (or reuse from backward mutation)
+                    total_diff_for_staleness = TotalCheckpoint.diff(
+                        pre_checkpoint, post_checkpoint,
+                        use_leq=True,
+                        column_rbw=tracking.column_reads_before_writes,
+                        structural_reads={},
+                        structural_mode=self._structural_mode,
+                    )
+                    if total_diff_for_staleness.has_file_changes:
+                        _changed_file_paths = total_diff_for_staleness.changed_file_paths
+
+            # Use memory checkpoint for staleness diff
+            _staleness_cp = post_checkpoint.memory if isinstance(post_checkpoint, TotalCheckpoint) else post_checkpoint
+
             # Also captures structural warnings from affected cells
             with timer(key="sdc:staleness", message=f"[sdc] Staleness update for {cell_id}"):
                 stale, staleness_warnings = self._update_staleness_incremental(
-                    post_checkpoint, set(changed_vars), column_changed, cell_id, my_position
+                    _staleness_cp, set(changed_vars), column_changed, cell_id, my_position,
+                    changed_file_paths=_changed_file_paths,
                 )
             # Merge warnings from staleness checks
             structural_warnings.extend(staleness_warnings)
@@ -506,8 +533,8 @@ class ReproducibilityEnforcer:
         self,
         cell_id: str,
         my_position: int,
-        pre_checkpoint: Checkpoint,
-        post_checkpoint: Checkpoint,
+        pre_checkpoint,
+        post_checkpoint,
         tracking: TrackingData,
     ) -> Tuple[Optional[ReproducibilityViolation], DiffResult, List]:
         """
@@ -573,16 +600,33 @@ class ReproducibilityEnforcer:
                 log(f"[bwm]   deep_aliases_added={sorted(set(expanded_sorted) - set(accessed_sorted))}")
         # ======================================================================
 
+        # Use TotalCheckpoint.diff if available (produces TotalDiffResult with file diff)
+        # Otherwise fall back to Checkpoint.diff (for plain Checkpoint objects)
+        _is_total = isinstance(pre_checkpoint, TotalCheckpoint)
+
         with timer(key="bwm:checkpoint_diff", message=f"[bwm] Checkpoint.diff (pre vs post)"):
-            current_diff = Checkpoint.diff(
-                pre_checkpoint,
-                post_checkpoint,
-                keys_to_include=keys_to_include,
-                use_leq=False,  # Detect creations for forward dependency caching
-                column_rbw=all_accessed_columns,
-                structural_reads={},  # Empty - ConflictResolver handles this
-                structural_mode=self._structural_mode,
-            )
+            if _is_total:
+                total_diff = TotalCheckpoint.diff(
+                    pre_checkpoint,
+                    post_checkpoint,
+                    keys_to_include=keys_to_include,
+                    use_leq=False,
+                    column_rbw=all_accessed_columns,
+                    structural_reads={},
+                    structural_mode=self._structural_mode,
+                )
+                current_diff = total_diff.memory
+            else:
+                total_diff = None
+                current_diff = Checkpoint.diff(
+                    pre_checkpoint,
+                    post_checkpoint,
+                    keys_to_include=keys_to_include,
+                    use_leq=False,  # Detect creations for forward dependency caching
+                    column_rbw=all_accessed_columns,
+                    structural_reads={},  # Empty - ConflictResolver handles this
+                    structural_mode=self._structural_mode,
+                )
 
         # Check if diff was truncated - if so, return violation
         with timer(key="bwm:check_truncation", message=f"[bwm] Check truncation"):
@@ -708,6 +752,32 @@ class ReproducibilityEnforcer:
                             typed_changes,
                         )
 
+        # File backward mutation check
+        if total_diff is not None and total_diff.has_file_changes:
+            for prior_cell_id in self._cell_order[:my_position]:
+                prior_record = self.records.get(prior_cell_id)
+                if prior_record is None:
+                    continue
+                file_conflicts = total_diff.changed_file_paths & prior_record.tracking.file_reads_before_writes
+                if file_conflicts:
+                    mutating_alpha = self._cell_id_to_alpha(cell_id)
+                    affected_alpha = self._cell_id_to_alpha(prior_cell_id)
+                    conflict_names = sorted(os.path.basename(p) for p in file_conflicts)
+                    message = (
+                        f"Cell {mutating_alpha} modified file(s) {conflict_names} "
+                        f"which Cell {affected_alpha} (earlier) reads."
+                    )
+                    return (
+                        ReproducibilityViolation(
+                            mutating_cell=cell_id,
+                            affected_cell=prior_cell_id,
+                            variables=conflict_names,
+                            message=message,
+                        ),
+                        current_diff,
+                        typed_changes,
+                    )
+
         return (None, current_diff, typed_changes)
 
     def _check_forward_dependency(
@@ -785,6 +855,28 @@ class ReproducibilityEnforcer:
                         violation_type="forward_dependency",
                     )
 
+        # File forward dependency: current cell reads files that a later cell wrote
+        if tracking.file_reads_before_writes:
+            for later_cell_id in self._cell_order[my_position + 1:]:
+                later_record = self.records.get(later_cell_id)
+                if later_record is None:
+                    continue
+                file_overlap = tracking.file_reads_before_writes & later_record.tracking.file_writes
+                if file_overlap:
+                    reading_alpha = self._cell_id_to_alpha(cell_id)
+                    writing_alpha = self._cell_id_to_alpha(later_cell_id)
+                    conflict_names = sorted(os.path.basename(p) for p in file_overlap)
+                    message = format_forward_dependency_message(
+                        reading_alpha, writing_alpha, conflict_names
+                    )
+                    return ReproducibilityViolation(
+                        mutating_cell=later_cell_id,
+                        affected_cell=cell_id,
+                        variables=conflict_names,
+                        message=message,
+                        violation_type="forward_dependency",
+                    )
+
         return None
 
     def _update_staleness_incremental(
@@ -794,6 +886,7 @@ class ReproducibilityEnforcer:
         column_changed: Dict[str, List[str]],
         just_executed: str,
         my_position: int,
+        changed_file_paths: Optional[Set[str]] = None,
     ) -> Tuple[List[str], List[str]]:
         """
         Incrementally update staleness cache (Rule 2 computation).
@@ -811,6 +904,7 @@ class ReproducibilityEnforcer:
             column_changed: Dict mapping var names to lists of changed column names
             just_executed: The cell_id that just executed (already marked fresh)
             my_position: Position of the executed cell in document order
+            changed_file_paths: Optional set of file paths that changed
 
         Returns:
             Tuple of:
@@ -833,6 +927,12 @@ class ReproducibilityEnforcer:
             if cell_id in self._stale_cells:
                 cells_skipped_stale += 1
                 continue  # Already stale, no need to re-check
+
+            # Check file staleness (cheap — set intersection, no diff needed)
+            if changed_file_paths and record.tracking.file_reads_before_writes:
+                if changed_file_paths & record.tracking.file_reads_before_writes:
+                    self._stale_cells.add(cell_id)
+                    continue  # Already stale, no need for expensive variable diff
 
             # Skip cells whose reads don't overlap with changed vars
             if not self._has_relevant_overlap(record, changed_vars, column_changed):

@@ -24,6 +24,9 @@ export interface IReproducibilityMetadata {
   column_changed?: { [key: string]: string[] };
   structural_reads?: { [key: string]: string[] };
   structural_warnings?: string[];
+  // File I/O tracking
+  file_reads?: string[];
+  file_writes?: string[];
   // Timing information (in milliseconds)
   run_duration_ms?: number;
   state_duration_ms?: number;
