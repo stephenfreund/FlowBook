@@ -948,6 +948,8 @@ SYSTEM_VARIABLES = {
     "_ii",
     "_iii",
     "_dh",
+    # Built-in function that may be patched by VFS for file tracking
+    "open",
 }
 
 

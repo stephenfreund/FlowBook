@@ -377,7 +377,11 @@ from flowbook.util.cell_index import index_to_alpha
 from flowbook.util.output import error, log, timer, output
 
 from flowbook.kernel.models import ReproducibilityMetadata
-from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX, POST_CHECKPOINT_PREFIX
+from flowbook.kernel.reproducibility_enforcer import (
+    ReproducibilityEnforcer,
+    PRE_CHECKPOINT_PREFIX,
+    POST_CHECKPOINT_PREFIX,
+)
 
 
 @magics_class
@@ -455,7 +459,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 f"writes={sorted(record.writes)}, seq={record.execution_seq}"
             )
 
-        self._display.display_icon_and_text("ℹ️", "Reproducibility Status", "\n".join(status_lines))
+        self._display.display_icon_and_text(
+            "ℹ️", "Reproducibility Status", "\n".join(status_lines)
+        )
 
     @line_magic
     def continue_after_violation(self, line: str) -> None:
@@ -598,13 +604,16 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
     def monotone(self, line: str) -> None:
         """Stub for monotone enforcement (use Reproducibility rules instead)."""
         self._display.display_icon_and_text(
-            "ℹ️", "Reproducibility kernel uses Reproducibility rules instead of monotone enforcement"
+            "ℹ️",
+            "Reproducibility kernel uses Reproducibility rules instead of monotone enforcement",
         )
 
     @line_magic
     def force_checkpoints(self, line: str) -> None:
         """Stub for force checkpoints (Reproducibility kernel always checkpoints)."""
-        self._display.display_icon_and_text("ℹ️", "Reproducibility kernel always takes checkpoints")
+        self._display.display_icon_and_text(
+            "ℹ️", "Reproducibility kernel always takes checkpoints"
+        )
 
     @line_magic
     def checkpoint(self, line: str) -> None:
@@ -616,7 +625,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
     @line_magic
     def restore(self, line: str) -> None:
         """Stub for restore magic (not supported in Reproducibility kernel)."""
-        self._display.display_icon_and_text("ℹ️", "Restore not supported in Reproducibility kernel")
+        self._display.display_icon_and_text(
+            "ℹ️", "Restore not supported in Reproducibility kernel"
+        )
 
     @line_magic
     def list_checkpoints(self, line: str) -> None:
@@ -713,10 +724,13 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         start_time = time.perf_counter() * 1000
         execution_time = None
 
-        with timer(message = f"do_execute: {self._cell_id}"):
+        with timer(message=f"do_execute: {self._cell_id}"):
             try:
                 # Ensure filesystem magics are registered
                 self._ensure_fs_magics()
+
+                # Ensure VFS patches are applied to user namespace
+                self._ensure_vfs_namespace_patched()
 
                 # Ensure tracking is initialized (done lazily on first execution)
                 self._ensure_tracking_initialized()
@@ -806,15 +820,17 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                     normal_exit = True
 
                     # Merge VFS file tracking into TrackingData
-                    if tracking is not None and (self._vfs.enabled or self._vfs.tracking_only):
+                    if tracking is not None and (
+                        self._vfs.enabled or self._vfs.tracking_only
+                    ):
                         file_tracking = self._vfs.get_cell_file_tracking()
-                        tracking.file_reads_before_writes = file_tracking.file_reads_before_writes
+                        tracking.file_reads_before_writes = (
+                            file_tracking.file_reads_before_writes
+                        )
                         tracking.file_writes = file_tracking.file_writes
                 except KeyboardInterrupt:
                     # Timeout occurred - restore pre-state
-                    self._restore_checkpoint(
-                        f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
-                    )
+                    self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
                     return self._handle_timeout_error(timeout)
                 finally:
                     timeout_handler.cancel()
@@ -823,9 +839,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
                 # If execution had an error, restore pre-state and skip Reproducibility checks
                 if result.get("status") == "error":
-                    self._restore_checkpoint(
-                        f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
-                    )
+                    self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
                     return result
 
                 # Warn about non-deepcopyable objects after successful execution
@@ -859,7 +873,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             # Warn about both violations but continue
                             if has_backward:
                                 if sdc_result.violation.truncation_details:
-                                    error(f"Reproducibility truncation: {sdc_result.violation.message}")
+                                    error(
+                                        f"Reproducibility truncation: {sdc_result.violation.message}"
+                                    )
                                     self._send_truncation_details(
                                         sdc_result.violation.truncation_details
                                     )
@@ -871,7 +887,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                 error(
                                     f"Forward dependency (continuing): {sdc_result.forward_violation.message}"
                                 )
-                                self._send_violation_warning(sdc_result.forward_violation)
+                                self._send_violation_warning(
+                                    sdc_result.forward_violation
+                                )
                         else:
                             # Block on violation - backward takes precedence
                             primary = (
@@ -882,7 +900,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
                             # Log truncation issues to terminal (for backward mutations)
                             if has_backward and sdc_result.violation.truncation_details:
-                                error(f"Reproducibility truncation: {sdc_result.violation.message}")
+                                error(
+                                    f"Reproducibility truncation: {sdc_result.violation.message}"
+                                )
                                 self._send_truncation_details(
                                     sdc_result.violation.truncation_details
                                 )
@@ -899,7 +919,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
                             # Also report forward violation if both exist
                             if has_backward and has_forward:
-                                self._send_violation_warning(sdc_result.forward_violation)
+                                self._send_violation_warning(
+                                    sdc_result.forward_violation
+                                )
 
                             return self._make_error_result(primary)
 
@@ -907,7 +929,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                     skip_display = (
                         has_backward or has_forward
                     ) and not self._continue_after_violation
-                    if not silent and result.get("status") != "error" and not skip_display:
+                    if (
+                        not silent
+                        and result.get("status") != "error"
+                        and not skip_display
+                    ):
                         state_ms = pre_timer.duration() + post_timer.duration()
                         self._display_execution_result(
                             execution_time,
@@ -919,7 +945,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
                 return result
             except Exception as e:
-                error(f"Reproducibility error in cell {self._cell_id}: {e}\n{traceback.format_exc()}")
+                error(
+                    f"Reproducibility error in cell {self._cell_id}: {e}\n{traceback.format_exc()}"
+                )
                 raise
             finally:
                 end_time = time.perf_counter() * 1000
@@ -1138,18 +1166,22 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             }
         )
 
-        # Combine variable reads/writes with file read-before-writes/writes (file: prefix)
+        # Get file tracking data (separate from variable tracking)
         # Only include files that were read before being written (important for reproducibility)
-        file_rbw = sorted(os.path.relpath(p) for p in tracking.file_reads_before_writes) if tracking else []
-        file_writes_list = sorted(os.path.relpath(p) for p in tracking.file_writes) if tracking else []
-        combined_reads = tracking_json["reads"] + [f"file:{f}" for f in file_rbw]
-        combined_writes = tracking_json["writes"] + [f"file:{f}" for f in file_writes_list]
+        file_rbw = (
+            sorted(os.path.relpath(p) for p in tracking.file_reads_before_writes)
+            if tracking
+            else []
+        )
+        file_writes_list = (
+            sorted(os.path.relpath(p) for p in tracking.file_writes) if tracking else []
+        )
 
         metadata = ReproducibilityMetadata(
             cell_id=self._cell_id or "",
             execution_seq=self._enforcer.seq_counter,
-            reads=combined_reads,
-            writes=combined_writes,
+            reads=tracking_json["reads"],  # Variable reads only
+            writes=tracking_json["writes"],  # Variable writes only
             changed_variables=sdc_result.changed_variables if sdc_result else [],
             stale_cells=sdc_result.stale_cells if sdc_result else [],
             violation=(
@@ -1163,8 +1195,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             column_changed=sdc_result.column_changed if sdc_result else {},
             structural_reads=tracking_json["structural_reads"],
             structural_warnings=structural_warnings,
-            file_reads=tracking_json.get("file_reads", []),
-            file_writes=tracking_json.get("file_writes", []),
+            file_reads=file_rbw,  # File reads (separate from variables)
+            file_writes=file_writes_list,  # File writes (separate from variables)
             run_duration_ms=run_duration,
             state_duration_ms=state_duration,
             check_duration_ms=check_duration,
@@ -1182,8 +1214,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             f"State: {state_duration:.0f} ms",
             f"Check: {check_duration:.0f} ms",
         ]
+
+        # Variable reads (separate from file reads)
         if tracking_json["reads"] or tracking_json["column_reads"]:
-            # Combine variable-level reads with column-level read variables
             read_vars = set(tracking_json["reads"]) | set(
                 tracking_json["column_reads"].keys()
             )
@@ -1193,7 +1226,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                     for v in list(read_vars)[:3]
                 ]
                 parts.append(f"Reads: {','.join(reads_preview)}")
-        # Show writes if there are variable-level writes OR column-level writes
+
+        # Variable writes (separate from file writes)
         write_vars = set(tracking_json["writes"]) | set(
             tracking_json["column_writes"].keys()
         )
@@ -1203,6 +1237,13 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 for v in list(write_vars)[:3]
             ]
             parts.append(f"Writes: {','.join(writes_preview)}")
+
+        # File I/O (separate section)
+        if file_rbw or file_writes_list:
+            if file_rbw:
+                parts.append(f"File Reads: {','.join(file_rbw)}")
+            if file_writes_list:
+                parts.append(f"File Writes: {','.join(file_writes_list)}")
 
         if sdc_result and sdc_result.stale_cells:
             # Convert cell IDs to @A references for display

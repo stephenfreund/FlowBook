@@ -29,6 +29,10 @@ class FileTrackingData:
     file_writes: Set[str] = field(default_factory=set)
 
 
+# Sentinel value for namespace patching
+_NOT_PRESENT = object()
+
+
 class VirtualFileSystem:
     """
     Copy-on-write overlay filesystem for notebook file I/O.
@@ -57,6 +61,13 @@ class VirtualFileSystem:
 
         # Original functions (saved for unpatching)
         self._originals: dict = {}
+
+        # Patched namespaces and their original 'open' values
+        # Maps namespace id -> (namespace, original_open_or_NOT_PRESENT)
+        self._patched_namespaces: dict = {}
+
+        # The current patched_open function (created during enable)
+        self._patched_open = None
 
     @property
     def enabled(self) -> bool:
@@ -186,9 +197,20 @@ class VirtualFileSystem:
             return overlay
         return real_path
 
+    def _should_track_path(self, abs_path: str) -> bool:
+        """Check if a path should be tracked (filter out internal sockets)."""
+        # Filter out FlowBook/FlowLab internal socket files
+        if abs_path.endswith(".sock"):
+            basename = os.path.basename(abs_path)
+            if basename.startswith(("flowbook_", "flowlab_")):
+                return False
+        return True
+
     def _track_read(self, path: str) -> None:
         """Record a file read."""
         abs_path = os.path.abspath(path)
+        if not self._should_track_path(abs_path):
+            return
         self._read_paths.add(abs_path)
         if abs_path not in self._cell_writes:
             self._cell_reads_before_writes.add(abs_path)
@@ -196,6 +218,8 @@ class VirtualFileSystem:
     def _track_write(self, path: str) -> None:
         """Record a file write."""
         abs_path = os.path.abspath(path)
+        if not self._should_track_path(abs_path):
+            return
         self._write_paths.add(abs_path)
         self._cell_writes.add(abs_path)
 
@@ -383,6 +407,7 @@ class VirtualFileSystem:
                 _orig_rmtree(overlay, *args, **kwargs)
 
         builtins.open = patched_open
+        self._patched_open = patched_open
         os.remove = patched_remove
         os.unlink = patched_remove
         os.rename = patched_rename
@@ -403,12 +428,50 @@ class VirtualFileSystem:
     def _install_tracking_patches(self) -> None:
         """Install lightweight patches that only track paths (no I/O redirect)."""
         self._originals = {
+            # File I/O
             "builtins.open": builtins.open,
+            # Write operations (modify filesystem)
+            "os.remove": os.remove,
+            "os.unlink": os.unlink,
+            "os.rmdir": os.rmdir,
+            "os.rename": os.rename,
+            "os.makedirs": os.makedirs,
+            "os.mkdir": os.mkdir,
+            "shutil.copy": shutil.copy,
+            "shutil.copy2": shutil.copy2,
+            "shutil.move": shutil.move,
+            "shutil.rmtree": shutil.rmtree,
+            # Read operations (query filesystem)
+            "os.path.exists": os.path.exists,
+            "os.listdir": os.listdir,
+            "os.stat": os.stat,
+            "os.path.isfile": os.path.isfile,
+            "os.path.isdir": os.path.isdir,
+            "os.path.getsize": os.path.getsize,
+            "os.path.getmtime": os.path.getmtime,
         }
 
         vfs = self
         _orig_open = self._originals["builtins.open"]
+        _orig_remove = self._originals["os.remove"]
+        _orig_unlink = self._originals["os.unlink"]
+        _orig_rmdir = self._originals["os.rmdir"]
+        _orig_rename = self._originals["os.rename"]
+        _orig_makedirs = self._originals["os.makedirs"]
+        _orig_mkdir = self._originals["os.mkdir"]
+        _orig_shutil_copy = self._originals["shutil.copy"]
+        _orig_shutil_copy2 = self._originals["shutil.copy2"]
+        _orig_shutil_move = self._originals["shutil.move"]
+        _orig_shutil_rmtree = self._originals["shutil.rmtree"]
+        _orig_exists = self._originals["os.path.exists"]
+        _orig_listdir = self._originals["os.listdir"]
+        _orig_stat = self._originals["os.stat"]
+        _orig_isfile = self._originals["os.path.isfile"]
+        _orig_isdir = self._originals["os.path.isdir"]
+        _orig_getsize = self._originals["os.path.getsize"]
+        _orig_getmtime = self._originals["os.path.getmtime"]
 
+        # --- File I/O ---
         def patched_open(file, mode="r", *args, **kwargs):
             path = str(file)
             is_write = any(c in mode for c in "wxa+")
@@ -418,7 +481,136 @@ class VirtualFileSystem:
                 vfs._track_read(path)
             return _orig_open(file, mode, *args, **kwargs)
 
+        # --- Write operations (delete) ---
+        def patched_remove(path, *args, **kwargs):
+            vfs._track_write(path)
+            return _orig_remove(path, *args, **kwargs)
+
+        def patched_unlink(path, *args, **kwargs):
+            vfs._track_write(path)
+            return _orig_unlink(path, *args, **kwargs)
+
+        def patched_rmdir(path, *args, **kwargs):
+            vfs._track_write(path)
+            return _orig_rmdir(path, *args, **kwargs)
+
+        def patched_shutil_rmtree(path, *args, **kwargs):
+            vfs._track_write(path)
+            return _orig_shutil_rmtree(path, *args, **kwargs)
+
+        # --- Write operations (create) ---
+        def patched_makedirs(name, *args, **kwargs):
+            vfs._track_write(name)
+            return _orig_makedirs(name, *args, **kwargs)
+
+        def patched_mkdir(path, *args, **kwargs):
+            vfs._track_write(path)
+            return _orig_mkdir(path, *args, **kwargs)
+
+        # --- Read + Write operations (copy/move) ---
+        def patched_rename(src, dst, *args, **kwargs):
+            vfs._track_read(src)
+            vfs._track_write(dst)
+            return _orig_rename(src, dst, *args, **kwargs)
+
+        def patched_shutil_copy(src, dst, *args, **kwargs):
+            vfs._track_read(src)
+            vfs._track_write(dst)
+            return _orig_shutil_copy(src, dst, *args, **kwargs)
+
+        def patched_shutil_copy2(src, dst, *args, **kwargs):
+            vfs._track_read(src)
+            vfs._track_write(dst)
+            return _orig_shutil_copy2(src, dst, *args, **kwargs)
+
+        def patched_shutil_move(src, dst, *args, **kwargs):
+            vfs._track_read(src)
+            vfs._track_write(dst)
+            return _orig_shutil_move(src, dst, *args, **kwargs)
+
+        # --- Read operations ---
+        def patched_exists(path):
+            vfs._track_read(path)
+            return _orig_exists(path)
+
+        def patched_listdir(path="."):
+            vfs._track_read(path)
+            return _orig_listdir(path)
+
+        def patched_stat(path, *args, **kwargs):
+            vfs._track_read(path)
+            return _orig_stat(path, *args, **kwargs)
+
+        def patched_isfile(path):
+            vfs._track_read(path)
+            return _orig_isfile(path)
+
+        def patched_isdir(path):
+            vfs._track_read(path)
+            return _orig_isdir(path)
+
+        def patched_getsize(filename):
+            vfs._track_read(filename)
+            return _orig_getsize(filename)
+
+        def patched_getmtime(filename):
+            vfs._track_read(filename)
+            return _orig_getmtime(filename)
+
+        # Install patches
         builtins.open = patched_open
+        self._patched_open = patched_open
+        os.remove = patched_remove
+        os.unlink = patched_unlink
+        os.rmdir = patched_rmdir
+        os.rename = patched_rename
+        os.makedirs = patched_makedirs
+        os.mkdir = patched_mkdir
+        shutil.copy = patched_shutil_copy
+        shutil.copy2 = patched_shutil_copy2
+        shutil.move = patched_shutil_move
+        shutil.rmtree = patched_shutil_rmtree
+        os.path.exists = patched_exists
+        os.listdir = patched_listdir
+        os.stat = patched_stat
+        os.path.isfile = patched_isfile
+        os.path.isdir = patched_isdir
+        os.path.getsize = patched_getsize
+        os.path.getmtime = patched_getmtime
+
+    def patch_namespace(self, namespace: dict) -> None:
+        """
+        Patch a namespace's 'open' to use our tracking open.
+
+        This is needed because IPython puts io.open directly in user_global_ns,
+        bypassing builtins.open. We need to patch that namespace too.
+
+        Safe to call multiple times on the same namespace.
+        """
+        if not (self._enabled or self._tracking_only):
+            return
+        if self._patched_open is None:
+            return
+
+        ns_id = id(namespace)
+        if ns_id in self._patched_namespaces:
+            return  # Already patched
+
+        # Save original value (or sentinel if not present)
+        original = namespace.get("open", _NOT_PRESENT)
+        self._patched_namespaces[ns_id] = (namespace, original)
+
+        # Install our patched open
+        namespace["open"] = self._patched_open
+
+    def _unpatch_namespaces(self) -> None:
+        """Restore all patched namespaces to their original state."""
+        for ns_id, (namespace, original) in self._patched_namespaces.items():
+            if original is _NOT_PRESENT:
+                namespace.pop("open", None)
+            else:
+                namespace["open"] = original
+        self._patched_namespaces.clear()
 
     # =========================================================================
     # Unpatch
@@ -426,6 +618,10 @@ class VirtualFileSystem:
 
     def _remove_patches(self) -> None:
         """Restore all original functions."""
+        # Restore patched namespaces first
+        self._unpatch_namespaces()
+        self._patched_open = None
+
         if "builtins.open" in self._originals:
             builtins.open = self._originals["builtins.open"]
         if "os.remove" in self._originals:
@@ -452,4 +648,14 @@ class VirtualFileSystem:
             shutil.move = self._originals["shutil.move"]
         if "shutil.rmtree" in self._originals:
             shutil.rmtree = self._originals["shutil.rmtree"]
+        if "os.stat" in self._originals:
+            os.stat = self._originals["os.stat"]
+        if "os.path.isfile" in self._originals:
+            os.path.isfile = self._originals["os.path.isfile"]
+        if "os.path.isdir" in self._originals:
+            os.path.isdir = self._originals["os.path.isdir"]
+        if "os.path.getsize" in self._originals:
+            os.path.getsize = self._originals["os.path.getsize"]
+        if "os.path.getmtime" in self._originals:
+            os.path.getmtime = self._originals["os.path.getmtime"]
         self._originals.clear()

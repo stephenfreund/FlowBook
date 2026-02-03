@@ -56,6 +56,8 @@ class BaseFlowbookKernel(IPythonKernel):
 
         # FS magics registration flag
         self._fs_magics_registered = False
+        # VFS namespace patching flag
+        self._vfs_namespace_patched = False
 
     # Backward compat: expose memory checkpoints as _checkpoint
     @property
@@ -71,6 +73,22 @@ class BaseFlowbookKernel(IPythonKernel):
         from flowbook.kernel_support.fs_magics import FileSystemMagics
         self.shell.register_magics(FileSystemMagics(self.shell, self))
         self._fs_magics_registered = True
+
+    def _ensure_vfs_namespace_patched(self) -> None:
+        """
+        Ensure VFS patches are applied to the user namespace.
+
+        IPython puts io.open directly in user_global_ns, bypassing builtins.open.
+        This method patches the namespace's 'open' to use our tracking version.
+        Called once when the shell is available.
+        """
+        if self._vfs_namespace_patched:
+            return
+        if self.shell is None:
+            return
+        if self._vfs.enabled or self._vfs.tracking_only:
+            self._vfs.patch_namespace(self.shell.user_global_ns)
+        self._vfs_namespace_patched = True
 
     async def do_execute(
         self,
