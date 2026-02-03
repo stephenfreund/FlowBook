@@ -13,16 +13,14 @@ No reproducibility tracking, no variable tracking - just execution and checkpoin
 import time
 from typing import Optional
 
-from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
 
-from flowbook.kernel_support.checkpoint import Checkpoints
-from flowbook.kernel_support.display_helpers import DisplayHelper
+from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
 
 from flowbook.checkpoint_kernel.models import CheckpointMetadata
 
 
-class CheckpointKernel(IPythonKernel):
+class CheckpointKernel(BaseFlowbookKernel):
     """
     IPython kernel with checkpoint timing measurement.
 
@@ -39,44 +37,27 @@ class CheckpointKernel(IPythonKernel):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        # Display helper
-        self._display = DisplayHelper()
-
-        # Current cell being executed
-        self._cell_id: Optional[str] = None
-
-        # Checkpointing
-        self._checkpoint = Checkpoints(
-            sanity_check=False,
-            warn_classes=False,
-        )
-
         # Expose checkpoint object to user code for rerun trials
         self.shell.user_ns["_flowbook_checkpoint"] = self._checkpoint
 
-    async def do_execute(
+    async def _do_execute_impl(
         self,
         code: str,
         silent: bool,
-        store_history: bool = True,
-        user_expressions: Optional[dict] = None,
-        allow_stdin: bool = False,
-        *,
-        cell_meta: Optional[dict] = None,
-        cell_id: Optional[str] = None,
+        store_history: bool,
+        user_expressions: Optional[dict],
+        allow_stdin: bool,
+        cell_meta: Optional[dict],
     ) -> dict:
         """
         Execute code and measure timing.
         """
-        # Extract cell context
-        self._cell_id = self._extract_cell_id(cell_id, cell_meta)
-
         # For empty code or pure magic, still report timing (with 0 values)
         is_trivial = not code.strip() or self._is_pure_magic(code)
 
         # Measure cell execution time
         exec_start = time.perf_counter()
-        result = await super().do_execute(
+        result = await self._ipython_do_execute(
             code,
             silent,
             store_history,
@@ -123,37 +104,6 @@ class CheckpointKernel(IPythonKernel):
             )
 
         return result
-
-    def _extract_cell_id(
-        self, cell_id: Optional[str], cell_meta: Optional[dict]
-    ) -> Optional[str]:
-        """Extract cell ID from arguments or metadata."""
-        if cell_id is not None:
-            return cell_id
-        if cell_meta is not None:
-            return cell_meta.get("cell_id")
-        return None
-
-    def _is_pure_magic(self, code: str) -> bool:
-        """Check if code is only magic commands (with optional comments)."""
-        # Force checkpoint on sentinel (for rerun trials)
-        if "__flowbook_force_checkpoint__" in code:
-            return False
-        lines = [line.strip() for line in code.strip().split("\n") if line.strip()]
-        return all(
-            line.startswith("%") or line.startswith("!") or line.startswith("#")
-            for line in lines
-        )
-
-    def _take_checkpoint(self, checkpoint_name: str) -> None:
-        """
-        Take a snapshot of the namespace.
-
-        Uses Checkpoints.save() to properly deep copy the namespace.
-        """
-        self._checkpoint.save(
-            checkpoint_name, dict(self.shell.user_ns), max_size_mb=None
-        )
 
 
 # Entry point

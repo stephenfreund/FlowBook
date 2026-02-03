@@ -204,8 +204,8 @@ MAGIC COMMANDS
 ================================================================================
 
 %notebook_structure cell1 cell2 ...  - Set cell order (auto-injected by client)
-%sdc_status                          - Display current Reproducibility state
-%sdc_stale                           - Show which cells are currently stale
+%flowbook_status                     - Display current Reproducibility state
+%flowbook_stale                      - Show which cells are currently stale
 
 Boolean toggle commands (no arg = enable, ? = show status):
 %continue_after_violation            - Enable continuing after violations
@@ -361,16 +361,15 @@ See checkpoint.py sections 13-14 for implementation details.
 import re
 import time
 import traceback
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 from IPython.core.magic import Magics, line_magic, magics_class
-from ipykernel.ipkernel import IPythonKernel
 from ipykernel.kernelapp import IPKernelApp
 
 from flowbook.kernel_support import extended_types
-from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints, filter_user_namespace
+from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
+from flowbook.kernel_support.checkpoint import filter_user_namespace
 from flowbook.kernel_support.deepcopyable import check_deepcopyable
-from flowbook.kernel_support.display_helpers import DisplayHelper
 from flowbook.kernel_support.timeout_handler import CellTimeoutHandler
 from flowbook.kernel_support.tracking import TrackingDict
 from flowbook.util.cell_index import index_to_alpha
@@ -381,7 +380,7 @@ from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PR
 
 
 @magics_class
-class FlowbookKernel(IPythonKernel, Magics):
+class FlowbookKernel(BaseFlowbookKernel, Magics):
     """
     IPython kernel with Reproducibility enforcement.
 
@@ -413,18 +412,6 @@ class FlowbookKernel(IPythonKernel, Magics):
         assert self.shell is not None
         self.shell.register_magics(self)
 
-        # Display helper
-        self._display = DisplayHelper()
-
-        # Current cell being executed
-        self._cell_id: Optional[str] = None
-
-        # Checkpointing (for pre/post comparison)
-        self._checkpoint = Checkpoints(
-            sanity_check=False,
-            warn_classes=False,
-        )
-
         # Tracking
         self._tracking = TrackingDict(self.shell.user_ns)
 
@@ -450,7 +437,7 @@ class FlowbookKernel(IPythonKernel, Magics):
         self._sdc.set_cell_order(cell_order)
 
     @line_magic
-    def sdc_status(self, line: str) -> None:
+    def flowbook_status(self, line: str) -> None:
         """Display current Reproducibility state."""
         order = self._sdc.cell_order
         records = self._sdc.records
@@ -505,12 +492,12 @@ class FlowbookKernel(IPythonKernel, Magics):
             )
 
     @line_magic
-    def sdc_stale(self, line: str) -> None:
+    def flowbook_stale(self, line: str) -> None:
         """
         Show which cells are currently stale.
 
         Usage:
-            %sdc_stale
+            %flowbook_stale
         """
         stale_cells = self._sdc.get_stale_cells()
         if not stale_cells:
@@ -710,25 +697,20 @@ class FlowbookKernel(IPythonKernel, Magics):
     # Execution
     # =========================================================================
 
-    async def do_execute(
+    async def _do_execute_impl(
         self,
         code: str,
         silent: bool,
         store_history: bool = True,
         user_expressions: Optional[dict] = None,
         allow_stdin: bool = False,
-        *,
         cell_meta: Optional[dict] = None,
-        cell_id: Optional[str] = None,
     ) -> dict:
         """
         Execute code with Reproducibility tracking and enforcement.
         """
         start_time = time.perf_counter() * 1000
         execution_time = None
-
-        # Extract cell context
-        self._cell_id = self._extract_cell_id(cell_id, cell_meta)
 
         with timer(message = f"do_execute: {self._cell_id}"):
             try:
@@ -787,7 +769,7 @@ class FlowbookKernel(IPythonKernel, Magics):
                                 message="Run cell code",
                             ):
                                 with timer(key="kernel:execute") as run_timer:
-                                    result = await super().do_execute(
+                                    result = await self._ipython_do_execute(
                                         code,
                                         silent,
                                         store_history,
@@ -804,7 +786,7 @@ class FlowbookKernel(IPythonKernel, Magics):
                             tracking = user_ns.get_tracking_data()
                     else:
                         with timer(key="kernel:execute") as run_timer:
-                            result = await super().do_execute(
+                            result = await self._ipython_do_execute(
                                 code,
                                 silent,
                                 store_history,
@@ -953,16 +935,6 @@ class FlowbookKernel(IPythonKernel, Magics):
         except (ValueError, IndexError):
             return self._cell_id
 
-    def _extract_cell_id(
-        self, cell_id: Optional[str], cell_meta: Optional[dict]
-    ) -> Optional[str]:
-        """Extract cell ID from arguments or metadata."""
-        if cell_id is not None:
-            return cell_id
-        if cell_meta is not None:
-            return cell_meta.get("cell_id")
-        return None
-
     def _process_structure_magic(self, code: str) -> str:
         """
         Process %notebook_structure magic if present at start of code.
@@ -978,15 +950,6 @@ class FlowbookKernel(IPythonKernel, Magics):
                 self._sdc.set_cell_order(parts)
             return "\n".join(lines[1:])
         return code
-
-    def _is_pure_magic(self, code: str) -> bool:
-        """Check if code is only magic commands (with optional comments)."""
-        lines = [line.strip() for line in code.strip().split("\n") if line.strip()]
-        # Allow magics (%), shell commands (!), and comments (#)
-        return all(
-            line.startswith("%") or line.startswith("!") or line.startswith("#")
-            for line in lines
-        )
 
     def _parse_timeout_from_code(self, code: str) -> Tuple[str, float]:
         """Parse timeout directive from code if present."""
@@ -1067,25 +1030,6 @@ class FlowbookKernel(IPythonKernel, Magics):
                 log(message)
                 self._display.display_icon_and_text("\u26a0\ufe0f", message)
 
-    def _take_checkpoint(self, checkpoint_name: str) -> Checkpoint:
-        """
-        Take a snapshot of checkpointable variables before execution.
-
-        Uses Checkpoints.save() to properly deep copy the namespace.
-        This is critical for correct operation with TrackingDict.
-        """
-        # Convert TrackingDict to regular dict for checkpointing
-        saved, removed = self._checkpoint.save(
-            checkpoint_name, dict(self.shell.user_ns), max_size_mb=None
-        )
-
-        for k, v in removed.items():
-            message = f"The object {k} (type {v}) cannot be checkpointed"
-            log(message)
-            self._display.display_icon_and_text("\u26a0\ufe0f", message)
-
-        return self._checkpoint.saved[checkpoint_name]
-
     async def _execute_without_sdc(
         self,
         code: str,
@@ -1096,7 +1040,7 @@ class FlowbookKernel(IPythonKernel, Magics):
         cell_meta: Optional[dict],
     ) -> dict:
         """Execute without Reproducibility tracking (for magics, empty code)."""
-        result = await super().do_execute(
+        result = await self._ipython_do_execute(
             code,
             silent,
             store_history,

@@ -7,11 +7,9 @@ This package provides:
 - ReproducibilityEnforcer: Core reproducibility logic (reusable)
 """
 
-import json
 import os
-import sys
 
-from jupyter_client.kernelspec import KernelSpecManager
+from flowbook.kernel_support.install import install_kernel
 
 from flowbook.kernel.flowbook_client import FlowbookKernelClient
 from flowbook.kernel.flowbook_kernel import FlowbookKernel
@@ -32,30 +30,7 @@ def install_flowbook_kernel() -> str:
     Returns:
         Path to installed kernel spec directory
     """
-    ksm = KernelSpecManager()
-
-    # Path to our kernel spec
-    spec_dir = os.path.join(os.path.dirname(__file__), "kernelspec")
-
-    # Install it
-    dest = ksm.install_kernel_spec(
-        spec_dir,
-        kernel_name="flowbook_kernel",
-        user=True,
-        replace=True,
-    )
-
-    # Update argv to use correct python
-    kernel_json = os.path.join(dest, "kernel.json")
-    with open(kernel_json, "r") as f:
-        spec = json.load(f)
-
-    spec["argv"][0] = sys.executable
-
-    with open(kernel_json, "w") as f:
-        json.dump(spec, f, indent=2)
-
-    return dest
+    return install_kernel(os.path.dirname(__file__), "flowbook_kernel")
 
 
 # Install kernel on import
