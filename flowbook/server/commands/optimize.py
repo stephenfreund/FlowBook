@@ -30,7 +30,7 @@ from flowbook.util.prompts import get_prompt
 from flowbook.util.dependencies import analyze_notebook, CellDependencies
 from flowbook.util.notebook_analysis import NotebookAnalysis
 from flowbook.kernel_support.types import (
-    DiffResult,
+    MemoryCheckpointDiffResult,
     TestCodeResult,
     TestCodeSuccess,
     TestCodeOriginalCrash,
@@ -431,7 +431,7 @@ class CodeExecutionOrchestrator:
 
     def _filter_diff(
         self, diff: Dict[str, Any], output_variables: Set[str]
-    ) -> DiffResult:
+    ) -> MemoryCheckpointDiffResult:
         """
         Filter diff result to only include specified output variables.
 
@@ -440,17 +440,17 @@ class CodeExecutionOrchestrator:
             output_variables: Variables to include
 
         Returns:
-            Filtered DiffResult containing only the specified variables
+            Filtered MemoryCheckpointDiffResult containing only the specified variables
         """
         # The checkpoint_compare returns a diff dictionary
         # We need to filter it to only include variables in output_variables
         if not output_variables:
             # If no output variables specified, return the full diff
-            return DiffResult(differences=diff)
+            return MemoryCheckpointDiffResult(differences=diff)
 
         # Filter to only include specified variables
         filtered_diff = {k: v for k, v in diff.items() if k in output_variables}
-        return DiffResult(differences=filtered_diff)
+        return MemoryCheckpointDiffResult(differences=filtered_diff)
 
 
 class OptimizationResultAndStats(BaseModel):

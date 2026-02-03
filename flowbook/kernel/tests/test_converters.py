@@ -2,14 +2,14 @@
 Tests for TrackingData conversion methods and change_detector module.
 
 These tests verify that the converters correctly bridge the existing
-TrackingData/DiffResult structures to the new typed AccessEvent/Change
+TrackingData/MemoryCheckpointDiffResult structures to the new typed AccessEvent/Change
 hierarchies.
 """
 
 import pytest
 
 from flowbook.kernel_support.models import TrackingData
-from flowbook.kernel_support.types import CompoundDiff, DiffResult, ValueComparison
+from flowbook.kernel_support.types import CompoundDiff, MemoryCheckpointDiffResult, ValueComparison
 
 from flowbook.kernel.access_events import ColumnRead, ColumnWrite, StructuralRead, VariableRead
 from flowbook.kernel.change_detector import (
@@ -226,14 +226,14 @@ class TestDetectChanges:
     """Tests for detect_changes function."""
 
     def test_empty_diff(self):
-        """Empty DiffResult produces empty list."""
-        diff = DiffResult(differences={})
+        """Empty MemoryCheckpointDiffResult produces empty list."""
+        diff = MemoryCheckpointDiffResult(differences={})
         changes = detect_changes(diff)
         assert changes == []
 
     def test_value_comparison_is_value_changed(self):
         """Top-level ValueComparison becomes ValueChanged."""
-        diff = DiffResult(
+        diff = MemoryCheckpointDiffResult(
             differences={
                 "x": ValueComparison(
                     status="different", value1=1, value2=2, message="values differ"
@@ -247,7 +247,7 @@ class TestDetectChanges:
 
     def test_dataframe_column_modified(self):
         """DataFrame column change becomes ColumnModified."""
-        diff = DiffResult(
+        diff = MemoryCheckpointDiffResult(
             differences={
                 "df": CompoundDiff(
                     source_type="dataframe",
@@ -388,7 +388,7 @@ class TestGetChangedVariables:
 
     def test_returns_variable_names(self):
         """Returns set of variable names from diff."""
-        diff = DiffResult(
+        diff = MemoryCheckpointDiffResult(
             differences={
                 "x": ValueComparison(
                     status="different", value1=1, value2=2, message=""
@@ -407,12 +407,12 @@ class TestHasAnyChanges:
 
     def test_empty_is_false(self):
         """Empty diff has no changes."""
-        diff = DiffResult(differences={})
+        diff = MemoryCheckpointDiffResult(differences={})
         assert has_any_changes(diff) is False
 
     def test_non_empty_is_true(self):
         """Non-empty diff has changes."""
-        diff = DiffResult(
+        diff = MemoryCheckpointDiffResult(
             differences={
                 "x": ValueComparison(
                     status="different", value1=1, value2=2, message=""
@@ -432,7 +432,7 @@ class TestIntegration:
 
     def test_column_modification_conflict_detection(self):
         """
-        Full pipeline: TrackingData + DiffResult -> Conflict
+        Full pipeline: TrackingData + MemoryCheckpointDiffResult -> Conflict
 
         Scenario:
         - Prior cell read df['price']
@@ -448,7 +448,7 @@ class TestIntegration:
         prior_reads = prior_tracking.to_read_events()
 
         # Current cell's diff
-        diff = DiffResult(
+        diff = MemoryCheckpointDiffResult(
             differences={
                 "df": CompoundDiff(
                     source_type="dataframe",
@@ -491,7 +491,7 @@ class TestIntegration:
         prior_reads = prior_tracking.to_read_events()
 
         # Current cell's diff - column added
-        diff = DiffResult(
+        diff = MemoryCheckpointDiffResult(
             differences={
                 "df": CompoundDiff(
                     source_type="dataframe",

@@ -13,7 +13,7 @@ import pandas as pd
 import numpy as np
 
 from flowbook.kernel_support.diff import Diff
-from flowbook.kernel_support.types import DiffResult, ValueComparison, CompoundDiff
+from flowbook.kernel_support.types import MemoryCheckpointDiffResult, ValueComparison, CompoundDiff
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 
 
@@ -538,17 +538,17 @@ class TestDiffEdgeCases:
 
 
 class TestDiffResultWarningsField:
-    """Tests for DiffResult.warnings field."""
+    """Tests for MemoryCheckpointDiffResult.warnings field."""
 
     def test_diff_result_has_warnings_field(self):
-        """DiffResult has a warnings field."""
-        result = DiffResult()
+        """MemoryCheckpointDiffResult has a warnings field."""
+        result = MemoryCheckpointDiffResult()
         assert hasattr(result, 'warnings')
         assert result.warnings == []
 
     def test_diff_result_warnings_initialized(self):
-        """DiffResult warnings can be initialized."""
-        result = DiffResult(warnings=['test warning'])
+        """MemoryCheckpointDiffResult warnings can be initialized."""
+        result = MemoryCheckpointDiffResult(warnings=['test warning'])
         assert result.warnings == ['test warning']
 
     def test_compound_diff_has_warnings_field(self):
@@ -581,17 +581,17 @@ class TestCheckpointDiffIntegration:
 
     def test_checkpoint_diff_accepts_structural_params(self):
         """Checkpoint.diff accepts structural_reads and structural_mode."""
-        from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint, MemoryCheckpoints
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         ns1 = {'df': pd.DataFrame({'a': [1]})}
         ns2 = {'df': pd.DataFrame({'a': [1], 'b': [2]})}
 
-        cp1 = Checkpoint('pre', ns1, {})
-        cp2 = Checkpoint('post', ns2, {})
+        cp1 = MemoryCheckpoint('pre', ns1, {})
+        cp2 = MemoryCheckpoint('post', ns2, {})
 
         # This should work when implemented
-        result = Checkpoint.diff(
+        result = MemoryCheckpoint.diff(
             cp1, cp2,
             use_leq=True,
             structural_reads={'df': {'columns'}},

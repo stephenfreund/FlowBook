@@ -35,14 +35,14 @@ Column-Level Tracking:
 
 from typing import TYPE_CHECKING, Optional
 
-from flowbook.kernel_support.checkpoint import Checkpoint
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 from flowbook.kernel_support.models import MonotonicityViolation, TrackingData
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 from flowbook.kernel_support.types import ValueComparison
 from flowbook.util.output import log, timer
 
 if TYPE_CHECKING:
-    from flowbook.kernel_support.checkpoint import Checkpoints
+    from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
 
 class MonotonicityEnforcer:
@@ -64,7 +64,7 @@ class MonotonicityEnforcer:
 
     def __init__(
         self,
-        checkpoints: "Checkpoints",
+        checkpoints: "MemoryCheckpoints",
         user_ns: dict,
         structural_mode: StructuralTrackingMode = StructuralTrackingMode.WARN,
     ):
@@ -143,8 +143,8 @@ class MonotonicityEnforcer:
         # Compare pre and post states
         with timer(key="monotone:diff", message="[monotone] Computing diff"):
             pre = self._checkpoints.get(self._pre_checkpoint_name)
-            post = Checkpoint("_monotone_post", self._user_ns, {})
-            diff_result = Checkpoint.diff(
+            post = MemoryCheckpoint("_monotone_post", self._user_ns, {})
+            diff_result = MemoryCheckpoint.diff(
                 pre,
                 post,
                 keys_to_include=rbw_vars,
@@ -187,7 +187,7 @@ class MonotonicityEnforcer:
         modified and how their values changed.
 
         Args:
-            diff_result: DiffResult from checkpoint comparison
+            diff_result: MemoryCheckpointDiffResult from checkpoint comparison
 
         Returns:
             Human-readable error description

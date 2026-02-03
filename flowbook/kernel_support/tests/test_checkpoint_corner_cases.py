@@ -6,10 +6,10 @@ import pytest
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from flowbook.kernel_support.checkpoint import (
-    Checkpoints,
     convert_series_object_to_specialized,
     convert_dataframe_object_to_specialized,
 )
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
 
 class TestObjectConversionEdgeCases:
@@ -190,7 +190,7 @@ class TestNestedStructures:
             "id": [1, 2]
         })
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"df": df}
         checkpoints.save("test", user_ns)
 
@@ -215,7 +215,7 @@ class TestNestedStructures:
             }
         }
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"data": deep_dict}
         checkpoints.save("test", user_ns)
 
@@ -239,7 +239,7 @@ class TestNestedStructures:
             "id": [1, 2]
         })
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"df": df}
         checkpoints.save("test", user_ns)
 
@@ -261,7 +261,7 @@ class TestNestedStructures:
             [[7, 8], [9, 10], [11, 12]]
         ])
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"s": s}
         checkpoints.save("test", user_ns)
 
@@ -280,7 +280,7 @@ class TestCheckpointManagementEdgeCases:
 
     def test_checkpoint_with_empty_name(self):
         """Test that empty checkpoint names are rejected."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 42}
 
         # Empty string as checkpoint name should raise ValueError
@@ -289,7 +289,7 @@ class TestCheckpointManagementEdgeCases:
 
     def test_checkpoint_with_special_characters_in_name(self):
         """Test checkpoint names with special characters."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 42}
 
         special_names = [
@@ -309,7 +309,7 @@ class TestCheckpointManagementEdgeCases:
 
     def test_multiple_sequential_saves_same_name(self):
         """Test saving multiple times to the same checkpoint name."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         # First save
         user_ns = {"x": 1, "y": 2}
@@ -327,7 +327,7 @@ class TestCheckpointManagementEdgeCases:
 
     def test_restore_then_save_new_checkpoint(self):
         """Test creating new checkpoint after restoring."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         # Save first checkpoint
         user_ns = {"x": 1}
@@ -353,7 +353,7 @@ class TestCheckpointManagementEdgeCases:
 
     def test_checkpoint_with_very_large_namespace(self):
         """Test checkpoint with many variables."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         # Create namespace with 1000 variables
         user_ns = {f"var_{i}": i for i in range(1000)}
@@ -367,7 +367,7 @@ class TestCheckpointManagementEdgeCases:
 
     def test_delete_nonexistent_checkpoint(self):
         """Test deleting a checkpoint that doesn't exist."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         # Should not raise an error
         checkpoints.delete("nonexistent")
@@ -377,7 +377,7 @@ class TestCheckpointManagementEdgeCases:
 
     def test_get_nonexistent_checkpoint(self):
         """Test getting a checkpoint that doesn't exist."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         # get() raises KeyError for nonexistent checkpoints
         with pytest.raises(KeyError):
@@ -385,13 +385,13 @@ class TestCheckpointManagementEdgeCases:
 
     def test_clear_empty_checkpoints(self):
         """Test clearing when no checkpoints exist."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         checkpoints.clear()
         assert len(checkpoints.list()) == 0
 
     def test_list_returns_ordered_by_creation(self):
         """Test that list returns checkpoint names in creation order."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1}
 
         names = ["cp3", "cp1", "cp2"]
@@ -416,7 +416,7 @@ class TestSpecialDataTypes:
         index = pd.MultiIndex.from_tuples(tuples, names=["first", "second"])
         df = pd.DataFrame(np.random.randn(6, 2), index=index, columns=["A", "B"])
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"df": df}
         checkpoints.save("test", user_ns)
 
@@ -433,7 +433,7 @@ class TestSpecialDataTypes:
         ])
         df = pd.DataFrame(np.random.randn(5, 4), columns=columns)
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"df": df}
         checkpoints.save("test", user_ns)
 
@@ -454,7 +454,7 @@ class TestSpecialDataTypes:
             )
         })
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"df": df}
         checkpoints.save("test", user_ns)
 
@@ -474,7 +474,7 @@ class TestSpecialDataTypes:
             "int64": pd.array([10000, 20000, None], dtype="Int64"),
         })
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"df": df}
         checkpoints.save("test", user_ns)
 
@@ -492,7 +492,7 @@ class TestSpecialDataTypes:
             "float64": pd.array([10.5, 20.5, None], dtype="Float64"),
         })
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"df": df}
         checkpoints.save("test", user_ns)
 
@@ -507,7 +507,7 @@ class TestSpecialDataTypes:
         """Test Series with sparse dtype."""
         s = pd.Series([0, 0, 1, 0, 0, 2, 0, 0, 3], dtype=pd.SparseDtype("int64", 0))
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"s": s}
         checkpoints.save("test", user_ns)
 
@@ -521,7 +521,7 @@ class TestSpecialDataTypes:
         """Test Series with interval dtype."""
         s = pd.Series(pd.IntervalIndex.from_tuples([(0, 1), (1, 2), (2, 3)]))
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"s": s}
         checkpoints.save("test", user_ns)
 
@@ -534,7 +534,7 @@ class TestSpecialDataTypes:
         """Test Series with period dtype."""
         s = pd.Series(pd.period_range("2020-01", periods=5, freq="M"))
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"s": s}
         checkpoints.save("test", user_ns)
 
@@ -558,7 +558,7 @@ class TestCheckpointWithDifferentTypes:
             "str_array": np.array(["a", "b", "c"]),
         }
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         checkpoints.save("test", user_ns)
 
         checkpoint = checkpoints.get("test")
@@ -578,7 +578,7 @@ class TestCheckpointWithDifferentTypes:
             "dict_var": {"a": 1, "b": {"c": 2}},
         }
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         checkpoints.save("test", user_ns)
 
         checkpoint = checkpoints.get("test")
@@ -600,7 +600,7 @@ class TestCheckpointWithDifferentTypes:
         obj = CustomClass(42)
         user_ns = {"custom": obj}
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         checkpoints.save("test", user_ns)
 
         checkpoint = checkpoints.get("test")
@@ -621,7 +621,7 @@ class TestCheckpointWithDifferentTypes:
             "dict_with_none": {"a": None, "b": 2},
         }
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         checkpoints.save("test", user_ns)
 
         checkpoint = checkpoints.get("test")
@@ -638,7 +638,7 @@ class TestCheckpointSanityChecks:
         """Test that sanity check detects if original data was modified."""
         df = pd.DataFrame({"a": [1, 2, 3]})
 
-        checkpoints = Checkpoints(sanity_check=True)
+        checkpoints = MemoryCheckpoints(sanity_check=True)
         user_ns = {"df": df}
         checkpoints.save("test", user_ns)
 
@@ -656,7 +656,7 @@ class TestCheckpointSanityChecks:
             "lists": [[1, 2], [3, 4], [5, 6]]
         })
 
-        checkpoints = Checkpoints(sanity_check=True)
+        checkpoints = MemoryCheckpoints(sanity_check=True)
         user_ns = {"df": df}
         checkpoints.save("test", user_ns)
 
@@ -677,14 +677,14 @@ class TestCheckpointSanityChecks:
         })
 
         # With sanity check
-        checkpoints_with = Checkpoints(sanity_check=True)
+        checkpoints_with = MemoryCheckpoints(sanity_check=True)
         user_ns_with = {"df": df.copy()}
         start = time.time()
         checkpoints_with.save("test", user_ns_with)
         time_with = time.time() - start
 
         # Without sanity check
-        checkpoints_without = Checkpoints(sanity_check=False)
+        checkpoints_without = MemoryCheckpoints(sanity_check=False)
         user_ns_without = {"df": df.copy()}
         start = time.time()
         checkpoints_without.save("test", user_ns_without)
@@ -707,7 +707,7 @@ class TestErrorRecovery:
 
         s = pd.Series([WeirdObject(1), WeirdObject(2)], dtype=object)
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"s": s}
 
         # Should not raise an error, conversion should gracefully fail
@@ -719,7 +719,7 @@ class TestErrorRecovery:
 
     def test_restore_with_incompatible_modifications(self):
         """Test restore when current namespace has incompatible changes."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         # Save with DataFrame
         user_ns = {"var": pd.DataFrame({"a": [1, 2, 3]})}
@@ -731,6 +731,208 @@ class TestErrorRecovery:
         # Restore should replace with checkpoint value
         checkpoint = checkpoints.get("test")
         assert isinstance(checkpoint.user_ns["var"], pd.DataFrame)
+
+
+class TestNonCheckpointableVariableRemoval:
+    """Tests for proper removal of non-checkpointable variables."""
+
+    def test_file_handle_identified_as_removed(self):
+        """File handles should be identified in the removed dict."""
+        import tempfile
+
+        checkpoints = MemoryCheckpoints()
+
+        # Create a file handle (TextIOWrapper) - this cannot be checkpointed
+        tmp = tempfile.NamedTemporaryFile(mode='w', delete=False)
+        user_ns = {"x": 1, "f": tmp}
+
+        saved, removed = checkpoints.save("test", user_ns)
+
+        # x should be saved, f should be removed
+        assert "x" in saved
+        assert "f" in removed
+        assert "TextIOWrapper" in str(removed["f"]) or "file" in str(removed["f"]).lower()
+
+        # Cleanup
+        tmp.close()
+        import os
+        os.unlink(tmp.name)
+
+    def test_socket_identified_as_removed(self):
+        """Socket objects should be identified in the removed dict."""
+        import socket
+
+        checkpoints = MemoryCheckpoints()
+
+        # Create a socket - this cannot be checkpointed
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        user_ns = {"x": 1, "sock": sock}
+
+        saved, removed = checkpoints.save("test", user_ns)
+
+        # x should be saved, sock should be removed
+        assert "x" in saved
+        assert "sock" in removed
+
+        # Cleanup
+        sock.close()
+
+    def test_generator_identified_as_removed(self):
+        """Generator objects should be identified in the removed dict."""
+        checkpoints = MemoryCheckpoints()
+
+        # Create a generator - this cannot be checkpointed
+        def gen():
+            yield 1
+            yield 2
+
+        g = gen()
+        user_ns = {"x": 1, "g": g}
+
+        saved, removed = checkpoints.save("test", user_ns)
+
+        # x should be saved, g should be removed
+        assert "x" in saved
+        assert "g" in removed
+
+    def test_multiple_non_checkpointable_objects(self):
+        """Multiple non-checkpointable objects should all be in removed."""
+        import tempfile
+        import socket
+
+        checkpoints = MemoryCheckpoints()
+
+        tmp = tempfile.NamedTemporaryFile(mode='w', delete=False)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        user_ns = {
+            "x": 1,
+            "y": [1, 2, 3],
+            "f": tmp,
+            "sock": sock,
+        }
+
+        saved, removed = checkpoints.save("test", user_ns)
+
+        # x and y should be saved
+        assert "x" in saved
+        assert "y" in saved
+
+        # f and sock should be removed
+        assert "f" in removed
+        assert "sock" in removed
+
+        # Cleanup
+        tmp.close()
+        sock.close()
+        import os
+        os.unlink(tmp.name)
+
+    def test_removed_vars_not_in_checkpoint(self):
+        """Removed variables should not appear in the checkpoint's user_ns."""
+        import tempfile
+
+        checkpoints = MemoryCheckpoints()
+
+        tmp = tempfile.NamedTemporaryFile(mode='w', delete=False)
+        user_ns = {"x": 1, "f": tmp}
+
+        saved, removed = checkpoints.save("test", user_ns)
+
+        # Get the checkpoint
+        cp = checkpoints.get("test")
+
+        # x should be in checkpoint, f should not
+        assert "x" in cp.user_ns
+        assert "f" not in cp.user_ns
+
+        # Cleanup
+        tmp.close()
+        import os
+        os.unlink(tmp.name)
+
+
+class TestBaseKernelCheckpointRemoval:
+    """Tests for base kernel removing non-checkpointable variables from namespace."""
+
+    def test_take_checkpoint_removes_non_checkpointable(self):
+        """_take_checkpoint should remove non-checkpointable vars from namespace."""
+        from unittest.mock import MagicMock, patch
+        import tempfile
+
+        # Create mock shell with user_ns
+        tmp = tempfile.NamedTemporaryFile(mode='w', delete=False)
+
+        mock_shell = MagicMock()
+        mock_shell.user_ns = {"x": 1, "f": tmp}
+
+        # Create mock kernel with required attributes
+        mock_kernel = MagicMock()
+        mock_kernel.shell = mock_shell
+        mock_kernel._display = MagicMock()
+        mock_kernel._vfs = MagicMock()
+        mock_kernel._vfs.enabled = False
+        mock_kernel._vfs.tracking_only = False
+
+        # Import and create Checkpoints
+        from flowbook.kernel_support.checkpoint import Checkpoints
+        mock_kernel._checkpoints = Checkpoints()
+
+        # Import the base kernel method and bind it
+        from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
+
+        # Call _take_checkpoint directly using the bound method pattern
+        _take_checkpoint = BaseFlowbookKernel._take_checkpoint.__get__(mock_kernel)
+        _take_checkpoint("test_checkpoint")
+
+        # x should still be in namespace
+        assert "x" in mock_shell.user_ns
+
+        # f should have been removed from namespace
+        assert "f" not in mock_shell.user_ns
+
+        # Warning should have been displayed
+        mock_kernel._display.display_icon_and_text.assert_called()
+
+        # Cleanup
+        tmp.close()
+        import os
+        os.unlink(tmp.name)
+
+    def test_take_checkpoint_preserves_checkpointable_vars(self):
+        """_take_checkpoint should preserve all checkpointable variables."""
+        from unittest.mock import MagicMock
+
+        mock_shell = MagicMock()
+        mock_shell.user_ns = {
+            "x": 1,
+            "y": "hello",
+            "z": [1, 2, 3],
+            "df": pd.DataFrame({"a": [1, 2]}),
+        }
+
+        mock_kernel = MagicMock()
+        mock_kernel.shell = mock_shell
+        mock_kernel._display = MagicMock()
+        mock_kernel._vfs = MagicMock()
+        mock_kernel._vfs.enabled = False
+        mock_kernel._vfs.tracking_only = False
+
+        from flowbook.kernel_support.checkpoint import Checkpoints
+        mock_kernel._checkpoints = Checkpoints()
+
+        from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
+        _take_checkpoint = BaseFlowbookKernel._take_checkpoint.__get__(mock_kernel)
+        _take_checkpoint("test_checkpoint")
+
+        # All checkpointable vars should still be in namespace
+        assert "x" in mock_shell.user_ns
+        assert "y" in mock_shell.user_ns
+        assert "z" in mock_shell.user_ns
+        assert "df" in mock_shell.user_ns
+
+        # No warnings should have been displayed (no removed vars)
+        mock_kernel._display.display_icon_and_text.assert_not_called()
 
 
 if __name__ == "__main__":

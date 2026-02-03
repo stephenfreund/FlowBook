@@ -5,8 +5,8 @@ This module defines the types used to represent differences between Python objec
 in a structured, tree-like format with typed path components.
 
 Key Functions:
-    - serialize_diff_result(): Convert DiffResult to JSON-compatible dict
-    - format_diff_as_markdown(): Convert DiffResult to human-readable markdown list
+    - serialize_diff_result(): Convert MemoryCheckpointDiffResult to JSON-compatible dict
+    - format_diff_as_markdown(): Convert MemoryCheckpointDiffResult to human-readable markdown list
 """
 
 from abc import ABC, abstractmethod
@@ -219,7 +219,7 @@ class CompoundDiff(BaseModel):
 DiffNode = Union[ValueComparison, CompoundDiff]
 
 
-class DiffResult(BaseModel):
+class MemoryCheckpointDiffResult(BaseModel):
     """
     Result of a namespace diff operation.
 
@@ -232,12 +232,12 @@ class DiffResult(BaseModel):
         warnings: Structural warnings (for warn mode - not blocking but informative)
 
     Example:
-        >>> result = DiffResult(differences={
+        >>> result = MemoryCheckpointDiffResult(differences={
         ...     'x': ValueComparison(status='different', value1=1, value2=2, message='...'),
         ...     'data': {'[0]': ValueComparison(...)}
         ... })
         >>> json_str = result.model_dump_json()
-        >>> restored = DiffResult.model_validate_json(json_str)
+        >>> restored = MemoryCheckpointDiffResult.model_validate_json(json_str)
     """
     differences: Dict[str, Any] = Field(
         default_factory=dict,
@@ -303,8 +303,8 @@ class DiffResult(BaseModel):
         return iter(self.differences)
 
     def __eq__(self, other):
-        """Compare DiffResult with another DiffResult or dict."""
-        if isinstance(other, DiffResult):
+        """Compare MemoryCheckpointDiffResult with another MemoryCheckpointDiffResult or dict."""
+        if isinstance(other, MemoryCheckpointDiffResult):
             return self.differences == other.differences
         elif isinstance(other, dict):
             # Allow comparison with plain dicts for backward compatibility
@@ -327,15 +327,15 @@ class DiffResult(BaseModel):
         """Get diff tree with default."""
         return self.differences.get(key, default)
 
-    def close_only(self) -> 'DiffResult':
+    def close_only(self) -> 'MemoryCheckpointDiffResult':
         """
-        Return a new DiffResult containing only 'close' comparisons.
+        Return a new MemoryCheckpointDiffResult containing only 'close' comparisons.
 
         Filters the diff tree to include only ValueComparison nodes with
         status='close', along with all parent paths needed to reach them.
 
         Returns:
-            DiffResult: New DiffResult with only close comparisons
+            MemoryCheckpointDiffResult: New MemoryCheckpointDiffResult with only close comparisons
 
         Example:
             >>> result = differ.diff(a, b)
@@ -344,15 +344,15 @@ class DiffResult(BaseModel):
         """
         return self._filter_by_status('close')
 
-    def different_only(self) -> 'DiffResult':
+    def different_only(self) -> 'MemoryCheckpointDiffResult':
         """
-        Return a new DiffResult containing only 'different' comparisons.
+        Return a new MemoryCheckpointDiffResult containing only 'different' comparisons.
 
         Filters the diff tree to include only ValueComparison nodes with
         status='different', along with all parent paths needed to reach them.
 
         Returns:
-            DiffResult: New DiffResult with only different comparisons
+            MemoryCheckpointDiffResult: New MemoryCheckpointDiffResult with only different comparisons
 
         Example:
             >>> result = differ.diff(a, b)
@@ -361,7 +361,7 @@ class DiffResult(BaseModel):
         """
         return self._filter_by_status('different')
 
-    def _filter_by_status(self, status: str) -> 'DiffResult':
+    def _filter_by_status(self, status: str) -> 'MemoryCheckpointDiffResult':
         """
         Filter diff tree by ValueComparison status.
 
@@ -369,7 +369,7 @@ class DiffResult(BaseModel):
             status: Status to filter for ('close' or 'different')
 
         Returns:
-            DiffResult: New DiffResult with only matching comparisons
+            MemoryCheckpointDiffResult: New MemoryCheckpointDiffResult with only matching comparisons
         """
         filtered_diffs = {}
 
@@ -378,7 +378,7 @@ class DiffResult(BaseModel):
             if filtered_node is not None:
                 filtered_diffs[var_name] = filtered_node
 
-        return DiffResult(differences=filtered_diffs)
+        return MemoryCheckpointDiffResult(differences=filtered_diffs)
 
     def _filter_node_by_status(self, node: DiffNode, status: str):
         """
@@ -425,12 +425,12 @@ class DiffResult(BaseModel):
             return node
 
 
-def serialize_diff_result(diff_result: DiffResult) -> Dict[str, Any]:
+def serialize_diff_result(diff_result: MemoryCheckpointDiffResult) -> Dict[str, Any]:
     """
-    Serialize a DiffResult to a JSON-compatible dictionary.
+    Serialize a MemoryCheckpointDiffResult to a JSON-compatible dictionary.
 
     Args:
-        diff_result: The DiffResult to serialize
+        diff_result: The MemoryCheckpointDiffResult to serialize
 
     Returns:
         JSON-compatible dict representation
@@ -500,7 +500,7 @@ class TestCodeSuccess(BaseModel):
         speedup: Calculated speedup ratio (original_duration / modified_duration)
     """
     status: Literal["success"] = Field(default="success", description="Result status discriminator")
-    diff: DiffResult = Field(..., description="Diff result comparing variables")
+    diff: MemoryCheckpointDiffResult = Field(..., description="Diff result comparing variables")
     original_duration: float = Field(..., description="Original code execution time in seconds")
     modified_duration: float = Field(..., description="Modified code execution time in seconds")
     speedup: float = Field(..., description="Speedup ratio (original / modified)")
@@ -559,12 +559,12 @@ TestCodeResult = Annotated[
 ]
 
 
-def format_diff_as_markdown(diff_result: DiffResult) -> str:
+def format_diff_as_markdown(diff_result: MemoryCheckpointDiffResult) -> str:
     """
-    Format a DiffResult as a human-readable markdown list.
+    Format a MemoryCheckpointDiffResult as a human-readable markdown list.
 
     Args:
-        diff_result: The DiffResult to format
+        diff_result: The MemoryCheckpointDiffResult to format
 
     Returns:
         Markdown-formatted string with bulleted list of all differences

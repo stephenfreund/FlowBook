@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 from typing import Any
 
-from flowbook.kernel_support.checkpoint import Checkpoints, Checkpoint
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints, MemoryCheckpoint
 
 
 # ============================================================================
@@ -44,7 +44,7 @@ class TestCircularReferences:
 
     def test_self_referential_list(self):
         """Test a list that contains itself."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         lst = [1, 2, 3]
         lst.append(lst)  # lst[3] is lst itself
@@ -65,7 +65,7 @@ class TestCircularReferences:
 
     def test_mutually_referential_lists(self):
         """Test two lists that reference each other."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         list_a = [1, 2, 3]
         list_b = [4, 5, 6]
@@ -91,7 +91,7 @@ class TestCircularReferences:
 
     def test_self_referential_dict(self):
         """Test a dict that contains itself."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         d = {'a': 1, 'b': 2}
         d['self'] = d
@@ -108,7 +108,7 @@ class TestCircularReferences:
 
     def test_circular_reference_in_dataframe(self):
         """Test DataFrame with cells containing circular references."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         lst = [1, 2, 3]
         lst.append(lst)
@@ -137,7 +137,7 @@ class TestSharedReferences:
 
     def test_same_list_in_multiple_variables(self):
         """Test that the same list referenced by multiple variables remains shared."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         shared_list = [1, 2, 3]
         user_ns = {'a': shared_list, 'b': shared_list}
@@ -159,7 +159,7 @@ class TestSharedReferences:
 
     def test_shared_dict_in_dataframe_cells(self):
         """Test shared dict referenced in multiple DataFrame cells."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         shared_dict = {'key': 'value'}
         df = pd.DataFrame({'col1': [shared_dict, {'other': 1}],
@@ -178,7 +178,7 @@ class TestSharedReferences:
 
     def test_reverse_memo_tracking(self):
         """Test that reverse_memo correctly tracks object identity."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         shared = [1, 2, 3]
         user_ns = {'a': shared, 'b': shared, 'c': [4, 5, 6]}
@@ -205,7 +205,7 @@ class TestFunctionCheckpointing:
 
     def test_function_with_closure(self):
         """Test function with closure variables are properly isolated."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         captured = [1, 2, 3]
 
@@ -228,7 +228,7 @@ class TestFunctionCheckpointing:
 
     def test_function_with_mutable_default_list(self):
         """Test function with mutable default argument."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         def func_with_default(items=[]):
             items.append(1)
@@ -254,7 +254,7 @@ class TestFunctionCheckpointing:
 
     def test_function_with_mutable_default_dict(self):
         """Test function with mutable default dict argument."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         def func_with_dict(config={}):
             config['count'] = config.get('count', 0) + 1
@@ -276,7 +276,7 @@ class TestFunctionCheckpointing:
 
     def test_lambda_with_captured_variable(self):
         """Test lambda with captured variables."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         multiplier = [2]
         func = lambda x: x * multiplier[0]
@@ -294,7 +294,7 @@ class TestFunctionCheckpointing:
 
     def test_nested_functions_with_shared_closure(self):
         """Test nested functions sharing closure variables."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         state = {'value': 100}
 
@@ -316,7 +316,7 @@ class TestFunctionCheckpointing:
 
     def test_recursive_function(self):
         """Test recursive function checkpointing."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         def factorial(n):
             if n <= 1:
@@ -337,7 +337,7 @@ class TestFunctionCheckpointing:
 
     def test_function_without_closure_or_defaults(self):
         """Test that simple functions without closure/defaults are unchanged."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         def simple_func(x, y):
             return x + y
@@ -353,7 +353,7 @@ class TestFunctionCheckpointing:
 
     def test_bound_method(self):
         """Test that bound methods are properly checkpointed."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         class Counter:
             def __init__(self):
@@ -379,7 +379,7 @@ class TestFunctionCheckpointing:
 
     def test_function_with_nested_closure(self):
         """Test function with nested mutable objects in closure."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         config = {'data': [1, 2, 3], 'nested': {'value': 100}}
 
@@ -406,7 +406,7 @@ class TestClassDefinitions:
 
     def test_class_variable_not_restored(self):
         """Test that mutable class variables are NOT properly restored (known issue)."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         class Counter:
             count = 0
@@ -423,7 +423,7 @@ class TestClassDefinitions:
 
     def test_class_instance_attributes_are_restored(self):
         """Test that instance attributes ARE properly restored."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         class MyClass:
             def __init__(self):
@@ -444,7 +444,7 @@ class TestClassDefinitions:
 
     def test_class_method_modification_persists(self):
         """Test that methods added to classes persist (known issue)."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         class Extensible:
             def original(self):
@@ -463,7 +463,7 @@ class TestClassDefinitions:
 
     def test_class_redefinition_works(self):
         """Test that class redefinition DOES work correctly."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         class MyClass:
             value = 1
@@ -484,7 +484,7 @@ class TestClassDefinitions:
 
     def test_instance_with_mutable_attributes(self):
         """Test instance with mutable attributes in __dict__."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         class Container:
             def __init__(self):
@@ -516,7 +516,7 @@ class TestCustomDeepcopy:
 
     def test_custom_deepcopy_method(self):
         """Test object with custom __deepcopy__."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         class CustomCopy:
             def __init__(self, value):
@@ -549,7 +549,7 @@ class TestCustomDeepcopy:
 
     def test_object_with_getstate_setstate(self):
         """Test object with __getstate__ and __setstate__."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         class Stateful:
             def __init__(self):
@@ -588,7 +588,7 @@ class TestGeneratorsAndIterators:
 
     def test_generator_fails_or_produces_empty(self):
         """Test that generators are either removed or produce empty/exhausted copies."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         def my_generator():
             yield 1
@@ -611,7 +611,7 @@ class TestGeneratorsAndIterators:
 
     def test_iterator_over_list(self):
         """Test iterator over a list."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         lst = [1, 2, 3, 4, 5]
         it = iter(lst)
@@ -635,7 +635,7 @@ class TestObjectDtypeConversion:
 
     def test_object_column_with_mixed_types(self):
         """Test object column with truly mixed types (can't be converted)."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         # Truly mixed: int, str, list, None
         df = pd.DataFrame({'mixed': [1, "string", [1, 2, 3], None]})
@@ -657,7 +657,7 @@ class TestObjectDtypeConversion:
 
     def test_object_column_with_integers_converts(self):
         """Test that object column with integers converts to Int64."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         # Object column with integers
         df = pd.DataFrame({'data': pd.Series([1, 2, 3, None], dtype=object)})
@@ -673,7 +673,7 @@ class TestObjectDtypeConversion:
 
     def test_object_column_with_strings_converts(self):
         """Test that object column with strings converts to string dtype."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         df = pd.DataFrame({'data': pd.Series(['a', 'b', 'c'], dtype=object)})
 
@@ -694,7 +694,7 @@ class TestExtensionDtypes:
 
     def test_categorical_dtype(self):
         """Test DataFrame with categorical dtype."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         df = pd.DataFrame({'cat': pd.Categorical(['a', 'b', 'c', 'a', 'b'])})
 
@@ -710,7 +710,7 @@ class TestExtensionDtypes:
 
     def test_nullable_integer_dtype(self):
         """Test DataFrame with nullable integer dtype."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         df = pd.DataFrame({'data': pd.array([1, 2, None, 4], dtype='Int64')})
 
@@ -726,7 +726,7 @@ class TestExtensionDtypes:
 
     def test_string_dtype(self):
         """Test DataFrame with StringDtype."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         df = pd.DataFrame({'text': pd.array(['hello', 'world', None], dtype='string')})
 
@@ -741,7 +741,7 @@ class TestExtensionDtypes:
 
     def test_boolean_dtype(self):
         """Test DataFrame with boolean dtype."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         df = pd.DataFrame({'flag': pd.array([True, False, None], dtype='boolean')})
 
@@ -764,7 +764,7 @@ class TestSpecialNumericValues:
 
     def test_nan_values(self):
         """Test that NaN values are properly handled."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         df = pd.DataFrame({'data': [1.0, np.nan, 3.0, np.nan, 5.0]})
 
@@ -781,7 +781,7 @@ class TestSpecialNumericValues:
 
     def test_infinity_values(self):
         """Test that inf and -inf are handled."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         df = pd.DataFrame({'data': [1.0, np.inf, -np.inf, 0.0]})
 
@@ -800,7 +800,7 @@ class TestSpecialNumericValues:
 
     def test_complex_numbers(self):
         """Test complex numbers."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         arr = np.array([1+2j, 3+4j, 5-6j])
 
@@ -816,7 +816,7 @@ class TestSpecialNumericValues:
 
     def test_decimal_objects(self):
         """Test Decimal objects."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         from decimal import Decimal
 
@@ -841,7 +841,7 @@ class TestCollectionTypes:
 
     def test_sets(self):
         """Test that sets are deep copied."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         s = {1, 2, 3, 4, 5}
 
@@ -857,7 +857,7 @@ class TestCollectionTypes:
 
     def test_frozensets(self):
         """Test frozensets (immutable, should be atomic)."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         fs = frozenset([1, 2, 3, 4, 5])
 
@@ -870,7 +870,7 @@ class TestCollectionTypes:
 
     def test_named_tuples(self):
         """Test named tuples."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         Point = collections.namedtuple('Point', ['x', 'y'])
         p = Point(3, 4)
@@ -886,7 +886,7 @@ class TestCollectionTypes:
 
     def test_deque(self):
         """Test collections.deque."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         dq = collections.deque([1, 2, 3, 4, 5], maxlen=5)
 
@@ -901,7 +901,7 @@ class TestCollectionTypes:
 
     def test_tuple_with_mutable_contents(self):
         """Test tuple containing mutable objects."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         t = (1, [2, 3, 4], {'key': 'value'})
 
@@ -927,7 +927,7 @@ class TestDatetimeTypes:
 
     def test_datetime_objects(self):
         """Test datetime.datetime objects."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         dt = datetime.datetime(2023, 1, 15, 10, 30, 45)
 
@@ -940,7 +940,7 @@ class TestDatetimeTypes:
 
     def test_timedelta_objects(self):
         """Test datetime.timedelta objects."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         td = datetime.timedelta(days=5, hours=3, minutes=30)
 
@@ -953,7 +953,7 @@ class TestDatetimeTypes:
 
     def test_datetime64_in_dataframe(self):
         """Test datetime64 dtype in DataFrame."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         dates = pd.date_range('2023-01-01', periods=5)
         df = pd.DataFrame({'dates': dates})
@@ -969,7 +969,7 @@ class TestDatetimeTypes:
 
     def test_timedelta64_in_dataframe(self):
         """Test timedelta64 dtype in DataFrame."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         df = pd.DataFrame({'duration': pd.to_timedelta(['1 days', '2 days', '3 days'])})
 
@@ -992,7 +992,7 @@ class TestMultiIndex:
 
     def test_multiindex_dataframe(self):
         """Test DataFrame with MultiIndex."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         arrays = [
             ['A', 'A', 'B', 'B'],
@@ -1012,7 +1012,7 @@ class TestMultiIndex:
 
     def test_multiindex_columns(self):
         """Test DataFrame with MultiIndex columns."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         arrays = [['A', 'A', 'B', 'B'],
                   ['x', 'y', 'x', 'y']]
@@ -1038,7 +1038,7 @@ class TestNestedDataFrames:
 
     def test_dataframe_in_dataframe_cell(self):
         """Test DataFrame containing DataFrames as cell values."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         inner_df1 = pd.DataFrame({'a': [1, 2]})
         inner_df2 = pd.DataFrame({'b': [3, 4]})
@@ -1057,7 +1057,7 @@ class TestNestedDataFrames:
 
     def test_list_of_dataframes(self):
         """Test list containing DataFrames."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         df1 = pd.DataFrame({'a': [1, 2]})
         df2 = pd.DataFrame({'b': [3, 4]})
@@ -1083,7 +1083,7 @@ class TestEdgeCasesComprehensive:
 
     def test_empty_series(self):
         """Test empty Series."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         s = pd.Series([], dtype=object)
 
@@ -1096,7 +1096,7 @@ class TestEdgeCasesComprehensive:
 
     def test_series_with_custom_index(self):
         """Test Series with custom index."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         s = pd.Series([1, 2, 3], index=['a', 'b', 'c'])
 
@@ -1111,7 +1111,7 @@ class TestEdgeCasesComprehensive:
 
     def test_dataframe_with_custom_index(self):
         """Test DataFrame with custom index."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         df = pd.DataFrame({'data': [1, 2, 3]}, index=['x', 'y', 'z'])
 
@@ -1126,7 +1126,7 @@ class TestEdgeCasesComprehensive:
 
     def test_very_nested_structure(self):
         """Test deeply nested data structures."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         nested = {'level1': {'level2': {'level3': {'level4': [1, 2, 3]}}}}
 
@@ -1141,7 +1141,7 @@ class TestEdgeCasesComprehensive:
 
     def test_none_value(self):
         """Test None values."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         user_ns = {'x': None}
         cp.save('test', user_ns)
@@ -1154,7 +1154,7 @@ class TestEdgeCasesComprehensive:
 
     def test_unicode_strings(self):
         """Test Unicode strings."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         text = "Hello 世界 🌍 Привет"
 
@@ -1169,7 +1169,7 @@ class TestEdgeCasesComprehensive:
 
     def test_bytes_objects(self):
         """Test bytes objects."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         data = b'\x00\x01\x02\xff\xfe'
 
@@ -1184,7 +1184,7 @@ class TestEdgeCasesComprehensive:
 
     def test_sparse_dataframe(self):
         """Test sparse DataFrame."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         # Create DataFrame with sparse and regular columns
         # (SparseArray doesn't support item assignment, so we test via regular column)
@@ -1206,7 +1206,7 @@ class TestEdgeCasesComprehensive:
 
     def test_restore_preserves_private_variables(self):
         """Test that restore doesn't remove private variables."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         user_ns = {'x': 1, '_private': 'secret'}
         cp.save('test', user_ns)

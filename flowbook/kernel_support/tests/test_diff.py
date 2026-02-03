@@ -15,24 +15,24 @@ import sys
 
 # Import the Diff class
 from flowbook.kernel_support.diff import Diff
-from flowbook.kernel_support.types import ValueComparison, CompoundDiff, DiffNode, DiffResult
+from flowbook.kernel_support.types import ValueComparison, CompoundDiff, DiffNode, MemoryCheckpointDiffResult
 
 
 # ============================================================================
 # TEST HELPERS
 # ============================================================================
 
-def assert_no_diff(result: DiffResult):
+def assert_no_diff(result: MemoryCheckpointDiffResult):
     """Assert that result contains no differences."""
     assert result == {}, f"Expected no differences, but got: {result}"
 
 
-def assert_has_diff(result: DiffResult, var: str):
+def assert_has_diff(result: MemoryCheckpointDiffResult, var: str):
     """Assert that variable has a difference."""
     assert var in result, f"Expected difference in '{var}', but not found. Result: {result}"
 
 
-def assert_message_contains(result: DiffResult, var: str, expected_text: str):
+def assert_message_contains(result: MemoryCheckpointDiffResult, var: str, expected_text: str):
     """Assert that the difference message for a variable contains expected text."""
     assert var in result, f"Variable '{var}' not in result"
 
@@ -65,7 +65,7 @@ def assert_message_contains(result: DiffResult, var: str, expected_text: str):
         raise AssertionError(f"Unexpected diff node type: {type(diff_node)}")
 
 
-def get_comparison(result: DiffResult, var: str) -> ValueComparison:
+def get_comparison(result: MemoryCheckpointDiffResult, var: str) -> ValueComparison:
     """Get ValueComparison for a variable (assumes simple diff)."""
     assert var in result, f"Variable '{var}' not in result"
     assert isinstance(result[var], ValueComparison), \
@@ -73,7 +73,7 @@ def get_comparison(result: DiffResult, var: str) -> ValueComparison:
     return result[var]
 
 
-def get_any_comparison(result: DiffResult, var: str) -> ValueComparison:
+def get_any_comparison(result: MemoryCheckpointDiffResult, var: str) -> ValueComparison:
     """Get any ValueComparison from a variable (handles nested diffs)."""
     assert var in result, f"Variable '{var}' not in result"
     diff_node = result[var]
@@ -101,7 +101,7 @@ def get_any_comparison(result: DiffResult, var: str) -> ValueComparison:
         raise AssertionError(f"Unexpected diff node type: {type(diff_node)}")
 
 
-def assert_status(result: DiffResult, var: str, expected_status: str):
+def assert_status(result: MemoryCheckpointDiffResult, var: str, expected_status: str):
     """Assert that a variable has a specific comparison status."""
     comparison = get_comparison(result, var)
     assert comparison.status == expected_status, \
@@ -1311,7 +1311,7 @@ class TestFloatCloseStatus:
 
     def test_float_close_in_array(self):
         """Close floats in arrays should be detected."""
-        from flowbook.kernel_support.types import DiffResult
+        from flowbook.kernel_support.types import MemoryCheckpointDiffResult
 
         differ = Diff(rtol=1e-5)
         a = {'arr': np.array([1.0, 2.0, 3.0])}
@@ -1319,7 +1319,7 @@ class TestFloatCloseStatus:
         result = differ.diff(a, b)
         # Array comparison doesn't currently return 'close' status per element
         # but at least shouldn't crash
-        assert isinstance(result, DiffResult)
+        assert isinstance(result, MemoryCheckpointDiffResult)
 
     def test_float_close_in_complex(self):
         """Close floats in complex numbers should be detected."""
@@ -2106,7 +2106,7 @@ class TestDiffResultFiltering:
         assert len(diff_result) == 1
 
     def test_close_only_with_no_close_comparisons(self):
-        """close_only() should return empty DiffResult if no close comparisons."""
+        """close_only() should return empty MemoryCheckpointDiffResult if no close comparisons."""
         differ = Diff()
         a = {'x': 1, 'y': 2}
         b = {'x': 10, 'y': 20}
@@ -2118,7 +2118,7 @@ class TestDiffResultFiltering:
         assert len(close_result) == 0
 
     def test_different_only_with_only_close_comparisons(self):
-        """different_only() should return empty DiffResult if only close comparisons."""
+        """different_only() should return empty MemoryCheckpointDiffResult if only close comparisons."""
         differ = Diff(rtol=1e-5)
         a = {'x': 1.0000001, 'y': 2.0000001}
         b = {'x': 1.0000002, 'y': 2.0000002}
@@ -2190,7 +2190,7 @@ class TestDiffResultFiltering:
         assert '[2]' not in diff_result['lst'].children
 
     def test_filtering_returns_new_diffresult(self):
-        """Filtering should return new DiffResult instances."""
+        """Filtering should return new MemoryCheckpointDiffResult instances."""
         differ = Diff(rtol=1e-5)
         a = {'x': 1.0000001, 'y': 1.0}
         b = {'x': 1.0000002, 'y': 2.0}
@@ -2204,10 +2204,10 @@ class TestDiffResultFiltering:
         assert result is not diff_result
         assert close_result is not diff_result
 
-        # All should be DiffResult instances
-        assert isinstance(result, DiffResult)
-        assert isinstance(close_result, DiffResult)
-        assert isinstance(diff_result, DiffResult)
+        # All should be MemoryCheckpointDiffResult instances
+        assert isinstance(result, MemoryCheckpointDiffResult)
+        assert isinstance(close_result, MemoryCheckpointDiffResult)
+        assert isinstance(diff_result, MemoryCheckpointDiffResult)
 
     def test_filtering_preserves_valuecomparison_objects(self):
         """Filtered results should contain same ValueComparison objects."""
@@ -2249,8 +2249,8 @@ class TestDiffResultFiltering:
         assert '.a' not in diff_result['obj'].children
 
     def test_filtering_empty_diffresult(self):
-        """Filtering an empty DiffResult should return empty DiffResult."""
-        result = DiffResult(differences={})
+        """Filtering an empty MemoryCheckpointDiffResult should return empty MemoryCheckpointDiffResult."""
+        result = MemoryCheckpointDiffResult(differences={})
 
         close_result = result.close_only()
         diff_result = result.different_only()

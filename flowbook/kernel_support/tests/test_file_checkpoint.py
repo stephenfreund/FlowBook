@@ -9,7 +9,7 @@ import pytest
 from flowbook.kernel_support.file_checkpoint import (
     FileCheckpoint,
     FileCheckpoints,
-    FileDiffResult,
+    FileCheckpointDiffResult,
     FileSnapshot,
 )
 

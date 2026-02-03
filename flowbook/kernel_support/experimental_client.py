@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from ipykernel.compiler import get_file_name
 from typing import List, Union
 
-from flowbook.kernel_support.types import DiffResult
+from flowbook.kernel_support.types import MemoryCheckpointDiffResult
 from flowbook.util.output import timer
 
 

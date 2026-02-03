@@ -5,8 +5,8 @@ import numpy as np
 from flowbook.kernel_support.checkpoint import (
     convert_series_object_to_specialized,
     convert_dataframe_object_to_specialized,
-    Checkpoints,
 )
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
 
 def test_convert_series_integers():
@@ -106,7 +106,7 @@ def test_convert_dataframe():
 
 def test_checkpoint_with_conversion():
     """Test that Checkpoints applies object dtype conversion."""
-    checkpoints = Checkpoints()
+    checkpoints = MemoryCheckpoints()
 
     # Create test data with object dtypes
     user_ns = {
@@ -133,7 +133,7 @@ def test_checkpoint_with_conversion():
 
 def test_in_place_modification():
     """Test that conversion modifies DataFrame columns in-place."""
-    checkpoints = Checkpoints()
+    checkpoints = MemoryCheckpoints()
 
     # Create test data with object dtypes
     df_original = pd.DataFrame({

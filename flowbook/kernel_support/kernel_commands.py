@@ -13,7 +13,7 @@ Commands are organized into categories:
 from typing import Any, Dict, List, Literal, Optional, Set, Union
 from pydantic import BaseModel, Field
 
-from flowbook.kernel_support.types import DiffResult, TestCodeResult
+from flowbook.kernel_support.types import MemoryCheckpointDiffResult, TestCodeResult
 from flowbook.kernel_support.extended_types import TypeModel
 
 
@@ -131,7 +131,7 @@ class CheckpointCompareRequest(KernelCommandRequest):
 class CheckpointCompareResponse(KernelCommandResponse):
     """Response with diff between two checkpoints."""
 
-    diff: DiffResult = Field(..., description="Differences between checkpoints")
+    diff: MemoryCheckpointDiffResult = Field(..., description="Differences between checkpoints")
 
 
 class CheckpointCompareLeqRequest(KernelCommandRequest):
@@ -160,7 +160,7 @@ class CheckpointCompareLeqRequest(KernelCommandRequest):
 class CheckpointCompareLeqResponse(KernelCommandResponse):
     """Response with leq diff between two checkpoints."""
 
-    diff: DiffResult = Field(..., description="Differences between checkpoints")
+    diff: MemoryCheckpointDiffResult = Field(..., description="Differences between checkpoints")
     is_leq: bool = Field(..., description="True if pre <= post for the specified keys (no differences found)")
 
 

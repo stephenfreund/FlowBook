@@ -17,7 +17,7 @@ import time
 import traceback
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Set
 
-from flowbook.kernel_support.checkpoint import Checkpoint
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 from flowbook.kernel_support.tracking import TrackingDict
 from flowbook.kernel_support.kernel_commands import (
     CheckpointSaveRequest,
@@ -267,7 +267,7 @@ class KernelCommandHandlers:
         try:
             old = self.kernel._checkpoint.get(req.name1)
             new = self.kernel._checkpoint.get(req.name2)
-            diff = Checkpoint.diff(old, new, keys_to_include=req.keys_to_include)
+            diff = MemoryCheckpoint.diff(old, new, keys_to_include=req.keys_to_include)
 
             return CheckpointCompareResponse(
                 status="ok",
@@ -275,10 +275,10 @@ class KernelCommandHandlers:
                 diff=diff,
             )
         except Exception as e:
-            from flowbook.kernel_support.types import DiffResult
+            from flowbook.kernel_support.types import MemoryCheckpointDiffResult
             tb_str = traceback.format_exc()
             # Return empty diff on error
-            empty_diff = DiffResult(added={}, removed={}, modified={})
+            empty_diff = MemoryCheckpointDiffResult(added={}, removed={}, modified={})
             return CheckpointCompareResponse(
                 status="error",
                 message=f"Failed to compare checkpoints '{req.name1}' and '{req.name2}': {e}",
@@ -306,7 +306,7 @@ class KernelCommandHandlers:
         try:
             old = self.kernel._checkpoint.get(req.name1)
             new = self.kernel._checkpoint.get(req.name2)
-            diff = Checkpoint.diff(
+            diff = MemoryCheckpoint.diff(
                 old,
                 new,
                 keys_to_include=req.keys_to_include,
@@ -324,10 +324,10 @@ class KernelCommandHandlers:
                 is_leq=is_leq,
             )
         except Exception as e:
-            from flowbook.kernel_support.types import DiffResult
+            from flowbook.kernel_support.types import MemoryCheckpointDiffResult
             tb_str = traceback.format_exc()
             # Return empty diff on error
-            empty_diff = DiffResult(differences={})
+            empty_diff = MemoryCheckpointDiffResult(differences={})
             return CheckpointCompareLeqResponse(
                 status="error",
                 message=f"Failed to compare checkpoints '{req.name1}' and '{req.name2}': {e}",

@@ -9,8 +9,9 @@ import numpy as np
 from flowbook.kernel_support.deepcopyable import check_deepcopyable
 from flowbook.kernel_support.deepcopy import deepcopy
 from flowbook.kernel_support.diff import Diff, _get_column_as_series
-from flowbook.kernel_support.checkpoint import (
-    Checkpoints,
+from flowbook.kernel_support.memory_checkpoint import (
+    MemoryCheckpoint,
+    MemoryCheckpoints,
     _collect_reachable_ids,
     _collect_reachable_ids_with_paths,
 )
@@ -229,7 +230,7 @@ class TestCheckpointsMultiIndex:
         """Should save and restore MultiIndex DataFrame."""
         user_ns = {'df': multiindex_df.copy()}
 
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
         cp.save('test', user_ns)
 
         # Modify
@@ -253,7 +254,7 @@ class TestCheckpointsMultiIndex:
                     lambda x: x.copy() if hasattr(x, 'copy') else x
                 )
 
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
         cp.save('test', user_ns)
 
         # Modify
@@ -268,13 +269,13 @@ class TestCheckpointsMultiIndex:
 
     def test_checkpoint_diff_multiindex(self, multiindex_df):
         """Checkpoint.diff should work with MultiIndex DataFrames."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         user_ns_a = {'df': multiindex_df.copy()}
         user_ns_b = {'df': multiindex_df.copy()}
         user_ns_b['df'].iloc[0, 0] = 999
 
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         cp.save('a', user_ns_a)
         cp.save('b', user_ns_b)
@@ -282,7 +283,7 @@ class TestCheckpointsMultiIndex:
         checkpoint_a = cp.get('a')
         checkpoint_b = cp.get('b')
 
-        diff_result = Checkpoint.diff(checkpoint_a, checkpoint_b)
+        diff_result = MemoryCheckpoint.diff(checkpoint_a, checkpoint_b)
 
         # Should detect the difference
         assert 'df' in diff_result.differences

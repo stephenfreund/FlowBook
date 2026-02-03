@@ -131,6 +131,18 @@ class ExperimentalActivationManager {
           this._deactivateUI();
         }
       });
+
+      // Also listen for status changes in case kernel starts after ready
+      notebook.sessionContext.statusChanged.connect(() => {
+        const isExperimental = this._kernelDetector.isExperimentalKernel(notebook);
+        console.log(`Experimental Plugin: Status changed, isExperimental = ${isExperimental}`);
+
+        if (isExperimental && !this._isUIActive) {
+          this._activateUI();
+        } else if (!isExperimental && this._isUIActive) {
+          this._deactivateUI();
+        }
+      });
     }
   }
 

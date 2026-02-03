@@ -19,7 +19,7 @@ from flowbook.server.base import NotebookCommand, ProcessingResult
 from flowbook.server.kernel_helper import KernelHelper
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.kernel_support.kernel_command_client import KernelCommandClient
-from flowbook.kernel_support.types import DiffResult, format_diff_as_markdown
+from flowbook.kernel_support.types import MemoryCheckpointDiffResult, format_diff_as_markdown
 from flowbook.util.flowbook_metadata import FlowbookMetadata
 from flowbook.util.metadata_extractor import extract_and_set_metadata
 from flowbook.util.output import log, timer, error as log_error
@@ -77,7 +77,7 @@ def format_diff_detail(var_name: str, node: Any, path: str = "") -> List[str]:
 
 def create_leq_error_output(
     cell_id: str,
-    diff: DiffResult,
+    diff: MemoryCheckpointDiffResult,
     rbw_set: Set[str]
 ) -> Dict[str, Any]:
     """
@@ -85,7 +85,7 @@ def create_leq_error_output(
 
     Args:
         cell_id: The cell identifier
-        diff: The DiffResult showing what changed
+        diff: The MemoryCheckpointDiffResult showing what changed
         rbw_set: The read-before-write set that was tested
 
     Returns:

@@ -13,7 +13,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from flowbook.kernel_support.checkpoint import Checkpoints
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData, MonotonicityViolation
 from flowbook.kernel_support.monotonicity import MonotonicityEnforcer
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
@@ -24,7 +24,7 @@ class TestMonotonicityEnforcerBaseline:
 
     @pytest.fixture
     def checkpoints(self):
-        return Checkpoints()
+        return MemoryCheckpoints()
 
     @pytest.fixture
     def user_ns(self):
@@ -89,7 +89,7 @@ class TestMonotonicityStructuralModeOff:
 
     def test_off_mode_ignores_structural_changes(self):
         """OFF mode ignores structural changes when checking monotonicity."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1], 'b': [2]})
         user_ns = {'df': df.copy()}
 
@@ -119,7 +119,7 @@ class TestMonotonicityStructuralModeWarn:
 
     def test_warn_mode_produces_warnings(self):
         """WARN mode produces warnings but no violation for structural issues."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1], 'b': [2]})
         user_ns = {'df': df.copy()}
 
@@ -149,7 +149,7 @@ class TestMonotonicityStructuralModeEnforce:
 
     def test_enforce_columns_read_blocks_column_addition(self):
         """ENFORCE: adding column is violation when df.columns was read."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1], 'b': [2]})
         user_ns = {'df': df.copy()}
 
@@ -174,7 +174,7 @@ class TestMonotonicityStructuralModeEnforce:
 
     def test_enforce_shape_read_blocks_row_addition(self):
         """ENFORCE: adding row is violation when df.shape was read."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1, 2]})
         user_ns = {'df': df.copy()}
 
@@ -199,7 +199,7 @@ class TestMonotonicityStructuralModeEnforce:
 
     def test_enforce_len_read_blocks_row_addition(self):
         """ENFORCE: adding row is violation when len(df) was called."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1, 2]})
         user_ns = {'df': df.copy()}
 
@@ -223,7 +223,7 @@ class TestMonotonicityStructuralModeEnforce:
 
     def test_enforce_iter_read_blocks_column_addition(self):
         """ENFORCE: adding column is violation when `for col in df` was used."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1], 'b': [2]})
         user_ns = {'df': df.copy()}
 
@@ -247,7 +247,7 @@ class TestMonotonicityStructuralModeEnforce:
 
     def test_enforce_dtypes_read_blocks_dtype_change(self):
         """ENFORCE: dtype change is violation when df.dtypes was read."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1, 2]})
         user_ns = {'df': df.copy()}
 
@@ -271,7 +271,7 @@ class TestMonotonicityStructuralModeEnforce:
 
     def test_enforce_index_read_blocks_index_change(self):
         """ENFORCE: index change is violation when df.index was read."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1, 2]}, index=[0, 1])
         user_ns = {'df': df.copy()}
 
@@ -295,7 +295,7 @@ class TestMonotonicityStructuralModeEnforce:
 
     def test_enforce_describe_read_blocks_column_addition(self):
         """ENFORCE: adding column is violation when df.describe() was called."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1, 2]})
         user_ns = {'df': df.copy()}
 
@@ -323,7 +323,7 @@ class TestMonotonicityStructuralNoFalsePositives:
 
     def test_no_violation_when_structure_unchanged(self):
         """No violation when structure unchanged, even with structural reads."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1, 2], 'b': [3, 4]})
         user_ns = {'df': df.copy()}
 
@@ -354,7 +354,7 @@ class TestMonotonicityStructuralNoFalsePositives:
 
     def test_no_violation_different_variable(self):
         """No violation when structural read is on different variable."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df1 = pd.DataFrame({'a': [1]})
         df2 = pd.DataFrame({'x': [1]})
         user_ns = {'df1': df1.copy(), 'df2': df2.copy()}
@@ -385,7 +385,7 @@ class TestMonotonicityStructuralSeries:
 
     def test_series_index_read_blocks_length_change(self):
         """ENFORCE: changing length is violation when s.index was read."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         s = pd.Series([1, 2, 3])
         user_ns = {'s': s.copy()}
 
@@ -409,7 +409,7 @@ class TestMonotonicityStructuralSeries:
 
     def test_series_dtype_read_blocks_dtype_change(self):
         """ENFORCE: dtype change is violation when s.dtype was read."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         s = pd.Series([1, 2, 3])
         user_ns = {'s': s.copy()}
 
@@ -433,7 +433,7 @@ class TestMonotonicityStructuralSeries:
 
     def test_series_name_read_blocks_name_change(self):
         """ENFORCE: name change is violation when s.name was read."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         s = pd.Series([1, 2], name='original')
         user_ns = {'s': s.copy()}
 
@@ -461,7 +461,7 @@ class TestMonotonicityStructuralStateRestoration:
 
     def test_state_restored_after_structural_violation(self):
         """State is restored after structural violation."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1], 'b': [2]})
         user_ns = {'df': df.copy()}
 
@@ -491,7 +491,7 @@ class TestMonotonicityStructuralMultipleReads:
 
     def test_multiple_structural_reads_all_checked(self):
         """All structural reads are checked for violations."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1, 2]})
         user_ns = {'df': df.copy()}
 
@@ -523,7 +523,7 @@ class TestMonotonicityStructuralViolationDetails:
     @pytest.mark.skip(reason="Enhancement: error message should mention structural nature of violation")
     def test_violation_details_mention_structural_issue(self):
         """Violation details mention structural issue."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1]})
         user_ns = {'df': df.copy()}
 
@@ -553,7 +553,7 @@ class TestMonotonicityStructuralNestedPaths:
 
     def test_nested_path_structural_violation(self):
         """Structural reads work with nested paths like data['train']."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1]})
         user_ns = {'data': {'train': df.copy()}}
 
@@ -581,7 +581,7 @@ class TestMonotonicityStructuralWithColumnTracking:
 
     def test_structural_and_column_tracking_combined(self):
         """Structural and column-level tracking work together."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({'a': [1, 2], 'b': [3, 4], 'c': [5, 6]})
         user_ns = {'df': df.copy()}
 

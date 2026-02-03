@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from typing import Any, List
 
-from flowbook.kernel_support.checkpoint import Checkpoints, _deep_copy_function
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints, _deep_copy_function
 
 
 # ============================================================================
@@ -26,7 +26,7 @@ class TestFunctionClosureIsolation:
 
     def test_function_with_list_closure(self):
         """Test that list variables captured in closures are isolated."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         # Create function with list closure
         counter = [0]
@@ -56,7 +56,7 @@ class TestFunctionClosureIsolation:
 
     def test_function_with_dict_closure(self):
         """Test that dict variables captured in closures are isolated."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         # Create function with dict closure
         state = {'count': 0, 'history': []}
@@ -83,7 +83,7 @@ class TestFunctionClosureIsolation:
 
     def test_function_closure_shared_with_variable(self):
         """Test when a function's closure variable is also a namespace variable."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         data = [1, 2, 3]
         def get_sum():
@@ -104,7 +104,7 @@ class TestFunctionClosureIsolation:
 
     def test_lambda_with_closure(self):
         """Test that lambdas with closures are properly handled."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         multiplier = [2]
         double = lambda x: x * multiplier[0]
@@ -123,7 +123,7 @@ class TestFunctionClosureIsolation:
 
     def test_nested_functions_shared_closure(self):
         """Test nested functions that share closure variables."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         shared = [0]
 
@@ -148,7 +148,7 @@ class TestFunctionClosureIsolation:
 
     def test_multiple_functions_same_closure(self):
         """Test multiple functions sharing the same closure variable."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         data = [0]
 
@@ -193,7 +193,7 @@ class TestFunctionWithMutableDefaults:
 
     def test_function_with_list_default(self):
         """Test that mutable default arguments are deep copied."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         def append_to(item, lst=[]):
             lst.append(item)
@@ -215,7 +215,7 @@ class TestFunctionWithMutableDefaults:
 
     def test_function_with_dict_default(self):
         """Test that dict default arguments are deep copied."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         def update_config(key, value, config={}):
             config[key] = value
@@ -237,7 +237,7 @@ class TestFunctionWithMutableDefaults:
 
     def test_function_with_kwonly_mutable_default(self):
         """Test that keyword-only mutable defaults are deep copied."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         def process(*, items=[]):
             items.append(len(items))
@@ -263,7 +263,7 @@ class TestFunctionWithoutClosure:
 
     def test_simple_function_no_closure(self):
         """Test that simple functions without closures work correctly."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         def add(a, b):
             return a + b
@@ -276,7 +276,7 @@ class TestFunctionWithoutClosure:
 
     def test_function_with_immutable_defaults(self):
         """Test that functions with immutable defaults are handled correctly."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         def greet(name, greeting="Hello"):
             return f"{greeting}, {name}!"
@@ -294,7 +294,7 @@ class TestMultipleRestoresWithFunctions:
 
     def test_multiple_restores_preserve_closure(self):
         """Test that restoring multiple times keeps closure pristine."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         counter = [0]
         def inc():
@@ -320,7 +320,7 @@ class TestMultipleRestoresWithFunctions:
 
     def test_multiple_restores_with_mutable_default(self):
         """Test multiple restores with mutable default arguments."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         def accumulate(val, acc=[]):
             acc.append(val)
@@ -421,7 +421,7 @@ class TestFunctionWithComplexClosures:
 
     def test_closure_with_numpy_array(self):
         """Test closure containing numpy array."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         arr = np.array([1, 2, 3])
         def get_sum():
@@ -440,7 +440,7 @@ class TestFunctionWithComplexClosures:
 
     def test_closure_with_dataframe(self):
         """Test closure containing pandas DataFrame."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         df = pd.DataFrame({'a': [1, 2, 3]})
         def get_mean():
@@ -459,7 +459,7 @@ class TestFunctionWithComplexClosures:
 
     def test_closure_with_custom_object(self):
         """Test closure containing custom class instance."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         class Counter:
             def __init__(self):
@@ -487,7 +487,7 @@ class TestFunctionWithComplexClosures:
 
     def test_closure_with_nested_mutable_structures(self):
         """Test closure with deeply nested mutable structures."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         nested = {'level1': {'level2': [1, 2, 3]}}
         def get_nested():
@@ -510,7 +510,7 @@ class TestGlobalReferencesInFunctions:
 
     def test_function_referencing_global_variable(self):
         """Test that functions referencing globals see restored values after restore."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         # Simulate Jupyter-style execution where __globals__ IS user_ns
         user_ns = {}
@@ -535,7 +535,7 @@ def get_sum():
 
     def test_recursive_function_via_globals(self):
         """Test recursive function where recursion uses __globals__ lookup."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         user_ns = {}
         exec("""
@@ -564,7 +564,7 @@ def factorial(n):
 
     def test_function_modifying_global_after_restore(self):
         """Test that restored function can modify restored globals."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         user_ns = {}
         exec("""
@@ -595,7 +595,7 @@ class TestEdgeCases:
 
     def test_recursive_function_with_closure(self):
         """Test recursive function that uses closure."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         call_count = [0]
         def factorial(n):
@@ -622,7 +622,7 @@ class TestEdgeCases:
 
     def test_function_referencing_itself_in_closure(self):
         """Test function that captures itself in closure (through variable)."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         log = []
         def func():
@@ -642,7 +642,7 @@ class TestEdgeCases:
 
     def test_generator_function_with_closure(self):
         """Test generator function with closure."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         data = [1, 2, 3, 4, 5]
         def gen():
@@ -661,7 +661,7 @@ class TestEdgeCases:
 
     def test_method_bound_to_object_with_closure(self):
         """Test that bound methods work correctly after restore."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
 
         class MyClass:
             def __init__(self, value):

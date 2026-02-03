@@ -2,7 +2,7 @@
 Changes - Typed records of what actually changed between checkpoints.
 
 This module defines a hierarchy of change types that replace the unstructured
-DiffResult with explicit typed objects representing specific kinds of changes.
+MemoryCheckpointDiffResult with explicit typed objects representing specific kinds of changes.
 
 Design Principles:
 - Each change type has clear, specific semantics
@@ -13,7 +13,7 @@ Change Detection Flow:
     pre_checkpoint ---> [cell execution] ---> post_checkpoint
                                |
                                v
-                    diff(pre, post) -> DiffResult
+                    diff(pre, post) -> MemoryCheckpointDiffResult
                                |
                                v
                     detect_changes(diff) -> List[Change]

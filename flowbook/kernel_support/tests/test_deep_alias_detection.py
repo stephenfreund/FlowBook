@@ -26,8 +26,8 @@ import numpy as np
 import pandas as pd
 from typing import Any, Dict, Set
 
-from flowbook.kernel_support.checkpoint import (
-    Checkpoint,
+from flowbook.kernel_support.memory_checkpoint import (
+    MemoryCheckpoint,
     _collect_reachable_ids,
     _collect_reachable_ids_with_paths,
 )
@@ -49,7 +49,7 @@ class TestBasicDeepAliasDetection:
             "d": {"b": {"value": 42}},  # Same value, different object
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"a"})
 
         assert "a" in aliases
@@ -65,7 +65,7 @@ class TestBasicDeepAliasDetection:
             "list_c": [[1, 2, 3], "other"],  # Same value, different object
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"list_a"})
 
         assert "list_a" in aliases
@@ -80,7 +80,7 @@ class TestBasicDeepAliasDetection:
             "y": {"z": shared},  # Shares at different depth
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"x"})
 
         assert aliases == {"x", "y"}
@@ -96,7 +96,7 @@ class TestBasicDeepAliasDetection:
             "d": {"other": "data"},  # Shares nothing
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"a"})
 
         assert aliases == {"a", "b", "c"}
@@ -109,7 +109,7 @@ class TestBasicDeepAliasDetection:
             "tuple_b": ("other", shared),
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"tuple_a"})
 
         assert aliases == {"tuple_a", "tuple_b"}
@@ -124,7 +124,7 @@ class TestBasicDeepAliasDetection:
             "b": {"data": shared_set},
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"a"})
 
         # Frozensets are immutable, so we might not track them
@@ -154,7 +154,7 @@ class TestTemporaryObjectIdReuse:
         s2 = pd.Series([1, 2, 3], name="data")
 
         namespace = {"s1": s1, "s2": s2}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"s1"})
 
         assert aliases == {"s1"}, f"Expected only s1, got {aliases}"
@@ -165,7 +165,7 @@ class TestTemporaryObjectIdReuse:
         df2 = pd.DataFrame({"id": [1, 2, 3], "value": [10, 20, 30]})
 
         namespace = {"df1": df1, "df2": df2}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"df1"})
 
         assert aliases == {"df1"}, f"Expected only df1, got {aliases}"
@@ -176,7 +176,7 @@ class TestTemporaryObjectIdReuse:
         arr2 = np.array([1, 2, 3, 4, 5])
 
         namespace = {"arr1": arr1, "arr2": arr2}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"arr1"})
 
         assert aliases == {"arr1"}, f"Expected only arr1, got {aliases}"
@@ -190,7 +190,7 @@ class TestTemporaryObjectIdReuse:
                 "value": list(range(100, 200)),
             })
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
 
         # Each DataFrame should only alias with itself
         for i in range(20):
@@ -203,7 +203,7 @@ class TestTemporaryObjectIdReuse:
         for i in range(20):
             namespace[f"s_{i}"] = pd.Series(list(range(100)), name=f"series_{i}")
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
 
         for i in range(20):
             aliases = checkpoint.get_aliases_for_vars({f"s_{i}"})
@@ -215,7 +215,7 @@ class TestTemporaryObjectIdReuse:
         col_copy = df["x"].copy()
 
         namespace = {"df": df, "col_copy": col_copy}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"df"})
 
         assert "col_copy" not in aliases
@@ -226,7 +226,7 @@ class TestTemporaryObjectIdReuse:
         df2 = pd.DataFrame({"id": ["a", "b", "c"]})  # object
 
         namespace = {"df1": df1, "df2": df2}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"df1"})
 
         assert aliases == {"df1"}
@@ -245,7 +245,7 @@ class TestNumpyViewDetection:
         view = base[1:4]
 
         namespace = {"base": base, "view": view}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"view"})
 
         assert "base" in aliases, "Base array should be alias of view"
@@ -259,7 +259,7 @@ class TestNumpyViewDetection:
         view3 = base[6:9]
 
         namespace = {"base": base, "v1": view1, "v2": view2, "v3": view3}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
 
         # All should be aliases of each other
         aliases = checkpoint.get_aliases_for_vars({"v1"})
@@ -272,7 +272,7 @@ class TestNumpyViewDetection:
         copy = base[1:4].copy()  # Copy
 
         namespace = {"base": base, "view": view, "copy": copy}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"base"})
 
         assert "view" in aliases
@@ -284,7 +284,7 @@ class TestNumpyViewDetection:
         reshaped = arr.reshape(2, 3)
 
         namespace = {"arr": arr, "reshaped": reshaped}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"arr"})
 
         assert "reshaped" in aliases
@@ -295,7 +295,7 @@ class TestNumpyViewDetection:
         transposed = arr.T
 
         namespace = {"arr": arr, "transposed": transposed}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"arr"})
 
         assert "transposed" in aliases
@@ -313,7 +313,7 @@ class TestDataFrameSeriesAliases:
         df = pd.DataFrame({"a": [1, 2, 3]})
         namespace = {"df1": df, "df2": df}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"df1"})
 
         assert aliases == {"df1", "df2"}
@@ -323,7 +323,7 @@ class TestDataFrameSeriesAliases:
         s = pd.Series([1, 2, 3])
         namespace = {"s1": s, "s2": s}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"s1"})
 
         assert aliases == {"s1", "s2"}
@@ -335,7 +335,7 @@ class TestDataFrameSeriesAliases:
         df2 = pd.DataFrame({"col": [{"another": 2}, shared_dict]})
 
         namespace = {"df1": df1, "df2": df2}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"df1"})
 
         assert "df2" in aliases, "df2 shares object in cells with df1"
@@ -347,7 +347,7 @@ class TestDataFrameSeriesAliases:
         s2 = pd.Series([[10, 20], shared_list])
 
         namespace = {"s1": s1, "s2": s2}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"s1"})
 
         assert "s2" in aliases
@@ -364,7 +364,7 @@ class TestDataFrameSeriesAliases:
         subset = df[["a"]]
 
         namespace = {"df": df, "subset": subset}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"df"})
 
         # subset is a new DataFrame, not an alias
@@ -387,7 +387,7 @@ class TestObjectDtypeElementTracking:
         arr2 = np.array([[10], shared], dtype=object)
 
         namespace = {"arr1": arr1, "arr2": arr2}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"arr1"})
 
         assert "arr2" in aliases
@@ -399,7 +399,7 @@ class TestObjectDtypeElementTracking:
         arr2 = np.array([{"another": 2}, shared], dtype=object)
 
         namespace = {"arr1": arr1, "arr2": arr2}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"arr1"})
 
         assert "arr2" in aliases
@@ -411,7 +411,7 @@ class TestObjectDtypeElementTracking:
         lst = [shared, "other"]
 
         namespace = {"arr": arr, "lst": lst}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"arr"})
 
         assert "lst" in aliases
@@ -437,7 +437,7 @@ class TestUserDefinedObjects:
         obj3 = Container({"data": [1, 2, 3]})  # Same value, different object
 
         namespace = {"obj1": obj1, "obj2": obj2, "obj3": obj3}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"obj1"})
 
         assert "obj2" in aliases
@@ -461,7 +461,7 @@ class TestUserDefinedObjects:
         outer2 = Outer(inner2)
 
         namespace = {"outer1": outer1, "outer2": outer2}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"outer1"})
 
         assert "outer2" in aliases
@@ -480,7 +480,7 @@ class TestCircularReferences:
         d["self"] = d
 
         namespace = {"d": d}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"d"})
 
         assert "d" in aliases  # Should complete without hanging
@@ -491,7 +491,7 @@ class TestCircularReferences:
         lst.append(lst)
 
         namespace = {"lst": lst}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"lst"})
 
         assert "lst" in aliases
@@ -503,7 +503,7 @@ class TestCircularReferences:
         a["ref"] = b
 
         namespace = {"a": a, "b": b}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"a"})
 
         assert aliases == {"a", "b"}
@@ -518,7 +518,7 @@ class TestCircularReferences:
         c["next"] = a  # Complete the cycle
 
         namespace = {"a": a, "b": b, "c": c}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"a"})
 
         assert aliases == {"a", "b", "c"}
@@ -533,7 +533,7 @@ class TestEdgeCases:
 
     def test_empty_namespace(self):
         """Empty namespace."""
-        checkpoint = Checkpoint("test", {}, {})
+        checkpoint = MemoryCheckpoint("test", {}, {})
         aliases = checkpoint.get_aliases_for_vars({"nonexistent"})
 
         assert aliases == {"nonexistent"}  # Returns input for missing vars
@@ -541,7 +541,7 @@ class TestEdgeCases:
     def test_empty_accessed_vars(self):
         """Empty accessed vars set."""
         namespace = {"x": [1, 2, 3]}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars(set())
 
         assert aliases == set()
@@ -549,7 +549,7 @@ class TestEdgeCases:
     def test_none_value(self):
         """Variables set to None."""
         namespace = {"a": None, "b": None}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"a"})
 
         # None is immutable, typically not tracked
@@ -563,7 +563,7 @@ class TestEdgeCases:
             "empty_df": pd.DataFrame(),
             "empty_series": pd.Series(dtype=float),
         }
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
 
         for var in namespace:
             aliases = checkpoint.get_aliases_for_vars({var})
@@ -579,7 +579,7 @@ class TestEdgeCases:
         other = {"ref": shared}
 
         namespace = {"deep": current, "other": other}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"deep"})
 
         assert "other" in aliases
@@ -592,7 +592,7 @@ class TestEdgeCases:
         other = {"ref": shared}
 
         namespace = {"parent": parent, "other": other}
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"parent"})
 
         assert "other" in aliases
@@ -605,7 +605,7 @@ class TestEdgeCases:
             "float1": 3.14,
             "float2": 3.14,
         }
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
 
         # Each should only alias with itself (or with interned copies)
         # The key is no unexpected aliases
@@ -620,7 +620,7 @@ class TestEdgeCases:
             "s2": "hello",  # Python interns short strings
             "s3": "world",
         }
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"s1"})
 
         # Strings are immutable, aliasing through interning is harmless
@@ -640,7 +640,7 @@ class TestPathTracking:
         shared = {"inner": True}
         namespace = {"outer": {"key": shared}}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
 
         # Check that path includes the key
         shared_id = id(shared)
@@ -654,7 +654,7 @@ class TestPathTracking:
         shared = {"inner": True}
         namespace = {"outer": [None, shared, None]}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
 
         shared_id = id(shared)
         if shared_id in checkpoint._id_to_paths:
@@ -673,7 +673,7 @@ class TestPathTracking:
         obj = Container()
         namespace = {"obj": obj}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
 
         shared_id = id(shared)
         if shared_id in checkpoint._id_to_paths:
@@ -762,7 +762,7 @@ class TestAliasIndexOptimizations:
         shared = {"inner": [1, 2, 3]}
         namespace = {"a": {"ref": shared}, "b": {"ref": shared}}
 
-        cp = Checkpoint("test", namespace, {})
+        cp = MemoryCheckpoint("test", namespace, {})
 
         # Index should NOT be built yet
         assert not cp._alias_index_built
@@ -783,7 +783,7 @@ class TestAliasIndexOptimizations:
         shared = {"data": [1, 2, 3]}
         namespace = {"x": {"ref": shared}, "y": {"ref": shared}}
 
-        cp = Checkpoint("test", namespace, {})
+        cp = MemoryCheckpoint("test", namespace, {})
 
         # First query
         result1 = cp.get_aliases_for_vars({"x"})
@@ -811,7 +811,7 @@ class TestAliasIndexOptimizations:
             shared = {"value": 42}
             namespace = {"a": {"ref": shared}, "b": {"ref": shared}}
 
-            cp = Checkpoint("test", namespace, {})
+            cp = MemoryCheckpoint("test", namespace, {})
             cp.get_aliases_for_vars({"a"})  # Trigger build
 
             # Index should be built but paths may be empty (optimization)
@@ -834,7 +834,7 @@ class TestAliasIndexOptimizations:
 
         namespace = {"df": df, "other": other}
 
-        cp = Checkpoint("test", namespace, {})
+        cp = MemoryCheckpoint("test", namespace, {})
         result = cp.get_aliases_for_vars({"other"})
 
         # Should find that df contains same shared object
@@ -849,7 +849,7 @@ class TestAliasIndexOptimizations:
 
         namespace = {"series": series, "other": other}
 
-        cp = Checkpoint("test", namespace, {})
+        cp = MemoryCheckpoint("test", namespace, {})
         result = cp.get_aliases_for_vars({"other"})
 
         # Should find that series contains same shared object
@@ -858,7 +858,7 @@ class TestAliasIndexOptimizations:
 
     def test_empty_namespace_no_error(self):
         """Empty namespace doesn't cause errors with lazy building."""
-        cp = Checkpoint("test", {}, {})
+        cp = MemoryCheckpoint("test", {}, {})
 
         # Should not raise
         result = cp.get_aliases_for_vars({"nonexistent"})
@@ -869,7 +869,7 @@ class TestAliasIndexOptimizations:
         shared = {"data": list(range(1000))}
         namespace = {f"var_{i}": {"ref": shared} for i in range(100)}
 
-        cp = Checkpoint("test", namespace, {})
+        cp = MemoryCheckpoint("test", namespace, {})
 
         # Checkpoint exists but index was never built
         assert not cp._alias_index_built

@@ -358,6 +358,7 @@ See checkpoint.py sections 13-14 for implementation details.
 ================================================================================
 """
 
+import os
 import re
 import time
 import traceback
@@ -416,7 +417,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         self._tracking = TrackingDict(self.shell.user_ns)
 
         # Reproducibility enforcement
-        self._sdc = ReproducibilityEnforcer(self._checkpoint)
+        self._enforcer = ReproducibilityEnforcer(self._checkpoint)
 
         # Continue after violation flag (default: stop on violation)
         self._continue_after_violation: bool = False
@@ -434,18 +435,18 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             %notebook_structure cell1 cell2 cell3 ...
         """
         cell_order = line.split()
-        self._sdc.set_cell_order(cell_order)
+        self._enforcer.set_cell_order(cell_order)
 
     @line_magic
     def flowbook_status(self, line: str) -> None:
         """Display current Reproducibility state."""
-        order = self._sdc.cell_order
-        records = self._sdc.records
+        order = self._enforcer.cell_order
+        records = self._enforcer.records
 
         status_lines = [
             f"Cell order: {order}",
             f"Executed cells: {list(records.keys())}",
-            f"Execution counter: {self._sdc.seq_counter}",
+            f"Execution counter: {self._enforcer.seq_counter}",
         ]
 
         for cell_id, record in records.items():
@@ -499,7 +500,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         Usage:
             %flowbook_stale
         """
-        stale_cells = self._sdc.get_stale_cells()
+        stale_cells = self._enforcer.get_stale_cells()
         if not stale_cells:
             self._display.display_icon_and_text("✓", "No stale cells")
             return
@@ -508,7 +509,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         stale_refs = []
         for cell_id in stale_cells:
             try:
-                idx = self._sdc.cell_order.index(cell_id)
+                idx = self._enforcer.cell_order.index(cell_id)
                 stale_refs.append(index_to_alpha(idx))
             except (ValueError, IndexError):
                 stale_refs.append(cell_id)
@@ -550,7 +551,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
             if not mode_str:
                 # Show current mode
-                current_mode = self._sdc.structural_mode.value
+                current_mode = self._enforcer.structural_mode.value
                 self._display.display_icon_and_text(
                     "🔍", f"Structural tracking mode: {current_mode}"
                 )
@@ -565,7 +566,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 return
 
             # Update Reproducibility enforcer
-            self._sdc.set_structural_mode(mode)
+            self._enforcer.set_structural_mode(mode)
 
             # Update TrackingDict if it exists
             if tracking is not None:
@@ -722,7 +723,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
                 # Update cell order if provided in metadata
                 if cell_meta and "cell_order" in cell_meta:
-                    self._sdc.set_cell_order(cell_meta["cell_order"])
+                    self._enforcer.set_cell_order(cell_meta["cell_order"])
 
                 # Check for notebook_structure magic (parse and remove if present)
                 code = self._process_structure_magic(code)
@@ -732,7 +733,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
                 # Skip Reproducibility for empty code or pure magic
                 if not code.strip() or self._is_pure_magic(code):
-                    return await self._execute_without_sdc(
+                    return await self._execute_without_enforcer(
                         code,
                         silent,
                         store_history,
@@ -840,7 +841,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 # Run Reproducibility check if we have tracking data and cell_id
                 if tracking and self._cell_id:
                     with timer(key="kernel:check") as check_timer:
-                        sdc_result = self._sdc.check(
+                        sdc_result = self._enforcer.check(
                             cell_id=self._cell_id,
                             pre_checkpoint=pre_checkpoint,
                             post_checkpoint=post_checkpoint,
@@ -940,7 +941,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         if self._cell_id is None:
             return "unknown"
         try:
-            index = self._sdc.cell_order.index(self._cell_id)
+            index = self._enforcer.cell_order.index(self._cell_id)
             return index_to_alpha(index)
         except (ValueError, IndexError):
             return self._cell_id
@@ -957,7 +958,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             magic_line = lines[0].strip()
             parts = magic_line.split()[1:]  # Skip the magic name
             if parts:
-                self._sdc.set_cell_order(parts)
+                self._enforcer.set_cell_order(parts)
             return "\n".join(lines[1:])
         return code
 
@@ -1040,7 +1041,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 log(message)
                 self._display.display_icon_and_text("\u26a0\ufe0f", message)
 
-    async def _execute_without_sdc(
+    async def _execute_without_enforcer(
         self,
         code: str,
         silent: bool,
@@ -1065,13 +1066,13 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         if not silent and self._cell_id:
             empty_metadata = ReproducibilityMetadata(
                 cell_id=self._cell_id,
-                execution_seq=self._sdc.seq_counter,
+                execution_seq=self._enforcer.seq_counter,
                 reads=[],
                 writes=[],
                 changed_variables=[],
-                stale_cells=self._sdc.get_stale_cells(),
+                stale_cells=self._enforcer.get_stale_cells(),
                 violation=None,
-                cell_order=self._sdc.cell_order,
+                cell_order=self._enforcer.cell_order,
             )
             # Use display_icon_and_text with metadata to send to frontend
             self._display.display_icon_and_text(
@@ -1137,11 +1138,18 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             }
         )
 
+        # Combine variable reads/writes with file read-before-writes/writes (file: prefix)
+        # Only include files that were read before being written (important for reproducibility)
+        file_rbw = sorted(os.path.relpath(p) for p in tracking.file_reads_before_writes) if tracking else []
+        file_writes_list = sorted(os.path.relpath(p) for p in tracking.file_writes) if tracking else []
+        combined_reads = tracking_json["reads"] + [f"file:{f}" for f in file_rbw]
+        combined_writes = tracking_json["writes"] + [f"file:{f}" for f in file_writes_list]
+
         metadata = ReproducibilityMetadata(
             cell_id=self._cell_id or "",
-            execution_seq=self._sdc.seq_counter,
-            reads=tracking_json["reads"],
-            writes=tracking_json["writes"],
+            execution_seq=self._enforcer.seq_counter,
+            reads=combined_reads,
+            writes=combined_writes,
             changed_variables=sdc_result.changed_variables if sdc_result else [],
             stale_cells=sdc_result.stale_cells if sdc_result else [],
             violation=(
@@ -1149,7 +1157,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 if (sdc_result and sdc_result.violation)
                 else None
             ),
-            cell_order=self._sdc.cell_order,
+            cell_order=self._enforcer.cell_order,
             column_reads=tracking_json["column_reads"],
             column_writes=tracking_json["column_writes"],
             column_changed=sdc_result.column_changed if sdc_result else {},
@@ -1201,7 +1209,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             stale_refs = []
             for cell_id in sdc_result.stale_cells:
                 try:
-                    idx = self._sdc.cell_order.index(cell_id)
+                    idx = self._enforcer.cell_order.index(cell_id)
                     stale_refs.append(index_to_alpha(idx))
                 except (ValueError, IndexError):
                     stale_refs.append(cell_id)  # Fallback to ID if not in order
@@ -1281,7 +1289,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         """Handle kernel shutdown/restart."""
         if restart:
             # Clear Reproducibility state on restart for clean slate
-            self._sdc.reset()
+            self._enforcer.reset()
 
         # Explicitly flush timings before shutdown - atexit may not run
         # if the kernel is killed by jupyter_client after timeout

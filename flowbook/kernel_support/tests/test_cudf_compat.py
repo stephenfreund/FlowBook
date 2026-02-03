@@ -369,11 +369,11 @@ class TestCudfCheckpoint:
     def test_checkpoint_cudf_dataframe(self):
         """cudf DataFrame should be checkpointed to CPU memory."""
         import cudf
-        from flowbook.kernel_support.checkpoint import Checkpoints
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
         gdf = cudf.DataFrame({'a': [1, 2, 3], 'b': [4.0, 5.0, 6.0]})
 
-        cp = Checkpoints(sanity_check=False)
+        cp = MemoryCheckpoints(sanity_check=False)
         user_ns = {'gdf': gdf}
         cp.save('test', user_ns)
 
@@ -384,11 +384,11 @@ class TestCudfCheckpoint:
     def test_restore_cudf_dataframe(self):
         """Restored DataFrame should be cudf again."""
         import cudf
-        from flowbook.kernel_support.checkpoint import Checkpoints
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
         gdf = cudf.DataFrame({'a': [1, 2, 3]})
 
-        cp = Checkpoints(sanity_check=False)
+        cp = MemoryCheckpoints(sanity_check=False)
         user_ns = {'gdf': gdf}
         cp.save('test', user_ns)
 
@@ -405,11 +405,11 @@ class TestCudfCheckpoint:
     def test_checkpoint_cudf_series(self):
         """cudf Series should be checkpointed and restored."""
         import cudf
-        from flowbook.kernel_support.checkpoint import Checkpoints
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
         gs = cudf.Series([1, 2, 3], name='values')
 
-        cp = Checkpoints(sanity_check=False)
+        cp = MemoryCheckpoints(sanity_check=False)
         user_ns = {'gs': gs}
         cp.save('test', user_ns)
 
@@ -426,12 +426,12 @@ class TestCudfCheckpoint:
     def test_mixed_pandas_cudf_checkpoint(self):
         """Mixed pandas/cudf checkpoint should work."""
         import cudf
-        from flowbook.kernel_support.checkpoint import Checkpoints
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
         gdf = cudf.DataFrame({'a': [1, 2, 3]})
         pdf = pd.DataFrame({'b': [4, 5, 6]})
 
-        cp = Checkpoints(sanity_check=False)
+        cp = MemoryCheckpoints(sanity_check=False)
         user_ns = {'gdf': gdf, 'pdf': pdf}
         cp.save('test', user_ns)
 
@@ -451,11 +451,11 @@ class TestCudfCheckpoint:
     def test_cudf_checkpoint_independence(self):
         """Modifications after restore should not affect checkpoint."""
         import cudf
-        from flowbook.kernel_support.checkpoint import Checkpoints
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
         gdf = cudf.DataFrame({'a': [1, 2, 3]})
 
-        cp = Checkpoints(sanity_check=False)
+        cp = MemoryCheckpoints(sanity_check=False)
         user_ns = {'gdf': gdf}
         cp.save('test', user_ns)
 
@@ -504,11 +504,11 @@ class TestCudfAliasDetection:
     def test_cudf_alias_detection_basic(self):
         """Alias detection should work for cudf DataFrames in checkpoint."""
         import cudf
-        from flowbook.kernel_support.checkpoint import Checkpoints
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
         gdf = cudf.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
 
-        cp = Checkpoints(sanity_check=False)
+        cp = MemoryCheckpoints(sanity_check=False)
         user_ns = {'gdf': gdf}
         cp.save('test', user_ns)
 
@@ -524,13 +524,13 @@ class TestCudfAliasDetection:
     def test_cudf_shared_reference_detection(self):
         """Shared references between cudf DataFrames should be detected as aliases."""
         import cudf
-        from flowbook.kernel_support.checkpoint import Checkpoints
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
         # Create DataFrames that share data (same object)
         gdf1 = cudf.DataFrame({'a': [1, 2, 3]})
         gdf2 = gdf1  # Same object
 
-        cp = Checkpoints(sanity_check=False)
+        cp = MemoryCheckpoints(sanity_check=False)
         user_ns = {'gdf1': gdf1, 'gdf2': gdf2}
         cp.save('test', user_ns)
 
@@ -552,12 +552,12 @@ class TestCudfAdvancedTypes:
         """cudf DataFrame with categorical column should checkpoint correctly."""
         import cudf
 
-        from flowbook.kernel_support.checkpoint import Checkpoints
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
         gdf = cudf.DataFrame({'a': [1, 2, 3]})
         gdf['cat'] = cudf.Series(['x', 'y', 'x']).astype('category')
 
-        cp = Checkpoints(sanity_check=False)
+        cp = MemoryCheckpoints(sanity_check=False)
         user_ns = {'gdf': gdf}
         cp.save('test', user_ns)
 
@@ -574,7 +574,7 @@ class TestCudfAdvancedTypes:
         """cudf DataFrame with MultiIndex should checkpoint correctly."""
         import cudf
 
-        from flowbook.kernel_support.checkpoint import Checkpoints
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
         # Create DataFrame with MultiIndex
         gdf = cudf.DataFrame({
@@ -584,7 +584,7 @@ class TestCudfAdvancedTypes:
         })
         gdf = gdf.set_index(['a', 'b'])
 
-        cp = Checkpoints(sanity_check=False)
+        cp = MemoryCheckpoints(sanity_check=False)
         user_ns = {'gdf': gdf}
         cp.save('test', user_ns)
 
@@ -601,12 +601,12 @@ class TestCudfAdvancedTypes:
         """cudf DataFrame with datetime index should checkpoint correctly."""
         import cudf
 
-        from flowbook.kernel_support.checkpoint import Checkpoints
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
         dates = cudf.date_range('2020-01-01', periods=3, freq='D')
         gdf = cudf.DataFrame({'a': [1, 2, 3]}, index=dates)
 
-        cp = Checkpoints(sanity_check=False)
+        cp = MemoryCheckpoints(sanity_check=False)
         user_ns = {'gdf': gdf}
         cp.save('test', user_ns)
 

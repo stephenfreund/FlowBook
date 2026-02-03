@@ -44,7 +44,7 @@ from flowbook.kernel_support.deepcopy import (
     _MAX_CONTAINER_CACHE_SIZE,
     _PRIMITIVE_IMMUTABLE_TYPES,
 )
-from flowbook.kernel_support.checkpoint import Checkpoints
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
 
 class TestListIsAllImmutable:
@@ -372,7 +372,7 @@ class TestCheckpointIntegration:
 
     def test_checkpoint_clears_cache_on_clear(self):
         """Checkpoints.clear() should clear the list cache."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
         large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
         user_ns = {'large_list': large_list}
 
@@ -384,7 +384,7 @@ class TestCheckpointIntegration:
 
     def test_checkpoint_clears_cache_on_last_delete(self):
         """Deleting the last checkpoint should clear the list cache."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
         large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
         user_ns = {'large_list': large_list}
 
@@ -396,7 +396,7 @@ class TestCheckpointIntegration:
 
     def test_checkpoint_preserves_cache_when_checkpoints_remain(self):
         """Cache should persist if checkpoints still exist."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
         large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
         user_ns = {'large_list': large_list}
 
@@ -414,7 +414,7 @@ class TestCheckpointIntegration:
 
     def test_repeated_checkpoints_use_cache(self):
         """Multiple checkpoints of same list should use cache."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
         large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
         user_ns = {'large_list': large_list}
 
@@ -691,7 +691,7 @@ class TestAliasTraversalOptimization:
 
     def test_primitive_list_cached_during_checkpoint(self):
         """Large primitive lists should be cached during checkpoint."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
         large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
         user_ns = {'large_list': large_list}
 
@@ -707,7 +707,7 @@ class TestAliasTraversalOptimization:
         stored in checkpoints, not the originals. The cache check must
         recognize these copies to skip traversal.
         """
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
         large_list = list(range(_LARGE_LIST_THRESHOLD + 100))
         user_ns = {'large_list': large_list}
 
@@ -726,7 +726,7 @@ class TestAliasTraversalOptimization:
 
     def test_non_primitive_list_not_cached_during_checkpoint(self):
         """Large non-primitive lists should NOT be cached during checkpoint."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
         large_list = [(i,) for i in range(_LARGE_LIST_THRESHOLD + 100)]
         user_ns = {'large_list': large_list}
 
@@ -737,7 +737,7 @@ class TestAliasTraversalOptimization:
 
     def test_checkpoint_with_shared_primitive_list(self):
         """Checkpoint should handle shared references to primitive lists."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
         shared_list = list(range(_LARGE_LIST_THRESHOLD + 100))
         user_ns = {
             'a': shared_list,
@@ -752,7 +752,7 @@ class TestAliasTraversalOptimization:
 
     def test_alias_detection_correctness_with_cache(self):
         """Alias detection should still work correctly with cache optimization."""
-        cp = Checkpoints()
+        cp = MemoryCheckpoints()
         # Create a structure with potential aliases
         shared_obj = {'key': 'value'}
         large_primitive_list = list(range(_LARGE_LIST_THRESHOLD + 100))

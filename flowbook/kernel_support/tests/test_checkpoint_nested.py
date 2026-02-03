@@ -8,7 +8,7 @@ Series, and Functions at any nesting level within custom objects.
 import pandas as pd
 import pytest
 
-from flowbook.kernel_support.checkpoint import Checkpoints
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
 
 class TestNestedDataFrames:
@@ -24,7 +24,7 @@ class TestNestedDataFrames:
         df = pd.DataFrame({'col': [[1, 2], [3, 4]]})
         container = Container(df)
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'container': container}
         checkpoints.save('test', user_ns)
 
@@ -46,7 +46,7 @@ class TestNestedDataFrames:
         df = pd.DataFrame({'col': ['a', 'b', 'c']})
         container = Container(df)
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'container': container}
         checkpoints.save('test', user_ns)
 
@@ -72,7 +72,7 @@ class TestNestedDataFrames:
                 self.middle = Middle()
 
         outer = Outer()
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'outer': outer}
         checkpoints.save('test', user_ns)
 
@@ -90,7 +90,7 @@ class TestNestedDataFrames:
         df2 = pd.DataFrame({'col': [[3, 4]]})
         data_list = [df1, df2]
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'data_list': data_list}
         checkpoints.save('test', user_ns)
 
@@ -106,7 +106,7 @@ class TestNestedDataFrames:
         df = pd.DataFrame({'col': [[1, 2]]})
         data_dict = {'key1': df}
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'data_dict': data_dict}
         checkpoints.save('test', user_ns)
 
@@ -128,7 +128,7 @@ class TestNestedSeries:
                 self.series = pd.Series([{'a': 1}, {'b': 2}])
 
         container = Container()
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'container': container}
         checkpoints.save('test', user_ns)
 
@@ -146,7 +146,7 @@ class TestNestedSeries:
         s2 = pd.Series([[3, 4]])
         series_list = [s1, s2]
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'series_list': series_list}
         checkpoints.save('test', user_ns)
 
@@ -169,7 +169,7 @@ class TestNestedFunctions:
                 self.callback = lambda: data
 
         container = CallbackContainer()
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'container': container}
         checkpoints.save('test', user_ns)
 
@@ -191,7 +191,7 @@ class TestNestedFunctions:
                 self.func = accumulate
 
         container = Container()
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'container': container}
         checkpoints.save('test', user_ns)
 
@@ -210,7 +210,7 @@ class TestNestedFunctions:
         func = lambda: data
         func_list = [func]
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'func_list': func_list}
         checkpoints.save('test', user_ns)
 
@@ -238,7 +238,7 @@ class TestCircularReferences:
         node1.next = node2
         node2.next = node1  # Circular!
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'node1': node1, 'node2': node2}
         checkpoints.save('test', user_ns)
 
@@ -261,7 +261,7 @@ class TestCircularReferences:
         obj = SelfRef()
         obj.self_ref = obj
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'obj': obj}
         checkpoints.save('test', user_ns)
 
@@ -287,7 +287,7 @@ class TestMixedNestedStructures:
                 self.func = lambda: data
 
         container = MixedContainer()
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'container': container}
         checkpoints.save('test', user_ns)
 
@@ -311,7 +311,7 @@ class TestMixedNestedStructures:
             'nested': [[df]]
         }
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'structure': structure}
         checkpoints.save('test', user_ns)
 
@@ -335,7 +335,7 @@ class TestEdgeCases:
                 self.df = pd.DataFrame()
 
         container = Container()
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'container': container}
         checkpoints.save('test', user_ns)
         checkpoints.restore('test', user_ns)
@@ -352,7 +352,7 @@ class TestEdgeCases:
                 self.value = 42
 
         obj = SlotsClass()
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'obj': obj}
         checkpoints.save('test', user_ns)
 
@@ -375,7 +375,7 @@ class TestEdgeCases:
                 self.df2 = df  # Same reference
 
         container = Container(df)
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'container': container}
         checkpoints.save('test', user_ns)
 
@@ -398,7 +398,7 @@ class TestPerformance:
         for _ in range(10):
             current = [current]
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'nested': current}
 
         # This should complete without stack overflow
@@ -421,7 +421,7 @@ class TestPerformance:
         # Create 100 containers with DataFrames
         containers = [Container(pd.DataFrame({'col': [[i]]})) for i in range(100)]
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {'containers': containers}
 
         # Should complete in reasonable time

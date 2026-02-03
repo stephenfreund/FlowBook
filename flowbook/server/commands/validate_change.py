@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from flowbook.kernel_support.checkpoint import is_valid_variable_name
 from flowbook.kernel_support.kernel_command_client import KernelCommandClient
 from flowbook.kernel_support.types import (
-    DiffResult, TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
+    MemoryCheckpointDiffResult, TestCodeResult, TestCodeSuccess, TestCodeOriginalCrash, TestCodeModifiedCrash,
     ExecutionError, format_diff_as_markdown
 )
 from flowbook.server.base import NotebookCommand, ProcessingResult

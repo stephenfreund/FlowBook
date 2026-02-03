@@ -2,7 +2,7 @@
 
 import pytest
 
-from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint, MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 
@@ -13,7 +13,7 @@ from flowbook.kernel.tests.conftest import make_tracking
 class TestReproducibilityEnforcer:
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -24,7 +24,7 @@ class TestReproducibilityEnforcer:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
+    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
         """Create a post-checkpoint."""
         self.checkpoints.save(name, namespace, max_size_mb=None)
         return self.checkpoints.saved[name]
@@ -329,7 +329,7 @@ class TestColumnAwareBackwardMutation:
     """Tests for column-aware backward mutation detection."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -340,7 +340,7 @@ class TestColumnAwareBackwardMutation:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
+    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
         """Create a post-checkpoint."""
         self.checkpoints.save(name, namespace, max_size_mb=None)
         return self.checkpoints.saved[name]
@@ -647,7 +647,7 @@ class TestContinueOnViolation:
     """Tests for continue_on_violation parameter."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -658,7 +658,7 @@ class TestContinueOnViolation:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
+    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
         """Create a post-checkpoint."""
         self.checkpoints.save(name, namespace, max_size_mb=None)
         return self.checkpoints.saved[name]
@@ -840,19 +840,19 @@ class TestTruncationDetection:
 
     def test_no_truncation_empty_diff(self):
         """Empty diff should not be truncated."""
-        from flowbook.kernel_support.types import DiffResult
+        from flowbook.kernel_support.types import MemoryCheckpointDiffResult
         from flowbook.kernel.reproducibility_enforcer import _check_for_truncation
 
-        diff = DiffResult(differences={})
+        diff = MemoryCheckpointDiffResult(differences={})
         truncated_vars = _check_for_truncation(diff)
         assert truncated_vars == []
 
     def test_no_truncation_simple_diff(self):
         """Simple diff without _truncated should not be detected."""
-        from flowbook.kernel_support.types import DiffResult, ValueComparison
+        from flowbook.kernel_support.types import MemoryCheckpointDiffResult, ValueComparison
         from flowbook.kernel.reproducibility_enforcer import _check_for_truncation
 
-        diff = DiffResult(differences={
+        diff = MemoryCheckpointDiffResult(differences={
             "x": ValueComparison(
                 status="different",
                 value1=1,
@@ -865,10 +865,10 @@ class TestTruncationDetection:
 
     def test_truncation_detected_in_dict(self):
         """Truncation in structural type (dict) should be detected."""
-        from flowbook.kernel_support.types import DiffResult, ValueComparison, CompoundDiff
+        from flowbook.kernel_support.types import MemoryCheckpointDiffResult, ValueComparison, CompoundDiff
         from flowbook.kernel.reproducibility_enforcer import _check_for_truncation, _format_diff_for_display
 
-        diff = DiffResult(differences={
+        diff = MemoryCheckpointDiffResult(differences={
             "my_dict": CompoundDiff(
                 source_type="dict",
                 children={
@@ -888,12 +888,12 @@ class TestTruncationDetection:
 
     def test_nested_container_truncation_is_ignored(self):
         """Truncation in nested container should NOT be flagged (only structure-level matters)."""
-        from flowbook.kernel_support.types import DiffResult, ValueComparison, CompoundDiff
+        from flowbook.kernel_support.types import MemoryCheckpointDiffResult, ValueComparison, CompoundDiff
         from flowbook.kernel.reproducibility_enforcer import _check_for_truncation
 
         # The outer dict is not truncated, only the inner list is
         # Since we only check the immediate variable's truncation status, this should pass
-        diff = DiffResult(differences={
+        diff = MemoryCheckpointDiffResult(differences={
             "outer": CompoundDiff(
                 source_type="dict",
                 children={
@@ -912,10 +912,10 @@ class TestTruncationDetection:
 
     def test_multiple_truncated_vars(self):
         """Multiple truncated variables should all be detected."""
-        from flowbook.kernel_support.types import DiffResult, ValueComparison, CompoundDiff
+        from flowbook.kernel_support.types import MemoryCheckpointDiffResult, ValueComparison, CompoundDiff
         from flowbook.kernel.reproducibility_enforcer import _check_for_truncation, _format_diff_for_display
 
-        diff = DiffResult(differences={
+        diff = MemoryCheckpointDiffResult(differences={
             "dict1": CompoundDiff(
                 source_type="dict",
                 children={"['key']": ValueComparison(status="different", value1=1, value2=2, message="diff")},
@@ -942,7 +942,7 @@ class TestStructuralTrackingOff:
     """Tests for structural tracking OFF mode with backward mutation detection."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -957,7 +957,7 @@ class TestStructuralTrackingOff:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
+    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
         """Create a post-checkpoint."""
         self.checkpoints.save(name, namespace, max_size_mb=None)
         return self.checkpoints.saved[name]
@@ -1088,7 +1088,7 @@ class TestStructuralTrackingWarn:
     """Tests for structural tracking WARN mode with backward mutation detection."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -1103,7 +1103,7 @@ class TestStructuralTrackingWarn:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
+    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
         """Create a post-checkpoint."""
         self.checkpoints.save(name, namespace, max_size_mb=None)
         return self.checkpoints.saved[name]
@@ -1173,7 +1173,7 @@ class TestStructuralTrackingEnforce:
     """Tests for structural tracking ENFORCE mode - structural reads ARE protected."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -1188,7 +1188,7 @@ class TestStructuralTrackingEnforce:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
+    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
         """Create a post-checkpoint."""
         self.checkpoints.save(name, namespace, max_size_mb=None)
         return self.checkpoints.saved[name]
@@ -1335,7 +1335,7 @@ class TestAccessedVarsOnlyOptimization:
     """
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -1346,7 +1346,7 @@ class TestAccessedVarsOnlyOptimization:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
+    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
         """Create a post-checkpoint."""
         self.checkpoints.save(name, namespace, max_size_mb=None)
         return self.checkpoints.saved[name]
@@ -1813,7 +1813,7 @@ class TestDeepAliasDetection:
         If cell modifies a["b"]["f"] = 4, then c should also be flagged
         as changing because c["b"] is the same object as a["b"].
         """
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         shared_inner = {"f": 1}
         namespace = {
@@ -1823,7 +1823,7 @@ class TestDeepAliasDetection:
         }
 
         # Create checkpoint with alias index
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
 
         # If we access "a", we should also get "c" because they share internal refs
         aliases = checkpoint.get_aliases_for_vars({"a"})
@@ -1834,7 +1834,7 @@ class TestDeepAliasDetection:
 
     def test_nested_dict_multiple_levels(self):
         """Test deep nesting - multiple levels of shared objects."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         deep_shared = {"value": 42}
         namespace = {
@@ -1843,7 +1843,7 @@ class TestDeepAliasDetection:
             "z": {"separate": {"value": 42}},  # Same value, different object
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"x"})
 
         assert "x" in aliases
@@ -1852,7 +1852,7 @@ class TestDeepAliasDetection:
 
     def test_list_with_shared_elements(self):
         """Test lists containing shared mutable objects."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         shared_dict = {"data": [1, 2, 3]}
         namespace = {
@@ -1861,7 +1861,7 @@ class TestDeepAliasDetection:
             "list_c": [{"data": [1, 2, 3]}],  # Same value, different object
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"list_a"})
 
         assert "list_a" in aliases
@@ -1871,7 +1871,7 @@ class TestDeepAliasDetection:
     def test_numpy_array_views(self):
         """Test numpy array views - arr2 is a view of arr1."""
         import numpy as np
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         arr1 = np.array([1, 2, 3, 4, 5])
         arr2 = arr1[1:4]  # View, shares memory with arr1
@@ -1879,7 +1879,7 @@ class TestDeepAliasDetection:
 
         namespace = {"arr1": arr1, "arr2": arr2, "arr3": arr3}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"arr1"})
 
         assert "arr1" in aliases
@@ -1890,14 +1890,14 @@ class TestDeepAliasDetection:
     def test_numpy_array_view_reverse(self):
         """Test that accessing view also finds base array."""
         import numpy as np
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         arr1 = np.array([1, 2, 3, 4, 5])
         arr2 = arr1[1:4]  # View
 
         namespace = {"base": arr1, "view": arr2}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"view"})
 
         assert "view" in aliases
@@ -1906,7 +1906,7 @@ class TestDeepAliasDetection:
     def test_object_dtype_series_shared_elements(self):
         """Test Series with object dtype containing shared objects."""
         import pandas as pd
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         shared_list = [1, 2, 3]
         series_a = pd.Series([shared_list, [4, 5], "str"])
@@ -1914,7 +1914,7 @@ class TestDeepAliasDetection:
 
         namespace = {"s_a": series_a, "s_b": series_b}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"s_a"})
 
         assert "s_a" in aliases
@@ -1923,7 +1923,7 @@ class TestDeepAliasDetection:
     def test_object_dtype_dataframe_shared_elements(self):
         """Test DataFrame with object dtype containing shared objects."""
         import pandas as pd
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         shared_dict = {"key": "value"}
         df_a = pd.DataFrame({"col": [shared_dict, {"other": 1}]})
@@ -1931,7 +1931,7 @@ class TestDeepAliasDetection:
 
         namespace = {"df_a": df_a, "df_b": df_b}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"df_a"})
 
         assert "df_a" in aliases
@@ -1939,7 +1939,7 @@ class TestDeepAliasDetection:
 
     def test_user_defined_object_shared_attribute(self):
         """Test user-defined objects with shared attribute references."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         shared_data = {"value": 100}
 
@@ -1953,7 +1953,7 @@ class TestDeepAliasDetection:
 
         namespace = {"obj_a": obj_a, "obj_b": obj_b, "obj_c": obj_c}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"obj_a"})
 
         assert "obj_a" in aliases
@@ -1962,7 +1962,7 @@ class TestDeepAliasDetection:
 
     def test_circular_references(self):
         """Test that circular references don't cause infinite loops."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         # Create circular structure
         a = {"name": "a"}
@@ -1972,7 +1972,7 @@ class TestDeepAliasDetection:
         namespace = {"obj_a": a, "obj_b": b}
 
         # This should not hang or crash
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"obj_a"})
 
         assert "obj_a" in aliases
@@ -1980,7 +1980,7 @@ class TestDeepAliasDetection:
 
     def test_self_referential_list(self):
         """Test list that contains itself."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         lst = [1, 2]
         lst.append(lst)  # Self-reference
@@ -1988,7 +1988,7 @@ class TestDeepAliasDetection:
         namespace = {"self_ref": lst}
 
         # Should not hang
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"self_ref"})
 
         assert "self_ref" in aliases
@@ -1997,7 +1997,7 @@ class TestDeepAliasDetection:
         """Test mix of dicts, lists, DataFrames all sharing an object."""
         import pandas as pd
         import numpy as np
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         shared_arr = np.array([1, 2, 3])
         namespace = {
@@ -2008,7 +2008,7 @@ class TestDeepAliasDetection:
             "independent": {"totally": "different"},  # Use dict instead of numpy array
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"dict_var"})
 
         assert "dict_var" in aliases
@@ -2019,7 +2019,7 @@ class TestDeepAliasDetection:
 
     def test_tuple_with_mutable_contents(self):
         """Test tuples containing shared mutable objects."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         shared_list = [1, 2, 3]
         namespace = {
@@ -2028,7 +2028,7 @@ class TestDeepAliasDetection:
             "tuple_c": ([1, 2, 3], "different"),
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"tuple_a"})
 
         assert "tuple_a" in aliases
@@ -2037,7 +2037,7 @@ class TestDeepAliasDetection:
 
     def test_no_aliases_returns_just_accessed(self):
         """Test that with no aliases, only accessed vars are returned."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         namespace = {
             "x": {"data": 1},
@@ -2045,18 +2045,18 @@ class TestDeepAliasDetection:
             "z": [3, 4, 5],
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"x"})
 
         assert aliases == {"x"}
 
     def test_new_variable_included(self):
         """Test that variables not in namespace are still included."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         namespace = {"x": [1, 2, 3]}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"x", "new_var"})
 
         assert "x" in aliases
@@ -2064,11 +2064,11 @@ class TestDeepAliasDetection:
 
     def test_empty_accessed_returns_empty(self):
         """Test empty accessed set returns empty."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         namespace = {"x": [1, 2, 3], "y": [4, 5, 6]}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars(set())
 
         assert aliases == set()
@@ -2090,7 +2090,7 @@ class TestDeepAliasDetection:
         objects are temporary and their ids can be reused after garbage collection.
         """
         import pandas as pd
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         # Create two completely independent DataFrames with same structure
         df1 = pd.DataFrame({"id": [1, 2, 3], "value": [10, 20, 30]})
@@ -2098,7 +2098,7 @@ class TestDeepAliasDetection:
 
         namespace = {"df1": df1, "df2": df2}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"df1"})
 
         assert "df1" in aliases
@@ -2111,7 +2111,7 @@ class TestDeepAliasDetection:
         This ensures we don't falsely detect aliases due to memoryview id reuse.
         """
         import numpy as np
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         # Create independent arrays with same values
         arr1 = np.array([1, 2, 3, 4, 5])
@@ -2119,7 +2119,7 @@ class TestDeepAliasDetection:
 
         namespace = {"arr1": arr1, "arr2": arr2}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"arr1"})
 
         assert "arr1" in aliases
@@ -2130,14 +2130,14 @@ class TestDeepAliasDetection:
         REGRESSION TEST: Independent Series with same values must NOT be aliases.
         """
         import pandas as pd
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         s1 = pd.Series([1, 2, 3], name="data")
         s2 = pd.Series([1, 2, 3], name="data")  # Same values, different object
 
         namespace = {"s1": s1, "s2": s2}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"s1"})
 
         assert "s1" in aliases
@@ -2151,7 +2151,7 @@ class TestDeepAliasDetection:
         of id() collision (if we were tracking temporary objects) would be higher.
         """
         import pandas as pd
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         # Create many independent DataFrames
         namespace = {}
@@ -2161,7 +2161,7 @@ class TestDeepAliasDetection:
                 "value": list(range(100, 200)),
             })
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
 
         # Check that accessing df_0 only returns df_0
         aliases = checkpoint.get_aliases_for_vars({"df_0"})
@@ -2175,7 +2175,7 @@ class TestDeepAliasDetection:
         This verifies we didn't break view detection while fixing the false positives.
         """
         import numpy as np
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         base_arr = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         view1 = base_arr[2:5]   # View of base
@@ -2189,7 +2189,7 @@ class TestDeepAliasDetection:
             "independent": independent,
         }
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"view1"})
 
         assert "view1" in aliases
@@ -2202,14 +2202,14 @@ class TestDeepAliasDetection:
         REGRESSION TEST: A copied column should not be an alias.
         """
         import pandas as pd
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
 
         df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
         col_copy = df["x"].copy()  # Explicit copy
 
         namespace = {"df": df, "col_copy": col_copy}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         aliases = checkpoint.get_aliases_for_vars({"df"})
 
         assert "df" in aliases
@@ -2232,12 +2232,12 @@ class TestDeepAliasIntegration:
         - Cell 2: modifies a["b"]["f"] = 4
         - Since c["b"] is same object, c also changed -> backward mutation!
         """
-        from flowbook.kernel_support.checkpoint import Checkpoints, Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints, MemoryCheckpoint
         from flowbook.kernel_support.models import TrackingData
         from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer
         from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints, StructuralTrackingMode.OFF)
         enforcer.set_cell_order(["cell_A", "cell_B"])
 
@@ -2293,7 +2293,7 @@ class TestDeepAliasIntegration:
             "a": {"b": original_inner},
             "c": {"b": original_inner},
         }
-        pre_cp_proper = Checkpoint("_pre_cell_B_proper", original_ns, {})
+        pre_cp_proper = MemoryCheckpoint("_pre_cell_B_proper", original_ns, {})
 
         # Now the diff should detect changes to both a and c
         # because they share the inner object
@@ -2317,13 +2317,13 @@ class TestDeepAliasIntegration:
 
     def test_expand_with_deep_aliases_uses_checkpoint_index(self):
         """Verify _expand_with_deep_aliases uses the checkpoint's lazy-built index."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
         from flowbook.kernel.reproducibility_enforcer import _expand_with_deep_aliases
 
         shared = {"inner": [1, 2, 3]}
         namespace = {"var_a": {"ref": shared}, "var_b": {"ref": shared}}
 
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
 
         # Verify index is NOT built initially (lazy building)
         assert not checkpoint._alias_index_built, "Alias index should be built lazily"
@@ -2341,7 +2341,7 @@ class TestDeepAliasIntegration:
     def test_performance_precomputed_vs_runtime(self):
         """Verify that using precomputed index is efficient."""
         import time
-        from flowbook.kernel_support.checkpoint import Checkpoint
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
         from flowbook.kernel.reproducibility_enforcer import _expand_with_deep_aliases
 
         # Create a moderately large namespace
@@ -2351,7 +2351,7 @@ class TestDeepAliasIntegration:
 
         # First call includes index building
         start = time.perf_counter()
-        checkpoint = Checkpoint("test", namespace, {})
+        checkpoint = MemoryCheckpoint("test", namespace, {})
         build_time = time.perf_counter() - start
 
         # Subsequent alias lookups should be fast

@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from unittest.mock import patch
 
-from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint, MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
 
 from flowbook.kernel.reproducibility_enforcer import (

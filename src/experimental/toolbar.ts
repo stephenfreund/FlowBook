@@ -47,7 +47,7 @@ export class NotebookToolbarExtension
       });
     };
 
-    // Create buttons
+    // Create buttons (start hidden, show only for experimental_kernel)
     commands.forEach(cmdInfo => {
       const button = new ToolbarButton({
         label: cmdInfo.label,
@@ -58,11 +58,13 @@ export class NotebookToolbarExtension
         }
       });
 
+      // Start hidden
+      button.node.style.display = 'none';
       panel.toolbar.insertItem(10, `flowbook-${cmdInfo.id}-button`, button);
       buttons.push(button);
     });
 
-    // Add Copy Connection File button
+    // Add Copy Connection File button (start hidden)
     const copyConnectionButton = new ToolbarButton({
       label: 'Copy Connection',
       tooltip: 'Copy kernel connection file path to clipboard',
@@ -71,10 +73,11 @@ export class NotebookToolbarExtension
       }
     });
 
+    copyConnectionButton.node.style.display = 'none';
     panel.toolbar.insertItem(100, 'flowbook-copy-connection-button', copyConnectionButton);
     buttons.push(copyConnectionButton);
 
-    // Initial visibility update
+    // Initial visibility update when session is ready
     panel.sessionContext.ready.then(() => {
       updateButtonVisibility();
     });

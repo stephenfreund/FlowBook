@@ -1,19 +1,19 @@
 """
-Change Detector - Converts DiffResult to typed Change list.
+Change Detector - Converts MemoryCheckpointDiffResult to typed Change list.
 
-This module bridges the existing DiffResult structure (with nested dictionaries
+This module bridges the existing MemoryCheckpointDiffResult structure (with nested dictionaries
 representing diff trees) to the new typed Change hierarchy.
 
 Usage:
-    from flowbook.kernel_support.types import DiffResult
+    from flowbook.kernel_support.types import MemoryCheckpointDiffResult
     from flowbook.kernel_support.change_detector import detect_changes
 
-    diff = DiffResult(differences={'df': {'[\"price\"]': ValueComparison(...)}})
+    diff = MemoryCheckpointDiffResult(differences={'df': {'[\"price\"]': ValueComparison(...)}})
     changes = detect_changes(diff)
     # [ColumnModified(variable='df', column='price')]
 
 Design:
-    The DiffResult contains a nested structure where:
+    The MemoryCheckpointDiffResult contains a nested structure where:
     - Top-level keys are variable names
     - Values can be:
         - ValueComparison: Simple value change
@@ -30,7 +30,7 @@ Design:
 import re
 from typing import Any, Dict, List, Optional
 
-from flowbook.kernel_support.types import CompoundDiff, DiffResult, ValueComparison
+from flowbook.kernel_support.types import CompoundDiff, MemoryCheckpointDiffResult, ValueComparison
 
 from flowbook.kernel.changes import (
     Change,
@@ -45,15 +45,15 @@ from flowbook.kernel.changes import (
 )
 
 
-def detect_changes(diff: DiffResult) -> List[Change]:
+def detect_changes(diff: MemoryCheckpointDiffResult) -> List[Change]:
     """
-    Convert a DiffResult to a list of typed Change objects.
+    Convert a MemoryCheckpointDiffResult to a list of typed Change objects.
 
     This is the main entry point for converting the diff tree into
     typed changes for conflict detection.
 
     Args:
-        diff: DiffResult from namespace comparison
+        diff: MemoryCheckpointDiffResult from namespace comparison
 
     Returns:
         List of Change objects describing what changed
@@ -456,14 +456,14 @@ def _analyze_column_change(variable: str, column: str, node: Any) -> Optional[Ch
     return None
 
 
-def get_changed_variables(diff: DiffResult) -> set:
+def get_changed_variables(diff: MemoryCheckpointDiffResult) -> set:
     """
     Get all variables that have any changes.
 
     This is a quick check without parsing the full change types.
 
     Args:
-        diff: DiffResult from namespace comparison
+        diff: MemoryCheckpointDiffResult from namespace comparison
 
     Returns:
         Set of variable names that changed
@@ -471,12 +471,12 @@ def get_changed_variables(diff: DiffResult) -> set:
     return set(diff.differences.keys())
 
 
-def has_any_changes(diff: DiffResult) -> bool:
+def has_any_changes(diff: MemoryCheckpointDiffResult) -> bool:
     """
     Check if the diff contains any changes.
 
     Args:
-        diff: DiffResult from namespace comparison
+        diff: MemoryCheckpointDiffResult from namespace comparison
 
     Returns:
         True if there are any changes

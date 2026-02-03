@@ -10,7 +10,7 @@ work correctly when:
 import pytest
 import pandas as pd
 import numpy as np
-from flowbook.kernel_support.checkpoint import Checkpoints, Checkpoint
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints, MemoryCheckpoint
 from flowbook.kernel_support.diff import Diff
 
 
@@ -19,7 +19,7 @@ class TestExtensionDtypeDeepCopy:
 
     def test_string_dtype_conversion(self):
         """Test converting object strings to StringDtype during deepcopy."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         # Object dtype with strings (may be object or StringDtype depending on pandas version)
         df = pd.DataFrame({'country': ['USA', 'UK', 'FR']})
@@ -34,7 +34,7 @@ class TestExtensionDtypeDeepCopy:
 
     def test_int64_dtype_conversion(self):
         """Test converting object integers to Int64 during deepcopy."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         # Object dtype with integers (no None, which would make it float)
         df = pd.DataFrame({'numbers': pd.array([1, 2, 3], dtype=object)})
@@ -49,7 +49,7 @@ class TestExtensionDtypeDeepCopy:
 
     def test_datetime_dtype_conversion(self):
         """Test converting object timestamps to datetime64 during deepcopy."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         # Object dtype with Timestamps
         df = pd.DataFrame({
@@ -65,7 +65,7 @@ class TestExtensionDtypeDeepCopy:
 
     def test_nested_dataframe_conversion(self):
         """Test that DataFrames nested in lists also get converted."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         df = pd.DataFrame({'country': ['USA', 'UK']})
         # List of DataFrames - all should be converted
@@ -181,7 +181,7 @@ class TestExtensionDtypeCheckpointIntegration:
 
     def test_save_restore_with_extension_dtypes(self):
         """Test full save/restore cycle with extension dtypes."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         # Create DataFrame with various dtypes
         df = pd.DataFrame({
@@ -204,7 +204,7 @@ class TestExtensionDtypeCheckpointIntegration:
 
     def test_checkpoint_diff_with_extension_dtypes(self):
         """Test checkpoint diffing with extension dtypes."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         df1 = pd.DataFrame({'country': ['USA', 'UK']})
         df2 = pd.DataFrame({'country': ['USA', 'FR']})
@@ -219,13 +219,13 @@ class TestExtensionDtypeCheckpointIntegration:
         cp2 = checkpoints.get('v2')
 
         # Should not crash
-        diff = Checkpoint.diff(cp1, cp2)
+        diff = MemoryCheckpoint.diff(cp1, cp2)
         # Should show difference in country column
         assert 'df' in diff.differences
 
     def test_nested_dataframes_with_extension_dtypes(self):
         """Test nested DataFrames all get converted properly."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
 
         df = pd.DataFrame({'country': ['USA', 'UK']})
         user_ns = {'dfs': [df.copy(), df.copy(), df.copy()]}

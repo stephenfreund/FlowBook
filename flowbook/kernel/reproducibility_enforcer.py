@@ -198,11 +198,11 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
+from flowbook.kernel_support.checkpoint import Checkpoint, CheckpointDiffResult
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint, MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
-from flowbook.kernel_support.total_checkpoint import TotalCheckpoint, TotalDiffResult
-from flowbook.kernel_support.types import DiffResult, DiffNode, ValueComparison, CompoundDiff
+from flowbook.kernel_support.types import MemoryCheckpointDiffResult, DiffNode, ValueComparison, CompoundDiff
 from flowbook.util.cell_index import index_to_alpha
 
 from flowbook.kernel.models import ReproducibilityExecutionRecord, ReproducibilityResult, ReproducibilityViolation
@@ -265,14 +265,14 @@ def _expand_with_deep_aliases(
 
     Args:
         accessed_vars: Set of variable names the cell accessed (reads + writes)
-        pre_checkpoint: The pre-execution checkpoint (Checkpoint or TotalCheckpoint)
+        pre_checkpoint: The pre-execution checkpoint (Checkpoint or Checkpoint)
         log_aliases: If True, log discovered alias relationships
 
     Returns:
         Expanded set including accessed_vars plus all their deep aliases
     """
     # Use the checkpoint's precomputed deep alias index
-    # TotalCheckpoint delegates get_aliases_for_vars to its memory checkpoint
+    # Checkpoint delegates get_aliases_for_vars to its memory checkpoint
     return pre_checkpoint.get_aliases_for_vars(accessed_vars, log_aliases=log_aliases)
 
 
@@ -299,7 +299,7 @@ class ReproducibilityEnforcer:
 
     def __init__(
         self,
-        checkpoints: Checkpoints,
+        checkpoints: MemoryCheckpoints,
         structural_mode: StructuralTrackingMode = StructuralTrackingMode.WARN,
     ):
         self.checkpoints = checkpoints
@@ -366,8 +366,8 @@ class ReproducibilityEnforcer:
 
         Args:
             cell_id: ID of the cell that just executed
-            pre_checkpoint: Snapshot before execution (Checkpoint or TotalCheckpoint)
-            post_checkpoint: Snapshot after execution (Checkpoint or TotalCheckpoint)
+            pre_checkpoint: Snapshot before execution (Checkpoint or Checkpoint)
+            post_checkpoint: Snapshot after execution (Checkpoint or Checkpoint)
             tracking: TrackingData with reads/writes
             continue_on_violation: If True, compute staleness even when violation detected
             namespace: Optional user namespace for capturing structural read values
@@ -451,10 +451,10 @@ class ReproducibilityEnforcer:
                 # Note: Don't pass current cell's structural_reads - intra-cell
                 # structural reads are not backward mutations. Structural warnings
                 # for prior cells are handled in staleness computation.
-                # Extract memory checkpoints if we have TotalCheckpoints
-                _pre_mem = pre_checkpoint.memory if isinstance(pre_checkpoint, TotalCheckpoint) else pre_checkpoint
-                _post_mem = post_checkpoint.memory if isinstance(post_checkpoint, TotalCheckpoint) else post_checkpoint
-                current_diff = Checkpoint.diff(
+                # Extract memory checkpoints if we have Checkpoints
+                _pre_mem = pre_checkpoint.memory if isinstance(pre_checkpoint, Checkpoint) else pre_checkpoint
+                _post_mem = post_checkpoint.memory if isinstance(post_checkpoint, Checkpoint) else post_checkpoint
+                current_diff = MemoryCheckpoint.diff(
                     _pre_mem,
                     _post_mem,
                     use_leq=True,
@@ -494,11 +494,11 @@ class ReproducibilityEnforcer:
             _changed_file_paths = None
             if current_diff is not None:
                 # Check if we have a total_diff from backward mutation check
-                # If pre_checkpoint is TotalCheckpoint, we computed total_diff there
-                _is_total_cp = isinstance(pre_checkpoint, TotalCheckpoint)
+                # If pre_checkpoint is Checkpoint, we computed total_diff there
+                _is_total_cp = isinstance(pre_checkpoint, Checkpoint)
                 if _is_total_cp and hasattr(pre_checkpoint, 'file') and pre_checkpoint.file is not None:
                     # Re-diff files for staleness (or reuse from backward mutation)
-                    total_diff_for_staleness = TotalCheckpoint.diff(
+                    total_diff_for_staleness = Checkpoint.diff(
                         pre_checkpoint, post_checkpoint,
                         use_leq=True,
                         column_rbw=tracking.column_reads_before_writes,
@@ -509,7 +509,7 @@ class ReproducibilityEnforcer:
                         _changed_file_paths = total_diff_for_staleness.changed_file_paths
 
             # Use memory checkpoint for staleness diff
-            _staleness_cp = post_checkpoint.memory if isinstance(post_checkpoint, TotalCheckpoint) else post_checkpoint
+            _staleness_cp = post_checkpoint.memory if isinstance(post_checkpoint, Checkpoint) else post_checkpoint
 
             # Also captures structural warnings from affected cells
             with timer(key="sdc:staleness", message=f"[sdc] Staleness update for {cell_id}"):
@@ -536,7 +536,7 @@ class ReproducibilityEnforcer:
         pre_checkpoint,
         post_checkpoint,
         tracking: TrackingData,
-    ) -> Tuple[Optional[ReproducibilityViolation], DiffResult, List]:
+    ) -> Tuple[Optional[ReproducibilityViolation], MemoryCheckpointDiffResult, List]:
         """
         Check if current cell causes a backward mutation (Rule 3 violation).
 
@@ -600,13 +600,13 @@ class ReproducibilityEnforcer:
                 log(f"[bwm]   deep_aliases_added={sorted(set(expanded_sorted) - set(accessed_sorted))}")
         # ======================================================================
 
-        # Use TotalCheckpoint.diff if available (produces TotalDiffResult with file diff)
-        # Otherwise fall back to Checkpoint.diff (for plain Checkpoint objects)
-        _is_total = isinstance(pre_checkpoint, TotalCheckpoint)
+        # Use Checkpoint.diff if pre_checkpoint is combined Checkpoint (produces CheckpointDiffResult with file diff)
+        # Otherwise fall back to MemoryCheckpoint.diff (for plain MemoryCheckpoint objects)
+        _is_combined = isinstance(pre_checkpoint, Checkpoint)
 
         with timer(key="bwm:checkpoint_diff", message=f"[bwm] Checkpoint.diff (pre vs post)"):
-            if _is_total:
-                total_diff = TotalCheckpoint.diff(
+            if _is_combined:
+                total_diff = Checkpoint.diff(
                     pre_checkpoint,
                     post_checkpoint,
                     keys_to_include=keys_to_include,
@@ -618,7 +618,7 @@ class ReproducibilityEnforcer:
                 current_diff = total_diff.memory
             else:
                 total_diff = None
-                current_diff = Checkpoint.diff(
+                current_diff = MemoryCheckpoint.diff(
                     pre_checkpoint,
                     post_checkpoint,
                     keys_to_include=keys_to_include,
@@ -948,7 +948,7 @@ class ReproducibilityEnforcer:
 
             diffs_performed += 1
             with timer(key="sdc:staleness_diff", message=f"[staleness] Diff for cell {cell_id}"):
-                diff_result = Checkpoint.diff(
+                diff_result = MemoryCheckpoint.diff(
                     pre_checkpoint,
                     current_checkpoint,
                     keys_to_include=record.tracking.reads_before_writes,
@@ -1101,7 +1101,7 @@ class ReproducibilityEnforcer:
             if pre_checkpoint is None:
                 continue
 
-            diff_result = Checkpoint.diff(
+            diff_result = MemoryCheckpoint.diff(
                 pre_checkpoint,
                 current_checkpoint,
                 keys_to_include=record.tracking.reads_before_writes,
@@ -1125,7 +1125,7 @@ class ReproducibilityEnforcer:
 
 
 def _extract_column_changes(
-    diff_result: DiffResult, tracking: TrackingData
+    diff_result: MemoryCheckpointDiffResult, tracking: TrackingData
 ) -> Dict[str, List[str]]:
     """
     Extract which DataFrame columns changed values from diff tree.
@@ -1236,7 +1236,7 @@ def _get_changed_columns_from_diff_node(node: DiffNode) -> Set[str]:
     return changed_cols
 
 
-def _check_for_truncation(diff_result: DiffResult) -> List[str]:
+def _check_for_truncation(diff_result: MemoryCheckpointDiffResult) -> List[str]:
     """
     Check if truncation might cause us to miss which columns/keys changed.
 
@@ -1250,7 +1250,7 @@ def _check_for_truncation(diff_result: DiffResult) -> List[str]:
       just means we don't know ALL the changed values (but we know it changed)
 
     Args:
-        diff_result: The DiffResult to check
+        diff_result: The MemoryCheckpointDiffResult to check
 
     Returns:
         List of variable names that had truncated diffs (empty if no truncation)
@@ -1270,13 +1270,13 @@ def _check_for_truncation(diff_result: DiffResult) -> List[str]:
 
 
 def _format_diff_for_display(
-    diff_result: DiffResult, truncated_vars: List[str], max_width: int = 120
+    diff_result: MemoryCheckpointDiffResult, truncated_vars: List[str], max_width: int = 120
 ) -> str:
     """
     Format truncated diff for human-readable display.
 
     Args:
-        diff_result: The DiffResult containing differences
+        diff_result: The MemoryCheckpointDiffResult containing differences
         truncated_vars: List of variable names that were truncated
         max_width: Maximum width for pretty printing
 
@@ -1345,7 +1345,7 @@ def _truncate_value(value, max_len: int = 100) -> str:
 
 
 def _extract_change_descriptions(
-    diff_result: DiffResult,
+    diff_result: MemoryCheckpointDiffResult,
     modified_columns: Dict[str, List[str]],
 ) -> List[str]:
     """

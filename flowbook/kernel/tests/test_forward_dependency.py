@@ -19,7 +19,7 @@ Example:
 
 import pytest
 
-from flowbook.kernel_support.checkpoint import Checkpoints
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
 
 from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX, POST_CHECKPOINT_PREFIX, format_forward_dependency_message
@@ -31,7 +31,7 @@ class TestForwardDependencyBasic:
     """Basic forward dependency detection tests."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -235,7 +235,7 @@ class TestForwardDependencyColumnLevel:
     """Column-level forward dependency detection tests."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -432,7 +432,7 @@ class TestForwardDependencyWithBackwardMutation:
     """Tests for interaction between forward dependency and backward mutation."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -558,7 +558,7 @@ class TestForwardDependencyWithContinueOnViolation:
     """Tests for forward dependency with continue_on_violation parameter."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -634,7 +634,7 @@ class TestForwardDependencyViolationType:
     """Tests for violation_type field."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -734,7 +734,7 @@ class TestForwardDependencyMultipleLaterCells:
     """Tests for forward dependency with multiple later cells."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -811,7 +811,7 @@ class TestForwardDependencyStaleness:
     """Tests for staleness computation with forward dependencies."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -1202,7 +1202,7 @@ class TestForwardDependencyColumnStaleness:
     """Tests for column-level staleness with forward dependencies."""
 
     def setup_method(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )

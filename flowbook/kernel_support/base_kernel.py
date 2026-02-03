@@ -4,7 +4,7 @@ BaseFlowbookKernel - Common base class for FlowBook and Checkpoint kernels.
 Provides shared functionality:
 - DisplayHelper initialization
 - Cell ID tracking
-- Checkpointing infrastructure (memory + file via TotalCheckpoints)
+- Checkpointing infrastructure (memory + file via Checkpoints)
 - Virtual filesystem (VFS) for file I/O interception
 - Cell ID extraction from metadata
 - Pure magic detection
@@ -18,7 +18,7 @@ from ipykernel.ipkernel import IPythonKernel
 
 from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
 from flowbook.kernel_support.display_helpers import DisplayHelper
-from flowbook.kernel_support.total_checkpoint import TotalCheckpoint, TotalCheckpoints
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 from flowbook.kernel_support.virtual_fs import VirtualFileSystem
 
 
@@ -42,25 +42,24 @@ class BaseFlowbookKernel(IPythonKernel):
         # Current cell being executed
         self._cell_id: Optional[str] = None
 
-        # Virtual filesystem
+        # Virtual filesystem for file tracking
         self._vfs = VirtualFileSystem()
+        # Enable tracking-only mode by default (tracks reads/writes without snapshots)
+        self._vfs.enable_tracking_only()
+        # Full VFS mode (with file snapshots) can be enabled via environment variable
         if os.environ.get("FLOWBOOK_VIRTUAL_FS", "0") == "1":
             self._vfs.enable()
 
-        # Unified checkpointing (memory + files)
-        self._checkpoints = TotalCheckpoints()
-        if os.environ.get("FLOWBOOK_FILE_CHECKPOINTS", "0") == "1":
-            self._checkpoints.file.enable()
-            # Enable tracking-only VFS if VFS not already fully enabled
-            if not self._vfs.enabled:
-                self._vfs.enable_tracking_only()
+        # Unified checkpointing (memory + files) - always enabled
+        self._checkpoints = Checkpoints()
+        self._checkpoints.file.enable()
 
         # FS magics registration flag
         self._fs_magics_registered = False
 
     # Backward compat: expose memory checkpoints as _checkpoint
     @property
-    def _checkpoint(self) -> Checkpoints:
+    def _checkpoint(self) -> MemoryCheckpoints:
         return self._checkpoints.memory
 
     def _ensure_fs_magics(self) -> None:
@@ -156,13 +155,13 @@ class BaseFlowbookKernel(IPythonKernel):
             for line in lines
         )
 
-    def _take_checkpoint(self, checkpoint_name: str) -> TotalCheckpoint:
+    def _take_checkpoint(self, checkpoint_name: str) -> Checkpoint:
         """
         Take a snapshot of the namespace (and optionally files).
 
-        Uses TotalCheckpoints.save() to deep copy the namespace and
+        Uses Checkpoints.save() to deep copy the namespace and
         snapshot written files.
-        Returns the TotalCheckpoint object.
+        Returns the Checkpoint object.
         """
         write_paths = self._vfs.get_write_paths() if (self._vfs.enabled or self._vfs.tracking_only) else None
         total, removed = self._checkpoints.save(
@@ -178,6 +177,9 @@ class BaseFlowbookKernel(IPythonKernel):
             message = f"The object {k} (type {v}) cannot be checkpointed"
             log(message)
             self._display.display_icon_and_text("\u26a0\ufe0f", message)
+            # Remove variables that couldn't be checkpointed from the namespace
+            if k in self.shell.user_ns:
+                del self.shell.user_ns[k]
 
         return total
 

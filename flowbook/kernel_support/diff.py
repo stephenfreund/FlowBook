@@ -174,7 +174,7 @@ from flowbook.kernel_support.types import (
     ValueComparison,
     CompoundDiff,
     DiffNode,
-    DiffResult,
+    MemoryCheckpointDiffResult,
     IndexComponent,
     KeyComponent,
     AttributeComponent,
@@ -791,7 +791,7 @@ class Diff:
         a: Dict[str, Any],
         b: Dict[str, Any],
         keys_to_include: Set[str] | None = None,
-    ) -> DiffResult:
+    ) -> MemoryCheckpointDiffResult:
         """
         Compare two user namespaces.
 
@@ -801,7 +801,7 @@ class Diff:
             keys_to_include: Optional set of keys to compare (default: all keys)
 
         Returns:
-            DiffResult instance containing diff trees for variables with differences.
+            MemoryCheckpointDiffResult instance containing diff trees for variables with differences.
             The differences dict is empty if all variables are equal.
             The warnings list contains structural warnings when structural_mode is WARN.
         """
@@ -876,7 +876,7 @@ class Diff:
                 f"({len(common_vars & keys_to_include)} variables compared)")
             _profile_stats.log_summary()
 
-        return DiffResult(differences=differences, warnings=list(self._warnings))
+        return MemoryCheckpointDiffResult(differences=differences, warnings=list(self._warnings))
 
     def _log_column_timings(
         self, df_path: str, column_timings: List[Tuple[float, str, str]]

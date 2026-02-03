@@ -72,6 +72,19 @@ class FlowbookActivationManager {
           this._deactivate();
         }
       });
+
+      // Also listen for status changes in case kernel starts after ready
+      notebook.sessionContext.statusChanged.connect(() => {
+        const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
+        const currentKernelName = notebook.sessionContext.session?.kernel?.name;
+        console.log(`FlowBook Plugin: Status changed, kernel = ${currentKernelName}, isFlowbook = ${isFlowbook}`);
+
+        if (isFlowbook && !this._isActive) {
+          this._activate();
+        } else if (!isFlowbook && this._isActive) {
+          this._deactivate();
+        }
+      });
     }
   }
 

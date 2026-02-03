@@ -13,7 +13,7 @@ Tests cover:
 import pytest
 import pandas as pd
 import numpy as np
-from flowbook.kernel_support.checkpoint import Checkpoints
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 from flowbook.kernel_support.monotonicity import MonotonicityEnforcer
 from flowbook.kernel_support.models import TrackingData, MonotonicityViolation
 
@@ -23,14 +23,14 @@ class TestMonotonicityEnforcerBasics:
 
     def test_init(self):
         """MonotonicityEnforcer can be initialized."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         assert enforcer is not None
 
     def test_save_pre_state(self):
         """save_pre_state saves a checkpoint."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1, "y": 2}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
 
@@ -41,7 +41,7 @@ class TestMonotonicityEnforcerBasics:
 
     def test_check_passes_no_rbw(self):
         """Check passes when there are no RBW variables."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -58,7 +58,7 @@ class TestMonotonicityPassing:
 
     def test_rbw_var_unchanged(self):
         """Check passes when RBW variable is unchanged."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 10, "y": 20}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -74,7 +74,7 @@ class TestMonotonicityPassing:
 
     def test_multiple_rbw_vars_unchanged(self):
         """Check passes when multiple RBW variables are unchanged."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"a": 1, "b": 2, "c": 3}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -89,7 +89,7 @@ class TestMonotonicityPassing:
 
     def test_write_only_vars_can_change(self):
         """Write-only variables can change without violation."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1, "y": 2}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -111,7 +111,7 @@ class TestMonotonicityViolations:
 
     def test_rbw_var_modified(self):
         """Check fails when RBW variable is modified."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 10}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -131,7 +131,7 @@ class TestMonotonicityViolations:
 
     def test_violation_restores_state(self):
         """Violation restores pre-execution state."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 10, "y": 20}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -153,7 +153,7 @@ class TestMonotonicityViolations:
 
     def test_multiple_violations(self):
         """Multiple RBW variables can be violated."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"a": 1, "b": 2, "c": 3}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -174,7 +174,7 @@ class TestMonotonicityViolations:
 
     def test_violation_cleans_up_checkpoint(self):
         """Violation cleans up the temporary checkpoint."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -193,7 +193,7 @@ class TestMonotonicityWithDataFrames:
 
     def test_dataframe_unchanged_passes(self):
         """DataFrame that's unchanged passes check."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
         user_ns = {"df": df}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
@@ -209,7 +209,7 @@ class TestMonotonicityWithDataFrames:
 
     def test_dataframe_modified_fails(self):
         """DataFrame that's modified fails check."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({"a": [1, 2, 3]})
         user_ns = {"df": df}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
@@ -229,7 +229,7 @@ class TestMonotonicityWithDataFrames:
 
     def test_dataframe_column_level_check(self):
         """Column-level RBW allows adding columns."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({"a": [1, 2, 3]})
         user_ns = {"df": df}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
@@ -252,7 +252,7 @@ class TestMonotonicityWithDataFrames:
 
     def test_dataframe_column_modified_fails(self):
         """Modifying a read column fails check."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
         user_ns = {"df": df}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
@@ -277,7 +277,7 @@ class TestMonotonicityWithNumpy:
 
     def test_numpy_array_unchanged_passes(self):
         """Numpy array unchanged passes check."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         arr = np.array([1, 2, 3])
         user_ns = {"arr": arr.copy()}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
@@ -293,7 +293,7 @@ class TestMonotonicityWithNumpy:
 
     def test_numpy_array_modified_fails(self):
         """Numpy array modified fails check."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         arr = np.array([1, 2, 3])
         user_ns = {"arr": arr}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
@@ -316,7 +316,7 @@ class TestViolationFormatting:
 
     def test_format_diff_details_simple(self):
         """Violation details are formatted correctly."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -331,7 +331,7 @@ class TestViolationFormatting:
 
     def test_violation_error_summary(self):
         """Violation has proper error summary."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"a": 1, "b": 2}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -351,7 +351,7 @@ class TestMonotonicityEdgeCases:
 
     def test_empty_namespace(self):
         """Works with empty namespace."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -362,7 +362,7 @@ class TestMonotonicityEdgeCases:
 
     def test_no_writes(self):
         """Works when there are no writes."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -373,7 +373,7 @@ class TestMonotonicityEdgeCases:
 
     def test_none_value(self):
         """Works with None values."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": None}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -384,7 +384,7 @@ class TestMonotonicityEdgeCases:
 
     def test_complex_nested_structure(self):
         """Works with complex nested structures."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {
             "data": {
                 "config": {"a": 1, "b": 2},
@@ -400,7 +400,7 @@ class TestMonotonicityEdgeCases:
 
     def test_nested_structure_modified(self):
         """Detects modification of nested structure."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"data": {"x": 1}}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -414,7 +414,7 @@ class TestMonotonicityEdgeCases:
 
     def test_multiple_cells(self):
         """Works across multiple cell executions."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1}
 
         # Cell 1
@@ -438,7 +438,7 @@ class TestMonotonicityFloatTolerance:
 
     def test_float_within_tolerance_passes(self):
         """Floats within tolerance pass check."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1.0}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")
@@ -453,7 +453,7 @@ class TestMonotonicityFloatTolerance:
 
     def test_float_outside_tolerance_fails(self):
         """Floats outside tolerance fail check."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1.0}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
         enforcer.save_pre_state("test")

@@ -13,7 +13,7 @@ import pandas as pd
 import numpy as np
 from unittest.mock import Mock, MagicMock, patch, AsyncMock
 
-from flowbook.kernel_support.checkpoint import Checkpoints
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 from flowbook.kernel_support.tracking import TrackingDict
 from flowbook.kernel_support.monotonicity import MonotonicityEnforcer
 from flowbook.kernel_support.models import (
@@ -100,7 +100,7 @@ class TestMonotonicityEnforcementFlow:
 
     def test_monotonicity_pass_flow(self):
         """Test full monotonicity flow when check passes."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 10, "y": 20}
 
         # Save pre-state
@@ -122,7 +122,7 @@ class TestMonotonicityEnforcementFlow:
 
     def test_monotonicity_fail_flow(self):
         """Test full monotonicity flow when check fails."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"x": 10}
 
         # Save pre-state
@@ -148,7 +148,7 @@ class TestMonotonicityEnforcementFlow:
 
     def test_monotonicity_with_column_tracking(self):
         """Test monotonicity with column-level tracking."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
         user_ns = {"df": df.copy()}
 
@@ -359,7 +359,7 @@ class TestCompleteExecutionScenarios:
 
     def test_scenario_monotonicity_violation_in_loop(self):
         """Simulate monotonicity violation in accumulation loop."""
-        checkpoints = Checkpoints()
+        checkpoints = MemoryCheckpoints()
         user_ns = {"total": 0, "items": [1, 2, 3, 4, 5]}
 
         # Save pre-state

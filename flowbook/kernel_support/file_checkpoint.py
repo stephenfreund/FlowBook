@@ -42,7 +42,7 @@ class FileDiffEntry:
 
 
 @dataclass
-class FileDiffResult:
+class FileCheckpointDiffResult:
     """Result of diffing two file checkpoints."""
     added: List[FileDiffEntry] = field(default_factory=list)
     removed: List[FileDiffEntry] = field(default_factory=list)
@@ -201,7 +201,7 @@ class FileCheckpoints:
                 os.remove(deleted_path)
 
     @staticmethod
-    def diff(a: FileCheckpoint, b: FileCheckpoint) -> FileDiffResult:
+    def diff(a: FileCheckpoint, b: FileCheckpoint) -> FileCheckpointDiffResult:
         """
         Diff two file checkpoints.
 
@@ -210,9 +210,9 @@ class FileCheckpoints:
             b: Second (later) checkpoint
 
         Returns:
-            FileDiffResult with added, removed, and modified entries
+            FileCheckpointDiffResult with added, removed, and modified entries
         """
-        result = FileDiffResult()
+        result = FileCheckpointDiffResult()
         all_paths = set(a.files.keys()) | set(b.files.keys())
 
         for path in sorted(all_paths):

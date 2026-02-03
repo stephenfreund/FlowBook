@@ -15,7 +15,7 @@ from flowbook.kernel_support.opaque import (
 )
 from flowbook.kernel_support.deepcopy import deepcopy as flowbook_deepcopy
 from flowbook.kernel_support.deepcopyable import check_deepcopyable
-from flowbook.kernel_support.checkpoint import _collect_reachable_ids
+from flowbook.kernel_support.memory_checkpoint import _collect_reachable_ids
 
 
 @pytest.fixture(autouse=True)

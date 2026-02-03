@@ -4,7 +4,7 @@ Shared pytest fixtures for SDC kernel tests.
 
 import pytest
 
-from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint, MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
 
 from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX
@@ -48,7 +48,7 @@ class ReproducibilityTestHelper:
     """
 
     def __init__(self):
-        self.checkpoints = Checkpoints(
+        self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
@@ -62,12 +62,12 @@ class ReproducibilityTestHelper:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def make_post_checkpoint(self, name: str, namespace: dict) -> Checkpoint:
+    def make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
         """Create and return a post-checkpoint."""
         self.checkpoints.save(name, namespace, max_size_mb=None)
         return self.checkpoints.saved[name]
 
-    def get_pre_checkpoint(self, cell_id: str) -> Checkpoint:
+    def get_pre_checkpoint(self, cell_id: str) -> MemoryCheckpoint:
         """Get the pre-checkpoint for a cell."""
         return self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"]
 

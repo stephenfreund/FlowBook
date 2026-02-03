@@ -97,27 +97,27 @@ class TestCheckpointHandlers:
     def test_handle_checkpoint_compare(self, handlers, mock_kernel):
         """Test checkpoint compare handler."""
         # Setup mocks
-        from flowbook.kernel_support.checkpoint import Checkpoint
-        from flowbook.kernel_support.types import DiffResult
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
+        from flowbook.kernel_support.types import MemoryCheckpointDiffResult
 
-        cp1 = Checkpoint("cp1", {'x': 1}, {})
-        cp2 = Checkpoint("cp2", {'x': 2}, {})
+        cp1 = MemoryCheckpoint("cp1", {'x': 1}, {})
+        cp2 = MemoryCheckpoint("cp2", {'x': 2}, {})
         mock_kernel._checkpoint.get.side_effect = [cp1, cp2]
 
         req = CheckpointCompareRequest(name1="cp1", name2="cp2")
         response = handlers.handle_checkpoint_compare(req)
 
         assert response.status == "ok"
-        assert isinstance(response.diff, DiffResult)
+        assert isinstance(response.diff, MemoryCheckpointDiffResult)
 
     def test_handle_checkpoint_compare_with_keys_to_include(self, handlers, mock_kernel):
         """Test checkpoint compare handler with keys_to_include parameter."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
-        from flowbook.kernel_support.types import DiffResult
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
+        from flowbook.kernel_support.types import MemoryCheckpointDiffResult
 
         # Create checkpoints with multiple variables, some different
-        cp1 = Checkpoint("cp1", {'x': 1, 'y': 2, 'z': 3}, {})
-        cp2 = Checkpoint("cp2", {'x': 999, 'y': 2, 'z': 3}, {})
+        cp1 = MemoryCheckpoint("cp1", {'x': 1, 'y': 2, 'z': 3}, {})
+        cp2 = MemoryCheckpoint("cp2", {'x': 999, 'y': 2, 'z': 3}, {})
         mock_kernel._checkpoint.get.side_effect = [cp1, cp2]
 
         # Compare only 'y' and 'z' (which are the same)
@@ -129,18 +129,18 @@ class TestCheckpointHandlers:
         response = handlers.handle_checkpoint_compare(req)
 
         assert response.status == "ok"
-        assert isinstance(response.diff, DiffResult)
+        assert isinstance(response.diff, MemoryCheckpointDiffResult)
         # Should have no differences since y and z are the same
         assert len(response.diff.differences) == 0
 
     def test_handle_checkpoint_compare_with_keys_showing_difference(self, handlers, mock_kernel):
         """Test that keys_to_include properly filters to show only requested differences."""
-        from flowbook.kernel_support.checkpoint import Checkpoint
-        from flowbook.kernel_support.types import DiffResult
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint
+        from flowbook.kernel_support.types import MemoryCheckpointDiffResult
 
         # Create checkpoints with multiple variables, some different
-        cp1 = Checkpoint("cp1", {'x': 1, 'y': 2, 'z': 3}, {})
-        cp2 = Checkpoint("cp2", {'x': 999, 'y': 999, 'z': 3}, {})
+        cp1 = MemoryCheckpoint("cp1", {'x': 1, 'y': 2, 'z': 3}, {})
+        cp2 = MemoryCheckpoint("cp2", {'x': 999, 'y': 999, 'z': 3}, {})
         mock_kernel._checkpoint.get.side_effect = [cp1, cp2]
 
         # Compare only 'x' (which is different)
@@ -152,7 +152,7 @@ class TestCheckpointHandlers:
         response = handlers.handle_checkpoint_compare(req)
 
         assert response.status == "ok"
-        assert isinstance(response.diff, DiffResult)
+        assert isinstance(response.diff, MemoryCheckpointDiffResult)
         # Should have difference in 'x', but not 'y' (even though it's different)
         assert 'x' in response.diff.differences
         assert 'y' not in response.diff.differences
