@@ -11,7 +11,7 @@ import { indexToAlpha } from '../cellindexutils';
 interface IReproducibilityMetadataDisplayProps {
   metadata: IReproducibilityMetadata | null;
   cellId: string | null;
-  currentCellOrder: string[];  // Current cell order from notebook (not historical)
+  currentCellOrder: string[]; // Current cell order from notebook (not historical)
 }
 
 /**
@@ -69,7 +69,9 @@ function flattenColumnTracking(
   return result;
 }
 
-const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayProps> = ({ metadata, cellId, currentCellOrder }) => {
+const ReproducibilityMetadataDisplay: React.FC<
+  IReproducibilityMetadataDisplayProps
+> = ({ metadata, cellId, currentCellOrder }) => {
   if (!metadata) {
     return (
       <div className="flowbook-metadata-empty">
@@ -87,11 +89,15 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
       {/* Cell ID Header */}
       {cellId && (
         <>
-          <div className="flowbook-metadata-header">Cell: {cellIdToReference(cellId, currentCellOrder)}</div>
+          <div className="flowbook-metadata-header">
+            Cell: {cellIdToReference(cellId, currentCellOrder)}
+          </div>
           <div className="flowbook-metadata-section">
             <div className="flowbook-metadata-item">
               <span style={{ fontSize: '0.85em', color: '#666' }}>Id: </span>
-              <code style={{ fontSize: '0.85em', color: '#666' }}>{cellId}</code>
+              <code style={{ fontSize: '0.85em', color: '#666' }}>
+                {cellId}
+              </code>
             </div>
           </div>
           <div className="flowbook-metadata-divider" />
@@ -116,13 +122,21 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
               <strong>Timing:</strong>
               <ul className="flowbook-timing-list">
                 {metadata.run_duration_ms !== undefined && (
-                  <li>Run: <code>{metadata.run_duration_ms.toFixed(0)} ms</code></li>
+                  <li>
+                    Run: <code>{metadata.run_duration_ms.toFixed(0)} ms</code>
+                  </li>
                 )}
                 {metadata.state_duration_ms !== undefined && (
-                  <li>State: <code>{metadata.state_duration_ms.toFixed(0)} ms</code></li>
+                  <li>
+                    State:{' '}
+                    <code>{metadata.state_duration_ms.toFixed(0)} ms</code>
+                  </li>
                 )}
                 {metadata.check_duration_ms !== undefined && (
-                  <li>Check: <code>{metadata.check_duration_ms.toFixed(0)} ms</code></li>
+                  <li>
+                    Check:{' '}
+                    <code>{metadata.check_duration_ms.toFixed(0)} ms</code>
+                  </li>
                 )}
               </ul>
             </div>
@@ -148,7 +162,11 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
             );
             return flatReads.length > 0 ? (
               <ul className="flowbook-variable-list">
-                {flatReads.map((v, i) => <li key={i}><code>{v}</code></li>)}
+                {flatReads.map((v, i) => (
+                  <li key={i}>
+                    <code>{v}</code>
+                  </li>
+                ))}
               </ul>
             ) : (
               <span className="flowbook-none"> None</span>
@@ -158,23 +176,29 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
       </div>
 
       {/* Structural Reads */}
-      {metadata.structural_reads && Object.keys(metadata.structural_reads).length > 0 && (
-        <>
-          <div className="flowbook-metadata-divider" />
-          <div className="flowbook-metadata-section">
-            <div className="flowbook-metadata-item">
-              <strong>Structural Reads:</strong>
-              <ul className="flowbook-variable-list flowbook-structural">
-                {Object.entries(metadata.structural_reads).flatMap(([varName, attrs]) =>
-                  attrs.map((attr, i) => (
-                    <li key={`${varName}.${attr}`}><code>{varName}.{attr}</code></li>
-                  ))
-                )}
-              </ul>
+      {metadata.structural_reads &&
+        Object.keys(metadata.structural_reads).length > 0 && (
+          <>
+            <div className="flowbook-metadata-divider" />
+            <div className="flowbook-metadata-section">
+              <div className="flowbook-metadata-item">
+                <strong>Structural Reads:</strong>
+                <ul className="flowbook-variable-list flowbook-structural">
+                  {Object.entries(metadata.structural_reads).flatMap(
+                    ([varName, attrs]) =>
+                      attrs.map((attr, i) => (
+                        <li key={`${varName}.${attr}`}>
+                          <code>
+                            {varName}.{attr}
+                          </code>
+                        </li>
+                      ))
+                  )}
+                </ul>
+              </div>
             </div>
-          </div>
-        </>
-      )}
+          </>
+        )}
 
       {/* Writes */}
       <div className="flowbook-metadata-divider" />
@@ -194,7 +218,11 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
             );
             return flatWrites.length > 0 ? (
               <ul className="flowbook-variable-list">
-                {flatWrites.map((v, i) => <li key={i}><code>{v}</code></li>)}
+                {flatWrites.map((v, i) => (
+                  <li key={i}>
+                    <code>{v}</code>
+                  </li>
+                ))}
               </ul>
             ) : (
               <span className="flowbook-none"> None</span>
@@ -211,7 +239,11 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
             <div className="flowbook-metadata-item">
               <strong>Files Read:</strong>
               <ul className="flowbook-variable-list">
-                {metadata.file_reads.map((f, i) => <li key={i}><code>{f}</code></li>)}
+                {metadata.file_reads.map((f, i) => (
+                  <li key={i}>
+                    <code>{f}</code>
+                  </li>
+                ))}
               </ul>
             </div>
           </div>
@@ -226,7 +258,11 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
             <div className="flowbook-metadata-item">
               <strong>Files Written:</strong>
               <ul className="flowbook-variable-list">
-                {metadata.file_writes.map((f, i) => <li key={i}><code>{f}</code></li>)}
+                {metadata.file_writes.map((f, i) => (
+                  <li key={i}>
+                    <code>{f}</code>
+                  </li>
+                ))}
               </ul>
             </div>
           </div>
@@ -245,18 +281,24 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
           {},
           metadata.column_changed
         );
-        return flatChanged.length > 0 && (
-          <>
-            <div className="flowbook-metadata-divider" />
-            <div className="flowbook-metadata-section">
-              <div className="flowbook-metadata-item">
-                <strong>Changed:</strong>
-                <ul className="flowbook-variable-list flowbook-changed">
-                  {flatChanged.map((v, i) => <li key={i}><code>{v}</code></li>)}
-                </ul>
+        return (
+          flatChanged.length > 0 && (
+            <>
+              <div className="flowbook-metadata-divider" />
+              <div className="flowbook-metadata-section">
+                <div className="flowbook-metadata-item">
+                  <strong>Changed:</strong>
+                  <ul className="flowbook-variable-list flowbook-changed">
+                    {flatChanged.map((v, i) => (
+                      <li key={i}>
+                        <code>{v}</code>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               </div>
-            </div>
-          </>
+            </>
+          )
         );
       })()}
 
@@ -269,7 +311,9 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
               <strong>Stale Cells:</strong>
               <ul className="flowbook-cell-list flowbook-stale">
                 {metadata.stale_cells.map((id, i) => (
-                  <li key={i}><code>{cellIdToReference(id, currentCellOrder)}</code></li>
+                  <li key={i}>
+                    <code>{cellIdToReference(id, currentCellOrder)}</code>
+                  </li>
                 ))}
               </ul>
             </div>
@@ -278,36 +322,41 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
       )}
 
       {/* Structural Warnings */}
-      {metadata.structural_warnings && metadata.structural_warnings.length > 0 && (
-        <>
-          <div className="flowbook-metadata-divider" />
-          <div className="flowbook-metadata-section flowbook-warning-section">
-            <div className="flowbook-warning-header">Structural Warnings</div>
-            <div className="flowbook-warning-content">
-              <ul className="flowbook-warning-list">
-                {metadata.structural_warnings.map((warning, i) => (
-                  <li key={i}>{warning}</li>
-                ))}
-              </ul>
+      {metadata.structural_warnings &&
+        metadata.structural_warnings.length > 0 && (
+          <>
+            <div className="flowbook-metadata-divider" />
+            <div className="flowbook-metadata-section flowbook-warning-section">
+              <div className="flowbook-warning-header">Structural Warnings</div>
+              <div className="flowbook-warning-content">
+                <ul className="flowbook-warning-list">
+                  {metadata.structural_warnings.map((warning, i) => (
+                    <li key={i}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
             </div>
-          </div>
-        </>
-      )}
+          </>
+        )}
 
       {/* Violation */}
       {hasViolation && metadata.violation && (
         <>
           <div className="flowbook-metadata-divider" />
-          <div className={`flowbook-metadata-section ${
-            metadata.violation.violation_type === 'forward_dependency'
-              ? 'flowbook-forward-dep-section'
-              : 'flowbook-violation-section'
-          }`}>
-            <div className={
+          <div
+            className={`flowbook-metadata-section ${
               metadata.violation.violation_type === 'forward_dependency'
-                ? 'flowbook-forward-dep-header'
-                : 'flowbook-violation-header'
-            }>
+                ? 'flowbook-forward-dep-section'
+                : 'flowbook-violation-section'
+            }`}
+          >
+            <div
+              className={
+                metadata.violation.violation_type === 'forward_dependency'
+                  ? 'flowbook-forward-dep-header'
+                  : 'flowbook-violation-header'
+              }
+            >
               {metadata.violation.violation_type === 'forward_dependency'
                 ? 'Forward Dependency'
                 : 'Reproducibility Violation'}
@@ -315,9 +364,32 @@ const ReproducibilityMetadataDisplay: React.FC<IReproducibilityMetadataDisplayPr
             <div className="flowbook-violation-content">
               <p>{metadata.violation.message}</p>
               <div className="flowbook-violation-details">
-                <strong>{metadata.violation.violation_type === 'forward_dependency' ? 'Writing Cell:' : 'Mutating Cell:'}</strong> <code>{cellIdToReference(metadata.violation.mutating_cell, currentCellOrder)}</code><br />
-                <strong>{metadata.violation.violation_type === 'forward_dependency' ? 'Reading Cell:' : 'Affected Cell:'}</strong> <code>{cellIdToReference(metadata.violation.affected_cell, currentCellOrder)}</code><br />
-                <strong>Variables:</strong> {metadata.violation.variables.join(', ')}
+                <strong>
+                  {metadata.violation.violation_type === 'forward_dependency'
+                    ? 'Writing Cell:'
+                    : 'Mutating Cell:'}
+                </strong>{' '}
+                <code>
+                  {cellIdToReference(
+                    metadata.violation.mutating_cell,
+                    currentCellOrder
+                  )}
+                </code>
+                <br />
+                <strong>
+                  {metadata.violation.violation_type === 'forward_dependency'
+                    ? 'Reading Cell:'
+                    : 'Affected Cell:'}
+                </strong>{' '}
+                <code>
+                  {cellIdToReference(
+                    metadata.violation.affected_cell,
+                    currentCellOrder
+                  )}
+                </code>
+                <br />
+                <strong>Variables:</strong>{' '}
+                {metadata.violation.variables.join(', ')}
               </div>
             </div>
           </div>
@@ -353,7 +425,11 @@ export class ReproducibilityMetadataPanel extends Widget {
     );
   }
 
-  public updateMetadata(metadata: IReproducibilityMetadata | null, cellId: string | null, currentCellOrder: string[]): void {
+  public updateMetadata(
+    metadata: IReproducibilityMetadata | null,
+    cellId: string | null,
+    currentCellOrder: string[]
+  ): void {
     this._metadata = metadata;
     this._cellId = cellId;
     this._currentCellOrder = currentCellOrder;

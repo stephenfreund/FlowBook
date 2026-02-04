@@ -130,6 +130,7 @@ src/
 ```
 
 **Plugin Activation**:
+
 - `flowbook:plugin` - Activates UI only when kernel is `flowbook_kernel`
 - `flowbook:experimental` - Activates UI only when kernel is `experimental_kernel`
 
@@ -163,12 +164,14 @@ The primary kernel with always-on reproducibility enforcement:
 - `models.py` - `ReproducibilityMetadata`, `ReproducibilityViolation`, `ReproducibilityResult` data classes
 
 **Features** (always enabled):
+
 - Variable tracking for all executions
 - Staleness computation (which cells need re-execution)
 - Backward mutation detection
 - Automatic rollback on reproducibility violations
 
 **Metadata Format** (sent via `display_data` output):
+
 ```python
 {
   "flowbook": {
@@ -197,6 +200,7 @@ Full-featured kernel extending IPython with advanced features:
 - `flowbook_pdb.py` - Debugger integration
 
 **Features** (all optional, toggled via magic commands):
+
 - Scalene profiling for CPU/memory analysis
 - Checkpointing for save/restore kernel state
 - Variable tracking for read-before-write analysis
@@ -251,6 +255,7 @@ All notebooks entering the system (via CLI or server) are automatically normaliz
 - **Source normalization**: Cell sources are converted from list to string format
 
 This normalization happens transparently at entry points:
+
 - **CLI**: `load_notebook()` in `flowbook/cli/helpers.py`
 - **Server**: `FlowbookCommandHandler.post()` in `flowbook/server/handlers.py`
 - **Core function**: `normalize_notebook()` in `flowbook/util/cell_ids.py`
@@ -307,19 +312,23 @@ This normalization happens transparently at entry points:
 ### Modifying Kernel Behavior
 
 **FlowBook Kernel** (reproducibility):
+
 - Kernel spec: `flowbook/kernel/kernelspec/`
 - Main kernel class: `flowbook/kernel/flowbook_kernel.py`
 - Reproducibility logic: `flowbook/kernel/reproducibility_enforcer.py`
 
 **Experimental Kernel** (AI commands, profiling):
+
 - Kernel spec: `flowbook/kernel_support/kernelspec/`
 - Main kernel class: `flowbook/kernel_support/experimental_kernel.py`
 
 **Checkpoint Kernel** (benchmarking):
+
 - Kernel spec: `flowbook/checkpoint_kernel/kernelspec/`
 - Main kernel class: `flowbook/checkpoint_kernel/checkpoint_kernel.py`
 
 **Frontend**:
+
 - Shared kernel utilities: `src/kernel.ts`
 - Kernel detection: `src/shared/kerneldetection.ts`
 

@@ -3,7 +3,7 @@
  */
 
 import { requestAPI } from './handler';
-import { CommandResult, ExecuteCommandRequest } from './experimental/types';
+import { ICommandResult, IExecuteCommandRequest } from './experimental/types';
 
 /**
  * FlowBook API client for server communication
@@ -13,10 +13,10 @@ export class FlowbookAPI {
    * Execute a command on the server
    */
   static async executeCommand(
-    request: ExecuteCommandRequest
-  ): Promise<CommandResult> {
+    request: IExecuteCommandRequest
+  ): Promise<ICommandResult> {
     try {
-      const result = await requestAPI<CommandResult>('execute', {
+      const result = await requestAPI<ICommandResult>('execute', {
         method: 'POST',
         body: JSON.stringify(request)
       });

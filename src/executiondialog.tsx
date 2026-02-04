@@ -47,19 +47,19 @@ const DialogContent: React.FC<IDialogContentProps> = ({
   onOkClick
 }) => {
   return (
-    <div className='flowbook-execution-dialog-content'>
-      <div className='flowbook-execution-dialog-header'>
-        <span className='flowbook-execution-dialog-title'>
+    <div className="flowbook-execution-dialog-content">
+      <div className="flowbook-execution-dialog-header">
+        <span className="flowbook-execution-dialog-title">
           Executing: {commandLabel}
         </span>
       </div>
-      <div className='flowbook-execution-dialog-body'>
+      <div className="flowbook-execution-dialog-body">
         <MessageDisplay segments={segments} />
       </div>
-      <div className='flowbook-execution-dialog-footer'>
+      <div className="flowbook-execution-dialog-footer">
         {state.isComplete && (
           <button
-            className='jp-Dialog-button jp-mod-accept'
+            className="jp-Dialog-button jp-mod-accept"
             onClick={onOkClick}
           >
             OK
@@ -118,7 +118,7 @@ export class CommandExecutionDialog extends Widget {
     this._currentSegment = null;
 
     // Return a promise that resolves when SSE connection is open
-    return new Promise<void>((resolve) => {
+    return new Promise<void>(resolve => {
       this._connectionResolve = resolve;
       this.connectToStream();
     });
@@ -200,7 +200,10 @@ export class CommandExecutionDialog extends Widget {
           const message: IMessage = JSON.parse(event.data);
           this.handleMessage(message);
         } catch (error) {
-          console.error('[CommandExecutionDialog] Error parsing message:', error);
+          console.error(
+            '[CommandExecutionDialog] Error parsing message:',
+            error
+          );
         }
       });
 
@@ -209,7 +212,10 @@ export class CommandExecutionDialog extends Widget {
         // Don't reconnect - dialog is transient
       });
     } catch (error) {
-      console.error('[CommandExecutionDialog] Error connecting to stream:', error);
+      console.error(
+        '[CommandExecutionDialog] Error connecting to stream:',
+        error
+      );
     }
   }
 
@@ -228,7 +234,7 @@ export class CommandExecutionDialog extends Widget {
    */
   private handleMessage(message: IMessage): void {
     switch (message.type) {
-      case MessageType.APPEND:
+      case MessageType.APPEND: {
         // Create a new segment with the content and metadata
         const segment: IMessageSegment = {
           content: message.content,
@@ -253,6 +259,7 @@ export class CommandExecutionDialog extends Widget {
         }
         this.render();
         break;
+      }
 
       case MessageType.NEWLINE:
         // Finalize current segment and add newline
@@ -280,10 +287,10 @@ export class CommandExecutionDialog extends Widget {
 
         this.render();
 
-          // Auto-close after 500ms on success (COMMENTED OUT FOR DEBUGGING)
-          this._autoCloseTimer = window.setTimeout(() => {
-            this.close();
-          }, 500);
+        // Auto-close after 500ms on success (COMMENTED OUT FOR DEBUGGING)
+        this._autoCloseTimer = window.setTimeout(() => {
+          this.close();
+        }, 500);
         break;
 
       case MessageType.CLEAR:
@@ -293,7 +300,10 @@ export class CommandExecutionDialog extends Widget {
         break;
 
       default:
-        console.warn('[CommandExecutionDialog] Unknown message type:', message.type);
+        console.warn(
+          '[CommandExecutionDialog] Unknown message type:',
+          message.type
+        );
     }
   }
 

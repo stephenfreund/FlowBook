@@ -18,12 +18,12 @@
 /* Cell highlighting based on Ferret metadata */
 .jp-Cell.flowbook-cell-warning {
   border-left: 4px solid #f5f543;
-  background-color: rgba(245, 245, 67, 0.05);
+  background-color: rgb(245 245 67 / 5%);
 }
 
 .jp-Cell.flowbook-cell-danger {
   border-left: 4px solid #f14c4c;
-  background-color: rgba(241, 76, 76, 0.05);
+  background-color: rgb(241 76 76 / 5%);
 }
 
 /* Ferret Metadata Panel Styles */
@@ -81,7 +81,7 @@
 }
 
 .flowbook-metadata-list {
-  margin: 8px 0 0 0;
+  margin: 8px 0 0;
   padding-left: 20px;
   list-style-type: disc;
 }
@@ -113,7 +113,7 @@
 }
 
 .flowbook-metadata-profile-output {
-  margin: 8px 0 0 0;
+  margin: 8px 0 0;
   padding: 12px;
   background-color: var(--jp-layout-color0);
   border: 1px solid var(--jp-border-color2);
@@ -121,8 +121,7 @@
   font-family: var(--jp-code-font-family);
   font-size: var(--jp-code-font-size);
   line-height: 1.4;
-  overflow-x: auto;
-  overflow-y: auto;
+  overflow: auto auto;
   max-height: 400px;
   white-space: pre;
   color: var(--jp-content-font-color1);
@@ -191,7 +190,7 @@
 }
 
 .flowbook-metadata-optimization-step-descriptions ul {
-  margin: 4px 0 0 0;
+  margin: 4px 0 0;
   padding-left: 20px;
   list-style-type: disc;
 }
@@ -231,14 +230,15 @@
   margin-bottom: 15px;
   padding: 10px;
   border-radius: 8px;
-  animation: fadeIn 0.3s ease-in;
+  animation: fade-in 0.3s ease-in;
 }
 
-@keyframes fadeIn {
+@keyframes fade-in {
   from {
     opacity: 0;
     transform: translateY(10px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);
@@ -311,13 +311,13 @@
   transition: background-color 0.2s;
 }
 
-.chat-send-button:hover:not(:disabled) {
-  background-color: var(--jp-brand-color0);
-}
-
 .chat-send-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.chat-send-button:hover:not(:disabled) {
+  background-color: var(--jp-brand-color0);
 }
 
 /* Scrollbar styling */
@@ -348,7 +348,7 @@
   background-color: var(--jp-layout-color1);
 
   /* ANSI color mappings */
-  --flowbook-color-black: #000000;
+  --flowbook-color-black: #000;
   --flowbook-color-red: #cd3131;
   --flowbook-color-green: #0dbc79;
   --flowbook-color-yellow: #e5e510;
@@ -356,7 +356,7 @@
   --flowbook-color-magenta: #bc3fbc;
   --flowbook-color-cyan: #11a8cd;
   --flowbook-color-white: #e5e5e5;
-  --flowbook-color-bright-black: #666666;
+  --flowbook-color-bright-black: #666;
   --flowbook-color-bright-red: #f14c4c;
   --flowbook-color-bright-green: #23d18b;
   --flowbook-color-bright-yellow: #f5f543;
@@ -368,8 +368,7 @@
 
 .flowbook-message-display {
   flex: 1;
-  overflow-y: auto;
-  overflow-x: auto;
+  overflow: auto auto;
   height: 100%;
 }
 
@@ -506,14 +505,14 @@
   transition: background-color 0.2s;
 }
 
-.flowbook-unittest-btn-add:hover,
-.flowbook-unittest-btn-generate:hover:not(:disabled) {
-  background: var(--jp-layout-color3);
-}
-
 .flowbook-unittest-btn-generate:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.flowbook-unittest-btn-add:hover,
+.flowbook-unittest-btn-generate:hover:not(:disabled) {
+  background: var(--jp-layout-color3);
 }
 
 .flowbook-unittest-list {
@@ -629,11 +628,13 @@
   font-size: 0.9em;
 }
 
+/* stylelint-disable-next-line selector-class-pattern */
 .flowbook-code-editor-wrapper .CodeMirror {
   height: auto;
   min-height: 100px;
 }
 
+/* stylelint-disable-next-line selector-class-pattern */
 .flowbook-code-editor-wrapper .CodeMirror-scroll {
   min-height: 100px;
 }
@@ -643,11 +644,8 @@
 /* Modal overlay backdrop */
 .flowbook-execution-dialog-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(0, 0, 0, 0.5);
+  inset: 0;
+  background-color: rgb(0 0 0 / 50%);
   z-index: 10000;
   display: flex;
   align-items: center;
@@ -659,7 +657,7 @@
   background-color: var(--jp-layout-color1);
   border: 1px solid var(--jp-border-color1);
   border-radius: 4px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 30%);
   width: 90vw;
   max-width: 1400px;
   max-height: 80vh;
@@ -667,7 +665,7 @@
   flex-direction: column;
 
   /* Inherit ANSI color variables from message panel */
-  --flowbook-color-black: #000000;
+  --flowbook-color-black: #000;
   --flowbook-color-red: #cd3131;
   --flowbook-color-green: #0dbc79;
   --flowbook-color-yellow: #e5e510;
@@ -675,7 +673,7 @@
   --flowbook-color-magenta: #bc3fbc;
   --flowbook-color-cyan: #11a8cd;
   --flowbook-color-white: #e5e5e5;
-  --flowbook-color-bright-black: #666666;
+  --flowbook-color-bright-black: #666;
   --flowbook-color-bright-red: #f14c4c;
   --flowbook-color-bright-green: #23d18b;
   --flowbook-color-bright-yellow: #f5f543;
@@ -720,8 +718,7 @@
 
 .flowbook-execution-dialog-body .flowbook-message-display {
   flex: 1;
-  overflow-y: auto;
-  overflow-x: auto;
+  overflow: auto auto;
   height: 100%;
 }
 
@@ -783,16 +780,19 @@
   height: 8px;
 }
 
-.flowbook-execution-dialog-body .flowbook-message-display::-webkit-scrollbar-track {
+.flowbook-execution-dialog-body
+  .flowbook-message-display::-webkit-scrollbar-track {
   background: var(--jp-layout-color1);
 }
 
-.flowbook-execution-dialog-body .flowbook-message-display::-webkit-scrollbar-thumb {
+.flowbook-execution-dialog-body
+  .flowbook-message-display::-webkit-scrollbar-thumb {
   background: var(--jp-border-color2);
   border-radius: 4px;
 }
 
-.flowbook-execution-dialog-body .flowbook-message-display::-webkit-scrollbar-thumb:hover {
+.flowbook-execution-dialog-body
+  .flowbook-message-display::-webkit-scrollbar-thumb:hover {
   background: var(--jp-border-color3);
 }
 
@@ -803,69 +803,17 @@
 /* Stale cell highlighting */
 .jp-Cell.flowbook-cell-stale {
   border-left: 4px solid #ffc107;
-  background-color: rgba(255, 193, 7, 0.12);
+  background-color: rgb(255 193 7 / 12%);
 }
 
 .jp-Cell.flowbook-cell-stale .jp-InputArea-editor {
-  background-color: rgba(255, 193, 7, 0.08);
+  background-color: rgb(255 193 7 / 8%);
 }
 
-/* FlowBook Metadata Panel Styles */
-
-.flowbook-metadata-panel {
-  display: flex;
-  flex-direction: column;
-  min-width: 250px;
-  height: 100%;
-  background-color: var(--jp-layout-color1);
-}
-
-.flowbook-metadata-content {
-  padding: 16px;
-  font-family: var(--jp-ui-font-family);
-  font-size: var(--jp-ui-font-size1);
-  color: var(--jp-ui-font-color1);
-  overflow-y: auto;
-}
-
-.flowbook-metadata-empty {
-  padding: 16px;
-  font-family: var(--jp-ui-font-family);
-  font-size: var(--jp-ui-font-size1);
-  color: var(--jp-ui-font-color2);
-  text-align: center;
-}
-
-.flowbook-metadata-empty p {
-  margin: 8px 0;
-}
-
-.flowbook-metadata-header {
-  font-weight: bold;
-  font-size: var(--jp-ui-font-size2);
-  margin-bottom: 12px;
-  color: var(--jp-ui-font-color0);
-  border-bottom: 2px solid var(--jp-border-color2);
-  padding-bottom: 8px;
-}
-
-.flowbook-metadata-divider {
-  height: 1px;
-  background: var(--jp-border-color2);
-  margin: 12px 0;
-}
-
-.flowbook-metadata-section {
-  margin-bottom: 8px;
-}
-
-.flowbook-metadata-item {
-  margin: 6px 0;
-  line-height: 1.6;
-}
+/* FlowBook Reproducibility Variable/Cell Lists */
 
 .flowbook-variable-list {
-  margin: 8px 0 0 0;
+  margin: 8px 0 0;
   padding-left: 20px;
   list-style-type: disc;
 }
@@ -893,7 +841,7 @@
 }
 
 .flowbook-cell-list {
-  margin: 8px 0 0 0;
+  margin: 8px 0 0;
   padding-left: 20px;
   list-style-type: disc;
 }
@@ -903,7 +851,7 @@
 }
 
 .flowbook-stale-section {
-  background-color: rgba(255, 193, 7, 0.15);
+  background-color: rgb(255 193 7 / 15%);
   padding: 8px;
   border-radius: 4px;
   margin: 8px -8px;
@@ -914,7 +862,7 @@
 }
 
 .flowbook-violation-section {
-  background-color: rgba(244, 67, 54, 0.1);
+  background-color: rgb(244 67 54 / 10%);
   padding: 12px;
   border-radius: 4px;
   margin: 8px -8px;
@@ -932,7 +880,7 @@
 }
 
 .flowbook-violation-content p {
-  margin: 0 0 8px 0;
+  margin: 0 0 8px;
 }
 
 .flowbook-violation-details {
@@ -950,7 +898,7 @@
 
 /* Forward Dependency Styles */
 .flowbook-forward-dep-section {
-  background-color: rgba(255, 152, 0, 0.15);
+  background-color: rgb(255 152 0 / 15%);
   padding: 12px;
   border-radius: 4px;
   margin: 8px -8px;
@@ -965,7 +913,7 @@
 
 /* Structural Warning Styles */
 .flowbook-warning-section {
-  background-color: rgba(255, 193, 7, 0.1);
+  background-color: rgb(255 193 7 / 10%);
   border-left: 3px solid #ffc107;
   padding: 8px;
   border-radius: 4px;

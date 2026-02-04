@@ -10,9 +10,9 @@ import { Notification } from '@jupyterlab/apputils';
 import { FlowbookAPI } from '../api';
 import { KernelUtils } from '../kernel';
 import {
-  CommandInfo,
-  CommandResult,
-  ExecuteCommandRequest,
+  ICommandInfo,
+  ICommandResult,
+  IExecuteCommandRequest,
   FLOWBOOK_COMMANDS
 } from './types';
 import { NotebookHistoryManager } from './history';
@@ -22,7 +22,7 @@ import { CommandExecutionDialog } from '../executiondialog';
  * Manages FlowBook commands, their registration, and execution
  */
 export class FlowbookCommandsManager {
-  private commands: CommandInfo[] = FLOWBOOK_COMMANDS;
+  private commands: ICommandInfo[] = FLOWBOOK_COMMANDS;
   private app: JupyterFrontEnd;
   private tracker: INotebookTracker;
   private historyManager: NotebookHistoryManager;
@@ -40,7 +40,7 @@ export class FlowbookCommandsManager {
   /**
    * Get all loaded commands
    */
-  getCommands(): CommandInfo[] {
+  getCommands(): ICommandInfo[] {
     return this.commands;
   }
 
@@ -54,7 +54,7 @@ export class FlowbookCommandsManager {
     commandId: string,
     notebook: NotebookPanel,
     cellIdsOrSpecificCell?: string | string[]
-  ): Promise<CommandResult | null> {
+  ): Promise<ICommandResult | null> {
     const commandInfo = this.commands.find(cmd => cmd.id === commandId);
     const commandLabel = commandInfo?.label || commandId;
 
@@ -85,7 +85,10 @@ export class FlowbookCommandsManager {
         if (typeof cellIdsOrSpecificCell === 'string') {
           // Single cell ID from cell toolbar
           selectedCellIds = [cellIdsOrSpecificCell];
-          console.log('Executing command on specific cell:', cellIdsOrSpecificCell);
+          console.log(
+            'Executing command on specific cell:',
+            cellIdsOrSpecificCell
+          );
         } else {
           // Array of cell IDs from notebook toolbar with selection
           selectedCellIds = cellIdsOrSpecificCell;
@@ -98,7 +101,7 @@ export class FlowbookCommandsManager {
       }
 
       // Build the request
-      const request: ExecuteCommandRequest = {
+      const request: IExecuteCommandRequest = {
         command: commandId,
         notebook: notebookContent,
         params: {}
@@ -128,7 +131,8 @@ export class FlowbookCommandsManager {
       // Update the notebook with results
       if (result.notebook) {
         // Add history entry for this command
-        const affectedCells = selectedCellIds || this.getAllCellIds(result.notebook);
+        const affectedCells =
+          selectedCellIds || this.getAllCellIds(result.notebook);
         this.historyManager.addCommandEntry(notebook.context.path, {
           id: `cmd-${Date.now()}`,
           timestamp: Date.now(),
@@ -150,7 +154,11 @@ export class FlowbookCommandsManager {
 
         // For commands that update metadata (like generate_tests), trigger a refresh
         // of the active cell to ensure panels update
-        if (commandId === 'generate_tests' || commandId === 'inspect' || commandId === 'profile') {
+        if (
+          commandId === 'generate_tests' ||
+          commandId === 'inspect' ||
+          commandId === 'profile'
+        ) {
           const activeCell = notebook.content.activeCell;
           if (activeCell) {
             // Trigger a cell update to refresh panels
@@ -159,12 +167,19 @@ export class FlowbookCommandsManager {
         }
 
         console.log('Command metadata:', result.metadata);
-        console.log(`Command cost: $${result.total_cost.toFixed(4)}, time: ${result.total_time.toFixed(2)}s`);
+        console.log(
+          `Command cost: $${result.total_cost.toFixed(4)}, time: ${result.total_time.toFixed(2)}s`
+        );
 
         // Format cost and time for display
-        const costStr = result.total_cost > 0 ? ` (Cost: $${result.total_cost.toFixed(4)}, Time: ${result.total_time.toFixed(1)}s)` : '';
-        Notification.success(`${commandInfo?.label || 'Command'} Complete${costStr}`, { autoClose: 3000 });
-
+        const costStr =
+          result.total_cost > 0
+            ? ` (Cost: $${result.total_cost.toFixed(4)}, Time: ${result.total_time.toFixed(1)}s)`
+            : '';
+        Notification.success(
+          `${commandInfo?.label || 'Command'} Complete${costStr}`,
+          { autoClose: 3000 }
+        );
       }
 
       return result;
@@ -180,7 +195,8 @@ export class FlowbookCommandsManager {
       } else if (error && typeof error === 'object') {
         // Try to extract from common error formats
         const errorObj = error as any;
-        errorMessage = errorObj.error || errorObj.message || errorObj.toString();
+        errorMessage =
+          errorObj.error || errorObj.message || errorObj.toString();
       }
 
       // Show error in dialog and keep it open
@@ -236,7 +252,7 @@ export class FlowbookCommandsManager {
       palette.addItem({
         command: commandId,
         category: 'FlowBook Commands',
-        args: {},
+        args: {}
       });
     });
   }

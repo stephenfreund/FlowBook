@@ -5,7 +5,11 @@
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
 import { ISignal, Signal } from '@lumino/signaling';
 
-export type FlowbookKernelType = 'flowbook_kernel' | 'experimental_kernel' | 'other' | 'none';
+export type FlowbookKernelType =
+  | 'flowbook_kernel'
+  | 'experimental_kernel'
+  | 'other'
+  | 'none';
 
 export interface IKernelChangeInfo {
   notebook: NotebookPanel;

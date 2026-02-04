@@ -5,7 +5,11 @@
 import { NotebookPanel } from '@jupyterlab/notebook';
 import { DocumentRegistry } from '@jupyterlab/docregistry';
 import { IDisposable } from '@lumino/disposable';
-import { ToolbarButton, Clipboard, showErrorMessage } from '@jupyterlab/apputils';
+import {
+  ToolbarButton,
+  Clipboard,
+  showErrorMessage
+} from '@jupyterlab/apputils';
 
 import { FlowbookCommandsManager } from './manager';
 import { FlowbookAPI } from '../api';
@@ -13,10 +17,10 @@ import { FlowbookAPI } from '../api';
 /**
  * Extension that adds FlowBook command buttons to the notebook toolbar
  */
-export class NotebookToolbarExtension
-  implements
-    DocumentRegistry.IWidgetExtension<NotebookPanel, DocumentRegistry.IModel>
-{
+export class NotebookToolbarExtension implements DocumentRegistry.IWidgetExtension<
+  NotebookPanel,
+  DocumentRegistry.IModel
+> {
   private manager: FlowbookCommandsManager;
 
   constructor(manager: FlowbookCommandsManager) {
@@ -74,7 +78,11 @@ export class NotebookToolbarExtension
     });
 
     copyConnectionButton.node.style.display = 'none';
-    panel.toolbar.insertItem(100, 'flowbook-copy-connection-button', copyConnectionButton);
+    panel.toolbar.insertItem(
+      100,
+      'flowbook-copy-connection-button',
+      copyConnectionButton
+    );
     buttons.push(copyConnectionButton);
 
     // Initial visibility update when session is ready
@@ -113,11 +121,14 @@ export class NotebookToolbarExtension
       }
 
       const kernelId = session.kernel.id;
-      const connectionFile = await FlowbookAPI.getKernelConnectionFile(kernelId);
+      const connectionFile =
+        await FlowbookAPI.getKernelConnectionFile(kernelId);
 
       Clipboard.copyToSystem(connectionFile);
 
-      console.log(`Copied kernel connection file to clipboard: ${connectionFile}`);
+      console.log(
+        `Copied kernel connection file to clipboard: ${connectionFile}`
+      );
     } catch (error) {
       await showErrorMessage(
         'Error',

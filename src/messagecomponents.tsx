@@ -46,7 +46,9 @@ export interface IMessageDisplayProps {
 /**
  * React component for displaying message segments with ANSI color styling
  */
-export const MessageDisplay: React.FC<IMessageDisplayProps> = ({ segments }) => {
+export const MessageDisplay: React.FC<IMessageDisplayProps> = ({
+  segments
+}) => {
   const contentRef = React.useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom when new messages arrive
@@ -57,8 +59,8 @@ export const MessageDisplay: React.FC<IMessageDisplayProps> = ({ segments }) => 
   }, [segments]);
 
   return (
-    <div className='flowbook-message-display' ref={contentRef}>
-      <pre className='flowbook-message-content'>
+    <div className="flowbook-message-display" ref={contentRef}>
+      <pre className="flowbook-message-content">
         {segments.map((segment, index) => {
           const style: React.CSSProperties = {};
 

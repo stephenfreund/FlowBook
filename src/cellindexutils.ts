@@ -34,21 +34,29 @@ export function indexToAlpha(index: number, cellId?: string): string {
   // Handle two letters (26-701): AA-ZZ
   else if (index < 26 + 26 * 26) {
     const offset = index - 26;
-    const first = String.fromCharCode('A'.charCodeAt(0) + Math.floor(offset / 26));
+    const first = String.fromCharCode(
+      'A'.charCodeAt(0) + Math.floor(offset / 26)
+    );
     const second = String.fromCharCode('A'.charCodeAt(0) + (offset % 26));
     alpha = '@' + first + second;
   }
   // Handle three letters (702-18277): AAA-ZZZ
   else if (index < 26 + 26 * 26 + 26 * 26 * 26) {
     const offset = index - (26 + 26 * 26);
-    const first = String.fromCharCode('A'.charCodeAt(0) + Math.floor(offset / (26 * 26)));
-    const second = String.fromCharCode('A'.charCodeAt(0) + Math.floor((offset / 26) % 26));
+    const first = String.fromCharCode(
+      'A'.charCodeAt(0) + Math.floor(offset / (26 * 26))
+    );
+    const second = String.fromCharCode(
+      'A'.charCodeAt(0) + Math.floor((offset / 26) % 26)
+    );
     const third = String.fromCharCode('A'.charCodeAt(0) + (offset % 26));
     alpha = '@' + first + second + third;
   }
   // Index too large
   else {
-    throw new Error(`Index ${index} is too large (max supported: 18277 for @ZZZ)`);
+    throw new Error(
+      `Index ${index} is too large (max supported: 18277 for @ZZZ)`
+    );
   }
 
   // Append cell ID suffix if provided
@@ -89,11 +97,13 @@ export function alphaToIndex(alpha: string): number {
   const letters = alpha.substring(1); // Remove @ prefix
 
   if (letters.length === 0) {
-    throw new Error('Invalid format: no letters after \'@\'');
+    throw new Error("Invalid format: no letters after '@'");
   }
 
   if (!/^[A-Z]+$/.test(letters)) {
-    throw new Error(`Invalid format: must contain only uppercase letters (got: ${alpha})`);
+    throw new Error(
+      `Invalid format: must contain only uppercase letters (got: ${alpha})`
+    );
   }
 
   const length = letters.length;
@@ -113,6 +123,8 @@ export function alphaToIndex(alpha: string): number {
     const third = letters.charCodeAt(2) - 'A'.charCodeAt(0);
     return 26 + 26 * 26 + first * 26 * 26 + second * 26 + third;
   } else {
-    throw new Error(`Invalid format: too many letters (max 3, got ${length} in ${alpha})`);
+    throw new Error(
+      `Invalid format: too many letters (max 3, got ${length} in ${alpha})`
+    );
   }
 }

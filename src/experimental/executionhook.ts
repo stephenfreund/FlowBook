@@ -4,11 +4,20 @@
  */
 
 import { JupyterFrontEnd } from '@jupyterlab/application';
-import { INotebookTracker, NotebookPanel, Notebook, NotebookActions } from '@jupyterlab/notebook';
+import {
+  INotebookTracker,
+  NotebookPanel,
+  Notebook,
+  NotebookActions
+} from '@jupyterlab/notebook';
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { IOutput } from '@jupyterlab/nbformat';
 import { FlowbookCommandsManager } from './manager';
-import { IFlowbookMetadata, IFlowbookProfileData, IDynamicDependencies } from './types';
+import {
+  IFlowbookMetadata,
+  IFlowbookProfileData,
+  IDynamicDependencies
+} from './types';
 
 /**
  * Manages execution hooks to auto-generate code before execution
@@ -74,9 +83,7 @@ export class ExecutionHookManager {
    */
   private wrapCommand(commandId: string): void {
     if (!this.app.commands.hasCommand(commandId)) {
-      console.warn(
-        `ExecutionHookManager: Command ${commandId} not found`
-      );
+      console.warn(`ExecutionHookManager: Command ${commandId} not found`);
       return;
     }
 
@@ -207,7 +214,9 @@ export class ExecutionHookManager {
    * Extract flowbook metadata from cell outputs.
    * Mirrors the server-side extract_and_set_metadata() function.
    */
-  private extractFlowbookMetadata(outputs: IOutput[]): Partial<IFlowbookMetadata> | null {
+  private extractFlowbookMetadata(
+    outputs: IOutput[]
+  ): Partial<IFlowbookMetadata> | null {
     for (const output of outputs) {
       if (output.output_type !== 'display_data') {
         continue;
@@ -272,7 +281,8 @@ export class ExecutionHookManager {
     }
 
     // Merge with existing flowbook metadata
-    const existingMeta = (cell.model.getMetadata('flowbook') as IFlowbookMetadata) || {};
+    const existingMeta =
+      (cell.model.getMetadata('flowbook') as IFlowbookMetadata) || {};
     const mergedMeta = { ...existingMeta, ...flowbookMeta };
 
     // Set the merged metadata on the cell

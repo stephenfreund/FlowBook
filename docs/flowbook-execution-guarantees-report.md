@@ -23,6 +23,7 @@ Flowbook enforces strictly serial cell execution with the following properties:
   3. Finally kills any stubborn child processes
 
 **Child Process Cleanup** (`ferret_kernel.py:37-125`):
+
 - Shuts down joblib/loky parallel executors cleanly
 - Resets the executor singleton to ensure fresh state
 - Recursively terminates and kills all child processes via `psutil`
@@ -59,6 +60,7 @@ The `Diff` class provides **isomorphic pointer structure comparison**:
 - **Pointer structure verification**: Detects when two namespaces have identical values but different aliasing patterns
 
 **Example of pointer structure mismatch:**
+
 ```python
 # Namespace A
 a = [1, 2, 3]
@@ -106,14 +108,15 @@ The `test_code` operation provides **A/B comparison** with guarantees:
 
 The following **cannot be checkpointed** and are silently removed:
 
-| Type | Reason | Code Location |
-|------|--------|---------------|
-| **Modules** | Cannot deep copy | `isinstance(v, types.ModuleType)` |
-| **Matplotlib objects** | Complex internal state | `type(v).__module__.startswith("matplotlib")` |
-| **NumPy arrays containing matplotlib objects** | Nested matplotlib reference | Check on `object` dtype arrays |
-| **Any type failing `copy.deepcopy()`** | Serialization impossible | Try/except in save loop |
+| Type                                           | Reason                      | Code Location                                 |
+| ---------------------------------------------- | --------------------------- | --------------------------------------------- |
+| **Modules**                                    | Cannot deep copy            | `isinstance(v, types.ModuleType)`             |
+| **Matplotlib objects**                         | Complex internal state      | `type(v).__module__.startswith("matplotlib")` |
+| **NumPy arrays containing matplotlib objects** | Nested matplotlib reference | Check on `object` dtype arrays                |
+| **Any type failing `copy.deepcopy()`**         | Serialization impossible    | Try/except in save loop                       |
 
 **Practical implications:**
+
 - Variables referencing `import numpy as np` are excluded
 - Matplotlib figures, axes, artists cannot be checkpointed
 - Open file handles, sockets, database connections fail
@@ -168,6 +171,7 @@ By default (`strict=True`), types must match exactly:
 - `np.int32` vs `np.int64` → **Type mismatch error**
 
 In non-strict mode (`strict=False`), these become compatible:
+
 - `int` ↔ `float` (int converted to float for comparison)
 - `list`/`tuple` ↔ `np.ndarray` (structural comparison)
 
@@ -176,11 +180,13 @@ In non-strict mode (`strict=False`), these become compatible:
 **Location:** `diff.py:593-640`
 
 NumPy arrays must match in:
+
 - **Shape**: Exactly equal dimensions
 - **Dtype**: Exactly matching data types
 - **Values**: Element-wise comparison (with tolerance for floats)
 
 **Floating point specifics:**
+
 - `np.allclose()` used with configurable `rtol=1e-5`, `atol=1e-8`
 - `equal_nan=True` - NaN values are considered equal
 
@@ -189,18 +195,21 @@ NumPy arrays must match in:
 **Location:** `diff.py:642-838`
 
 **Series requirements:**
+
 - Index must be equal (via `.equals()`)
 - Name must match exactly
 - Dtype must match
 - Values must match (NaN-aware)
 
 **DataFrame requirements:**
+
 - Shape must match
 - Columns must match (order and names)
 - Index must match
 - Per-column values must match
 
 **GroupBy special handling:**
+
 - Internal cache (`_cache`, `_grouper._cache`) is **ignored**
 - Only semantic properties compared: underlying data, grouper config, selection
 
@@ -224,6 +233,7 @@ NumPy arrays must match in:
 **Location:** `diff.py:1034-1112`
 
 Custom objects must have `__dict__` for comparison:
+
 - Objects without `__dict__` fall back to `!=` operator
 - Objects where `!=` raises an exception cause comparison errors
 - All public attributes are recursively compared
@@ -247,6 +257,7 @@ Class variables defined on the class itself (via `cls.attr` or in the class body
 **1. Notebooks operate on data instances, not class definitions**
 
 The primary workflow in data science notebooks is:
+
 - Load/create data → Transform data → Analyze results
 - Users work with DataFrame instances, array instances, model instances
 - Class-level state mutation is extremely rare in notebook workflows
@@ -291,6 +302,7 @@ Classes from imported libraries (`sklearn.linear_model.LinearRegression`, `panda
 **5. Implementation complexity would be substantial**
 
 Properly tracking class variables would require:
+
 - Traversing the Method Resolution Order (MRO) for inherited class variables
 - Handling metaclasses and descriptors
 - Distinguishing class variables from class methods
@@ -317,6 +329,7 @@ Notebooks encourage functional, data-centric programming where state flows throu
 **7. Instance state captures what matters**
 
 For machine learning and data science use cases, the important state is always in instances:
+
 - Model weights → `model.coef_`, `model.weights`
 - Training history → `history.losses`
 - Configuration → `config.learning_rate` (instance attribute)
@@ -366,10 +379,12 @@ Floating point comparison follows this priority:
 4. **Different**: Outside tolerance → Status "different"
 
 Default tolerances:
+
 - `rtol = 1e-5` (relative)
 - `atol = 1e-8` (absolute)
 
 For checkpoint diffs specifically (`checkpoint.py:115`):
+
 - `atol = 1e-6`
 - `report_close = False` (close values treated as equal)
 
@@ -447,14 +462,14 @@ For checkpoint diffs specifically (`checkpoint.py:115`):
 
 ## Summary Table: Key Guarantees vs Restrictions
 
-| Guarantee | Restriction |
-|-----------|-------------|
-| Serial, single-threaded execution | No multi-process state sharing between cells |
-| Deep copy checkpoints with alias tracking | Modules, matplotlib, non-copyable objects excluded |
-| Deterministic namespace diffs | Pointer structure must be isomorphic |
-| NaN equality (NaN == NaN) | Floating point tolerance required for numeric comparison |
-| Type tracking for all variables | Only first 10 elements inspected for containers |
-| Per-cell timeout enforcement | Maximum 30 minutes default; child processes killed on timeout |
-| GroupBy cache-independent comparison | Internal cache fields ignored |
-| Test code A/B comparison | Requires checkpointable environment |
-| Instance attribute tracking | Class variables not tracked (by design - see §2.10) |
+| Guarantee                                 | Restriction                                                   |
+| ----------------------------------------- | ------------------------------------------------------------- |
+| Serial, single-threaded execution         | No multi-process state sharing between cells                  |
+| Deep copy checkpoints with alias tracking | Modules, matplotlib, non-copyable objects excluded            |
+| Deterministic namespace diffs             | Pointer structure must be isomorphic                          |
+| NaN equality (NaN == NaN)                 | Floating point tolerance required for numeric comparison      |
+| Type tracking for all variables           | Only first 10 elements inspected for containers               |
+| Per-cell timeout enforcement              | Maximum 30 minutes default; child processes killed on timeout |
+| GroupBy cache-independent comparison      | Internal cache fields ignored                                 |
+| Test code A/B comparison                  | Requires checkpointable environment                           |
+| Instance attribute tracking               | Class variables not tracked (by design - see §2.10)           |

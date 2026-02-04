@@ -12,7 +12,11 @@ interface IUnitTestPanelProps {
   tracker: INotebookTracker | null;
 }
 
-const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) => {
+const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({
+  cell,
+  app,
+  tracker
+}) => {
   const [tests, setTests] = React.useState<IUnitTest[]>([]);
   const [cellId, setCellId] = React.useState<string | null>(null);
   const [isGenerating, setIsGenerating] = React.useState<boolean>(false);
@@ -29,7 +33,11 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) =
     const flowbookMetadata = cell.model.getMetadata('flowbook') as any;
     const unitTests = flowbookMetadata?.unit_tests as IUnitTests | undefined;
 
-    console.log('[UnitTestPanel] Loading tests from cell', cell.model.id, unitTests);
+    console.log(
+      '[UnitTestPanel] Loading tests from cell',
+      cell.model.id,
+      unitTests
+    );
 
     // Update both tests and cellId together
     if (unitTests && unitTests.tests) {
@@ -48,7 +56,7 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) =
     }
 
     // Retrieve existing metadata for flowbook, or create an empty object
-    const flowbookMetadata = cell.model.getMetadata('flowbook') as any || {};
+    const flowbookMetadata = (cell.model.getMetadata('flowbook') as any) || {};
 
     // Update the unit_tests property
     flowbookMetadata.unit_tests = {
@@ -63,12 +71,20 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) =
     // Set the updated metadata back
     cell.model.setMetadata('flowbook', flowbookMetadata);
 
-    console.log('[UnitTestPanel] Saved tests to cell', cell.model.id, 'tests:', JSON.stringify(tests));
+    console.log(
+      '[UnitTestPanel] Saved tests to cell',
+      cell.model.id,
+      'tests:',
+      JSON.stringify(tests)
+    );
 
     // Verify it was written
     setTimeout(() => {
       const checkFlowbook = cell.model.getMetadata('flowbook') as any;
-      console.log('[UnitTestPanel] Verify: flowbook.unit_tests =', checkFlowbook?.unit_tests);
+      console.log(
+        '[UnitTestPanel] Verify: flowbook.unit_tests =',
+        checkFlowbook?.unit_tests
+      );
     }, 100);
   }, [tests, cell, cellId]);
 
@@ -95,7 +111,9 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) =
 
   const handleGenerateTests = async () => {
     if (!cell || !app || !tracker) {
-      console.warn('[UnitTestPanel] Cannot generate tests: missing cell, app, or tracker');
+      console.warn(
+        '[UnitTestPanel] Cannot generate tests: missing cell, app, or tracker'
+      );
       return;
     }
 
@@ -111,11 +129,16 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) =
       // The command will have updated the metadata, so we need to refresh
       setTimeout(() => {
         const flowbookMetadata = cell.model.getMetadata('flowbook') as any;
-        const unitTests = flowbookMetadata?.unit_tests as IUnitTests | undefined;
+        const unitTests = flowbookMetadata?.unit_tests as
+          | IUnitTests
+          | undefined;
 
         if (unitTests && unitTests.tests) {
           setTests([...unitTests.tests]);
-          console.log('[UnitTestPanel] Reloaded tests after generation:', unitTests.tests.length);
+          console.log(
+            '[UnitTestPanel] Reloaded tests after generation:',
+            unitTests.tests.length
+          );
         }
         setIsGenerating(false);
       }, 500); // Small delay to ensure metadata is saved
@@ -137,7 +160,9 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) =
   return (
     <div className="flowbook-unittest-content">
       <div className="flowbook-unittest-header">
-        <div className="flowbook-unittest-cell-id">Cell: {cell.model.id.substring(0, 8)}...</div>
+        <div className="flowbook-unittest-cell-id">
+          Cell: {cell.model.id.substring(0, 8)}...
+        </div>
       </div>
 
       <div className="flowbook-unittest-actions">
@@ -166,7 +191,7 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) =
                   type="text"
                   className="flowbook-unittest-title-input"
                   value={test.title}
-                  onChange={(e) => updateTest(index, 'title', e.target.value)}
+                  onChange={e => updateTest(index, 'title', e.target.value)}
                   placeholder="Test title"
                 />
                 <button
@@ -182,7 +207,9 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) =
                 <textarea
                   className="flowbook-unittest-textarea"
                   value={test.description}
-                  onChange={(e) => updateTest(index, 'description', e.target.value)}
+                  onChange={e =>
+                    updateTest(index, 'description', e.target.value)
+                  }
                   placeholder="What does this test verify?"
                   rows={2}
                 />
@@ -193,7 +220,9 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) =
                 <textarea
                   className="flowbook-unittest-code-editor"
                   value={test.setup_code}
-                  onChange={(e) => updateTest(index, 'setup_code', e.target.value)}
+                  onChange={e =>
+                    updateTest(index, 'setup_code', e.target.value)
+                  }
                   placeholder="# Set up test globals here"
                   rows={4}
                   spellCheck={false}
@@ -205,7 +234,9 @@ const UnitTestEditor: React.FC<IUnitTestPanelProps> = ({ cell, app, tracker }) =
                 <textarea
                   className="flowbook-unittest-code-editor"
                   value={test.assertion_code}
-                  onChange={(e) => updateTest(index, 'assertion_code', e.target.value)}
+                  onChange={e =>
+                    updateTest(index, 'assertion_code', e.target.value)
+                  }
                   placeholder="# Add assertions here"
                   rows={4}
                   spellCheck={false}
@@ -240,7 +271,11 @@ export class UnitTestPanel extends Widget {
 
   private render(): void {
     ReactDOM.render(
-      <UnitTestEditor cell={this._cell} app={this._app} tracker={this._tracker} />,
+      <UnitTestEditor
+        cell={this._cell}
+        app={this._app}
+        tracker={this._tracker}
+      />,
       this.node
     );
   }

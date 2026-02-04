@@ -13,11 +13,13 @@ Extend FlowBook's checkpointing and diffing systems to track class-level attribu
 ### What We're Tracking
 
 **In scope:**
+
 - Data attributes on classes defined in the notebook (`__module__ == '__main__'`)
 - Mutable class-level state (lists, dicts, custom objects as class attributes)
 - Class-level configuration values
 
 **Out of scope:**
+
 - Classes from imported modules (already excluded via module filtering)
 - Methods, classmethods, staticmethods, properties (code, not state)
 - Dunder attributes (`__doc__`, `__module__`, etc.)
@@ -383,7 +385,7 @@ def _deepcopy_user_class(cls: type, memo: Dict[int, Any]) -> type:
 # d[type] = _deepcopy_user_class  # Only if we want to copy class objects
 ```
 
-**Note:** For most use cases, classes should preserve identity (same class object). The class *attributes* are separately deep copied in checkpoint.save(). This maintains Python's expectation that `isinstance(obj, MyClass)` works correctly across checkpoint restore.
+**Note:** For most use cases, classes should preserve identity (same class object). The class _attributes_ are separately deep copied in checkpoint.save(). This maintains Python's expectation that `isinstance(obj, MyClass)` works correctly across checkpoint restore.
 
 ---
 
@@ -424,6 +426,7 @@ class Config:
 ```
 
 **Handling:**
+
 - On restore, match by class name in namespace, not object identity
 - Restore attributes to whichever class currently has that name
 - If class was deleted, skip (no error)
@@ -443,6 +446,7 @@ Child.config['b'] = 2  # Modifies Base.config!
 ```
 
 **Handling:**
+
 - `get_class_data_attributes()` only looks at `cls.__dict__`
 - Parent class (`Base`) is separately checkpointed
 - Changes via subclass appear in parent's diff
@@ -461,6 +465,7 @@ class MyClass(metaclass=SingletonMeta):
 ```
 
 **Handling:**
+
 - Metaclass attributes are out of scope for v1
 - Metaclass state won't be tracked unless the metaclass itself is in namespace
 - Document as known limitation
@@ -476,6 +481,7 @@ Node.root.parent = Node.root
 ```
 
 **Handling:**
+
 - The memo mechanism handles circular references
 - Same memo used for namespace and class attributes
 - No special handling needed
@@ -490,6 +496,7 @@ class ModelRegistry:
 ```
 
 **Handling:**
+
 - The opaque handler pattern in `flowbook/kernel/opaque.py` applies
 - `_checkpointable_value()` should include opaque-handled objects
 - Keras/PyTorch models as class attributes work automatically
@@ -678,6 +685,7 @@ def test_sdc_backward_mutation_class_attribute():
 ## Part 8: Implementation Order
 
 ### Phase 1: Core Infrastructure (checkpoint.py)
+
 1. Add `is_user_defined_class()` helper
 2. Add `get_class_data_attributes()` helper
 3. Update `Checkpoint` dataclass with `class_attributes` field
@@ -686,18 +694,21 @@ def test_sdc_backward_mutation_class_attribute():
 6. Update `_build_alias_index()` to include class attributes
 
 ### Phase 2: Diff Integration (diff.py)
+
 7. Add `_is_user_defined_class()` helper
 8. Add `_compare_user_class()` method
 9. Update `_compare_values()` dispatch to handle user classes
 10. Add unit tests for class attribute diffing
 
 ### Phase 3: Testing and Validation
+
 11. Add unit tests for checkpoint save/restore
 12. Add integration tests for end-to-end flows
 13. Add tests for edge cases (inheritance, circular refs)
 14. Verify existing tests still pass
 
 ### Phase 4: SDC Integration (Optional Enhancement)
+
 15. Add class attribute access tracking to TrackingDict
 16. Update TrackingData to include class attribute reads/writes
 17. Update SDC enforcer to detect class attribute mutations
@@ -714,10 +725,12 @@ Change section 2.10 from "Class Variables Are Not Tracked" to:
 > **2.10 Class Variables Are Tracked for User-Defined Classes**
 >
 > FlowBook tracks class-level data attributes for classes defined in the notebook (`__module__ == '__main__'`). This includes:
+>
 > - Mutable class attributes (lists, dicts, custom objects)
 > - Class-level configuration values
 >
 > **Not tracked:**
+>
 > - Classes from imported modules (already excluded)
 > - Methods, class methods, static methods, properties
 > - Dunder attributes (`__doc__`, `__module__`, etc.)

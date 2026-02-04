@@ -44,8 +44,13 @@ export class StalenessManager {
    * as computed by the kernel. We replace our entire set with this truth.
    */
   updateFromMetadata(reproducibilityMetadata: IReproducibilityMetadata): void {
-    console.log('StalenessManager: Before update, stale cells =', [...this._staleCells]);
-    console.log('StalenessManager: Metadata stale_cells =', reproducibilityMetadata.stale_cells);
+    console.log('StalenessManager: Before update, stale cells =', [
+      ...this._staleCells
+    ]);
+    console.log(
+      'StalenessManager: Metadata stale_cells =',
+      reproducibilityMetadata.stale_cells
+    );
 
     // Track previous state for diff
     const previousStale = new Set(this._staleCells);
@@ -58,7 +63,9 @@ export class StalenessManager {
     const added = [...currentStale].filter(id => !previousStale.has(id));
     const removed = [...previousStale].filter(id => !currentStale.has(id));
 
-    console.log('StalenessManager: After update, stale cells =', [...this._staleCells]);
+    console.log('StalenessManager: After update, stale cells =', [
+      ...this._staleCells
+    ]);
     console.log('StalenessManager: Added =', added, ', Removed =', removed);
 
     if (added.length > 0 || removed.length > 0) {

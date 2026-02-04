@@ -11,17 +11,30 @@ interface IMetadataDisplayProps {
   cellId: string | null;
 }
 
-const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) => {
+const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({
+  metadata,
+  cellId
+}) => {
   const [profileExpanded, setProfileExpanded] = React.useState(false);
   const [envExpanded, setEnvExpanded] = React.useState(false);
   const [envAfterExpanded, setEnvAfterExpanded] = React.useState(false);
   const [originalCodeExpanded, setOriginalCodeExpanded] = React.useState(false);
-  const [optimizedCodeExpanded, setOptimizedCodeExpanded] = React.useState(false);
-  const [generatedCodeExpanded, setGeneratedCodeExpanded] = React.useState(false);
+  const [optimizedCodeExpanded, setOptimizedCodeExpanded] =
+    React.useState(false);
+  const [generatedCodeExpanded, setGeneratedCodeExpanded] =
+    React.useState(false);
 
   console.log('[MetadataDisplay] Rendering with metadata:', metadata);
 
-  if (!metadata || (!metadata.optimization_potential && !metadata.profile && !metadata.dynamic_dependencies && !metadata.generated && !metadata.optimized && !metadata.optimization_applied)) {
+  if (
+    !metadata ||
+    (!metadata.optimization_potential &&
+      !metadata.profile &&
+      !metadata.dynamic_dependencies &&
+      !metadata.generated &&
+      !metadata.optimized &&
+      !metadata.optimization_applied)
+  ) {
     console.log('[MetadataDisplay] No metadata, showing empty state');
     return (
       <div className="flowbook-metadata-empty">
@@ -54,44 +67,49 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
             </div>
           </div>
 
-            <div className="flowbook-metadata-divider" />
-            <div className="flowbook-metadata-section">
-              <div
-                className="flowbook-metadata-profile-toggle"
-                onClick={() => setEnvExpanded(!envExpanded)}
-              >
-                <strong>Environment (Before)</strong>
-                <span className="flowbook-metadata-toggle-icon">
-                  {envExpanded ? '▼' : '▶'}
-                </span>
-              </div>
-              {envExpanded && (
-                <pre className="flowbook-metadata-profile-output">
-                  {Object.entries(metadata.profile.env).map(([key, value]) => (
-                    <div key={key}>
-                      <strong>{key}:</strong> {value}
-                    </div>
-                  ))}
-                </pre>
-              )}
+          <div className="flowbook-metadata-divider" />
+          <div className="flowbook-metadata-section">
+            <div
+              className="flowbook-metadata-profile-toggle"
+              onClick={() => setEnvExpanded(!envExpanded)}
+            >
+              <strong>Environment (Before)</strong>
+              <span className="flowbook-metadata-toggle-icon">
+                {envExpanded ? '▼' : '▶'}
+              </span>
             </div>
+            {envExpanded && (
+              <pre className="flowbook-metadata-profile-output">
+                {Object.entries(metadata.profile.env).map(([key, value]) => (
+                  <div key={key}>
+                    <strong>{key}:</strong> {value}
+                  </div>
+                ))}
+              </pre>
+            )}
+          </div>
 
-            <div className="flowbook-metadata-divider" />
-            <div className="flowbook-metadata-section">
-              <div
-                className="flowbook-metadata-profile-toggle"
-                onClick={() => setEnvAfterExpanded(!envAfterExpanded)}
-              >
-                <strong>Environment Changes</strong>
-                <span className="flowbook-metadata-toggle-icon">
-                  {envAfterExpanded ? '▼' : '▶'}
-                </span>
-              </div>
-              {envAfterExpanded && (() => {
+          <div className="flowbook-metadata-divider" />
+          <div className="flowbook-metadata-section">
+            <div
+              className="flowbook-metadata-profile-toggle"
+              onClick={() => setEnvAfterExpanded(!envAfterExpanded)}
+            >
+              <strong>Environment Changes</strong>
+              <span className="flowbook-metadata-toggle-icon">
+                {envAfterExpanded ? '▼' : '▶'}
+              </span>
+            </div>
+            {envAfterExpanded &&
+              (() => {
                 const envBefore = metadata.profile.env;
                 const envAfter = metadata.profile.env_after;
-                const additions = Object.entries(envAfter).filter(([key]) => !(key in envBefore));
-                const removals = Object.entries(envBefore).filter(([key]) => !(key in envAfter));
+                const additions = Object.entries(envAfter).filter(
+                  ([key]) => !(key in envBefore)
+                );
+                const removals = Object.entries(envBefore).filter(
+                  ([key]) => !(key in envAfter)
+                );
 
                 return (
                   <pre className="flowbook-metadata-profile-output">
@@ -109,7 +127,13 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
                     )}
                     {removals.length > 0 && (
                       <>
-                        <div style={{ color: 'red', marginTop: additions.length > 0 ? '0.5em' : '0', marginBottom: '0.5em' }}>
+                        <div
+                          style={{
+                            color: 'red',
+                            marginTop: additions.length > 0 ? '0.5em' : '0',
+                            marginBottom: '0.5em'
+                          }}
+                        >
                           <strong>Removed:</strong>
                         </div>
                         {removals.map(([key, value]) => (
@@ -127,7 +151,7 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
                   </pre>
                 );
               })()}
-            </div>
+          </div>
 
           {metadata.profile.profile && metadata.profile.profile.trim() && (
             <>
@@ -165,12 +189,22 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
               <strong>Reads Before Writes:</strong>
               {metadata.dynamic_dependencies.reads_before_writes.length > 0 ? (
                 <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
-                  {metadata.dynamic_dependencies.reads_before_writes.map((varName, idx) => (
-                    <li key={idx}><code>{varName}</code></li>
-                  ))}
+                  {metadata.dynamic_dependencies.reads_before_writes.map(
+                    (varName, idx) => (
+                      <li key={idx}>
+                        <code>{varName}</code>
+                      </li>
+                    )
+                  )}
                 </ul>
               ) : (
-                <span style={{ fontStyle: 'italic', color: '#666', marginLeft: '0.5em' }}>
+                <span
+                  style={{
+                    fontStyle: 'italic',
+                    color: '#666',
+                    marginLeft: '0.5em'
+                  }}
+                >
                   None
                 </span>
               )}
@@ -184,11 +218,19 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
               {metadata.dynamic_dependencies.writes.length > 0 ? (
                 <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
                   {metadata.dynamic_dependencies.writes.map((varName, idx) => (
-                    <li key={idx}><code>{varName}</code></li>
+                    <li key={idx}>
+                      <code>{varName}</code>
+                    </li>
                   ))}
                 </ul>
               ) : (
-                <span style={{ fontStyle: 'italic', color: '#666', marginLeft: '0.5em' }}>
+                <span
+                  style={{
+                    fontStyle: 'italic',
+                    color: '#666',
+                    marginLeft: '0.5em'
+                  }}
+                >
                   None
                 </span>
               )}
@@ -197,63 +239,85 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
 
           {/* Column-level DataFrame reads tracking */}
           {metadata.dynamic_dependencies.column_reads_before_writes &&
-           Object.entries(metadata.dynamic_dependencies.column_reads_before_writes).some(([, cols]) => cols.length > 0) && (
-            <>
-              <div className="flowbook-metadata-divider" />
-              <div className="flowbook-metadata-section">
-                <div className="flowbook-metadata-item">
-                  <strong>DataFrame Columns Read:</strong>
-                  <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
-                    {Object.entries(metadata.dynamic_dependencies.column_reads_before_writes)
-                      .filter(([, columns]) => columns.length > 0)
-                      .map(([dfName, columns], idx) => (
-                        <li key={idx}>
-                          <code>{dfName}</code>
-                          <ul style={{ paddingLeft: '1.5em', marginTop: '0.25em' }}>
-                            {columns.map((col, colIdx) => (
-                              <li key={colIdx} style={{ listStyleType: 'circle' }}>
-                                <code>{col}</code>
-                              </li>
-                            ))}
-                          </ul>
-                        </li>
+            Object.entries(
+              metadata.dynamic_dependencies.column_reads_before_writes
+            ).some(([, cols]) => cols.length > 0) && (
+              <>
+                <div className="flowbook-metadata-divider" />
+                <div className="flowbook-metadata-section">
+                  <div className="flowbook-metadata-item">
+                    <strong>DataFrame Columns Read:</strong>
+                    <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
+                      {Object.entries(
+                        metadata.dynamic_dependencies.column_reads_before_writes
                       )
-                    )}
-                  </ul>
+                        .filter(([, columns]) => columns.length > 0)
+                        .map(([dfName, columns], idx) => (
+                          <li key={idx}>
+                            <code>{dfName}</code>
+                            <ul
+                              style={{
+                                paddingLeft: '1.5em',
+                                marginTop: '0.25em'
+                              }}
+                            >
+                              {columns.map((col, colIdx) => (
+                                <li
+                                  key={colIdx}
+                                  style={{ listStyleType: 'circle' }}
+                                >
+                                  <code>{col}</code>
+                                </li>
+                              ))}
+                            </ul>
+                          </li>
+                        ))}
+                    </ul>
+                  </div>
                 </div>
-              </div>
-            </>
-          )}
+              </>
+            )}
 
           {/* Column-level DataFrame writes tracking */}
           {metadata.dynamic_dependencies.column_writes &&
-           Object.entries(metadata.dynamic_dependencies.column_writes).some(([, cols]) => cols.length > 0) && (
-            <>
-              <div className="flowbook-metadata-divider" />
-              <div className="flowbook-metadata-section">
-                <div className="flowbook-metadata-item">
-                  <strong>DataFrame Columns Written:</strong>
-                  <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
-                    {Object.entries(metadata.dynamic_dependencies.column_writes)
-                      .filter(([, columns]) => columns.length > 0)
-                      .map(([dfName, columns], idx) => (
-                        <li key={idx}>
-                          <code>{dfName}</code>
-                          <ul style={{ paddingLeft: '1.5em', marginTop: '0.25em' }}>
-                            {columns.map((col, colIdx) => (
-                              <li key={colIdx} style={{ listStyleType: 'circle' }}>
-                                <code>{col}</code>
-                              </li>
-                            ))}
-                          </ul>
-                        </li>
+            Object.entries(metadata.dynamic_dependencies.column_writes).some(
+              ([, cols]) => cols.length > 0
+            ) && (
+              <>
+                <div className="flowbook-metadata-divider" />
+                <div className="flowbook-metadata-section">
+                  <div className="flowbook-metadata-item">
+                    <strong>DataFrame Columns Written:</strong>
+                    <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
+                      {Object.entries(
+                        metadata.dynamic_dependencies.column_writes
                       )
-                    )}
-                  </ul>
+                        .filter(([, columns]) => columns.length > 0)
+                        .map(([dfName, columns], idx) => (
+                          <li key={idx}>
+                            <code>{dfName}</code>
+                            <ul
+                              style={{
+                                paddingLeft: '1.5em',
+                                marginTop: '0.25em'
+                              }}
+                            >
+                              {columns.map((col, colIdx) => (
+                                <li
+                                  key={colIdx}
+                                  style={{ listStyleType: 'circle' }}
+                                >
+                                  <code>{col}</code>
+                                </li>
+                              ))}
+                            </ul>
+                          </li>
+                        ))}
+                    </ul>
+                  </div>
                 </div>
-              </div>
-            </>
-          )}
+              </>
+            )}
         </>
       )}
 
@@ -357,11 +421,13 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
             <div className="flowbook-metadata-item">
               <strong>Modified Cells:</strong>
               <ul style={{ marginTop: '0.5em', paddingLeft: '1.5em' }}>
-                {metadata.optimization_applied.modified_cell_ids.map((cellId, idx) => (
-                  <li key={idx}>
-                    <code>{cellId.substring(0, 8)}...</code>
-                  </li>
-                ))}
+                {metadata.optimization_applied.modified_cell_ids.map(
+                  (cellId, idx) => (
+                    <li key={idx}>
+                      <code>{cellId.substring(0, 8)}...</code>
+                    </li>
+                  )
+                )}
               </ul>
             </div>
           </div>
@@ -378,7 +444,8 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
 
           <div className="flowbook-metadata-section">
             <div className="flowbook-metadata-item">
-              <strong>Potential:</strong> {metadata.optimization_potential.potential}
+              <strong>Potential:</strong>{' '}
+              {metadata.optimization_potential.potential}
             </div>
           </div>
 
@@ -391,28 +458,36 @@ const MetadataDisplay: React.FC<IMetadataDisplayProps> = ({ metadata, cellId }) 
                     <strong>Optimization Plan:</strong>
                   </div>
                   <div className="flowbook-metadata-optimization-plan">
-                    {metadata.optimization_potential.optimization_plan.map((step, index) => (
-                      <div key={index} className="flowbook-metadata-optimization-step">
-                        <div className="flowbook-metadata-optimization-step-header">
-                          <strong>Target: </strong>
-                          Cell <code>{step.target_cell_id.substring(0, 8)}...</code>
-                          {step.function_name && (
-                            <>
-                              {' '}/{' '}
-                              Function <code>{step.function_name}</code>
-                            </>
-                          )}
+                    {metadata.optimization_potential.optimization_plan.map(
+                      (step, index) => (
+                        <div
+                          key={index}
+                          className="flowbook-metadata-optimization-step"
+                        >
+                          <div className="flowbook-metadata-optimization-step-header">
+                            <strong>Target: </strong>
+                            Cell{' '}
+                            <code>
+                              {step.target_cell_id.substring(0, 8)}...
+                            </code>
+                            {step.function_name && (
+                              <>
+                                {' '}
+                                / Function <code>{step.function_name}</code>
+                              </>
+                            )}
+                          </div>
+                          <div className="flowbook-metadata-optimization-step-descriptions">
+                            <strong>Optimizations:</strong>
+                            <ul>
+                              {step.description.map((desc, descIndex) => (
+                                <li key={descIndex}>{desc}</li>
+                              ))}
+                            </ul>
+                          </div>
                         </div>
-                        <div className="flowbook-metadata-optimization-step-descriptions">
-                          <strong>Optimizations:</strong>
-                          <ul>
-                            {step.description.map((desc, descIndex) => (
-                              <li key={descIndex}>{desc}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      </div>
-                    ))}
+                      )
+                    )}
                   </div>
                 </div>
               </>
@@ -445,14 +520,24 @@ export class FlowbookMetadataPanel extends Widget {
    * Render the React component into the panel
    */
   private render(): void {
-    ReactDOM.render(<MetadataDisplay metadata={this._metadata} cellId={this._cellId} />, this.node);
+    ReactDOM.render(
+      <MetadataDisplay metadata={this._metadata} cellId={this._cellId} />,
+      this.node
+    );
   }
 
   /**
    * Update the displayed metadata
    */
-  public updateMetadata(metadata: IFlowbookMetadata | null, cellId: string | null): void {
-    console.log('[MetadataPanel] updateMetadata called with:', metadata, cellId);
+  public updateMetadata(
+    metadata: IFlowbookMetadata | null,
+    cellId: string | null
+  ): void {
+    console.log(
+      '[MetadataPanel] updateMetadata called with:',
+      metadata,
+      cellId
+    );
     this._metadata = metadata;
     this._cellId = cellId;
     this.render();

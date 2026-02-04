@@ -79,7 +79,7 @@ export class MessagePanel extends Widget {
    */
   private handleMessage(message: IMessage): void {
     switch (message.type) {
-      case MessageType.APPEND:
+      case MessageType.APPEND: {
         // Create a new segment with the content and metadata
         const segment: IMessageSegment = {
           content: message.content,
@@ -104,6 +104,7 @@ export class MessagePanel extends Widget {
         }
         this.updateDisplay();
         break;
+      }
 
       case MessageType.NEWLINE:
         // Finalize current segment and add newline

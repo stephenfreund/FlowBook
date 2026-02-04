@@ -4,7 +4,7 @@
 
 import { NotebookPanel } from '@jupyterlab/notebook';
 import { showDialog, Dialog } from '@jupyterlab/apputils';
-import { KernelInfo } from './experimental/types';
+import { IKernelInfo } from './experimental/types';
 
 /**
  * Utility functions for working with Jupyter kernels
@@ -13,7 +13,7 @@ export class KernelUtils {
   /**
    * Get kernel information from a notebook panel
    */
-  static getKernelInfo(notebook: NotebookPanel): KernelInfo | null {
+  static getIKernelInfo(notebook: NotebookPanel): IKernelInfo | null {
     const session = notebook.sessionContext.session;
 
     if (!session || !session.kernel) {
@@ -31,10 +31,10 @@ export class KernelUtils {
    */
   static async ensureKernel(
     notebook: NotebookPanel
-  ): Promise<KernelInfo | null> {
+  ): Promise<IKernelInfo | null> {
     await notebook.sessionContext.ready;
 
-    let kernelInfo = this.getKernelInfo(notebook);
+    let kernelInfo = this.getIKernelInfo(notebook);
 
     if (!kernelInfo) {
       const shouldStart = await showDialog({
@@ -49,7 +49,7 @@ export class KernelUtils {
       if (shouldStart.button.accept) {
         await notebook.sessionContext.startKernel();
         await notebook.sessionContext.ready;
-        kernelInfo = this.getKernelInfo(notebook);
+        kernelInfo = this.getIKernelInfo(notebook);
 
         if (!kernelInfo) {
           showDialog({

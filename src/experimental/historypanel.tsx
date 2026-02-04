@@ -9,7 +9,7 @@ import { NotebookHistoryManager } from './history';
 import { IHistoryEntry } from './types';
 import { LabIcon } from '@jupyterlab/ui-components';
 
-interface HistoryPanelProps {
+interface IHistoryPanelProps {
   tracker: INotebookTracker;
   historyManager: NotebookHistoryManager;
 }
@@ -17,7 +17,7 @@ interface HistoryPanelProps {
 /**
  * React component for the history panel
  */
-function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
+function HistoryPanelComponent(props: IHistoryPanelProps): JSX.Element {
   const { tracker, historyManager } = props;
   const [entries, setEntries] = useState<IHistoryEntry[]>([]);
   const [currentIndex, setCurrentIndex] = useState<number>(-1);
@@ -79,7 +79,9 @@ function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
     return () => {
       if (currentWidget?.content.model) {
         try {
-          currentWidget.content.model.cells.changed.disconnect(onNotebookChanged);
+          currentWidget.content.model.cells.changed.disconnect(
+            onNotebookChanged
+          );
         } catch (e) {
           // Ignore if already disconnected
         }
@@ -114,9 +116,7 @@ function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
   if (!notebookPath) {
     return (
       <div className="flowbook-history-panel">
-        <div className="flowbook-history-empty">
-          No notebook open
-        </div>
+        <div className="flowbook-history-empty">No notebook open</div>
       </div>
     );
   }
@@ -124,9 +124,7 @@ function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
   if (entries.length === 0) {
     return (
       <div className="flowbook-history-panel">
-        <div className="flowbook-history-empty">
-          No history yet
-        </div>
+        <div className="flowbook-history-empty">No history yet</div>
       </div>
     );
   }
@@ -158,7 +156,8 @@ function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
         {entries.map((entry, index) => {
           const isCurrent = index === currentIndex;
           const isFuture = index > currentIndex;
-          const entryClass = `flowbook-history-entry ${isCurrent ? 'current' : ''} ${isFuture ? 'future' : ''}`.trim();
+          const entryClass =
+            `flowbook-history-entry ${isCurrent ? 'current' : ''} ${isFuture ? 'future' : ''}`.trim();
 
           // Get dynamic description based on current notebook state
           const description = currentNotebook
@@ -166,7 +165,16 @@ function HistoryPanelComponent(props: HistoryPanelProps): JSX.Element {
             : entry.description;
 
           if (index === 0) {
-            console.log('[HistoryPanel] First entry - index:', index, 'currentIndex:', currentIndex, 'isCurrent:', isCurrent, 'class:', entryClass);
+            console.log(
+              '[HistoryPanel] First entry - index:',
+              index,
+              'currentIndex:',
+              currentIndex,
+              'isCurrent:',
+              isCurrent,
+              'class:',
+              entryClass
+            );
           }
 
           return (
@@ -206,7 +214,10 @@ export class HistoryPanel extends ReactWidget {
   private tracker: INotebookTracker;
   private historyManager: NotebookHistoryManager;
 
-  constructor(tracker: INotebookTracker, historyManager: NotebookHistoryManager) {
+  constructor(
+    tracker: INotebookTracker,
+    historyManager: NotebookHistoryManager
+  ) {
     super();
     this.id = 'flowbook-history-panel';
     this.tracker = tracker;

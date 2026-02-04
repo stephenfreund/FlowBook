@@ -5,7 +5,7 @@
 /**
  * Information about a FlowBook command from the server
  */
-export interface CommandInfo {
+export interface ICommandInfo {
   id: string;
   label: string;
   icon: string;
@@ -53,7 +53,7 @@ export interface IHistoryState {
 /**
  * Hardcoded list of available FlowBook commands
  */
-export const FLOWBOOK_COMMANDS: CommandInfo[] = [
+export const FLOWBOOK_COMMANDS: ICommandInfo[] = [
   {
     id: 'cleanup',
     label: 'Tidy',
@@ -93,7 +93,8 @@ export const FLOWBOOK_COMMANDS: CommandInfo[] = [
     id: 'test_leq',
     label: 'Test Leq',
     icon: 'ui-components:check',
-    tooltip: 'Execute cells and verify read-before-write variables aren\'t modified',
+    tooltip:
+      "Execute cells and verify read-before-write variables aren't modified",
     requires_kernel: true
   },
   {
@@ -129,7 +130,7 @@ export const FLOWBOOK_COMMANDS: CommandInfo[] = [
 /**
  * Result from executing a command
  */
-export interface CommandResult {
+export interface ICommandResult {
   notebook: any;
   metadata: any;
   total_cost: number;
@@ -139,7 +140,7 @@ export interface CommandResult {
 /**
  * Information about a Jupyter kernel
  */
-export interface KernelInfo {
+export interface IKernelInfo {
   kernel_id: string;
   kernel_name: string;
   connection_file?: string;
@@ -148,7 +149,7 @@ export interface KernelInfo {
 /**
  * Request body for the /flowbook/execute API endpoint
  */
-export interface ExecuteCommandRequest {
+export interface IExecuteCommandRequest {
   command: string;
   notebook: any;
   kernel_id?: string;

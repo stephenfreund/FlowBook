@@ -59,15 +59,15 @@ python -m flowbook.testing.scripts.run_correctness examples/Example.ipynb -n 10 
 
 Located in `flowbook/testing/notebooks/`:
 
-| Notebook | Cells | Description | Key Features |
-|----------|-------|-------------|--------------|
-| `deterministic.ipynb` | 6 | Simple deterministic operations | Scalars, lists, dicts, strings |
-| `nondeterministic.ipynb` | 5 | Random operations | Tests seeding fix |
-| `dependencies.ipynb` | 8 | Variable dependency chains | Tests dependency tracking |
-| `pandas_heavy.ipynb` | 8 | Single DataFrame operations | Filter, aggregate, groupby |
-| `multi_dataframe.ipynb` | 10 | E-commerce data model | 3 DataFrames (customers, products, orders), joins, aggregations |
-| `data_pipeline.ipynb` | 10 | Sensor data ETL pipeline | Raw data, cleaning, rolling stats, pivots, correlations |
-| `ml_workflow.ipynb` | 10 | ML classification pipeline | Feature engineering, encoding, train/test split, sklearn model |
+| Notebook                 | Cells | Description                     | Key Features                                                    |
+| ------------------------ | ----- | ------------------------------- | --------------------------------------------------------------- |
+| `deterministic.ipynb`    | 6     | Simple deterministic operations | Scalars, lists, dicts, strings                                  |
+| `nondeterministic.ipynb` | 5     | Random operations               | Tests seeding fix                                               |
+| `dependencies.ipynb`     | 8     | Variable dependency chains      | Tests dependency tracking                                       |
+| `pandas_heavy.ipynb`     | 8     | Single DataFrame operations     | Filter, aggregate, groupby                                      |
+| `multi_dataframe.ipynb`  | 10    | E-commerce data model           | 3 DataFrames (customers, products, orders), joins, aggregations |
+| `data_pipeline.ipynb`    | 10    | Sensor data ETL pipeline        | Raw data, cleaning, rolling stats, pivots, correlations         |
+| `ml_workflow.ipynb`      | 10    | ML classification pipeline      | Feature engineering, encoding, train/test split, sklearn model  |
 
 ## Output
 
@@ -371,14 +371,15 @@ The framework is completely isolated:
 
 Based on test notebooks:
 
-| Notebook Type | Check Time (ms) | Namespace Size |
-|---------------|-----------------|----------------|
-| Simple scalars | 0.2 - 0.3 | 5 - 10 vars |
-| Single DataFrame | 0.7 - 2.0 | 10 - 15 vars |
-| Multiple DataFrames | 0.8 - 2.5 | 10 - 15 vars |
-| ML Pipeline | 1.0 - 18.0 | 15 - 30 vars |
+| Notebook Type       | Check Time (ms) | Namespace Size |
+| ------------------- | --------------- | -------------- |
+| Simple scalars      | 0.2 - 0.3       | 5 - 10 vars    |
+| Single DataFrame    | 0.7 - 2.0       | 10 - 15 vars   |
+| Multiple DataFrames | 0.8 - 2.5       | 10 - 15 vars   |
+| ML Pipeline         | 1.0 - 18.0      | 15 - 30 vars   |
 
 Factors affecting check time:
+
 - Number of variables in namespace
 - Number of variables accessed by cell (reads + writes)
 - Complexity of data structures (DataFrames vs scalars)

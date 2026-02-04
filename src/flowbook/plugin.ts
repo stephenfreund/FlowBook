@@ -39,7 +39,9 @@ class FlowbookActivationManager {
 
   private _setupKernelChangeListener(): void {
     this._kernelDetector.kernelChanged.connect((_, info) => {
-      console.log(`FlowBook Plugin: Kernel changed from ${info.previousKernel} to ${info.currentKernel}`);
+      console.log(
+        `FlowBook Plugin: Kernel changed from ${info.previousKernel} to ${info.currentKernel}`
+      );
       if (info.currentKernel === 'flowbook_kernel') {
         this._activate();
       } else if (info.previousKernel === 'flowbook_kernel') {
@@ -49,7 +51,9 @@ class FlowbookActivationManager {
 
     // Also check when current widget changes
     this._tracker.currentChanged.connect(() => {
-      console.log('FlowBook Plugin: Current notebook changed, checking kernel...');
+      console.log(
+        'FlowBook Plugin: Current notebook changed, checking kernel...'
+      );
       this._checkCurrentNotebook();
     });
   }
@@ -64,7 +68,9 @@ class FlowbookActivationManager {
       notebook.sessionContext.ready.then(() => {
         const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
         const currentKernelName = notebook.sessionContext.session?.kernel?.name;
-        console.log(`FlowBook Plugin: Session ready, kernel = ${currentKernelName}, isFlowbook = ${isFlowbook}`);
+        console.log(
+          `FlowBook Plugin: Session ready, kernel = ${currentKernelName}, isFlowbook = ${isFlowbook}`
+        );
 
         if (isFlowbook) {
           this._activate();
@@ -77,7 +83,9 @@ class FlowbookActivationManager {
       notebook.sessionContext.statusChanged.connect(() => {
         const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
         const currentKernelName = notebook.sessionContext.session?.kernel?.name;
-        console.log(`FlowBook Plugin: Status changed, kernel = ${currentKernelName}, isFlowbook = ${isFlowbook}`);
+        console.log(
+          `FlowBook Plugin: Status changed, kernel = ${currentKernelName}, isFlowbook = ${isFlowbook}`
+        );
 
         if (isFlowbook && !this._isActive) {
           this._activate();
@@ -100,7 +108,10 @@ class FlowbookActivationManager {
     this._app.shell.add(this._panel, 'right', { rank: 510 });
 
     // Create highlighter
-    this._highlighter = new ReproducibilityCellHighlighter(this._tracker, this._panel);
+    this._highlighter = new ReproducibilityCellHighlighter(
+      this._tracker,
+      this._panel
+    );
 
     // Create execution hook
     new ReproducibilityExecutionHookManager(
@@ -155,7 +166,9 @@ export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
   autoStart: true,
   requires: [INotebookTracker],
   activate: (app: JupyterFrontEnd, tracker: INotebookTracker) => {
-    console.log('FlowBook Plugin: Extension registered (will activate when flowbook_kernel is used)');
+    console.log(
+      'FlowBook Plugin: Extension registered (will activate when flowbook_kernel is used)'
+    );
     new FlowbookActivationManager(app, tracker);
   }
 };

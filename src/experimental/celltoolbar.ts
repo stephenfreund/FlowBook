@@ -77,7 +77,8 @@ export class CellToolbarExtension {
           if (panel) {
             panel.sessionContext.kernelChanged.connect(() => {
               const newKernelName = panel.sessionContext.session?.kernel?.name;
-              button.node.style.display = newKernelName === 'experimental_kernel' ? '' : 'none';
+              button.node.style.display =
+                newKernelName === 'experimental_kernel' ? '' : 'none';
             });
           }
 

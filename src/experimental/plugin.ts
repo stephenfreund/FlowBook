@@ -59,7 +59,11 @@ class ExperimentalActivationManager {
     // Initialize shared managers
     this._historyManager = new NotebookHistoryManager();
     this._cellIndexManager = new CellIndexManager();
-    this._manager = new FlowbookCommandsManager(app, tracker, this._historyManager);
+    this._manager = new FlowbookCommandsManager(
+      app,
+      tracker,
+      this._historyManager
+    );
 
     // Register commands (they will check kernel before executing)
     this._manager.registerCommands();
@@ -134,8 +138,11 @@ class ExperimentalActivationManager {
 
       // Also listen for status changes in case kernel starts after ready
       notebook.sessionContext.statusChanged.connect(() => {
-        const isExperimental = this._kernelDetector.isExperimentalKernel(notebook);
-        console.log(`Experimental Plugin: Status changed, isExperimental = ${isExperimental}`);
+        const isExperimental =
+          this._kernelDetector.isExperimentalKernel(notebook);
+        console.log(
+          `Experimental Plugin: Status changed, isExperimental = ${isExperimental}`
+        );
 
         if (isExperimental && !this._isUIActive) {
           this._activateUI();
@@ -234,7 +241,9 @@ export const experimentalPlugin: JupyterFrontEndPlugin<void> = {
     palette: ICommandPalette | null,
     toolbarRegistry: IToolbarWidgetRegistry | null
   ) => {
-    console.log('Experimental Plugin: Extension registered (will activate UI when experimental_kernel is used)');
+    console.log(
+      'Experimental Plugin: Extension registered (will activate UI when experimental_kernel is used)'
+    );
     new ExperimentalActivationManager(app, tracker, palette, toolbarRegistry);
   }
 };

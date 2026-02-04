@@ -3,7 +3,11 @@
  */
 
 import { JupyterFrontEnd } from '@jupyterlab/application';
-import { INotebookTracker, Notebook, NotebookActions } from '@jupyterlab/notebook';
+import {
+  INotebookTracker,
+  Notebook,
+  NotebookActions
+} from '@jupyterlab/notebook';
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { IOutput } from '@jupyterlab/nbformat';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
@@ -28,15 +32,23 @@ export class ReproducibilityExecutionHookManager {
     NotebookActions.executed.connect(this._onCellExecuted, this);
 
     // Listen for cell execution start to set cell_order via magic
-    NotebookActions.executionScheduled.connect(this._onExecutionScheduled, this);
+    NotebookActions.executionScheduled.connect(
+      this._onExecutionScheduled,
+      this
+    );
 
-    console.log('ReproducibilityExecutionHookManager: Execution hooks installed');
+    console.log(
+      'ReproducibilityExecutionHookManager: Execution hooks installed'
+    );
   }
 
   /**
    * Called before cell execution - send %notebook_structure magic to set cell order
    */
-  private _onExecutionScheduled(_sender: any, args: { notebook: Notebook; cell: Cell }): void {
+  private _onExecutionScheduled(
+    _sender: any,
+    args: { notebook: Notebook; cell: Cell }
+  ): void {
     const { notebook } = args;
 
     // Get the notebook panel
@@ -58,37 +70,60 @@ export class ReproducibilityExecutionHookManager {
     const session = panel.sessionContext.session;
     if (session && session.kernel && cellOrder.length > 0) {
       const magicCommand = `%notebook_structure ${cellOrder.join(' ')}`;
-      session.kernel.requestExecute({ code: magicCommand, silent: true, store_history: false });
-      console.log(`ReproducibilityExecutionHook: Sent notebook_structure with ${cellOrder.length} cells`);
+      session.kernel.requestExecute({
+        code: magicCommand,
+        silent: true,
+        store_history: false
+      });
+      console.log(
+        `ReproducibilityExecutionHook: Sent notebook_structure with ${cellOrder.length} cells`
+      );
     }
   }
 
-  private _extractReproducibilityMetadata(outputs: IOutput[]): IReproducibilityMetadata | null {
-    console.log(`ReproducibilityExecutionHook: Checking ${outputs.length} outputs for flowbook metadata`);
+  private _extractReproducibilityMetadata(
+    outputs: IOutput[]
+  ): IReproducibilityMetadata | null {
+    console.log(
+      `ReproducibilityExecutionHook: Checking ${outputs.length} outputs for flowbook metadata`
+    );
 
     for (const output of outputs) {
-      console.log(`ReproducibilityExecutionHook: Output type = ${output.output_type}`);
+      console.log(
+        `ReproducibilityExecutionHook: Output type = ${output.output_type}`
+      );
 
       if (output.output_type !== 'display_data') {
         continue;
       }
 
       const metadata = (output as any).metadata;
-      console.log('ReproducibilityExecutionHook: display_data metadata =', metadata);
+      console.log(
+        'ReproducibilityExecutionHook: display_data metadata =',
+        metadata
+      );
 
       if (!metadata?.flowbook) {
         console.log('ReproducibilityExecutionHook: No flowbook in metadata');
         continue;
       }
 
-      console.log('ReproducibilityExecutionHook: Found flowbook metadata!', metadata.flowbook);
+      console.log(
+        'ReproducibilityExecutionHook: Found flowbook metadata!',
+        metadata.flowbook
+      );
       return metadata.flowbook as IReproducibilityMetadata;
     }
-    console.log('ReproducibilityExecutionHook: No flowbook metadata found in any output');
+    console.log(
+      'ReproducibilityExecutionHook: No flowbook metadata found in any output'
+    );
     return null;
   }
 
-  private _onCellExecuted(_sender: any, args: { notebook: Notebook; cell: Cell }): void {
+  private _onCellExecuted(
+    _sender: any,
+    args: { notebook: Notebook; cell: Cell }
+  ): void {
     const { notebook, cell } = args;
 
     if (cell.model.type !== 'code') {
@@ -109,7 +144,8 @@ export class ReproducibilityExecutionHookManager {
     }
 
     // Extract reproducibility metadata
-    const reproducibilityMetadata = this._extractReproducibilityMetadata(outputs);
+    const reproducibilityMetadata =
+      this._extractReproducibilityMetadata(outputs);
     if (!reproducibilityMetadata) {
       return;
     }
@@ -121,6 +157,9 @@ export class ReproducibilityExecutionHookManager {
     const stalenessManager = this._highlighter.getStalenessManager(panel);
     stalenessManager.updateFromMetadata(reproducibilityMetadata);
 
-    console.log(`ReproducibilityExecutionHook: Extracted metadata for cell ${cell.model.id}:`, reproducibilityMetadata);
+    console.log(
+      `ReproducibilityExecutionHook: Extracted metadata for cell ${cell.model.id}:`,
+      reproducibilityMetadata
+    );
   }
 }

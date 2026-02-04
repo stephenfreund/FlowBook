@@ -53,7 +53,10 @@ export class ReproducibilityCellHighlighter {
     return manager;
   }
 
-  private _onNotebookChanged(tracker: INotebookTracker, notebook: NotebookPanel | null): void {
+  private _onNotebookChanged(
+    tracker: INotebookTracker,
+    notebook: NotebookPanel | null
+  ): void {
     if (notebook) {
       this._monitorNotebook(notebook);
     }
@@ -74,7 +77,10 @@ export class ReproducibilityCellHighlighter {
     return cellOrder;
   }
 
-  private _onActiveCellChanged(tracker: INotebookTracker, cell: Cell | null): void {
+  private _onActiveCellChanged(
+    tracker: INotebookTracker,
+    cell: Cell | null
+  ): void {
     const notebook = tracker.currentWidget;
     if (!notebook) {
       this._panel.clear();
@@ -83,12 +89,18 @@ export class ReproducibilityCellHighlighter {
 
     if (cell && cell.model.type === 'code') {
       const metadata = cell.model.metadata as any;
-      const reproducibilityMetadata = metadata?.flowbook as IReproducibilityMetadata | undefined;
+      const reproducibilityMetadata = metadata?.flowbook as
+        | IReproducibilityMetadata
+        | undefined;
       const cellId = cell.model.id;
       const currentCellOrder = this._getCurrentCellOrder(notebook);
 
       if (reproducibilityMetadata) {
-        this._panel.updateMetadata(reproducibilityMetadata, cellId, currentCellOrder);
+        this._panel.updateMetadata(
+          reproducibilityMetadata,
+          cellId,
+          currentCellOrder
+        );
       } else {
         this._panel.clear();
       }
@@ -117,12 +129,18 @@ export class ReproducibilityCellHighlighter {
     }
 
     const metadata = activeCell.model.metadata as any;
-    const reproducibilityMetadata = metadata?.flowbook as IReproducibilityMetadata | undefined;
+    const reproducibilityMetadata = metadata?.flowbook as
+      | IReproducibilityMetadata
+      | undefined;
 
     if (reproducibilityMetadata) {
       const cellId = activeCell.model.id;
       const currentCellOrder = this._getCurrentCellOrder(notebook);
-      this._panel.updateMetadata(reproducibilityMetadata, cellId, currentCellOrder);
+      this._panel.updateMetadata(
+        reproducibilityMetadata,
+        cellId,
+        currentCellOrder
+      );
     }
   }
 
@@ -149,20 +167,30 @@ export class ReproducibilityCellHighlighter {
     // Add stale class if needed
     if (isStale) {
       cell.node.classList.add('flowbook-cell-stale');
-      console.log(`CellHighlighter: Added .flowbook-cell-stale class to cell ${cellId}`);
+      console.log(
+        `CellHighlighter: Added .flowbook-cell-stale class to cell ${cellId}`
+      );
     } else {
-      console.log(`CellHighlighter: Removed .flowbook-cell-stale class from cell ${cellId}`);
+      console.log(
+        `CellHighlighter: Removed .flowbook-cell-stale class from cell ${cellId}`
+      );
     }
 
     // Update panel if this is the active cell
     if (this._tracker.activeCell === cell) {
       const metadata = cell.model.metadata as any;
-      const reproducibilityMetadata = metadata?.flowbook as IReproducibilityMetadata | undefined;
+      const reproducibilityMetadata = metadata?.flowbook as
+        | IReproducibilityMetadata
+        | undefined;
       const notebook = this._tracker.currentWidget;
 
       if (reproducibilityMetadata && notebook) {
         const currentCellOrder = this._getCurrentCellOrder(notebook);
-        this._panel.updateMetadata(reproducibilityMetadata, cellId, currentCellOrder);
+        this._panel.updateMetadata(
+          reproducibilityMetadata,
+          cellId,
+          currentCellOrder
+        );
       }
     }
   }

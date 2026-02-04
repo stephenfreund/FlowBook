@@ -58,10 +58,17 @@ export class CellMetadataHighlighter {
   ): void {
     if (cell && cell.model.type === 'code') {
       const metadata = cell.model.metadata as any;
-      const flowbookMetadata = metadata?.flowbook as IFlowbookMetadata | undefined;
+      const flowbookMetadata = metadata?.flowbook as
+        | IFlowbookMetadata
+        | undefined;
       const cellId = cell.model.id;
 
-      if (flowbookMetadata && (flowbookMetadata.optimization_potential || flowbookMetadata.profile || flowbookMetadata.dynamic_dependencies)) {
+      if (
+        flowbookMetadata &&
+        (flowbookMetadata.optimization_potential ||
+          flowbookMetadata.profile ||
+          flowbookMetadata.dynamic_dependencies)
+      ) {
         this.panel.updateMetadata(flowbookMetadata, cellId);
       } else {
         this.panel.clear();
@@ -111,14 +118,19 @@ export class CellMetadataHighlighter {
    */
   private updateCell(cell: Cell): void {
     const metadata = cell.model.metadata as any;
-    const flowbookMetadata = metadata?.flowbook as IFlowbookMetadata | undefined;
+    const flowbookMetadata = metadata?.flowbook as
+      | IFlowbookMetadata
+      | undefined;
     const cellId = cell.model.id;
 
     // Remove existing classes
     cell.node.classList.remove('flowbook-cell-warning', 'flowbook-cell-danger');
 
     // Check if any flowbook metadata exists (optimization potential or profile)
-    if (flowbookMetadata && (flowbookMetadata.optimization_potential || flowbookMetadata.profile)) {
+    if (
+      flowbookMetadata &&
+      (flowbookMetadata.optimization_potential || flowbookMetadata.profile)
+    ) {
       // Apply CSS class based on optimization potential metadata if present
       if (flowbookMetadata.optimization_potential) {
         const { potential } = flowbookMetadata.optimization_potential;
@@ -135,12 +147,16 @@ export class CellMetadataHighlighter {
 
     // Update panel if this is the active cell
     if (this.tracker.activeCell === cell) {
-      if (flowbookMetadata && (flowbookMetadata.optimization_potential || flowbookMetadata.profile || flowbookMetadata.dynamic_dependencies)) {
+      if (
+        flowbookMetadata &&
+        (flowbookMetadata.optimization_potential ||
+          flowbookMetadata.profile ||
+          flowbookMetadata.dynamic_dependencies)
+      ) {
         this.panel.updateMetadata(flowbookMetadata, cellId);
       } else {
         this.panel.clear();
       }
     }
   }
-
 }

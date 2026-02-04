@@ -51,7 +51,10 @@ export class NotebookHistoryManager {
   /**
    * Add a command entry to history
    */
-  addCommandEntry(notebookPath: string, entry: Omit<IHistoryEntry, 'type'>): void {
+  addCommandEntry(
+    notebookPath: string,
+    entry: Omit<IHistoryEntry, 'type'>
+  ): void {
     const state = this.ensureHistory(notebookPath);
 
     // If we've undone and now executing a command, discard future history
@@ -79,21 +82,34 @@ export class NotebookHistoryManager {
    * Capture a user edit (called after debounce or on command execution)
    */
   captureUserEdit(notebookPath: string, notebook: NotebookPanel): void {
-    if (this._isRestoring) return;
+    if (this._isRestoring) {
+      return;
+    }
 
     const state = this.ensureHistory(notebookPath);
-    if (state.currentIndex < 0) return; // No initial state yet
+    if (state.currentIndex < 0) {
+      return;
+    } // No initial state yet
 
     const currentSnapshot = notebook.content.model?.toJSON();
-    if (!currentSnapshot) return;
+    if (!currentSnapshot) {
+      return;
+    }
 
     const lastEntry = state.entries[state.currentIndex];
-    if (!lastEntry) return;
+    if (!lastEntry) {
+      return;
+    }
 
     // Compare snapshots
-    const changes = this.compareSnapshots(lastEntry.notebookSnapshot, currentSnapshot);
+    const changes = this.compareSnapshots(
+      lastEntry.notebookSnapshot,
+      currentSnapshot
+    );
 
-    if (!changes.hasChanges) return;
+    if (!changes.hasChanges) {
+      return;
+    }
 
     // If we've undone and user makes edit, discard future history
     if (state.currentIndex < state.entries.length - 1) {
@@ -101,10 +117,9 @@ export class NotebookHistoryManager {
     }
 
     // Check if we should combine with the previous user edit entry
-    const shouldCombine = lastEntry.type === 'user-edit' && this.hasCellOverlap(
-      lastEntry.affectedCells,
-      changes.affectedCells
-    );
+    const shouldCombine =
+      lastEntry.type === 'user-edit' &&
+      this.hasCellOverlap(lastEntry.affectedCells, changes.affectedCells);
 
     if (shouldCombine) {
       // Update the existing user edit entry
@@ -112,13 +127,25 @@ export class NotebookHistoryManager {
       lastEntry.timestamp = Date.now();
 
       // Merge affected cells (unique cells only)
-      const combinedCells = new Set([...lastEntry.affectedCells, ...changes.affectedCells]);
+      const combinedCells = new Set([
+        ...lastEntry.affectedCells,
+        ...changes.affectedCells
+      ]);
       lastEntry.affectedCells = Array.from(combinedCells);
 
       // Merge categorized cells
-      const combinedAdded = new Set([...(lastEntry.addedCells || []), ...changes.addedCells]);
-      const combinedDeleted = new Set([...(lastEntry.deletedCells || []), ...changes.deletedCells]);
-      const combinedModified = new Set([...(lastEntry.modifiedCells || []), ...changes.modifiedCells]);
+      const combinedAdded = new Set([
+        ...(lastEntry.addedCells || []),
+        ...changes.addedCells
+      ]);
+      const combinedDeleted = new Set([
+        ...(lastEntry.deletedCells || []),
+        ...changes.deletedCells
+      ]);
+      const combinedModified = new Set([
+        ...(lastEntry.modifiedCells || []),
+        ...changes.modifiedCells
+      ]);
       lastEntry.addedCells = Array.from(combinedAdded);
       lastEntry.deletedCells = Array.from(combinedDeleted);
       lastEntry.modifiedCells = Array.from(combinedModified);
@@ -217,14 +244,20 @@ export class NotebookHistoryManager {
       this.onNotebookChanged(notebookPath, notebook);
     };
     notebook.content.model?.cells.changed.connect(cellsChangedListener);
-    listeners.push({ signal: notebook.content.model?.cells.changed, callback: cellsChangedListener });
+    listeners.push({
+      signal: notebook.content.model?.cells.changed,
+      callback: cellsChangedListener
+    });
 
     // Listen to content changes
     const contentChangedListener = () => {
       this.onNotebookChanged(notebookPath, notebook);
     };
     notebook.content.model?.contentChanged.connect(contentChangedListener);
-    listeners.push({ signal: notebook.content.model?.contentChanged, callback: contentChangedListener });
+    listeners.push({
+      signal: notebook.content.model?.contentChanged,
+      callback: contentChangedListener
+    });
 
     // Listen to metadata changes on existing cells
     notebook.content.widgets.forEach(cell => {
@@ -232,13 +265,19 @@ export class NotebookHistoryManager {
         this.onNotebookChanged(notebookPath, notebook);
       };
       cell.model.metadataChanged.connect(metadataChangedListener);
-      listeners.push({ signal: cell.model.metadataChanged, callback: metadataChangedListener });
+      listeners.push({
+        signal: cell.model.metadataChanged,
+        callback: metadataChangedListener
+      });
 
       const cellContentChangedListener = () => {
         this.onNotebookChanged(notebookPath, notebook);
       };
       cell.model.contentChanged.connect(cellContentChangedListener);
-      listeners.push({ signal: cell.model.contentChanged, callback: cellContentChangedListener });
+      listeners.push({
+        signal: cell.model.contentChanged,
+        callback: cellContentChangedListener
+      });
     });
 
     this._changeListeners.set(notebookPath, listeners);
@@ -273,11 +312,18 @@ export class NotebookHistoryManager {
   /**
    * Handle notebook changes (with debouncing)
    */
-  private onNotebookChanged(notebookPath: string, notebook: NotebookPanel): void {
-    if (this._isRestoring) return;
+  private onNotebookChanged(
+    notebookPath: string,
+    notebook: NotebookPanel
+  ): void {
+    if (this._isRestoring) {
+      return;
+    }
 
     const state = this._history.get(notebookPath);
-    if (!state) return;
+    if (!state) {
+      return;
+    }
 
     // Clear existing debounce timer
     if (this._debounceTimers.has(notebookPath)) {
@@ -314,8 +360,12 @@ export class NotebookHistoryManager {
       cellsMoved: number;
     };
   } {
-    const beforeCells = new Map<string, any>(before.cells?.map((c: any) => [c.id, c]) || []);
-    const afterCells = new Map<string, any>(after.cells?.map((c: any) => [c.id, c]) || []);
+    const beforeCells = new Map<string, any>(
+      before.cells?.map((c: any) => [c.id, c]) || []
+    );
+    const afterCells = new Map<string, any>(
+      after.cells?.map((c: any) => [c.id, c]) || []
+    );
 
     let added = 0;
     let deleted = 0;
@@ -392,13 +442,19 @@ export class NotebookHistoryManager {
     const parts: string[] = [];
 
     if (summary.cellsAdded > 0) {
-      parts.push(`${summary.cellsAdded} cell${summary.cellsAdded > 1 ? 's' : ''} added`);
+      parts.push(
+        `${summary.cellsAdded} cell${summary.cellsAdded > 1 ? 's' : ''} added`
+      );
     }
     if (summary.cellsDeleted > 0) {
-      parts.push(`${summary.cellsDeleted} cell${summary.cellsDeleted > 1 ? 's' : ''} deleted`);
+      parts.push(
+        `${summary.cellsDeleted} cell${summary.cellsDeleted > 1 ? 's' : ''} deleted`
+      );
     }
     if (summary.cellsModified > 0) {
-      parts.push(`${summary.cellsModified} cell${summary.cellsModified > 1 ? 's' : ''} modified`);
+      parts.push(
+        `${summary.cellsModified} cell${summary.cellsModified > 1 ? 's' : ''} modified`
+      );
     }
     if (summary.cellsMoved > 0) {
       parts.push('cells reordered');
@@ -446,7 +502,11 @@ export class NotebookHistoryManager {
   /**
    * Jump to a specific history entry
    */
-  jumpToEntry(notebookPath: string, index: number, notebook: NotebookPanel): IHistoryEntry | null {
+  jumpToEntry(
+    notebookPath: string,
+    index: number,
+    notebook: NotebookPanel
+  ): IHistoryEntry | null {
     const state = this._history.get(notebookPath);
     if (!state || index < 0 || index >= state.entries.length) {
       return null;
@@ -511,7 +571,10 @@ export class NotebookHistoryManager {
     // For command entries, show affected cells if available
     if (entry.type === 'command') {
       if (entry.affectedCells && entry.affectedCells.length > 0) {
-        const refs = this.getCellReferences(currentNotebook, entry.affectedCells);
+        const refs = this.getCellReferences(
+          currentNotebook,
+          entry.affectedCells
+        );
         if (refs.length > 0) {
           // Get the base description without any existing cell information
           const baseDesc = entry.description.split(/\[.*?\]|\(.*?\)/)[0].trim();
@@ -530,7 +593,9 @@ export class NotebookHistoryManager {
       if (refs.length > 0) {
         parts.push(`added ${refs.join(', ')}`);
       } else if (entry.editSummary?.cellsAdded) {
-        parts.push(`added ${entry.editSummary.cellsAdded} cell${entry.editSummary.cellsAdded > 1 ? 's' : ''}`);
+        parts.push(
+          `added ${entry.editSummary.cellsAdded} cell${entry.editSummary.cellsAdded > 1 ? 's' : ''}`
+        );
       }
     }
 
@@ -540,13 +605,17 @@ export class NotebookHistoryManager {
       if (refs.length > 0) {
         parts.push(`edited ${refs.join(', ')}`);
       } else if (entry.editSummary?.cellsModified) {
-        parts.push(`edited ${entry.editSummary.cellsModified} cell${entry.editSummary.cellsModified > 1 ? 's' : ''}`);
+        parts.push(
+          `edited ${entry.editSummary.cellsModified} cell${entry.editSummary.cellsModified > 1 ? 's' : ''}`
+        );
       }
     }
 
     // Deleted cells (can't show indices since cells don't exist)
     if (entry.editSummary?.cellsDeleted && entry.editSummary.cellsDeleted > 0) {
-      parts.push(`deleted ${entry.editSummary.cellsDeleted} cell${entry.editSummary.cellsDeleted > 1 ? 's' : ''}`);
+      parts.push(
+        `deleted ${entry.editSummary.cellsDeleted} cell${entry.editSummary.cellsDeleted > 1 ? 's' : ''}`
+      );
     }
 
     // Moved cells
@@ -587,7 +656,9 @@ export class NotebookHistoryManager {
    */
   private pruneOldEntries(notebookPath: string): void {
     const state = this._history.get(notebookPath);
-    if (!state) return;
+    if (!state) {
+      return;
+    }
 
     if (state.entries.length > state.maxEntries) {
       const removeCount = state.entries.length - state.maxEntries;
@@ -613,7 +684,9 @@ export class NotebookHistoryManager {
 
     // For markdown cells, compare attachments if present
     if (before.cell_type === 'markdown' && before.attachments) {
-      if (JSON.stringify(before.attachments) !== JSON.stringify(after.attachments)) {
+      if (
+        JSON.stringify(before.attachments) !== JSON.stringify(after.attachments)
+      ) {
         return true;
       }
     }

@@ -33,14 +33,16 @@ export class CellIndexManager {
     this.updateAllOverlays(notebookPath, notebook);
 
     // Use MutationObserver to watch for editor elements being added to DOM
-    const observer = new MutationObserver((mutations) => {
+    const observer = new MutationObserver(mutations => {
       for (const mutation of mutations) {
         if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
           // Check if any added nodes contain editor elements
           for (const node of mutation.addedNodes) {
             if (node instanceof HTMLElement) {
-              if (node.classList.contains('jp-InputArea-editor') ||
-                  node.querySelector('.jp-InputArea-editor')) {
+              if (
+                node.classList.contains('jp-InputArea-editor') ||
+                node.querySelector('.jp-InputArea-editor')
+              ) {
                 // Editor element was added, update overlays
                 this.updateAllOverlays(notebookPath, notebook);
                 return;
@@ -66,7 +68,10 @@ export class CellIndexManager {
     };
 
     notebook.content.model?.cells.changed.connect(cellsChangedListener);
-    listeners.push({ signal: notebook.content.model?.cells.changed, callback: cellsChangedListener });
+    listeners.push({
+      signal: notebook.content.model?.cells.changed,
+      callback: cellsChangedListener
+    });
 
     this._listeners.set(notebookPath, listeners);
   }
@@ -113,14 +118,19 @@ export class CellIndexManager {
   /**
    * Update all cell index overlays for a notebook
    */
-  private updateAllOverlays(notebookPath: string, notebook: NotebookPanel): void {
+  private updateAllOverlays(
+    notebookPath: string,
+    notebook: NotebookPanel
+  ): void {
     const overlays = this._overlays.get(notebookPath);
-    if (!overlays) return;
+    if (!overlays) {
+      return;
+    }
 
     // Build map of cell ID to code cell index
     const cellIndexMap = new Map<string, number>();
     let codeCellIndex = 0;
-    notebook.content.widgets.forEach((cell) => {
+    notebook.content.widgets.forEach(cell => {
       if (cell.model.type === 'code') {
         cellIndexMap.set(cell.model.id, codeCellIndex);
         codeCellIndex++;
@@ -128,12 +138,14 @@ export class CellIndexManager {
     });
 
     // Add overlays to all code cells that have editor elements
-    notebook.content.widgets.forEach((cell) => {
+    notebook.content.widgets.forEach(cell => {
       if (cell.model.type === 'code') {
         const cellId = cell.model.id;
         const index = cellIndexMap.get(cellId);
 
-        if (index === undefined) return;
+        if (index === undefined) {
+          return;
+        }
 
         // Check if overlay already exists for this cell
         const existingOverlay = overlays.get(cellId);
