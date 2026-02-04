@@ -21,7 +21,7 @@ Structure-Using vs Structure-Revealing:
 from abc import ABC
 from typing import Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class AccessEvent(BaseModel, ABC):
@@ -32,10 +32,9 @@ class AccessEvent(BaseModel, ABC):
     specificity about what kind of access occurred.
     """
 
-    variable: str
+    model_config = ConfigDict(frozen=True)  # Immutable for use in sets
 
-    class Config:
-        frozen = True  # Immutable for use in sets
+    variable: str
 
 
 class ColumnRead(AccessEvent):

@@ -11,7 +11,7 @@ Key Functions:
 
 from abc import ABC, abstractmethod
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union, ForwardRef
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 import traceback
 import math
 
@@ -152,13 +152,12 @@ class ValueComparison(BaseModel):
             # Don't fail if the check itself has an error
             pass
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     @property
     def is_close(self) -> bool:
         """Return True if the values are close (within tolerance)."""
         return self.status == "close"
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 # Source types for compound diffs - helps identify what kind of structure the diff came from
@@ -203,13 +202,12 @@ class CompoundDiff(BaseModel):
         ...     warnings=["DataFrame columns differ but in warn mode"]
         ... )
     """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     source_type: DiffSourceType = Field(..., description="Type of structure this diff represents")
     children: Dict[str, "DiffNode"] = Field(default_factory=dict, description="Nested diffs")
     truncated: bool = Field(default=False, description="Whether diff was truncated")
     warnings: List[str] = Field(default_factory=list, description="Structural warnings (warn mode)")
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 # Type alias for the tree structure of differences
@@ -239,6 +237,8 @@ class MemoryCheckpointDiffResult(BaseModel):
         >>> json_str = result.model_dump_json()
         >>> restored = MemoryCheckpointDiffResult.model_validate_json(json_str)
     """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     differences: Dict[str, Any] = Field(
         default_factory=dict,
         description="Dictionary mapping variable names to diff trees (DiffNode)"
@@ -247,9 +247,6 @@ class MemoryCheckpointDiffResult(BaseModel):
         default_factory=list,
         description="Structural warnings (warn mode - informative but not blocking)"
     )
-
-    class Config:
-        arbitrary_types_allowed = True
 
     @field_validator('differences', mode='before')
     @classmethod
@@ -476,13 +473,12 @@ class ExecutionError(BaseModel):
         traceback: Full formatted stack trace
         code_snippet: Optional snippet of the code that crashed
     """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     error_type: str = Field(..., description="Exception type name")
     error_message: str = Field(..., description="Exception message")
     traceback: str = Field(..., description="Full formatted stack trace")
     code_snippet: Optional[str] = Field(None, description="Code that crashed")
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class TestCodeSuccess(BaseModel):
@@ -499,14 +495,13 @@ class TestCodeSuccess(BaseModel):
         modified_duration: Execution time of the modified code in seconds
         speedup: Calculated speedup ratio (original_duration / modified_duration)
     """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     status: Literal["success"] = Field(default="success", description="Result status discriminator")
     diff: MemoryCheckpointDiffResult = Field(..., description="Diff result comparing variables")
     original_duration: float = Field(..., description="Original code execution time in seconds")
     modified_duration: float = Field(..., description="Modified code execution time in seconds")
     speedup: float = Field(..., description="Speedup ratio (original / modified)")
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class TestCodeOriginalCrash(BaseModel):
@@ -521,12 +516,11 @@ class TestCodeOriginalCrash(BaseModel):
         error: Detailed information about the crash
         original_duration: Optional partial execution time before crash
     """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     status: Literal["original_crash"] = Field(default="original_crash", description="Result status discriminator")
     error: ExecutionError = Field(..., description="Error details")
     original_duration: Optional[float] = Field(None, description="Time before crash (if measurable)")
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class TestCodeModifiedCrash(BaseModel):
@@ -542,13 +536,12 @@ class TestCodeModifiedCrash(BaseModel):
         original_duration: Execution time of the original code (succeeded)
         modified_duration: Optional partial execution time before crash
     """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     status: Literal["modified_crash"] = Field(default="modified_crash", description="Result status discriminator")
     error: ExecutionError = Field(..., description="Error details")
     original_duration: float = Field(..., description="Original code execution time in seconds")
     modified_duration: Optional[float] = Field(None, description="Time before crash (if measurable)")
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 # Discriminated union type for test_code results

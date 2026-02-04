@@ -31,8 +31,8 @@ class GeneratedTests(BaseModel):
 
     tests: List[UnitTest] = Field(
         description="List of 3-5 unit tests covering various scenarios",
-        min_items=3,
-        max_items=5,
+        min_length=3,
+        max_length=5,
     )
 
 

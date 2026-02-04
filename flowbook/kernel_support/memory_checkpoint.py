@@ -923,8 +923,7 @@ from flowbook.kernel_support.extended_types import TypeModel, get_type_model
 from flowbook.util.output import log, output, timer
 
 
-# Enable copy-on-write mode for better performance with DataFrame copies
-pd.options.mode.copy_on_write = True
+# Note: copy-on-write is always enabled in pandas >= 3.0
 
 # Infer string columns as StringDtype instead of object (for better performance)
 pd.options.future.infer_string = True
@@ -1805,11 +1804,7 @@ class MemoryCheckpoints:
         self.sanity_check = sanity_check
         self.warn_classes = warn_classes
         self.saved: dict[str, MemoryCheckpoint] = {}
-
-        # Ensure copy-on-write is enabled for performance
-        if not pd.options.mode.copy_on_write:
-            log("WARNING: pandas copy_on_write was disabled - re-enabling for checkpoint performance")
-            pd.options.mode.copy_on_write = True
+        # Note: copy-on-write is always enabled in pandas >= 3.0
 
     def _estimate_size(self, variables: dict[str, Any]) -> int:
         """

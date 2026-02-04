@@ -11,7 +11,7 @@ Commands are organized into categories:
 """
 
 from typing import Any, Dict, List, Literal, Optional, Set, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from flowbook.kernel_support.types import MemoryCheckpointDiffResult, TestCodeResult
 from flowbook.kernel_support.extended_types import TypeModel
@@ -30,10 +30,9 @@ class KernelCommandRequest(BaseModel):
     which operation to perform.
     """
 
-    command: str = Field(..., description="Command identifier")
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    class Config:
-        arbitrary_types_allowed = True
+    command: str = Field(..., description="Command identifier")
 
 
 class KernelCommandResponse(BaseModel):
@@ -44,12 +43,11 @@ class KernelCommandResponse(BaseModel):
     Additional data is provided in subclass-specific fields.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     status: Literal["ok", "error"] = Field(..., description="Response status")
     message: str = Field(default="", description="Human-readable message")
     traceback: Optional[str] = Field(default=None, description="Stack trace for errors")
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 # ============================================================================
@@ -292,11 +290,10 @@ class ProgressMessage(BaseModel):
     while they're still executing.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     type: Literal["progress"] = "progress"
     message: str = Field(..., description="Progress update message")
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class FinalMessage(BaseModel):
@@ -307,6 +304,8 @@ class FinalMessage(BaseModel):
     this is the final message of the operation.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     type: Literal["final"] = "final"
     ok: bool = Field(..., description="Whether the operation succeeded")
     response: Optional[Dict[str, Any]] = Field(
@@ -315,6 +314,3 @@ class FinalMessage(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message (present if ok=False)"
     )
-
-    class Config:
-        arbitrary_types_allowed = True

@@ -16,7 +16,7 @@ for communication between kernel components and the frontend.
 
 import os
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     from flowbook.kernel.access_events import (
@@ -249,6 +249,8 @@ class TrackingData(BaseModel):
         variables.update(self.reads_before_writes)
         return variables
 
+    model_config = ConfigDict(frozen=False)  # Allow modification after creation
+
     def get_written_variables(self) -> Set[str]:
         """
         Get all variables that were written during cell execution.
@@ -257,9 +259,6 @@ class TrackingData(BaseModel):
             Set of variable names that were written
         """
         return set(self.writes)
-
-    class Config:
-        frozen = False  # Allow modification after creation
 
 
 class ExecutionProfile(BaseModel):
@@ -361,6 +360,8 @@ class ExecutionContext(BaseModel):
         original_code: Original code before directive parsing
     """
 
+    model_config = ConfigDict(frozen=False)
+
     cell_id: Optional[str] = Field(None, description="Cell identifier")
     code: str = Field(..., description="Code to execute")
     timeout: float = Field(..., description="Execution timeout in seconds")
@@ -384,6 +385,3 @@ class ExecutionContext(BaseModel):
             and not self.has_cell_magics
             and not self.has_shell_magics
         )
-
-    class Config:
-        frozen = False

@@ -21,7 +21,7 @@ Structural Mode:
 from enum import Enum
 from typing import FrozenSet, List, Optional, Tuple, Type
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from flowbook.kernel.access_events import AccessEvent, ColumnRead, StructuralRead, VariableRead
 from flowbook.kernel.changes import (
@@ -69,6 +69,8 @@ class ConflictRule(BaseModel):
         description: Human-readable explanation for docs and error messages
     """
 
+    model_config = ConfigDict(frozen=True)
+
     change_types: Tuple[Type[Change], ...]
     read_types: Tuple[Type[AccessEvent], ...]
     same_column: bool = False
@@ -76,9 +78,6 @@ class ConflictRule(BaseModel):
     severity: ConflictSeverity
     is_structural: bool = False
     description: str
-
-    class Config:
-        frozen = True
 
     def matches(self, change: Change, read: AccessEvent) -> bool:
         """

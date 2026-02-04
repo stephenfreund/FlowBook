@@ -22,7 +22,7 @@ Change Detection Flow:
 from abc import ABC
 from typing import Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class Change(BaseModel, ABC):
@@ -33,10 +33,9 @@ class Change(BaseModel, ABC):
     what kind of modification occurred.
     """
 
-    variable: str
+    model_config = ConfigDict(frozen=True)  # Immutable
 
-    class Config:
-        frozen = True  # Immutable
+    variable: str
 
 
 class ValueChanged(Change):

@@ -19,7 +19,7 @@ Usage:
 
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from flowbook.kernel.access_events import AccessEvent
 from flowbook.kernel.changes import Change
@@ -43,14 +43,13 @@ class ConflictResult(BaseModel):
         description: Human-readable explanation
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     change: Change
     read: AccessEvent
     severity: ConflictSeverity
     rule: Optional[ConflictRule] = None
     description: str
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class ConflictResolver:

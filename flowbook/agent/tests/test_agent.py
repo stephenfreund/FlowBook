@@ -15,8 +15,8 @@ from agents import Tool
 from pydantic import BaseModel
 
 
-class TestOutput(BaseModel):
-    """Test output model for testing."""
+class SampleOutput(BaseModel):
+    """Sample output model for testing."""
     message: str
     count: int
 
@@ -50,12 +50,12 @@ class TestFlowbookAgent:
                 key="test-agent",
                 model="openai/gpt-4o-mini", 
                 instructions="You are a test agent.",
-                output_type=TestOutput,
+                output_type=SampleOutput,
                 log_dir=temp_dir
             )
             
             assert agent.name == "test-agent"
-            assert agent.output_type == TestOutput
+            assert agent.output_type == SampleOutput
             
     def test_initialization_with_tools(self):
         """Test FlowbookAgent initialization with tools."""
