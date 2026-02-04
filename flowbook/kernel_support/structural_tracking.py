@@ -827,9 +827,17 @@ class StructuralAccessTracker:
         Indexers like df.loc[...] internally access structural attributes like
         .columns, .index, .axes but from the user's perspective these are just
         data access operations, not structure-revealing operations.
+
+        For __setitem__, we also check for chained assignment and raise
+        ChainedAssignmentError if detected. This is necessary because our
+        wrapper chain adds extra references that would otherwise bypass
+        pandas' built-in chained assignment detection.
         """
+        import sys
+        import warnings
+        from pandas.errors import ChainedAssignmentError
         try:
-            from pandas.core.indexing import _LocIndexer, _iLocIndexer, _AtIndexer, _iAtIndexer
+            from pandas.core.indexing import _LocIndexer, _iLocIndexer, _AtIndexer, _iAtIndexer, REF_COUNT_IDX
             indexer_classes = [
                 ('_LocIndexer', _LocIndexer),
                 ('_iLocIndexer', _iLocIndexer),
@@ -849,8 +857,30 @@ class StructuralAccessTracker:
                 key = f'{cls_name}.{method_name}'
                 self._original_methods[key] = original
 
-                def make_wrapper(orig):
+                def make_wrapper(orig, is_setitem=method_name == '__setitem__'):
                     def wrapper(obj, *args, **kwargs):
+                        # For __setitem__, check for chained assignment before proceeding
+                        # Our wrapper chain adds 1 extra reference, so we adjust the threshold
+                        # from REF_COUNT_IDX (2) to REF_COUNT_IDX + 1 (3)
+                        if is_setitem:
+                            # obj is the indexer (e.g., _iLocIndexer), obj.obj is the DataFrame/Series
+                            target = getattr(obj, 'obj', None)
+                            if target is not None:
+                                # Adjust threshold: pandas uses <= 2, we use <= 3 to account for wrapper
+                                if sys.getrefcount(target) <= REF_COUNT_IDX + 1:
+                                    warnings.warn(
+                                        "A value is being set on a copy of a DataFrame or Series "
+                                        "through chained assignment.\n"
+                                        "Such chained assignment never works to update the original "
+                                        "DataFrame or Series, because the intermediate object on which "
+                                        "we are setting values always behaves as a copy (due to Copy-on-Write).\n\n"
+                                        "Try using '.loc[row_indexer, col_indexer] = value' instead, "
+                                        "to perform the assignment in a single step.\n\n"
+                                        "See the documentation for a more detailed explanation: "
+                                        "https://pandas.pydata.org/pandas-docs/stable/user_guide/copy_on_write.html#chained-assignment",
+                                        ChainedAssignmentError,
+                                        stacklevel=2,
+                                    )
                         with _structure_using_context():
                             # Unwrap cudf proxy to get underlying pandas object
                             unwrapped = _unwrap_cudf_proxy(obj)

@@ -57,7 +57,13 @@ Usage:
 import re
 import time
 import traceback
+import warnings
 from typing import Any, Dict, Optional, Tuple
+
+from pandas.errors import ChainedAssignmentError
+
+# Configure pandas ChainedAssignmentError to be raised as an error
+warnings.filterwarnings('error', category=ChainedAssignmentError)
 
 from IPython.core.magic import Magics, line_cell_magic, magics_class
 from ipykernel.ipkernel import IPythonKernel

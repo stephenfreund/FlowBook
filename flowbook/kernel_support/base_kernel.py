@@ -12,7 +12,13 @@ Provides shared functionality:
 """
 
 import os
+import warnings
 from typing import Optional
+
+from pandas.errors import ChainedAssignmentError
+
+# Configure pandas ChainedAssignmentError to be raised as an error
+warnings.filterwarnings('error', category=ChainedAssignmentError)
 
 from ipykernel.ipkernel import IPythonKernel
 
