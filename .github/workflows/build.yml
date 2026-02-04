@@ -34,7 +34,7 @@ jobs:
           python -m pip install "jupyterlab>=4.0.0,<5"
 
       - name: Install Node dependencies
-        run: jlpm install
+        run: jlpm install --no-immutable
 
       - name: Lint TypeScript
         run: jlpm run lint:check
