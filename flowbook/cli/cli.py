@@ -122,9 +122,9 @@ def cli_main():
     )
 
     parser.add_argument(
-        "--force-checkpoints",
+        "--vfs",
         action="store_true",
-        help="Force checkpointing before every cell execution (stored as pre_{cell_id})",
+        help="Enable virtual filesystem (writes go to overlay, preserving real FS)",
     )
 
     parser.add_argument(
@@ -217,18 +217,17 @@ def cli_main():
                 connection_file=connection_file, kernel_name=kernel_to_use
             )
 
-            # Enable force checkpoints if requested
-            if args.force_checkpoints:
-                from flowbook.kernel_support.kernel_command_client import KernelCommandClient
-
-                command_client = KernelCommandClient(kernel_client, timeout=30)
-                command_client.force_checkpoints(enabled=True)
-                log("Force checkpoints enabled")
+            # Enable virtual filesystem if requested
+            if args.vfs:
+                log("Enabling virtual filesystem...")
+                kernel_client.execute("%virtual_fs on", silent=True)
+                kernel_client.get_shell_msg(timeout=10)
+                log("Virtual filesystem enabled")
 
         # Extract command-specific kwargs (those not in common CLI args)
         common_args = {
             'command', 'paths', 'kernel_name', 'output', 'model', 'fast_model',
-            'cell_ids', 'timings_file', 'metadata_file', 'force_checkpoints', 'verbose'
+            'cell_ids', 'timings_file', 'metadata_file', 'vfs', 'verbose'
         }
         command_kwargs = {
             k: v for k, v in vars(args).items()

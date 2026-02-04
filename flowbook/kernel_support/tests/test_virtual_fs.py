@@ -708,3 +708,79 @@ class TestCellTrackingExtended:
         assert os.path.abspath(file1) in reads
         assert os.path.abspath(file1) in writes  # deleted
         assert os.path.abspath(file2) in writes
+
+
+class TestModeTransition:
+    """Tests for transitioning between VFS modes."""
+
+    def test_tracking_only_to_full_vfs(self, vfs, tmpdir):
+        """Test transition from tracking-only to full VFS mode."""
+        real_file = os.path.join(tmpdir, "transition.txt")
+
+        # Start in tracking-only mode
+        vfs.enable_tracking_only()
+        assert vfs.tracking_only
+        assert not vfs.enabled
+
+        # Transition to full VFS mode
+        vfs.enable()
+        assert vfs.enabled
+        assert not vfs.tracking_only
+
+        # Write should go to overlay, not real FS
+        with open(real_file, "w") as f:
+            f.write("overlay content")
+
+        # Patched exists should find it
+        assert os.path.exists(real_file)
+
+        # Real file should NOT exist
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(real_file)
+
+    def test_namespace_repatched_after_mode_transition(self, vfs, tmpdir):
+        """Namespaces patched before mode change should use new patched_open."""
+        real_file = os.path.join(tmpdir, "ns_test.txt")
+
+        # Start in tracking-only mode
+        vfs.enable_tracking_only()
+
+        # Patch a namespace
+        namespace = {"x": 1}
+        vfs.patch_namespace(namespace)
+        tracking_open = namespace["open"]
+
+        # Transition to full VFS mode
+        vfs.enable()
+
+        # Namespace should now have the new full VFS patched_open
+        assert "open" in namespace
+        assert namespace["open"] is not tracking_open
+        assert namespace["open"] is vfs._patched_open
+
+        # Use namespace's open to write - should go to overlay
+        namespace["open"](real_file, "w").close()
+
+        # Patched exists should find it
+        assert os.path.exists(real_file)
+
+        # Real file should NOT exist
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(real_file)
+
+    def test_multiple_namespaces_repatched(self, vfs, tmpdir):
+        """Multiple namespaces should all be repatched after mode transition."""
+        vfs.enable_tracking_only()
+
+        # Patch multiple namespaces
+        ns1 = {"name": "ns1"}
+        ns2 = {"name": "ns2"}
+        vfs.patch_namespace(ns1)
+        vfs.patch_namespace(ns2)
+
+        # Transition to full VFS mode
+        vfs.enable()
+
+        # Both should have the new patched_open
+        assert ns1["open"] is vfs._patched_open
+        assert ns2["open"] is vfs._patched_open

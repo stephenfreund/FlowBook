@@ -81,10 +81,19 @@ class VirtualFileSystem:
         """Enable full VFS mode: create overlay and install patches."""
         if self._enabled:
             return
+        # If transitioning from tracking-only mode, save namespaces and clean up
+        saved_namespaces = []
+        if self._tracking_only:
+            # Save namespace references before removing patches
+            saved_namespaces = [ns for ns_id, (ns, orig) in self._patched_namespaces.items()]
+            self._remove_patches()
+            self._tracking_only = False
         self._overlay_dir = tempfile.mkdtemp(prefix="flowbook_vfs_")
         self._enabled = True
-        self._tracking_only = False
         self._install_patches()
+        # Re-patch any previously patched namespaces with new patched_open
+        for namespace in saved_namespaces:
+            self.patch_namespace(namespace)
 
     def enable_tracking_only(self) -> None:
         """Enable tracking-only mode: record paths without redirecting I/O."""
