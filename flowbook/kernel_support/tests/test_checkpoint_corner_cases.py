@@ -117,18 +117,15 @@ class TestObjectConversionEdgeCases:
         # Note: precision may be lost in float conversion
 
     def test_complex_numbers_with_none_values(self):
-        """Test that complex numbers with None values remain as object.
-
-        Note: infer_dtype returns "mixed" for complex numbers with None values,
-        so they cannot be automatically converted. However, complex numbers
-        WITHOUT None values are properly detected and converted to complex128.
-        """
+        """Test that complex numbers with None values are converted to complex128."""
         s = pd.Series([1+2j, 2+3j, 0+4j, None], dtype=object)
         result = convert_series_object_to_specialized(s)
-        # Complex numbers WITH None are inferred as "mixed" and remain object
-        assert result.dtype == object
+        # Complex numbers are properly detected and converted to complex128
+        assert result.dtype == np.complex128
         assert result[0] == 1+2j
         assert result[1] == 2+3j
+        # None becomes NaN in complex dtype
+        assert np.isnan(result[3])
 
     def test_complex_numbers_without_none_values(self):
         """Test that complex numbers without None values are converted."""
