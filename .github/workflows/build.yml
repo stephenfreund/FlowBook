@@ -31,7 +31,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install hatchling hatch-nodejs-version hatch-jupyter-builder "jupyterlab>=4.0.0,<5"
+          python -m pip install hatchling hatch-nodejs-version hatch-jupyter-builder editables "jupyterlab>=4.0.0,<5"
 
       - name: Install Node dependencies
         run: jlpm install --no-immutable
