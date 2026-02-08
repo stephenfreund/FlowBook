@@ -54,6 +54,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -561,10 +562,14 @@ def setup_environment(
     """
     # 1. Remove existing environment if it exists
     print(f"[ENV] Removing existing environment at '{env_path}' if present...")
-    subprocess.run(
-        ["conda", "env", "remove", "-p", str(env_path), "-y"],
-        stderr=subprocess.DEVNULL,
-    )
+    # delete the whole environment directory
+    try:
+        shutil.rmtree(env_path)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[ERROR] Failed to remove environment (exit code: {e})")
+        return False
 
     # 2. Create new environment with Python 3.11
     print(f"[ENV] Creating new environment at '{env_path}' with Python 3.11...")
