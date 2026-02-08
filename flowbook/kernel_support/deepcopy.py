@@ -1542,23 +1542,24 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
 
     # Suspend column tracking during deepcopy to avoid recording internal accesses
     with suspend_column_tracking():
-        # Convert object columns to specialized dtypes on the original DataFrame first
+        # Shallow copy FIRST: CoW handles non-object columns efficiently
+        # This ensures we never mutate the original DataFrame's dtypes
+        df_copy = df.copy(deep=False)
+
+        # Convert object columns to specialized dtypes on the COPY
         # (only when _convert_object_dtypes=True)
         if _convert_object_dtypes:
             # Use iloc to read columns (handles MultiIndex) but column name to write
             # (preserves dtype correctly)
-            for i in range(len(df.columns)):
-                col = df.columns[i]
-                col_series = df.iloc[:, i]
+            for i in range(len(df_copy.columns)):
+                col = df_copy.columns[i]
+                col_series = df_copy.iloc[:, i]
                 if col_series.dtype == object:
                     converted = _convert_object_column_dtype(col_series)
                     if converted.dtype != object:
                         log(f"Converted column {col} from object to {converted.dtype}")
                         # Use column name for assignment to preserve dtype
-                        df[col] = converted
-
-        # Shallow copy: CoW handles non-object columns efficiently
-        df_copy = df.copy(deep=False)
+                        df_copy[col] = converted
 
         # Process remaining object columns
         # Use iloc to read columns (handles MultiIndex) but column name to write
@@ -1612,19 +1613,18 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
 
     # Suspend column tracking during deepcopy to avoid recording internal accesses
     with suspend_column_tracking():
-        # Convert object Series to specialized dtype on the original Series first
+        # Shallow copy FIRST to avoid mutating the original Series
+        series_copy = series.copy(deep=False)
+
+        # Convert object Series to specialized dtype on the COPY
         # (only when _convert_object_dtypes=True)
-        if _convert_object_dtypes and series.dtype == object:
-            # Try to convert to specialized dtype first
-            converted = _convert_object_column_dtype(series)
+        if _convert_object_dtypes and series_copy.dtype == object:
+            # Try to convert to specialized dtype
+            converted = _convert_object_column_dtype(series_copy)
 
             if converted.dtype != object:
-                # Successfully converted - update original Series
                 log(f"Converted Series from object to {converted.dtype}")
-                series = converted
-
-        # Shallow copy: CoW handles non-object Series efficiently
-        series_copy = series.copy(deep=False)
+                series_copy = converted
 
         # Process if still object dtype
         if series_copy.dtype == object:
