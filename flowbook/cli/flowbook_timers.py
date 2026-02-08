@@ -948,6 +948,129 @@ def format_table(
     return "\n".join(lines)
 
 
+def format_per_key_table(
+    key: str,
+    stats_by_file: dict[str, TimerStats],
+    file_order: list[str],
+) -> str:
+    """
+    Format a single timer key as a table with one row per file.
+
+    Args:
+        key: Timer key name
+        stats_by_file: Dict mapping file_path -> TimerStats for this key (missing means empty row)
+        file_order: Ordered list of file paths to include
+
+    Returns:
+        Formatted table string
+    """
+    if not file_order:
+        return f"Timer Key: {key}\nNo data available\n"
+
+    lines = []
+
+    # Title
+    lines.append(f"Timer Key: {key}")
+
+    # Calculate key column width from file basenames
+    def file_display_name(fp: str) -> str:
+        name = os.path.basename(fp)
+        for suffix in ['.timers.json', '.json']:
+            if name.endswith(suffix):
+                name = name[:-len(suffix)]
+                break
+        return truncate_timer_key(name, max_length=50)
+
+    display_names = {fp: file_display_name(fp) for fp in file_order}
+    max_name_len = max(len(n) for n in display_names.values()) if display_names else 0
+    key_width = max(len("Timer Key"), max_name_len)
+
+    # Row width: key + space + Count(8) + space + 9 numeric columns (14 each) + 8 spaces + " | " separator
+    row_width = key_width + 1 + 8 + 1 + 14 * 9 + 8 + 2
+
+    lines.append("=" * row_width)
+
+    # Header
+    header = (
+        f"{'Timer Key':<{key_width}} "
+        f"{'Count':>8} "
+        f"{'Mean':>14} "
+        f"{'Median':>14} "
+        f"{'Max':>14} | "
+        f"{'P90':>14} "
+        f"{'P95':>14} "
+        f"{'Min':>14} "
+        f"{'Total':>14} "
+        f"{'Std Dev':>14}"
+    )
+    lines.append(header)
+    lines.append("-" * row_width)
+
+    # Data rows
+    row_idx = 0
+    total_count = 0
+    total_time = 0.0
+
+    for fp in file_order:
+        display_name = display_names[fp]
+        s = stats_by_file.get(fp)
+
+        if s is None:
+            # Empty row for file without data (incomplete run)
+            row = (
+                f"{display_name:<{key_width}} "
+                f"{'':>8} "
+                f"{'':>14} "
+                f"{'':>14} "
+                f"{'':>14} | "
+                f"{'':>14} "
+                f"{'':>14} "
+                f"{'':>14} "
+                f"{'':>14} "
+                f"{'':>14}"
+            )
+        else:
+            row = (
+                f"{display_name:<{key_width}} "
+                f"{s.count:>8} "
+                f"{format_time(s.mean, use_commas=True):>14} "
+                f"{format_time(s.median, use_commas=True):>14} "
+                f"{format_time(s.max, use_commas=True):>14} | "
+                f"{format_time(s.p90, use_commas=True):>14} "
+                f"{format_time(s.p95, use_commas=True):>14} "
+                f"{format_time(s.min, use_commas=True):>14} "
+                f"{format_time(s.total, use_commas=True):>14} "
+                f"{format_time(s.std, use_commas=True):>14}"
+            )
+            total_count += s.count
+            total_time += s.total
+
+        if row_idx % 2 == 0:
+            row = termcolor.colored(row, "yellow")
+        else:
+            row = termcolor.colored(row, "white")
+        lines.append(row)
+        row_idx += 1
+
+    # Footer
+    lines.append("-" * row_width)
+    mean_time = total_time / total_count if total_count > 0 else 0
+    footer = (
+        f"{'TOTAL':<{key_width}} "
+        f"{total_count:>8} "
+        f"{format_time(mean_time, use_commas=True):>14} "
+        f"{'':>14} "  # Median
+        f"{'':>14} | "  # Max
+        f"{'':>14} "  # P90
+        f"{'':>14} "  # P95
+        f"{'':>14} "  # Min
+        f"{format_time(total_time, use_commas=True):>14}"  # Total
+    )
+    lines.append(footer)
+
+    return "\n".join(lines)
+
+
 def format_json_single(stats: list[TimerStats], timings: list[dict]) -> str:
     """
     Format statistics as JSON for a single file.
@@ -1130,22 +1253,39 @@ def process_multiple_files(file_paths: list[str], args):
         file_paths: List of file paths
         args: Command line arguments
     """
-    # Load all files
-    timings_by_file = load_multiple_timings(file_paths)
+    # Load all files (unfiltered)
+    all_timings_by_file = load_multiple_timings(file_paths)
 
-    if not timings_by_file:
+    if not all_timings_by_file:
         print("Error: No valid timing files found", file=sys.stderr)
         sys.exit(1)
+
+    # Check cli:main_exit BEFORE filtering by keys
+    files_without_main_exit = set()
+    for file_path, timings in all_timings_by_file.items():
+        cli_main_exit = [t for t in timings if t["key"] == "cli:main_exit"]
+        if len(cli_main_exit) > 1:
+            print(
+                f"Warning: Multiple cli:main_exit keys found in {file_path}",
+                file=sys.stderr,
+            )
+        elif len(cli_main_exit) == 0:
+            files_without_main_exit.add(file_path)
 
     # Filter by keys if specified
     if args.keys:
         keys_set = set(args.keys)
         timings_by_file = {
             fp: [t for t in timings if t["key"] in keys_set]
-            for fp, timings in timings_by_file.items()
+            for fp, timings in all_timings_by_file.items()
         }
-        # Remove files with no matching timings
-        timings_by_file = {fp: t for fp, t in timings_by_file.items() if t}
+        # Keep files that have matching timings OR are missing cli:main_exit (shown as empty rows)
+        timings_by_file = {
+            fp: t for fp, t in timings_by_file.items()
+            if t or fp in files_without_main_exit
+        }
+    else:
+        timings_by_file = all_timings_by_file
 
     # Build stats and grouped timings for each file
     stats_by_file = {}
@@ -1171,38 +1311,74 @@ def process_multiple_files(file_paths: list[str], args):
 
     # Output based on format
     if args.format == "table":
-        # Print table for each file
-        for file_path in timings_by_file.keys():
-            stats = stats_by_file[file_path]
-            grouped = grouped_by_file[file_path]
-            title = f"Timer Statistics: {file_path} (all times in ms)"
+        if args.keys:
+            # Consolidated per-key tables: one table per key with files as rows
+            for key in args.keys:
+                # Build per-file stats for this specific key
+                key_stats_by_file = {}
+                for file_path in timings_by_file:
+                    key_timings = [t for t in timings_by_file[file_path] if t["key"] == key]
+                    if key_timings:
+                        durations = [float(t["duration"]) for t in key_timings]
+                        key_stats = calculate_stats(durations)
+                        key_stats_by_file[file_path] = TimerStats(key=key, **key_stats)
+
+                # Include files that have data OR are missing cli:main_exit (empty rows)
+                file_order = sorted([
+                    fp for fp in timings_by_file
+                    if fp in key_stats_by_file or fp in files_without_main_exit
+                ])
+
+                print(format_per_key_table(key, key_stats_by_file, file_order))
+                print()
+                print()
+
+            # Print combined table
+            title = f"COMBINED Timer Statistics ({len(timings_by_file)} files) (all times in ms)"
             print(
                 format_table(
-                    stats,
+                    combined_stats,
                     args.sort_by,
                     title,
                     args.top,
-                    grouped_timings=grouped,
+                    grouped_timings=combined_grouped,
                     show_histograms=args.histograms,
                     clip_percentile=args.clip,
                 )
             )
-            print()  # Blank line between tables
-            print()
+        else:
+            # Original per-file tables (when no specific keys selected)
+            for file_path in timings_by_file.keys():
+                stats = stats_by_file[file_path]
+                grouped = grouped_by_file[file_path]
+                title = f"Timer Statistics: {file_path} (all times in ms)"
+                print(
+                    format_table(
+                        stats,
+                        args.sort_by,
+                        title,
+                        args.top,
+                        grouped_timings=grouped,
+                        show_histograms=args.histograms,
+                        clip_percentile=args.clip,
+                    )
+                )
+                print()  # Blank line between tables
+                print()
 
-        # Print combined table
-        title = f"COMBINED Timer Statistics ({len(timings_by_file)} files) (all times in ms)"
-        print(
-            format_table(
-                combined_stats,
-                args.sort_by,
-                title,
-                args.top,
-                grouped_timings=combined_grouped,
-                show_histograms=args.histograms,
-                clip_percentile=args.clip,
+            # Print combined table
+            title = f"COMBINED Timer Statistics ({len(timings_by_file)} files) (all times in ms)"
+            print(
+                format_table(
+                    combined_stats,
+                    args.sort_by,
+                    title,
+                    args.top,
+                    grouped_timings=combined_grouped,
+                    show_histograms=args.histograms,
+                    clip_percentile=args.clip,
+                )
             )
-        )
 
     elif args.format == "json":
         output = format_json_multi(timings_by_file, stats_by_file, combined_stats)
@@ -1212,36 +1388,18 @@ def process_multiple_files(file_paths: list[str], args):
         output = format_csv_multi(timings_by_file, stats_by_file, combined_stats)
         print(output)
 
-    print()
-    first_error = True
-    for file_path, valid_records in timings_by_file.items():
-        # Look for a cli_main_exit key
-        cli_main_exit = [t for t in valid_records if t["key"] == "cli:main_exit"]
-        if len(cli_main_exit) > 1:
-            if first_error:
-                print("=" * 60)
-                print("WARNINGS")
-                print("=" * 60)
+    # Show warnings for files without cli:main_exit (only in non-keys mode,
+    # since keys mode shows them as empty rows in the per-key tables)
+    if not args.keys and files_without_main_exit:
+        print()
+        print("=" * 60)
+        print("WARNINGS")
+        print("=" * 60)
+        for file_path in sorted(files_without_main_exit):
             print(
-                f"Warning: Multiple cli:main_exit keys found in {file_path}",
+                f"Warning: No cli:main_exit key found in {file_path}",
                 file=sys.stderr,
             )
-            print(
-                f"Warning: {len(cli_main_exit)} cli:main_exit keys found in {file_path}",
-                file=sys.stderr,
-            )
-            print(f"Warning: {cli_main_exit}", file=sys.stderr)
-            first_error = False
-        elif len(cli_main_exit) == 0:
-            if first_error:
-                print("=" * 60)
-                print("WARNINGS")
-                print("=" * 60)
-            print(
-                f"Warning: No cli:main_exit key found in {file_path}", file=sys.stderr
-            )
-            first_error = False
-    if not first_error:
         print("=" * 60)
         print()
 
