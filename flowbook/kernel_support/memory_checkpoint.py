@@ -928,11 +928,6 @@ from flowbook.util.output import log, output, timer
 if hasattr(pd.options.mode, 'copy_on_write'):
     pd.options.mode.copy_on_write = True
 
-# Infer string columns as StringDtype instead of object (for better performance)
-# Only enable for pandas 3.0+ where this is the default behavior
-if tuple(int(x) for x in pd.__version__.split('.')[:2]) >= (3, 0):
-    pd.options.future.infer_string = True
-
 # Environment variable to enable detailed checkpoint profiling
 # Set FLOWBOOK_PROFILE_CHECKPOINT=1 to record deepcopy timings keyed by type
 _PROFILE_CHECKPOINT = os.environ.get("FLOWBOOK_PROFILE_CHECKPOINT", "0") == "1"
