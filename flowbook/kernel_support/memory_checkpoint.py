@@ -1525,7 +1525,6 @@ class MemoryCheckpoint:
         user_ns: dict[str, Any],
         memo: dict[int, Any],
         cudf_origins: Optional['cudf_compat.CuDFOriginTracker'] = None,
-        dtype_origins: Optional['DtypeOriginTracker'] = None,
     ):
         """
         Create a new checkpoint.
@@ -1535,7 +1534,6 @@ class MemoryCheckpoint:
             user_ns: Deep-copied user namespace variables
             memo: Dictionary mapping original object IDs to their copies
             cudf_origins: Optional tracker for cudf object origins (for restore)
-            dtype_origins: Optional tracker for original dtypes (for restore)
         """
         self.name = name
         self.user_ns = user_ns
@@ -1544,10 +1542,6 @@ class MemoryCheckpoint:
         # cuDF origin tracking (for restore)
         from flowbook.kernel_support import cudf_compat
         self._cudf_origins = cudf_origins or cudf_compat.CuDFOriginTracker()
-
-        # Dtype origin tracking (for restore after object->specialized conversion)
-        from flowbook.kernel_support.dtype_tracker import DtypeOriginTracker
-        self._dtype_origins = dtype_origins or DtypeOriginTracker()
 
         # Deep alias detection index (built lazily on first query)
         self._reachable_ids: Dict[str, Set[int]] = {}
@@ -2071,13 +2065,6 @@ class MemoryCheckpoints:
                 for k, v in checkpointable_values.items():
                     cudf_origins.record(k, v)
 
-            # Record dtype origins before deep copy (object dtypes become specialized)
-            with timer(key="checkpoint:dtype_origins", message="Recording dtype origins"):
-                from flowbook.kernel_support.dtype_tracker import DtypeOriginTracker
-                dtype_origins = DtypeOriginTracker()
-                for k, v in checkpointable_values.items():
-                    dtype_origins.record(k, v)
-
             # Use helper to deep copy all variables
             with timer(key="checkpoint:deepcopy", message="Deep copying variables"):
                 cp, memo, failed = self._deep_copy_user_ns(checkpointable_values)
@@ -2091,7 +2078,7 @@ class MemoryCheckpoints:
                 for k in failed:
                     removed[k] = get_type_model(checkpointable_values[k])
 
-            self.saved[name] = MemoryCheckpoint(name, cp, memo, cudf_origins, dtype_origins)
+            self.saved[name] = MemoryCheckpoint(name, cp, memo, cudf_origins)
 
         if self.sanity_check:
             with timer(key="checkpoint:sanity_check", message="Running sanity check"):
@@ -2130,10 +2117,6 @@ class MemoryCheckpoints:
         # Convert pandas objects back to cudf if they originated from cudf
         for k in list(restored_vars.keys()):
             restored_vars[k] = cp._cudf_origins.restore_value(k, restored_vars[k])
-
-        # Restore original dtypes (object columns that were converted to specialized types)
-        for k in list(restored_vars.keys()):
-            restored_vars[k] = cp._dtype_origins.restore_value(k, restored_vars[k])
 
         user_ns.update(restored_vars)
 
