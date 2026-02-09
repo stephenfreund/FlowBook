@@ -318,6 +318,8 @@ class VirtualFileSystem:
                     os.mkdir = saved_mkdir
 
         def patched_open(file, mode="r", *args, **kwargs):
+            if isinstance(file, bytes):
+                return _orig_open(file, mode, *args, **kwargs)
             path = str(file)
             is_write = any(c in mode for c in "wxa+")
             if is_write:
@@ -331,6 +333,8 @@ class VirtualFileSystem:
                 return _orig_open(resolved, mode, *args, **kwargs)
 
         def patched_remove(path, *args, **kwargs):
+            if isinstance(path, bytes):
+                return _orig_remove(path, *args, **kwargs)
             abs_path = os.path.abspath(path)
             vfs._track_write(path)
             vfs._deleted_paths.add(abs_path)
@@ -339,6 +343,8 @@ class VirtualFileSystem:
                 _orig_remove(overlay, *args, **kwargs)
 
         def patched_rename(src, dst, *args, **kwargs):
+            if isinstance(src, bytes) or isinstance(dst, bytes):
+                return _orig_rename(src, dst, *args, **kwargs)
             vfs._track_read(src)
             vfs._track_write(dst)
             overlay_src = vfs._resolve_read_path(src)
@@ -353,6 +359,8 @@ class VirtualFileSystem:
             vfs._deleted_paths.add(abs_src)
 
         def patched_makedirs(name, *args, **kwargs):
+            if isinstance(name, bytes):
+                return _orig_makedirs(name, *args, **kwargs)
             overlay = vfs._to_overlay_path(name)
             # Temporarily restore originals to avoid recursion
             os.makedirs = _orig_makedirs
@@ -365,6 +373,8 @@ class VirtualFileSystem:
                 os.mkdir = patched_mkdir
 
         def patched_mkdir(path, *args, **kwargs):
+            if isinstance(path, bytes):
+                return _orig_mkdir(path, *args, **kwargs)
             overlay = vfs._to_overlay_path(path)
             overlay_parent = os.path.dirname(overlay)
             # Temporarily restore originals to avoid recursion
@@ -379,6 +389,8 @@ class VirtualFileSystem:
                 os.mkdir = patched_mkdir
 
         def patched_rmdir(path, *args, **kwargs):
+            if isinstance(path, bytes):
+                return _orig_rmdir(path, *args, **kwargs)
             abs_path = os.path.abspath(path)
             vfs._deleted_paths.add(abs_path)
             overlay = vfs._to_overlay_path(abs_path)
@@ -386,6 +398,8 @@ class VirtualFileSystem:
                 _orig_rmdir(overlay, *args, **kwargs)
 
         def patched_exists(path):
+            if isinstance(path, bytes):
+                return _orig_exists(path)
             abs_path = os.path.abspath(path)
             if abs_path in vfs._deleted_paths:
                 return False
@@ -395,6 +409,8 @@ class VirtualFileSystem:
             return _orig_exists(path)
 
         def patched_listdir(path="."):
+            if isinstance(path, bytes):
+                return _orig_listdir(path)
             abs_path = os.path.abspath(path)
             # Merge real FS and overlay
             real_entries = set()
@@ -414,6 +430,8 @@ class VirtualFileSystem:
             return result
 
         def patched_shutil_copy(src, dst, *args, **kwargs):
+            if isinstance(src, bytes) or isinstance(dst, bytes):
+                return _orig_copy(src, dst, *args, **kwargs)
             vfs._track_read(src)
             vfs._track_write(dst)
             resolved_src = vfs._resolve_read_path(src)
@@ -422,6 +440,8 @@ class VirtualFileSystem:
             return _orig_copy(resolved_src, overlay_dst, *args, **kwargs)
 
         def patched_shutil_copy2(src, dst, *args, **kwargs):
+            if isinstance(src, bytes) or isinstance(dst, bytes):
+                return _orig_copy2(src, dst, *args, **kwargs)
             vfs._track_read(src)
             vfs._track_write(dst)
             resolved_src = vfs._resolve_read_path(src)
@@ -430,6 +450,8 @@ class VirtualFileSystem:
             return _orig_copy2(resolved_src, overlay_dst, *args, **kwargs)
 
         def patched_shutil_move(src, dst, *args, **kwargs):
+            if isinstance(src, bytes) or isinstance(dst, bytes):
+                return _orig_move(src, dst, *args, **kwargs)
             vfs._track_read(src)
             vfs._track_write(dst)
             resolved_src = vfs._resolve_read_path(src)
@@ -443,6 +465,8 @@ class VirtualFileSystem:
             vfs._deleted_paths.add(abs_src)
 
         def patched_shutil_rmtree(path, *args, **kwargs):
+            if isinstance(path, bytes):
+                return _orig_rmtree(path, *args, **kwargs)
             abs_path = os.path.abspath(path)
             vfs._deleted_paths.add(abs_path)
             overlay = vfs._to_overlay_path(abs_path)

@@ -1476,3 +1476,309 @@ class TestExcludedPrefixes:
 
         vfs.disable()
         shutil.rmtree(storage_dir, ignore_errors=True)
+
+
+class TestBytesPathHandling:
+    """Tests that bytes paths don't crash VFS patches.
+
+    Libraries like psutil pass bytes paths (e.g., b"/proc") to OS functions.
+    The VFS overlay is string-only, so bytes paths must bypass it entirely.
+    """
+
+    # =========================================================================
+    # Full VFS mode — bytes paths should bypass overlay without crashing
+    # =========================================================================
+
+    def test_bytes_open_read(self, vfs, tmpdir):
+        """open() with bytes path should not crash in full VFS mode."""
+        real_file = os.path.join(tmpdir, "bytes_read.txt")
+        with open(real_file, "w") as f:
+            f.write("hello")
+
+        vfs.enable()
+
+        # Bytes path bypasses overlay and reads from real FS
+        bytes_path = real_file.encode()
+        with open(bytes_path, "r") as f:
+            assert f.read() == "hello"
+
+    def test_bytes_open_write(self, vfs, tmpdir):
+        """open() with bytes path should not crash in full VFS mode."""
+        vfs.enable()
+
+        bytes_path = os.path.join(tmpdir, "bytes_write.txt").encode()
+        with open(bytes_path, "w") as f:
+            f.write("written")
+
+        # str(bytes_path) produces "b'...'" which goes to overlay;
+        # patched_open uses str(file), so this is already handled.
+        # Just verify no crash.
+
+    def test_bytes_exists(self, vfs, tmpdir):
+        """os.path.exists with bytes path should not crash."""
+        vfs.enable()
+        bytes_path = tmpdir.encode()
+        assert os.path.exists(bytes_path)
+
+    def test_bytes_listdir(self, vfs, tmpdir):
+        """os.listdir with bytes path should not crash."""
+        vfs.enable()
+        bytes_path = tmpdir.encode()
+        entries = os.listdir(bytes_path)
+        assert isinstance(entries, list)
+
+    def test_bytes_remove(self, vfs, tmpdir):
+        """os.remove with bytes path should not crash."""
+        real_file = os.path.join(tmpdir, "bytes_rm.txt")
+        with open(real_file, "w") as f:
+            f.write("delete me")
+
+        vfs.enable()
+
+        bytes_path = real_file.encode()
+        os.remove(bytes_path)
+        # Bytes path bypasses overlay and goes to real OS
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(real_file)
+
+    def test_bytes_rename(self, vfs, tmpdir):
+        """os.rename with bytes src/dst should not crash."""
+        src = os.path.join(tmpdir, "bytes_src.txt")
+        dst = os.path.join(tmpdir, "bytes_dst.txt")
+        with open(src, "w") as f:
+            f.write("content")
+
+        vfs.enable()
+
+        os.rename(src.encode(), dst.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(src)
+        assert orig_exists(dst)
+
+    def test_bytes_makedirs(self, vfs, tmpdir):
+        """os.makedirs with bytes path should not crash."""
+        vfs.enable()
+        new_dirs = os.path.join(tmpdir, "bytes_a", "bytes_b")
+        os.makedirs(new_dirs.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(new_dirs)
+
+    def test_bytes_mkdir(self, vfs, tmpdir):
+        """os.mkdir with bytes path should not crash."""
+        vfs.enable()
+        new_dir = os.path.join(tmpdir, "bytes_mkdir")
+        os.mkdir(new_dir.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(new_dir)
+
+    def test_bytes_rmdir(self, vfs, tmpdir):
+        """os.rmdir with bytes path should not crash."""
+        dir_to_rm = os.path.join(tmpdir, "bytes_rmdir")
+        os.mkdir(dir_to_rm)
+
+        vfs.enable()
+        os.rmdir(dir_to_rm.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(dir_to_rm)
+
+    def test_bytes_shutil_copy(self, vfs, tmpdir):
+        """shutil.copy with bytes src/dst should not crash."""
+        src = os.path.join(tmpdir, "bytes_cp_src.txt")
+        dst = os.path.join(tmpdir, "bytes_cp_dst.txt")
+        with open(src, "w") as f:
+            f.write("copy me")
+
+        vfs.enable()
+        # Bytes guard bypasses overlay; _orig_copy internally calls patched
+        # open() which also has a bytes guard, so the copy goes to real FS
+        shutil.copy(src.encode(), dst.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(dst)
+
+    def test_bytes_shutil_copy2(self, vfs, tmpdir):
+        """shutil.copy2 with bytes src/dst should not crash."""
+        src = os.path.join(tmpdir, "bytes_cp2_src.txt")
+        dst = os.path.join(tmpdir, "bytes_cp2_dst.txt")
+        with open(src, "w") as f:
+            f.write("copy2 me")
+
+        vfs.enable()
+        # Bytes guard bypasses overlay; _orig_copy2 internally calls patched
+        # open() which also has a bytes guard, so the copy goes to real FS
+        shutil.copy2(src.encode(), dst.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(dst)
+
+    def test_bytes_shutil_move(self, vfs, tmpdir):
+        """shutil.move with bytes src/dst should not crash."""
+        src = os.path.join(tmpdir, "bytes_mv_src.txt")
+        dst = os.path.join(tmpdir, "bytes_mv_dst.txt")
+        with open(src, "w") as f:
+            f.write("move me")
+
+        vfs.enable()
+        shutil.move(src.encode(), dst.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(src)
+        assert orig_exists(dst)
+
+    def test_bytes_shutil_rmtree(self, vfs, tmpdir):
+        """shutil.rmtree with bytes path should not crash."""
+        tree = os.path.join(tmpdir, "bytes_tree")
+        os.makedirs(tree)
+
+        vfs.enable()
+        # Just verify no TypeError — shutil.rmtree internally uses relative
+        # str paths for sub-entries, which interact with the overlay.
+        shutil.rmtree(tree.encode())
+
+    # =========================================================================
+    # Tracking-only mode — bytes paths should be decoded and tracked
+    # =========================================================================
+
+    def test_tracking_bytes_open_read(self, vfs, tmpdir):
+        """open() read with bytes path in tracking mode should not crash."""
+        real_file = os.path.join(tmpdir, "track_bytes_read.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        with open(real_file.encode(), "r") as f:
+            f.read()
+
+    def test_tracking_bytes_open_write(self, vfs, tmpdir):
+        """open() write with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        path = os.path.join(tmpdir, "track_bytes_write.txt")
+        with open(path.encode(), "w") as f:
+            f.write("data")
+
+    def test_tracking_bytes_remove(self, vfs, tmpdir):
+        """os.remove with bytes path in tracking mode should not crash."""
+        real_file = os.path.join(tmpdir, "track_bytes_rm.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        os.remove(real_file.encode())
+
+    def test_tracking_bytes_rename(self, vfs, tmpdir):
+        """os.rename with bytes paths in tracking mode should not crash."""
+        src = os.path.join(tmpdir, "track_bytes_ren_src.txt")
+        dst = os.path.join(tmpdir, "track_bytes_ren_dst.txt")
+        with open(src, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        os.rename(src.encode(), dst.encode())
+
+    def test_tracking_bytes_exists(self, vfs, tmpdir):
+        """os.path.exists with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        assert os.path.exists(tmpdir.encode())
+
+    def test_tracking_bytes_listdir(self, vfs, tmpdir):
+        """os.listdir with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        entries = os.listdir(tmpdir.encode())
+        assert isinstance(entries, list)
+
+    def test_tracking_bytes_stat(self, vfs, tmpdir):
+        """os.stat with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        result = os.stat(tmpdir.encode())
+        assert result is not None
+
+    def test_tracking_bytes_isfile(self, vfs, tmpdir):
+        """os.path.isfile with bytes path in tracking mode should not crash."""
+        real_file = os.path.join(tmpdir, "track_bytes_isfile.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        assert os.path.isfile(real_file.encode())
+
+    def test_tracking_bytes_isdir(self, vfs, tmpdir):
+        """os.path.isdir with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        assert os.path.isdir(tmpdir.encode())
+
+    def test_tracking_bytes_getsize(self, vfs, tmpdir):
+        """os.path.getsize with bytes path in tracking mode should not crash."""
+        real_file = os.path.join(tmpdir, "track_bytes_size.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        size = os.path.getsize(real_file.encode())
+        assert size > 0
+
+    def test_tracking_bytes_getmtime(self, vfs, tmpdir):
+        """os.path.getmtime with bytes path in tracking mode should not crash."""
+        real_file = os.path.join(tmpdir, "track_bytes_mtime.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        mtime = os.path.getmtime(real_file.encode())
+        assert mtime > 0
+
+    def test_tracking_bytes_makedirs(self, vfs, tmpdir):
+        """os.makedirs with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        new_dirs = os.path.join(tmpdir, "track_bytes_mkdirs", "sub")
+        os.makedirs(new_dirs.encode())
+        assert os.path.exists(new_dirs)
+
+    def test_tracking_bytes_mkdir(self, vfs, tmpdir):
+        """os.mkdir with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        new_dir = os.path.join(tmpdir, "track_bytes_mkdir")
+        os.mkdir(new_dir.encode())
+        assert os.path.exists(new_dir)
+
+    def test_tracking_bytes_rmdir(self, vfs, tmpdir):
+        """os.rmdir with bytes path in tracking mode should not crash."""
+        dir_to_rm = os.path.join(tmpdir, "track_bytes_rmdir")
+        os.mkdir(dir_to_rm)
+
+        vfs.enable_tracking_only()
+        os.rmdir(dir_to_rm.encode())
+
+    def test_tracking_bytes_shutil_copy(self, vfs, tmpdir):
+        """shutil.copy with bytes paths in tracking mode should not crash."""
+        src = os.path.join(tmpdir, "track_bytes_cp_src.txt")
+        dst = os.path.join(tmpdir, "track_bytes_cp_dst.txt")
+        with open(src, "w") as f:
+            f.write("copy me")
+
+        vfs.enable_tracking_only()
+        shutil.copy(src.encode(), dst.encode())
+
+    def test_tracking_bytes_shutil_copy2(self, vfs, tmpdir):
+        """shutil.copy2 with bytes paths in tracking mode should not crash."""
+        src = os.path.join(tmpdir, "track_bytes_cp2_src.txt")
+        dst = os.path.join(tmpdir, "track_bytes_cp2_dst.txt")
+        with open(src, "w") as f:
+            f.write("copy2 me")
+
+        vfs.enable_tracking_only()
+        shutil.copy2(src.encode(), dst.encode())
+
+    def test_tracking_bytes_shutil_move(self, vfs, tmpdir):
+        """shutil.move with bytes paths in tracking mode should not crash."""
+        src = os.path.join(tmpdir, "track_bytes_mv_src.txt")
+        dst = os.path.join(tmpdir, "track_bytes_mv_dst.txt")
+        with open(src, "w") as f:
+            f.write("move me")
+
+        vfs.enable_tracking_only()
+        shutil.move(src.encode(), dst.encode())
+
+    def test_tracking_bytes_shutil_rmtree(self, vfs, tmpdir):
+        """shutil.rmtree with bytes path in tracking mode should not crash."""
+        tree = os.path.join(tmpdir, "track_bytes_tree")
+        os.makedirs(os.path.join(tree, "sub"))
+
+        vfs.enable_tracking_only()
+        shutil.rmtree(tree.encode())
