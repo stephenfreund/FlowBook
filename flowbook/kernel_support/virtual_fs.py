@@ -59,6 +59,10 @@ class VirtualFileSystem:
         self._cell_reads_before_writes: Set[str] = set()
         self._cell_writes: Set[str] = set()
 
+        # Path filtering: only track paths under _notebook_dir (if set)
+        self._notebook_dir: Optional[str] = None
+        self._excluded_prefixes: Set[str] = set()
+
         # Original functions (saved for unpatching)
         self._originals: dict = {}
 
@@ -206,13 +210,37 @@ class VirtualFileSystem:
             return overlay
         return real_path
 
+    def set_notebook_dir(self, path: str) -> None:
+        """Set the notebook directory. Only files under this tree will be tracked."""
+        self._notebook_dir = os.path.abspath(path).rstrip(os.sep) + os.sep
+
+    def add_excluded_prefix(self, prefix: str) -> None:
+        """Add a path prefix to exclude from tracking (e.g., checkpoint storage dir)."""
+        abs_prefix = os.path.abspath(prefix)
+        self._excluded_prefixes.add(abs_prefix)
+
     def _should_track_path(self, abs_path: str) -> bool:
-        """Check if a path should be tracked (filter out internal sockets)."""
+        """Check if a path should be tracked.
+
+        Only tracks files under the notebook directory tree (if set).
+        Always excludes internal FlowBook paths and explicitly excluded prefixes.
+        """
         # Filter out FlowBook/FlowLab internal socket files
         if abs_path.endswith(".sock"):
             basename = os.path.basename(abs_path)
             if basename.startswith(("flowbook_", "flowlab_")):
                 return False
+
+        # Filter out dynamically excluded prefixes (e.g., checkpoint storage dir)
+        for prefix in self._excluded_prefixes:
+            if abs_path.startswith(prefix):
+                return False
+
+        # Only track files under the notebook directory tree
+        if self._notebook_dir is not None:
+            if not abs_path.startswith(self._notebook_dir):
+                return False
+
         return True
 
     def _track_read(self, path: str) -> None:

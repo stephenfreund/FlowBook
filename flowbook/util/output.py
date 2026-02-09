@@ -149,13 +149,18 @@ class Output:
         timings = self.timings
         if timings:
             if os.path.exists(self.timings_file):
-                saved_timings: Timings = json.load(open(self.timings_file))
-                log(f"Output timer data loaded from {self.timings_file}")
-                saved_timings.extend(timings)
-                timings = saved_timings
-                log(f"Output timer data extended by {len(self.timings)} entries")
+                try:
+                    with open(self.timings_file) as f:
+                        saved_timings: Timings = json.load(f)
+                    log(f"Output timer data loaded from {self.timings_file}")
+                    saved_timings.extend(timings)
+                    timings = saved_timings
+                    log(f"Output timer data extended by {len(self.timings)} entries")
+                except (json.JSONDecodeError, OSError) as e:
+                    log(f"Warning: could not load timings file {self.timings_file}: {e}")
 
-            json.dump(timings, open(self.timings_file, "w"), indent=2)
+            with open(self.timings_file, "w") as f:
+                json.dump(timings, f, indent=2)
             log(f"Output timer data saved to {self.timings_file}")
 
     def add_timing(self, key: str, duration: float):
