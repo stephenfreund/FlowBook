@@ -1782,3 +1782,236 @@ class TestBytesPathHandling:
 
         vfs.enable_tracking_only()
         shutil.rmtree(tree.encode())
+
+
+class TestOverlayScoping:
+    """Tests that full VFS overlay redirection is scoped to notebook directory.
+
+    When notebook_dir is set, writes to paths outside that directory should
+    go to the real FS (not the overlay), while writes inside should still
+    be redirected to the overlay. This fixes libraries like joblib that write
+    to /dev/shm or /tmp and then call os.chmod on the same path.
+    """
+
+    def test_write_outside_notebook_dir_goes_to_real_fs(self, vfs, tmpdir):
+        """open() write outside notebook dir should go to real FS, not overlay."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        outside_file = os.path.join(outside_dir, "temp.pkl")
+        with open(outside_file, "w") as f:
+            f.write("external data")
+
+        # File should exist on real FS
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(outside_file)
+
+        # Verify content via real FS
+        orig_open = vfs._originals["builtins.open"]
+        with orig_open(outside_file, "r") as f:
+            assert f.read() == "external data"
+
+    def test_write_inside_notebook_dir_goes_to_overlay(self, vfs, tmpdir):
+        """open() write inside notebook dir should go to overlay."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        inside_file = os.path.join(notebook_dir, "output.csv")
+        with open(inside_file, "w") as f:
+            f.write("notebook data")
+
+        # File should NOT exist on real FS
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(inside_file)
+
+        # But patched exists should find it
+        assert os.path.exists(inside_file)
+
+    def test_read_outside_notebook_dir_from_real_fs(self, vfs, tmpdir):
+        """open() read outside notebook dir should read from real FS."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        outside_file = os.path.join(outside_dir, "input.dat")
+        with open(outside_file, "w") as f:
+            f.write("real data")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        with open(outside_file, "r") as f:
+            assert f.read() == "real data"
+
+    def test_remove_outside_notebook_dir_removes_real_file(self, vfs, tmpdir):
+        """os.remove outside notebook dir should delete real file."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        outside_file = os.path.join(outside_dir, "to_delete.txt")
+        with open(outside_file, "w") as f:
+            f.write("delete me")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        os.remove(outside_file)
+
+        # Real file should be gone
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(outside_file)
+
+    def test_chmod_after_write_outside_notebook_dir(self, vfs, tmpdir):
+        """Simulates joblib pattern: write + chmod outside notebook dir succeeds."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        outside_file = os.path.join(outside_dir, "joblib_temp.pkl")
+
+        # Write goes to real FS (outside notebook dir)
+        with open(outside_file, "w") as f:
+            f.write("pickle data")
+
+        # os.chmod is NOT patched by VFS, so it operates on real FS.
+        # This should succeed because the file is on the real FS.
+        os.chmod(outside_file, 0o644)
+
+        # Verify the file is readable
+        orig_open = vfs._originals["builtins.open"]
+        with orig_open(outside_file, "r") as f:
+            assert f.read() == "pickle data"
+
+    def test_makedirs_outside_notebook_dir_creates_real_dirs(self, vfs, tmpdir):
+        """os.makedirs outside notebook dir should create real directories."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        outside_dirs = os.path.join(tmpdir, "outside", "deep", "path")
+        os.makedirs(outside_dirs)
+
+        # Real dirs should exist
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(outside_dirs)
+
+    def test_no_notebook_dir_overlays_everything(self, vfs, tmpdir):
+        """Without set_notebook_dir, all writes go to overlay (backward compat)."""
+        vfs.enable()
+
+        real_file = os.path.join(tmpdir, "anywhere.txt")
+        with open(real_file, "w") as f:
+            f.write("overlay content")
+
+        # File should NOT exist on real FS
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(real_file)
+
+        # But patched exists should find it
+        assert os.path.exists(real_file)
+
+    def test_exists_outside_notebook_dir_uses_real_fs(self, vfs, tmpdir):
+        """os.path.exists outside notebook dir should use real FS only."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        outside_file = os.path.join(outside_dir, "check.txt")
+        with open(outside_file, "w") as f:
+            f.write("exists")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        assert os.path.exists(outside_file)
+        assert not os.path.exists(os.path.join(outside_dir, "nonexistent.txt"))
+
+    def test_listdir_outside_notebook_dir_uses_real_fs(self, vfs, tmpdir):
+        """os.listdir outside notebook dir should use real FS only."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        with open(os.path.join(outside_dir, "a.txt"), "w") as f:
+            f.write("a")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        entries = os.listdir(outside_dir)
+        assert "a.txt" in entries
+
+    def test_shutil_copy_outside_notebook_dir_uses_real_fs(self, vfs, tmpdir):
+        """shutil.copy outside notebook dir should use real FS."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        src = os.path.join(outside_dir, "src.txt")
+        dst = os.path.join(outside_dir, "dst.txt")
+        with open(src, "w") as f:
+            f.write("copy me")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        shutil.copy(src, dst)
+
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(dst)
+
+    def test_rename_outside_notebook_dir_uses_real_fs(self, vfs, tmpdir):
+        """os.rename outside notebook dir should use real FS."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        src = os.path.join(outside_dir, "old.txt")
+        dst = os.path.join(outside_dir, "new.txt")
+        with open(src, "w") as f:
+            f.write("rename me")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        os.rename(src, dst)
+
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(src)
+        assert orig_exists(dst)
+
+    def test_rmtree_outside_notebook_dir_removes_real_tree(self, vfs, tmpdir):
+        """shutil.rmtree outside notebook dir should remove real directory."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_tree = os.path.join(tmpdir, "outside_tree")
+        os.makedirs(notebook_dir)
+        os.makedirs(os.path.join(outside_tree, "sub"))
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        shutil.rmtree(outside_tree)
+
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(outside_tree)
