@@ -1,3 +1,4 @@
+import io
 import json
 from pathlib import Path
 import sys
@@ -148,18 +149,21 @@ class Output:
 
         timings = self.timings
         if timings:
-            if os.path.exists(self.timings_file):
-                try:
-                    with open(self.timings_file) as f:
-                        saved_timings: Timings = json.load(f)
-                    log(f"Output timer data loaded from {self.timings_file}")
-                    saved_timings.extend(timings)
-                    timings = saved_timings
-                    log(f"Output timer data extended by {len(self.timings)} entries")
-                except (json.JSONDecodeError, OSError) as e:
-                    log(f"Warning: could not load timings file {self.timings_file}: {e}")
+            # Use io.open to bypass VFS patched builtins.open so timings
+            # are always written to the real filesystem, not the overlay.
+            try:
+                with io.open(self.timings_file) as f:
+                    saved_timings: Timings = json.load(f)
+                log(f"Output timer data loaded from {self.timings_file}")
+                saved_timings.extend(timings)
+                timings = saved_timings
+                log(f"Output timer data extended by {len(self.timings)} entries")
+            except FileNotFoundError:
+                pass
+            except (json.JSONDecodeError, OSError) as e:
+                log(f"Warning: could not load timings file {self.timings_file}: {e}")
 
-            with open(self.timings_file, "w") as f:
+            with io.open(self.timings_file, "w") as f:
                 json.dump(timings, f, indent=2)
             log(f"Output timer data saved to {self.timings_file}")
 
