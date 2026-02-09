@@ -1248,3 +1248,217 @@ class TestBothModesTracking:
                 f"Cell tracking not cleared in {mode_name}"
             assert len(tracking2.file_reads_before_writes) == 0, \
                 f"Cell reads not cleared in {mode_name}"
+
+
+class TestNotebookDirFiltering:
+    """Tests for notebook directory-based path filtering."""
+
+    def test_no_notebook_dir_tracks_everything(self, vfs, tmpdir):
+        """Without set_notebook_dir, all paths are tracked."""
+        vfs.enable_tracking_only()
+
+        file_path = os.path.join(tmpdir, "anywhere.txt")
+        vfs._track_write(file_path)
+        vfs._track_read(file_path)
+
+        assert os.path.abspath(file_path) in vfs.get_write_paths()
+        assert os.path.abspath(file_path) in vfs.get_read_paths()
+
+    def test_files_inside_notebook_dir_tracked(self, vfs, tmpdir):
+        """Files under notebook dir should be tracked."""
+        vfs.set_notebook_dir(tmpdir)
+        vfs.enable_tracking_only()
+
+        file_path = os.path.join(tmpdir, "data.csv")
+        vfs._track_write(file_path)
+        vfs._track_read(file_path)
+
+        assert os.path.abspath(file_path) in vfs.get_write_paths()
+        assert os.path.abspath(file_path) in vfs.get_read_paths()
+
+    def test_files_in_subdirs_tracked(self, vfs, tmpdir):
+        """Files in subdirectories of notebook dir should be tracked."""
+        vfs.set_notebook_dir(tmpdir)
+        vfs.enable_tracking_only()
+
+        subdir = os.path.join(tmpdir, "output", "models")
+        file_path = os.path.join(subdir, "model.pkl")
+        vfs._track_write(file_path)
+        vfs._track_read(file_path)
+
+        assert os.path.abspath(file_path) in vfs.get_write_paths()
+        assert os.path.abspath(file_path) in vfs.get_read_paths()
+
+    def test_files_outside_notebook_dir_not_tracked(self, vfs, tmpdir):
+        """Files outside notebook dir should NOT be tracked."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable_tracking_only()
+
+        outside_file = os.path.join(tmpdir, "outside.txt")
+        vfs._track_write(outside_file)
+        vfs._track_read(outside_file)
+
+        assert os.path.abspath(outside_file) not in vfs.get_write_paths()
+        assert os.path.abspath(outside_file) not in vfs.get_read_paths()
+
+    def test_temp_dir_files_not_tracked(self, vfs, tmpdir):
+        """Files in system temp dirs should NOT be tracked when notebook dir is set."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable_tracking_only()
+
+        temp_file = os.path.join(tempfile.gettempdir(), "library_temp.dat")
+        vfs._track_write(temp_file)
+
+        assert os.path.abspath(temp_file) not in vfs.get_write_paths()
+
+    def test_site_packages_not_tracked(self, vfs, tmpdir):
+        """Files in site-packages should NOT be tracked when notebook dir is set."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable_tracking_only()
+
+        pkg_file = "/usr/lib/python3/site-packages/some_lib/cache.dat"
+        vfs._track_write(pkg_file)
+
+        assert os.path.abspath(pkg_file) not in vfs.get_write_paths()
+
+    def test_cell_tracking_respects_notebook_dir(self, vfs, tmpdir):
+        """Per-cell tracking should also respect notebook dir filtering."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable_tracking_only()
+        vfs.reset_cell_tracking()
+
+        inside_read = os.path.join(notebook_dir, "input.csv")
+        inside_write = os.path.join(notebook_dir, "output.csv")
+        outside = os.path.join(tmpdir, "other.csv")
+
+        # Read inside (before any write to this path)
+        vfs._track_read(inside_read)
+        # Write inside
+        vfs._track_write(inside_write)
+        # Read and write outside notebook dir
+        vfs._track_read(outside)
+        vfs._track_write(outside)
+
+        tracking = vfs.get_cell_file_tracking()
+        assert os.path.abspath(inside_write) in tracking.file_writes
+        assert os.path.abspath(outside) not in tracking.file_writes
+        assert os.path.abspath(inside_read) in tracking.file_reads_before_writes
+        assert os.path.abspath(outside) not in tracking.file_reads_before_writes
+
+    def test_patched_open_respects_notebook_dir(self, vfs, tmpdir):
+        """Patched open() should only track files under notebook dir."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable_tracking_only()
+        vfs.reset_cell_tracking()
+
+        # Write inside notebook dir
+        inside_file = os.path.join(notebook_dir, "output.csv")
+        with open(inside_file, "w") as f:
+            f.write("data")
+
+        # Write outside notebook dir
+        outside_file = os.path.join(outside_dir, "temp.dat")
+        with open(outside_file, "w") as f:
+            f.write("temp")
+
+        writes = vfs.get_write_paths()
+        assert os.path.abspath(inside_file) in writes
+        assert os.path.abspath(outside_file) not in writes
+
+
+class TestExcludedPrefixes:
+    """Tests for explicitly excluded path prefixes."""
+
+    def test_excluded_prefix_not_tracked(self, vfs, tmpdir):
+        """Files under excluded prefix should not be tracked."""
+        vfs.set_notebook_dir(tmpdir)
+        excluded = os.path.join(tmpdir, "checkpoints")
+        os.makedirs(excluded)
+        vfs.add_excluded_prefix(excluded)
+        vfs.enable_tracking_only()
+
+        file_path = os.path.join(excluded, "snapshot.dat")
+        vfs._track_write(file_path)
+        vfs._track_read(file_path)
+
+        assert os.path.abspath(file_path) not in vfs.get_write_paths()
+        assert os.path.abspath(file_path) not in vfs.get_read_paths()
+
+    def test_excluded_prefix_within_notebook_dir(self, vfs, tmpdir):
+        """Excluded prefix should override notebook dir inclusion."""
+        vfs.set_notebook_dir(tmpdir)
+        cache_dir = os.path.join(tmpdir, ".cache")
+        os.makedirs(cache_dir)
+        vfs.add_excluded_prefix(cache_dir)
+        vfs.enable_tracking_only()
+
+        # File in notebook dir but under excluded prefix
+        cached = os.path.join(cache_dir, "data.bin")
+        vfs._track_write(cached)
+
+        # File in notebook dir, not excluded
+        normal = os.path.join(tmpdir, "data.csv")
+        vfs._track_write(normal)
+
+        assert os.path.abspath(cached) not in vfs.get_write_paths()
+        assert os.path.abspath(normal) in vfs.get_write_paths()
+
+    def test_multiple_excluded_prefixes(self, vfs, tmpdir):
+        """Multiple excluded prefixes should all be respected."""
+        vfs.set_notebook_dir(tmpdir)
+        dir_a = os.path.join(tmpdir, "dir_a")
+        dir_b = os.path.join(tmpdir, "dir_b")
+        os.makedirs(dir_a)
+        os.makedirs(dir_b)
+        vfs.add_excluded_prefix(dir_a)
+        vfs.add_excluded_prefix(dir_b)
+        vfs.enable_tracking_only()
+
+        file_a = os.path.join(dir_a, "a.txt")
+        file_b = os.path.join(dir_b, "b.txt")
+        file_ok = os.path.join(tmpdir, "ok.txt")
+        vfs._track_write(file_a)
+        vfs._track_write(file_b)
+        vfs._track_write(file_ok)
+
+        writes = vfs.get_write_paths()
+        assert os.path.abspath(file_a) not in writes
+        assert os.path.abspath(file_b) not in writes
+        assert os.path.abspath(file_ok) in writes
+
+    def test_checkpoint_storage_dir_excluded(self, tmpdir):
+        """Simulates base_kernel setup: checkpoint storage dir is excluded from VFS."""
+        vfs = VirtualFileSystem()
+        vfs.set_notebook_dir(tmpdir)
+
+        # Simulate what base_kernel does: create checkpoint storage and exclude it
+        storage_dir = tempfile.mkdtemp(prefix="flowbook_file_cp_", dir=tmpdir)
+        vfs.add_excluded_prefix(storage_dir)
+        vfs.enable_tracking_only()
+
+        # File inside checkpoint storage (created by FileCheckpoints.save)
+        cp_file = os.path.join(storage_dir, "_pre_abcd", "snapshot.dat")
+        vfs._track_write(cp_file)
+
+        # Normal user file
+        user_file = os.path.join(tmpdir, "output.csv")
+        vfs._track_write(user_file)
+
+        writes = vfs.get_write_paths()
+        assert os.path.abspath(cp_file) not in writes
+        assert os.path.abspath(user_file) in writes
+
+        vfs.disable()
+        shutil.rmtree(storage_dir, ignore_errors=True)
