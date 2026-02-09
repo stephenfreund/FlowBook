@@ -9,6 +9,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
@@ -151,15 +152,21 @@ class FileCheckpoints:
             saved_path = os.path.join(cp_dir, safe_name)
 
             try:
+                file_start = time.perf_counter()
                 shutil.copy2(source, saved_path)
                 file_hash = _hash_file(saved_path)
                 size = os.path.getsize(saved_path)
+                file_duration_ms = (time.perf_counter() - file_start) * 1000
                 files[real_path] = FileSnapshot(
                     real_path=real_path,
                     saved_copy=saved_path,
                     file_hash=file_hash,
                     size=size,
                 )
+                if file_duration_ms > 10:  # Log files taking >10ms
+                    from flowbook.util.output import log
+                    size_mb = size / (1024 * 1024)
+                    log(f"File checkpoint: {os.path.basename(real_path)} ({size_mb:.1f} MB) took {file_duration_ms:.0f} ms")
             except (OSError, IOError):
                 pass
 

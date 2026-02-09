@@ -187,10 +187,17 @@ class BaseFlowbookKernel(IPythonKernel):
         snapshot written files.
         Returns the Checkpoint object.
         """
-        write_paths = self._vfs.get_write_paths() if (self._vfs.enabled or self._vfs.tracking_only) else None
+        from flowbook.util.output import timer
+
+        with timer(key="checkpoint:get_write_paths", message="Get VFS write paths"):
+            write_paths = self._vfs.get_write_paths() if (self._vfs.enabled or self._vfs.tracking_only) else None
+
+        with timer(key="checkpoint:dict_ns", message="Convert namespace to dict"):
+            ns_dict = dict(self.shell.user_ns)
+
         total, removed = self._checkpoints.save(
             checkpoint_name,
-            dict(self.shell.user_ns),
+            ns_dict,
             write_paths=write_paths,
             vfs=self._vfs if self._vfs.enabled else None,
             max_size_mb=None,

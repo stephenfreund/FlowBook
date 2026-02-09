@@ -758,7 +758,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
                 # Take pre-execution snapshot
                 user_ns = self.shell.user_ns
-                with timer(key="kernel:checkpoint") as pre_timer:
+                with timer(key="kernel:checkpoint", message="Pre-execution checkpoint") as pre_timer:
                     pre_checkpoint = self._take_checkpoint(
                         f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
                     )
@@ -847,7 +847,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 #     self._warn_non_deepcopyable_objects()
 
                 # Take post-execution snapshot
-                with timer(key="kernel:checkpoint") as post_timer:
+                with timer(key="kernel:checkpoint", message="Post-execution checkpoint") as post_timer:
                     post_checkpoint = self._take_checkpoint(
                         f"{POST_CHECKPOINT_PREFIX}{self._cell_id}"
                     )
@@ -934,13 +934,17 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         and result.get("status") != "error"
                         and not skip_display
                     ):
-                        state_ms = pre_timer.duration() + post_timer.duration()
+                        pre_ms = pre_timer.duration()
+                        post_ms = post_timer.duration()
+                        state_ms = pre_ms + post_ms
                         self._display_execution_result(
                             execution_time,
                             state_ms,
                             check_timer.duration(),
                             tracking,
                             sdc_result,
+                            pre_state_ms=pre_ms,
+                            post_state_ms=post_ms,
                         )
 
                 return result
@@ -1148,6 +1152,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         check_duration: float,
         tracking,
         sdc_result,
+        pre_state_ms: float = 0.0,
+        post_state_ms: float = 0.0,
     ) -> None:
         """Display execution timing and Reproducibility metadata."""
         # Build metadata for display
@@ -1209,9 +1215,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             self._send_structural_warnings(structural_warnings)
 
         # Build display text
+        state_detail = f"State: {state_duration:.0f} ms (pre={pre_state_ms:.0f}, post={post_state_ms:.0f})"
         parts = [
             f"Run: {run_duration:.0f} ms",
-            f"State: {state_duration:.0f} ms",
+            state_detail,
             f"Check: {check_duration:.0f} ms",
         ]
 

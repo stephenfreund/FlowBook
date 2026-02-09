@@ -133,7 +133,10 @@ class Checkpoints:
 
         file_cp = None
         if self.file._enabled and write_paths is not None:
-            file_cp = self.file.save(name, write_paths, vfs=vfs)
+            from flowbook.util.output import timer
+            n_files = len(write_paths) if write_paths else 0
+            with timer(key="checkpoint:file_save", message=f"File checkpoint ({n_files} files)"):
+                file_cp = self.file.save(name, write_paths, vfs=vfs)
 
         total = Checkpoint(
             memory=self.memory.saved[name],
