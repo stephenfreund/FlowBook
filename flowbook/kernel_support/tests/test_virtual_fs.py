@@ -302,6 +302,20 @@ class TestSocketFiltering:
         assert abs_socket in vfs.get_read_paths()
         assert abs_socket in vfs.get_write_paths()
 
+    def test_bytes_path_decoded_and_tracked(self, vfs, tmpdir):
+        """Bytes paths (e.g., from psutil on Linux) should be decoded to str."""
+        vfs.enable_tracking_only()
+        vfs.reset_cell_tracking()
+
+        bytes_path = os.path.join(tmpdir, "data.txt").encode()
+        vfs._track_read(bytes_path)
+        vfs._track_write(bytes_path)
+
+        # Should not raise, and decoded str path should be tracked
+        str_path = os.path.abspath(os.fsdecode(bytes_path))
+        assert str_path in vfs.get_read_paths()
+        assert str_path in vfs.get_write_paths()
+
     def test_regular_files_still_tracked(self, vfs, tmpdir):
         vfs.enable_tracking_only()
         vfs.reset_cell_tracking()

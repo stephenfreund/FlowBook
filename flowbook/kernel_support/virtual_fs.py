@@ -243,8 +243,11 @@ class VirtualFileSystem:
 
         return True
 
-    def _track_read(self, path: str) -> None:
+    def _track_read(self, path) -> None:
         """Record a file read."""
+        # Convert bytes paths to str (e.g., psutil passes b"/proc" to os.listdir at shutdown)
+        if isinstance(path, bytes):
+            path = os.fsdecode(path)
         abs_path = os.path.abspath(path)
         if not self._should_track_path(abs_path):
             return
@@ -252,8 +255,11 @@ class VirtualFileSystem:
         if abs_path not in self._cell_writes:
             self._cell_reads_before_writes.add(abs_path)
 
-    def _track_write(self, path: str) -> None:
+    def _track_write(self, path) -> None:
         """Record a file write."""
+        # Convert bytes paths to str (e.g., psutil passes b"/proc" to os.listdir at shutdown)
+        if isinstance(path, bytes):
+            path = os.fsdecode(path)
         abs_path = os.path.abspath(path)
         if not self._should_track_path(abs_path):
             return
