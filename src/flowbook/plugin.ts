@@ -161,9 +161,10 @@ class FlowbookActivationManager {
         if (!activeCell || activeCell.model.type !== 'code') {
           return false;
         }
-        const meta = activeCell.model.getMetadata(
-          'flowbook'
-        ) as IReproducibilityMetadata | undefined;
+        const metadata = activeCell.model.metadata as any;
+        const meta = metadata?.flowbook as
+          | IReproducibilityMetadata
+          | undefined;
         return meta?.cell_is_contaminated === true;
       },
       execute: async () => {
