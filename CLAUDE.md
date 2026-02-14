@@ -101,6 +101,14 @@ The frontend exports **two JupyterLab plugins** that activate based on the kerne
 ```
 src/
 ├── index.ts                 # Exports [flowbookPlugin, experimentalPlugin]
+├── api.ts                   # Shared FlowbookAPI for HTTP communication
+├── kernel.ts                # Shared KernelUtils
+├── handler.ts               # Request handler
+├── cellindex.ts             # Cell index management
+├── cellindexutils.ts        # Cell index utilities
+├── executiondialog.tsx       # Execution dialog component
+├── logpanel.tsx             # Log panel UI component
+├── messagecomponents.tsx    # Message UI components
 ├── shared/                  # Shared utilities
 │   ├── kerneldetection.ts   # KernelDetector class for kernel type detection
 │   └── types.ts             # Shared type definitions
@@ -117,16 +125,13 @@ src/
 │   ├── historypanel.tsx     # History panel UI
 │   ├── unittestpanel.tsx    # Unit test panel
 │   └── unittesttracker.ts   # Unit test cell tracking
-├── flowbook/                # FlowBook kernel plugin (reproducibility tracking)
-│   ├── plugin.ts            # Plugin activation with kernel gating
-│   ├── types.ts             # IReproducibilityMetadata, IReproducibilityViolation interfaces
-│   ├── stalenessmanager.ts  # Tracks stale cells per notebook
-│   ├── metadatapanel.tsx    # Reproducibility metadata panel (reads, writes, stale cells)
-│   ├── cellhighlighter.ts   # Red highlighting for stale cells
-│   └── executionhook.ts     # Extract flowbook metadata from outputs
-├── api.ts                   # Shared FlowbookAPI for HTTP communication
-├── kernel.ts                # Shared KernelUtils
-└── [other shared files]     # panel.tsx, executiondialog.tsx, etc.
+└── flowbook/                # FlowBook kernel plugin (reproducibility tracking)
+    ├── plugin.ts            # Plugin activation with kernel gating
+    ├── types.ts             # IReproducibilityMetadata, IReproducibilityViolation, IReproducibilityCellState
+    ├── stalenessmanager.ts  # Tracks stale cells per notebook
+    ├── metadatapanel.tsx    # Reproducibility metadata panel (reads, writes, stale cells)
+    ├── cellhighlighter.ts   # Red highlighting for stale cells
+    └── executionhook.ts     # Extract flowbook metadata from outputs + cell edit detection
 ```
 
 **Plugin Activation**:
@@ -158,17 +163,53 @@ The server uses the modern **ExtensionApp** pattern (not legacy extension points
 
 The primary kernel with always-on reproducibility enforcement:
 
-- `flowbook_kernel.py` - Main `FlowbookKernel` implementation
+- `flowbook_kernel.py` - Main `FlowbookKernel` implementation with magic commands
 - `flowbook_client.py` - `FlowbookKernelClient` with `cell_order` injection for reproducibility checks
-- `reproducibility_enforcer.py` - `ReproducibilityEnforcer` implements reproducibility rules (staleness propagation, backward mutation detection)
-- `models.py` - `ReproducibilityMetadata`, `ReproducibilityViolation`, `ReproducibilityResult` data classes
+- `reproducibility_enforcer.py` - `ReproducibilityEnforcer` implements formal transition rules (see below)
+- `models.py` - `ReproducibilityMetadata`, `ReproducibilityViolation`, `ReproducibilityResult`, `ReproducibilityExecutionRecord` data classes
+- `changes.py` - Typed records of what changed between checkpoints (`ValueChanged`, `ColumnAdded`, etc.)
+- `access_events.py` - Typed records of variable/column/structural access during cell execution
+- `change_detector.py` - Converts `MemoryCheckpointDiffResult` to typed `Change` list
+- `conflict_resolver.py` - Matches `Change`s against `AccessEvent`s using declarative rules
+- `conflict_rules.py` - Declarative specification of reproducibility conflict detection
+
+**Formal Transition Rules** (from `FORMAL_DEVELOPMENT.md`):
+
+The enforcer implements four transition rules from the formal specification:
+
+| Rule | Condition | Cell status | Effect |
+|---|---|---|---|
+| EXEC-ACCEPT | No backward conflict, not forward-contaminated | fresh | StaleFwd |
+| EXEC-CONTAMINATED | No backward conflict, forward-contaminated | stale | StaleFwd |
+| EXEC-REJECT | Backward conflict (BackConflict) | unchanged | rollback |
+| EXEC-RESTORE | All predecessors fresh, execute from prefix checkpoint | fresh | StaleFwd |
+
+And three runtime checks:
+
+- **BackConflict** (Def 1.8.2): Cell wrote to location read by earlier *fresh* cell → reject
+- **FwdContaminated** (Def 1.8.3): Cell read location written by later executed cell → accept as stale
+- **StaleFwd** (Def 1.8.1): Cell wrote to location read by later fresh cell → mark later cell stale
+
+**Magic Commands**:
+
+| Command | Description |
+|---|---|
+| `%notebook_structure <ids...>` | Set notebook cell order (sent by frontend before each execution) |
+| `%cell_edited <cell_id>` | Mark edited cell stale (EDIT transition §2.3, sent by frontend) |
+| `%flowbook_status` | Display current reproducibility state |
+| `%flowbook_stale` | Show stale cells |
+| `%continue_after_violation <on/off>` | Control whether backward violations reject or warn |
+| `%structural_tracking <off/warn/enforce>` | Set DataFrame structural attribute tracking mode |
 
 **Features** (always enabled):
 
 - Variable tracking for all executions
 - Staleness computation (which cells need re-execution)
-- Backward mutation detection
-- Automatic rollback on reproducibility violations
+- Backward mutation detection with column-aware conflict resolution
+- Forward contamination detection (cell marked stale, not rejected)
+- EXEC-RESTORE from prefix checkpoint when all predecessors are fresh
+- Edit-triggered staleness via frontend notification
+- Automatic rollback on backward reproducibility violations
 
 **Metadata Format** (sent via `display_data` output):
 
@@ -182,7 +223,19 @@ The primary kernel with always-on reproducibility enforcement:
     "changed_variables": List[str],
     "stale_cells": List[str],
     "violation": Optional[dict],
-    "cell_order": List[str]
+    "cell_order": List[str],
+    "column_reads": Dict[str, List[str]],
+    "column_writes": Dict[str, List[str]],
+    "column_changed": Dict[str, List[str]],
+    "structural_reads": Dict[str, List[str]],
+    "structural_warnings": List[str],
+    "file_reads": List[str],
+    "file_writes": List[str],
+    "run_duration_ms": float,
+    "state_duration_ms": float,
+    "check_duration_ms": float,
+    "cell_is_contaminated": bool,
+    "exec_mode": "live" | "restore"
   }
 }
 ```
@@ -316,6 +369,8 @@ This normalization happens transparently at entry points:
 - Kernel spec: `flowbook/kernel/kernelspec/`
 - Main kernel class: `flowbook/kernel/flowbook_kernel.py`
 - Reproducibility logic: `flowbook/kernel/reproducibility_enforcer.py`
+- Conflict detection pipeline: `access_events.py` → `change_detector.py` → `conflict_rules.py` → `conflict_resolver.py`
+- Formal specification: `FORMAL_DEVELOPMENT.md`
 
 **Experimental Kernel** (AI commands, profiling):
 
@@ -388,3 +443,5 @@ jupyter labextension develop . --overwrite
 - Kernel installation happens automatically on import via `make_kernels()` in `__init__.py`
 - Timer utilities (`flowbook/util/output.py`) provide performance instrumentation throughout
 - Cell metadata tracking requires `FlowbookKernelClient` for proper `cell_id` propagation
+- Formal specification of reproducibility rules is in `FORMAL_DEVELOPMENT.md` with an Implementation Map linking formal definitions to code locations
+- The frontend `executionhook.ts` sends `%notebook_structure` before each cell execution and `%cell_edited` (debounced 1s) when a previously-executed cell's source changes
