@@ -7,12 +7,14 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 import { INotebookTracker } from '@jupyterlab/notebook';
+import { IDisposable } from '@lumino/disposable';
 
 import { KernelDetector } from '../shared/kerneldetection';
 import { ReproducibilityMetadataPanel } from './metadatapanel';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { CellIndexManager } from '../cellindex';
+import { IReproducibilityMetadata } from './types';
 
 /**
  * Track activation state per notebook
@@ -26,6 +28,7 @@ class FlowbookActivationManager {
   private _cellIndexManager: CellIndexManager;
   private _isActive = false;
   private _activeNotebookPath: string | null = null;
+  private _execRestoreDisposables: IDisposable[] = [];
 
   constructor(app: JupyterFrontEnd, tracker: INotebookTracker) {
     this._app = app;
@@ -120,6 +123,9 @@ class FlowbookActivationManager {
       this._highlighter
     );
 
+    // Register exec-restore command and context menu
+    this._registerExecRestoreCommand();
+
     // Start cell index overlays for current notebook
     const widget = this._tracker.currentWidget;
     if (widget) {
@@ -129,6 +135,78 @@ class FlowbookActivationManager {
 
     this._isActive = true;
     console.log('FlowBook Plugin: Activated');
+  }
+
+  /**
+   * Register the flowbook:exec-restore command and context menu item.
+   *
+   * The command sends %exec_restore <cellId> silently, then triggers
+   * notebook:run-cell to re-execute the active cell from its prefix
+   * checkpoint. The context menu item is only visible when the active
+   * cell has cell_is_contaminated === true in its flowbook metadata.
+   */
+  private _registerExecRestoreCommand(): void {
+    const commandId = 'flowbook:exec-restore';
+    const tracker = this._tracker;
+    const app = this._app;
+
+    const commandDisposable = app.commands.addCommand(commandId, {
+      label: 'Restore from checkpoint',
+      isVisible: () => {
+        const panel = tracker.currentWidget;
+        if (!panel) {
+          return false;
+        }
+        const activeCell = panel.content.activeCell;
+        if (!activeCell || activeCell.model.type !== 'code') {
+          return false;
+        }
+        const meta = activeCell.model.getMetadata(
+          'flowbook'
+        ) as IReproducibilityMetadata | undefined;
+        return meta?.cell_is_contaminated === true;
+      },
+      execute: async () => {
+        const panel = tracker.currentWidget;
+        if (!panel) {
+          return;
+        }
+        const activeCell = panel.content.activeCell;
+        if (!activeCell || activeCell.model.type !== 'code') {
+          return;
+        }
+        const cellId = activeCell.model.id;
+        const session = panel.sessionContext.session;
+        if (!session || !session.kernel) {
+          return;
+        }
+
+        // Send %exec_restore magic silently — sets the pending flag in the kernel.
+        // The kernel's ZMQ queue ensures ordering:
+        //   1. %exec_restore <cell_id>
+        //   2. %notebook_structure <order>  (sent by _onExecutionScheduled)
+        //   3. Cell code                    (_do_execute_impl consumes the flag)
+        const future = session.kernel.requestExecute({
+          code: `%exec_restore ${cellId}`,
+          silent: true,
+          store_history: false
+        });
+        await future.done;
+
+        // Now trigger cell execution via the standard notebook command.
+        // The right-click context menu already makes the cell active,
+        // so notebook:run-cell targets the correct cell.
+        await app.commands.execute('notebook:run-cell');
+      }
+    });
+
+    const menuDisposable = app.contextMenu.addItem({
+      command: commandId,
+      selector: '.jp-Cell.jp-CodeCell',
+      rank: 0
+    });
+
+    this._execRestoreDisposables.push(commandDisposable, menuDisposable);
   }
 
   private _deactivate(): void {
@@ -143,6 +221,12 @@ class FlowbookActivationManager {
       this._cellIndexManager.stopMonitoring(this._activeNotebookPath);
       this._activeNotebookPath = null;
     }
+
+    // Remove exec-restore command and context menu item
+    for (const d of this._execRestoreDisposables) {
+      d.dispose();
+    }
+    this._execRestoreDisposables = [];
 
     // Remove panel
     if (this._panel) {

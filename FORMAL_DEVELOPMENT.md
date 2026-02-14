@@ -683,7 +683,7 @@ through n need to be re-run in order."
 | EXEC-ACCEPT | §1.8 | `check()` when no violations in `kernel/reproducibility_enforcer.py` |
 | EXEC-CONTAMINATED | §1.8 | `check()` when `forward_violation` in `kernel/reproducibility_enforcer.py` |
 | EXEC-REJECT | §1.8 | `_do_execute_impl()` backward branch in `kernel/flowbook_kernel.py` |
-| EXEC-RESTORE | §1.8 | `can_exec_restore()` + `check(is_exec_restore=True)` in `kernel/reproducibility_enforcer.py` |
+| EXEC-RESTORE | §1.8 | `can_exec_restore()` + `check(is_exec_restore=True)` in `kernel/reproducibility_enforcer.py`; `%exec_restore` magic + pending flag in `kernel/flowbook_kernel.py`; `flowbook:exec-restore` command in `src/flowbook/plugin.ts` |
 | EDIT | §2.3 | `mark_cell_edited()` in `kernel/reproducibility_enforcer.py` |
 | Quiescence | Def 2.5.1 | All cells executed and `_stale_cells` empty |
 

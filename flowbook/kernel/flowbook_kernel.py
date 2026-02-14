@@ -426,6 +426,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         # Continue after violation flag (default: stop on violation)
         self._continue_after_violation: bool = False
 
+        # Pending EXEC-RESTORE flag: set by %exec_restore, consumed by _do_execute_impl
+        self._pending_exec_restore: Optional[str] = None
+
     # =========================================================================
     # Magic Commands
     # =========================================================================
@@ -553,6 +556,35 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 f"Cell edited, marked stale",
                 metadata=metadata.to_display_metadata(),
             )
+
+    @line_magic
+    def exec_restore(self, line: str) -> None:
+        """[EXEC-RESTORE] Request execution from prefix checkpoint (§1.8).
+
+        Sets a pending flag that is consumed by the next _do_execute_impl() call.
+        The frontend sends this magic silently before triggering cell execution,
+        so the ZMQ queue ordering is: %exec_restore → %notebook_structure → cell code.
+
+        Usage:
+            %exec_restore <cell_id>
+        """
+        cell_id = line.strip()
+        if not cell_id:
+            self._display.display_icon_and_text(
+                "❌", "Usage: %exec_restore <cell_id>"
+            )
+            return
+
+        if not self._enforcer.can_exec_restore(cell_id):
+            alpha = self._enforcer._cell_id_to_alpha(cell_id)
+            self._display.display_icon_and_text(
+                "❌",
+                f"Cannot restore Cell {alpha}: not all predecessors are fresh. "
+                "Re-run earlier cells first.",
+            )
+            return
+
+        self._pending_exec_restore = cell_id
 
     @line_magic
     def structural_tracking(self, line: str) -> None:
@@ -786,29 +818,32 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         cell_meta,
                     )
 
-                # [EXEC-RESTORE] Check if we can execute from prefix checkpoint (§1.8)
+                # [EXEC-RESTORE] Check and consume pending flag set by %exec_restore magic.
                 _is_exec_restore = False
                 _old_live_checkpoint = None
-                if self._cell_id and self._enforcer.can_exec_restore(self._cell_id):
-                    prefix_cp_name = self._enforcer.get_prefix_checkpoint_name(self._cell_id)
-                    if prefix_cp_name is not None and self._checkpoint.get(prefix_cp_name) is not None:
-                        _is_exec_restore = True
-                        # Save old live store for StaleFwd delta computation
-                        _old_live_checkpoint = self._take_checkpoint(
-                            f"_old_live_{self._cell_id}"
-                        )
-                        # Restore to σ^post_{i-1}
-                        self._restore_checkpoint(prefix_cp_name)
-                        log(f"[EXEC-RESTORE] Restored to {prefix_cp_name} for cell {self._cell_id}")
-                    elif prefix_cp_name is None:
-                        # First cell — could restore to empty state, but current live
-                        # state should already reflect initial state if all j < i are fresh
-                        # (which is trivially true since there are no predecessors)
-                        _is_exec_restore = True
-                        _old_live_checkpoint = self._take_checkpoint(
-                            f"_old_live_{self._cell_id}"
-                        )
-                        log(f"[EXEC-RESTORE] First cell {self._cell_id}, using current state")
+
+                if self._pending_exec_restore is not None:
+                    if self._pending_exec_restore == self._cell_id:
+                        # Re-validate precondition (predecessors may have become stale
+                        # between the magic and execution)
+                        if self._enforcer.can_exec_restore(self._cell_id):
+                            prefix_name = self._enforcer.get_prefix_checkpoint_name(self._cell_id)
+                            if prefix_name is not None and prefix_name in self._checkpoints.memory.saved:
+                                # Save old live store for StaleFwd delta computation
+                                _old_live_checkpoint = self._take_checkpoint(
+                                    f"_old_live_{self._cell_id}"
+                                )
+                                # Restore prefix checkpoint (σ^post_{i-1})
+                                self._restore_checkpoint(prefix_name)
+                                _is_exec_restore = True
+                                log(f"[exec_restore] Restored prefix checkpoint {prefix_name} for cell {self._cell_id}")
+                            else:
+                                # First cell or missing checkpoint — execute from current state
+                                log(f"[exec_restore] No prefix checkpoint for cell {self._cell_id}, executing normally")
+                        else:
+                            log(f"[exec_restore] Precondition no longer valid for cell {self._cell_id}, executing normally")
+                    # Clear flag regardless (user may have executed a different cell)
+                    self._pending_exec_restore = None
 
                 # Take pre-execution snapshot
                 user_ns = self.shell.user_ns
@@ -1001,6 +1036,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             pre_state_ms=pre_ms,
                             post_state_ms=post_ms,
                         )
+
+                # Clean up temporary old live checkpoint used for EXEC-RESTORE
+                if _old_live_checkpoint is not None:
+                    self._checkpoints.delete(f"_old_live_{self._cell_id}")
 
                 return result
             except Exception as e:

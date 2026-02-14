@@ -613,12 +613,12 @@ class TestForwardDependencyMessageFormatting:
         """Test message formatting with single variable."""
         message = format_forward_dependency_message("@B", "@C", ["x"])
 
-        assert "Forward Dependency" in message
+        assert "Forward Contamination" in message
         assert "@B" in message
         assert "@C" in message
         assert "x" in message
         assert "top-to-bottom" in message
-        assert "reproducibility" in message
+        assert "Restore from checkpoint" in message
 
     def test_message_format_multiple_variables(self):
         """Test message formatting with multiple variables."""

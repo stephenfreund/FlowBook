@@ -1747,19 +1747,17 @@ def format_forward_dependency_message(
     vars_str = format_variable_list(variables)
 
     lines = [
-        "❌ Reproducibility Violation: Forward Dependency",
+        "⚠️ Forward Contamination",
         "",
         f"Cell {reading_cell_alpha} reads {vars_str} which was written by "
         f"Cell {writing_cell_alpha} (later in notebook).",
         "",
-        f"In top-to-bottom order, Cell {writing_cell_alpha} runs after "
-        f"Cell {reading_cell_alpha}, so {reading_cell_alpha} would see a "
-        "different (or undefined) value.",
+        f"Cell {reading_cell_alpha} executed successfully but is marked stale "
+        "because it read out-of-order state that would not exist in a "
+        "top-to-bottom run.",
         "",
-        "Why blocked: This out-of-order execution breaks reproducibility.",
-        "",
-        f"Fix: Re-run from Cell {reading_cell_alpha} downward, or move the "
-        "write before the read.",
+        'Fix: Right-click the cell and select "Restore from checkpoint", '
+        "or re-run cells in notebook order.",
     ]
 
     return "\n".join(lines)
