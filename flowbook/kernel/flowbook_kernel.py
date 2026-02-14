@@ -525,6 +525,36 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         )
 
     @line_magic
+    def cell_edited(self, line: str) -> None:
+        """[EDIT transition] Mark a cell as edited (stale) (§2.3).
+
+        Usage:
+            %cell_edited <cell_id>
+        """
+        cell_id = line.strip()
+        if not cell_id:
+            return
+
+        stale_cells = self._enforcer.mark_cell_edited(cell_id)
+        if cell_id in [c for c in stale_cells]:
+            # Send updated staleness info to frontend
+            metadata = ReproducibilityMetadata(
+                cell_id=cell_id,
+                execution_seq=self._enforcer.seq_counter,
+                reads=[],
+                writes=[],
+                changed_variables=[],
+                stale_cells=stale_cells,
+                violation=None,
+                cell_order=self._enforcer.cell_order,
+            )
+            self._display.display_icon_and_text(
+                "✏️",
+                f"Cell edited, marked stale",
+                metadata=metadata.to_display_metadata(),
+            )
+
+    @line_magic
     def structural_tracking(self, line: str) -> None:
         """
         Set structural tracking mode for DataFrame/Series attribute monitoring.
@@ -756,6 +786,30 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         cell_meta,
                     )
 
+                # [EXEC-RESTORE] Check if we can execute from prefix checkpoint (§1.8)
+                _is_exec_restore = False
+                _old_live_checkpoint = None
+                if self._cell_id and self._enforcer.can_exec_restore(self._cell_id):
+                    prefix_cp_name = self._enforcer.get_prefix_checkpoint_name(self._cell_id)
+                    if prefix_cp_name is not None and self._checkpoint.get(prefix_cp_name) is not None:
+                        _is_exec_restore = True
+                        # Save old live store for StaleFwd delta computation
+                        _old_live_checkpoint = self._take_checkpoint(
+                            f"_old_live_{self._cell_id}"
+                        )
+                        # Restore to σ^post_{i-1}
+                        self._restore_checkpoint(prefix_cp_name)
+                        log(f"[EXEC-RESTORE] Restored to {prefix_cp_name} for cell {self._cell_id}")
+                    elif prefix_cp_name is None:
+                        # First cell — could restore to empty state, but current live
+                        # state should already reflect initial state if all j < i are fresh
+                        # (which is trivially true since there are no predecessors)
+                        _is_exec_restore = True
+                        _old_live_checkpoint = self._take_checkpoint(
+                            f"_old_live_{self._cell_id}"
+                        )
+                        log(f"[EXEC-RESTORE] First cell {self._cell_id}, using current state")
+
                 # Take pre-execution snapshot
                 user_ns = self.shell.user_ns
                 with timer(key="kernel:checkpoint", message="Pre-execution checkpoint") as pre_timer:
@@ -862,27 +916,29 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             tracking=tracking,
                             continue_on_violation=self._continue_after_violation,
                             namespace=self.shell.user_ns,  # For capturing structural read values
+                            is_exec_restore=_is_exec_restore,
+                            old_live_checkpoint=_old_live_checkpoint,
                         )
 
                     # Handle violations (backward mutation and/or forward dependency)
                     has_backward = sdc_result and sdc_result.violation
                     has_forward = sdc_result and sdc_result.forward_violation
 
-                    if has_backward or has_forward:
+                    # [EXEC-REJECT] Backward conflict → rollback (Def 1.8.2)
+                    if has_backward:
                         if self._continue_after_violation:
-                            # Warn about both violations but continue
-                            if has_backward:
-                                if sdc_result.violation.truncation_details:
-                                    error(
-                                        f"Reproducibility truncation: {sdc_result.violation.message}"
-                                    )
-                                    self._send_truncation_details(
-                                        sdc_result.violation.truncation_details
-                                    )
+                            # Warn about backward violation but continue
+                            if sdc_result.violation.truncation_details:
                                 error(
-                                    f"Reproducibility violation (continuing): {sdc_result.violation.message}"
+                                    f"Reproducibility truncation: {sdc_result.violation.message}"
                                 )
-                                self._send_violation_warning(sdc_result.violation)
+                                self._send_truncation_details(
+                                    sdc_result.violation.truncation_details
+                                )
+                            error(
+                                f"Reproducibility violation (continuing): {sdc_result.violation.message}"
+                            )
+                            self._send_violation_warning(sdc_result.violation)
                             if has_forward:
                                 error(
                                     f"Forward dependency (continuing): {sdc_result.forward_violation.message}"
@@ -891,15 +947,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                     sdc_result.forward_violation
                                 )
                         else:
-                            # Block on violation - backward takes precedence
-                            primary = (
-                                sdc_result.violation
-                                if has_backward
-                                else sdc_result.forward_violation
-                            )
-
-                            # Log truncation issues to terminal (for backward mutations)
-                            if has_backward and sdc_result.violation.truncation_details:
+                            # Block on backward violation
+                            # Log truncation issues to terminal
+                            if sdc_result.violation.truncation_details:
                                 error(
                                     f"Reproducibility truncation: {sdc_result.violation.message}"
                                 )
@@ -907,27 +957,32 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                     sdc_result.violation.truncation_details
                                 )
 
-                            error(f"Reproducibility violation: {primary.message}")
+                            error(f"Reproducibility violation: {sdc_result.violation.message}")
 
-                            # Only rollback for backward mutations (forward deps didn't change anything)
-                            if has_backward:
-                                self._restore_checkpoint(
-                                    f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
-                                )
+                            self._restore_checkpoint(
+                                f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
+                            )
 
-                            self._send_violation_error(primary)
+                            self._send_violation_error(sdc_result.violation)
 
                             # Also report forward violation if both exist
-                            if has_backward and has_forward:
+                            if has_forward:
                                 self._send_violation_warning(
                                     sdc_result.forward_violation
                                 )
 
-                            return self._make_error_result(primary)
+                            return self._make_error_result(sdc_result.violation)
 
-                    # Display results (skip if silent, error, or violation with rollback)
+                    # [EXEC-CONTAMINATED] Forward contamination → warn, don't reject (§1.8)
+                    if has_forward and not has_backward:
+                        error(
+                            f"Forward dependency (contaminated): {sdc_result.forward_violation.message}"
+                        )
+                        self._send_violation_warning(sdc_result.forward_violation)
+
+                    # Display results (skip if silent, error, or backward violation with rollback)
                     skip_display = (
-                        has_backward or has_forward
+                        has_backward
                     ) and not self._continue_after_violation
                     if (
                         not silent
@@ -1206,6 +1261,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             run_duration_ms=run_duration,
             state_duration_ms=state_duration,
             check_duration_ms=check_duration,
+            cell_is_contaminated=sdc_result.cell_is_contaminated if sdc_result else False,
+            exec_mode=sdc_result.exec_mode if sdc_result else "live",
         )
 
         # Log and display structural warnings

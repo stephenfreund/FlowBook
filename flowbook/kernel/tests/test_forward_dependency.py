@@ -830,14 +830,15 @@ class TestForwardDependencyStaleness:
 
     def test_staleness_after_forward_dependency_with_continue(self):
         """
-        When a forward dependency is detected but we continue, staleness is computed.
+        When a forward dependency is detected, the cell is marked stale (EXEC-CONTAMINATED).
 
         Scenario:
         - Cell D executes first, writes x
         - Cell B executes second, reads x (forward dependency on D)
-        - With continue_on_violation=True, B should report staleness info
+        - B is marked stale because it's forward-contaminated
 
-        Since B read from D (later cell), running D again would make B stale.
+        Since B is stale, re-executing D does NOT trigger backward violation
+        against B (BackConflict only checks fresh cells per Def 1.8.2).
         """
         # Cell D writes x
         self._save_pre_checkpoint("d", {})
@@ -858,16 +859,16 @@ class TestForwardDependencyStaleness:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads={"x"}, writes=set()),
-            continue_on_violation=True,  # Continue to get staleness
         )
 
-        # Forward violation detected
+        # Forward violation detected, B is contaminated and stale
         assert result_b.forward_violation is not None
         assert result_b.forward_violation.mutating_cell == "d"
+        assert result_b.cell_is_contaminated is True
+        assert "b" in result_b.stale_cells
 
         # Now re-execute D with different value
-        # Note: D is later than B in document order, so D modifying x that B reads
-        # is a backward mutation. We use continue_on_violation to still get staleness.
+        # B is stale (contaminated), so BackConflict skips it — no violation
         self._save_pre_checkpoint("d", {"x": 10})
         post_d2 = self._make_post_checkpoint("post_d2", {"x": 999})
         result_d2 = self.sdc.check(
@@ -875,15 +876,10 @@ class TestForwardDependencyStaleness:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
             post_checkpoint=post_d2,
             tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=True,  # D is after B, so this is backward mutation
         )
 
-        # D modifying x after B read it is a backward mutation
-        assert result_d2.violation is not None
-        assert result_d2.violation.affected_cell == "b"
-        # B is NOT stale because staleness only propagates forward (to cells below D)
-        # The backward mutation violation is sufficient to indicate the issue
-        assert "b" not in result_d2.stale_cells
+        # No backward violation because B is stale (BackConflict only checks fresh)
+        assert result_d2.violation is None
 
     def test_out_of_order_execution_staleness_chain(self):
         """
@@ -1007,8 +1003,13 @@ class TestForwardDependencyStaleness:
         )
         assert result_a.forward_violation is not None
 
+        # All cells (A, B, C) are forward-contaminated → stale
+        assert "a" in self.sdc._stale_cells
+        assert "b" in self.sdc._stale_cells
+        assert "c" in self.sdc._stale_cells
+
         # Now re-run D with different x
-        # D is last in document order, so modifying x that C reads is backward mutation
+        # C reads x but is stale (EXEC-CONTAMINATED), so BackConflict skips it
         self._save_pre_checkpoint("d", {"x": 1, "y": 2, "z": 3, "w": 4})
         post_d2 = self._make_post_checkpoint("post_d2", {"x": 999, "y": 2, "z": 3, "w": 4})
         result_d2 = self.sdc.check(
@@ -1016,18 +1017,10 @@ class TestForwardDependencyStaleness:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
             post_checkpoint=post_d2,
             tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=True,  # D is after C, so this is backward mutation
         )
 
-        # D modifying x is backward mutation against C (which reads x)
-        assert result_d2.violation is not None
-        assert result_d2.violation.affected_cell == "c"
-        # C is NOT stale because staleness only propagates forward (to cells below D)
-        # The backward mutation violation is sufficient to indicate the issue
-        assert "c" not in result_d2.stale_cells
-        # B and A are also not stale (above D)
-        assert "b" not in result_d2.stale_cells
-        assert "a" not in result_d2.stale_cells
+        # No backward violation — C is stale so BackConflict skips it (Def 1.8.2)
+        assert result_d2.violation is None
 
     def test_staleness_when_later_cell_re_executes(self):
         """
@@ -1035,7 +1028,8 @@ class TestForwardDependencyStaleness:
 
         Cell order: [a, b, c]
         Execution: c writes x, b reads x (forward dep on c)
-        When c re-executes with different value, b should become stale.
+        B is EXEC-CONTAMINATED (stale). When c re-executes, no backward violation
+        because B is stale (BackConflict only checks fresh cells).
         """
         # Cell C writes x
         self._save_pre_checkpoint("c", {})
@@ -1048,7 +1042,7 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # Cell B reads x (forward dependency)
+        # Cell B reads x (forward dependency) → contaminated/stale
         self._save_pre_checkpoint("b", {"x": 10})
         post_b = self._make_post_checkpoint("post_b", {"x": 10, "y": 20})
         result_b = self.sdc.check(
@@ -1056,13 +1050,14 @@ class TestForwardDependencyStaleness:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
-            continue_on_violation=True,
         )
         assert result_b.forward_violation is not None
         assert result_b.forward_violation.mutating_cell == "c"
+        assert result_b.cell_is_contaminated is True
+        assert "b" in result_b.stale_cells
 
         # Re-run C with different value
-        # C is after B in document order, so C modifying x that B reads is backward mutation
+        # B is stale (contaminated), so BackConflict skips it
         self._save_pre_checkpoint("c", {"x": 10, "y": 20})
         post_c2 = self._make_post_checkpoint("post_c2", {"x": 999, "y": 20})
         result_c2 = self.sdc.check(
@@ -1070,23 +1065,19 @@ class TestForwardDependencyStaleness:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             post_checkpoint=post_c2,
             tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=True,  # C is after B, so this is backward mutation
         )
 
-        # C modifying x is backward mutation against B
-        assert result_c2.violation is not None
-        assert result_c2.violation.affected_cell == "b"
-        # B is NOT stale because staleness only propagates forward (to cells below C)
-        # The backward mutation violation is sufficient to indicate the issue
-        assert "b" not in result_c2.stale_cells
+        # No backward violation — B is stale so BackConflict skips it
+        assert result_c2.violation is None
 
-    def test_no_staleness_when_forward_dep_value_unchanged(self):
+    def test_no_additional_staleness_when_forward_dep_value_unchanged(self):
         """
-        No staleness when later cell re-executes but value doesn't change.
+        No additional staleness when value doesn't change, but B stays stale from contamination.
 
         Cell order: [a, b, c]
-        Execution: c writes x=10, b reads x (forward dep)
-        When c re-executes with same x=10, b should NOT be stale.
+        Execution: c writes x=10, b reads x (forward dep → contaminated/stale)
+        When c re-executes with same x=10, B remains stale (from contamination).
+        The test verifies C's re-execution doesn't cause additional issues.
         """
         # Cell C writes x
         self._save_pre_checkpoint("c", {})
@@ -1099,7 +1090,7 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # Cell B reads x (forward dependency)
+        # Cell B reads x (forward dependency → contaminated/stale)
         self._save_pre_checkpoint("b", {"x": 10})
         post_b = self._make_post_checkpoint("post_b", {"x": 10, "y": 20})
         result_b = self.sdc.check(
@@ -1107,11 +1098,12 @@ class TestForwardDependencyStaleness:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             post_checkpoint=post_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
-            continue_on_violation=True,
         )
         assert result_b.forward_violation is not None
+        assert result_b.cell_is_contaminated is True
+        assert "b" in result_b.stale_cells
 
-        # Re-run C with SAME value
+        # Re-run C with SAME value — no violation, no new staleness
         self._save_pre_checkpoint("c", {"x": 10, "y": 20})
         post_c2 = self._make_post_checkpoint("post_c2", {"x": 10, "y": 20})  # x unchanged
         result_c2 = self.sdc.check(
@@ -1121,8 +1113,10 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # B should NOT be stale - x didn't actually change
-        assert "b" not in result_c2.stale_cells
+        # No backward violation (B is stale, skipped by BackConflict)
+        assert result_c2.violation is None
+        # B is still stale (from contamination), but C's re-execution didn't add staleness
+        assert "b" in result_c2.stale_cells  # B was already stale
 
     def test_mixed_forward_backward_staleness(self):
         """
@@ -1266,9 +1260,12 @@ class TestForwardDependencyColumnStaleness:
         )
         assert result_b.forward_violation is not None
 
+        # B is contaminated (stale) from forward dependency
+        assert result_b.cell_is_contaminated is True
+        assert "b" in result_b.stale_cells
+
         # Re-run C with different price values
-        # C is after B in document order, so C modifying df['price'] that B reads
-        # is a backward mutation
+        # B is stale (contaminated), so BackConflict skips it — no violation
         df_modified2 = df.copy()
         df_modified2["price"] = [999, 888]
         self._save_pre_checkpoint("c", {"df": df_modified, "total": 300})
@@ -1282,15 +1279,12 @@ class TestForwardDependencyColumnStaleness:
                 writes={"df"},
                 column_writes={"df": {"price"}},
             ),
-            continue_on_violation=True,  # C is after B, so this is backward mutation
         )
 
-        # C modifying price is backward mutation against B
-        assert result_c2.violation is not None
-        assert result_c2.violation.affected_cell == "b"
-        # B is NOT stale because staleness only propagates forward (to cells below C)
-        # The backward mutation violation is sufficient to indicate the issue
-        assert "b" not in result_c2.stale_cells
+        # No backward violation — B is stale so BackConflict skips it
+        assert result_c2.violation is None
+        # B is still stale from contamination
+        assert "b" in result_c2.stale_cells
 
     def test_no_column_staleness_different_columns(self):
         """
@@ -1359,3 +1353,198 @@ class TestForwardDependencyColumnStaleness:
 
         # B reads price, C only changed qty - B should NOT be stale
         assert "b" not in result_c2.stale_cells
+
+
+class TestForwardContaminationExecContaminated:
+    """Tests for EXEC-CONTAMINATED rule: forward-contaminated cells are NOT rejected.
+
+    Per the formal rule (§1.8), when a cell has no backward conflict but IS
+    forward-contaminated, execution proceeds and the cell is recorded as stale.
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_post_checkpoint(self, name: str, namespace: dict):
+        self.checkpoints.save(name, namespace, max_size_mb=None)
+        return self.checkpoints.saved[name]
+
+    def _save_post_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{POST_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def test_forward_contamination_does_not_reject(self):
+        """Forward-contaminated cell should proceed (no backward violation).
+
+        Cell C writes x, then Cell B reads x (forward dependency).
+        B should NOT have a backward violation — it should be accepted
+        with contamination status.
+        """
+        # Cell C writes x
+        self._save_pre_checkpoint("c", {})
+        post_c = self._make_post_checkpoint("post_c", {"x": 20})
+        self._save_post_checkpoint("c", {"x": 20})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Cell B reads x — forward dependency but no backward violation
+        self._save_pre_checkpoint("b", {"x": 20})
+        post_b = self._make_post_checkpoint("post_b", {"x": 20})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # No backward violation
+        assert result_b.violation is None
+        # Forward violation detected
+        assert result_b.forward_violation is not None
+        # Cell is contaminated
+        assert result_b.cell_is_contaminated is True
+
+    def test_forward_contaminated_cell_is_stale(self):
+        """A forward-contaminated cell should be recorded as stale.
+
+        After EXEC-CONTAMINATED, the cell itself should appear in stale_cells.
+        """
+        # Cell C writes x
+        self._save_pre_checkpoint("c", {})
+        post_c = self._make_post_checkpoint("post_c", {"x": 20})
+        self._save_post_checkpoint("c", {"x": 20})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Cell B reads x — forward contaminated
+        self._save_pre_checkpoint("b", {"x": 20})
+        post_b = self._make_post_checkpoint("post_b", {"x": 20})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell B itself should be in stale_cells
+        assert "b" in result_b.stale_cells
+
+    def test_forward_contamination_still_propagates_stalefwd(self):
+        """StaleFwd should still mark downstream cells stale after EXEC-CONTAMINATED.
+
+        Cell C writes x, Cell B reads x and writes y, Cell D reads y.
+        When B executes (contaminated), D should become stale if y changed.
+        """
+        # First execute D (reads y)
+        self._save_pre_checkpoint("d", {"y": 0})
+        post_d = self._make_post_checkpoint("post_d", {"y": 0})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            post_checkpoint=post_d,
+            tracking=make_tracking(reads={"y"}, writes=set()),
+        )
+
+        # Cell C writes x
+        self._save_pre_checkpoint("c", {"y": 0})
+        post_c = self._make_post_checkpoint("post_c", {"x": 20, "y": 0})
+        self._save_post_checkpoint("c", {"x": 20, "y": 0})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Cell B reads x (forward dep on C) and writes y
+        self._save_pre_checkpoint("b", {"x": 20, "y": 0})
+        post_b = self._make_post_checkpoint("post_b", {"x": 20, "y": 99})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # B is contaminated
+        assert result_b.cell_is_contaminated is True
+        # D should be stale because B changed y which D reads
+        assert "d" in result_b.stale_cells
+
+    def test_backward_conflict_still_rejects_with_both(self):
+        """When both backward and forward violations exist, backward wins (EXEC-REJECT).
+
+        Cell A reads x, Cell D writes z. Cell B modifies x (backward) and reads z (forward).
+        B should be rejected (backward takes precedence).
+        """
+        # Cell A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell D writes z
+        self._save_pre_checkpoint("d", {"x": 1})
+        post_d = self._make_post_checkpoint("post_d", {"x": 1, "z": 2})
+        self._save_post_checkpoint("d", {"x": 1, "z": 2})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            post_checkpoint=post_d,
+            tracking=make_tracking(reads=set(), writes={"z"}),
+        )
+
+        # Cell B modifies x (backward violation against A) AND reads z (forward dep on D)
+        self._save_pre_checkpoint("b", {"x": 1, "z": 2})
+        post_b = self._make_post_checkpoint("post_b", {"x": 999, "z": 2})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"z"}, writes={"x"}),
+        )
+
+        # Backward violation should be present
+        assert result_b.violation is not None
+        assert result_b.violation.violation_type == "backward_mutation"
+        assert result_b.violation.affected_cell == "a"
+
+        # Forward violation also present
+        assert result_b.forward_violation is not None
+        assert result_b.forward_violation.violation_type == "forward_dependency"
+
+    def test_non_contaminated_cell_is_fresh(self):
+        """A cell without forward contamination should be recorded as fresh (EXEC-ACCEPT)."""
+        # Cell A writes x (no forward dependency)
+        self._save_pre_checkpoint("a", {})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        result_a = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Not contaminated
+        assert result_a.cell_is_contaminated is False
+        # Not stale
+        assert "a" not in result_a.stale_cells

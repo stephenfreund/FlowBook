@@ -31,6 +31,10 @@ export interface IReproducibilityMetadata {
   run_duration_ms?: number;
   state_duration_ms?: number;
   check_duration_ms?: number;
+  // Forward contamination flag (EXEC-CONTAMINATED)
+  cell_is_contaminated?: boolean;
+  // Execution mode (EXEC-RESTORE)
+  exec_mode?: 'live' | 'restore';
 }
 
 export interface IReproducibilityCellState {

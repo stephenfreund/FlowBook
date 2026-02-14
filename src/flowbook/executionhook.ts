@@ -16,6 +16,8 @@ import { IReproducibilityMetadata } from './types';
 export class ReproducibilityExecutionHookManager {
   private _tracker: INotebookTracker;
   private _highlighter: ReproducibilityCellHighlighter;
+  private _editTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private _executedCells: Set<string> = new Set();
 
   constructor(
     _app: JupyterFrontEnd,
@@ -37,9 +39,85 @@ export class ReproducibilityExecutionHookManager {
       this
     );
 
+    // [EDIT transition (§2.3)] Listen for cell content changes
+    this._tracker.currentChanged.connect(this._setupCellEditListener, this);
+
     console.log(
       'ReproducibilityExecutionHookManager: Execution hooks installed'
     );
+  }
+
+  /**
+   * [EDIT transition (§2.3)] Set up listeners for cell content changes.
+   * When a code cell's source changes and the cell was previously executed,
+   * send %cell_edited <cell_id> to the kernel with debouncing.
+   */
+  private _setupCellEditListener(): void {
+    const panel = this._tracker.currentWidget;
+    if (!panel) {
+      return;
+    }
+
+    const notebook = panel.content;
+    for (let i = 0; i < notebook.widgets.length; i++) {
+      const cell = notebook.widgets[i];
+      if (cell.model.type !== 'code') {
+        continue;
+      }
+      const cellId = cell.model.id;
+      const model = cell.model as ICodeCellModel;
+
+      // Listen for source changes
+      model.sharedModel.changed.connect(() => {
+        this._onCellContentChanged(cellId);
+      });
+    }
+  }
+
+  /**
+   * [EDIT transition (§2.3)] Handle cell content change with debouncing.
+   */
+  private _onCellContentChanged(cellId: string): void {
+    // Only notify kernel about cells that have been previously executed
+    if (!this._executedCells.has(cellId)) {
+      return;
+    }
+
+    // Debounce: cancel previous timer for this cell
+    const existing = this._editTimers.get(cellId);
+    if (existing) {
+      clearTimeout(existing);
+    }
+
+    // Set new timer (1s debounce)
+    const timer = setTimeout(() => {
+      this._sendCellEdited(cellId);
+      this._editTimers.delete(cellId);
+    }, 1000);
+
+    this._editTimers.set(cellId, timer);
+  }
+
+  /**
+   * [EDIT transition (§2.3)] Send %cell_edited magic to kernel.
+   */
+  private _sendCellEdited(cellId: string): void {
+    const panel = this._tracker.currentWidget;
+    if (!panel) {
+      return;
+    }
+
+    const session = panel.sessionContext.session;
+    if (session && session.kernel) {
+      session.kernel.requestExecute({
+        code: `%cell_edited ${cellId}`,
+        silent: true,
+        store_history: false
+      });
+      console.log(
+        `ReproducibilityExecutionHook: Sent cell_edited for ${cellId}`
+      );
+    }
   }
 
   /**
@@ -129,6 +207,9 @@ export class ReproducibilityExecutionHookManager {
     if (cell.model.type !== 'code') {
       return;
     }
+
+    // [EDIT transition (§2.3)] Track executed cells for edit detection
+    this._executedCells.add(cell.model.id);
 
     // Get the notebook panel
     const panel = this._tracker.currentWidget;
