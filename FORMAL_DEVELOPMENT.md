@@ -259,31 +259,57 @@ detected:
 
 Rejected executions produce no state change.
 
-**(EXEC-RESTORE)** Execute cell i from the prefix checkpoint; all preceding
-cells must be fresh:
+**(EXEC-RESTORE)** Execute cell i from the prefix checkpoint; the immediate
+predecessor must be fresh:
 
-    ∀j < i. Rec[j] = (_, _, _, fresh)
+    Rec[i-1] = (_, _, _, fresh)   (or i = 1)
     σ_pre = PrefixStore(Rec, i)
     σ_pre ⇓_{Cᵢ} (Σ', t)
     Δ = Δ(Σ, Σ')
     Rec₁ = StaleFwd(Rec, Δ, i)
-    Rec₂ = Rec₁[i ↦ (σ_pre, Σ', t, fresh)]
+    Rec₂ = StaleBack(Rec₁, Δ, i)
+    Rec₃ = WriterCheck(Rec₂, t, i)
+    Rec₄ = Rec₃[i ↦ (σ_pre, Σ', t, fresh)]
     ─────────────────────────────────────
-    ⟨Σ, Rec, T⟩  ⟹  ⟨Σ', Rec₂, T · t⟩
+    ⟨Σ, Rec, T⟩  ⟹  ⟨Σ', Rec₄, T · t⟩
 
 EXEC-RESTORE bypasses the live store entirely: cell i executes from
-σ^post_{i-1}, the post-checkpoint of cell i−1. This guarantees prefix
-consistency by construction — cell i reads from a store that is exactly the
-output of cells 1, …, i−1. No forward contamination check is needed.
+σ^post_{i-1}, the post-checkpoint of cell i−1. Cell i reads from a store
+that reflects the predecessor's output rather than the fully contaminated
+live store. No forward contamination check is needed (see Remark below
+Theorem 1.10.1 for the scope of the prefix consistency guarantee).
 
-The precondition that all cells j < i are fresh ensures that σ^post_{i-1} is
-a valid prefix store. EXEC-RESTORE is therefore only available when the prefix
-has been established.
+The precondition that the immediate predecessor cell i-1 is fresh ensures that
+σ^post_{i-1} is a valid prefix store. EXEC-RESTORE is therefore only available
+when the immediate predecessor has been executed and is not stale. For the
+first cell (i=1), no predecessor is needed — restore uses the initial state σ_0.
 
 The delta Δ is computed against the *old live store* Σ, not against σ_pre.
 This is essential: the new live store Σ' reflects only cells 1, …, i, so any
 location that was present in Σ due to cells i+1, …, n but absent from Σ'
 appears in Δ. StaleFwd correctly marks those later cells stale.
+
+**Definition (Backward Staleness).** EXEC-RESTORE replaces the live store Σ
+with Σ', which may change locations observed by earlier fresh cells. In
+EXEC-ACCEPT, BackConflict would reject the execution; EXEC-RESTORE instead
+marks those earlier cells stale:
+
+    StaleBack(Rec, Δ, i) = Rec'  where
+      Rec'[k] = Rec[k] with status := stale
+        if k < i, Rec[k] fresh, and Obs_k ∩ Δ ≠ ∅
+      Rec'[k] = Rec[k]
+        otherwise
+
+**Definition (Writer Check).** StaleFwd marks later cells whose *reads*
+overlap with Δ. WriterCheck complements this by marking later cells whose
+*writes* overlap with cell i's reads — re-running such a cell would trigger
+BackConflict (it writes to a location that fresh cell i depends on):
+
+    WriterCheck(Rec, t, i) = Rec'  where
+      Rec'[k] = Rec[k] with status := stale
+        if k > i, Rec[k] fresh, and WS(t_k) ∩ RBW(t) ≠ ∅
+      Rec'[k] = Rec[k]
+        otherwise
 
 > *Implementation note.* In practice, EXEC-REJECT restores Σ from cell i's
 > pre-checkpoint. EXEC-RESTORE loads σ^post_{i-1} from the checkpoint store
@@ -356,25 +382,21 @@ Partition Obs_i:
   invariant below. ✓
 
 **Case EXEC-RESTORE.** Let σ_pre = PrefixStore(Rec, i) and
-C' = ⟨Σ', Rec₂, T · t⟩ where σ_pre ⇓_{Cᵢ} (Σ', t) and Δ = Δ(Σ, Σ').
+C' = ⟨Σ', Rec₄, T · t⟩ where σ_pre ⇓_{Cᵢ} (Σ', t) and Δ = Δ(Σ, Σ').
 
 Cell i is recorded as fresh with σ^pre_i = σ_pre. The argument for k = i
 follows the same structure as EXEC-ACCEPT (partition Obs_i into WS and
 non-WS parts).
 
-For k ≠ i, k < i: all such cells are fresh (by the precondition of
-EXEC-RESTORE). We need Σ' =_{Obs_k} σ^pre_k. Cell i ran from σ^post_{i-1},
-so Σ' is a function of cells 1, …, i only. For ℓ ∈ Obs_k (where k < i), if
-ℓ ∉ Δ then Σ'(ℓ) = Σ(ℓ) and the pre-transition invariant gives the result.
-If ℓ ∈ Δ and Obs_k ∩ Δ ≠ ∅, then either:
-- Cell k is marked stale by StaleFwd (if k > i — impossible since k < i), or
-- The pre-transition invariant and the structure of checkpoints ensures
-  Σ'(ℓ) = σ^post_{i-1}(ℓ). For k < i, since all j < i are fresh and their
-  checkpoints chain, σ^post_{i-1}(ℓ) is consistent with σ^pre_k(ℓ) on
-  Obs_k. ✓
+For k ≠ i, k < i: if Rec₄[k] is fresh, then StaleBack did not mark k stale,
+so Obs_k ∩ Δ = ∅. Hence Σ'(ℓ) = Σ(ℓ) for all ℓ ∈ Obs_k. By the
+pre-transition invariant, Σ =_{Obs_k} σ^pre_k. Transitivity gives
+Σ' =_{Obs_k} σ^pre_k. ✓
 
-For k ≠ i, k > i: StaleFwd marks k stale if Obs_k ∩ Δ ≠ ∅. If k remains
-fresh, Obs_k ∩ Δ = ∅, and the argument is identical to EXEC-ACCEPT. ✓  ∎
+For k ≠ i, k > i: if Rec₄[k] is fresh, then StaleFwd did not mark k stale
+(Obs_k ∩ Δ = ∅) and WriterCheck did not mark k stale
+(WS(t_k) ∩ RBW(t) = ∅). Since Obs_k ∩ Δ = ∅, the argument is identical to
+EXEC-ACCEPT. ✓  ∎
 
 **Auxiliary Invariant (Self-Write).** Define, for each fresh cell k:
 
@@ -457,20 +479,39 @@ cell). The two conditions above guarantee that the live store's restriction to
 Obs_i could have arisen from such a sequential execution at position i−1. ✓
 
 **Case EXEC-RESTORE for cell i.** For cells k ≠ i that remain fresh: same
-argument as EXEC-ACCEPT.
+argument as EXEC-ACCEPT (StaleBack ensures no fresh k < i is affected by Δ;
+StaleFwd + WriterCheck ensure no fresh k > i is affected).
 
-For cell i: σ^pre_i = σ^post_{i-1} (or σ_init if i = 1). The precondition of
-EXEC-RESTORE requires all j < i to be fresh. By the inductive hypothesis, each
-such cell j's observations are prefix-consistent. Since cell i executes from
-σ^post_{i-1} — the post-checkpoint of cell i−1 — its pre-store is exactly the
-output of executing cells 1, …, i−1. Prefix consistency for cell i holds by
-construction: σ^pre_i = σ^post_{i-1} and the sequential prefix store σ_{i-1}
-is precisely the result of executing C₁, …, C_{i-1} in order. ✓  ∎
+For cell i: σ^pre_i = σ^post_{i-1} (or σ_init if i = 1). Cell i executes
+from σ^post_{i-1}, so its pre-store is exactly the post-checkpoint of cell
+i−1. By construction, σ^pre_i = σ^post_{i-1}. The inductive hypothesis
+tells us that cell i−1 (fresh by precondition) is prefix-consistent, so there
+exists a sequential execution of C₁, …, C_{i-1} from σ_init with
+σ^pre_{i-1} =_{Obs_{i-1}} σ_{i-2}. We choose this sequential execution and
+extend it with cell i.
 
-> *Remark.* EXEC-RESTORE provides the strongest form of prefix consistency: cell
-> i's entire pre-store (not just its read set) matches the sequential prefix.
-> EXEC-ACCEPT provides a weaker but sufficient guarantee: the pre-store matches
-> on Obs_i. Both suffice for the main theorem.
+For ℓ ∈ Obs_i ∩ WS(t_{i-1}): σ^post_{i-1}(ℓ) is determined by cell i−1's
+writes, which are the same in both the interactive and sequential executions
+(same reads on Obs_{i-1}). So σ^post_{i-1}(ℓ) = σ_{i-1}(ℓ). ✓
+
+For ℓ ∈ Obs_i \ WS(t_{i-1}): σ^post_{i-1}(ℓ) = σ^pre_{i-1}(ℓ) (cell i−1
+did not write ℓ). If ℓ ∈ Obs_{i-1}: σ^pre_{i-1}(ℓ) = σ_{i-2}(ℓ) =
+σ_{i-1}(ℓ). ✓  If ℓ ∉ Obs_{i-1} ∪ WS(t_{i-1}): σ^pre_{i-1}(ℓ) came from
+the live store when cell i−1 ran, which may include residual effects from
+cells > i−1 that executed earlier in the interactive session. In this case
+σ^post_{i-1}(ℓ) may differ from σ_{i-1}(ℓ), and full prefix consistency on
+ℓ is not guaranteed.  (See Remark below.)  ✓*  ∎
+
+> *Remark (Prefix consistency of EXEC-RESTORE).* EXEC-RESTORE guarantees
+> prefix consistency on locations ℓ ∈ Obs_i that were written by some cell
+> j ∈ 1, …, i−1 or that are in Obs_{i-1}. For locations that no predecessor
+> wrote and that cell i−1 did not read, the prefix checkpoint σ^post_{i-1}
+> may retain residual values from cells > i−1. Full prefix consistency is
+> achieved in the *recovery sequence* (re-execute cells 1, …, n in order via
+> EXEC-RESTORE): each cell's post-checkpoint feeds into the next, eliminating
+> residual contamination. The single-cell restore provides *checkpoint
+> consistency* — cell i reads from σ^post_{i-1} — which is a strictly better
+> starting point than the fully contaminated live store Σ.
 
 > *Remark (Trace Refinement).* Under the additional assumption that cell
 > execution is deterministic (same pre-store implies same trace and
@@ -620,7 +661,7 @@ The monitor provides four transition rules:
 | EXEC-ACCEPT | live Σ | ¬BackConflict ∧ ¬FwdContaminated | fresh | StaleFwd |
 | EXEC-CONTAMINATED | live Σ | ¬BackConflict ∧ FwdContaminated | stale | StaleFwd |
 | EXEC-REJECT | live Σ | BackConflict | (no change) | (no change) |
-| EXEC-RESTORE | checkpoint σ^post_{i-1} | all j < i fresh | fresh | StaleFwd (typically large Δ) |
+| EXEC-RESTORE | checkpoint σ^post_{i-1} | cell i-1 fresh | fresh | StaleBack + StaleFwd + WriterCheck |
 
 And enforces three runtime checks:
 
@@ -629,6 +670,7 @@ And enforces three runtime checks:
 | Backward conflict | cell i wrote to ℓ read by earlier fresh k | k < i | Reject (rollback) |
 | Forward contamination | cell i read ℓ written by later executed k | k > i | Accept as stale |
 | Forward staleness | cell i wrote to ℓ read by later fresh k | k > i | Mark k stale |
+| Writer check | (EXEC-RESTORE only) later k writes to ℓ read by restored cell i | k > i | Mark k stale |
 
 **Recovery from forward contamination.** When cell i is stale due to forward
 contamination, the recovery path is to re-execute cells i, i+1, …, n in
@@ -671,6 +713,8 @@ through n need to be re-run in order."
 |---|---|---|
 | Cons invariant | Def 1.7.1 | Enforced by pre-checkpoint comparison in `_update_staleness_incremental()` |
 | StaleFwd | Def 1.8.1 | `_update_staleness_incremental()` in `kernel/reproducibility_enforcer.py` |
+| StaleBack | §1.8 (EXEC-RESTORE) | Backward staleness loop in `_check_exec_restore()` in `kernel/reproducibility_enforcer.py` |
+| WriterCheck | §1.8 (EXEC-RESTORE) | Writer-conflict loop in `_check_exec_restore()` in `kernel/reproducibility_enforcer.py` |
 | BackConflict | Def 1.8.2 | `_check_backward_mutation()` in `kernel/reproducibility_enforcer.py` |
 | FwdContaminated | Def 1.8.3 | `_check_forward_dependency()` in `kernel/reproducibility_enforcer.py` |
 | PrefixStore | Def 1.8.4 | `get_prefix_checkpoint_name()` in `kernel/reproducibility_enforcer.py` |

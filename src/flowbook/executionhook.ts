@@ -14,16 +14,18 @@ import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { IReproducibilityMetadata } from './types';
 
 export class ReproducibilityExecutionHookManager {
+  private _app: JupyterFrontEnd;
   private _tracker: INotebookTracker;
   private _highlighter: ReproducibilityCellHighlighter;
   private _editTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private _executedCells: Set<string> = new Set();
 
   constructor(
-    _app: JupyterFrontEnd,
+    app: JupyterFrontEnd,
     tracker: INotebookTracker,
     highlighter: ReproducibilityCellHighlighter
   ) {
+    this._app = app;
     this._tracker = tracker;
     this._highlighter = highlighter;
     this._setupHooks();
@@ -237,6 +239,9 @@ export class ReproducibilityExecutionHookManager {
     // Update staleness manager
     const stalenessManager = this._highlighter.getStalenessManager(panel);
     stalenessManager.updateFromMetadata(reproducibilityMetadata);
+
+    // Notify command system so context menu items re-evaluate isEnabled
+    this._app.commands.notifyCommandChanged('flowbook:exec-restore');
 
     console.log(
       `ReproducibilityExecutionHook: Extracted metadata for cell ${cell.model.id}:`,

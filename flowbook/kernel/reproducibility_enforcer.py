@@ -1154,6 +1154,7 @@ class ReproducibilityEnforcer:
         # Compute StaleFwd using delta against old live store
         stale = []
         structural_warnings = []
+        delta_changed_vars = set()
         if old_live_checkpoint is not None:
             # Delta = diff(old_live, post) — what changed from the user's perspective
             _old_live_mem = old_live_checkpoint.memory if isinstance(old_live_checkpoint, Checkpoint) else old_live_checkpoint
@@ -1165,6 +1166,7 @@ class ReproducibilityEnforcer:
             )
             if restore_diff.differences:
                 restore_changed_vars = set(restore_diff.differences.keys())
+                delta_changed_vars = restore_changed_vars
                 restore_column_changed = _extract_column_changes(restore_diff, tracking)
                 stale, structural_warnings = self._update_staleness_incremental(
                     _post_mem, restore_changed_vars, restore_column_changed,
@@ -1173,11 +1175,44 @@ class ReproducibilityEnforcer:
         else:
             # No old live checkpoint — use standard diff for staleness
             if changed_vars:
+                delta_changed_vars = set(changed_vars)
                 _staleness_cp = post_checkpoint.memory if isinstance(post_checkpoint, Checkpoint) else post_checkpoint
                 stale, structural_warnings = self._update_staleness_incremental(
-                    _staleness_cp, set(changed_vars), column_changed,
+                    _staleness_cp, delta_changed_vars, column_changed,
                     cell_id, my_position,
                 )
+
+        # [EXEC-RESTORE §1.8] StaleBack: mark earlier fresh cells stale
+        # if their reads overlap with Δ(Σ, Σ').
+        #
+        # In EXEC-ACCEPT/CONTAMINATED, BackConflict rejects cell i if it
+        # modifies locations read by fresh cells k < i. EXEC-RESTORE has
+        # no BackConflict (cell i runs from the prefix checkpoint, not Σ),
+        # so we mark k stale instead.
+        if delta_changed_vars:
+            for earlier_cell_id in self._cell_order[:my_position]:
+                if earlier_cell_id in self.records and earlier_cell_id not in self._stale_cells:
+                    earlier_reads = self.records[earlier_cell_id].tracking.reads_before_writes
+                    if earlier_reads & delta_changed_vars:
+                        self._stale_cells.add(earlier_cell_id)
+
+        # [EXEC-RESTORE §1.8] Mark later cells that would cause BackConflict.
+        #
+        # StaleFwd (above) marks later cells that READ changed variables.
+        # But it misses later cells that WRITE to variables this cell reads:
+        # re-running such a cell would trigger BackConflict (it mutates a
+        # location that a fresh earlier cell depends on).  Mark those stale
+        # so the user sees them highlighted and knows they need attention.
+        cell_reads = tracking.reads_before_writes
+        if cell_reads:
+            for later_cell_id in self._cell_order[my_position + 1:]:
+                if later_cell_id in self.records and later_cell_id not in self._stale_cells:
+                    later_writes = self.records[later_cell_id].tracking.writes
+                    if later_writes & cell_reads:
+                        self._stale_cells.add(later_cell_id)
+
+        # Re-sort stale list by document order
+        stale = [cid for cid in self._cell_order if cid in self._stale_cells]
 
         return ReproducibilityResult(
             violation=None,
@@ -1241,21 +1276,30 @@ class ReproducibilityEnforcer:
     def can_exec_restore(self, cell_id: str) -> bool:
         """[EXEC-RESTORE precondition] (§1.8)
 
-        True iff all cells j < i (in document order) have fresh records.
-        This means all predecessors have been executed and are not stale.
+        True iff the immediate predecessor (cell i-1) has a fresh record,
+        which guarantees its post-checkpoint (the prefix store) is valid.
+        For the first cell in document order, always returns True (restore
+        to initial state).
+
+        Cells earlier than the immediate predecessor may be unexecuted
+        (e.g. executed with cell_id=None) — this is acceptable because the
+        prefix store depends only on σ^post_{i-1}.
         """
         try:
             my_position = self._cell_order.index(cell_id)
         except ValueError:
             return False
 
-        for prior_cell_id in self._cell_order[:my_position]:
-            # All prior cells must have records (been executed)
-            if prior_cell_id not in self.records:
-                return False
-            # All prior cells must be fresh (not stale)
-            if prior_cell_id in self._stale_cells:
-                return False
+        if my_position == 0:
+            return True  # First cell — restore to initial state
+
+        prev_cell_id = self._cell_order[my_position - 1]
+        # Immediate predecessor must have been executed
+        if prev_cell_id not in self.records:
+            return False
+        # Immediate predecessor must be fresh (not stale)
+        if prev_cell_id in self._stale_cells:
+            return False
 
         return True
 
@@ -1756,7 +1800,7 @@ def format_forward_dependency_message(
         "because it read out-of-order state that would not exist in a "
         "top-to-bottom run.",
         "",
-        'Fix: Right-click the cell and select "Restore from checkpoint", '
+        'Fix: Right-click the cell and select "Run with Previous Cell\'s state", '
         "or re-run cells in notebook order.",
     ]
 

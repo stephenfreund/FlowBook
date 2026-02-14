@@ -2451,10 +2451,10 @@ class TestExecRestore:
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
 
-        # Mark A stale
-        self.sdc._stale_cells.add("a")
+        # Mark B stale (immediate predecessor of C)
+        self.sdc._stale_cells.add("b")
 
-        # C cannot exec-restore since A is stale
+        # C cannot exec-restore since B (immediate predecessor) is stale
         assert self.sdc.can_exec_restore("c") is False
 
     def test_can_exec_restore_with_unexecuted_predecessor(self):

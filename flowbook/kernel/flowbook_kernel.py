@@ -569,22 +569,34 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             %exec_restore <cell_id>
         """
         cell_id = line.strip()
+        log(f"[exec_restore magic] Received for cell_id={cell_id!r}")
         if not cell_id:
             self._display.display_icon_and_text(
                 "❌", "Usage: %exec_restore <cell_id>"
             )
             return
 
-        if not self._enforcer.can_exec_restore(cell_id):
-            alpha = self._enforcer._cell_id_to_alpha(cell_id)
-            self._display.display_icon_and_text(
-                "❌",
-                f"Cannot restore Cell {alpha}: not all predecessors are fresh. "
-                "Re-run earlier cells first.",
-            )
+        can_restore = self._enforcer.can_exec_restore(cell_id)
+        if not can_restore:
+            # Identify the immediate predecessor for a helpful error message
+            try:
+                pos = self._enforcer.cell_order.index(cell_id)
+                cell_alpha = index_to_alpha(pos)
+                if pos > 0:
+                    prev_alpha = index_to_alpha(pos - 1)
+                    msg = (
+                        f"Cannot restore {cell_alpha}: predecessor {prev_alpha} "
+                        f"has not been executed or is stale. Run {prev_alpha} first."
+                    )
+                else:
+                    msg = f"Cannot restore {cell_alpha}: cell not in notebook order."
+            except (ValueError, IndexError):
+                msg = "Cannot restore: cell not in notebook order."
+            self._display.display_icon_and_text("❌", msg)
             return
 
         self._pending_exec_restore = cell_id
+        log(f"[exec_restore magic] Pending flag set for {cell_id}")
 
     @line_magic
     def structural_tracking(self, line: str) -> None:
@@ -724,6 +736,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             # Patch run_code to use TrackingDict for both globals and locals
             self._patch_run_code(tracking_dict)
 
+            # Save initial state checkpoint (σ_0) for EXEC-RESTORE on the first cell
+            self._take_checkpoint("_initial_state")
+
     def _patch_run_code(self, tracking_dict: TrackingDict) -> None:
         """
         Patch shell.run_code to use TrackingDict for both globals and locals.
@@ -828,18 +843,74 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         # between the magic and execution)
                         if self._enforcer.can_exec_restore(self._cell_id):
                             prefix_name = self._enforcer.get_prefix_checkpoint_name(self._cell_id)
-                            if prefix_name is not None and prefix_name in self._checkpoints.memory.saved:
-                                # Save old live store for StaleFwd delta computation
+
+                            if prefix_name is None:
+                                # First cell — restore to initial state (σ_0)
+                                if "_initial_state" in self._checkpoints.memory.saved:
+                                    _old_live_checkpoint = self._take_checkpoint(
+                                        f"_old_live_{self._cell_id}"
+                                    )
+                                    self._restore_checkpoint("_initial_state")
+                                    _is_exec_restore = True
+                                    log(f"[exec_restore] Restored initial state for first cell {self._cell_id}")
+                                else:
+                                    log(f"[exec_restore] No initial state checkpoint, executing normally")
+
+                            elif prefix_name in self._checkpoints.memory.saved:
+                                # Non-first cell, predecessor has been run — normal restore
                                 _old_live_checkpoint = self._take_checkpoint(
                                     f"_old_live_{self._cell_id}"
                                 )
-                                # Restore prefix checkpoint (σ^post_{i-1})
                                 self._restore_checkpoint(prefix_name)
                                 _is_exec_restore = True
                                 log(f"[exec_restore] Restored prefix checkpoint {prefix_name} for cell {self._cell_id}")
+
                             else:
-                                # First cell or missing checkpoint — execute from current state
-                                log(f"[exec_restore] No prefix checkpoint for cell {self._cell_id}, executing normally")
+                                # Non-first cell, predecessor NOT run — refuse
+                                try:
+                                    cell_idx = self._enforcer.cell_order.index(self._cell_id)
+                                    prev_idx = cell_idx - 1
+                                    prev_alpha = index_to_alpha(prev_idx)
+                                    cell_alpha = index_to_alpha(cell_idx)
+                                except (ValueError, IndexError):
+                                    prev_alpha = "?"
+                                    cell_alpha = self._cell_id
+                                error_msg = (
+                                    f"Cannot restore {cell_alpha}: predecessor {prev_alpha} "
+                                    f"has not been executed. Run {prev_alpha} first."
+                                )
+                                log(f"[exec_restore] {error_msg}")
+                                self._display.display_icon_and_text("❌", error_msg)
+                                self._pending_exec_restore = None
+                                return {
+                                    "status": "error",
+                                    "execution_count": self.execution_count,
+                                    "ename": "ExecRestoreError",
+                                    "evalue": error_msg,
+                                    "traceback": [error_msg],
+                                }
+
+                            # Emit visible notification on successful restore
+                            if _is_exec_restore:
+                                try:
+                                    cell_idx = self._enforcer.cell_order.index(self._cell_id)
+                                    cell_alpha = index_to_alpha(cell_idx)
+                                    if cell_idx > 0:
+                                        prev_alpha = index_to_alpha(cell_idx - 1)
+                                        self._display.display_icon_and_text(
+                                            "↩",
+                                            f"Restored from {prev_alpha} checkpoint — re-executing {cell_alpha} from prefix state",
+                                        )
+                                    else:
+                                        self._display.display_icon_and_text(
+                                            "↩",
+                                            f"Restored to initial state — re-executing {cell_alpha}",
+                                        )
+                                except (ValueError, IndexError):
+                                    self._display.display_icon_and_text(
+                                        "↩",
+                                        "Restored from prefix checkpoint — re-executing",
+                                    )
                         else:
                             log(f"[exec_restore] Precondition no longer valid for cell {self._cell_id}, executing normally")
                     # Clear flag regardless (user may have executed a different cell)

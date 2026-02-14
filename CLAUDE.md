@@ -445,3 +445,13 @@ jupyter labextension develop . --overwrite
 - Cell metadata tracking requires `FlowbookKernelClient` for proper `cell_id` propagation
 - Formal specification of reproducibility rules is in `FORMAL_DEVELOPMENT.md` with an Implementation Map linking formal definitions to code locations
 - The frontend `executionhook.ts` sends `%notebook_structure` before each cell execution and `%cell_edited` (debounced 1s) when a previously-executed cell's source changes
+
+
+## Formal Specification Sync
+
+This project maintains a formal specification in `FORMAL_DEVELOPMENT.md` that maps formal concepts to their source code implementations. The spec and the code must always be kept in sync — **changes flow in both directions:**
+
+- **Spec → Code:** When a formal concept in `FORMAL_DEVELOPMENT.md` is added, modified, or removed, the corresponding source code MUST be updated to reflect the change. The spec is the source of truth for *what* the system should do.
+- **Code → Spec:** When source code implementing a formal concept is created, modified, renamed, or deleted, the mapping in `FORMAL_DEVELOPMENT.md` MUST be updated to reflect the change.
+
+Before completing any task, verify that `FORMAL_DEVELOPMENT.md` and the source code it references are consistent with each other.
