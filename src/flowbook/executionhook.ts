@@ -6,10 +6,13 @@ import { JupyterFrontEnd } from '@jupyterlab/application';
 import {
   INotebookTracker,
   Notebook,
-  NotebookActions
+  NotebookActions,
+  NotebookPanel
 } from '@jupyterlab/notebook';
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
+import { CellChange } from '@jupyter/ydoc';
 import { IOutput } from '@jupyterlab/nbformat';
+import { Kernel, KernelMessage } from '@jupyterlab/services';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { IReproducibilityMetadata } from './types';
 
@@ -19,6 +22,8 @@ export class ReproducibilityExecutionHookManager {
   private _highlighter: ReproducibilityCellHighlighter;
   private _editTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private _executedCells: Set<string> = new Set();
+  private _attachedKernel: Kernel.IKernelConnection | null = null;
+  private _listenedCellIds: Set<string> = new Set();
 
   constructor(
     app: JupyterFrontEnd,
@@ -44,6 +49,9 @@ export class ReproducibilityExecutionHookManager {
     // [EDIT transition (§2.3)] Listen for cell content changes
     this._tracker.currentChanged.connect(this._setupCellEditListener, this);
 
+    // Listen for IOPub messages (catches silent magic responses like %cell_edited)
+    this._tracker.currentChanged.connect(this._setupIOPubListener, this);
+
     console.log(
       'ReproducibilityExecutionHookManager: Execution hooks installed'
     );
@@ -53,6 +61,8 @@ export class ReproducibilityExecutionHookManager {
    * [EDIT transition (§2.3)] Set up listeners for cell content changes.
    * When a code cell's source changes and the cell was previously executed,
    * send %cell_edited <cell_id> to the kernel with debouncing.
+   *
+   * Also watches for newly inserted cells so they get listeners too.
    */
   private _setupCellEditListener(): void {
     const panel = this._tracker.currentWidget;
@@ -61,19 +71,40 @@ export class ReproducibilityExecutionHookManager {
     }
 
     const notebook = panel.content;
-    for (let i = 0; i < notebook.widgets.length; i++) {
-      const cell = notebook.widgets[i];
-      if (cell.model.type !== 'code') {
-        continue;
-      }
-      const cellId = cell.model.id;
-      const model = cell.model as ICodeCellModel;
 
-      // Listen for source changes
-      model.sharedModel.changed.connect(() => {
-        this._onCellContentChanged(cellId);
-      });
+    // Attach listeners to all existing code cells
+    for (let i = 0; i < notebook.widgets.length; i++) {
+      this._attachCellEditListener(notebook.widgets[i]);
     }
+
+    // Watch for newly inserted cells
+    notebook.model?.cells.changed.connect(() => {
+      for (let i = 0; i < notebook.widgets.length; i++) {
+        this._attachCellEditListener(notebook.widgets[i]);
+      }
+    });
+  }
+
+  /**
+   * Attach a content-change listener to a single cell (idempotent).
+   */
+  private _attachCellEditListener(cell: Cell): void {
+    if (cell.model.type !== 'code') {
+      return;
+    }
+    const cellId = cell.model.id;
+    if (this._listenedCellIds.has(cellId)) {
+      return;
+    }
+    this._listenedCellIds.add(cellId);
+
+    const model = cell.model as ICodeCellModel;
+    model.sharedModel.changed.connect((_sender: any, change: CellChange) => {
+      // Only react to source text edits, not output/metadata/executionCount changes
+      if (change.sourceChange) {
+        this._onCellContentChanged(cellId);
+      }
+    });
   }
 
   /**
@@ -120,6 +151,72 @@ export class ReproducibilityExecutionHookManager {
         `ReproducibilityExecutionHook: Sent cell_edited for ${cellId}`
       );
     }
+  }
+
+  /**
+   * Set up an IOPub listener on the current kernel to catch display_data
+   * messages containing flowbook metadata — including those from silent
+   * magic executions like %cell_edited that never reach a cell's output area.
+   */
+  private _setupIOPubListener(): void {
+    const panel = this._tracker.currentWidget;
+    if (!panel) {
+      return;
+    }
+
+    this._connectIOPub(panel);
+
+    // Re-attach when the kernel restarts or changes
+    panel.sessionContext.kernelChanged.connect(() => {
+      this._connectIOPub(panel);
+    });
+  }
+
+  private _connectIOPub(panel: NotebookPanel): void {
+    const kernel = panel.sessionContext.session?.kernel;
+    if (!kernel || kernel === this._attachedKernel) {
+      return;
+    }
+
+    this._attachedKernel = kernel;
+    kernel.iopubMessage.connect(this._onIOPubMessage, this);
+
+    console.log(
+      'ReproducibilityExecutionHook: IOPub listener attached to kernel'
+    );
+  }
+
+  private _onIOPubMessage(
+    _sender: Kernel.IKernelConnection,
+    msg: KernelMessage.IIOPubMessage
+  ): void {
+    if (msg.header.msg_type !== 'display_data') {
+      return;
+    }
+
+    const content = (msg as KernelMessage.IDisplayDataMsg).content;
+    const flowbook = content.metadata?.flowbook as
+      | IReproducibilityMetadata
+      | undefined;
+    if (!flowbook) {
+      return;
+    }
+
+    const panel = this._tracker.currentWidget;
+    if (!panel) {
+      return;
+    }
+
+    const stalenessManager = this._highlighter.getStalenessManager(panel);
+    stalenessManager.updateFromMetadata(flowbook);
+
+    // Notify command system so context menu items re-evaluate isEnabled
+    this._app.commands.notifyCommandChanged('flowbook:exec-restore');
+
+    console.log(
+      'ReproducibilityExecutionHook: IOPub metadata update, stale_cells =',
+      flowbook.stale_cells
+    );
   }
 
   /**
