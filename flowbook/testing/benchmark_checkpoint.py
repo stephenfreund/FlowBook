@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import ast
 import csv
 import random
 import sys
@@ -282,6 +283,318 @@ def execute_and_get_error(
     return error_msg
 
 
+# ---------------------------------------------------------------------------
+# Memory measurement helpers (client-side, injected into kernel)
+# ---------------------------------------------------------------------------
+
+_MEMORY_SETUP_CODE = '''
+import sys as _sys
+import time as _time
+import types as _types
+import numpy as _np
+from pympler import asizeof as _asizeof
+from pympler.asizeof import Asizer as _Asizer
+
+
+def _get_inner_ndarray(_arr):
+    """Unwrap pandas ExtensionArray to get the underlying ndarray."""
+    for _attr in ('_ndarray', '_data'):
+        _inner = getattr(_arr, _attr, None)
+        if _inner is not None and isinstance(_inner, _np.ndarray):
+            return _inner
+    if isinstance(_arr, _np.ndarray):
+        return _arr
+    return None
+
+
+def _collect_user_ns_array_ids():
+    """Collect ids of all ndarrays reachable from user namespace variables.
+
+    Returns a set of ndarray ids.  Used to detect CoW sharing:
+    if a checkpoint array has the same id as a user_ns array, it's shared.
+    """
+    _ids = set()
+    _skip = {'_flowbook_checkpoint', '_flowbook_measure_memory',
+             '_get_inner_ndarray', '_collect_user_ns_array_ids',
+             '_checkpoint_var_overhead',
+             '_asizeof', '_Asizer', '_time', '_sys', '_types', '_np',
+             'In', 'Out', 'get_ipython', 'exit', 'quit'}
+    for _k, _v in globals().items():
+        if _k.startswith('_') or _k in _skip or isinstance(_v, _types.ModuleType):
+            continue
+        if hasattr(_v, '_mgr') and hasattr(_v._mgr, 'arrays'):
+            for _arr in _v._mgr.arrays:
+                _ids.add(id(_arr))
+                _nd = _get_inner_ndarray(_arr)
+                if _nd is not None:
+                    _ids.add(id(_nd))
+        elif isinstance(_v, _np.ndarray):
+            _ids.add(id(_v))
+    return _ids
+
+
+def _is_shared(_arr, _nd, _user_ids):
+    """Check if an array is shared with user namespace.
+
+    An array is shared if:
+    - Its id (or inner ndarray id) matches a user_ns array, OR
+    - It's a numpy view (owndata=False), meaning its data lives elsewhere
+    """
+    if id(_arr) in _user_ids:
+        return True
+    if _nd is not None and id(_nd) in _user_ids:
+        return True
+    # numpy views (owndata=False) share their data buffer via .base
+    if _nd is not None and isinstance(_nd, _np.ndarray) and not _nd.flags.owndata:
+        return True
+    if isinstance(_arr, _np.ndarray) and not _arr.flags.owndata:
+        return True
+    return False
+
+
+def _checkpoint_var_overhead(_v, _user_ids, _seen=None):
+    """Return the true memory overhead for one checkpoint variable.
+
+    For DataFrames/Series: sums nbytes only for arrays that are NOT
+    shared with user namespace (by identity or view status).
+    For numpy arrays: same check.
+    For other types: uses sys.getsizeof.
+
+    _seen tracks ndarray ids already counted to avoid double-counting
+    when multiple variables alias the same object (e.g. X = features).
+    """
+    if _seen is None:
+        _seen = set()
+    if hasattr(_v, '_mgr') and hasattr(_v._mgr, 'arrays'):
+        _overhead = 0
+        for _arr in _v._mgr.arrays:
+            _nd = _get_inner_ndarray(_arr)
+            _aid = id(_nd) if _nd is not None else id(_arr)
+            if _aid in _seen:
+                continue
+            _seen.add(_aid)
+            if not _is_shared(_arr, _nd, _user_ids):
+                _overhead += _nd.nbytes if _nd is not None else _sys.getsizeof(_arr)
+        _overhead += object.__sizeof__(_v) + 1024
+        return _overhead
+    if isinstance(_v, _np.ndarray):
+        _aid = id(_v)
+        if _aid in _seen:
+            return 128  # wrapper only, data already counted
+        _seen.add(_aid)
+        if not _is_shared(_v, _v, _user_ids):
+            return _v.nbytes + 128
+        return 128
+    return _sys.getsizeof(_v)
+
+
+def _flowbook_measure_memory():
+    """Measure namespace size with and without checkpoints.
+
+    Returns two totals:
+      user_ns_bytes              - globals() with checkpoint objects excluded
+                                   (measured via pympler asizeof)
+      user_ns_and_checkpoint_bytes - user_ns_bytes + checkpoint overhead
+                                   (checkpoint overhead uses ownership-based
+                                    accounting to correctly handle CoW/views)
+
+    Returns (user_ns_bytes, user_ns_and_checkpoint_bytes, diagnostics, measurement_time_s).
+    """
+    _t0 = _time.perf_counter()
+    _diag = {}
+
+    _cp_obj = None
+    if '_flowbook_checkpoint' in globals():
+        _cp_obj = globals()['_flowbook_checkpoint']
+
+    # 1. Measure user namespace (excluding checkpoint objects)
+    _sizer = _Asizer()
+    if _cp_obj is not None:
+        _sizer.exclude_refs(_cp_obj)
+        if hasattr(_cp_obj, 'saved'):
+            _sizer.exclude_refs(_cp_obj.saved)
+    user_ns_bytes = _sizer.asizeof(globals())
+
+    # 2. Compute checkpoint overhead by identity-based accounting.
+    #    pympler.asizeof overcounts numpy views/CoW copies.  Instead,
+    #    we walk checkpoint data manually and only count arrays that are
+    #    NOT shared (by object identity) with user namespace.
+    #
+    #    We compute TWO totals:
+    #    - checkpoint_overhead_bytes: per-checkpoint reference accounting
+    #      (each checkpoint's data counted independently - may overcount
+    #       when the ndarray cache shares the same copy across checkpoints)
+    #    - unique_overhead_bytes: actual memory footprint, counting each
+    #      unique ndarray object only once across ALL checkpoints
+    checkpoint_overhead_bytes = 0
+    unique_overhead_bytes = 0
+    if _cp_obj is not None and hasattr(_cp_obj, 'saved'):
+        _saved = _cp_obj.saved
+        _diag['num_checkpoints'] = len(_saved)
+        _cp_overheads = {}
+        _user_ids = _collect_user_ns_array_ids()
+
+        # Track ndarray ids seen across ALL checkpoints for dedup
+        _global_array_seen = set()
+
+        for _name, _ckpt in _saved.items():
+            _cp_overhead = 0
+            _cp_unique = 0
+            _seen = set()  # track ndarray ids to avoid double-counting aliases
+            if hasattr(_ckpt, 'user_ns'):
+                for _k, _v in _ckpt.user_ns.items():
+                    _oh = _checkpoint_var_overhead(_v, _user_ids, _seen)
+                    _cp_overhead += _oh
+                    # Cross-checkpoint dedup: only count unique ndarray objects once
+                    if isinstance(_v, _np.ndarray):
+                        _aid = id(_v)
+                        if _aid not in _global_array_seen:
+                            _global_array_seen.add(_aid)
+                            _cp_unique += _oh
+                        # else: shared with another checkpoint via ndarray cache
+                    elif hasattr(_v, '_mgr') and hasattr(_v._mgr, 'arrays'):
+                        # DataFrame: dedup individual backing arrays
+                        _unique_arr_bytes = 0
+                        for _arr in _v._mgr.arrays:
+                            _nd = _get_inner_ndarray(_arr)
+                            _aid = id(_nd) if _nd is not None else id(_arr)
+                            if _aid not in _global_array_seen:
+                                _global_array_seen.add(_aid)
+                                if not _is_shared(_arr, _nd, _user_ids):
+                                    _unique_arr_bytes += _nd.nbytes if _nd is not None else _sys.getsizeof(_arr)
+                        _cp_unique += _unique_arr_bytes + object.__sizeof__(_v) + 1024
+                    else:
+                        _cp_unique += _oh
+            # Add overhead for the MemoryCheckpoint object itself
+            _ckpt_meta_oh = _sys.getsizeof(_ckpt)
+            if hasattr(_ckpt, 'reverse_memo'):
+                _ckpt_meta_oh += _sys.getsizeof(_ckpt.reverse_memo)
+            _cp_overhead += _ckpt_meta_oh
+            _cp_unique += _ckpt_meta_oh
+            _cp_overheads[_name] = _cp_overhead
+            checkpoint_overhead_bytes += _cp_overhead
+            unique_overhead_bytes += _cp_unique
+
+        _diag['checkpoint_overheads'] = _cp_overheads
+        _diag['reference_overhead_bytes'] = checkpoint_overhead_bytes
+        _diag['unique_overhead_bytes'] = unique_overhead_bytes
+
+        # --- Per-variable overhead for last checkpoint ---
+        _last_ckpt = list(_saved.values())[-1] if _saved else None
+        _last_name = list(_saved.keys())[-1] if _saved else None
+        if _last_ckpt is not None and hasattr(_last_ckpt, 'user_ns'):
+            _sharing = []
+            _var_overheads = []
+            _diag_seen = set()
+            for _k, _v in _last_ckpt.user_ns.items():
+                _info = {'name': _k, 'type': type(_v).__name__}
+                _var_oh = _checkpoint_var_overhead(_v, _user_ids, _diag_seen)
+                _var_overheads.append((_k, _var_oh, type(_v).__name__))
+                if hasattr(_v, '_mgr') and hasattr(_v._mgr, 'arrays'):
+                    _unique = 0
+                    _shared = 0
+                    for _arr in _v._mgr.arrays:
+                        _nd = _get_inner_ndarray(_arr)
+                        if _is_shared(_arr, _nd, _user_ids):
+                            _shared += 1
+                        else:
+                            _unique += 1
+                    _info['unique_arrays'] = _unique
+                    _info['shared_arrays'] = _shared
+                elif isinstance(_v, _np.ndarray):
+                    _info['shared'] = _is_shared(_v, _v, _user_ids)
+                    _info['nbytes'] = int(_v.nbytes)
+                _sharing.append(_info)
+            _diag['sharing'] = _sharing
+            _diag['var_overheads'] = _var_overheads
+            # Report reverse_memo size for last checkpoint
+            if hasattr(_last_ckpt, 'reverse_memo'):
+                _diag['reverse_memo_entries'] = len(_last_ckpt.reverse_memo)
+                _diag['reverse_memo_bytes'] = _sys.getsizeof(_last_ckpt.reverse_memo)
+
+    # Use unique (deduplicated) overhead for the primary total so that
+    # plots reflect actual memory footprint, not reference-counted refs.
+    user_ns_and_checkpoint_bytes = user_ns_bytes + unique_overhead_bytes
+
+    # --- Diagnostics: top user namespace variables by size ---
+    _var_sizes = []
+    for _k, _v in globals().items():
+        if _k.startswith('_') or isinstance(_v, _types.ModuleType):
+            continue
+        if _k in ('In', 'Out', 'get_ipython', 'exit', 'quit'):
+            continue
+        _var_sizes.append((_k, _asizeof.asizeof(_v), type(_v).__name__))
+    _var_sizes.sort(key=lambda x: x[1], reverse=True)
+    _diag['top_vars'] = _var_sizes[:10]
+
+    _elapsed = _time.perf_counter() - _t0
+    return (user_ns_bytes, user_ns_and_checkpoint_bytes, _diag, _elapsed)
+'''
+
+
+def setup_memory_measurement(kernel_client, timeout: float = 60.0) -> bool:
+    """Inject pympler measurement helper into the kernel.
+
+    Call once after the kernel is ready.
+    Returns True on success.
+    """
+    return execute_silent(kernel_client, _MEMORY_SETUP_CODE, timeout)
+
+
+def measure_memory(kernel_client, timeout: float = 300.0) -> dict:
+    """Execute the measurement helper and return results.
+
+    Returns dict with user_ns_bytes, user_ns_and_checkpoint_bytes,
+    and diagnostics (dict, may be empty).
+    On failure returns all zeros with empty diagnostics.
+    """
+    # Use empty code so the checkpoint kernel treats this as trivial
+    # and does NOT take a checkpoint.  The actual work happens in
+    # user_expressions which are evaluated without triggering a save.
+    msg_id = kernel_client.execute(
+        '',
+        user_expressions={'_mem': '_flowbook_measure_memory()'},
+        silent=True,
+    )
+
+    # Wait for idle
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            log('Memory measurement timed out')
+            return {'user_ns_bytes': 0, 'user_ns_and_checkpoint_bytes': 0, 'diagnostics': {}}
+        try:
+            msg = kernel_client.get_iopub_msg(timeout=1.0)
+        except Exception:
+            continue
+        if msg['parent_header'].get('msg_id') != msg_id:
+            continue
+        if msg['header']['msg_type'] == 'status':
+            if msg['content']['execution_state'] == 'idle':
+                break
+
+    # Get the shell reply which contains user_expressions
+    try:
+        reply = kernel_client.get_shell_msg(timeout=5.0)
+        expr = reply['content'].get('user_expressions', {}).get('_mem', {})
+        if expr.get('status') == 'ok':
+            text = expr['data']['text/plain']
+            tup = ast.literal_eval(text)
+            user_ns_bytes, user_ns_and_checkpoint_bytes, diag, meas_time = tup
+            log(f'  Memory measurement took {meas_time*1000:.1f}ms')
+            return {
+                'user_ns_bytes': int(user_ns_bytes),
+                'user_ns_and_checkpoint_bytes': int(user_ns_and_checkpoint_bytes),
+                'diagnostics': diag,
+            }
+        else:
+            log(f'Memory measurement expression error: {expr}')
+    except Exception as e:
+        log(f'Memory measurement failed: {e}')
+
+    return {'user_ns_bytes': 0, 'user_ns_and_checkpoint_bytes': 0, 'diagnostics': {}}
+
+
 def run_rerun_trials(
     kernel_client: CheckpointKernelClient,
     cells: List[Cell],
@@ -429,9 +742,18 @@ def run_benchmark(
         kernel_manager, kernel_client = create_checkpoint_kernel()
         log("Kernel ready")
 
+        # Setup memory measurement
+        if setup_memory_measurement(kernel_client):
+            log("Memory measurement helper injected")
+        else:
+            log("WARNING: Failed to inject memory measurement helper")
+
         # Write CSV header
         writer = csv.writer(output_file)
-        writer.writerow(["cell_id", "execution_count", "cell_runtime_s", "commit_time_s"])
+        writer.writerow([
+            "cell_id", "execution_count", "cell_runtime_s", "commit_time_s",
+            "user_ns_bytes", "user_ns_and_checkpoint_bytes",
+        ])
 
         # Execute each cell
         for i, cell in enumerate(cells):
@@ -443,13 +765,58 @@ def run_benchmark(
             if timing.get("error"):
                 log(f"  Error: {timing['error'][:100]}...")
             else:
+                mem = measure_memory(kernel_client)
                 writer.writerow([
                     cell.cell_id,
                     timing.get("execution_count", ""),
                     timing.get("cell_runtime_s", ""),
-                    timing.get("commit_time_s", "")
+                    timing.get("commit_time_s", ""),
+                    mem["user_ns_bytes"],
+                    mem["user_ns_and_checkpoint_bytes"],
                 ])
+                mb = 1024 * 1024
+                overhead = mem['user_ns_and_checkpoint_bytes'] - mem['user_ns_bytes']
                 log(f"  Run: {timing.get('cell_runtime_s', 0)*1000:.1f}ms, Commit: {timing.get('commit_time_s', 0)*1000:.1f}ms")
+                ref_oh = mem.get('diagnostics', {}).get('reference_overhead_bytes', overhead)
+                log(f"  Memory: user_ns={mem['user_ns_bytes']/mb:,.1f}MB, "
+                    f"checkpoint_overhead={overhead/mb:,.1f}MB"
+                    + (f" (ref={ref_oh/mb:,.1f}MB)" if ref_oh != overhead else ""))
+
+                # Log diagnostics if available
+                diag = mem.get('diagnostics', {})
+                if diag:
+                    if 'num_checkpoints' in diag:
+                        log(f"  Diagnostics: {diag['num_checkpoints']} checkpoints")
+                    if 'checkpoint_overheads' in diag:
+                        for cp_name, cp_oh in diag['checkpoint_overheads'].items():
+                            log(f"    checkpoint '{cp_name}': {cp_oh/mb:,.1f}MB owned")
+                    if 'var_overheads' in diag:
+                        log(f"  Per-variable overhead (last checkpoint):")
+                        for var_name, var_oh, var_type in diag['var_overheads']:
+                            if var_oh > 100_000:
+                                log(f"    {var_name} ({var_type}): {var_oh/mb:,.1f}MB")
+                    if 'reverse_memo_entries' in diag:
+                        rm_entries = diag['reverse_memo_entries']
+                        rm_bytes = diag['reverse_memo_bytes']
+                        log(f"  reverse_memo: {rm_entries:,} entries, {rm_bytes/mb:,.1f}MB hash table")
+                    if 'sharing' in diag:
+                        log(f"  Array sharing (last checkpoint):")
+                        for info in diag['sharing']:
+                            name = info['name']
+                            vtype = info['type']
+                            if 'unique_arrays' in info:
+                                log(f"    {name} ({vtype}): unique={info['unique_arrays']}, shared={info['shared_arrays']}")
+                            elif 'shared' in info:
+                                nbytes = info.get('nbytes', 0)
+                                status = 'shared' if info['shared'] else 'UNIQUE'
+                                log(f"    {name} ({vtype}): {status} {nbytes/mb:.1f}MB")
+                            else:
+                                log(f"    {name} ({vtype})")
+                    if 'top_vars' in diag:
+                        log(f"  Top user namespace variables:")
+                        for var_name, var_size, var_type in diag['top_vars']:
+                            log(f"    {var_name} ({var_type}): {var_size/mb:,.1f}MB")
+
                 executed_cells.append(cell)
 
         # Flush output
