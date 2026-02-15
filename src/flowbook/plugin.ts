@@ -14,6 +14,7 @@ import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { CellIndexManager } from '../cellindex';
 import { IReproducibilityMetadata } from './types';
+import { FlowbookToolbarExtension } from './toolbar';
 
 /**
  * Register the flowbook:exec-restore command at plugin startup.
@@ -112,14 +113,20 @@ class FlowbookActivationManager {
   private _panel: ReproducibilityMetadataPanel | null = null;
   private _highlighter: ReproducibilityCellHighlighter | null = null;
   private _cellIndexManager: CellIndexManager;
+  private _toolbarExtension: FlowbookToolbarExtension;
   private _isActive = false;
   private _activeNotebookPath: string | null = null;
 
-  constructor(app: JupyterFrontEnd, tracker: INotebookTracker) {
+  constructor(
+    app: JupyterFrontEnd,
+    tracker: INotebookTracker,
+    toolbarExtension: FlowbookToolbarExtension
+  ) {
     this._app = app;
     this._tracker = tracker;
     this._kernelDetector = new KernelDetector(tracker);
     this._cellIndexManager = new CellIndexManager();
+    this._toolbarExtension = toolbarExtension;
 
     this._setupKernelChangeListener();
     this._checkCurrentNotebook();
@@ -201,6 +208,9 @@ class FlowbookActivationManager {
       this._panel
     );
 
+    // Set highlighter on toolbar extension so it can access staleness manager
+    this._toolbarExtension.setHighlighter(this._highlighter);
+
     // Create execution hook
     new ReproducibilityExecutionHookManager(
       this._app,
@@ -263,6 +273,10 @@ export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
     // Register exec-restore command at startup (context menu item in schema)
     registerExecRestoreCommand(app, tracker, kernelDetector);
 
-    new FlowbookActivationManager(app, tracker);
+    // Create and register toolbar extension
+    const toolbarExtension = new FlowbookToolbarExtension(kernelDetector);
+    app.docRegistry.addWidgetExtension('Notebook', toolbarExtension);
+
+    new FlowbookActivationManager(app, tracker, toolbarExtension);
   }
 };

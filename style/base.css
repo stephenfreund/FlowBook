@@ -873,7 +873,6 @@
 
 .flowbook-violation-header {
   font-weight: bold;
-  color: var(--jp-error-color1);
   margin-bottom: 8px;
 }
 
@@ -988,4 +987,25 @@
   background-color: rgb(255 193 7 / 18%);
   padding: 1px 4px;
   border-radius: 2px;
+}
+
+/* Violation notice sections for detailed messages */
+.flowbook-violation-header {
+  margin-bottom: 4px;
+}
+
+.flowbook-violation-section {
+  margin-top: 4px;
+  border: none;
+  background: none;
+}
+
+.flowbook-violation-section ul {
+  margin: 2px 0 0 20px;
+  padding: 0;
+  list-style-type: disc;
+}
+
+.flowbook-violation-section li {
+  margin: 0;
 }

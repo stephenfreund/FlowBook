@@ -263,20 +263,34 @@ export class ReproducibilityCellHighlighter {
   ): void {
     const cellId = cell.model.id;
     const isStale = stalenessManager.isCellStale(cellId);
-    // Check if cell was executed in current kernel session (not just has an execution count)
+    // Check if cell was executed in current kernel session
+    // Use both frontend tracking AND flowbook metadata (which persists across browser refresh)
     const executedInSession = this._executedInSession.get(notebookPath);
-    const isUnexecuted = !executedInSession || !executedInSession.has(cellId);
+    const hasFlowbookMetadata = cell.model.getMetadata('flowbook') !== undefined;
+    const wasExecutedInSession =
+      (executedInSession && executedInSession.has(cellId)) || hasFlowbookMetadata;
+    const isUnexecuted = !wasExecutedInSession;
+
+    // Check if cell is empty (whitespace-only counts as empty)
+    const codeModel = cell.model as ICodeCellModel;
+    const source = codeModel.sharedModel.getSource();
+    const isEmpty = !source || source.trim() === '';
 
     console.log(
-      `CellHighlighter: Updating cell ${cellId}, isStale=${isStale}, isUnexecuted=${isUnexecuted}`
+      `CellHighlighter: Updating cell ${cellId}, isStale=${isStale}, isUnexecuted=${isUnexecuted}, isEmpty=${isEmpty}`
     );
 
     // Remove existing highlight classes
     cell.node.classList.remove('flowbook-cell-stale');
     cell.node.classList.remove('flowbook-cell-unexecuted');
 
-    // Add appropriate class
-    if (isStale) {
+    // Skip highlighting for empty cells
+    if (isEmpty) {
+      console.log(
+        `CellHighlighter: Cell ${cellId} is empty, skipping highlight`
+      );
+    } else if (isStale) {
+      // Add appropriate class
       cell.node.classList.add('flowbook-cell-stale');
       console.log(
         `CellHighlighter: Added .flowbook-cell-stale class to cell ${cellId}`
@@ -501,13 +515,12 @@ export class ReproducibilityCellHighlighter {
 
       // Different message format for forward contamination vs backward violation
       const isForwardContamination = violation.type === 'forward_dependency';
-      let message: string;
       let plainText: string;
       let noticeOutput: IOutput;
 
       if (isForwardContamination) {
         // Forward contamination: reading cell read from later writing cell
-        message = `${vars} written by downstream cell ${mutRef}`;
+        const message = `${vars} written by downstream cell ${mutRef}`;
         const hint = 'Right-click → "Run with upstream state" to fix';
         plainText = `\u26a0\ufe0f Contaminated: ${message}. ${hint}.`;
         const htmlMessage = message.replace(/`([^`]+)`/g, '<code>$1</code>');
@@ -520,14 +533,48 @@ export class ReproducibilityCellHighlighter {
           metadata: { flowbook_violation_notice: true, flowbook_is_contamination: true }
         };
       } else {
-        // Backward violation: mutating cell modified variable read by earlier cell
-        message = `Cell ${mutRef} modified ${vars} read by earlier cell ${affRef}`;
-        plainText = `\u274c Violation: ${message}`;
-        const htmlMessage = message.replace(/`([^`]+)`/g, '<code>$1</code>');
+        // Backward violation: build detailed message
+        const htmlParts: string[] = [];
+        const plainParts: string[] = [];
+
+        // Header line
+        const headerMsg = `Cell ${mutRef} modified ${vars} which Cell ${affRef} (earlier) reads.`;
+        const headerHtml = headerMsg.replace(/`([^`]+)`/g, '<code>$1</code>');
+        htmlParts.push(`<div class="flowbook-violation-header">\u274c <b>Not Reproducible</b>: ${headerHtml}</div>`);
+        plainParts.push(`\u274c Not Reproducible: ${headerMsg}`);
+
+        // What the earlier cell reads (structural_reads_detail)
+        if (violation.structural_reads_detail) {
+          const readsHtml: string[] = [];
+          const readsPlain: string[] = [];
+          for (const [varName, attrs] of Object.entries(violation.structural_reads_detail)) {
+            for (const [attr, value] of Object.entries(attrs)) {
+              readsHtml.push(`<li><code>${varName}.${attr}</code> \u2192 ${this._escapeHtml(value)}</li>`);
+              readsPlain.push(`  \u2022 ${varName}.${attr} \u2192 ${value}`);
+            }
+          }
+          if (readsHtml.length > 0) {
+            htmlParts.push(`<div class="flowbook-violation-section"><b>What Cell ${affRef} read:</b><ul>${readsHtml.join('')}</ul></div>`);
+            plainParts.push(`What Cell ${affRef} read:`);
+            plainParts.push(...readsPlain);
+          }
+        }
+
+        // What this cell changed (changes_detail)
+        if (violation.changes_detail && violation.changes_detail.length > 0) {
+          const changesHtml = violation.changes_detail.map(c => `<li>${this._escapeHtml(c)}</li>`).join('');
+          const changesPlain = violation.changes_detail.map(c => `  \u2022 ${c}`);
+          htmlParts.push(`<div class="flowbook-violation-section"><b>What Cell ${mutRef} changed:</b><ul>${changesHtml}</ul></div>`);
+          plainParts.push(`What Cell ${mutRef} changed:`);
+          plainParts.push(...changesPlain);
+        }
+
+        plainText = plainParts.join('\n');
+
         noticeOutput = {
           output_type: 'display_data',
           data: {
-            'text/html': `<div class="flowbook-violation-notice">\u274c <b>Violation</b>: ${htmlMessage}</div>`,
+            'text/html': `<div class="flowbook-violation-notice">${htmlParts.join('')}</div>`,
             'text/plain': plainText
           },
           metadata: { flowbook_violation_notice: true }
@@ -611,6 +658,18 @@ export class ReproducibilityCellHighlighter {
       }
       outputs.fromJSON(allOutputs);
     }
+  }
+
+  /**
+   * Escape HTML special characters in a string.
+   */
+  private _escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
   }
 
   /**

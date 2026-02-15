@@ -278,12 +278,25 @@ export class ReproducibilityExecutionHookManager {
     _sender: any,
     args: { notebook: Notebook; cell: Cell }
   ): void {
-    const { notebook } = args;
+    const { notebook, cell } = args;
 
     // Get the notebook panel
     const panel = this._tracker.currentWidget;
     if (!panel || panel.content !== notebook) {
       return;
+    }
+
+    // Cancel any pending edit timer for this cell.
+    // If user edited and then immediately ran, the execution makes the cell fresh,
+    // so there's no need to send %cell_edited (which would incorrectly mark it stale).
+    const cellId = cell.model.id;
+    const pendingTimer = this._editTimers.get(cellId);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      this._editTimers.delete(cellId);
+      console.log(
+        `ReproducibilityExecutionHook: Cancelled pending cell_edited for ${cellId} (cell is executing)`
+      );
     }
 
     // Build cell order array (only code cells)
@@ -401,7 +414,9 @@ export class ReproducibilityExecutionHookManager {
         mutating_cell: v.mutating_cell,
         affected_cell: v.affected_cell,
         variables: v.variables,
-        message: `Cell ${mutRef} modified ${v.variables.map(vv => '`' + vv + '`').join(', ')} read by ${affRef}`
+        message: `Cell ${mutRef} modified ${v.variables.map(vv => '`' + vv + '`').join(', ')} read by ${affRef}`,
+        structural_reads_detail: (v as any).structural_reads_detail,
+        changes_detail: (v as any).changes_detail
       };
       cell.model.setMetadata('flowbook_violation', violationInfo);
 
@@ -647,14 +662,47 @@ export class ReproducibilityExecutionHookManager {
         metadata: { flowbook_violation_notice: true, flowbook_is_contamination: true }
       };
     } else {
-      // Backward violation: mutating cell modified variable read by earlier cell
-      message = `Cell ${mutRef} modified ${vars} read by earlier cell ${affRef}`;
-      const htmlMessage = message.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // Backward violation: build detailed message
+      const htmlParts: string[] = [];
+      const plainParts: string[] = [];
+
+      // Header line
+      const headerMsg = `Cell ${mutRef} modified ${vars} which Cell ${affRef} (earlier) reads.`;
+      const headerHtml = headerMsg.replace(/`([^`]+)`/g, '<code>$1</code>');
+      htmlParts.push(`<div class="flowbook-violation-header">\u274c <b>Not Reproducible</b>: ${headerHtml}</div>`);
+      plainParts.push(`\u274c Not Reproducible: ${headerMsg}`);
+
+      // What the earlier cell reads (structural_reads_detail)
+      if (violation.structural_reads_detail) {
+        const readsHtml: string[] = [];
+        const readsPlain: string[] = [];
+        for (const [varName, attrs] of Object.entries(violation.structural_reads_detail)) {
+          for (const [attr, value] of Object.entries(attrs)) {
+            readsHtml.push(`<li><code>${varName}.${attr}</code> \u2192 ${this._escapeHtml(String(value))}</li>`);
+            readsPlain.push(`  \u2022 ${varName}.${attr} \u2192 ${value}`);
+          }
+        }
+        if (readsHtml.length > 0) {
+          htmlParts.push(`<div class="flowbook-violation-section"><b>What Cell ${affRef} read:</b><ul>${readsHtml.join('')}</ul></div>`);
+          plainParts.push(`What Cell ${affRef} read:`);
+          plainParts.push(...readsPlain);
+        }
+      }
+
+      // What this cell changed (changes_detail)
+      if (violation.changes_detail && violation.changes_detail.length > 0) {
+        const changesHtml = violation.changes_detail.map(c => `<li>${this._escapeHtml(c)}</li>`).join('');
+        const changesPlain = violation.changes_detail.map(c => `  \u2022 ${c}`);
+        htmlParts.push(`<div class="flowbook-violation-section"><b>What Cell ${mutRef} changed:</b><ul>${changesHtml}</ul></div>`);
+        plainParts.push(`What Cell ${mutRef} changed:`);
+        plainParts.push(...changesPlain);
+      }
+
       noticeOutput = {
         output_type: 'display_data',
         data: {
-          'text/html': `<div class="flowbook-violation-notice">\u274c <b>Violation</b>: ${htmlMessage}</div>`,
-          'text/plain': `\u274c Violation: ${message}`
+          'text/html': `<div class="flowbook-violation-notice">${htmlParts.join('')}</div>`,
+          'text/plain': plainParts.join('\n')
         },
         metadata: { flowbook_violation_notice: true }
       };
@@ -760,5 +808,17 @@ export class ReproducibilityExecutionHookManager {
       }
     }
     outputs.fromJSON(allOutputs);
+  }
+
+  /**
+   * Escape HTML special characters in a string.
+   */
+  private _escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
   }
 }
