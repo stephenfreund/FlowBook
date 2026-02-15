@@ -808,6 +808,25 @@ the delta between two stores, computed by direct comparison. The trace-derived
 WS(t) is retained in the implementation for informational purposes (debugging,
 UI display) but is not used in conflict detection.
 
+**RBW(t) as over-approximation.** The trace-based RBW is a valid
+_over-approximation_ of locations the cell may have read from the pre-store.
+If an untraced write occurs before a traced read (e.g., a C extension mutates
+a variable, then Python code reads it), the trace shows a read event without
+a preceding write. This adds the location to RBW even though the cell didn't
+actually read from the pre-store — it read its own written value. This
+over-inclusion is safe: it may cause extra staleness propagation but cannot
+miss real dependencies.
+
+**Untraced reads are covered by reference tracking.** One might worry that
+untraced reads (e.g., a C extension internally traversing an object graph)
+could cause missed dependencies. However, to pass any data to a C extension,
+Python code must first read a reference — and that reference read _is_ traced.
+The analysis operates at object granularity: reading a reference `obj` means
+the cell is considered to depend on everything reachable from `obj`. Since
+deep alias expansion (`_expand_with_deep_aliases()`) includes all objects
+sharing internal references, untraced reads within C extensions are
+conservatively covered by the traced read of the root reference.
+
 ### 3.3 Practical Implications
 
 The conflict detection rules (BackConflict, StaleFwd, FwdContaminated) all
