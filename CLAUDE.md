@@ -177,29 +177,29 @@ The primary kernel with always-on reproducibility enforcement:
 
 The enforcer implements four transition rules from the formal specification:
 
-| Rule | Condition | Cell status | Effect |
-|---|---|---|---|
-| EXEC-ACCEPT | No backward conflict, not forward-contaminated | fresh | StaleFwd |
-| EXEC-CONTAMINATED | No backward conflict, forward-contaminated | stale | StaleFwd |
-| EXEC-REJECT | Backward conflict (BackConflict) | unchanged | rollback |
-| EXEC-RESTORE | All predecessors fresh, execute from prefix checkpoint | fresh | StaleFwd |
+| Rule              | Condition                                              | Cell status | Effect   |
+| ----------------- | ------------------------------------------------------ | ----------- | -------- |
+| EXEC-ACCEPT       | No backward conflict, not forward-contaminated         | fresh       | StaleFwd |
+| EXEC-CONTAMINATED | No backward conflict, forward-contaminated             | stale       | StaleFwd |
+| EXEC-REJECT       | Backward conflict (BackConflict)                       | unchanged   | rollback |
+| EXEC-RESTORE      | All predecessors fresh, execute from prefix checkpoint | fresh       | StaleFwd |
 
 And three runtime checks:
 
-- **BackConflict** (Def 1.8.2): Cell wrote to location read by earlier *fresh* cell → reject
+- **BackConflict** (Def 1.8.2): Cell wrote to location read by earlier _fresh_ cell → reject
 - **FwdContaminated** (Def 1.8.3): Cell read location written by later executed cell → accept as stale
 - **StaleFwd** (Def 1.8.1): Cell wrote to location read by later fresh cell → mark later cell stale
 
 **Magic Commands**:
 
-| Command | Description |
-|---|---|
-| `%notebook_structure <ids...>` | Set notebook cell order (sent by frontend before each execution) |
-| `%cell_edited <cell_id>` | Mark edited cell stale (EDIT transition §2.3, sent by frontend) |
-| `%flowbook_status` | Display current reproducibility state |
-| `%flowbook_stale` | Show stale cells |
-| `%continue_after_violation <on/off>` | Control whether backward violations reject or warn |
-| `%structural_tracking <off/warn/enforce>` | Set DataFrame structural attribute tracking mode |
+| Command                                   | Description                                                      |
+| ----------------------------------------- | ---------------------------------------------------------------- |
+| `%notebook_structure <ids...>`            | Set notebook cell order (sent by frontend before each execution) |
+| `%cell_edited <cell_id>`                  | Mark edited cell stale (EDIT transition §2.3, sent by frontend)  |
+| `%flowbook_status`                        | Display current reproducibility state                            |
+| `%flowbook_stale`                         | Show stale cells                                                 |
+| `%continue_after_violation <on/off>`      | Control whether backward violations reject or warn               |
+| `%structural_tracking <off/warn/enforce>` | Set DataFrame structural attribute tracking mode                 |
 
 **Features** (always enabled):
 
@@ -446,12 +446,11 @@ jupyter labextension develop . --overwrite
 - Formal specification of reproducibility rules is in `FORMAL_DEVELOPMENT.md` with an Implementation Map linking formal definitions to code locations
 - The frontend `executionhook.ts` sends `%notebook_structure` before each cell execution and `%cell_edited` (debounced 1s) when a previously-executed cell's source changes
 
-
 ## Formal Specification Sync
 
 This project maintains a formal specification in `FORMAL_DEVELOPMENT.md` that maps formal concepts to their source code implementations. The spec and the code must always be kept in sync — **changes flow in both directions:**
 
-- **Spec → Code:** When a formal concept in `FORMAL_DEVELOPMENT.md` is added, modified, or removed, the corresponding source code MUST be updated to reflect the change. The spec is the source of truth for *what* the system should do.
+- **Spec → Code:** When a formal concept in `FORMAL_DEVELOPMENT.md` is added, modified, or removed, the corresponding source code MUST be updated to reflect the change. The spec is the source of truth for _what_ the system should do.
 - **Code → Spec:** When source code implementing a formal concept is created, modified, renamed, or deleted, the mapping in `FORMAL_DEVELOPMENT.md` MUST be updated to reflect the change.
 
 Before completing any task, verify that `FORMAL_DEVELOPMENT.md` and the source code it references are consistent with each other.
