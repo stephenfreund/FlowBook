@@ -88,7 +88,7 @@ class ConflictResolver:
 
     def __init__(
         self,
-        structural_mode: StructuralMode = StructuralMode.WARN,
+        structural_mode: StructuralMode = StructuralMode.ENFORCE,
         rules: Optional[List[ConflictRule]] = None,
     ):
         """

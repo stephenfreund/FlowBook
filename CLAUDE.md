@@ -301,7 +301,7 @@ Register in `flowbook/server/__init__.py` or `commands.py`.
 
 All notebooks entering the system (via CLI or server) are automatically normalized to ensure consistent cell identification:
 
-- **4-character lowercase IDs**: All cells receive unique 4-character lowercase letter IDs (e.g., "abcd", "xyzw")
+- **4-character lowercase IDs**: All cells receive unique 4-character lowercase alphanumeric IDs (e.g., "abcd", "623a")
 - **Automatic ID generation**: Cells without IDs are assigned new unique IDs
 - **ID replacement**: Non-4-character IDs (like UUIDs or custom IDs) are replaced with new 4-character IDs
 - **Duplicate handling**: Duplicate IDs are automatically regenerated to ensure uniqueness

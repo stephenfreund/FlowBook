@@ -66,7 +66,7 @@ class MonotonicityEnforcer:
         self,
         checkpoints: "MemoryCheckpoints",
         user_ns: dict,
-        structural_mode: StructuralTrackingMode = StructuralTrackingMode.WARN,
+        structural_mode: StructuralTrackingMode = StructuralTrackingMode.ENFORCE,
     ):
         """
         Initialize the enforcer.
@@ -74,7 +74,7 @@ class MonotonicityEnforcer:
         Args:
             checkpoints: Checkpoint manager instance
             user_ns: The user namespace dict (may be TrackingDict)
-            structural_mode: How to handle structural reads (default: WARN)
+            structural_mode: How to handle structural reads (default: ENFORCE)
         """
         self._checkpoints = checkpoints
         self._user_ns = user_ns

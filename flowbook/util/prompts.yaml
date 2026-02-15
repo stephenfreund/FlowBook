@@ -383,3 +383,55 @@ generate_tests_input: |
   - Cover normal cases, edge cases, and corner cases
   - Make tests independent and self-contained
 
+fix_violation_instructions: |
+  You are an expert at fixing reproducibility violations in Jupyter notebooks.
+  A reproducibility violation occurs when:
+  - Backward mutation: A cell modifies a variable that was read by an earlier cell
+  - Forward dependency: A cell reads a variable that was written by a later cell
+
+  Your goal is to propose MINIMAL changes to fix the violation while preserving
+  the notebook's intended behavior.
+
+  Preferred fix strategies (in order of preference):
+  1. **alpha_rename**: Rename the variable in the mutating cell to a new name
+     (e.g., `df` -> `df_processed`). This is usually the cleanest fix.
+  2. **copy_value**: Insert a copy before mutation (e.g., `df = df.copy()`)
+  3. **merge_cells**: Combine cells that logically belong together
+  4. **reorder**: Move code within a cell to avoid conflicts
+
+  Guidelines:
+  - Make the smallest change that fixes the violation
+  - Preserve the notebook's intended data flow and outputs
+  - Prefer alpha-renaming over copying for DataFrames (more memory efficient)
+  - When renaming, use descriptive names that indicate the transformation
+  - Each fix_entry must specify which cell(s) it modifies
+
+fix_violation_input: |
+  ## Reproducibility Violation
+
+  Type: {violation_type}
+  Mutating cell: {mutating_cell_id}
+  Affected cell: {affected_cell_id}
+  Variables involved: {variables}
+  Violation message: {violation_message}
+  {changes_detail}
+
+  ## Notebook Code
+
+  The notebook is shown below with cell delimiters. Each cell starts with:
+  `# ====== CELL [cell_id] (code|markdown) ======`
+
+  ```python
+  {notebook_python}
+  ```
+
+  ## Instructions
+
+  Propose a fix for this violation. Return:
+  - strategy: One of "alpha_rename", "copy_value", "merge_cells", "reorder"
+  - fix_entries: List of changes, each with:
+    - cell_ids: List of cell IDs affected (usually one, but multiple for merge)
+    - modified_source: The new source code for the cell(s)
+    - explanation: Brief explanation of this specific change
+  - explanation: Overall explanation of the fix strategy
+

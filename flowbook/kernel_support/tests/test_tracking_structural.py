@@ -23,10 +23,10 @@ class TestTrackingDictStructuralSetup:
         td = TrackingDict()
         assert hasattr(td, '_structural_tracker')
 
-    def test_default_mode_is_warn(self):
-        """Default structural tracking mode is WARN."""
+    def test_default_mode_is_enforce(self):
+        """Default structural tracking mode is ENFORCE."""
         td = TrackingDict()
-        assert td.structural_tracking_mode == StructuralTrackingMode.WARN
+        assert td.structural_tracking_mode == StructuralTrackingMode.ENFORCE
 
     def test_set_structural_tracking_mode(self):
         """Can set structural tracking mode."""

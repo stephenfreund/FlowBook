@@ -300,7 +300,7 @@ class ReproducibilityEnforcer:
     def __init__(
         self,
         checkpoints: MemoryCheckpoints,
-        structural_mode: StructuralTrackingMode = StructuralTrackingMode.WARN,
+        structural_mode: StructuralTrackingMode = StructuralTrackingMode.ENFORCE,
     ):
         self.checkpoints = checkpoints
         self.records: Dict[str, ReproducibilityExecutionRecord] = {}
