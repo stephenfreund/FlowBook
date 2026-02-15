@@ -1358,7 +1358,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             violation=(
                 sdc_result.violation.to_dict()
                 if (sdc_result and sdc_result.violation)
-                else None
+                else (
+                    sdc_result.forward_violation.to_dict()
+                    if (sdc_result and sdc_result.forward_violation)
+                    else None
+                )
             ),
             cell_order=self._enforcer.cell_order,
             column_reads=tracking_json["column_reads"],
@@ -1441,8 +1445,27 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
     def _send_violation_error(self, violation) -> None:
         """Send Reproducibility violation as error via iopub.
 
-        Uses the violation.message from the enforcer verbatim.
+        Emits structured flowbook metadata before the error so the frontend
+        can store and update violation info (e.g., when cells are reordered).
         """
+        # Emit structured metadata for the frontend
+        metadata = ReproducibilityMetadata(
+            cell_id=self._cell_id or "",
+            execution_seq=self._enforcer.seq_counter,
+            reads=[],
+            writes=[],
+            changed_variables=[],
+            stale_cells=self._enforcer.get_stale_cells(),
+            violation=violation.to_dict(),
+            cell_order=self._enforcer.cell_order,
+        )
+        self._display.display_icon_and_text(
+            "❌",
+            "Backward violation",
+            metadata=metadata.to_display_metadata(),
+        )
+
+        # Then send the error
         self.send_response(
             self.iopub_socket,
             "error",

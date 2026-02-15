@@ -32,7 +32,7 @@ function registerExecRestoreCommand(
   const commandId = 'flowbook:exec-restore';
 
   app.commands.addCommand(commandId, {
-    label: 'Run with Previous Cell\'s state',
+    label: 'Run with upstream state',
     isEnabled: () => {
       try {
         const panel = tracker.currentWidget;
@@ -47,9 +47,9 @@ function registerExecRestoreCommand(
         if (!activeCell || activeCell.model.type !== 'code') {
           return false;
         }
-        const meta = activeCell.model.getMetadata(
-          'flowbook'
-        ) as IReproducibilityMetadata | undefined;
+        const meta = activeCell.model.getMetadata('flowbook') as
+          | IReproducibilityMetadata
+          | undefined;
         return meta?.cell_is_contaminated === true;
       } catch (e) {
         console.error('FlowBook exec-restore isEnabled error:', e);

@@ -56,7 +56,7 @@ class TestForwardContaminationMessage:
     def test_mentions_context_menu_action(self):
         """Message should mention the context menu action."""
         message = format_forward_dependency_message("@B", "@C", ["x"])
-        assert "Run with Previous Cell's state" in message
+        assert "Run with upstream state" in message
 
     def test_mentions_notebook_order_alternative(self):
         """Message should mention re-running in notebook order as alternative fix."""

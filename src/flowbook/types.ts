@@ -44,3 +44,19 @@ export interface IReproducibilityCellState {
   writes: string[];
   isStale: boolean;
 }
+
+export interface IStalenessReason {
+  type: string; // "variable_modified" | "source_edited" | "contaminated" | "writer_conflict" | "unknown"
+  causing_cell?: string; // actual cell ID
+  variables?: string[];
+  columns?: { [key: string]: string[] };
+  message: string; // human-readable (@A notation)
+}
+
+export interface IViolationInfo {
+  type: string; // "backward_mutation" | "forward_dependency" | "truncation"
+  mutating_cell: string; // actual cell ID
+  affected_cell: string; // actual cell ID
+  variables: string[];
+  message: string; // human-readable (@A notation)
+}

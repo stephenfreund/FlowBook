@@ -1794,13 +1794,13 @@ def format_forward_dependency_message(
         "⚠️ Forward Contamination",
         "",
         f"Cell {reading_cell_alpha} reads {vars_str} which was written by "
-        f"Cell {writing_cell_alpha} (later in notebook).",
+        f"downstream cell {writing_cell_alpha}.",
         "",
         f"Cell {reading_cell_alpha} executed successfully but is marked stale "
         "because it read out-of-order state that would not exist in a "
         "top-to-bottom run.",
         "",
-        'Fix: Right-click the cell and select "Run with Previous Cell\'s state", '
+        'Fix: Right-click the cell and select "Run with upstream state", '
         "or re-run cells in notebook order.",
     ]
 

@@ -618,7 +618,7 @@ class TestForwardDependencyMessageFormatting:
         assert "@C" in message
         assert "x" in message
         assert "top-to-bottom" in message
-        assert "Run with Previous Cell's state" in message
+        assert "Run with upstream state" in message
 
     def test_message_format_multiple_variables(self):
         """Test message formatting with multiple variables."""
