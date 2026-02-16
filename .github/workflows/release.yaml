@@ -1,9 +1,8 @@
 name: Release to PyPI
 
 on:
-  push:
-    tags:
-      - 'v*'  # Trigger on version tags like v0.0.1, v0.0.2, etc.
+  release:
+    types: [created]  # Trigger when a new release is created in GitHub
   workflow_dispatch:  # Allow manual triggering for testing
 
 jobs:
@@ -40,9 +39,8 @@ jobs:
           # Using trusted publishing (no token needed if configured in PyPI)
           # If not using trusted publishing, you'll need to set password: ${{ secrets.PYPI_API_TOKEN }}
 
-      - name: Create GitHub Release
+      - name: Upload release assets
         uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'release'
         with:
           files: placeholder-package/dist/*
-          generate_release_notes: true

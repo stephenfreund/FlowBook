@@ -31,10 +31,10 @@ Repository = "https://github.com/stephenfreund/FlowBook"
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "flowbook_python/",
+    "flowbook/",
     "README.md",
     "LICENSE",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["flowbook_python"]
+packages = ["flowbook"]

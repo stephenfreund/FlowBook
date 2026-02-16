@@ -95,7 +95,7 @@ Test the package build locally:
 ```bash
 cd placeholder-package  # Or repository root for full package
 python -m build
-pip install dist/flowbook_python-0.0.1-py3-none-any.whl  # Test installation
+pip install dist/flowbook-0.0.1-py3-none-any.whl  # Test installation
 ```
 
 ## Version Management
