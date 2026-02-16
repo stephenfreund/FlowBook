@@ -1,4 +1,4 @@
-# flowbook-python (Placeholder Package)
+# flowbook-python
 
 ## Installation
 
