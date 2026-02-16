@@ -261,6 +261,18 @@ def load_comparison_json(file_path: str) -> Dict[str, Any]:
     return data
 
 
+def extract_warnings(data: Dict[str, Any]) -> List[str]:
+    """Extract all memory warnings from comparison data."""
+    warnings = []
+    for kernel_name in ["baseline", "flowbook"]:
+        kernel_data = data.get("kernels", {}).get(kernel_name, {})
+        for cell in kernel_data.get("cells", []) + kernel_data.get("rerun_cells", []):
+            cell_warnings = cell.get("memory_warnings") or []
+            for w in cell_warnings:
+                warnings.append(f"{kernel_name} cell {cell.get('cell_id', '?')}: {w}")
+    return warnings
+
+
 def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     """Compute statistics from a single comparison file."""
     notebook_path = data.get("notebook_path", file_path)
@@ -1073,6 +1085,10 @@ def main():
             stats = compute_file_stats(data, file_path)
             stats_list.append(stats)
             file_data[file_path] = data
+            # Print any memory measurement warnings
+            warnings = extract_warnings(data)
+            for w in warnings:
+                print(f"Memory warning ({Path(file_path).name}): {w}", file=sys.stderr)
         except Exception as e:
             print(f"Warning: Error loading {file_path}: {e}", file=sys.stderr)
             continue

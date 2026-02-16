@@ -44,6 +44,7 @@ class CellMetrics:
     status: str
     error: Optional[str] = None
     checkpoint_details: Optional[Dict[str, Any]] = None
+    memory_warnings: Optional[List[str]] = None
 
 
 @dataclass
@@ -492,7 +493,8 @@ def run_baseline_execution(
                     user_ns_bytes=mem["user_ns_bytes"],
                     user_ns_and_checkpoint_bytes=mem["user_ns_and_checkpoint_bytes"],
                     status="ok",
-                    error=None
+                    error=None,
+                    memory_warnings=mem.get("diagnostics", {}).get("warnings"),
                 ))
                 log(f"  Runtime: {runtime_ms:.1f}ms, Memory: {mem['user_ns_bytes']:,}B")
 
@@ -551,7 +553,8 @@ def run_baseline_execution(
                         user_ns_bytes=last_mem["user_ns_bytes"],
                         user_ns_and_checkpoint_bytes=last_mem["user_ns_and_checkpoint_bytes"],
                         status="ok",
-                        error=None
+                        error=None,
+                        memory_warnings=last_mem.get("diagnostics", {}).get("warnings"),
                     ))
                     log(f"  Runtime: {runtime_ms:.1f}ms, Memory: {last_mem['user_ns_bytes']:,}B")
 
@@ -682,6 +685,7 @@ def run_flowbook_execution(
                     status=status,
                     error=timing.get("violation") or timing.get("error"),
                     checkpoint_details=ckpt_details,
+                    memory_warnings=mem.get("diagnostics", {}).get("warnings"),
                 ))
                 log(f"  Runtime: {runtime_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms, Memory: {mem['user_ns_bytes']:,}B, Checkpoint: {mem['user_ns_and_checkpoint_bytes']:,}B")
 
@@ -763,6 +767,7 @@ def run_flowbook_execution(
                         status=status,
                         error=timing.get("violation") or timing.get("error"),
                         checkpoint_details=last_ckpt_details,
+                        memory_warnings=last_mem.get("diagnostics", {}).get("warnings"),
                     ))
                     log(f"  Runtime: {runtime_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms, Memory: {last_mem['user_ns_bytes']:,}B, Checkpoint: {last_mem['user_ns_and_checkpoint_bytes']:,}B")
 
