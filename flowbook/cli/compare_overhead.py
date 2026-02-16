@@ -868,9 +868,7 @@ def plot_combined(
             cell_data[c["cell_id"]]["state_ms"] = c["state_duration_ms"]
             cell_data[c["cell_id"]]["check_ms"] = c["check_duration_ms"]
             cell_data[c["cell_id"]]["user_ns_bytes"] = c.get("user_ns_bytes", 0)
-            # Use checkpoint_details.total_bytes if available, fall back to user_ns_and_checkpoint_bytes
-            details = c.get("checkpoint_details") or {}
-            cell_data[c["cell_id"]]["total_bytes"] = details.get("total_bytes", 0) or c.get("user_ns_and_checkpoint_bytes", 0)
+            cell_data[c["cell_id"]]["total_bytes"] = c.get("user_ns_and_checkpoint_bytes", 0)
 
     cell_ids = list(cell_data.keys())
     baseline_runtimes = [cell_data[cid].get("baseline_runtime_ms", 0) for cid in cell_ids]
@@ -885,9 +883,7 @@ def plot_combined(
         state_times.append(fc.get("state_duration_ms", 0))
         check_times.append(fc.get("check_duration_ms", 0))
         user_ns_bytes.append(fc.get("user_ns_bytes", 0))
-        # Use checkpoint_details.total_bytes if available
-        details = fc.get("checkpoint_details") or {}
-        total_bytes.append(details.get("total_bytes", 0) or fc.get("user_ns_and_checkpoint_bytes", 0))
+        total_bytes.append(fc.get("user_ns_and_checkpoint_bytes", 0))
 
     cells = np.arange(1, len(baseline_runtimes) + 1)
 
@@ -937,6 +933,15 @@ def plot_combined(
     ax.set_ylim(bottom=0)
     ax.tick_params(axis='both', labelsize=tick_size)
 
+    # Add overhead percentage label at end of run
+    if baseline_cumsum[-1] > 0:
+        time_overhead_pct = (total_cumsum[-1] - baseline_cumsum[-1]) / baseline_cumsum[-1] * 100
+        ax.annotate(f'{time_overhead_pct:.1f}% overhead',
+                    xy=(cells[-1], total_cumsum[-1] / 1000),
+                    xytext=(5, 0), textcoords='offset points',
+                    fontsize=legend_size, va='center', ha='left',
+                    color=colors[1])
+
     # Panel 2: Memory
     ax = axes[1]
     ax.fill_between(cells, 0, user_mb, alpha=0.3, color=colors[0], label='User Namespace')
@@ -960,6 +965,15 @@ def plot_combined(
     ax.set_xlim(left=1)
     ax.set_ylim(bottom=0)
     ax.tick_params(axis='both', labelsize=tick_size)
+
+    # Add overhead percentage label at end of run
+    if user_mb[-1] > 0:
+        mem_overhead_pct = (total_mb[-1] - user_mb[-1]) / user_mb[-1] * 100
+        ax.annotate(f'{mem_overhead_pct:.1f}% overhead',
+                    xy=(cells[-1], total_mb[-1]),
+                    xytext=(5, 0), textcoords='offset points',
+                    fontsize=legend_size, va='center', ha='left',
+                    color=colors[1])
 
     # Add notebook name as figure title
     notebook_name = Path(data.get("notebook_path", "notebook")).stem
