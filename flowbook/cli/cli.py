@@ -241,6 +241,7 @@ def cli_main():
                 kernel_client=kernel_client,
                 selected_cell_ids=selected_cell_ids,
                 config=config,
+                notebook_path=os.path.abspath(notebook_path),
                 **command_kwargs,
             )
         )

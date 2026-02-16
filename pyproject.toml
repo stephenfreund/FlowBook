@@ -70,6 +70,7 @@ flowbook_stats = "flowbook.cli.stats_cli:stats_cli_main"
 flowbook_timers = "flowbook.cli.flowbook_timers:main"
 flowbook_metadata = "flowbook.cli.metadata_cli:metadata_cli_main"
 flowbook_slurm = "flowbook.slurm.slurm_cli:main"
+flowbook_compare_overhead = "flowbook.cli.compare_overhead:main"
 flowlab = "flowbook.cli.lab_cli:lab_main"
 
 [tool.hatch.version]

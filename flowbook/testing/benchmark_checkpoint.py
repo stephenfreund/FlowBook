@@ -385,7 +385,10 @@ def _checkpoint_var_overhead(_v, _user_ids, _seen=None):
         if not _is_shared(_v, _v, _user_ids):
             return _v.nbytes + 128
         return 128
-    return _sys.getsizeof(_v)
+    # For plain Python containers (lists, dicts, etc.), use asizeof to measure
+    # the full recursive size. Unlike numpy arrays, these don't have CoW sharing,
+    # so deepcopy creates fully independent copies.
+    return _asizeof.asizeof(_v)
 
 
 def _flowbook_measure_memory():
@@ -437,6 +440,107 @@ def _flowbook_measure_memory():
         # Track ndarray ids seen across ALL checkpoints for dedup
         _global_array_seen = set()
 
+        # Primitive types that don't need recursive measurement
+        _PRIMITIVE_TYPES = (type(None), bool, int, float, complex, str, bytes)
+
+        def _container_unique_overhead(_obj, _global_seen, _user_ids):
+            """
+            Recursively measure container overhead with cross-checkpoint deduplication.
+
+            Walks nested containers (list, tuple, set, dict), tracking each by id().
+            Only counts unique objects across all checkpoints.
+
+            Returns the unique overhead in bytes.
+            """
+            _obj_id = id(_obj)
+            if _obj_id in _global_seen:
+                return 0  # Already counted in another checkpoint
+            _global_seen.add(_obj_id)
+
+            if isinstance(_obj, list):
+                _total = _sys.getsizeof(_obj)  # Shallow size of list
+                for _item in _obj:
+                    if isinstance(_item, (list, tuple, set, dict)):
+                        _total += _container_unique_overhead(_item, _global_seen, _user_ids)
+                    elif isinstance(_item, _np.ndarray):
+                        _aid = id(_item)
+                        if _aid not in _global_seen:
+                            _global_seen.add(_aid)
+                            _total += _item.nbytes + 128
+                    elif hasattr(_item, '_mgr') and hasattr(_item._mgr, 'arrays'):
+                        # DataFrame inside container
+                        for _arr in _item._mgr.arrays:
+                            _nd = _get_inner_ndarray(_arr)
+                            _aid = id(_nd) if _nd is not None else id(_arr)
+                            if _aid not in _global_seen:
+                                _global_seen.add(_aid)
+                                if not _is_shared(_arr, _nd, _user_ids):
+                                    _total += _nd.nbytes if _nd is not None else _sys.getsizeof(_arr)
+                        _total += object.__sizeof__(_item) + 1024
+                    elif type(_item) not in _PRIMITIVE_TYPES:
+                        # Non-primitive leaf - use asizeof
+                        _total += _asizeof.asizeof(_item)
+                    # Primitives: already counted in getsizeof of container
+                return _total
+
+            elif isinstance(_obj, tuple):
+                _total = _sys.getsizeof(_obj)
+                for _item in _obj:
+                    if isinstance(_item, (list, tuple, set, dict)):
+                        _total += _container_unique_overhead(_item, _global_seen, _user_ids)
+                    elif isinstance(_item, _np.ndarray):
+                        _aid = id(_item)
+                        if _aid not in _global_seen:
+                            _global_seen.add(_aid)
+                            _total += _item.nbytes + 128
+                    elif type(_item) not in _PRIMITIVE_TYPES:
+                        _total += _asizeof.asizeof(_item)
+                return _total
+
+            elif isinstance(_obj, set):
+                _total = _sys.getsizeof(_obj)
+                for _item in _obj:
+                    # Sets can only contain hashable (usually immutable) items
+                    # but check for tuples which can contain mutable nested structures
+                    if isinstance(_item, tuple):
+                        _total += _container_unique_overhead(_item, _global_seen, _user_ids)
+                    elif type(_item) not in _PRIMITIVE_TYPES:
+                        _total += _asizeof.asizeof(_item)
+                return _total
+
+            elif isinstance(_obj, dict):
+                _total = _sys.getsizeof(_obj)
+                for _key, _val in _obj.items():
+                    # Keys are hashable, but check for tuples
+                    if isinstance(_key, tuple):
+                        _total += _container_unique_overhead(_key, _global_seen, _user_ids)
+                    elif type(_key) not in _PRIMITIVE_TYPES:
+                        _total += _asizeof.asizeof(_key)
+                    # Values can be anything
+                    if isinstance(_val, (list, tuple, set, dict)):
+                        _total += _container_unique_overhead(_val, _global_seen, _user_ids)
+                    elif isinstance(_val, _np.ndarray):
+                        _aid = id(_val)
+                        if _aid not in _global_seen:
+                            _global_seen.add(_aid)
+                            _total += _val.nbytes + 128
+                    elif hasattr(_val, '_mgr') and hasattr(_val._mgr, 'arrays'):
+                        for _arr in _val._mgr.arrays:
+                            _nd = _get_inner_ndarray(_arr)
+                            _aid = id(_nd) if _nd is not None else id(_arr)
+                            if _aid not in _global_seen:
+                                _global_seen.add(_aid)
+                                if not _is_shared(_arr, _nd, _user_ids):
+                                    _total += _nd.nbytes if _nd is not None else _sys.getsizeof(_arr)
+                        _total += object.__sizeof__(_val) + 1024
+                    elif type(_val) not in _PRIMITIVE_TYPES:
+                        _total += _asizeof.asizeof(_val)
+                return _total
+
+            else:
+                # Not a container - shouldn't reach here, but fallback
+                return _asizeof.asizeof(_obj)
+
         for _name, _ckpt in _saved.items():
             _cp_overhead = 0
             _cp_unique = 0
@@ -463,8 +567,15 @@ def _flowbook_measure_memory():
                                 if not _is_shared(_arr, _nd, _user_ids):
                                     _unique_arr_bytes += _nd.nbytes if _nd is not None else _sys.getsizeof(_arr)
                         _cp_unique += _unique_arr_bytes + object.__sizeof__(_v) + 1024
+                    elif isinstance(_v, (list, tuple, set, dict)):
+                        # Container: recursively walk and deduplicate nested structures
+                        _cp_unique += _container_unique_overhead(_v, _global_array_seen, _user_ids)
                     else:
-                        _cp_unique += _oh
+                        # Other types: use asizeof, track by id to avoid double-counting
+                        _aid = id(_v)
+                        if _aid not in _global_array_seen:
+                            _global_array_seen.add(_aid)
+                            _cp_unique += _oh
             # Add overhead for the MemoryCheckpoint object itself
             _ckpt_meta_oh = _sys.getsizeof(_ckpt)
             if hasattr(_ckpt, 'reverse_memo'):
@@ -529,6 +640,65 @@ def _flowbook_measure_memory():
 
     _elapsed = _time.perf_counter() - _t0
     return (user_ns_bytes, user_ns_and_checkpoint_bytes, _diag, _elapsed)
+
+
+def _flowbook_checkpoint_details(_top_n=20):
+    """Get detailed breakdown of checkpoint contents by variable type.
+
+    Returns dict with:
+        num_checkpoints: int
+        total_bytes: int - total checkpoint overhead
+        by_type: dict mapping type name to {count: int, bytes: int}
+        top_variables: list of top N largest variables [{name, type, size_bytes}]
+    """
+    _result = {
+        'num_checkpoints': 0,
+        'total_bytes': 0,
+        'by_type': {},
+        'top_variables': [],
+    }
+
+    _cp_obj = None
+    if '_flowbook_checkpoint' in globals():
+        _cp_obj = globals()['_flowbook_checkpoint']
+
+    if _cp_obj is None or not hasattr(_cp_obj, 'saved'):
+        return _result
+
+    _saved = _cp_obj.saved
+    _result['num_checkpoints'] = len(_saved)
+    _user_ids = _collect_user_ns_array_ids()
+
+    # Collect all variables across all checkpoints
+    _all_vars = []  # [(name, type_name, size_bytes, checkpoint_name)]
+    _type_agg = {}  # type_name -> {count: int, bytes: int}
+
+    for _ckpt_name, _ckpt in _saved.items():
+        if not hasattr(_ckpt, 'user_ns'):
+            continue
+        _seen = set()
+        for _k, _v in _ckpt.user_ns.items():
+            _type_name = type(_v).__name__
+            _size = _checkpoint_var_overhead(_v, _user_ids, _seen)
+            _all_vars.append((_k, _type_name, _size, _ckpt_name))
+
+            # Aggregate by type
+            if _type_name not in _type_agg:
+                _type_agg[_type_name] = {'count': 0, 'bytes': 0}
+            _type_agg[_type_name]['count'] += 1
+            _type_agg[_type_name]['bytes'] += _size
+            _result['total_bytes'] += _size
+
+    _result['by_type'] = _type_agg
+
+    # Get top N largest variables (sorted by size descending)
+    _all_vars.sort(key=lambda x: x[2], reverse=True)
+    _result['top_variables'] = [
+        {'name': _v[0], 'type': _v[1], 'size_bytes': _v[2]}
+        for _v in _all_vars[:_top_n]
+    ]
+
+    return _result
 '''
 
 
@@ -593,6 +763,53 @@ def measure_memory(kernel_client, timeout: float = 300.0) -> dict:
         log(f'Memory measurement failed: {e}')
 
     return {'user_ns_bytes': 0, 'user_ns_and_checkpoint_bytes': 0, 'diagnostics': {}}
+
+
+def measure_checkpoint_details(kernel_client, timeout: float = 60.0) -> dict:
+    """Get detailed breakdown of checkpoint contents by variable type.
+
+    Returns dict with:
+        num_checkpoints: int
+        total_bytes: int
+        by_type: dict mapping type name to {count, bytes}
+        top_variables: list of top 20 largest variables [{name, type, size_bytes}]
+
+    On failure returns empty structure.
+    """
+    msg_id = kernel_client.execute(
+        '',
+        user_expressions={'_details': '_flowbook_checkpoint_details()'},
+        silent=True,
+    )
+
+    # Wait for idle
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            return {'num_checkpoints': 0, 'total_bytes': 0, 'by_type': {}, 'top_variables': []}
+        try:
+            msg = kernel_client.get_iopub_msg(timeout=1.0)
+        except Exception:
+            continue
+        if msg['parent_header'].get('msg_id') != msg_id:
+            continue
+        if msg['header']['msg_type'] == 'status':
+            if msg['content']['execution_state'] == 'idle':
+                break
+
+    # Get the shell reply which contains user_expressions
+    try:
+        reply = kernel_client.get_shell_msg(timeout=5.0)
+        expr = reply['content'].get('user_expressions', {}).get('_details', {})
+        if expr.get('status') == 'ok':
+            text = expr['data']['text/plain']
+            return ast.literal_eval(text)
+        else:
+            log(f'Checkpoint details expression error: {expr}')
+    except Exception as e:
+        log(f'Checkpoint details failed: {e}')
+
+    return {'num_checkpoints': 0, 'total_bytes': 0, 'by_type': {}, 'top_variables': []}
 
 
 def run_rerun_trials(
