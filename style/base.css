@@ -800,14 +800,16 @@
    FlowBook Reproducibility Styles
    ======================================== */
 
-/* Stale cell highlighting */
-.jp-Cell.flowbook-cell-stale {
-  border-left: 4px solid #ffc107;
-  background-color: rgb(255 193 7 / 12%);
+/* Stale cell highlighting - only the editor box, not the full cell */
+.jp-Cell.flowbook-cell-stale .jp-InputArea-editor {
+  background-color: rgb(255 193 7 / 15%);
+  border: 1px solid #ffc107;
 }
 
-.jp-Cell.flowbook-cell-stale .jp-InputArea-editor {
-  background-color: rgb(255 193 7 / 8%);
+/* Unexecuted cell highlighting - same as stale but no notice message */
+.jp-Cell.flowbook-cell-unexecuted .jp-InputArea-editor {
+  background-color: rgb(255 193 7 / 15%);
+  border: 1px solid #ffc107;
 }
 
 /* FlowBook Reproducibility Variable/Cell Lists */
@@ -871,7 +873,6 @@
 
 .flowbook-violation-header {
   font-weight: bold;
-  color: var(--jp-error-color1);
   margin-bottom: 8px;
 }
 
@@ -938,4 +939,73 @@
 .flowbook-warning-list li {
   margin: 4px 0;
   color: #856404;
+}
+
+/* Staleness notice output */
+.flowbook-staleness-notice {
+  background-color: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 0.88em;
+  color: #664d03;
+}
+
+.flowbook-staleness-notice code {
+  background-color: rgb(255 193 7 / 18%);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+/* Violation notice output (matches staleness notice pattern) */
+.flowbook-violation-notice {
+  background-color: #f8d7da;
+  border: 1px solid #f5c2c7;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 0.88em;
+  color: #842029;
+}
+
+.flowbook-violation-notice code {
+  background-color: rgb(220 53 69 / 15%);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+/* Contamination notice output (forward dependency - matches staleness colors) */
+.flowbook-contamination-notice {
+  background-color: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 0.88em;
+  color: #664d03;
+}
+
+.flowbook-contamination-notice code {
+  background-color: rgb(255 193 7 / 18%);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+/* Violation notice sections for detailed messages */
+.flowbook-violation-header {
+  margin-bottom: 4px;
+}
+
+.flowbook-violation-section {
+  margin-top: 4px;
+  border: none;
+  background: none;
+}
+
+.flowbook-violation-section ul {
+  margin: 2px 0 0 20px;
+  padding: 0;
+  list-style-type: disc;
+}
+
+.flowbook-violation-section li {
+  margin: 0;
 }

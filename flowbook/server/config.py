@@ -8,10 +8,10 @@ class FlowbookConfig(BaseModel):
     ensuring consistent behavior between Jupyter server and CLI usage.
     """
     model: str = Field(
-        default="gpt-5.1",
+        default="claude-opus-4-5",
         description="The model to use for AI-powered commands"
     )
     fast_model: str = Field(
-        default="gpt-5.1-mini",
+        default="claude-opus-4-5",
         description="The fast model to use for lightweight AI operations"
     )

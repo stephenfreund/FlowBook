@@ -503,7 +503,7 @@ class StructuralAccessTracker:
         """Set the currently active tracker."""
         _structural_thread_local.structural_tracker = tracker
 
-    def __init__(self, mode: StructuralTrackingMode = StructuralTrackingMode.WARN,
+    def __init__(self, mode: StructuralTrackingMode = StructuralTrackingMode.ENFORCE,
                  namespace_ref: Optional[dict] = None):
         """
         Initialize the tracker.

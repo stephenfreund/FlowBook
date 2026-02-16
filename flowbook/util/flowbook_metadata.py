@@ -142,6 +142,43 @@ class UnitTests(BaseModel):
     )
 
 
+class ProposedFixEntry(BaseModel):
+    """A single cell modification in a proposed fix."""
+
+    cell_ids: List[str] = Field(
+        description="IDs of cells affected by this entry (usually one, multiple for merge)"
+    )
+    modified_source: str = Field(
+        description="The new source code for the cell(s). Empty string means delete."
+    )
+    explanation: str = Field(
+        description="Brief explanation of this specific change"
+    )
+
+
+class ProposedFix(BaseModel):
+    """A proposed fix for a reproducibility violation."""
+
+    violation_type: str = Field(
+        description="Type of violation: 'backward_mutation' or 'forward_dependency'"
+    )
+    mutating_cell: str = Field(
+        description="ID of the cell that caused the violation"
+    )
+    affected_cell: str = Field(
+        description="ID of the cell affected by the violation"
+    )
+    strategy: str = Field(
+        description="Fix strategy: 'alpha_rename', 'copy_value', 'merge_cells', or 'reorder'"
+    )
+    fix_entries: List[ProposedFixEntry] = Field(
+        description="List of cell modifications to apply"
+    )
+    explanation: str = Field(
+        description="Overall explanation of the fix strategy"
+    )
+
+
 class FlowbookMetadata(BaseModel):
     optimization_potential: Optional[OptimizationPotential] = None
     profile: Optional[ProfileData] = None
@@ -150,6 +187,7 @@ class FlowbookMetadata(BaseModel):
     optimized: Optional[OptimizedCodeMetadata] = None
     optimization_applied: Optional[OptimizationAppliedMetadata] = None
     unit_tests: Optional[UnitTests] = None
+    proposed_fix: Optional[ProposedFix] = None
 
     def get_optimization_potential(self) -> Optional[OptimizationPotential]:
         return self.optimization_potential
@@ -196,6 +234,15 @@ class FlowbookMetadata(BaseModel):
 
     def set_unit_tests(self, metadata: UnitTests) -> FlowbookMetadata:
         return self.model_copy(update={"unit_tests": metadata})
+
+    def get_proposed_fix(self) -> Optional[ProposedFix]:
+        return self.proposed_fix
+
+    def set_proposed_fix(self, metadata: ProposedFix) -> FlowbookMetadata:
+        return self.model_copy(update={"proposed_fix": metadata})
+
+    def clear_proposed_fix(self) -> FlowbookMetadata:
+        return self.model_copy(update={"proposed_fix": None})
 
     @staticmethod
     def from_cell(cell: nbformat.NotebookNode) -> FlowbookMetadata:
@@ -306,3 +353,28 @@ def get_flowbook_metadata_from_cell(cell: nbformat.NotebookNode) -> dict | None:
         return flowbook
     # fallback, it is a BaseModel
     return FlowbookMetadata.model_validate(flowbook).model_dump()
+
+
+def set_proposed_fix_flowbook_metadata(
+    cell: nbformat.NotebookNode, metadata: ProposedFix
+) -> None:
+    """Set the proposed fix metadata for a cell."""
+    if "metadata" not in cell:
+        cell["metadata"] = {}
+    flowbook = cell["metadata"].get("flowbook", {})
+    if not isinstance(flowbook, dict):
+        flowbook = FlowbookMetadata.model_validate(flowbook).model_dump()
+    flowbook["proposed_fix"] = metadata.model_dump()
+    cell["metadata"]["flowbook"] = flowbook
+
+
+def clear_proposed_fix_flowbook_metadata(cell: nbformat.NotebookNode) -> None:
+    """Clear the proposed fix metadata from a cell."""
+    if "metadata" not in cell:
+        return
+    flowbook = cell["metadata"].get("flowbook", {})
+    if not isinstance(flowbook, dict):
+        flowbook = FlowbookMetadata.model_validate(flowbook).model_dump()
+    if "proposed_fix" in flowbook:
+        del flowbook["proposed_fix"]
+    cell["metadata"]["flowbook"] = flowbook

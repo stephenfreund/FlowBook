@@ -49,10 +49,10 @@ class TestStructuralTrackingMode:
 class TestStructuralAccessTrackerInit:
     """Tests for StructuralAccessTracker initialization."""
 
-    def test_default_mode_is_warn(self):
-        """Default mode is WARN."""
+    def test_default_mode_is_enforce(self):
+        """Default mode is ENFORCE."""
         tracker = StructuralAccessTracker()
-        assert tracker.mode == StructuralTrackingMode.WARN
+        assert tracker.mode == StructuralTrackingMode.ENFORCE
 
     def test_custom_mode(self):
         """Can initialize with custom mode."""

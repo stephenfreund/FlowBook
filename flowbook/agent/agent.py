@@ -217,9 +217,9 @@ class FlowbookAgent(Agent, Generic[T], RunHooks[FlowbookContext]):
         context.context.usage = context.usage
 
     @staticmethod
-    async def make_and_run_agent(
+    async def make_and_run_agent( 
         key: str,
-        model: str = "gpt-4o-mini",
+        model: str = "claude-opus-4-5",
         instructions: str = "Answer the question.",
         output_type: Type[T] | None = None,
         tools: List[Tool] = [],
@@ -246,7 +246,7 @@ class FlowbookAgent(Agent, Generic[T], RunHooks[FlowbookContext]):
 def main():
     agent = FlowbookAgent(
         key="test-agent",
-        model="gpt-4o-mini",
+        model="claude-opus-4-5",
         instructions="You are a test agent.",
     )
     response, stats = asyncio.run(agent.run("What is the capital of France?"))
@@ -266,7 +266,7 @@ def main():
 
     agent = FlowbookAgent(
         key="test-agent",
-        model="gpt-4o-mini",
+        model="claude-opus-4-5",
         instructions="You are a test agent.",
         output_type=TestOutput,
     )
@@ -280,7 +280,7 @@ def main():
 
     agent = FlowbookAgent(
         key="test-agent",
-        model="gpt-4o-mini",
+        model="claude-opus-4-5",
         instructions="You are a test agent.",
         output_type=str,
     )

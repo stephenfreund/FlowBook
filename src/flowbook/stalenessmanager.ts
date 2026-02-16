@@ -4,7 +4,7 @@
 
 import { NotebookPanel } from '@jupyterlab/notebook';
 import { ISignal, Signal } from '@lumino/signaling';
-import { IReproducibilityMetadata } from './types';
+import { IReproducibilityMetadata, IStalenessReason } from './types';
 
 export interface IStalenessChange {
   added: string[];
@@ -14,6 +14,7 @@ export interface IStalenessChange {
 
 export class StalenessManager {
   private _staleCells = new Set<string>();
+  private _stalenessReasons = new Map<string, IStalenessReason>();
   private _stalenessChanged = new Signal<this, IStalenessChange>(this);
   private _notebook: NotebookPanel;
 
@@ -35,6 +36,20 @@ export class StalenessManager {
    */
   isCellStale(cellId: string): boolean {
     return this._staleCells.has(cellId);
+  }
+
+  /**
+   * Store the reason a cell became stale
+   */
+  setReason(cellId: string, reason: IStalenessReason): void {
+    this._stalenessReasons.set(cellId, reason);
+  }
+
+  /**
+   * Get the reason a cell is stale
+   */
+  getReason(cellId: string): IStalenessReason | undefined {
+    return this._stalenessReasons.get(cellId);
   }
 
   /**
@@ -66,6 +81,11 @@ export class StalenessManager {
     console.log('StalenessManager: After update, stale cells =', [
       ...this._staleCells
     ]);
+    // Clear reasons for cells that are no longer stale
+    for (const id of removed) {
+      this._stalenessReasons.delete(id);
+    }
+
     console.log('StalenessManager: Added =', added, ', Removed =', removed);
 
     if (added.length > 0 || removed.length > 0) {
@@ -83,6 +103,7 @@ export class StalenessManager {
   clear(): void {
     const removed = [...this._staleCells];
     this._staleCells.clear();
+    this._stalenessReasons.clear();
 
     if (removed.length > 0) {
       this._stalenessChanged.emit({
@@ -106,5 +127,6 @@ export class StalenessManager {
 
   dispose(): void {
     this._staleCells.clear();
+    this._stalenessReasons.clear();
   }
 }

@@ -18,6 +18,7 @@ from flowbook.server.commands.test import TestCommand
 from flowbook.server.commands.generate_tests import GenerateTestsCommand
 from flowbook.server.commands.prepare_code import PrepareCodeForFlowbookCommand
 from flowbook.server.commands.test_leq import TestLeqCommand
+from flowbook.server.commands.fix import FixCommand
 
 __all__ = [
     "AnalyzeNotebookCommand",
@@ -36,5 +37,6 @@ __all__ = [
     "GenerateTestsCommand",
     "PrepareCodeForFlowbookCommand",
     "TestLeqCommand",
+    "FixCommand",
 ]
 

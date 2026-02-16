@@ -93,14 +93,14 @@ def cli_main():
 
     parser.add_argument(
         "--model",
-        default="gpt-4o",
-        help="AI model to use for commands (default: gpt-4o)",
+        default="claude-opus-4-5",
+        help="AI model to use for commands (default: claude-opus-4-5)",
     )
 
     parser.add_argument(
         "--fast-model",
-        default="gpt-4o-mini",
-        help="Fast AI model to use for lightweight operations (default: gpt-4o-mini)",
+        default="claude-sonnet-4-5",
+        help="Fast AI model to use for lightweight operations (default: claude-sonnet-4-5)",
     )
 
     parser.add_argument(

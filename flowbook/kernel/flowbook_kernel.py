@@ -426,6 +426,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         # Continue after violation flag (default: stop on violation)
         self._continue_after_violation: bool = False
 
+        # Pending EXEC-RESTORE flag: set by %exec_restore, consumed by _do_execute_impl
+        self._pending_exec_restore: Optional[str] = None
+
     # =========================================================================
     # Magic Commands
     # =========================================================================
@@ -523,6 +526,77 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         self._display.display_icon_and_text(
             "⚠️", f"Stale cells: {', '.join(stale_refs)}"
         )
+
+    @line_magic
+    def cell_edited(self, line: str) -> None:
+        """[EDIT transition] Mark a cell as edited (stale) (§2.3).
+
+        Usage:
+            %cell_edited <cell_id>
+        """
+        cell_id = line.strip()
+        if not cell_id:
+            return
+
+        stale_cells = self._enforcer.mark_cell_edited(cell_id)
+        if cell_id in [c for c in stale_cells]:
+            # Send updated staleness info to frontend
+            metadata = ReproducibilityMetadata(
+                cell_id=cell_id,
+                execution_seq=self._enforcer.seq_counter,
+                reads=[],
+                writes=[],
+                changed_variables=[],
+                stale_cells=stale_cells,
+                violation=None,
+                cell_order=self._enforcer.cell_order,
+            )
+            self._display.display_icon_and_text(
+                "✏️",
+                f"Cell edited, marked stale",
+                metadata=metadata.to_display_metadata(),
+            )
+
+    @line_magic
+    def exec_restore(self, line: str) -> None:
+        """[EXEC-RESTORE] Request execution from prefix checkpoint (§1.8).
+
+        Sets a pending flag that is consumed by the next _do_execute_impl() call.
+        The frontend sends this magic silently before triggering cell execution,
+        so the ZMQ queue ordering is: %exec_restore → %notebook_structure → cell code.
+
+        Usage:
+            %exec_restore <cell_id>
+        """
+        cell_id = line.strip()
+        log(f"[exec_restore magic] Received for cell_id={cell_id!r}")
+        if not cell_id:
+            self._display.display_icon_and_text(
+                "❌", "Usage: %exec_restore <cell_id>"
+            )
+            return
+
+        can_restore = self._enforcer.can_exec_restore(cell_id)
+        if not can_restore:
+            # Identify the immediate predecessor for a helpful error message
+            try:
+                pos = self._enforcer.cell_order.index(cell_id)
+                cell_alpha = index_to_alpha(pos)
+                if pos > 0:
+                    prev_alpha = index_to_alpha(pos - 1)
+                    msg = (
+                        f"Cannot restore {cell_alpha}: predecessor {prev_alpha} "
+                        f"has not been executed or is stale. Run {prev_alpha} first."
+                    )
+                else:
+                    msg = f"Cannot restore {cell_alpha}: cell not in notebook order."
+            except (ValueError, IndexError):
+                msg = "Cannot restore: cell not in notebook order."
+            self._display.display_icon_and_text("❌", msg)
+            return
+
+        self._pending_exec_restore = cell_id
+        log(f"[exec_restore magic] Pending flag set for {cell_id}")
 
     @line_magic
     def structural_tracking(self, line: str) -> None:
@@ -662,6 +736,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             # Patch run_code to use TrackingDict for both globals and locals
             self._patch_run_code(tracking_dict)
 
+            # Save initial state checkpoint (σ_0) for EXEC-RESTORE on the first cell
+            self._take_checkpoint("_initial_state")
+
     def _patch_run_code(self, tracking_dict: TrackingDict) -> None:
         """
         Patch shell.run_code to use TrackingDict for both globals and locals.
@@ -755,6 +832,89 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         allow_stdin,
                         cell_meta,
                     )
+
+                # [EXEC-RESTORE] Check and consume pending flag set by %exec_restore magic.
+                _is_exec_restore = False
+                _old_live_checkpoint = None
+
+                if self._pending_exec_restore is not None:
+                    if self._pending_exec_restore == self._cell_id:
+                        # Re-validate precondition (predecessors may have become stale
+                        # between the magic and execution)
+                        if self._enforcer.can_exec_restore(self._cell_id):
+                            prefix_name = self._enforcer.get_prefix_checkpoint_name(self._cell_id)
+
+                            if prefix_name is None:
+                                # First cell — restore to initial state (σ_0)
+                                if "_initial_state" in self._checkpoints.memory.saved:
+                                    _old_live_checkpoint = self._take_checkpoint(
+                                        f"_old_live_{self._cell_id}"
+                                    )
+                                    self._restore_checkpoint("_initial_state")
+                                    _is_exec_restore = True
+                                    log(f"[exec_restore] Restored initial state for first cell {self._cell_id}")
+                                else:
+                                    log(f"[exec_restore] No initial state checkpoint, executing normally")
+
+                            elif prefix_name in self._checkpoints.memory.saved:
+                                # Non-first cell, predecessor has been run — normal restore
+                                _old_live_checkpoint = self._take_checkpoint(
+                                    f"_old_live_{self._cell_id}"
+                                )
+                                self._restore_checkpoint(prefix_name)
+                                _is_exec_restore = True
+                                log(f"[exec_restore] Restored prefix checkpoint {prefix_name} for cell {self._cell_id}")
+
+                            else:
+                                # Non-first cell, predecessor NOT run — refuse
+                                try:
+                                    cell_idx = self._enforcer.cell_order.index(self._cell_id)
+                                    prev_idx = cell_idx - 1
+                                    prev_alpha = index_to_alpha(prev_idx)
+                                    cell_alpha = index_to_alpha(cell_idx)
+                                except (ValueError, IndexError):
+                                    prev_alpha = "?"
+                                    cell_alpha = self._cell_id
+                                error_msg = (
+                                    f"Cannot restore {cell_alpha}: predecessor {prev_alpha} "
+                                    f"has not been executed. Run {prev_alpha} first."
+                                )
+                                log(f"[exec_restore] {error_msg}")
+                                self._display.display_icon_and_text("❌", error_msg)
+                                self._pending_exec_restore = None
+                                return {
+                                    "status": "error",
+                                    "execution_count": self.execution_count,
+                                    "ename": "ExecRestoreError",
+                                    "evalue": error_msg,
+                                    "traceback": [error_msg],
+                                }
+
+                            # Emit visible notification on successful restore
+                            if _is_exec_restore:
+                                try:
+                                    cell_idx = self._enforcer.cell_order.index(self._cell_id)
+                                    cell_alpha = index_to_alpha(cell_idx)
+                                    if cell_idx > 0:
+                                        prev_alpha = index_to_alpha(cell_idx - 1)
+                                        self._display.display_icon_and_text(
+                                            "↩",
+                                            f"Restored from {prev_alpha} checkpoint — re-executing {cell_alpha} from prefix state",
+                                        )
+                                    else:
+                                        self._display.display_icon_and_text(
+                                            "↩",
+                                            f"Restored to initial state — re-executing {cell_alpha}",
+                                        )
+                                except (ValueError, IndexError):
+                                    self._display.display_icon_and_text(
+                                        "↩",
+                                        "Restored from prefix checkpoint — re-executing",
+                                    )
+                        else:
+                            log(f"[exec_restore] Precondition no longer valid for cell {self._cell_id}, executing normally")
+                    # Clear flag regardless (user may have executed a different cell)
+                    self._pending_exec_restore = None
 
                 # Take pre-execution snapshot
                 user_ns = self.shell.user_ns
@@ -862,27 +1022,29 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             tracking=tracking,
                             continue_on_violation=self._continue_after_violation,
                             namespace=self.shell.user_ns,  # For capturing structural read values
+                            is_exec_restore=_is_exec_restore,
+                            old_live_checkpoint=_old_live_checkpoint,
                         )
 
                     # Handle violations (backward mutation and/or forward dependency)
                     has_backward = sdc_result and sdc_result.violation
                     has_forward = sdc_result and sdc_result.forward_violation
 
-                    if has_backward or has_forward:
+                    # [EXEC-REJECT] Backward conflict → rollback (Def 1.8.2)
+                    if has_backward:
                         if self._continue_after_violation:
-                            # Warn about both violations but continue
-                            if has_backward:
-                                if sdc_result.violation.truncation_details:
-                                    error(
-                                        f"Reproducibility truncation: {sdc_result.violation.message}"
-                                    )
-                                    self._send_truncation_details(
-                                        sdc_result.violation.truncation_details
-                                    )
+                            # Warn about backward violation but continue
+                            if sdc_result.violation.truncation_details:
                                 error(
-                                    f"Reproducibility violation (continuing): {sdc_result.violation.message}"
+                                    f"Reproducibility truncation: {sdc_result.violation.message}"
                                 )
-                                self._send_violation_warning(sdc_result.violation)
+                                self._send_truncation_details(
+                                    sdc_result.violation.truncation_details
+                                )
+                            error(
+                                f"Reproducibility violation (continuing): {sdc_result.violation.message}"
+                            )
+                            self._send_violation_warning(sdc_result.violation)
                             if has_forward:
                                 error(
                                     f"Forward dependency (continuing): {sdc_result.forward_violation.message}"
@@ -891,15 +1053,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                     sdc_result.forward_violation
                                 )
                         else:
-                            # Block on violation - backward takes precedence
-                            primary = (
-                                sdc_result.violation
-                                if has_backward
-                                else sdc_result.forward_violation
-                            )
-
-                            # Log truncation issues to terminal (for backward mutations)
-                            if has_backward and sdc_result.violation.truncation_details:
+                            # Block on backward violation
+                            # Log truncation issues to terminal
+                            if sdc_result.violation.truncation_details:
                                 error(
                                     f"Reproducibility truncation: {sdc_result.violation.message}"
                                 )
@@ -907,27 +1063,32 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                     sdc_result.violation.truncation_details
                                 )
 
-                            error(f"Reproducibility violation: {primary.message}")
+                            error(f"Reproducibility violation: {sdc_result.violation.message}")
 
-                            # Only rollback for backward mutations (forward deps didn't change anything)
-                            if has_backward:
-                                self._restore_checkpoint(
-                                    f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
-                                )
+                            self._restore_checkpoint(
+                                f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
+                            )
 
-                            self._send_violation_error(primary)
+                            self._send_violation_error(sdc_result.violation)
 
                             # Also report forward violation if both exist
-                            if has_backward and has_forward:
+                            if has_forward:
                                 self._send_violation_warning(
                                     sdc_result.forward_violation
                                 )
 
-                            return self._make_error_result(primary)
+                            return self._make_error_result(sdc_result.violation)
 
-                    # Display results (skip if silent, error, or violation with rollback)
+                    # [EXEC-CONTAMINATED] Forward contamination → warn, don't reject (§1.8)
+                    if has_forward and not has_backward:
+                        error(
+                            f"Forward dependency (contaminated): {sdc_result.forward_violation.message}"
+                        )
+                        self._send_violation_warning(sdc_result.forward_violation)
+
+                    # Display results (skip if silent, error, or backward violation with rollback)
                     skip_display = (
-                        has_backward or has_forward
+                        has_backward
                     ) and not self._continue_after_violation
                     if (
                         not silent
@@ -946,6 +1107,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             pre_state_ms=pre_ms,
                             post_state_ms=post_ms,
                         )
+
+                # Clean up temporary old live checkpoint used for EXEC-RESTORE
+                if _old_live_checkpoint is not None:
+                    self._checkpoints.delete(f"_old_live_{self._cell_id}")
 
                 return result
             except Exception as e:
@@ -1193,7 +1358,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             violation=(
                 sdc_result.violation.to_dict()
                 if (sdc_result and sdc_result.violation)
-                else None
+                else (
+                    sdc_result.forward_violation.to_dict()
+                    if (sdc_result and sdc_result.forward_violation)
+                    else None
+                )
             ),
             cell_order=self._enforcer.cell_order,
             column_reads=tracking_json["column_reads"],
@@ -1206,6 +1375,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             run_duration_ms=run_duration,
             state_duration_ms=state_duration,
             check_duration_ms=check_duration,
+            cell_is_contaminated=sdc_result.cell_is_contaminated if sdc_result else False,
+            exec_mode=sdc_result.exec_mode if sdc_result else "live",
         )
 
         # Log and display structural warnings
@@ -1274,8 +1445,27 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
     def _send_violation_error(self, violation) -> None:
         """Send Reproducibility violation as error via iopub.
 
-        Uses the violation.message from the enforcer verbatim.
+        Emits structured flowbook metadata before the error so the frontend
+        can store and update violation info (e.g., when cells are reordered).
         """
+        # Emit structured metadata for the frontend
+        metadata = ReproducibilityMetadata(
+            cell_id=self._cell_id or "",
+            execution_seq=self._enforcer.seq_counter,
+            reads=[],
+            writes=[],
+            changed_variables=[],
+            stale_cells=self._enforcer.get_stale_cells(),
+            violation=violation.to_dict(),
+            cell_order=self._enforcer.cell_order,
+        )
+        self._display.display_icon_and_text(
+            "❌",
+            "Backward violation",
+            metadata=metadata.to_display_metadata(),
+        )
+
+        # Then send the error
         self.send_response(
             self.iopub_socket,
             "error",

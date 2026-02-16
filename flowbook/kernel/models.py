@@ -54,7 +54,7 @@ class ReproducibilityViolation:
 
 @dataclass
 class ReproducibilityExecutionRecord:
-    """Record of a cell's most recent execution."""
+    """Record of a cell's most recent execution — Rec[i] in the formalism (§1.6)."""
 
     cell_id: str
     tracking: TrackingData
@@ -69,7 +69,7 @@ class ReproducibilityExecutionRecord:
 
 @dataclass
 class ReproducibilityResult:
-    """Result of SDC check after cell execution."""
+    """Result of monitor check — determines transition rule (EXEC-ACCEPT/CONTAMINATED/REJECT)."""
 
     violation: Optional[ReproducibilityViolation]  # Primary violation (backward mutation)
     stale_cells: List[str]  # cell IDs that need re-execution (document order)
@@ -77,6 +77,8 @@ class ReproducibilityResult:
     column_changed: Dict[str, List[str]] = field(default_factory=dict)  # var -> [changed columns]
     structural_warnings: List[str] = field(default_factory=list)  # warnings from WARN mode
     forward_violation: Optional[ReproducibilityViolation] = None  # Forward dependency violation (if any)
+    cell_is_contaminated: bool = False  # [EXEC-CONTAMINATED] True if cell executed but is forward-contaminated
+    exec_mode: str = "live"  # [EXEC-RESTORE] "live" or "restore"
 
 
 @dataclass
@@ -105,6 +107,8 @@ class ReproducibilityMetadata:
     run_duration_ms: float = 0.0  # Code execution time
     state_duration_ms: float = 0.0  # Checkpoint time (pre + post)
     check_duration_ms: float = 0.0  # SDC check time
+    cell_is_contaminated: bool = False  # [EXEC-CONTAMINATED] True if forward-contaminated
+    exec_mode: str = "live"  # [EXEC-RESTORE] "live" or "restore"
 
     def to_display_metadata(self) -> dict:
         """Format for display in output metadata."""
@@ -128,5 +132,7 @@ class ReproducibilityMetadata:
                 "run_duration_ms": self.run_duration_ms,
                 "state_duration_ms": self.state_duration_ms,
                 "check_duration_ms": self.check_duration_ms,
+                "cell_is_contaminated": self.cell_is_contaminated,
+                "exec_mode": self.exec_mode,
             }
         }

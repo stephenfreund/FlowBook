@@ -152,8 +152,17 @@ class TestReproducibilityEnforcer:
         assert "b" not in result.stale_cells
 
     def test_cell_order_update_affects_violation_check(self):
-        """Cell order can be updated, affecting position-based checks."""
-        # Initially [a, b, c, d]
+        """Cell order can be updated, affecting position-based checks.
+
+        Scenario 1: order [a, b] — A before B, so A modifying x is not a
+        backward violation against B.
+
+        Scenario 2: order [b, a] — B before A, so A modifying x IS a
+        backward violation against B (B reads x).
+
+        We use a fresh enforcer for scenario 2 to avoid cross-contamination.
+        """
+        # Scenario 1: [a, b, c, d] — A is before B
         # B reads x
         self._save_pre_checkpoint("b", {"x": 1})
         post_b = self._make_post_checkpoint("post_b", {"x": 1})
@@ -165,7 +174,6 @@ class TestReproducibilityEnforcer:
         )
 
         # A modifies x - A is before B in order, so NOT a violation
-        # (B can depend on A, that's forward dependency)
         self._save_pre_checkpoint("a", {"x": 1})
         post_a = self._make_post_checkpoint("post_a", {"x": 2})
         result = self.sdc.check(
@@ -176,12 +184,22 @@ class TestReproducibilityEnforcer:
         )
         assert result.violation is None
 
-        # Now reorder: [b, a, c, d] - B is now before A
+        # Scenario 2: Fresh state with order [b, a, c, d] — B is before A
+        self.sdc.reset()
         self.sdc.set_cell_order(["b", "a", "c", "d"])
 
+        # B reads x (fresh)
+        self._save_pre_checkpoint("b", {"x": 1})
+        post_b2 = self._make_post_checkpoint("post_b2", {"x": 1})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b2,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
         # A modifies x - now A is AFTER B, so this IS a violation
-        # (A is mutating what B, an earlier cell, reads)
-        self._save_pre_checkpoint("a", {"x": 2})
+        self._save_pre_checkpoint("a", {"x": 1})
         post_a2 = self._make_post_checkpoint("post_a2", {"x": 3})
         result = self.sdc.check(
             cell_id="a",
@@ -2367,3 +2385,416 @@ class TestDeepAliasIntegration:
         # Lookup should be much faster than build (rough sanity check)
         # 100 lookups should take less time than building once
         # (unless namespace is very simple)
+
+
+class TestExecRestore:
+    """Tests for EXEC-RESTORE transition rule (§1.8)."""
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
+        self.checkpoints.save(name, namespace, max_size_mb=None)
+        return self.checkpoints.saved[name]
+
+    def test_can_exec_restore_all_fresh(self):
+        """can_exec_restore returns True when all j < i are fresh."""
+        # Execute A and B (both fresh)
+        self._save_pre_checkpoint("a", {})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        self._save_pre_checkpoint("b", {"x": 1})
+        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # C can exec-restore since A and B are both fresh
+        assert self.sdc.can_exec_restore("c") is True
+
+    def test_can_exec_restore_with_stale_predecessor(self):
+        """can_exec_restore returns False when any j < i is stale."""
+        # Execute A
+        self._save_pre_checkpoint("a", {})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Execute B
+        self._save_pre_checkpoint("b", {"x": 1})
+        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Mark B stale (immediate predecessor of C)
+        self.sdc._stale_cells.add("b")
+
+        # C cannot exec-restore since B (immediate predecessor) is stale
+        assert self.sdc.can_exec_restore("c") is False
+
+    def test_can_exec_restore_with_unexecuted_predecessor(self):
+        """can_exec_restore returns False when a predecessor hasn't executed."""
+        # Only execute A (skip B)
+        self._save_pre_checkpoint("a", {})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # C cannot exec-restore since B hasn't executed
+        assert self.sdc.can_exec_restore("c") is False
+
+    def test_can_exec_restore_first_cell(self):
+        """First cell can always exec-restore (no predecessors)."""
+        assert self.sdc.can_exec_restore("a") is True
+
+    def test_exec_restore_cell_is_fresh(self):
+        """Cell is always fresh after EXEC-RESTORE."""
+        # Mark C as stale
+        self._save_pre_checkpoint("c", {})
+        post_c = self._make_post_checkpoint("post_c", {"z": 1})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads=set(), writes={"z"}),
+        )
+        self.sdc._stale_cells.add("c")
+        assert "c" in self.sdc._stale_cells
+
+        # EXEC-RESTORE for C
+        self._save_pre_checkpoint("c", {"z": 1})
+        post_c2 = self._make_post_checkpoint("post_c2", {"z": 2})
+        result = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c2,
+            tracking=make_tracking(reads=set(), writes={"z"}),
+            is_exec_restore=True,
+        )
+
+        # Cell is fresh (not stale)
+        assert "c" not in self.sdc._stale_cells
+        assert result.exec_mode == "restore"
+
+    def test_exec_restore_no_backward_check(self):
+        """EXEC-RESTORE skips backward conflict check."""
+        # Execute A (reads x)
+        self._save_pre_checkpoint("a", {"x": 1})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # B modifies x — would normally be backward violation against A
+        # But with is_exec_restore=True, no backward check
+        self._save_pre_checkpoint("b", {"x": 1})
+        post_b = self._make_post_checkpoint("post_b", {"x": 999})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+            is_exec_restore=True,
+        )
+
+        # No violation in EXEC-RESTORE mode
+        assert result.violation is None
+        assert result.forward_violation is None
+        assert result.exec_mode == "restore"
+
+    def test_exec_restore_stalefwd_uses_old_live_delta(self):
+        """StaleFwd uses Δ(old_live, post) in EXEC-RESTORE mode."""
+        # Execute C (reads y)
+        self._save_pre_checkpoint("c", {"y": 0})
+        post_c = self._make_post_checkpoint("post_c", {"y": 0})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads={"y"}, writes=set()),
+        )
+
+        # EXEC-RESTORE for B: old live has y=0, post has y=99
+        # Create old_live checkpoint
+        self.checkpoints.save("_old_live_b", {"y": 0}, max_size_mb=None)
+        old_live = self.checkpoints.saved["_old_live_b"]
+
+        self._save_pre_checkpoint("b", {"y": 0})  # prefix state
+        post_b = self._make_post_checkpoint("post_b", {"y": 99})  # after execution
+
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads=set(), writes={"y"}),
+            is_exec_restore=True,
+            old_live_checkpoint=old_live,
+        )
+
+        # C reads y, and y changed from 0→99 in old_live→post delta
+        # So C should be stale
+        assert "c" in result.stale_cells
+
+    def test_get_prefix_checkpoint_name(self):
+        """get_prefix_checkpoint_name returns correct checkpoint name."""
+        from flowbook.kernel.reproducibility_enforcer import POST_CHECKPOINT_PREFIX
+
+        # First cell → None
+        assert self.sdc.get_prefix_checkpoint_name("a") is None
+
+        # Second cell → post_a
+        assert self.sdc.get_prefix_checkpoint_name("b") == f"{POST_CHECKPOINT_PREFIX}a"
+
+        # Third cell → post_b
+        assert self.sdc.get_prefix_checkpoint_name("c") == f"{POST_CHECKPOINT_PREFIX}b"
+
+    def test_exec_restore_first_cell(self):
+        """First cell EXEC-RESTORE works (no prefix checkpoint)."""
+        self._save_pre_checkpoint("a", {})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+            is_exec_restore=True,
+        )
+
+        assert result.violation is None
+        assert result.exec_mode == "restore"
+        assert "a" not in self.sdc._stale_cells
+
+
+class TestBackwardConflictFreshOnly:
+    """Tests that BackConflict only checks fresh cells (Def 1.8.2)."""
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
+        self.checkpoints.save(name, namespace, max_size_mb=None)
+        return self.checkpoints.saved[name]
+
+    def test_backward_conflict_skips_stale_cells(self):
+        """Stale prior cell should be excluded from backward conflict check.
+
+        Setup: Cell A reads x, then mark A stale. Cell B modifies x.
+        Expected: No violation because A is stale (BackConflict only checks fresh).
+        """
+        # Cell A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Mark A stale
+        self.sdc._stale_cells.add("a")
+
+        # Cell B modifies x — should NOT trigger violation because A is stale
+        self._save_pre_checkpoint("b", {"x": 1})
+        post_b = self._make_post_checkpoint("post_b", {"x": 999})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        assert result_b.violation is None
+
+    def test_backward_conflict_still_fires_for_fresh_cells(self):
+        """Fresh prior cell should still trigger backward conflict.
+
+        Setup: Cell A reads x (fresh), Cell B modifies x.
+        Expected: Violation because A is fresh.
+        """
+        # Cell A reads x (fresh — not in _stale_cells)
+        self._save_pre_checkpoint("a", {"x": 1})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell B modifies x — SHOULD trigger violation because A is fresh
+        self._save_pre_checkpoint("b", {"x": 1})
+        post_b = self._make_post_checkpoint("post_b", {"x": 999})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        assert result_b.violation is not None
+        assert result_b.violation.mutating_cell == "b"
+        assert result_b.violation.affected_cell == "a"
+
+    def test_backward_conflict_mixed_stale_and_fresh(self):
+        """When multiple prior cells exist, only fresh ones trigger conflict.
+
+        Setup: Cell A reads x (stale), Cell B reads x (fresh), Cell C modifies x.
+        Expected: Violation against B (fresh) but not A (stale).
+        """
+        # Cell A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            post_checkpoint=post_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell B reads x
+        self._save_pre_checkpoint("b", {"x": 1})
+        post_b = self._make_post_checkpoint("post_b", {"x": 1})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            post_checkpoint=post_b,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Mark A stale, keep B fresh
+        self.sdc._stale_cells.add("a")
+
+        # Cell C modifies x — should conflict with B (fresh) but not A (stale)
+        self._save_pre_checkpoint("c", {"x": 1})
+        post_c = self._make_post_checkpoint("post_c", {"x": 999})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            post_checkpoint=post_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        assert result_c.violation is not None
+        # Should report B as the affected cell (first fresh cell in doc order that reads x)
+        # A is skipped because it's stale
+        assert result_c.violation.affected_cell == "b"
+
+
+class TestEditTriggeredStaleness:
+    """Tests for EDIT transition (§2.3) — mark_cell_edited()."""
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
+        self.checkpoints.save(name, namespace, max_size_mb=None)
+        return self.checkpoints.saved[name]
+
+    def _execute_cell(self, cell_id: str, pre_ns: dict, post_ns: dict,
+                      reads: set = None, writes: set = None):
+        """Helper to execute a cell with given pre/post namespaces."""
+        reads = reads or set()
+        writes = writes or set()
+        self._save_pre_checkpoint(cell_id, pre_ns)
+        post = self._make_post_checkpoint(f"post_{cell_id}", post_ns)
+        return self.sdc.check(
+            cell_id=cell_id,
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"],
+            post_checkpoint=post,
+            tracking=make_tracking(reads=reads, writes=writes),
+        )
+
+    def test_edit_marks_cell_stale(self):
+        """Editing an executed cell marks it stale."""
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        assert "a" not in self.sdc._stale_cells
+
+        stale = self.sdc.mark_cell_edited("a")
+        assert "a" in self.sdc._stale_cells
+        assert "a" in stale
+
+    def test_edit_does_not_propagate_downstream(self):
+        """Editing a cell does NOT propagate staleness to downstream cells.
+
+        Downstream propagation is deferred to execution time (StaleFwd).
+        """
+        # A writes x, B reads x
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        self._execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
+
+        assert "a" not in self.sdc._stale_cells
+        assert "b" not in self.sdc._stale_cells
+
+        # Edit A — only A should become stale, not B
+        self.sdc.mark_cell_edited("a")
+        assert "a" in self.sdc._stale_cells
+        assert "b" not in self.sdc._stale_cells
+
+    def test_edit_unexecuted_cell_is_noop(self):
+        """Editing an unexecuted cell has no effect."""
+        # "a" has never been executed — no record
+        stale = self.sdc.mark_cell_edited("a")
+        assert "a" not in self.sdc._stale_cells
+        assert stale == []
+
+    def test_edit_already_stale_cell(self):
+        """Editing an already-stale cell is idempotent."""
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+
+        # Mark stale via edit
+        self.sdc.mark_cell_edited("a")
+        assert "a" in self.sdc._stale_cells
+
+        # Mark stale again — no change
+        stale = self.sdc.mark_cell_edited("a")
+        assert "a" in self.sdc._stale_cells
+        assert stale.count("a") == 1  # Only appears once

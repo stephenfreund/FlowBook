@@ -13,6 +13,95 @@ import { ReproducibilityMetadataPanel } from './metadatapanel';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { CellIndexManager } from '../cellindex';
+import { IReproducibilityMetadata } from './types';
+import { FlowbookToolbarExtension } from './toolbar';
+
+/**
+ * Register the flowbook:exec-restore command at plugin startup.
+ *
+ * The command is registered once, but its isEnabled check gates on:
+ * 1. Current kernel is flowbook_kernel
+ * 2. Active cell has cell_is_contaminated === true
+ *
+ * The context menu item is defined declaratively in schema/plugin.json.
+ */
+function registerExecRestoreCommand(
+  app: JupyterFrontEnd,
+  tracker: INotebookTracker,
+  kernelDetector: KernelDetector
+): void {
+  const commandId = 'flowbook:exec-restore';
+
+  app.commands.addCommand(commandId, {
+    label: 'Run with upstream state',
+    isEnabled: () => {
+      try {
+        const panel = tracker.currentWidget;
+        if (!panel) {
+          return false;
+        }
+        // Gate on flowbook_kernel
+        if (!kernelDetector.isFlowbookKernel(panel)) {
+          return false;
+        }
+        const activeCell = panel.content.activeCell;
+        if (!activeCell || activeCell.model.type !== 'code') {
+          return false;
+        }
+        const meta = activeCell.model.getMetadata('flowbook') as
+          | IReproducibilityMetadata
+          | undefined;
+        return meta?.cell_is_contaminated === true;
+      } catch (e) {
+        console.error('FlowBook exec-restore isEnabled error:', e);
+        return false;
+      }
+    },
+    isVisible: () => {
+      try {
+        const panel = tracker.currentWidget;
+        if (!panel) {
+          return false;
+        }
+        return kernelDetector.isFlowbookKernel(panel);
+      } catch {
+        return false;
+      }
+    },
+    execute: async () => {
+      const panel = tracker.currentWidget;
+      if (!panel) {
+        return;
+      }
+      const activeCell = panel.content.activeCell;
+      if (!activeCell || activeCell.model.type !== 'code') {
+        return;
+      }
+      const cellId = activeCell.model.id;
+      const session = panel.sessionContext.session;
+      if (!session || !session.kernel) {
+        return;
+      }
+
+      // Send %exec_restore magic silently — sets the pending flag in the kernel.
+      // The kernel's ZMQ queue ensures ordering:
+      //   1. %exec_restore <cell_id>
+      //   2. %notebook_structure <order>  (sent by _onExecutionScheduled)
+      //   3. Cell code                    (_do_execute_impl consumes the flag)
+      const future = session.kernel.requestExecute({
+        code: `%exec_restore ${cellId}`,
+        silent: true,
+        store_history: false
+      });
+      await future.done;
+
+      // Now trigger cell execution via the standard notebook command.
+      // The right-click context menu already makes the cell active,
+      // so notebook:run-cell targets the correct cell.
+      await app.commands.execute('notebook:run-cell');
+    }
+  });
+}
 
 /**
  * Track activation state per notebook
@@ -24,14 +113,20 @@ class FlowbookActivationManager {
   private _panel: ReproducibilityMetadataPanel | null = null;
   private _highlighter: ReproducibilityCellHighlighter | null = null;
   private _cellIndexManager: CellIndexManager;
+  private _toolbarExtension: FlowbookToolbarExtension;
   private _isActive = false;
   private _activeNotebookPath: string | null = null;
 
-  constructor(app: JupyterFrontEnd, tracker: INotebookTracker) {
+  constructor(
+    app: JupyterFrontEnd,
+    tracker: INotebookTracker,
+    toolbarExtension: FlowbookToolbarExtension
+  ) {
     this._app = app;
     this._tracker = tracker;
     this._kernelDetector = new KernelDetector(tracker);
     this._cellIndexManager = new CellIndexManager();
+    this._toolbarExtension = toolbarExtension;
 
     this._setupKernelChangeListener();
     this._checkCurrentNotebook();
@@ -113,6 +208,9 @@ class FlowbookActivationManager {
       this._panel
     );
 
+    // Set highlighter on toolbar extension so it can access staleness manager
+    this._toolbarExtension.setHighlighter(this._highlighter);
+
     // Create execution hook
     new ReproducibilityExecutionHookManager(
       this._app,
@@ -169,6 +267,16 @@ export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
     console.log(
       'FlowBook Plugin: Extension registered (will activate when flowbook_kernel is used)'
     );
-    new FlowbookActivationManager(app, tracker);
+
+    const kernelDetector = new KernelDetector(tracker);
+
+    // Register exec-restore command at startup (context menu item in schema)
+    registerExecRestoreCommand(app, tracker, kernelDetector);
+
+    // Create and register toolbar extension
+    const toolbarExtension = new FlowbookToolbarExtension(kernelDetector);
+    app.docRegistry.addWidgetExtension('Notebook', toolbarExtension);
+
+    new FlowbookActivationManager(app, tracker, toolbarExtension);
   }
 };

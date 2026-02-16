@@ -3,7 +3,8 @@ Utilities for generating and managing notebook cell IDs.
 
 This module provides functions to:
 - Generate unique 4-character cell IDs
-- Normalize notebooks by ensuring all cells have unique 4-character IDs
+- Validate cell IDs (4 lowercase alphanumeric characters)
+- Normalize notebooks by ensuring all cells have unique valid IDs
 """
 
 import random
@@ -24,10 +25,28 @@ def generate_cell_id(existing_ids: Set[str]) -> str:
         A unique 4-character ID not in existing_ids
     """
     while True:
-        # Generate random 4-character ID
+        # Generate random 4-character ID (letters only for new IDs)
         cell_id = ''.join(random.choices(string.ascii_lowercase, k=4))
         if cell_id not in existing_ids:
             return cell_id
+
+
+def is_valid_cell_id(cell_id: str) -> bool:
+    """
+    Check if a cell ID is valid (4 lowercase alphanumeric characters).
+
+    Args:
+        cell_id: The cell ID to validate
+
+    Returns:
+        True if valid, False otherwise
+    """
+    if len(cell_id) != 4:
+        return False
+    for c in cell_id:
+        if not (c.isdigit() or (c.isalpha() and c.islower())):
+            return False
+    return True
 
 
 def normalize_notebook(notebook: Dict[str, Any]) -> Dict[str, Any]:
@@ -58,8 +77,8 @@ def normalize_notebook(notebook: Dict[str, Any]) -> Dict[str, Any]:
         cell_id = cell.get("id")
         if cell_id is None:
             needs_changes = True
-        elif len(str(cell_id)) != 4 or not str(cell_id).isalpha() or not str(cell_id).islower():
-            # Non-4-character ID or not all lowercase letters - needs replacement
+        elif not is_valid_cell_id(str(cell_id)):
+            # Invalid ID format - needs replacement
             needs_changes = True
         elif cell_id in existing_ids:
             duplicate_ids.add(cell_id)
@@ -92,14 +111,12 @@ def normalize_notebook(notebook: Dict[str, Any]) -> Dict[str, Any]:
 
         # Replace if:
         # - No ID
-        # - Non-4-character ID
+        # - Invalid ID format
         # - Duplicate ID
         # - Already seen in this pass
         needs_new_id = (
             cell_id is None or
-            len(str(cell_id)) != 4 or
-            not str(cell_id).isalpha() or
-            not str(cell_id).islower() or
+            not is_valid_cell_id(str(cell_id)) or
             cell_id in duplicate_ids or
             cell_id in existing_ids
         )
