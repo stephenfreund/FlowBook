@@ -216,6 +216,10 @@ class FileStats:
     flowbook_memory_bytes: int
     memory_overhead_bytes: int
     memory_overhead_pct: float
+    # Last cell overhead percentages
+    last_cell_state_overhead_pct: float = 0.0
+    last_cell_check_overhead_pct: float = 0.0
+    last_cell_memory_overhead_pct: float = 0.0
     # Rerun stats (optional)
     num_reruns: int = 0
     rerun_baseline_runtime_ms: float = 0.0
@@ -306,6 +310,33 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     rerun_flowbook_total = rerun_flowbook_runtime + rerun_state_overhead + rerun_check_overhead
     rerun_final_checkpoint = flowbook_rerun_totals.get("final_checkpoint_bytes", 0)
 
+    # Last cell overhead calculations
+    baseline_cells = baseline.get("cells", [])
+    flowbook_cells = flowbook.get("cells", [])
+
+    last_cell_state_pct = 0.0
+    last_cell_check_pct = 0.0
+    last_cell_memory_pct = 0.0
+
+    if flowbook_cells and baseline_cells:
+        last_fc = flowbook_cells[-1]
+        last_bc = baseline_cells[-1]
+
+        last_baseline_runtime = last_bc.get("cell_runtime_ms", 0.0)
+        last_state = last_fc.get("state_duration_ms", 0.0)
+        last_check = last_fc.get("check_duration_ms", 0.0)
+
+        if last_baseline_runtime > 0:
+            last_cell_state_pct = (last_state / last_baseline_runtime) * 100
+            last_cell_check_pct = (last_check / last_baseline_runtime) * 100
+
+        last_user_ns = last_fc.get("user_ns_bytes", 0)
+        # Use checkpoint_details.total_bytes if available
+        last_details = last_fc.get("checkpoint_details") or {}
+        last_total = last_details.get("total_bytes", 0) or last_fc.get("user_ns_and_checkpoint_bytes", 0)
+        if last_user_ns > 0:
+            last_cell_memory_pct = ((last_total - last_user_ns) / last_user_ns) * 100
+
     return FileStats(
         notebook_path=notebook_path,
         notebook_name=notebook_name,
@@ -322,6 +353,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         flowbook_memory_bytes=flowbook_memory,
         memory_overhead_bytes=memory_overhead,
         memory_overhead_pct=memory_pct,
+        last_cell_state_overhead_pct=last_cell_state_pct,
+        last_cell_check_overhead_pct=last_cell_check_pct,
+        last_cell_memory_overhead_pct=last_cell_memory_pct,
         num_reruns=num_reruns,
         rerun_baseline_runtime_ms=rerun_baseline_runtime,
         rerun_flowbook_runtime_ms=rerun_flowbook_runtime,
@@ -351,9 +385,10 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
         )
 
     slowdowns = np.array([s.slowdown for s in stats_list])
-    state_pcts = np.array([s.state_overhead_pct for s in stats_list])
-    check_pcts = np.array([s.check_overhead_pct for s in stats_list])
-    memory_pcts = np.array([s.memory_overhead_pct for s in stats_list])
+    # Use last cell overhead percentages for aggregate stats
+    state_pcts = np.array([s.last_cell_state_overhead_pct for s in stats_list])
+    check_pcts = np.array([s.last_cell_check_overhead_pct for s in stats_list])
+    memory_pcts = np.array([s.last_cell_memory_overhead_pct for s in stats_list])
 
     return AggregateStats(
         num_files=len(stats_list),
@@ -662,7 +697,7 @@ def extract_checkpoint_type_data(data: Dict[str, Any]) -> Optional[Dict[str, Any
     # First pass: collect all type names
     all_type_names: set = set()
     for c in all_cells:
-        details = c.get("checkpoint_details", {})
+        details = c.get("checkpoint_details") or {}
         by_type = details.get("by_type", {})
         all_type_names.update(by_type.keys())
 
@@ -673,7 +708,7 @@ def extract_checkpoint_type_data(data: Dict[str, Any]) -> Optional[Dict[str, Any
 
     # Second pass: collect data
     for c in all_cells:
-        details = c.get("checkpoint_details", {})
+        details = c.get("checkpoint_details") or {}
         by_type = details.get("by_type", {})
         cell_total = details.get("total_bytes", 0)
         total_bytes.append(cell_total)
@@ -717,13 +752,16 @@ def extract_checkpoint_type_data(data: Dict[str, Any]) -> Optional[Dict[str, Any
 
 def plot_checkpoint_types(
     data: Dict[str, Any],
-    output_path: str,
+    output_path: Optional[str] = None,
     large_fonts: bool = False
-) -> None:
+) -> Optional[Any]:
     """
     Plot checkpoint memory usage broken down by variable type.
 
     Creates a stacked area plot showing memory by type over cells.
+
+    If output_path is provided, saves the plot and returns None.
+    If output_path is None, returns the figure for use with PdfPages.
     """
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -731,7 +769,7 @@ def plot_checkpoint_types(
     type_data = extract_checkpoint_type_data(data)
     if type_data is None:
         print("No checkpoint_details data available for type breakdown plot")
-        return
+        return None
 
     sns.set_theme(style="whitegrid")
     colors = sns.color_palette("husl", len(type_data["types_ordered"]))
@@ -783,19 +821,26 @@ def plot_checkpoint_types(
         ax.tick_params(axis='both', labelsize=tick_size)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
 
-    print(f"Checkpoint types plot saved to: {output_path}")
+    if output_path is not None:
+        plt.savefig(output_path, dpi=150)
+        plt.close()
+        print(f"Checkpoint types plot saved to: {output_path}")
+        return None
+    else:
+        return fig
 
 
 def plot_combined(
     data: Dict[str, Any],
-    output_path: str,
+    output_path: Optional[str] = None,
     large_fonts: bool = True
-) -> None:
+) -> Optional[Any]:
     """
     Create combined multi-panel plot (slowdown + memory).
+
+    If output_path is provided, saves the plot and returns None.
+    If output_path is None, returns the figure for use with PdfPages.
     """
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -823,7 +868,9 @@ def plot_combined(
             cell_data[c["cell_id"]]["state_ms"] = c["state_duration_ms"]
             cell_data[c["cell_id"]]["check_ms"] = c["check_duration_ms"]
             cell_data[c["cell_id"]]["user_ns_bytes"] = c.get("user_ns_bytes", 0)
-            cell_data[c["cell_id"]]["total_bytes"] = c.get("user_ns_and_checkpoint_bytes", 0)
+            # Use checkpoint_details.total_bytes if available, fall back to user_ns_and_checkpoint_bytes
+            details = c.get("checkpoint_details") or {}
+            cell_data[c["cell_id"]]["total_bytes"] = details.get("total_bytes", 0) or c.get("user_ns_and_checkpoint_bytes", 0)
 
     cell_ids = list(cell_data.keys())
     baseline_runtimes = [cell_data[cid].get("baseline_runtime_ms", 0) for cid in cell_ids]
@@ -838,7 +885,9 @@ def plot_combined(
         state_times.append(fc.get("state_duration_ms", 0))
         check_times.append(fc.get("check_duration_ms", 0))
         user_ns_bytes.append(fc.get("user_ns_bytes", 0))
-        total_bytes.append(fc.get("user_ns_and_checkpoint_bytes", 0))
+        # Use checkpoint_details.total_bytes if available
+        details = fc.get("checkpoint_details") or {}
+        total_bytes.append(details.get("total_bytes", 0) or fc.get("user_ns_and_checkpoint_bytes", 0))
 
     cells = np.arange(1, len(baseline_runtimes) + 1)
 
@@ -859,23 +908,18 @@ def plot_combined(
     legend_size = 16 if large_fonts else 10
     tick_size = 14 if large_fonts else 10
 
-    # Check if we have memory data
-    has_memory = any(b > 0 for b in total_bytes)
-    n_panels = 2 if has_memory else 1
+    # Always show both panels (time and memory)
+    n_panels = 2
 
     fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 6))
-    if n_panels == 1:
-        axes = [axes]
 
-    # Panel 1: Slowdown
+    # Panel 1: Time comparison (Baseline vs FlowBook)
     ax = axes[0]
-    ax.fill_between(cells, 0, baseline_cumsum / 1000, alpha=0.3, color=colors[0], label="Cell Run Time")
-    ax.fill_between(cells, baseline_cumsum / 1000, (baseline_cumsum + state_cumsum) / 1000, alpha=0.3, color=colors[1], label="State Checkpoint")
-    ax.fill_between(cells, (baseline_cumsum + state_cumsum) / 1000, total_cumsum / 1000, alpha=0.3, color=colors[2], label="Reproducibility Check")
+    ax.fill_between(cells, 0, baseline_cumsum / 1000, alpha=0.3, color=colors[0], label="Baseline")
+    ax.fill_between(cells, baseline_cumsum / 1000, total_cumsum / 1000, alpha=0.3, color=colors[1], label="FlowBook Overhead")
 
     ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4)
-    ax.plot(cells, (baseline_cumsum + state_cumsum) / 1000, color=colors[1], linewidth=2, marker='o', markersize=4)
-    ax.plot(cells, total_cumsum / 1000, color=colors[2], linewidth=2, marker='o', markersize=4)
+    ax.plot(cells, total_cumsum / 1000, color=colors[1], linewidth=2, marker='o', markersize=4)
 
     # Add separator for rerun phase
     if initial_count < len(cells):
@@ -883,7 +927,7 @@ def plot_combined(
 
     ax.set_xlabel("Cell Number", fontsize=label_size)
     ax.set_ylabel("Cumulative Time (seconds)", fontsize=label_size)
-    title = "Cumulative Cell Run and Checkpointing Times"
+    title = "Cumulative Runtime"
     if initial_count < len(cells):
         title += f" (cells 1-{initial_count} + {len(cells) - initial_count} reruns)"
     ax.set_title(title, fontsize=title_size)
@@ -893,36 +937,42 @@ def plot_combined(
     ax.set_ylim(bottom=0)
     ax.tick_params(axis='both', labelsize=tick_size)
 
-    # Panel 2: Memory (if available)
-    if has_memory:
-        ax = axes[1]
-        ax.fill_between(cells, 0, user_mb, alpha=0.3, color=colors[0], label='User Namespace')
-        ax.fill_between(cells, user_mb, total_mb, alpha=0.3, color=colors[1], label='Checkpoint Overhead')
+    # Panel 2: Memory
+    ax = axes[1]
+    ax.fill_between(cells, 0, user_mb, alpha=0.3, color=colors[0], label='User Namespace')
+    ax.fill_between(cells, user_mb, total_mb, alpha=0.3, color=colors[1], label='Checkpoint Overhead')
 
-        ax.plot(cells, user_mb, color=colors[0], linewidth=2, marker='o', markersize=4)
-        ax.plot(cells, total_mb, color=colors[1], linewidth=2, marker='o', markersize=4)
+    ax.plot(cells, user_mb, color=colors[0], linewidth=2, marker='o', markersize=4)
+    ax.plot(cells, total_mb, color=colors[1], linewidth=2, marker='o', markersize=4)
 
-        # Add separator for rerun phase
-        if initial_count < len(cells):
-            ax.axvline(x=initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+    # Add separator for rerun phase
+    if initial_count < len(cells):
+        ax.axvline(x=initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
 
-        ax.set_xlabel('Cell Number', fontsize=label_size)
-        ax.set_ylabel('Memory (MB)', fontsize=label_size)
-        title = 'Memory Usage'
-        if initial_count < len(cells):
-            title += f' (cells 1-{initial_count} + {len(cells) - initial_count} reruns)'
-        ax.set_title(title, fontsize=title_size)
-        ax.legend(loc='upper left', fontsize=legend_size)
-        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
-        ax.set_xlim(left=1)
-        ax.set_ylim(bottom=0)
-        ax.tick_params(axis='both', labelsize=tick_size)
+    ax.set_xlabel('Cell Number', fontsize=label_size)
+    ax.set_ylabel('Memory (MB)', fontsize=label_size)
+    title = 'Memory Usage'
+    if initial_count < len(cells):
+        title += f' (cells 1-{initial_count} + {len(cells) - initial_count} reruns)'
+    ax.set_title(title, fontsize=title_size)
+    ax.legend(loc='upper left', fontsize=legend_size)
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.set_xlim(left=1)
+    ax.set_ylim(bottom=0)
+    ax.tick_params(axis='both', labelsize=tick_size)
 
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
+    # Add notebook name as figure title
+    notebook_name = Path(data.get("notebook_path", "notebook")).stem
+    fig.suptitle(notebook_name, fontsize=title_size + 2, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])  # Leave room for suptitle
 
-    print(f"Combined plot saved to: {output_path}")
+    if output_path is not None:
+        plt.savefig(output_path, dpi=150)
+        plt.close()
+        print(f"Combined plot saved to: {output_path}")
+        return None
+    else:
+        return fig
 
 
 def main():
@@ -1039,27 +1089,52 @@ def main():
 
     # Generate plots if requested
     if args.plot:
+        from matplotlib.backends.backend_pdf import PdfPages
+        import matplotlib.pyplot as plt
+
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        for file_path, data in file_data.items():
-            notebook_name = Path(data.get("notebook_path", file_path)).stem
+        # Collect all combined plots into one PDF
+        combined_figures = []
+        types_figures = []
 
+        for file_path, data in file_data.items():
             # Combined plot
-            combined_path = output_dir / f"{notebook_name}_overhead.pdf"
             try:
-                plot_combined(data, str(combined_path), args.large_fonts)
+                fig = plot_combined(data, output_path=None, large_fonts=args.large_fonts)
+                if fig is not None:
+                    combined_figures.append(fig)
             except Exception as e:
                 print(f"Warning: Could not generate plot for {file_path}: {e}", file=sys.stderr)
 
             # Checkpoint types plot (if data available)
             type_data = extract_checkpoint_type_data(data)
             if type_data is not None:
-                types_path = output_dir / f"{notebook_name}_checkpoint_types.pdf"
                 try:
-                    plot_checkpoint_types(data, str(types_path), args.large_fonts)
+                    fig = plot_checkpoint_types(data, output_path=None, large_fonts=args.large_fonts)
+                    if fig is not None:
+                        types_figures.append(fig)
                 except Exception as e:
                     print(f"Warning: Could not generate checkpoint types plot for {file_path}: {e}", file=sys.stderr)
+
+        # Save combined plots to a single PDF
+        if combined_figures:
+            combined_path = output_dir / "all_overhead.pdf"
+            with PdfPages(str(combined_path)) as pdf:
+                for fig in combined_figures:
+                    pdf.savefig(fig, dpi=150)
+                    plt.close(fig)
+            print(f"Combined overhead plots saved to: {combined_path}")
+
+        # Save checkpoint types plots to a single PDF
+        if types_figures:
+            types_path = output_dir / "all_checkpoint_types.pdf"
+            with PdfPages(str(types_path)) as pdf:
+                for fig in types_figures:
+                    pdf.savefig(fig, dpi=150)
+                    plt.close(fig)
+            print(f"Checkpoint types plots saved to: {types_path}")
 
 
 if __name__ == "__main__":
