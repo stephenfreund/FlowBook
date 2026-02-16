@@ -145,11 +145,11 @@ print(flowbook.__version__)  # Output: 0.0.1
 
 ### Workflow Features
 
-- **Trigger**: Git tags starting with 'v' (e.g., v0.0.1, v0.1.0)
+- **Trigger**: Creating a new release in GitHub (not tag pushes)
 - **Build environment**: Ubuntu latest, Python 3.11
 - **Publishing**: PyPA's official GitHub Action
 - **Trusted publishing**: Configured for OIDC authentication (no secrets needed)
-- **Artifacts**: Automatically attached to GitHub releases
+- **Artifacts**: Automatically uploaded to the GitHub release
 
 ### Version Management
 
