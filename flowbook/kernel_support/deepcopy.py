@@ -337,10 +337,32 @@ _large_dict_cache: Dict[int, Tuple[dict, dict, int]] = {}
 # Dict mapping id(copy) -> copy for recognizing copies during alias traversal
 _primitive_dict_copies: Dict[int, dict] = {}
 
+# =============================================================================
+# NumPy ndarray caching
+# =============================================================================
+# For numeric (non-object) ndarrays unchanged between checkpoints, we reuse
+# the previous checkpoint's copy to avoid O(n) memcpy + allocation.
+#
+# Cache structure: id(original) -> (cached_copy, shape, dtype, nbytes)
+# Note: We do NOT store a reference to the original array, so it can be GC'd.
+# If a new array reuses the same id with matching metadata, the content
+# equality check ensures correctness.
+_ndarray_cache: Dict[int, Tuple[np.ndarray, tuple, np.dtype, int]] = {}
+# Dict mapping id(copy) -> True for recognizing copies during alias traversal
+_ndarray_copies: Dict[int, np.ndarray] = {}
+
+# Maximum cached ndarrays before clearing (prevents unbounded memory growth)
+_MAX_NDARRAY_CACHE_SIZE = 1000
+
+# Chunk size in bytes for _fast_array_equal comparison.
+# Limits the boolean intermediate array to ~1 MB per chunk and allows
+# early termination on first mismatched chunk.
+_ARRAY_EQUAL_CHUNK_BYTES = 1 << 20  # 1 MB
+
 
 def clear_container_cache() -> None:
     """
-    Clear all primitive container caches (lists, sets, dicts).
+    Clear all primitive container caches (lists, sets, dicts) and ndarray cache.
 
     Called by checkpoint.py when checkpoints are deleted or cleared to:
     1. Free memory held by cached copies
@@ -356,6 +378,8 @@ def clear_container_cache() -> None:
     _primitive_set_copies.clear()
     _large_dict_cache.clear()
     _primitive_dict_copies.clear()
+    _ndarray_cache.clear()
+    _ndarray_copies.clear()
 
 
 # Backwards compatibility alias
@@ -373,6 +397,7 @@ def get_container_cache_stats() -> Dict[str, Any]:
         'list_cache_size': len(_large_list_cache),
         'set_cache_size': len(_large_set_cache),
         'dict_cache_size': len(_large_dict_cache),
+        'ndarray_cache_size': len(_ndarray_cache),
         'threshold': _LARGE_LIST_THRESHOLD,
         'max_size': _MAX_CONTAINER_CACHE_SIZE,
     }
@@ -1917,6 +1942,121 @@ def reset_pytorch_deepcopy_handler():
     except ImportError:
         pass
 
+
+# =============================================================================
+# NumPy ndarray handler with cross-checkpoint caching
+# =============================================================================
+
+
+def _fast_array_equal(a: np.ndarray, b: np.ndarray) -> bool:
+    """
+    Fast vectorized byte-level array comparison.
+
+    Compares arrays as raw uint8 views to:
+    - Handle NaN correctly (byte-identical NaN values compare equal)
+    - Leverage numpy's vectorized ``==`` and ``all()``
+    - Chunk large arrays for bounded memory (~1 MB bool intermediate)
+      and early termination on first mismatched chunk
+
+    For non-contiguous arrays, falls back to ``np.array_equal``.
+    """
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    if a.size == 0:
+        return True
+
+    # Both C-contiguous: compare as raw bytes (fast, NaN-safe)
+    if a.flags.c_contiguous and b.flags.c_contiguous:
+        try:
+            a_bytes = a.view(np.uint8)
+            b_bytes = b.view(np.uint8)
+        except ValueError:
+            # Structured / void dtypes may not support a uint8 view
+            return bool(np.array_equal(a, b, equal_nan=True))
+
+        n = a_bytes.size
+        chunk = _ARRAY_EQUAL_CHUNK_BYTES
+
+        if n <= chunk:
+            # Single vectorized comparison — no Python loop
+            return bool(np.all(a_bytes == b_bytes))
+
+        # Chunked: bounded intermediate allocation + early exit
+        for i in range(0, n, chunk):
+            if not np.all(a_bytes[i:i + chunk] == b_bytes[i:i + chunk]):
+                return False
+        return True
+
+    # Non-contiguous: fall back to numpy (handles strides, NaN)
+    return bool(np.array_equal(a, b, equal_nan=True))
+
+
+def _deepcopy_ndarray(arr: np.ndarray, memo: dict) -> np.ndarray:
+    """
+    Deep copy an ndarray with cross-checkpoint caching for numeric arrays.
+
+    For numeric (non-object) dtype arrays:
+    - Checks the ndarray cache for an identical copy from a prior checkpoint
+    - If the source array is unchanged (fast byte-level comparison): reuses
+      the cached copy — zero allocation, zero memcpy
+    - If changed or not cached: creates a new copy via ``arr.copy()`` and
+      updates the cache
+
+    For object-dtype arrays:
+    - Delegates to numpy's built-in ``__deepcopy__`` which recurses into
+      each element (existing behaviour, unchanged)
+
+    The cache is keyed by ``id(original)`` and validated by shape / dtype /
+    nbytes metadata plus a fast vectorized content comparison.
+    """
+    obj_id = id(arr)
+
+    # Already copied in this deepcopy pass (alias dedup within one checkpoint)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    # Object-dtype arrays may contain mutable Python objects — skip cache,
+    # delegate to numpy's built-in deepcopy for correct element recursion
+    if arr.dtype == object:
+        y = arr.__deepcopy__(memo)
+        memo[obj_id] = y
+        return y
+
+    # --- Cross-checkpoint cache lookup ---
+    if obj_id in _ndarray_cache:
+        cached_copy, cached_shape, cached_dtype, cached_nbytes = _ndarray_cache[obj_id]
+        if (arr.shape == cached_shape
+                and arr.dtype == cached_dtype
+                and arr.nbytes == cached_nbytes
+                and _fast_array_equal(arr, cached_copy)):
+            log(f"[deepcopy] ndarray cache hit "
+                f"({arr.nbytes / (1024 * 1024):.1f} MB, {arr.shape} {arr.dtype})")
+            memo[obj_id] = cached_copy
+            return cached_copy
+
+    # --- Cache miss: full copy ---
+    y = arr.copy()
+
+    # Cache arrays >= 1 KB (avoids overhead for tiny scalars / 0-d arrays)
+    if arr.nbytes >= 1024:
+        if len(_ndarray_cache) > _MAX_NDARRAY_CACHE_SIZE:
+            _ndarray_cache.clear()
+            _ndarray_copies.clear()
+            log(f"[deepcopy] ndarray cache exceeded {_MAX_NDARRAY_CACHE_SIZE} entries, cleared")
+
+        _ndarray_cache[obj_id] = (y, arr.shape, arr.dtype, arr.nbytes)
+        _ndarray_copies[id(y)] = y
+
+    memo[obj_id] = y
+
+    if arr.nbytes > 1024 * 1024:
+        log(f"[deepcopy] ndarray cache miss, copied "
+            f"{arr.nbytes / (1024 * 1024):.1f} MB {arr.shape} {arr.dtype}")
+
+    return y
+
+
+d[np.ndarray] = _deepcopy_ndarray
 
 del d  # Clean up namespace
 

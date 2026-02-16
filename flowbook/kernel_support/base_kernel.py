@@ -50,6 +50,8 @@ class BaseFlowbookKernel(IPythonKernel):
 
         # Virtual filesystem for file tracking
         self._vfs = VirtualFileSystem()
+        # Only track files under the notebook's working directory
+        self._vfs.set_notebook_dir(os.getcwd())
         # Enable tracking-only mode by default (tracks reads/writes without snapshots)
         self._vfs.enable_tracking_only()
         # Full VFS mode (with file snapshots) can be enabled via environment variable
@@ -59,6 +61,10 @@ class BaseFlowbookKernel(IPythonKernel):
         # Unified checkpointing (memory + files) - always enabled
         self._checkpoints = Checkpoints()
         self._checkpoints.file.enable()
+
+        # Exclude checkpoint storage dir from VFS tracking to prevent feedback loop
+        if self._checkpoints.file._storage_dir:
+            self._vfs.add_excluded_prefix(self._checkpoints.file._storage_dir)
 
         # FS magics registration flag
         self._fs_magics_registered = False
@@ -187,10 +193,17 @@ class BaseFlowbookKernel(IPythonKernel):
         snapshot written files.
         Returns the Checkpoint object.
         """
-        write_paths = self._vfs.get_write_paths() if (self._vfs.enabled or self._vfs.tracking_only) else None
+        from flowbook.util.output import timer
+
+        with timer(key="checkpoint:get_write_paths", message="Get VFS write paths"):
+            write_paths = self._vfs.get_write_paths() if (self._vfs.enabled or self._vfs.tracking_only) else None
+
+        with timer(key="checkpoint:dict_ns", message="Convert namespace to dict"):
+            ns_dict = dict(self.shell.user_ns)
+
         total, removed = self._checkpoints.save(
             checkpoint_name,
-            dict(self.shell.user_ns),
+            ns_dict,
             write_paths=write_paths,
             vfs=self._vfs if self._vfs.enabled else None,
             max_size_mb=None,

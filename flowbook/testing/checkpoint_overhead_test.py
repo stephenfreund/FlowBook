@@ -22,6 +22,10 @@ import pandas as pd
 import seaborn as sns
 from jupyter_client import KernelManager
 
+from flowbook.testing.benchmark_checkpoint import (
+    _MEMORY_SETUP_CODE,
+    measure_memory,
+)
 from flowbook.testing.notebook_loader import Cell, load_notebook
 from flowbook.util.output import log
 
@@ -165,6 +169,35 @@ def execute_cell_timed(kernel_client, cell: Cell, timeout: float = 300.0) -> dic
     return {"cell_runtime_s": elapsed, "error": error_msg}
 
 
+def _setup_baseline_memory(kernel_client, timeout: float = 60.0) -> bool:
+    """Inject pympler measurement helper into baseline kernel.
+
+    Uses the same helper as FlowBook; checkpoint_bytes will be 0
+    since baseline has no _flowbook_checkpoint.
+    """
+    msg_id = kernel_client.execute(_MEMORY_SETUP_CODE, silent=True)
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            return False
+        try:
+            msg = kernel_client.get_iopub_msg(timeout=1.0)
+        except Exception:
+            continue
+        if msg['parent_header'].get('msg_id') != msg_id:
+            continue
+        if msg['header']['msg_type'] == 'error':
+            return False
+        if msg['header']['msg_type'] == 'status':
+            if msg['content']['execution_state'] == 'idle':
+                break
+    try:
+        kernel_client.get_shell_msg(timeout=1.0)
+    except Exception:
+        pass
+    return True
+
+
 def run_baseline(notebook_path: str, output_csv: str, cell_timeout: float = 300.0) -> None:
     """
     Run notebook on baseline python3 kernel and save timings to CSV.
@@ -180,9 +213,18 @@ def run_baseline(notebook_path: str, output_csv: str, cell_timeout: float = 300.
         kernel_manager, kernel_client = create_baseline_kernel()
         log("Baseline: Kernel ready")
 
+        # Setup memory measurement
+        if _setup_baseline_memory(kernel_client):
+            log("Baseline: Memory measurement helper injected")
+        else:
+            log("Baseline: WARNING: Failed to inject memory measurement helper")
+
         with open(output_csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["cell_id", "cell_runtime_s", "commit_time_s"])
+            writer.writerow([
+                "cell_id", "cell_runtime_s", "commit_time_s",
+                "user_ns_bytes", "user_ns_and_checkpoint_bytes",
+            ])
 
             for i, cell in enumerate(cells):
                 log(f"Baseline: Executing cell {i+1}/{len(cells)} ({cell.cell_id})...")
@@ -191,9 +233,14 @@ def run_baseline(notebook_path: str, output_csv: str, cell_timeout: float = 300.
                 if timing.get("error"):
                     log(f"  Error: {timing['error'][:100]}...")
                 else:
+                    mem = measure_memory(kernel_client)
                     # Baseline has no commit time
-                    writer.writerow([cell.cell_id, timing["cell_runtime_s"], 0.0])
+                    writer.writerow([
+                        cell.cell_id, timing["cell_runtime_s"], 0.0,
+                        mem["user_ns_bytes"], mem["user_ns_and_checkpoint_bytes"],
+                    ])
                     log(f"  Run: {timing['cell_runtime_s']*1000:.1f}ms")
+                    log(f"  Memory: user_ns={mem['user_ns_bytes']:,}B, with_checkpoints={mem['user_ns_and_checkpoint_bytes']:,}B")
 
         log(f"Baseline: Results written to {output_csv}")
 
@@ -226,9 +273,9 @@ def run_flowbook_benchmark(
         if rerun_seed is not None:
             cmd.extend(["--seed", str(rerun_seed)])
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=False, text=True)
     if result.returncode != 0:
-        log(f"FlowBook benchmark stderr: {result.stderr}")
+        log(f"FlowBook benchmark failed with exit code {result.returncode}")
     log(f"FlowBook: Results written to {output_csv}")
     if num_reruns > 0:
         log(f"FlowBook: Rerun results written to {rerun_output_csv}")
@@ -419,6 +466,68 @@ def plot_checkpoint_times(
         ax.tick_params(axis='both', labelsize=tick_size)
 
 
+def _has_memory_columns(csv_path: str) -> bool:
+    """Check if a CSV file has memory measurement columns."""
+    try:
+        df = pd.read_csv(csv_path, nrows=0)
+        return 'user_ns_bytes' in df.columns and 'user_ns_and_checkpoint_bytes' in df.columns
+    except Exception:
+        return False
+
+
+def plot_memory_comparison(
+    ax,
+    flowbook_csv: str,
+    colors,
+    title: str,
+    large_fonts: bool = False,
+) -> None:
+    """Plot memory usage from the checkpoint run: user_ns + checkpoint overhead.
+
+    Uses user_ns_bytes and user_ns_and_checkpoint_bytes from the FlowBook CSV.
+    The difference is the checkpoint overhead.
+    Matches the visual style of plot_slowdown (stacked fills + marker lines).
+    """
+    df = pd.read_csv(flowbook_csv)
+
+    mb = 1024 * 1024
+
+    df['cell'] = range(1, len(df) + 1)
+    df['user_mb'] = df['user_ns_bytes'] / mb
+    df['total_mb'] = df['user_ns_and_checkpoint_bytes'] / mb
+
+    # Font sizes for paper-ready plots
+    label_size = 18 if large_fonts else None
+    title_size = 20 if large_fonts else None
+    legend_size = 16 if large_fonts else None
+    tick_size = 14 if large_fonts else None
+
+    # Same structure as plot_slowdown:
+    # Blue fill = user namespace (analogous to cell run time)
+    # Orange fill = checkpoint overhead stacked on top
+    ax.fill_between(
+        df['cell'], 0, df['user_mb'],
+        alpha=0.3, color=colors[0], label='User Namespace',
+    )
+    ax.fill_between(
+        df['cell'], df['user_mb'], df['total_mb'],
+        alpha=0.3, color=colors[1], label='Checkpoint Overhead',
+    )
+
+    ax.plot(df['cell'], df['user_mb'], color=colors[0], linewidth=2, marker='o', markersize=4)
+    ax.plot(df['cell'], df['total_mb'], color=colors[1], linewidth=2, marker='o', markersize=4)
+
+    ax.set_xlabel('Cell Number', fontsize=label_size)
+    ax.set_ylabel('Memory (MB)', fontsize=label_size)
+    ax.set_title(title, fontsize=title_size)
+    ax.legend(loc='upper left', fontsize=legend_size)
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.set_xlim(left=1)
+    ax.set_ylim(bottom=0)
+    if large_fonts:
+        ax.tick_params(axis='both', labelsize=tick_size)
+
+
 def print_summary_statistics(
     baseline_csv: str,
     flowbook_csv: str,
@@ -465,6 +574,21 @@ def print_summary_statistics(
         log(f"  P75:     {np.percentile(times, 75):,.2f} ms")
         log(f"  P95:     {np.percentile(times, 95):,.2f} ms")
 
+    # Memory statistics (from FlowBook run only)
+    mb = 1024 * 1024
+    if _has_memory_columns(flowbook_csv):
+        flow_user_final = df_flow["user_ns_bytes"].iloc[-1]
+        flow_total_final = df_flow["user_ns_and_checkpoint_bytes"].iloc[-1]
+        flow_cp_overhead = flow_total_final - flow_user_final
+        log("")
+        log("Memory Usage (final cell):")
+        log(f"  User namespace:         {flow_user_final/mb:,.1f} MB")
+        log(f"  With checkpoints:       {flow_total_final/mb:,.1f} MB")
+        log(f"  Checkpoint overhead:    {flow_cp_overhead/mb:,.1f} MB (cross-checkpoint deduped)")
+        if flow_user_final > 0:
+            mem_overhead_pct = (flow_cp_overhead / flow_user_final) * 100
+            log(f"  Checkpoint overhead:    {mem_overhead_pct:.1f}%")
+
     log("")
     log("=" * 60)
     log("")
@@ -477,14 +601,16 @@ def create_comparison_plot(
     kishu_csv: Optional[str] = None,
     rerun_csv: Optional[str] = None,
     large_fonts: bool = False,
+    show_checkpoint_dist: bool = False,
 ) -> None:
     """
     Create slowdown comparison plot.
 
-    Panel layout:
-    - 1 panel: Just FlowBook (no Kishu, no rerun)
-    - 2 panels: FlowBook + Kishu, OR FlowBook + rerun checkpoint times
-    - 3 panels: FlowBook + Kishu + rerun checkpoint times
+    Builds a list of panels from left to right:
+    - Always: FlowBook slowdown
+    - If Kishu: Kishu slowdown
+    - If --checkpoint-dist and rerun data: checkpoint time histogram
+    - If memory data in both CSVs: memory comparison
     """
     # Print summary statistics
     print_summary_statistics(baseline_csv, flowbook_csv, rerun_csv)
@@ -493,27 +619,41 @@ def create_comparison_plot(
     colors = sns.color_palette()
 
     has_rerun = rerun_csv and os.path.exists(rerun_csv)
+    has_memory = _has_memory_columns(flowbook_csv)
 
-    if kishu_csv and has_rerun:
-        # 3 panels: FlowBook, Kishu, Checkpoint Times
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
-        plot_slowdown(ax1, baseline_csv, flowbook_csv, colors, "Cumulative Times (FlowBook)", large_fonts)
-        plot_slowdown(ax2, baseline_csv, kishu_csv, colors, "Cumulative Times (Kishu)", large_fonts)
-        plot_checkpoint_times(ax3, flowbook_csv, rerun_csv, colors, "Per-Cell Checkpoint Times", large_fonts)
-    elif kishu_csv:
-        # 2 panels: FlowBook, Kishu
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True)
-        plot_slowdown(ax1, baseline_csv, flowbook_csv, colors, "Cumulative Cell Run and Checkpointing Times (FlowBook)", large_fonts)
-        plot_slowdown(ax2, baseline_csv, kishu_csv, colors, "Cumulative Cell Run and Checkpointing Times (Kishu)", large_fonts)
-    elif has_rerun:
-        # 2 panels: FlowBook slowdown, Checkpoint Times
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        plot_slowdown(ax1, baseline_csv, flowbook_csv, colors, "Cumulative Cell Run and Checkpointing Times", large_fonts)
-        plot_checkpoint_times(ax2, flowbook_csv, rerun_csv, colors, "Per-Cell Checkpoint Times", large_fonts)
+    # Collect panels as (plot_func, args) tuples
+    panels = []
+
+    # Always include FlowBook slowdown
+    if kishu_csv:
+        panels.append(
+            lambda ax: plot_slowdown(ax, baseline_csv, flowbook_csv, colors, "Cumulative Times (FlowBook)", large_fonts)
+        )
+        panels.append(
+            lambda ax: plot_slowdown(ax, baseline_csv, kishu_csv, colors, "Cumulative Times (Kishu)", large_fonts)
+        )
     else:
-        # 1 panel: Just FlowBook
-        fig, ax1 = plt.subplots(1, 1, figsize=(8, 6))
-        plot_slowdown(ax1, baseline_csv, flowbook_csv, colors, "Cumulative Cell Run and Checkpointing Times", large_fonts)
+        panels.append(
+            lambda ax: plot_slowdown(ax, baseline_csv, flowbook_csv, colors, "Cumulative Cell Run and Checkpointing Times", large_fonts)
+        )
+
+    if show_checkpoint_dist and has_rerun:
+        panels.append(
+            lambda ax: plot_checkpoint_times(ax, flowbook_csv, rerun_csv, colors, "Per-Cell Checkpoint Times", large_fonts)
+        )
+
+    if has_memory:
+        panels.append(
+            lambda ax: plot_memory_comparison(ax, flowbook_csv, colors, "Memory Usage", large_fonts)
+        )
+
+    n = len(panels)
+    fig, axes = plt.subplots(1, n, figsize=(7 * n, 6))
+    if n == 1:
+        axes = [axes]
+
+    for ax, draw in zip(axes, panels):
+        draw(ax)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
@@ -551,6 +691,11 @@ def main():
         help="Skip running benchmarks, use existing CSV files"
     )
     parser.add_argument(
+        "--flowbook-only",
+        action="store_true",
+        help="Only rerun the FlowBook checkpoint benchmark (skip baseline, reuse existing baseline CSV)"
+    )
+    parser.add_argument(
         "--reruns",
         type=int,
         default=0,
@@ -568,12 +713,20 @@ def main():
         default=None,
         help="Random seed for rerun cell selection (default: None)"
     )
+    parser.add_argument(
+        "--checkpoint-dist",
+        action="store_true",
+        help="Show checkpoint time distribution histogram panel"
+    )
 
     args = parser.parse_args()
 
     # Validate arguments
     if not args.plot_only and not args.notebook:
         parser.error("notebook is required unless --plot-only is specified")
+
+    if args.flowbook_only and not os.path.exists("baseline_timings.csv"):
+        parser.error("--flowbook-only requires an existing baseline_timings.csv")
 
     # Determine output filename
     if args.output:
@@ -591,7 +744,10 @@ def main():
 
     # Run benchmarks unless --plot-only
     if not args.plot_only:
-        run_baseline(args.notebook, baseline_csv, args.timeout)
+        if not args.flowbook_only:
+            run_baseline(args.notebook, baseline_csv, args.timeout)
+        else:
+            log("Skipping baseline (--flowbook-only), reusing existing baseline_timings.csv")
         run_flowbook_benchmark(
             args.notebook,
             flowbook_csv,
@@ -617,6 +773,7 @@ def main():
         baseline_csv, flowbook_csv, output_path, kishu_csv,
         rerun_csv=rerun_csv_path,
         large_fonts=args.plot_only,
+        show_checkpoint_dist=args.checkpoint_dist,
     )
 
 

@@ -302,6 +302,20 @@ class TestSocketFiltering:
         assert abs_socket in vfs.get_read_paths()
         assert abs_socket in vfs.get_write_paths()
 
+    def test_bytes_path_decoded_and_tracked(self, vfs, tmpdir):
+        """Bytes paths (e.g., from psutil on Linux) should be decoded to str."""
+        vfs.enable_tracking_only()
+        vfs.reset_cell_tracking()
+
+        bytes_path = os.path.join(tmpdir, "data.txt").encode()
+        vfs._track_read(bytes_path)
+        vfs._track_write(bytes_path)
+
+        # Should not raise, and decoded str path should be tracked
+        str_path = os.path.abspath(os.fsdecode(bytes_path))
+        assert str_path in vfs.get_read_paths()
+        assert str_path in vfs.get_write_paths()
+
     def test_regular_files_still_tracked(self, vfs, tmpdir):
         vfs.enable_tracking_only()
         vfs.reset_cell_tracking()
@@ -1248,3 +1262,756 @@ class TestBothModesTracking:
                 f"Cell tracking not cleared in {mode_name}"
             assert len(tracking2.file_reads_before_writes) == 0, \
                 f"Cell reads not cleared in {mode_name}"
+
+
+class TestNotebookDirFiltering:
+    """Tests for notebook directory-based path filtering."""
+
+    def test_no_notebook_dir_tracks_everything(self, vfs, tmpdir):
+        """Without set_notebook_dir, all paths are tracked."""
+        vfs.enable_tracking_only()
+
+        file_path = os.path.join(tmpdir, "anywhere.txt")
+        vfs._track_write(file_path)
+        vfs._track_read(file_path)
+
+        assert os.path.abspath(file_path) in vfs.get_write_paths()
+        assert os.path.abspath(file_path) in vfs.get_read_paths()
+
+    def test_files_inside_notebook_dir_tracked(self, vfs, tmpdir):
+        """Files under notebook dir should be tracked."""
+        vfs.set_notebook_dir(tmpdir)
+        vfs.enable_tracking_only()
+
+        file_path = os.path.join(tmpdir, "data.csv")
+        vfs._track_write(file_path)
+        vfs._track_read(file_path)
+
+        assert os.path.abspath(file_path) in vfs.get_write_paths()
+        assert os.path.abspath(file_path) in vfs.get_read_paths()
+
+    def test_files_in_subdirs_tracked(self, vfs, tmpdir):
+        """Files in subdirectories of notebook dir should be tracked."""
+        vfs.set_notebook_dir(tmpdir)
+        vfs.enable_tracking_only()
+
+        subdir = os.path.join(tmpdir, "output", "models")
+        file_path = os.path.join(subdir, "model.pkl")
+        vfs._track_write(file_path)
+        vfs._track_read(file_path)
+
+        assert os.path.abspath(file_path) in vfs.get_write_paths()
+        assert os.path.abspath(file_path) in vfs.get_read_paths()
+
+    def test_files_outside_notebook_dir_not_tracked(self, vfs, tmpdir):
+        """Files outside notebook dir should NOT be tracked."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable_tracking_only()
+
+        outside_file = os.path.join(tmpdir, "outside.txt")
+        vfs._track_write(outside_file)
+        vfs._track_read(outside_file)
+
+        assert os.path.abspath(outside_file) not in vfs.get_write_paths()
+        assert os.path.abspath(outside_file) not in vfs.get_read_paths()
+
+    def test_temp_dir_files_not_tracked(self, vfs, tmpdir):
+        """Files in system temp dirs should NOT be tracked when notebook dir is set."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable_tracking_only()
+
+        temp_file = os.path.join(tempfile.gettempdir(), "library_temp.dat")
+        vfs._track_write(temp_file)
+
+        assert os.path.abspath(temp_file) not in vfs.get_write_paths()
+
+    def test_site_packages_not_tracked(self, vfs, tmpdir):
+        """Files in site-packages should NOT be tracked when notebook dir is set."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable_tracking_only()
+
+        pkg_file = "/usr/lib/python3/site-packages/some_lib/cache.dat"
+        vfs._track_write(pkg_file)
+
+        assert os.path.abspath(pkg_file) not in vfs.get_write_paths()
+
+    def test_cell_tracking_respects_notebook_dir(self, vfs, tmpdir):
+        """Per-cell tracking should also respect notebook dir filtering."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable_tracking_only()
+        vfs.reset_cell_tracking()
+
+        inside_read = os.path.join(notebook_dir, "input.csv")
+        inside_write = os.path.join(notebook_dir, "output.csv")
+        outside = os.path.join(tmpdir, "other.csv")
+
+        # Read inside (before any write to this path)
+        vfs._track_read(inside_read)
+        # Write inside
+        vfs._track_write(inside_write)
+        # Read and write outside notebook dir
+        vfs._track_read(outside)
+        vfs._track_write(outside)
+
+        tracking = vfs.get_cell_file_tracking()
+        assert os.path.abspath(inside_write) in tracking.file_writes
+        assert os.path.abspath(outside) not in tracking.file_writes
+        assert os.path.abspath(inside_read) in tracking.file_reads_before_writes
+        assert os.path.abspath(outside) not in tracking.file_reads_before_writes
+
+    def test_patched_open_respects_notebook_dir(self, vfs, tmpdir):
+        """Patched open() should only track files under notebook dir."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable_tracking_only()
+        vfs.reset_cell_tracking()
+
+        # Write inside notebook dir
+        inside_file = os.path.join(notebook_dir, "output.csv")
+        with open(inside_file, "w") as f:
+            f.write("data")
+
+        # Write outside notebook dir
+        outside_file = os.path.join(outside_dir, "temp.dat")
+        with open(outside_file, "w") as f:
+            f.write("temp")
+
+        writes = vfs.get_write_paths()
+        assert os.path.abspath(inside_file) in writes
+        assert os.path.abspath(outside_file) not in writes
+
+
+class TestExcludedPrefixes:
+    """Tests for explicitly excluded path prefixes."""
+
+    def test_excluded_prefix_not_tracked(self, vfs, tmpdir):
+        """Files under excluded prefix should not be tracked."""
+        vfs.set_notebook_dir(tmpdir)
+        excluded = os.path.join(tmpdir, "checkpoints")
+        os.makedirs(excluded)
+        vfs.add_excluded_prefix(excluded)
+        vfs.enable_tracking_only()
+
+        file_path = os.path.join(excluded, "snapshot.dat")
+        vfs._track_write(file_path)
+        vfs._track_read(file_path)
+
+        assert os.path.abspath(file_path) not in vfs.get_write_paths()
+        assert os.path.abspath(file_path) not in vfs.get_read_paths()
+
+    def test_excluded_prefix_within_notebook_dir(self, vfs, tmpdir):
+        """Excluded prefix should override notebook dir inclusion."""
+        vfs.set_notebook_dir(tmpdir)
+        cache_dir = os.path.join(tmpdir, ".cache")
+        os.makedirs(cache_dir)
+        vfs.add_excluded_prefix(cache_dir)
+        vfs.enable_tracking_only()
+
+        # File in notebook dir but under excluded prefix
+        cached = os.path.join(cache_dir, "data.bin")
+        vfs._track_write(cached)
+
+        # File in notebook dir, not excluded
+        normal = os.path.join(tmpdir, "data.csv")
+        vfs._track_write(normal)
+
+        assert os.path.abspath(cached) not in vfs.get_write_paths()
+        assert os.path.abspath(normal) in vfs.get_write_paths()
+
+    def test_multiple_excluded_prefixes(self, vfs, tmpdir):
+        """Multiple excluded prefixes should all be respected."""
+        vfs.set_notebook_dir(tmpdir)
+        dir_a = os.path.join(tmpdir, "dir_a")
+        dir_b = os.path.join(tmpdir, "dir_b")
+        os.makedirs(dir_a)
+        os.makedirs(dir_b)
+        vfs.add_excluded_prefix(dir_a)
+        vfs.add_excluded_prefix(dir_b)
+        vfs.enable_tracking_only()
+
+        file_a = os.path.join(dir_a, "a.txt")
+        file_b = os.path.join(dir_b, "b.txt")
+        file_ok = os.path.join(tmpdir, "ok.txt")
+        vfs._track_write(file_a)
+        vfs._track_write(file_b)
+        vfs._track_write(file_ok)
+
+        writes = vfs.get_write_paths()
+        assert os.path.abspath(file_a) not in writes
+        assert os.path.abspath(file_b) not in writes
+        assert os.path.abspath(file_ok) in writes
+
+    def test_checkpoint_storage_dir_excluded(self, tmpdir):
+        """Simulates base_kernel setup: checkpoint storage dir is excluded from VFS."""
+        vfs = VirtualFileSystem()
+        vfs.set_notebook_dir(tmpdir)
+
+        # Simulate what base_kernel does: create checkpoint storage and exclude it
+        storage_dir = tempfile.mkdtemp(prefix="flowbook_file_cp_", dir=tmpdir)
+        vfs.add_excluded_prefix(storage_dir)
+        vfs.enable_tracking_only()
+
+        # File inside checkpoint storage (created by FileCheckpoints.save)
+        cp_file = os.path.join(storage_dir, "_pre_abcd", "snapshot.dat")
+        vfs._track_write(cp_file)
+
+        # Normal user file
+        user_file = os.path.join(tmpdir, "output.csv")
+        vfs._track_write(user_file)
+
+        writes = vfs.get_write_paths()
+        assert os.path.abspath(cp_file) not in writes
+        assert os.path.abspath(user_file) in writes
+
+        vfs.disable()
+        shutil.rmtree(storage_dir, ignore_errors=True)
+
+
+class TestBytesPathHandling:
+    """Tests that bytes paths don't crash VFS patches.
+
+    Libraries like psutil pass bytes paths (e.g., b"/proc") to OS functions.
+    The VFS overlay is string-only, so bytes paths must bypass it entirely.
+    """
+
+    # =========================================================================
+    # Full VFS mode — bytes paths should bypass overlay without crashing
+    # =========================================================================
+
+    def test_bytes_open_read(self, vfs, tmpdir):
+        """open() with bytes path should not crash in full VFS mode."""
+        real_file = os.path.join(tmpdir, "bytes_read.txt")
+        with open(real_file, "w") as f:
+            f.write("hello")
+
+        vfs.enable()
+
+        # Bytes path bypasses overlay and reads from real FS
+        bytes_path = real_file.encode()
+        with open(bytes_path, "r") as f:
+            assert f.read() == "hello"
+
+    def test_bytes_open_write(self, vfs, tmpdir):
+        """open() with bytes path should not crash in full VFS mode."""
+        vfs.enable()
+
+        bytes_path = os.path.join(tmpdir, "bytes_write.txt").encode()
+        with open(bytes_path, "w") as f:
+            f.write("written")
+
+        # str(bytes_path) produces "b'...'" which goes to overlay;
+        # patched_open uses str(file), so this is already handled.
+        # Just verify no crash.
+
+    def test_bytes_exists(self, vfs, tmpdir):
+        """os.path.exists with bytes path should not crash."""
+        vfs.enable()
+        bytes_path = tmpdir.encode()
+        assert os.path.exists(bytes_path)
+
+    def test_bytes_listdir(self, vfs, tmpdir):
+        """os.listdir with bytes path should not crash."""
+        vfs.enable()
+        bytes_path = tmpdir.encode()
+        entries = os.listdir(bytes_path)
+        assert isinstance(entries, list)
+
+    def test_bytes_remove(self, vfs, tmpdir):
+        """os.remove with bytes path should not crash."""
+        real_file = os.path.join(tmpdir, "bytes_rm.txt")
+        with open(real_file, "w") as f:
+            f.write("delete me")
+
+        vfs.enable()
+
+        bytes_path = real_file.encode()
+        os.remove(bytes_path)
+        # Bytes path bypasses overlay and goes to real OS
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(real_file)
+
+    def test_bytes_rename(self, vfs, tmpdir):
+        """os.rename with bytes src/dst should not crash."""
+        src = os.path.join(tmpdir, "bytes_src.txt")
+        dst = os.path.join(tmpdir, "bytes_dst.txt")
+        with open(src, "w") as f:
+            f.write("content")
+
+        vfs.enable()
+
+        os.rename(src.encode(), dst.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(src)
+        assert orig_exists(dst)
+
+    def test_bytes_makedirs(self, vfs, tmpdir):
+        """os.makedirs with bytes path should not crash."""
+        vfs.enable()
+        new_dirs = os.path.join(tmpdir, "bytes_a", "bytes_b")
+        os.makedirs(new_dirs.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(new_dirs)
+
+    def test_bytes_mkdir(self, vfs, tmpdir):
+        """os.mkdir with bytes path should not crash."""
+        vfs.enable()
+        new_dir = os.path.join(tmpdir, "bytes_mkdir")
+        os.mkdir(new_dir.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(new_dir)
+
+    def test_bytes_rmdir(self, vfs, tmpdir):
+        """os.rmdir with bytes path should not crash."""
+        dir_to_rm = os.path.join(tmpdir, "bytes_rmdir")
+        os.mkdir(dir_to_rm)
+
+        vfs.enable()
+        os.rmdir(dir_to_rm.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(dir_to_rm)
+
+    def test_bytes_shutil_copy(self, vfs, tmpdir):
+        """shutil.copy with bytes src/dst should not crash."""
+        src = os.path.join(tmpdir, "bytes_cp_src.txt")
+        dst = os.path.join(tmpdir, "bytes_cp_dst.txt")
+        with open(src, "w") as f:
+            f.write("copy me")
+
+        vfs.enable()
+        # Bytes guard bypasses overlay; _orig_copy internally calls patched
+        # open() which also has a bytes guard, so the copy goes to real FS
+        shutil.copy(src.encode(), dst.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(dst)
+
+    def test_bytes_shutil_copy2(self, vfs, tmpdir):
+        """shutil.copy2 with bytes src/dst should not crash."""
+        src = os.path.join(tmpdir, "bytes_cp2_src.txt")
+        dst = os.path.join(tmpdir, "bytes_cp2_dst.txt")
+        with open(src, "w") as f:
+            f.write("copy2 me")
+
+        vfs.enable()
+        # Bytes guard bypasses overlay; _orig_copy2 internally calls patched
+        # open() which also has a bytes guard, so the copy goes to real FS
+        shutil.copy2(src.encode(), dst.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(dst)
+
+    def test_bytes_shutil_move(self, vfs, tmpdir):
+        """shutil.move with bytes src/dst should not crash."""
+        src = os.path.join(tmpdir, "bytes_mv_src.txt")
+        dst = os.path.join(tmpdir, "bytes_mv_dst.txt")
+        with open(src, "w") as f:
+            f.write("move me")
+
+        vfs.enable()
+        shutil.move(src.encode(), dst.encode())
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(src)
+        assert orig_exists(dst)
+
+    def test_bytes_shutil_rmtree(self, vfs, tmpdir):
+        """shutil.rmtree with bytes path should not crash."""
+        tree = os.path.join(tmpdir, "bytes_tree")
+        os.makedirs(tree)
+
+        vfs.enable()
+        # Just verify no TypeError — shutil.rmtree internally uses relative
+        # str paths for sub-entries, which interact with the overlay.
+        shutil.rmtree(tree.encode())
+
+    # =========================================================================
+    # Tracking-only mode — bytes paths should be decoded and tracked
+    # =========================================================================
+
+    def test_tracking_bytes_open_read(self, vfs, tmpdir):
+        """open() read with bytes path in tracking mode should not crash."""
+        real_file = os.path.join(tmpdir, "track_bytes_read.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        with open(real_file.encode(), "r") as f:
+            f.read()
+
+    def test_tracking_bytes_open_write(self, vfs, tmpdir):
+        """open() write with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        path = os.path.join(tmpdir, "track_bytes_write.txt")
+        with open(path.encode(), "w") as f:
+            f.write("data")
+
+    def test_tracking_bytes_remove(self, vfs, tmpdir):
+        """os.remove with bytes path in tracking mode should not crash."""
+        real_file = os.path.join(tmpdir, "track_bytes_rm.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        os.remove(real_file.encode())
+
+    def test_tracking_bytes_rename(self, vfs, tmpdir):
+        """os.rename with bytes paths in tracking mode should not crash."""
+        src = os.path.join(tmpdir, "track_bytes_ren_src.txt")
+        dst = os.path.join(tmpdir, "track_bytes_ren_dst.txt")
+        with open(src, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        os.rename(src.encode(), dst.encode())
+
+    def test_tracking_bytes_exists(self, vfs, tmpdir):
+        """os.path.exists with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        assert os.path.exists(tmpdir.encode())
+
+    def test_tracking_bytes_listdir(self, vfs, tmpdir):
+        """os.listdir with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        entries = os.listdir(tmpdir.encode())
+        assert isinstance(entries, list)
+
+    def test_tracking_bytes_stat(self, vfs, tmpdir):
+        """os.stat with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        result = os.stat(tmpdir.encode())
+        assert result is not None
+
+    def test_tracking_bytes_isfile(self, vfs, tmpdir):
+        """os.path.isfile with bytes path in tracking mode should not crash."""
+        real_file = os.path.join(tmpdir, "track_bytes_isfile.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        assert os.path.isfile(real_file.encode())
+
+    def test_tracking_bytes_isdir(self, vfs, tmpdir):
+        """os.path.isdir with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        assert os.path.isdir(tmpdir.encode())
+
+    def test_tracking_bytes_getsize(self, vfs, tmpdir):
+        """os.path.getsize with bytes path in tracking mode should not crash."""
+        real_file = os.path.join(tmpdir, "track_bytes_size.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        size = os.path.getsize(real_file.encode())
+        assert size > 0
+
+    def test_tracking_bytes_getmtime(self, vfs, tmpdir):
+        """os.path.getmtime with bytes path in tracking mode should not crash."""
+        real_file = os.path.join(tmpdir, "track_bytes_mtime.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        mtime = os.path.getmtime(real_file.encode())
+        assert mtime > 0
+
+    def test_tracking_bytes_makedirs(self, vfs, tmpdir):
+        """os.makedirs with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        new_dirs = os.path.join(tmpdir, "track_bytes_mkdirs", "sub")
+        os.makedirs(new_dirs.encode())
+        assert os.path.exists(new_dirs)
+
+    def test_tracking_bytes_mkdir(self, vfs, tmpdir):
+        """os.mkdir with bytes path in tracking mode should not crash."""
+        vfs.enable_tracking_only()
+        new_dir = os.path.join(tmpdir, "track_bytes_mkdir")
+        os.mkdir(new_dir.encode())
+        assert os.path.exists(new_dir)
+
+    def test_tracking_bytes_rmdir(self, vfs, tmpdir):
+        """os.rmdir with bytes path in tracking mode should not crash."""
+        dir_to_rm = os.path.join(tmpdir, "track_bytes_rmdir")
+        os.mkdir(dir_to_rm)
+
+        vfs.enable_tracking_only()
+        os.rmdir(dir_to_rm.encode())
+
+    def test_tracking_bytes_shutil_copy(self, vfs, tmpdir):
+        """shutil.copy with bytes paths in tracking mode should not crash."""
+        src = os.path.join(tmpdir, "track_bytes_cp_src.txt")
+        dst = os.path.join(tmpdir, "track_bytes_cp_dst.txt")
+        with open(src, "w") as f:
+            f.write("copy me")
+
+        vfs.enable_tracking_only()
+        shutil.copy(src.encode(), dst.encode())
+
+    def test_tracking_bytes_shutil_copy2(self, vfs, tmpdir):
+        """shutil.copy2 with bytes paths in tracking mode should not crash."""
+        src = os.path.join(tmpdir, "track_bytes_cp2_src.txt")
+        dst = os.path.join(tmpdir, "track_bytes_cp2_dst.txt")
+        with open(src, "w") as f:
+            f.write("copy2 me")
+
+        vfs.enable_tracking_only()
+        shutil.copy2(src.encode(), dst.encode())
+
+    def test_tracking_bytes_shutil_move(self, vfs, tmpdir):
+        """shutil.move with bytes paths in tracking mode should not crash."""
+        src = os.path.join(tmpdir, "track_bytes_mv_src.txt")
+        dst = os.path.join(tmpdir, "track_bytes_mv_dst.txt")
+        with open(src, "w") as f:
+            f.write("move me")
+
+        vfs.enable_tracking_only()
+        shutil.move(src.encode(), dst.encode())
+
+    def test_tracking_bytes_shutil_rmtree(self, vfs, tmpdir):
+        """shutil.rmtree with bytes path in tracking mode should not crash."""
+        tree = os.path.join(tmpdir, "track_bytes_tree")
+        os.makedirs(os.path.join(tree, "sub"))
+
+        vfs.enable_tracking_only()
+        shutil.rmtree(tree.encode())
+
+
+class TestOverlayScoping:
+    """Tests that full VFS overlay redirection is scoped to notebook directory.
+
+    When notebook_dir is set, writes to paths outside that directory should
+    go to the real FS (not the overlay), while writes inside should still
+    be redirected to the overlay. This fixes libraries like joblib that write
+    to /dev/shm or /tmp and then call os.chmod on the same path.
+    """
+
+    def test_write_outside_notebook_dir_goes_to_real_fs(self, vfs, tmpdir):
+        """open() write outside notebook dir should go to real FS, not overlay."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        outside_file = os.path.join(outside_dir, "temp.pkl")
+        with open(outside_file, "w") as f:
+            f.write("external data")
+
+        # File should exist on real FS
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(outside_file)
+
+        # Verify content via real FS
+        orig_open = vfs._originals["builtins.open"]
+        with orig_open(outside_file, "r") as f:
+            assert f.read() == "external data"
+
+    def test_write_inside_notebook_dir_goes_to_overlay(self, vfs, tmpdir):
+        """open() write inside notebook dir should go to overlay."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        inside_file = os.path.join(notebook_dir, "output.csv")
+        with open(inside_file, "w") as f:
+            f.write("notebook data")
+
+        # File should NOT exist on real FS
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(inside_file)
+
+        # But patched exists should find it
+        assert os.path.exists(inside_file)
+
+    def test_read_outside_notebook_dir_from_real_fs(self, vfs, tmpdir):
+        """open() read outside notebook dir should read from real FS."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        outside_file = os.path.join(outside_dir, "input.dat")
+        with open(outside_file, "w") as f:
+            f.write("real data")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        with open(outside_file, "r") as f:
+            assert f.read() == "real data"
+
+    def test_remove_outside_notebook_dir_removes_real_file(self, vfs, tmpdir):
+        """os.remove outside notebook dir should delete real file."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        outside_file = os.path.join(outside_dir, "to_delete.txt")
+        with open(outside_file, "w") as f:
+            f.write("delete me")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        os.remove(outside_file)
+
+        # Real file should be gone
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(outside_file)
+
+    def test_chmod_after_write_outside_notebook_dir(self, vfs, tmpdir):
+        """Simulates joblib pattern: write + chmod outside notebook dir succeeds."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        outside_file = os.path.join(outside_dir, "joblib_temp.pkl")
+
+        # Write goes to real FS (outside notebook dir)
+        with open(outside_file, "w") as f:
+            f.write("pickle data")
+
+        # os.chmod is NOT patched by VFS, so it operates on real FS.
+        # This should succeed because the file is on the real FS.
+        os.chmod(outside_file, 0o644)
+
+        # Verify the file is readable
+        orig_open = vfs._originals["builtins.open"]
+        with orig_open(outside_file, "r") as f:
+            assert f.read() == "pickle data"
+
+    def test_makedirs_outside_notebook_dir_creates_real_dirs(self, vfs, tmpdir):
+        """os.makedirs outside notebook dir should create real directories."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        os.makedirs(notebook_dir)
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        outside_dirs = os.path.join(tmpdir, "outside", "deep", "path")
+        os.makedirs(outside_dirs)
+
+        # Real dirs should exist
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(outside_dirs)
+
+    def test_no_notebook_dir_overlays_everything(self, vfs, tmpdir):
+        """Without set_notebook_dir, all writes go to overlay (backward compat)."""
+        vfs.enable()
+
+        real_file = os.path.join(tmpdir, "anywhere.txt")
+        with open(real_file, "w") as f:
+            f.write("overlay content")
+
+        # File should NOT exist on real FS
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(real_file)
+
+        # But patched exists should find it
+        assert os.path.exists(real_file)
+
+    def test_exists_outside_notebook_dir_uses_real_fs(self, vfs, tmpdir):
+        """os.path.exists outside notebook dir should use real FS only."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        outside_file = os.path.join(outside_dir, "check.txt")
+        with open(outside_file, "w") as f:
+            f.write("exists")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        assert os.path.exists(outside_file)
+        assert not os.path.exists(os.path.join(outside_dir, "nonexistent.txt"))
+
+    def test_listdir_outside_notebook_dir_uses_real_fs(self, vfs, tmpdir):
+        """os.listdir outside notebook dir should use real FS only."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        with open(os.path.join(outside_dir, "a.txt"), "w") as f:
+            f.write("a")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        entries = os.listdir(outside_dir)
+        assert "a.txt" in entries
+
+    def test_shutil_copy_outside_notebook_dir_uses_real_fs(self, vfs, tmpdir):
+        """shutil.copy outside notebook dir should use real FS."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        src = os.path.join(outside_dir, "src.txt")
+        dst = os.path.join(outside_dir, "dst.txt")
+        with open(src, "w") as f:
+            f.write("copy me")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        shutil.copy(src, dst)
+
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(dst)
+
+    def test_rename_outside_notebook_dir_uses_real_fs(self, vfs, tmpdir):
+        """os.rename outside notebook dir should use real FS."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_dir = os.path.join(tmpdir, "outside")
+        os.makedirs(notebook_dir)
+        os.makedirs(outside_dir)
+
+        src = os.path.join(outside_dir, "old.txt")
+        dst = os.path.join(outside_dir, "new.txt")
+        with open(src, "w") as f:
+            f.write("rename me")
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        os.rename(src, dst)
+
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(src)
+        assert orig_exists(dst)
+
+    def test_rmtree_outside_notebook_dir_removes_real_tree(self, vfs, tmpdir):
+        """shutil.rmtree outside notebook dir should remove real directory."""
+        notebook_dir = os.path.join(tmpdir, "notebook")
+        outside_tree = os.path.join(tmpdir, "outside_tree")
+        os.makedirs(notebook_dir)
+        os.makedirs(os.path.join(outside_tree, "sub"))
+
+        vfs.set_notebook_dir(notebook_dir)
+        vfs.enable()
+
+        shutil.rmtree(outside_tree)
+
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(outside_tree)

@@ -1,3 +1,4 @@
+import io
 import json
 from pathlib import Path
 import sys
@@ -87,7 +88,9 @@ class Output:
     def __init__(self, *, timings_file: str | None = None):
         if timings_file is None:
             # Check environment variable first, then fall back to default
-            timings_file = os.environ.get("FLOWBOOK_TIMINGS_FILE", "flowbook-times.json")
+            timings_file = os.environ.get(
+                "FLOWBOOK_TIMINGS_FILE", "flowbook-times.json"
+            )
         self.pending = None
         self.contexts = []
         self.output_contexts = []
@@ -148,19 +151,21 @@ class Output:
 
         timings = self.timings
         if timings:
-            if os.path.exists(self.timings_file):
-                try:
-                    with open(self.timings_file) as f:
-                        saved_timings: Timings = json.load(f)
-                    log(f"Output timer data loaded from {self.timings_file}")
-                    saved_timings.extend(timings)
-                    timings = saved_timings
-                    log(f"Output timer data extended by {len(self.timings)} entries")
-                except (json.JSONDecodeError, ValueError):
-                    # Corrupted file - log warning and overwrite with current timings
-                    log(f"Warning: {self.timings_file} is corrupted, overwriting")
+            # Use io.open to bypass VFS patched builtins.open so timings
+            # are always written to the real filesystem, not the overlay.
+            try:
+                with io.open(self.timings_file) as f:
+                    saved_timings: Timings = json.load(f)
+                log(f"Output timer data loaded from {self.timings_file}")
+                saved_timings.extend(timings)
+                timings = saved_timings
+                log(f"Output timer data extended by {len(self.timings)} entries")
+            except FileNotFoundError:
+                pass
+            except (json.JSONDecodeError, OSError) as e:
+                log(f"Warning: could not load timings file {self.timings_file}: {e}")
 
-            with open(self.timings_file, "w") as f:
+            with io.open(self.timings_file, "w") as f:
                 json.dump(timings, f, indent=2)
             log(f"Output timer data saved to {self.timings_file}")
 

@@ -636,7 +636,48 @@ class TestCheckpointNameValidation:
         assert cp.exists('checkpoint.v2')
 
 
-# Note: Copy-on-write tests removed - CoW is always enabled in pandas >= 3.0
+# ============================================================================
+# COPY-ON-WRITE VERIFICATION TESTS (pandas 2.x only)
+# ============================================================================
+
+class TestCopyOnWriteVerification:
+    """Test that CoW is verified and enabled on initialization (pandas 2.x only)."""
+
+    @pytest.mark.skipif(
+        not hasattr(pd.options.mode, 'copy_on_write'),
+        reason="copy_on_write option not available in this pandas version"
+    )
+    def test_cow_enabled_check(self):
+        """Test that CoW gets enabled if disabled."""
+        # Temporarily disable CoW
+        original_cow = pd.options.mode.copy_on_write
+        pd.options.mode.copy_on_write = False
+
+        try:
+            # Creating MemoryCheckpoints should re-enable it
+            cp = MemoryCheckpoints()
+
+            # Verify CoW is now enabled
+            assert pd.options.mode.copy_on_write == True
+        finally:
+            # Restore original setting
+            pd.options.mode.copy_on_write = original_cow
+
+    @pytest.mark.skipif(
+        not hasattr(pd.options.mode, 'copy_on_write'),
+        reason="copy_on_write option not available in this pandas version"
+    )
+    def test_cow_already_enabled(self):
+        """Test that no warning when CoW already enabled."""
+        # Ensure CoW is enabled
+        pd.options.mode.copy_on_write = True
+
+        # Should work without issues
+        cp = MemoryCheckpoints()
+
+        # CoW should still be enabled
+        assert pd.options.mode.copy_on_write == True
+
 
 # ============================================================================
 # SIZE WARNING TESTS
