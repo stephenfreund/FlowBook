@@ -20,6 +20,16 @@ To install the extension, execute:
 pip install flowbook
 ```
 
+## Command Line Tools
+
+FlowBook provides several command line tools for notebook processing, optimization, and analysis. See [CLI.md](CLI.md) for complete documentation including:
+
+- `flowbook` - Main CLI for notebook processing commands
+- `flowlab` - Launch JupyterLab with FlowBook extensions
+- `flowbook_optimize` - Optimization pipeline for notebooks
+- `flowbook_compare_overhead` - Analyze baseline comparison results
+- And more...
+
 ## Uninstall
 
 To remove the extension, execute:

@@ -417,6 +417,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         assert self.shell is not None
         self.shell.register_magics(self)
 
+        # Expose checkpoint object to user code for memory measurement
+        # (consistent with checkpoint_kernel for benchmark_checkpoint.py compatibility)
+        self.shell.user_ns["_flowbook_checkpoint"] = self._checkpoint
+
         # Tracking
         self._tracking = TrackingDict(self.shell.user_ns)
 
