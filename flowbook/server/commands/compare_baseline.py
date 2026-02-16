@@ -921,10 +921,11 @@ class CompareBaselineCommand(NotebookCommand):
 
             comparison_dict = to_dict(comparison)
 
-            # Save JSON output as NOTEBOOK_NAME_comparison.json
-            notebook_dir = Path(notebook_path).parent
+            # Save JSON output in the same directory as the timings file
+            from flowbook.util.output import output as global_output
+            timings_dir = Path(global_output.timings_file).parent
             notebook_stem = Path(notebook_path).stem
-            json_output_path = notebook_dir / f"{notebook_stem}_comparison.json"
+            json_output_path = timings_dir / f"{notebook_stem}_comparison.json"
 
             with open(json_output_path, "w") as f:
                 json.dump(comparison_dict, f, indent=2)
