@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "flowbook-python"
 version = "0.0.1"
-description = "Placeholder package for flowbook-python PyPI name reservation"
+description = "FlowBook!"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.8"
