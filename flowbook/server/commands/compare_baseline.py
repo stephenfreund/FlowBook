@@ -487,6 +487,13 @@ def run_baseline_execution(
         else:
             log("Baseline: WARNING: Failed to inject memory measurement helper")
 
+        # Warmup: pre-import pandas to match FlowBook kernel's startup state
+        # (FlowBook kernel imports pandas at init for ChainedAssignmentError config)
+        warmup_code = "import pandas; del pandas"
+        kernel_client.execute(warmup_code, silent=True)
+        _wait_for_idle(kernel_client)
+        log("Baseline: Warmup imports completed")
+
         total_runtime_ms = 0.0
         final_user_ns_bytes = 0
         final_checkpoint_bytes = 0
