@@ -917,18 +917,19 @@ class CompareBaselineCommand(NotebookCommand):
                 log(f"Extra cells: {extra_cells}")
             log("")
 
-            # Run baseline
-            log("=" * 60)
-            log("BASELINE EXECUTION (python3)")
-            log("=" * 60)
-            baseline_results = run_baseline_execution(notebook_content, cell_timeout, rerun_indices)
-            log("")
-
-            # Run FlowBook
+            # Run FlowBook first to avoid cold-cache bias
+            # (baseline would otherwise warm OS file cache, giving FlowBook unfair advantage)
             log("=" * 60)
             log("FLOWBOOK EXECUTION (flowbook_kernel)")
             log("=" * 60)
             flowbook_results = run_flowbook_execution(notebook_content, cell_timeout, rerun_indices)
+            log("")
+
+            # Run baseline second (benefits from warmed caches - conservative overhead estimate)
+            log("=" * 60)
+            log("BASELINE EXECUTION (python3)")
+            log("=" * 60)
+            baseline_results = run_baseline_execution(notebook_content, cell_timeout, rerun_indices)
             log("")
 
             # Build comparison result
