@@ -288,8 +288,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     flowbook_runtime = flowbook_totals.get("cell_runtime_ms", 0.0)
     state_overhead = flowbook_totals.get("state_duration_ms", 0.0)
     check_overhead = flowbook_totals.get("check_duration_ms", 0.0)
-    # Use baseline runtime as base for fair comparison - FlowBook overhead is state + check
-    flowbook_total = baseline_runtime + state_overhead + check_overhead
+    flowbook_total = flowbook_runtime
 
     if baseline_runtime > 0:
         slowdown = flowbook_total / baseline_runtime
@@ -320,8 +319,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     rerun_flowbook_runtime = flowbook_rerun_totals.get("cell_runtime_ms", 0.0)
     rerun_state_overhead = flowbook_rerun_totals.get("state_duration_ms", 0.0)
     rerun_check_overhead = flowbook_rerun_totals.get("check_duration_ms", 0.0)
-    # Use baseline runtime as base for fair comparison
-    rerun_flowbook_total = rerun_baseline_runtime + rerun_state_overhead + rerun_check_overhead
+    rerun_flowbook_total = rerun_flowbook_runtime
     rerun_final_checkpoint = flowbook_rerun_totals.get("final_checkpoint_bytes", 0)
 
     # Last cell overhead calculations
@@ -879,6 +877,7 @@ def plot_combined(
 
     for c in flowbook_cells:
         if c["cell_id"] in cell_data:
+            cell_data[c["cell_id"]]["flowbook_runtime_ms"] = c["cell_runtime_ms"]
             cell_data[c["cell_id"]]["state_ms"] = c["state_duration_ms"]
             cell_data[c["cell_id"]]["check_ms"] = c["check_duration_ms"]
             cell_data[c["cell_id"]]["user_ns_bytes"] = c.get("user_ns_bytes", 0)
@@ -886,6 +885,7 @@ def plot_combined(
 
     cell_ids = list(cell_data.keys())
     baseline_runtimes = [cell_data[cid].get("baseline_runtime_ms", 0) for cid in cell_ids]
+    flowbook_runtimes = [cell_data[cid].get("flowbook_runtime_ms", 0) for cid in cell_ids]
     state_times = [cell_data[cid].get("state_ms", 0) for cid in cell_ids]
     check_times = [cell_data[cid].get("check_ms", 0) for cid in cell_ids]
     user_ns_bytes = [cell_data[cid].get("user_ns_bytes", 0) for cid in cell_ids]
@@ -894,6 +894,7 @@ def plot_combined(
     # Add rerun cells data
     for i, (bc, fc) in enumerate(zip(baseline_rerun_cells, flowbook_rerun_cells)):
         baseline_runtimes.append(bc.get("cell_runtime_ms", 0))
+        flowbook_runtimes.append(fc.get("cell_runtime_ms", 0))
         state_times.append(fc.get("state_duration_ms", 0))
         check_times.append(fc.get("check_duration_ms", 0))
         user_ns_bytes.append(fc.get("user_ns_bytes", 0))
@@ -901,11 +902,9 @@ def plot_combined(
 
     cells = np.arange(1, len(baseline_runtimes) + 1)
 
-    # Cumulative times
+    # Cumulative times - use actual measured times for both kernels
     baseline_cumsum = np.cumsum(baseline_runtimes)
-    state_cumsum = np.cumsum(state_times)
-    check_cumsum = np.cumsum(check_times)
-    total_cumsum = baseline_cumsum + state_cumsum + check_cumsum
+    flowbook_cumsum = np.cumsum(flowbook_runtimes)
 
     # Memory
     mb = 1024 * 1024
@@ -927,10 +926,10 @@ def plot_combined(
     # Panel 1: Time comparison (Baseline vs FlowBook)
     ax = axes[0]
     ax.fill_between(cells, 0, baseline_cumsum / 1000, alpha=0.3, color=colors[0], label="Baseline")
-    ax.fill_between(cells, baseline_cumsum / 1000, total_cumsum / 1000, alpha=0.3, color=colors[1], label="FlowBook Overhead")
+    ax.fill_between(cells, baseline_cumsum / 1000, flowbook_cumsum / 1000, alpha=0.3, color=colors[1], label="FlowBook Overhead")
 
     ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4)
-    ax.plot(cells, total_cumsum / 1000, color=colors[1], linewidth=2, marker='o', markersize=4)
+    ax.plot(cells, flowbook_cumsum / 1000, color=colors[1], linewidth=2, marker='o', markersize=4)
 
     # Add separator for rerun phase
     if initial_count < len(cells):
@@ -950,9 +949,9 @@ def plot_combined(
 
     # Add overhead percentage label at end of run
     if baseline_cumsum[-1] > 0:
-        time_overhead_pct = (total_cumsum[-1] - baseline_cumsum[-1]) / baseline_cumsum[-1] * 100
+        time_overhead_pct = (flowbook_cumsum[-1] - baseline_cumsum[-1]) / baseline_cumsum[-1] * 100
         ax.annotate(f'{time_overhead_pct:.1f}% overhead',
-                    xy=(cells[-1], total_cumsum[-1] / 1000),
+                    xy=(cells[-1], flowbook_cumsum[-1] / 1000),
                     xytext=(5, 0), textcoords='offset points',
                     fontsize=legend_size, va='center', ha='left',
                     color=colors[1])

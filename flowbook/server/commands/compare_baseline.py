@@ -318,13 +318,16 @@ def execute_cell_flowbook(
     timeout: float = 300.0
 ) -> Dict[str, Any]:
     """
-    Execute a cell on the flowbook_kernel and extract timing from metadata.
+    Execute a cell on the flowbook_kernel and measure execution time.
 
     Returns:
-        Dict with cell_runtime_ms, state_duration_ms, check_duration_ms, and optional error
+        Dict with cell_runtime_ms (client-side), state_duration_ms, check_duration_ms, and optional error
     """
     # Set cell order for reproducibility tracking
     kernel_client.set_cell_order(cell_order)
+
+    # Measure wall-clock time from client side (same as baseline)
+    start = time.perf_counter()
 
     msg_id = kernel_client.execute(source, cell_id=cell_id)
 
@@ -374,6 +377,9 @@ def execute_cell_flowbook(
     except Exception:
         pass
 
+    # Calculate client-side elapsed time (same methodology as baseline)
+    elapsed = time.perf_counter() - start
+
     if flowbook_metadata:
         # Check for violations in metadata
         violation = flowbook_metadata.get("violation")
@@ -382,7 +388,8 @@ def execute_cell_flowbook(
             violation_msg = violation.get("message", "Reproducibility violation")
 
         return {
-            "cell_runtime_ms": flowbook_metadata.get("run_duration_ms", 0.0),
+            # Use client-side timing for fair comparison with baseline
+            "cell_runtime_ms": elapsed * 1000,
             "state_duration_ms": flowbook_metadata.get("state_duration_ms", 0.0),
             "check_duration_ms": flowbook_metadata.get("check_duration_ms", 0.0),
             "error": error_msg,
@@ -391,7 +398,7 @@ def execute_cell_flowbook(
         }
     else:
         return {
-            "cell_runtime_ms": None,
+            "cell_runtime_ms": elapsed * 1000,
             "state_duration_ms": None,
             "check_duration_ms": None,
             "error": error_msg or "No flowbook metadata received",
