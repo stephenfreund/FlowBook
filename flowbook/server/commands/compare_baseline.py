@@ -489,7 +489,7 @@ def run_baseline_execution(
 
         # Warmup: pre-import pandas to match FlowBook kernel's startup state
         # (FlowBook kernel imports pandas at init for ChainedAssignmentError config)
-        warmup_code = "import pandas; del pandas"
+        warmup_code = "import pandas"
         kernel_client.execute(warmup_code, silent=True)
         _wait_for_idle(kernel_client)
         log("Baseline: Warmup imports completed")
