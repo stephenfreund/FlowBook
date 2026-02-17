@@ -924,12 +924,10 @@ def plot_combined(
     fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 6))
 
     # Panel 1: Time comparison (Baseline vs FlowBook)
+    # Use lines only (not shaded areas) since these are independent measurements
     ax = axes[0]
-    ax.fill_between(cells, 0, baseline_cumsum / 1000, alpha=0.3, color=colors[0], label="Baseline")
-    ax.fill_between(cells, baseline_cumsum / 1000, flowbook_cumsum / 1000, alpha=0.3, color=colors[1], label="FlowBook Overhead")
-
-    ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4)
-    ax.plot(cells, flowbook_cumsum / 1000, color=colors[1], linewidth=2, marker='o', markersize=4)
+    ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label="Baseline")
+    ax.plot(cells, flowbook_cumsum / 1000, color=colors[1], linewidth=2, marker='o', markersize=4, label="FlowBook")
 
     # Add separator for rerun phase
     if initial_count < len(cells):
