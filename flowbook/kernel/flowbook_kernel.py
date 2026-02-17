@@ -575,9 +575,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         cell_id = line.strip()
         log(f"[exec_restore magic] Received for cell_id={cell_id!r}")
         if not cell_id:
-            self._display.display_icon_and_text(
-                "❌", "Usage: %exec_restore <cell_id>"
-            )
+            self._display.display_icon_and_text("❌", "Usage: %exec_restore <cell_id>")
             return
 
         can_restore = self._enforcer.can_exec_restore(cell_id)
@@ -846,7 +844,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         # Re-validate precondition (predecessors may have become stale
                         # between the magic and execution)
                         if self._enforcer.can_exec_restore(self._cell_id):
-                            prefix_name = self._enforcer.get_prefix_checkpoint_name(self._cell_id)
+                            prefix_name = self._enforcer.get_prefix_checkpoint_name(
+                                self._cell_id
+                            )
 
                             if prefix_name is None:
                                 # First cell — restore to initial state (σ_0)
@@ -856,9 +856,13 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                     )
                                     self._restore_checkpoint("_initial_state")
                                     _is_exec_restore = True
-                                    log(f"[exec_restore] Restored initial state for first cell {self._cell_id}")
+                                    log(
+                                        f"[exec_restore] Restored initial state for first cell {self._cell_id}"
+                                    )
                                 else:
-                                    log(f"[exec_restore] No initial state checkpoint, executing normally")
+                                    log(
+                                        f"[exec_restore] No initial state checkpoint, executing normally"
+                                    )
 
                             elif prefix_name in self._checkpoints.memory.saved:
                                 # Non-first cell, predecessor has been run — normal restore
@@ -867,12 +871,16 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                 )
                                 self._restore_checkpoint(prefix_name)
                                 _is_exec_restore = True
-                                log(f"[exec_restore] Restored prefix checkpoint {prefix_name} for cell {self._cell_id}")
+                                log(
+                                    f"[exec_restore] Restored prefix checkpoint {prefix_name} for cell {self._cell_id}"
+                                )
 
                             else:
                                 # Non-first cell, predecessor NOT run — refuse
                                 try:
-                                    cell_idx = self._enforcer.cell_order.index(self._cell_id)
+                                    cell_idx = self._enforcer.cell_order.index(
+                                        self._cell_id
+                                    )
                                     prev_idx = cell_idx - 1
                                     prev_alpha = index_to_alpha(prev_idx)
                                     cell_alpha = index_to_alpha(cell_idx)
@@ -897,7 +905,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             # Emit visible notification on successful restore
                             if _is_exec_restore:
                                 try:
-                                    cell_idx = self._enforcer.cell_order.index(self._cell_id)
+                                    cell_idx = self._enforcer.cell_order.index(
+                                        self._cell_id
+                                    )
                                     cell_alpha = index_to_alpha(cell_idx)
                                     if cell_idx > 0:
                                         prev_alpha = index_to_alpha(cell_idx - 1)
@@ -916,13 +926,17 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                         "Restored from prefix checkpoint — re-executing",
                                     )
                         else:
-                            log(f"[exec_restore] Precondition no longer valid for cell {self._cell_id}, executing normally")
+                            log(
+                                f"[exec_restore] Precondition no longer valid for cell {self._cell_id}, executing normally"
+                            )
                     # Clear flag regardless (user may have executed a different cell)
                     self._pending_exec_restore = None
 
                 # Take pre-execution snapshot
                 user_ns = self.shell.user_ns
-                with timer(key="kernel:checkpoint", message="Pre-execution checkpoint") as pre_timer:
+                with timer(
+                    key="kernel:checkpoint", message="Pre-execution checkpoint"
+                ) as pre_timer:
                     pre_checkpoint = self._take_checkpoint(
                         f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
                     )
@@ -1011,7 +1025,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 #     self._warn_non_deepcopyable_objects()
 
                 # Take post-execution snapshot
-                with timer(key="kernel:checkpoint", message="Post-execution checkpoint") as post_timer:
+                with timer(
+                    key="kernel:checkpoint", message="Post-execution checkpoint"
+                ) as post_timer:
                     post_checkpoint = self._take_checkpoint(
                         f"{POST_CHECKPOINT_PREFIX}{self._cell_id}"
                     )
@@ -1067,7 +1083,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                     sdc_result.violation.truncation_details
                                 )
 
-                            error(f"Reproducibility violation: {sdc_result.violation.message}")
+                            error(
+                                f"Reproducibility violation: {sdc_result.violation.message}"
+                            )
 
                             self._restore_checkpoint(
                                 f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
@@ -1091,9 +1109,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         self._send_violation_warning(sdc_result.forward_violation)
 
                     # Display results (skip if silent, error, or backward violation with rollback)
-                    skip_display = (
-                        has_backward
-                    ) and not self._continue_after_violation
+                    skip_display = (has_backward) and not self._continue_after_violation
                     if (
                         not silent
                         and result.get("status") != "error"
@@ -1103,7 +1119,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         post_ms = post_timer.duration()
                         state_ms = pre_ms + post_ms
                         self._display_execution_result(
-                            execution_time,
+                            # execution_time,
+                            time.perf_counter() * 1000 - start_time,
                             state_ms,
                             check_timer.duration(),
                             tracking,
@@ -1379,7 +1396,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             run_duration_ms=run_duration,
             state_duration_ms=state_duration,
             check_duration_ms=check_duration,
-            cell_is_contaminated=sdc_result.cell_is_contaminated if sdc_result else False,
+            cell_is_contaminated=(
+                sdc_result.cell_is_contaminated if sdc_result else False
+            ),
             exec_mode=sdc_result.exec_mode if sdc_result else "live",
         )
 

@@ -31,6 +31,39 @@ from flowbook.testing.benchmark_checkpoint import (
 from flowbook.util.output import log
 
 
+def generate_comparison_filename(notebook_path: str, num_components: int = 3) -> str:
+    """
+    Generate a comparison filename from the notebook path.
+
+    Takes the last N path components (directories + filename without extension)
+    and joins them with '---'.
+
+    Example:
+        /path/to/zyh1104/sticker-sales-solution-ensembling/notebook.ipynb
+        -> zyh1104---sticker-sales-solution-ensembling---notebook_comparison.json
+
+    Args:
+        notebook_path: Path to the notebook
+        num_components: Number of path components to include (default: 3)
+
+    Returns:
+        Filename string like 'dir1---dir2---filename_comparison.json'
+    """
+    path = Path(notebook_path)
+    stem = path.stem
+
+    # Get parent directory components
+    parts = list(path.parent.parts)
+
+    # Take the last (num_components - 1) directory parts + the stem
+    dir_parts = parts[-(num_components - 1):] if len(parts) >= (num_components - 1) else parts
+    all_parts = dir_parts + [stem]
+
+    # Join with '---'
+    name = '---'.join(all_parts)
+    return f"{name}_comparison.json"
+
+
 @dataclass
 class CellMetrics:
     """Metrics for a single cell execution."""
@@ -44,6 +77,7 @@ class CellMetrics:
     status: str
     error: Optional[str] = None
     checkpoint_details: Optional[Dict[str, Any]] = None
+    memory_warnings: Optional[List[str]] = None
 
 
 @dataclass
@@ -492,7 +526,8 @@ def run_baseline_execution(
                     user_ns_bytes=mem["user_ns_bytes"],
                     user_ns_and_checkpoint_bytes=mem["user_ns_and_checkpoint_bytes"],
                     status="ok",
-                    error=None
+                    error=None,
+                    memory_warnings=mem.get("diagnostics", {}).get("warnings"),
                 ))
                 log(f"  Runtime: {runtime_ms:.1f}ms, Memory: {mem['user_ns_bytes']:,}B")
 
@@ -551,7 +586,8 @@ def run_baseline_execution(
                         user_ns_bytes=last_mem["user_ns_bytes"],
                         user_ns_and_checkpoint_bytes=last_mem["user_ns_and_checkpoint_bytes"],
                         status="ok",
-                        error=None
+                        error=None,
+                        memory_warnings=last_mem.get("diagnostics", {}).get("warnings"),
                     ))
                     log(f"  Runtime: {runtime_ms:.1f}ms, Memory: {last_mem['user_ns_bytes']:,}B")
 
@@ -682,6 +718,7 @@ def run_flowbook_execution(
                     status=status,
                     error=timing.get("violation") or timing.get("error"),
                     checkpoint_details=ckpt_details,
+                    memory_warnings=mem.get("diagnostics", {}).get("warnings"),
                 ))
                 log(f"  Runtime: {runtime_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms, Memory: {mem['user_ns_bytes']:,}B, Checkpoint: {mem['user_ns_and_checkpoint_bytes']:,}B")
 
@@ -763,6 +800,7 @@ def run_flowbook_execution(
                         status=status,
                         error=timing.get("violation") or timing.get("error"),
                         checkpoint_details=last_ckpt_details,
+                        memory_warnings=last_mem.get("diagnostics", {}).get("warnings"),
                     ))
                     log(f"  Runtime: {runtime_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms, Memory: {last_mem['user_ns_bytes']:,}B, Checkpoint: {last_mem['user_ns_and_checkpoint_bytes']:,}B")
 
@@ -921,10 +959,11 @@ class CompareBaselineCommand(NotebookCommand):
 
             comparison_dict = to_dict(comparison)
 
-            # Save JSON output as NOTEBOOK_NAME_comparison.json
-            notebook_dir = Path(notebook_path).parent
+            # Save JSON output in the same directory as the timings file
+            from flowbook.util.output import output as global_output
+            timings_dir = Path(global_output.timings_file).parent
             notebook_stem = Path(notebook_path).stem
-            json_output_path = notebook_dir / f"{notebook_stem}_comparison.json"
+            json_output_path = timings_dir / f"{notebook_stem}_comparison.json"
 
             with open(json_output_path, "w") as f:
                 json.dump(comparison_dict, f, indent=2)

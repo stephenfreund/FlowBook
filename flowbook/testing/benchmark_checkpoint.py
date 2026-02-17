@@ -296,6 +296,21 @@ from pympler import asizeof as _asizeof
 from pympler.asizeof import Asizer as _Asizer
 
 
+_memory_warnings = []
+
+
+def _safe_asizeof(_v):
+    """Wrapper for asizeof that handles read-only buffer errors gracefully."""
+    try:
+        return _asizeof.asizeof(_v)
+    except ValueError as _e:
+        # Fallback for objects with read-only buffers (e.g., some numpy arrays, LightGBM models)
+        _type_name = type(_v).__name__
+        _shallow = _sys.getsizeof(_v)
+        _memory_warnings.append(f"{_type_name} has read-only buffer, using shallow size ({_shallow} bytes)")
+        return _shallow
+
+
 def _get_inner_ndarray(_arr):
     """Unwrap pandas ExtensionArray to get the underlying ndarray."""
     for _attr in ('_ndarray', '_data'):
@@ -316,7 +331,7 @@ def _collect_user_ns_array_ids():
     _ids = set()
     _skip = {'_flowbook_checkpoint', '_flowbook_measure_memory',
              '_get_inner_ndarray', '_collect_user_ns_array_ids',
-             '_checkpoint_var_overhead',
+             '_checkpoint_var_overhead', '_safe_asizeof', '_memory_warnings',
              '_asizeof', '_Asizer', '_time', '_sys', '_types', '_np',
              'In', 'Out', 'get_ipython', 'exit', 'quit'}
     for _k, _v in globals().items():
@@ -388,7 +403,7 @@ def _checkpoint_var_overhead(_v, _user_ids, _seen=None):
     # For plain Python containers (lists, dicts, etc.), use asizeof to measure
     # the full recursive size. Unlike numpy arrays, these don't have CoW sharing,
     # so deepcopy creates fully independent copies.
-    return _asizeof.asizeof(_v)
+    return _safe_asizeof(_v)
 
 
 def _flowbook_measure_memory():
@@ -403,6 +418,8 @@ def _flowbook_measure_memory():
 
     Returns (user_ns_bytes, user_ns_and_checkpoint_bytes, diagnostics, measurement_time_s).
     """
+    global _memory_warnings
+    _memory_warnings = []  # Clear warnings from previous measurements
     _t0 = _time.perf_counter()
     _diag = {}
 
@@ -479,7 +496,7 @@ def _flowbook_measure_memory():
                         _total += object.__sizeof__(_item) + 1024
                     elif type(_item) not in _PRIMITIVE_TYPES:
                         # Non-primitive leaf - use asizeof
-                        _total += _asizeof.asizeof(_item)
+                        _total += _safe_asizeof(_item)
                     # Primitives: already counted in getsizeof of container
                 return _total
 
@@ -494,7 +511,7 @@ def _flowbook_measure_memory():
                             _global_seen.add(_aid)
                             _total += _item.nbytes + 128
                     elif type(_item) not in _PRIMITIVE_TYPES:
-                        _total += _asizeof.asizeof(_item)
+                        _total += _safe_asizeof(_item)
                 return _total
 
             elif isinstance(_obj, set):
@@ -505,7 +522,7 @@ def _flowbook_measure_memory():
                     if isinstance(_item, tuple):
                         _total += _container_unique_overhead(_item, _global_seen, _user_ids)
                     elif type(_item) not in _PRIMITIVE_TYPES:
-                        _total += _asizeof.asizeof(_item)
+                        _total += _safe_asizeof(_item)
                 return _total
 
             elif isinstance(_obj, dict):
@@ -515,7 +532,7 @@ def _flowbook_measure_memory():
                     if isinstance(_key, tuple):
                         _total += _container_unique_overhead(_key, _global_seen, _user_ids)
                     elif type(_key) not in _PRIMITIVE_TYPES:
-                        _total += _asizeof.asizeof(_key)
+                        _total += _safe_asizeof(_key)
                     # Values can be anything
                     if isinstance(_val, (list, tuple, set, dict)):
                         _total += _container_unique_overhead(_val, _global_seen, _user_ids)
@@ -534,12 +551,12 @@ def _flowbook_measure_memory():
                                     _total += _nd.nbytes if _nd is not None else _sys.getsizeof(_arr)
                         _total += object.__sizeof__(_val) + 1024
                     elif type(_val) not in _PRIMITIVE_TYPES:
-                        _total += _asizeof.asizeof(_val)
+                        _total += _safe_asizeof(_val)
                 return _total
 
             else:
                 # Not a container - shouldn't reach here, but fallback
-                return _asizeof.asizeof(_obj)
+                return _safe_asizeof(_obj)
 
         for _name, _ckpt in _saved.items():
             _cp_overhead = 0
@@ -634,9 +651,13 @@ def _flowbook_measure_memory():
             continue
         if _k in ('In', 'Out', 'get_ipython', 'exit', 'quit'):
             continue
-        _var_sizes.append((_k, _asizeof.asizeof(_v), type(_v).__name__))
+        _var_sizes.append((_k, _safe_asizeof(_v), type(_v).__name__))
     _var_sizes.sort(key=lambda x: x[1], reverse=True)
     _diag['top_vars'] = _var_sizes[:10]
+
+    # Include any warnings from read-only buffer fallbacks
+    if _memory_warnings:
+        _diag['warnings'] = _memory_warnings[:]
 
     _elapsed = _time.perf_counter() - _t0
     return (user_ns_bytes, user_ns_and_checkpoint_bytes, _diag, _elapsed)
@@ -752,6 +773,9 @@ def measure_memory(kernel_client, timeout: float = 300.0) -> dict:
             tup = ast.literal_eval(text)
             user_ns_bytes, user_ns_and_checkpoint_bytes, diag, meas_time = tup
             log(f'  Memory measurement took {meas_time*1000:.1f}ms')
+            # Log any warnings from read-only buffer fallbacks
+            for warning in diag.get('warnings', []):
+                log(f'  Memory warning: {warning}')
             return {
                 'user_ns_bytes': int(user_ns_bytes),
                 'user_ns_and_checkpoint_bytes': int(user_ns_and_checkpoint_bytes),
