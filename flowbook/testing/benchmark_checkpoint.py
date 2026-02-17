@@ -840,13 +840,16 @@ def _flowbook_checkpoint_details(_top_n=20):
     _all_vars = []  # [(name, type_name, size_bytes, checkpoint_name)]
     _type_agg = {}  # type_name -> {count: int, bytes: int}
 
+    # Track ndarray ids globally to deduplicate across checkpoints
+    # (same approach as _flowbook_measure_memory uses for unique_overhead_bytes)
+    _global_seen = set()
+
     for _ckpt_name, _ckpt in _saved.items():
         if not hasattr(_ckpt, 'user_ns'):
             continue
-        _seen = set()
         for _k, _v in _ckpt.user_ns.items():
             _type_name = type(_v).__name__
-            _size = _checkpoint_var_overhead(_v, _user_ids, _seen)
+            _size = _checkpoint_var_overhead(_v, _user_ids, _global_seen)
             _all_vars.append((_k, _type_name, _size, _ckpt_name))
 
             # Aggregate by type
