@@ -293,10 +293,21 @@ import time as _time
 import types as _types
 import numpy as _np
 from pympler import asizeof as _asizeof
-from pympler.asizeof import Asizer as _Asizer
 
 
 _memory_warnings = []
+
+# Primitive types that don't need recursive measurement
+_PRIMITIVE_TYPES = (type(None), bool, int, float, complex, str, bytes)
+
+# Names to skip when measuring namespace
+_SKIP_NAMES = {'_flowbook_checkpoint', '_flowbook_measure_memory',
+               '_measure_object_deep', '_measure_namespace_deep',
+               '_get_inner_ndarray', '_collect_user_ns_array_ids',
+               '_checkpoint_var_overhead', '_safe_asizeof', '_memory_warnings',
+               '_is_shared', '_PRIMITIVE_TYPES', '_SKIP_NAMES',
+               '_asizeof', '_time', '_sys', '_types', '_np',
+               'In', 'Out', 'get_ipython', 'exit', 'quit'}
 
 
 def _safe_asizeof(_v):
@@ -308,6 +319,12 @@ def _safe_asizeof(_v):
         _type_name = type(_v).__name__
         _shallow = _sys.getsizeof(_v)
         _memory_warnings.append(f"{_type_name} has read-only buffer, using shallow size ({_shallow} bytes)")
+        return _shallow
+    except Exception as _e:
+        # Catch any other measurement errors
+        _type_name = type(_v).__name__
+        _shallow = _sys.getsizeof(_v)
+        _memory_warnings.append(f"{_type_name} measurement failed ({type(_e).__name__}), using shallow size")
         return _shallow
 
 
@@ -322,20 +339,145 @@ def _get_inner_ndarray(_arr):
     return None
 
 
+def _measure_object_deep(_obj, _seen, _shared_array_ids=None):
+    """Measure memory of a single object recursively.
+
+    Uses .nbytes for numpy arrays (avoids read-only buffer errors).
+    Tracks seen IDs to avoid double-counting shared/aliased objects.
+    Handles CoW arrays correctly by checking owndata flag.
+
+    Args:
+        _obj: Object to measure
+        _seen: Set of object IDs already counted (mutated)
+        _shared_array_ids: Set of array IDs that are shared (CoW) - count as 0 data bytes
+
+    Returns:
+        Size in bytes (0 if already counted or shared)
+    """
+    if _shared_array_ids is None:
+        _shared_array_ids = set()
+
+    _obj_id = id(_obj)
+    if _obj_id in _seen:
+        return 0  # Already counted
+    _seen.add(_obj_id)
+
+    # Skip modules entirely
+    if isinstance(_obj, _types.ModuleType):
+        return 0
+
+    # Primitives - just use getsizeof
+    if type(_obj) in _PRIMITIVE_TYPES:
+        return _sys.getsizeof(_obj)
+
+    # Numpy arrays - use .nbytes (safe, no buffer access)
+    if isinstance(_obj, _np.ndarray):
+        # Check if this is a view (CoW or slice) - data owned elsewhere
+        if not _obj.flags.owndata:
+            # It's a view - data buffer is shared, just count wrapper overhead
+            return 128
+        if _obj_id in _shared_array_ids:
+            # Explicitly marked as shared
+            return 128
+        return _obj.nbytes + 128
+
+    # DataFrames/Series - walk internal arrays
+    if hasattr(_obj, '_mgr') and hasattr(_obj._mgr, 'arrays'):
+        _total = object.__sizeof__(_obj) + 1024  # DataFrame wrapper overhead
+        for _arr in _obj._mgr.arrays:
+            _nd = _get_inner_ndarray(_arr)
+            _target = _nd if _nd is not None else _arr
+            _aid = id(_target)
+            if _aid in _seen:
+                continue
+            _seen.add(_aid)
+            if isinstance(_target, _np.ndarray):
+                if not _target.flags.owndata or _aid in _shared_array_ids:
+                    _total += 128  # View/shared, just wrapper
+                else:
+                    _total += _target.nbytes + 128
+            else:
+                _total += _sys.getsizeof(_target)
+        return _total
+
+    # Containers - recurse into elements
+    if isinstance(_obj, list):
+        _total = _sys.getsizeof(_obj)
+        for _item in _obj:
+            _total += _measure_object_deep(_item, _seen, _shared_array_ids)
+        return _total
+
+    if isinstance(_obj, tuple):
+        _total = _sys.getsizeof(_obj)
+        for _item in _obj:
+            _total += _measure_object_deep(_item, _seen, _shared_array_ids)
+        return _total
+
+    if isinstance(_obj, dict):
+        _total = _sys.getsizeof(_obj)
+        for _key, _val in _obj.items():
+            _total += _measure_object_deep(_key, _seen, _shared_array_ids)
+            _total += _measure_object_deep(_val, _seen, _shared_array_ids)
+        return _total
+
+    if isinstance(_obj, set):
+        _total = _sys.getsizeof(_obj)
+        for _item in _obj:
+            _total += _measure_object_deep(_item, _seen, _shared_array_ids)
+        return _total
+
+    if isinstance(_obj, frozenset):
+        _total = _sys.getsizeof(_obj)
+        for _item in _obj:
+            _total += _measure_object_deep(_item, _seen, _shared_array_ids)
+        return _total
+
+    # Other objects - try asizeof with fallback
+    return _safe_asizeof(_obj)
+
+
+def _measure_namespace_deep(_namespace, _exclude_ids=None, _seen=None, _shared_array_ids=None):
+    """Measure total memory of objects in a namespace dict.
+
+    Args:
+        _namespace: Dict of {name: object} to measure (e.g., globals(), checkpoint.user_ns)
+        _exclude_ids: Set of object IDs to skip entirely (e.g., checkpoint object when measuring user_ns)
+        _seen: Set of already-counted object IDs (for cross-namespace dedup)
+        _shared_array_ids: Set of array IDs that are shared (CoW) - count as 0 data bytes
+
+    Returns:
+        Total size in bytes
+    """
+    if _seen is None:
+        _seen = set()
+    if _exclude_ids is None:
+        _exclude_ids = set()
+    if _shared_array_ids is None:
+        _shared_array_ids = set()
+
+    _total = 0
+    for _k, _v in _namespace.items():
+        # Skip internal names and modules
+        if _k.startswith('_') or _k in _SKIP_NAMES:
+            continue
+        if isinstance(_v, _types.ModuleType):
+            continue
+        # Skip excluded objects (e.g., checkpoint object)
+        if id(_v) in _exclude_ids:
+            continue
+        _total += _measure_object_deep(_v, _seen, _shared_array_ids)
+    return _total
+
+
 def _collect_user_ns_array_ids():
     """Collect ids of all ndarrays reachable from user namespace variables.
 
-    Returns a set of ndarray ids.  Used to detect CoW sharing:
+    Returns a set of ndarray ids. Used to detect CoW sharing:
     if a checkpoint array has the same id as a user_ns array, it's shared.
     """
     _ids = set()
-    _skip = {'_flowbook_checkpoint', '_flowbook_measure_memory',
-             '_get_inner_ndarray', '_collect_user_ns_array_ids',
-             '_checkpoint_var_overhead', '_safe_asizeof', '_memory_warnings',
-             '_asizeof', '_Asizer', '_time', '_sys', '_types', '_np',
-             'In', 'Out', 'get_ipython', 'exit', 'quit'}
     for _k, _v in globals().items():
-        if _k.startswith('_') or _k in _skip or isinstance(_v, _types.ModuleType):
+        if _k.startswith('_') or _k in _SKIP_NAMES or isinstance(_v, _types.ModuleType):
             continue
         if hasattr(_v, '_mgr') and hasattr(_v._mgr, 'arrays'):
             for _arr in _v._mgr.arrays:
@@ -373,7 +515,7 @@ def _checkpoint_var_overhead(_v, _user_ids, _seen=None):
     For DataFrames/Series: sums nbytes only for arrays that are NOT
     shared with user namespace (by identity or view status).
     For numpy arrays: same check.
-    For other types: uses sys.getsizeof.
+    For other types: uses _safe_asizeof.
 
     _seen tracks ndarray ids already counted to avoid double-counting
     when multiple variables alias the same object (e.g. X = features).
@@ -400,9 +542,7 @@ def _checkpoint_var_overhead(_v, _user_ids, _seen=None):
         if not _is_shared(_v, _v, _user_ids):
             return _v.nbytes + 128
         return 128
-    # For plain Python containers (lists, dicts, etc.), use asizeof to measure
-    # the full recursive size. Unlike numpy arrays, these don't have CoW sharing,
-    # so deepcopy creates fully independent copies.
+    # For other types, use _safe_asizeof (handles read-only buffer errors)
     return _safe_asizeof(_v)
 
 
@@ -411,7 +551,7 @@ def _flowbook_measure_memory():
 
     Returns two totals:
       user_ns_bytes              - globals() with checkpoint objects excluded
-                                   (measured via pympler asizeof)
+                                   (measured via unified deep traversal)
       user_ns_and_checkpoint_bytes - user_ns_bytes + checkpoint overhead
                                    (checkpoint overhead uses ownership-based
                                     accounting to correctly handle CoW/views)
@@ -428,12 +568,20 @@ def _flowbook_measure_memory():
         _cp_obj = globals()['_flowbook_checkpoint']
 
     # 1. Measure user namespace (excluding checkpoint objects)
-    _sizer = _Asizer()
+    # Build set of object IDs to exclude (checkpoint objects and their contents)
+    _exclude_ids = set()
     if _cp_obj is not None:
-        _sizer.exclude_refs(_cp_obj)
+        _exclude_ids.add(id(_cp_obj))
         if hasattr(_cp_obj, 'saved'):
-            _sizer.exclude_refs(_cp_obj.saved)
-    user_ns_bytes = _sizer.asizeof(globals())
+            _exclude_ids.add(id(_cp_obj.saved))
+            for _ckpt in _cp_obj.saved.values():
+                _exclude_ids.add(id(_ckpt))
+                if hasattr(_ckpt, 'user_ns'):
+                    _exclude_ids.add(id(_ckpt.user_ns))
+
+    # Use unified deep measurement (handles read-only buffers, CoW arrays)
+    _user_ns_seen = set()
+    user_ns_bytes = _measure_namespace_deep(globals(), _exclude_ids=_exclude_ids, _seen=_user_ns_seen)
 
     # 2. Compute checkpoint overhead by identity-based accounting.
     #    pympler.asizeof overcounts numpy views/CoW copies.  Instead,
@@ -456,9 +604,6 @@ def _flowbook_measure_memory():
 
         # Track ndarray ids seen across ALL checkpoints for dedup
         _global_array_seen = set()
-
-        # Primitive types that don't need recursive measurement
-        _PRIMITIVE_TYPES = (type(None), bool, int, float, complex, str, bytes)
 
         def _container_unique_overhead(_obj, _global_seen, _user_ids):
             """
@@ -647,11 +792,12 @@ def _flowbook_measure_memory():
     # --- Diagnostics: top user namespace variables by size ---
     _var_sizes = []
     for _k, _v in globals().items():
-        if _k.startswith('_') or isinstance(_v, _types.ModuleType):
+        if _k.startswith('_') or _k in _SKIP_NAMES or isinstance(_v, _types.ModuleType):
             continue
-        if _k in ('In', 'Out', 'get_ipython', 'exit', 'quit'):
-            continue
-        _var_sizes.append((_k, _safe_asizeof(_v), type(_v).__name__))
+        # Use _measure_object_deep for consistent measurement with user_ns
+        _var_seen = set()
+        _var_size = _measure_object_deep(_v, _var_seen)
+        _var_sizes.append((_k, _var_size, type(_v).__name__))
     _var_sizes.sort(key=lambda x: x[1], reverse=True)
     _diag['top_vars'] = _var_sizes[:10]
 
