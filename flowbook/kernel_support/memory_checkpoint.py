@@ -1786,7 +1786,13 @@ class MemoryCheckpoints:
     Attributes:
         sanity_check: If True, verify copies match originals after save
         saved: Dictionary mapping checkpoint names to MemoryCheckpoint objects
+        _instance: Class variable pointing to the most recently created instance
+                   (used for external access to checkpoint costs)
     """
+
+    # Class variable to hold reference to the active instance
+    # This allows external code (like compare_baseline) to access checkpoint costs
+    _instance: "MemoryCheckpoints | None" = None
 
     def __init__(
         self,
@@ -1804,6 +1810,16 @@ class MemoryCheckpoints:
         self.sanity_check = sanity_check
         self.warn_classes = warn_classes
         self.saved: dict[str, MemoryCheckpoint] = {}
+
+        # Register this instance as the singleton
+        MemoryCheckpoints._instance = self
+
+        # Per-variable memory costs from last deepcopy (populated by Scalene tracking)
+        self._last_var_memory_costs: dict[str, dict] = {}
+
+        # Per-checkpoint memory costs (keyed by checkpoint name)
+        # This allows tracking pre and post checkpoint costs separately
+        self._var_memory_costs_by_checkpoint: dict[str, dict[str, dict]] = {}
 
         # Ensure copy-on-write is enabled for performance (pandas 2.x only)
         if hasattr(pd.options.mode, 'copy_on_write') and not pd.options.mode.copy_on_write:
@@ -1857,6 +1873,9 @@ class MemoryCheckpoints:
         - pandas Series: shallow copy + deep copy if object dtype
         - Functions: deep copy closure and mutable defaults
 
+        If Scalene memory tracking is enabled, also records the memory
+        cost of copying each variable, stored in self._last_var_memory_costs.
+
         Args:
             variables: Dictionary of variables to copy
 
@@ -1864,14 +1883,41 @@ class MemoryCheckpoints:
             Tuple of (copied dictionary, memo dictionary for tracking copied objects,
                      dictionary of failed variables with their exceptions)
         """
+        # Import Scalene tracker (lazy import to avoid circular deps)
+        from flowbook.kernel_support.scalene_memory import ScaleneMemoryTracker
+
         copied = {}
         memo = {}
         failed = {}
+        var_memory_costs = {}  # Per-variable memory tracking
+
+        # Check if Scalene tracking is available and enabled
+        track_memory = ScaleneMemoryTracker.is_tracking()
+        if track_memory:
+            log(f"Scalene tracking enabled for deepcopy of {len(variables)} variables")
+        else:
+            # Debug: check why tracking is disabled
+            available = ScaleneMemoryTracker.is_available()
+            enabled = ScaleneMemoryTracker._tracking_enabled
+            log(f"Scalene tracking disabled (available={available}, enabled={enabled})")
 
         loop_start = time.time()
         for k, v in variables.items():
             try:
                 start_time = time.time()
+
+                # Measure object size directly if tracking enabled
+                # This is more reliable than Scalene footprint delta which
+                # doesn't update in real-time during deepcopy operations
+                if track_memory:
+                    from flowbook.kernel_support.scalene_memory import get_object_size
+                    obj_size = get_object_size(v)
+                    var_memory_costs[k] = {
+                        'bytes': obj_size,
+                        'type': type(v).__name__,
+                        'module': type(v).__module__,
+                    }
+
                 # Use custom deepcopy which handles pandas and functions specially
                 copied[k] = deepcopy(v, memo)
 
@@ -1908,6 +1954,11 @@ class MemoryCheckpoints:
         if _PROFILE_CHECKPOINT:
             loop_duration_ms = (time.time() - loop_start) * 1000
             output.add_timing("deepcopy:loop_total", loop_duration_ms)
+
+        # Store memory costs for later retrieval (if tracking was enabled)
+        if track_memory and var_memory_costs:
+            self._last_var_memory_costs = var_memory_costs
+            log(f"Scalene tracked memory for {len(var_memory_costs)} variables")
 
         return copied, memo, failed
 
@@ -2069,6 +2120,10 @@ class MemoryCheckpoints:
             with timer(key="checkpoint:deepcopy", message="Deep copying variables"):
                 cp, memo, failed = self._deep_copy_user_ns(checkpointable_values)
 
+            # Store memory costs keyed by checkpoint name (if Scalene tracking was enabled)
+            if self._last_var_memory_costs:
+                self._var_memory_costs_by_checkpoint[name] = self._last_var_memory_costs.copy()
+
             # Track successfully copied variables
             with timer(key="checkpoint:type_models", message="Generating type models"):
                 for k in cp:
@@ -2133,6 +2188,118 @@ class MemoryCheckpoints:
         return {
             k: get_type_model(v) for k, v in self.checkpointable_vars(user_ns).items()
         }
+
+    def get_last_var_memory_costs(self) -> dict[str, dict]:
+        """
+        Get per-variable memory costs from the last deepcopy operation.
+
+        This data is only available when Scalene memory tracking is enabled
+        and a checkpoint save or restore operation has been performed.
+
+        Returns:
+            Dictionary mapping variable names to memory cost info:
+            {
+                'var_name': {
+                    'bytes': int,   # Memory allocated for this variable
+                    'type': str,    # Type name of the variable
+                    'module': str,  # Module of the variable's type
+                }
+            }
+
+            Returns empty dict if no Scalene tracking data is available.
+        """
+        return self._last_var_memory_costs.copy()
+
+    def get_var_memory_costs_for_checkpoint(self, name: str) -> dict[str, dict]:
+        """
+        Get per-variable memory costs for a specific checkpoint.
+
+        Args:
+            name: Checkpoint name (e.g., "_pre_abc1", "_post_abc1")
+
+        Returns:
+            Dictionary mapping variable names to memory cost info.
+            Returns empty dict if checkpoint not found or no tracking data.
+        """
+        return self._var_memory_costs_by_checkpoint.get(name, {}).copy()
+
+    def get_cell_checkpoint_costs(self, cell_id: str) -> dict[str, dict]:
+        """
+        Get combined per-variable memory costs for a cell's checkpoints.
+
+        Combines the costs from both pre and post checkpoints for a cell,
+        summing the bytes for each variable. This gives the total memory
+        overhead of checkpointing for that cell.
+
+        Args:
+            cell_id: Cell ID (e.g., "abc1")
+
+        Returns:
+            Dictionary mapping variable names to combined memory cost info:
+            {
+                'var_name': {
+                    'bytes': int,   # Combined pre + post memory allocated
+                    'type': str,    # Type name of the variable
+                    'module': str,  # Module of the variable's type
+                    'pre_bytes': int,   # Memory from pre-checkpoint
+                    'post_bytes': int,  # Memory from post-checkpoint
+                }
+            }
+
+            Returns empty dict if no checkpoint data found for the cell.
+        """
+        pre_name = f"_pre_{cell_id}"
+        post_name = f"_post_{cell_id}"
+
+        pre_costs = self._var_memory_costs_by_checkpoint.get(pre_name, {})
+        post_costs = self._var_memory_costs_by_checkpoint.get(post_name, {})
+
+        if not pre_costs and not post_costs:
+            return {}
+
+        # Combine costs from both checkpoints
+        combined: dict[str, dict] = {}
+
+        # Add pre-checkpoint costs
+        for var_name, cost_info in pre_costs.items():
+            combined[var_name] = {
+                'bytes': cost_info.get('bytes', 0),
+                'type': cost_info.get('type', 'unknown'),
+                'module': cost_info.get('module', 'unknown'),
+                'pre_bytes': cost_info.get('bytes', 0),
+                'post_bytes': 0,
+            }
+
+        # Add post-checkpoint costs
+        for var_name, cost_info in post_costs.items():
+            post_bytes = cost_info.get('bytes', 0)
+            if var_name in combined:
+                combined[var_name]['bytes'] += post_bytes
+                combined[var_name]['post_bytes'] = post_bytes
+            else:
+                combined[var_name] = {
+                    'bytes': post_bytes,
+                    'type': cost_info.get('type', 'unknown'),
+                    'module': cost_info.get('module', 'unknown'),
+                    'pre_bytes': 0,
+                    'post_bytes': post_bytes,
+                }
+
+        return combined
+
+    def get_all_checkpoint_costs(self) -> dict[str, dict[str, dict]]:
+        """
+        Get all per-checkpoint memory costs.
+
+        Returns:
+            Dictionary mapping checkpoint names to their per-variable costs.
+        """
+        return {k: v.copy() for k, v in self._var_memory_costs_by_checkpoint.items()}
+
+    def clear_var_memory_costs(self) -> None:
+        """Clear stored per-variable memory costs."""
+        self._last_var_memory_costs = {}
+        self._var_memory_costs_by_checkpoint = {}
 
     def delete(self, name: str) -> None:
         """

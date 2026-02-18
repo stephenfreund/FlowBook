@@ -659,15 +659,232 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             )
 
     # =========================================================================
-    # Stub magics for compatibility with FlowbookKernel notebooks
+    # Scalene memory tracking magic
     # =========================================================================
 
     @line_magic
+    def scalene_memory(self, line: str) -> None:
+        """
+        Control Scalene-based memory tracking.
+
+        Scalene provides precise memory measurement by tracking malloc/free
+        at the native level. This magic command controls the tracker and
+        displays memory statistics.
+
+        Usage:
+            %scalene_memory on      - Enable memory + GPU tracking
+            %scalene_memory off     - Disable tracking
+            %scalene_memory ?       - Show total memory + GPU stats
+            %scalene_memory vars    - Show per-variable memory breakdown
+            %scalene_memory vars 10 - Show top 10 variables by size
+            %scalene_memory ckpt    - Show checkpoint overhead breakdown
+            %scalene_memory reset   - Reset all statistics
+
+        Note: Scalene tracking requires the kernel to be launched with the
+        Scalene library preloaded via DYLD_INSERT_LIBRARIES (macOS) or
+        LD_PRELOAD (Linux).
+        """
+        from flowbook.kernel_support.scalene_memory import ScaleneMemoryTracker
+
+        cmd = line.strip().lower()
+        args = cmd.split()
+        subcmd = args[0] if args else "?"
+
+        if subcmd == "on":
+            if not ScaleneMemoryTracker.is_available():
+                self._display.display_icon_and_text(
+                    "❌", "Scalene not available. Launch kernel with Scalene preload."
+                )
+                return
+            if ScaleneMemoryTracker.start():
+                self._display.display_icon_and_text(
+                    "✅", "Scalene memory tracking enabled"
+                )
+            else:
+                self._display.display_icon_and_text(
+                    "❌", "Failed to start Scalene tracking"
+                )
+
+        elif subcmd == "off":
+            if ScaleneMemoryTracker.stop():
+                self._display.display_icon_and_text(
+                    "✅", "Scalene memory tracking disabled"
+                )
+            else:
+                self._display.display_icon_and_text(
+                    "ℹ️", "Scalene tracking was not active"
+                )
+
+        elif subcmd == "?" or subcmd == "status":
+            if not ScaleneMemoryTracker.is_available():
+                self._display.display_icon_and_text(
+                    "ℹ️", "Scalene not available (kernel not launched with preload)"
+                )
+                return
+            tracking_status = "enabled" if ScaleneMemoryTracker.is_tracking() else "disabled"
+            stats = ScaleneMemoryTracker.get_memory()
+            msg = f"Tracking: {tracking_status}\n"
+            msg += f"Memory: current={stats['current_footprint_mb']:.1f} MB, "
+            msg += f"max={stats['max_footprint_mb']:.1f} MB, "
+            msg += f"net={stats['net_allocation_mb']:+.1f} MB"
+            gpu_samples = stats.get('gpu_samples', 0)
+            gpu_mem = stats.get('gpu_mem_samples', 0)
+            if gpu_samples > 0 or gpu_mem > 0:
+                msg += f"\nGPU: samples={gpu_samples:.0f}, mem={gpu_mem:.1f}"
+            self._display.display_icon_and_text("📊", msg)
+
+        elif subcmd == "vars":
+            # Show per-variable memory breakdown
+            limit = 20
+            if len(args) > 1:
+                try:
+                    limit = int(args[1])
+                except ValueError:
+                    pass
+            self._show_var_memory_breakdown(limit)
+
+        elif subcmd == "ckpt":
+            # Show checkpoint copy costs
+            self._show_checkpoint_memory_costs()
+
+        elif subcmd == "reset":
+            if ScaleneMemoryTracker.reset():
+                self._display.display_icon_and_text(
+                    "✅", "Scalene statistics reset"
+                )
+            else:
+                self._display.display_icon_and_text(
+                    "❌", "Failed to reset Scalene statistics"
+                )
+
+        else:
+            self._display.display_icon_and_text(
+                "❓", f"Unknown command: {subcmd}. Use on/off/?/vars/ckpt/reset"
+            )
+
+    def _show_var_memory_breakdown(self, limit: int = 20) -> None:
+        """Show per-variable memory breakdown from user namespace."""
+        import sys
+
+        user_ns = self.shell.user_ns
+        checkpointable = self._checkpoints.checkpointable_vars(user_ns)
+
+        # Calculate sizes for each variable
+        var_sizes = []
+        for name, value in checkpointable.items():
+            try:
+                # Estimate size
+                if hasattr(value, 'nbytes'):
+                    size = value.nbytes
+                elif hasattr(value, 'memory_usage'):
+                    size = value.memory_usage(deep=True)
+                    if hasattr(size, 'sum'):
+                        size = size.sum()
+                else:
+                    size = sys.getsizeof(value)
+                var_sizes.append((name, type(value).__name__, size))
+            except Exception:
+                var_sizes.append((name, type(value).__name__, 0))
+
+        # Sort by size descending
+        var_sizes.sort(key=lambda x: x[2], reverse=True)
+        var_sizes = var_sizes[:limit]
+
+        # Format output
+        lines = ["Variable         Type            Size"]
+        lines.append("─" * 50)
+        for name, type_name, size in var_sizes:
+            size_str = self._format_bytes(size)
+            lines.append(f"{name:<16} {type_name:<15} {size_str:>10}")
+
+        self._display.display_icon_and_text("📊", "\n".join(lines))
+
+    def _show_checkpoint_memory_costs(self) -> None:
+        """Show per-variable checkpoint copy costs (combined pre + post)."""
+        # Get all checkpoint costs
+        all_costs = self._checkpoints.memory.get_all_checkpoint_costs()
+
+        if not all_costs:
+            self._display.display_icon_and_text(
+                "ℹ️", "No checkpoint memory costs available.\n"
+                "Enable Scalene tracking (%scalene_memory on) before running cells."
+            )
+            return
+
+        # Group by cell ID (extract from _pre_xxx and _post_xxx)
+        cell_costs: dict = {}
+        for ckpt_name, costs in all_costs.items():
+            if ckpt_name.startswith("_pre_"):
+                cell_id = ckpt_name[5:]
+                if cell_id not in cell_costs:
+                    cell_costs[cell_id] = {'pre': {}, 'post': {}}
+                cell_costs[cell_id]['pre'] = costs
+            elif ckpt_name.startswith("_post_"):
+                cell_id = ckpt_name[6:]
+                if cell_id not in cell_costs:
+                    cell_costs[cell_id] = {'pre': {}, 'post': {}}
+                cell_costs[cell_id]['post'] = costs
+
+        if not cell_costs:
+            self._display.display_icon_and_text(
+                "ℹ️", "No cell checkpoint costs available.\n"
+                "Enable Scalene tracking (%scalene_memory on) before running cells."
+            )
+            return
+
+        lines = ["Checkpoint Memory Costs (measured by Scalene):"]
+        lines.append("")
+
+        # Show combined per-variable costs (aggregate across all cells)
+        combined: dict = {}
+        for cell_id, cell_data in cell_costs.items():
+            for costs in [cell_data['pre'], cell_data['post']]:
+                for var_name, info in costs.items():
+                    if var_name not in combined:
+                        combined[var_name] = {
+                            'bytes': 0,
+                            'type': info['type'],
+                            'module': info.get('module', 'unknown')
+                        }
+                    combined[var_name]['bytes'] += info.get('bytes', 0)
+
+        # Sort by bytes descending
+        sorted_costs = sorted(combined.items(), key=lambda x: x[1]['bytes'], reverse=True)
+
+        # Calculate total
+        total_bytes = sum(c['bytes'] for _, c in sorted_costs)
+
+        lines.append(f"Total checkpoint overhead: {self._format_bytes(total_bytes)}")
+        lines.append(f"({len(cell_costs)} cells, pre + post checkpoints each)")
+        lines.append("")
+        lines.append("  Variable         Type            Total Alloc")
+        lines.append("  " + "─" * 48)
+
+        for name, info in sorted_costs[:20]:  # Top 20
+            size_str = self._format_bytes(info['bytes'])
+            type_name = info['type']
+            lines.append(f"  {name:<16} {type_name:<15} {size_str:>10}")
+
+        if len(sorted_costs) > 20:
+            lines.append(f"  ... and {len(sorted_costs) - 20} more variables")
+
+        self._display.display_icon_and_text("📊", "\n".join(lines))
+
+    def _format_bytes(self, size: int) -> str:
+        """Format bytes as human-readable string."""
+        if size < 1024:
+            return f"{size} B"
+        elif size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        elif size < 1024 * 1024 * 1024:
+            return f"{size / (1024 * 1024):.1f} MB"
+        else:
+            return f"{size / (1024 * 1024 * 1024):.1f} GB"
+
+    @line_magic
     def scalene(self, line: str) -> None:
-        """Stub for Scalene profiling (not supported in Reproducibility kernel)."""
-        self._display.display_icon_and_text(
-            "ℹ️", "Scalene profiling not supported in Reproducibility kernel"
-        )
+        """Alias for scalene_memory (backwards compatibility)."""
+        self.scalene_memory(line)
 
     @line_magic
     def tracking(self, line: str) -> None:

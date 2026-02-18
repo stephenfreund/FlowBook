@@ -1,6 +1,12 @@
 """
 Compare baseline (python3) vs FlowBook kernel execution with timing and memory metrics.
 
+4-Phase Execution:
+  Phase 1: FlowBook timing (Scalene OFF) - collect cell_runtime_ms, state_duration_ms, check_duration_ms
+  Phase 2: Baseline timing (Scalene OFF) - collect cell_runtime_ms
+  Phase 3: Baseline memory (Scalene ON) - collect current_footprint_mb, gpu_mem
+  Phase 4: FlowBook memory (Scalene ON) - collect current_footprint_mb, gpu_mem, checkpoint overhead
+
 Usage via CLI:
     flowbook compare-baseline notebook.ipynb
     flowbook compare-baseline notebook.ipynb --timeout 300
@@ -9,7 +15,10 @@ Usage via CLI:
 import argparse
 import json
 import os
+import platform
 import random
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -23,11 +32,6 @@ from flowbook import make_kernels
 from flowbook.kernel.flowbook_client import FlowbookKernelClient
 from flowbook.server.base import NotebookCommand, ProcessingResult
 from flowbook.server.config import FlowbookConfig
-from flowbook.testing.benchmark_checkpoint import (
-    _MEMORY_SETUP_CODE,
-    measure_memory,
-    measure_checkpoint_details,
-)
 from flowbook.util.output import log
 
 
@@ -65,48 +69,121 @@ def generate_comparison_filename(notebook_path: str, num_components: int = 3) ->
 
 
 @dataclass
-class CellMetrics:
-    """Metrics for a single cell execution."""
+class TimingCellMetrics:
+    """Timing metrics for a single cell execution (Scalene OFF)."""
     cell_id: str
     cell_index: int
     cell_runtime_ms: float
-    state_duration_ms: float
-    check_duration_ms: float
-    user_ns_bytes: int
-    user_ns_and_checkpoint_bytes: int
+    state_duration_ms: float  # FlowBook only
+    check_duration_ms: float  # FlowBook only
     status: str
     error: Optional[str] = None
-    checkpoint_details: Optional[Dict[str, Any]] = None
-    memory_warnings: Optional[List[str]] = None
+
+
+@dataclass
+class MemoryCellMetrics:
+    """Memory metrics for a single cell execution (Scalene ON)."""
+    cell_id: str
+    cell_index: int
+    current_footprint_mb: float
+    max_footprint_mb: float
+    allocation_delta_mb: float
+    gpu_mem_samples: float
+    checkpoint_var_costs: Optional[Dict[str, Any]] = None  # FlowBook only
+    status: str = "ok"
+    error: Optional[str] = None
+
+
+@dataclass
+class TimingResults:
+    """Timing results from a notebook execution (Scalene OFF)."""
+    kernel_name: str
+    cells: List[TimingCellMetrics] = field(default_factory=list)
+    totals: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MemoryResults:
+    """Memory results from a notebook execution (Scalene ON)."""
+    kernel_name: str
+    cells: List[MemoryCellMetrics] = field(default_factory=list)
+    totals: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class KernelResults:
-    """Results from running a notebook on a single kernel."""
+    """Combined timing and memory results for a kernel."""
     kernel_name: str
-    cells: List[CellMetrics] = field(default_factory=list)
-    totals: Dict[str, Any] = field(default_factory=dict)
-    rerun_cells: List[CellMetrics] = field(default_factory=list)
-    rerun_totals: Dict[str, Any] = field(default_factory=dict)
+    timing: Optional[TimingResults] = None
+    memory: Optional[MemoryResults] = None
 
 
 @dataclass
 class ComparisonResult:
-    """Complete comparison result."""
-    version: str = "1.0"
+    """Complete comparison result with 4-phase execution."""
+    version: str = "2.0"
     notebook_path: str = ""
     timestamp: str = ""
     kernels: Dict[str, KernelResults] = field(default_factory=dict)
+    scalene_available: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-def create_baseline_kernel() -> Tuple[KernelManager, BlockingKernelClient]:
+def _get_scalene_preload_env() -> Dict[str, str]:
+    """Get environment variables needed for Scalene memory tracking."""
+    try:
+        import scalene
+        from scalene.scalene_preload import ScalenePreload
+    except ImportError:
+        return {}
+
+    args = argparse.Namespace(
+        memory=True,
+        allocation_sampling_window=10485767,
+    )
+
+    return ScalenePreload.get_preload_environ(args)
+
+
+def _is_scalene_available() -> bool:
+    """Check if Scalene is installed and can be used."""
+    try:
+        import scalene
+        from scalene.scalene_preload import ScalenePreload
+        return True
+    except ImportError:
+        return False
+
+
+def create_baseline_kernel(
+    with_scalene_preload: bool = False
+) -> Tuple[KernelManager, BlockingKernelClient]:
     """
-    Start a baseline python3 kernel.
+    Start the baseline scalene kernel.
+
+    Args:
+        with_scalene_preload: If True, use kernel spec with Scalene library preloaded
 
     Returns:
         Tuple of (KernelManager, BlockingKernelClient)
     """
+    # Import to ensure kernels are registered
+    from flowbook.baseline_scalene_kernel import (
+        install_baseline_scalene_kernel,
+        install_baseline_scalene_preload_kernel,
+    )
+    try:
+        install_baseline_scalene_kernel()
+        install_baseline_scalene_preload_kernel()
+    except Exception:
+        pass
+
+    # Choose kernel name based on whether we want Scalene preloaded
+    if with_scalene_preload:
+        kernel_name = "baseline_scalene_preload_kernel"
+    else:
+        kernel_name = "baseline_scalene_kernel"
+
     max_attempts = 3
     kernel_manager = None
     kernel_client = None
@@ -124,7 +201,7 @@ def create_baseline_kernel() -> Tuple[KernelManager, BlockingKernelClient]:
                 except Exception:
                     pass
 
-            kernel_manager = KernelManager(kernel_name="python3")
+            kernel_manager = KernelManager(kernel_name=kernel_name)
             kernel_manager.start_kernel()
 
             kernel_client = BlockingKernelClient()
@@ -167,14 +244,33 @@ def create_baseline_kernel() -> Tuple[KernelManager, BlockingKernelClient]:
     raise Exception("Kernel failed to start")
 
 
-def create_flowbook_kernel() -> Tuple[KernelManager, FlowbookKernelClient]:
+def create_flowbook_kernel(
+    with_scalene_preload: bool = False
+) -> Tuple[KernelManager, FlowbookKernelClient]:
     """
     Start a flowbook_kernel.
+
+    Args:
+        with_scalene_preload: If True, use kernel spec with Scalene library preloaded
 
     Returns:
         Tuple of (KernelManager, FlowbookKernelClient)
     """
     make_kernels()
+
+    # Also install the scalene preload kernel if needed
+    if with_scalene_preload:
+        from flowbook.kernel import install_flowbook_scalene_preload_kernel
+        try:
+            install_flowbook_scalene_preload_kernel()
+        except Exception:
+            pass
+
+    # Choose kernel name based on whether we want Scalene preloaded
+    if with_scalene_preload:
+        kernel_name = "flowbook_scalene_preload_kernel"
+    else:
+        kernel_name = "flowbook_kernel"
 
     max_attempts = 3
     kernel_manager = None
@@ -193,7 +289,7 @@ def create_flowbook_kernel() -> Tuple[KernelManager, FlowbookKernelClient]:
                 except Exception:
                     pass
 
-            kernel_manager = KernelManager(kernel_name="flowbook_kernel")
+            kernel_manager = KernelManager(kernel_name=kernel_name)
             kernel_manager.start_kernel()
 
             kernel_client = FlowbookKernelClient()
@@ -427,12 +523,61 @@ def _wait_for_idle(kernel_client, timeout: float = 30.0) -> None:
         pass
 
 
-def setup_memory_measurement(kernel_client, timeout: float = 60.0) -> bool:
-    """Inject pympler measurement helper into the kernel."""
-    msg_id = kernel_client.execute(_MEMORY_SETUP_CODE, silent=True)
+def enable_scalene_tracking(kernel_client, timeout: float = 30.0) -> bool:
+    """Enable Scalene memory tracking via magic command."""
+    # First check if Scalene is available in the kernel
+    debug_code = """
+import os
+import platform
+import sys
+_debug_info = {
+    'platform': platform.system(),
+    'dyld': os.environ.get('DYLD_INSERT_LIBRARIES', 'NOT SET'),
+    'ld_preload': os.environ.get('LD_PRELOAD', 'NOT SET'),
+    'python': sys.executable,
+}
+try:
+    from scalene.scalene_profiler import Scalene
+    _debug_info['scalene_import'] = 'OK'
+    _debug_info['scalene_initialized'] = Scalene._Scalene__initialized
+except ImportError as e:
+    _debug_info['scalene_import'] = f'FAILED: {e}'
+except Exception as e:
+    _debug_info['scalene_import'] = f'ERROR: {e}'
+try:
+    from flowbook.kernel_support.scalene_memory import ScaleneMemoryTracker
+    ScaleneMemoryTracker._scalene_available = None  # Reset cache
+    _debug_info['tracker_available'] = ScaleneMemoryTracker.is_available()
+except Exception as e:
+    _debug_info['tracker_available'] = f'ERROR: {e}'
+print(_debug_info)
+"""
+    msg_id = kernel_client.execute(debug_code, silent=False)
+
+    # Collect iopub messages to get print output
     start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            msg = kernel_client.get_iopub_msg(timeout=1.0)
+            if msg['parent_header'].get('msg_id') != msg_id:
+                continue
+            msg_type = msg['header']['msg_type']
+            if msg_type == 'stream':
+                text = msg['content'].get('text', '')
+                if text:
+                    log(f"Scalene debug: {text.strip()}")
+            elif msg_type == 'status':
+                if msg['content']['execution_state'] == 'idle':
+                    break
+        except Exception:
+            continue
+
+    msg_id = kernel_client.execute("%scalene_memory on", silent=False)
+    start_time = time.time()
+    success = False
     while True:
         if time.time() - start_time > timeout:
+            log("Scalene enable: timeout waiting for response")
             return False
         try:
             msg = kernel_client.get_iopub_msg(timeout=1.0)
@@ -440,63 +585,221 @@ def setup_memory_measurement(kernel_client, timeout: float = 60.0) -> bool:
             continue
         if msg['parent_header'].get('msg_id') != msg_id:
             continue
-        if msg['header']['msg_type'] == 'error':
+        msg_type = msg['header']['msg_type']
+        if msg_type == 'display_data':
+            # Check for success/failure icons in display_data (FlowBook kernel)
+            text = msg['content'].get('data', {}).get('text/plain', '')
+            if '✅' in text or 'enabled' in text.lower():
+                success = True
+            elif '❌' in text or 'failed' in text.lower() or 'not available' in text.lower():
+                log(f"Scalene enable failed: {text}")
+                return False
+        elif msg_type == 'stream':
+            # Check for success/failure text in stream output (baseline kernel)
+            text = msg['content'].get('text', '')
+            if 'enabled' in text.lower():
+                success = True
+            elif 'failed' in text.lower() or 'not available' in text.lower():
+                log(f"Scalene enable failed: {text}")
+                return False
+        elif msg_type == 'error':
+            log(f"Scalene enable error: {msg['content']}")
             return False
-        if msg['header']['msg_type'] == 'status':
+        elif msg_type == 'status':
             if msg['content']['execution_state'] == 'idle':
                 break
     try:
         kernel_client.get_shell_msg(timeout=1.0)
     except Exception:
         pass
+
+    if success:
+        return True
+    else:
+        log("Scalene enable: no success indicator found")
+        return False
+
+
+def disable_scalene_tracking(kernel_client, timeout: float = 30.0) -> bool:
+    """Disable Scalene memory tracking via magic command."""
+    msg_id = kernel_client.execute("%scalene_memory off", silent=True)
+    _wait_for_idle(kernel_client, timeout)
     return True
 
 
-def run_baseline_execution(
+def get_scalene_memory_stats(kernel_client, timeout: float = 30.0) -> Dict[str, Any]:
+    """Get current Scalene memory statistics.
+
+    Returns dict with current_footprint_mb, max_footprint_mb, gpu_mem_samples, etc.
+    """
+    # Use a single execute with user_expressions to get stats
+    # The expression creates the dict inline to avoid variable persistence issues
+    expr_code = """(lambda: (
+        __import__('flowbook.kernel_support.scalene_memory', fromlist=['ScaleneMemoryTracker']).ScaleneMemoryTracker.get_memory()
+    ))()"""
+
+    msg_id = kernel_client.execute(
+        '',
+        user_expressions={'_stats': expr_code},
+        silent=True,
+    )
+
+    # Wait for idle on iopub channel
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            return {"current_footprint_mb": 0.0, "max_footprint_mb": 0.0, "gpu_mem_samples": 0.0}
+        try:
+            msg = kernel_client.get_iopub_msg(timeout=1.0)
+        except Exception:
+            continue
+        if msg['parent_header'].get('msg_id') != msg_id:
+            continue
+        if msg['header']['msg_type'] == 'status':
+            if msg['content']['execution_state'] == 'idle':
+                break
+
+    # Get the execute_reply, matching by msg_id to ensure we get the right one
+    try:
+        import ast
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                reply = kernel_client.get_shell_msg(timeout=1.0)
+            except Exception:
+                continue
+            # Check if this is the reply to our specific request
+            if reply['parent_header'].get('msg_id') != msg_id:
+                # Not our reply, keep looking
+                continue
+            if reply['header']['msg_type'] != 'execute_reply':
+                # Not an execute_reply, keep looking
+                continue
+
+            user_exprs = reply['content'].get('user_expressions', {})
+            expr = user_exprs.get('_stats', {})
+            if expr.get('status') == 'ok':
+                text = expr['data']['text/plain']
+                stats = ast.literal_eval(text)
+                log(f"Scalene stats: footprint={stats.get('current_footprint_mb', 0):.2f}MB, "
+                    f"malloc={stats.get('total_malloc_mb', 0):.2f}MB, "
+                    f"max={stats.get('max_footprint_mb', 0):.2f}MB")
+                return stats
+            else:
+                log(f"Scalene stats error: {expr.get('evalue', 'unknown')}")
+                break
+    except Exception as e:
+        log(f"Failed to get Scalene stats: {e}")
+
+    return {"current_footprint_mb": 0.0, "max_footprint_mb": 0.0, "gpu_mem_samples": 0.0}
+
+
+def get_flowbook_checkpoint_var_costs(
+    kernel_client, cell_id: str, timeout: float = 30.0
+) -> Dict[str, Any]:
+    """Get per-variable checkpoint memory costs from FlowBook kernel.
+
+    Gets combined costs from both pre and post checkpoints for a cell.
+    This gives the total memory overhead of checkpointing for that cell.
+
+    Args:
+        kernel_client: Kernel client to execute code on
+        cell_id: Cell ID to get checkpoint costs for
+        timeout: Timeout in seconds
+
+    Returns:
+        Dict with variable name -> {bytes, type, module, pre_bytes, post_bytes}
+    """
+    code = f"""
+from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
+_ckpt_var_costs = {{}}
+if hasattr(MemoryCheckpoints, '_instance') and MemoryCheckpoints._instance:
+    _ckpt_var_costs = MemoryCheckpoints._instance.get_cell_checkpoint_costs("{cell_id}")
+"""
+    msg_id = kernel_client.execute(code, silent=True)
+    _wait_for_idle(kernel_client, timeout)
+
+    msg_id = kernel_client.execute(
+        '',
+        user_expressions={'_costs': '_ckpt_var_costs'},
+        silent=True,
+    )
+
+    # Wait for idle on iopub
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            return {}
+        try:
+            msg = kernel_client.get_iopub_msg(timeout=1.0)
+        except Exception:
+            continue
+        if msg['parent_header'].get('msg_id') != msg_id:
+            continue
+        if msg['header']['msg_type'] == 'status':
+            if msg['content']['execution_state'] == 'idle':
+                break
+
+    # Get the execute_reply, matching by msg_id
+    try:
+        import ast
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                reply = kernel_client.get_shell_msg(timeout=1.0)
+            except Exception:
+                continue
+            if reply['parent_header'].get('msg_id') != msg_id:
+                continue
+            if reply['header']['msg_type'] != 'execute_reply':
+                continue
+
+            expr = reply['content'].get('user_expressions', {}).get('_costs', {})
+            if expr.get('status') == 'ok':
+                text = expr['data']['text/plain']
+                return ast.literal_eval(text)
+            break
+    except Exception as e:
+        log(f"Failed to get checkpoint var costs: {e}")
+
+    return {}
+
+
+def run_baseline_timing(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
-    rerun_indices: Optional[List[int]] = None
-) -> KernelResults:
+) -> TimingResults:
     """
-    Run notebook on baseline python3 kernel and collect metrics.
+    Run notebook on baseline kernel and collect TIMING metrics only (Scalene OFF).
 
     Args:
         notebook_content: Notebook JSON
         cell_timeout: Timeout per cell in seconds
-        rerun_indices: List of cell indices to re-execute after initial pass (with replacement)
+
+    Returns:
+        TimingResults with cell timing data
     """
-    if rerun_indices is None:
-        rerun_indices = []
     cells = notebook_content.get("cells", [])
     code_cells = [c for c in cells if c.get("cell_type") == "code"]
 
-    log(f"Baseline: Found {len(code_cells)} code cells")
+    log(f"Baseline Timing: Found {len(code_cells)} code cells")
 
     kernel_manager = None
     kernel_client = None
-    results = KernelResults(kernel_name="python3")
+    results = TimingResults(kernel_name="baseline_scalene_kernel")
 
     try:
-        log("Baseline: Starting python3 kernel...")
-        kernel_manager, kernel_client = create_baseline_kernel()
-        log("Baseline: Kernel ready")
-
-        # Setup memory measurement
-        if setup_memory_measurement(kernel_client):
-            log("Baseline: Memory measurement helper injected")
-        else:
-            log("Baseline: WARNING: Failed to inject memory measurement helper")
+        log("Baseline Timing: Starting baseline_scalene_kernel (no Scalene preload)...")
+        kernel_manager, kernel_client = create_baseline_kernel(with_scalene_preload=False)
+        log("Baseline Timing: Kernel ready")
 
         # Warmup: pre-import pandas to match FlowBook kernel's startup state
-        # (FlowBook kernel imports pandas at init for ChainedAssignmentError config)
         warmup_code = "import pandas"
         kernel_client.execute(warmup_code, silent=True)
         _wait_for_idle(kernel_client)
-        log("Baseline: Warmup imports completed")
+        log("Baseline Timing: Warmup imports completed")
 
         total_runtime_ms = 0.0
-        final_user_ns_bytes = 0
-        final_checkpoint_bytes = 0
 
         for idx, cell in enumerate(code_cells):
             cell_id = cell.get("id", f"cell_{idx}")
@@ -507,112 +810,40 @@ def run_baseline_execution(
             if not source.strip():
                 continue
 
-            log(f"Baseline: Executing cell {idx+1}/{len(code_cells)} ({cell_id})...")
+            log(f"Baseline Timing: Executing cell {idx+1}/{len(code_cells)} ({cell_id})...")
 
             timing = execute_cell_baseline(kernel_client, source, cell_timeout)
 
             if timing.get("error"):
                 log(f"  Error:\n{timing['error']}")
-                results.cells.append(CellMetrics(
+                results.cells.append(TimingCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
                     cell_runtime_ms=0.0,
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
-                    user_ns_bytes=0,
-                    user_ns_and_checkpoint_bytes=0,
                     status="error",
                     error=timing["error"]
                 ))
             else:
-                mem = measure_memory(kernel_client)
                 runtime_ms = timing["cell_runtime_ms"]
                 total_runtime_ms += runtime_ms
-                final_user_ns_bytes = mem["user_ns_bytes"]
-                final_checkpoint_bytes = mem["user_ns_and_checkpoint_bytes"]
 
-                results.cells.append(CellMetrics(
+                results.cells.append(TimingCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
                     cell_runtime_ms=runtime_ms,
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
-                    user_ns_bytes=mem["user_ns_bytes"],
-                    user_ns_and_checkpoint_bytes=mem["user_ns_and_checkpoint_bytes"],
                     status="ok",
-                    error=None,
-                    memory_warnings=mem.get("diagnostics", {}).get("warnings"),
                 ))
-                log(f"  Runtime: {runtime_ms:.1f}ms, Memory: {mem['user_ns_bytes']:,}B")
+                log(f"  Runtime: {runtime_ms:.1f}ms")
 
         results.totals = {
             "cell_runtime_ms": total_runtime_ms,
-            "state_duration_ms": 0.0,
-            "check_duration_ms": 0.0,
-            "final_user_ns_bytes": final_user_ns_bytes,
-            "final_checkpoint_bytes": final_checkpoint_bytes,
         }
 
-        log(f"Baseline: Total runtime {total_runtime_ms:.1f}ms")
-
-        # Run extra cells if requested
-        if rerun_indices:
-            log("")
-            log(f"Baseline: Running {len(rerun_indices)} extra cell re-executions...")
-            rerun_runtime_ms = 0.0
-            last_mem = {}
-
-            for rerun_idx, orig_idx in enumerate(rerun_indices):
-                cell = code_cells[orig_idx]
-                cell_id = cell.get("id", f"cell_{orig_idx}")
-                source = cell.get("source", "")
-                if isinstance(source, list):
-                    source = "".join(source)
-
-                log(f"Baseline: Rerun {rerun_idx+1}/{len(rerun_indices)} (cell {cell_id})...")
-
-                timing = execute_cell_baseline(kernel_client, source, cell_timeout)
-
-                if timing.get("error"):
-                    log(f"  Error:\n{timing['error']}")
-                    results.rerun_cells.append(CellMetrics(
-                        cell_id=cell_id,
-                        cell_index=orig_idx,
-                        cell_runtime_ms=0.0,
-                        state_duration_ms=0.0,
-                        check_duration_ms=0.0,
-                        user_ns_bytes=0,
-                        user_ns_and_checkpoint_bytes=0,
-                        status="error",
-                        error=timing["error"]
-                    ))
-                else:
-                    last_mem = measure_memory(kernel_client)
-                    runtime_ms = timing["cell_runtime_ms"]
-                    rerun_runtime_ms += runtime_ms
-
-                    results.rerun_cells.append(CellMetrics(
-                        cell_id=cell_id,
-                        cell_index=orig_idx,
-                        cell_runtime_ms=runtime_ms,
-                        state_duration_ms=0.0,
-                        check_duration_ms=0.0,
-                        user_ns_bytes=last_mem["user_ns_bytes"],
-                        user_ns_and_checkpoint_bytes=last_mem["user_ns_and_checkpoint_bytes"],
-                        status="ok",
-                        error=None,
-                        memory_warnings=last_mem.get("diagnostics", {}).get("warnings"),
-                    ))
-                    log(f"  Runtime: {runtime_ms:.1f}ms, Memory: {last_mem['user_ns_bytes']:,}B")
-
-            results.rerun_totals = {
-                "cell_runtime_ms": rerun_runtime_ms,
-                "state_duration_ms": 0.0,
-                "check_duration_ms": 0.0,
-                "final_user_ns_bytes": last_mem.get("user_ns_bytes", 0),
-                "final_checkpoint_bytes": last_mem.get("user_ns_and_checkpoint_bytes", 0),
-            }
-            log(f"Baseline: Rerun total runtime {rerun_runtime_ms:.1f}ms")
+        log(f"Baseline Timing: Total runtime {total_runtime_ms:.1f}ms")
 
     finally:
         cleanup_kernel(kernel_manager, kernel_client)
@@ -620,53 +851,43 @@ def run_baseline_execution(
     return results
 
 
-def run_flowbook_execution(
+def run_flowbook_timing(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
-    rerun_indices: Optional[List[int]] = None
-) -> KernelResults:
+) -> TimingResults:
     """
-    Run notebook on flowbook_kernel and collect metrics.
+    Run notebook on FlowBook kernel and collect TIMING metrics only (Scalene OFF).
 
     Args:
         notebook_content: Notebook JSON
         cell_timeout: Timeout per cell in seconds
-        rerun_indices: List of cell indices to re-execute after initial pass (with replacement)
+
+    Returns:
+        TimingResults with cell timing data including state_duration_ms, check_duration_ms
     """
-    if rerun_indices is None:
-        rerun_indices = []
     cells = notebook_content.get("cells", [])
     code_cells = [c for c in cells if c.get("cell_type") == "code"]
     cell_order = [c.get("id", f"cell_{i}") for i, c in enumerate(code_cells)]
 
-    log(f"FlowBook: Found {len(code_cells)} code cells")
+    log(f"FlowBook Timing: Found {len(code_cells)} code cells")
 
     kernel_manager = None
     kernel_client = None
-    results = KernelResults(kernel_name="flowbook_kernel")
+    results = TimingResults(kernel_name="flowbook_kernel")
 
     try:
-        log("FlowBook: Starting flowbook_kernel...")
-        kernel_manager, kernel_client = create_flowbook_kernel()
-        log("FlowBook: Kernel ready")
-
-        # Setup memory measurement
-        if setup_memory_measurement(kernel_client):
-            log("FlowBook: Memory measurement helper injected")
-        else:
-            log("FlowBook: WARNING: Failed to inject memory measurement helper")
+        log("FlowBook Timing: Starting flowbook_kernel (no Scalene preload)...")
+        kernel_manager, kernel_client = create_flowbook_kernel(with_scalene_preload=False)
+        log("FlowBook Timing: Kernel ready")
 
         # Enable continue_after_violation so we can measure full execution even with repro issues
         kernel_client.execute("%continue_after_violation on", silent=True)
-        # Wait for it to complete
         _wait_for_idle(kernel_client)
-        log("FlowBook: continue_after_violation enabled")
+        log("FlowBook Timing: continue_after_violation enabled")
 
         total_runtime_ms = 0.0
         total_state_ms = 0.0
         total_check_ms = 0.0
-        final_user_ns_bytes = 0
-        final_checkpoint_bytes = 0
 
         for idx, cell in enumerate(code_cells):
             cell_id = cell.get("id", f"cell_{idx}")
@@ -677,7 +898,7 @@ def run_flowbook_execution(
             if not source.strip():
                 continue
 
-            log(f"FlowBook: Executing cell {idx+1}/{len(code_cells)} ({cell_id})...")
+            log(f"FlowBook Timing: Executing cell {idx+1}/{len(code_cells)} ({cell_id})...")
 
             timing = execute_cell_flowbook(
                 kernel_client, source, cell_id, cell_order, cell_timeout
@@ -685,24 +906,19 @@ def run_flowbook_execution(
 
             if timing.get("error") and timing.get("cell_runtime_ms") is None:
                 log(f"  Error:\n{timing['error']}")
-                results.cells.append(CellMetrics(
+                results.cells.append(TimingCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
                     cell_runtime_ms=0.0,
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
-                    user_ns_bytes=0,
-                    user_ns_and_checkpoint_bytes=0,
                     status="error",
                     error=timing["error"]
                 ))
             else:
-                # Log any violations (warnings with continue_after_violation)
                 if timing.get("violation"):
-                    log(f"  ⚠️  Violation: {timing['violation']}")
+                    log(f"  Violation: {timing['violation']}")
 
-                mem = measure_memory(kernel_client)
-                ckpt_details = measure_checkpoint_details(kernel_client)
                 runtime_ms = timing["cell_runtime_ms"] or 0.0
                 state_ms = timing["state_duration_ms"] or 0.0
                 check_ms = timing["check_duration_ms"] or 0.0
@@ -710,122 +926,278 @@ def run_flowbook_execution(
                 total_runtime_ms += runtime_ms
                 total_state_ms += state_ms
                 total_check_ms += check_ms
-                final_user_ns_bytes = mem["user_ns_bytes"]
-                final_checkpoint_bytes = mem["user_ns_and_checkpoint_bytes"]
 
-                # Determine status
+                status = "ok"
                 if timing.get("error"):
                     status = "error"
                 elif timing.get("violation"):
                     status = "violation"
-                else:
-                    status = "ok"
 
-                results.cells.append(CellMetrics(
+                results.cells.append(TimingCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
                     cell_runtime_ms=runtime_ms,
                     state_duration_ms=state_ms,
                     check_duration_ms=check_ms,
-                    user_ns_bytes=mem["user_ns_bytes"],
-                    user_ns_and_checkpoint_bytes=mem["user_ns_and_checkpoint_bytes"],
                     status=status,
                     error=timing.get("violation") or timing.get("error"),
-                    checkpoint_details=ckpt_details,
-                    memory_warnings=mem.get("diagnostics", {}).get("warnings"),
                 ))
-                log(f"  Runtime: {runtime_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms, Memory: {mem['user_ns_bytes']:,}B, Checkpoint: {mem['user_ns_and_checkpoint_bytes']:,}B")
+                log(f"  Runtime: {runtime_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
 
         results.totals = {
             "cell_runtime_ms": total_runtime_ms,
             "state_duration_ms": total_state_ms,
             "check_duration_ms": total_check_ms,
-            "final_user_ns_bytes": final_user_ns_bytes,
-            "final_checkpoint_bytes": final_checkpoint_bytes,
         }
 
-        log(f"FlowBook: Total runtime {total_runtime_ms:.1f}ms, state {total_state_ms:.1f}ms, check {total_check_ms:.1f}ms")
+        log(f"FlowBook Timing: Total runtime {total_runtime_ms:.1f}ms, state {total_state_ms:.1f}ms, check {total_check_ms:.1f}ms")
 
-        # Run extra cells if requested
-        if rerun_indices:
-            log("")
-            log(f"FlowBook: Running {len(rerun_indices)} extra cell re-executions...")
-            rerun_runtime_ms = 0.0
-            rerun_state_ms = 0.0
-            rerun_check_ms = 0.0
-            last_mem = {}
-            last_ckpt_details = {}
+    finally:
+        cleanup_kernel(kernel_manager, kernel_client)
 
-            for rerun_idx, orig_idx in enumerate(rerun_indices):
-                cell = code_cells[orig_idx]
-                cell_id = cell.get("id", f"cell_{orig_idx}")
-                source = cell.get("source", "")
-                if isinstance(source, list):
-                    source = "".join(source)
+    return results
 
-                log(f"FlowBook: Rerun {rerun_idx+1}/{len(rerun_indices)} (cell {cell_id})...")
 
-                timing = execute_cell_flowbook(
-                    kernel_client, source, cell_id, cell_order, cell_timeout
+def run_baseline_memory(
+    notebook_content: Dict[str, Any],
+    cell_timeout: float,
+) -> MemoryResults:
+    """
+    Run notebook on baseline kernel with Scalene preload and collect MEMORY metrics.
+
+    Args:
+        notebook_content: Notebook JSON
+        cell_timeout: Timeout per cell in seconds
+
+    Returns:
+        MemoryResults with cell memory data from Scalene
+    """
+    cells = notebook_content.get("cells", [])
+    code_cells = [c for c in cells if c.get("cell_type") == "code"]
+
+    log(f"Baseline Memory: Found {len(code_cells)} code cells")
+
+    kernel_manager = None
+    kernel_client = None
+    results = MemoryResults(kernel_name="baseline_scalene_kernel")
+
+    try:
+        log("Baseline Memory: Starting baseline_scalene_kernel WITH Scalene preload...")
+        kernel_manager, kernel_client = create_baseline_kernel(with_scalene_preload=True)
+        log("Baseline Memory: Kernel ready")
+
+        # Enable Scalene tracking
+        if enable_scalene_tracking(kernel_client):
+            log("Baseline Memory: Scalene tracking enabled")
+        else:
+            log("Baseline Memory: WARNING: Failed to enable Scalene tracking")
+
+        # Warmup
+        warmup_code = "import pandas"
+        kernel_client.execute(warmup_code, silent=True)
+        _wait_for_idle(kernel_client)
+
+        # Get baseline memory stats
+        before_stats = get_scalene_memory_stats(kernel_client)
+
+        for idx, cell in enumerate(code_cells):
+            cell_id = cell.get("id", f"cell_{idx}")
+            source = cell.get("source", "")
+            if isinstance(source, list):
+                source = "".join(source)
+
+            if not source.strip():
+                continue
+
+            log(f"Baseline Memory: Executing cell {idx+1}/{len(code_cells)} ({cell_id})...")
+
+            # Get stats before cell
+            pre_stats = get_scalene_memory_stats(kernel_client)
+
+            timing = execute_cell_baseline(kernel_client, source, cell_timeout)
+
+            # Small delay for Scalene to process samples
+            time.sleep(0.2)
+
+            # Get stats after cell
+            post_stats = get_scalene_memory_stats(kernel_client)
+
+            if timing.get("error"):
+                log(f"  Error:\n{timing['error']}")
+                results.cells.append(MemoryCellMetrics(
+                    cell_id=cell_id,
+                    cell_index=idx,
+                    current_footprint_mb=0.0,
+                    max_footprint_mb=0.0,
+                    allocation_delta_mb=0.0,
+                    gpu_mem_samples=0.0,
+                    status="error",
+                    error=timing["error"]
+                ))
+            else:
+                allocation_delta = (
+                    post_stats.get("total_malloc_mb", 0) - pre_stats.get("total_malloc_mb", 0)
                 )
+                results.cells.append(MemoryCellMetrics(
+                    cell_id=cell_id,
+                    cell_index=idx,
+                    current_footprint_mb=post_stats.get("current_footprint_mb", 0.0),
+                    max_footprint_mb=post_stats.get("max_footprint_mb", 0.0),
+                    allocation_delta_mb=allocation_delta,
+                    gpu_mem_samples=post_stats.get("gpu_mem_samples", 0.0),
+                    status="ok",
+                ))
+                log(f"  Footprint: {post_stats.get('current_footprint_mb', 0):.1f}MB, "
+                    f"Delta: {allocation_delta:.1f}MB, GPU: {post_stats.get('gpu_mem_samples', 0):.0f}")
 
-                if timing.get("error") and timing.get("cell_runtime_ms") is None:
-                    log(f"  Error:\n{timing['error']}")
-                    results.rerun_cells.append(CellMetrics(
-                        cell_id=cell_id,
-                        cell_index=orig_idx,
-                        cell_runtime_ms=0.0,
-                        state_duration_ms=0.0,
-                        check_duration_ms=0.0,
-                        user_ns_bytes=0,
-                        user_ns_and_checkpoint_bytes=0,
-                        status="error",
-                        error=timing["error"]
-                    ))
-                else:
-                    if timing.get("violation"):
-                        log(f"  ⚠️  Violation: {timing['violation']}")
+        # Get final stats
+        final_stats = get_scalene_memory_stats(kernel_client)
+        results.totals = {
+            "final_footprint_mb": final_stats.get("current_footprint_mb", 0.0),
+            "max_footprint_mb": final_stats.get("max_footprint_mb", 0.0),
+            "total_allocation_mb": final_stats.get("total_malloc_mb", 0.0) - before_stats.get("total_malloc_mb", 0.0),
+            "gpu_mem_samples": final_stats.get("gpu_mem_samples", 0.0),
+        }
 
-                    last_mem = measure_memory(kernel_client)
-                    last_ckpt_details = measure_checkpoint_details(kernel_client)
-                    runtime_ms = timing["cell_runtime_ms"] or 0.0
-                    state_ms = timing["state_duration_ms"] or 0.0
-                    check_ms = timing["check_duration_ms"] or 0.0
+        log(f"Baseline Memory: Final footprint {final_stats.get('current_footprint_mb', 0):.1f}MB, "
+            f"Max {final_stats.get('max_footprint_mb', 0):.1f}MB")
 
-                    rerun_runtime_ms += runtime_ms
-                    rerun_state_ms += state_ms
-                    rerun_check_ms += check_ms
+        # Disable Scalene tracking
+        disable_scalene_tracking(kernel_client)
 
-                    if timing.get("error"):
-                        status = "error"
-                    elif timing.get("violation"):
-                        status = "violation"
-                    else:
-                        status = "ok"
+    finally:
+        cleanup_kernel(kernel_manager, kernel_client)
 
-                    results.rerun_cells.append(CellMetrics(
-                        cell_id=cell_id,
-                        cell_index=orig_idx,
-                        cell_runtime_ms=runtime_ms,
-                        state_duration_ms=state_ms,
-                        check_duration_ms=check_ms,
-                        user_ns_bytes=last_mem["user_ns_bytes"],
-                        user_ns_and_checkpoint_bytes=last_mem["user_ns_and_checkpoint_bytes"],
-                        status=status,
-                        error=timing.get("violation") or timing.get("error"),
-                        checkpoint_details=last_ckpt_details,
-                        memory_warnings=last_mem.get("diagnostics", {}).get("warnings"),
-                    ))
-                    log(f"  Runtime: {runtime_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms, Memory: {last_mem['user_ns_bytes']:,}B, Checkpoint: {last_mem['user_ns_and_checkpoint_bytes']:,}B")
+    return results
 
-            results.rerun_totals = {
-                "cell_runtime_ms": rerun_runtime_ms,
-                "state_duration_ms": rerun_state_ms,
-                "check_duration_ms": rerun_check_ms,
-                "final_user_ns_bytes": last_mem.get("user_ns_bytes", 0),
-                "final_checkpoint_bytes": last_mem.get("user_ns_and_checkpoint_bytes", 0),
-            }
-            log(f"FlowBook: Rerun total runtime {rerun_runtime_ms:.1f}ms, state {rerun_state_ms:.1f}ms, check {rerun_check_ms:.1f}ms")
+
+def run_flowbook_memory(
+    notebook_content: Dict[str, Any],
+    cell_timeout: float,
+) -> MemoryResults:
+    """
+    Run notebook on FlowBook kernel with Scalene preload and collect MEMORY metrics.
+
+    Args:
+        notebook_content: Notebook JSON
+        cell_timeout: Timeout per cell in seconds
+
+    Returns:
+        MemoryResults with cell memory data from Scalene + checkpoint var costs
+    """
+    cells = notebook_content.get("cells", [])
+    code_cells = [c for c in cells if c.get("cell_type") == "code"]
+    cell_order = [c.get("id", f"cell_{i}") for i, c in enumerate(code_cells)]
+
+    log(f"FlowBook Memory: Found {len(code_cells)} code cells")
+
+    kernel_manager = None
+    kernel_client = None
+    results = MemoryResults(kernel_name="flowbook_kernel")
+
+    try:
+        log("FlowBook Memory: Starting flowbook_kernel WITH Scalene preload...")
+        kernel_manager, kernel_client = create_flowbook_kernel(with_scalene_preload=True)
+        log("FlowBook Memory: Kernel ready")
+
+        # Enable Scalene tracking
+        if enable_scalene_tracking(kernel_client):
+            log("FlowBook Memory: Scalene tracking enabled")
+        else:
+            log("FlowBook Memory: WARNING: Failed to enable Scalene tracking")
+
+        # Enable continue_after_violation
+        kernel_client.execute("%continue_after_violation on", silent=True)
+        _wait_for_idle(kernel_client)
+
+        # Small delay to let Scalene process any pending samples
+        time.sleep(0.5)
+
+        # Get baseline memory stats
+        before_stats = get_scalene_memory_stats(kernel_client)
+
+        for idx, cell in enumerate(code_cells):
+            cell_id = cell.get("id", f"cell_{idx}")
+            source = cell.get("source", "")
+            if isinstance(source, list):
+                source = "".join(source)
+
+            if not source.strip():
+                continue
+
+            log(f"FlowBook Memory: Executing cell {idx+1}/{len(code_cells)} ({cell_id})...")
+
+            # Get stats before cell
+            pre_stats = get_scalene_memory_stats(kernel_client)
+
+            timing = execute_cell_flowbook(
+                kernel_client, source, cell_id, cell_order, cell_timeout
+            )
+
+            # Small delay for Scalene to process samples
+            time.sleep(0.2)
+
+            # Get stats after cell
+            post_stats = get_scalene_memory_stats(kernel_client)
+
+            # Get checkpoint variable costs (combined pre + post)
+            var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id)
+
+            # Debug logging for checkpoint costs
+            if var_costs:
+                log(f"  Checkpoint costs for {len(var_costs)} variables:")
+                for var_name, info in list(var_costs.items())[:3]:
+                    log(f"    {var_name}: {info.get('bytes', 0)/1024/1024:.2f}MB ({info.get('type')})")
+                if len(var_costs) > 3:
+                    log(f"    ... and {len(var_costs) - 3} more")
+            else:
+                log(f"  No checkpoint costs retrieved for cell {cell_id}")
+
+            if timing.get("error") and timing.get("cell_runtime_ms") is None:
+                log(f"  Error:\n{timing['error']}")
+                results.cells.append(MemoryCellMetrics(
+                    cell_id=cell_id,
+                    cell_index=idx,
+                    current_footprint_mb=0.0,
+                    max_footprint_mb=0.0,
+                    allocation_delta_mb=0.0,
+                    gpu_mem_samples=0.0,
+                    checkpoint_var_costs=None,
+                    status="error",
+                    error=timing["error"]
+                ))
+            else:
+                allocation_delta = (
+                    post_stats.get("total_malloc_mb", 0) - pre_stats.get("total_malloc_mb", 0)
+                )
+                results.cells.append(MemoryCellMetrics(
+                    cell_id=cell_id,
+                    cell_index=idx,
+                    current_footprint_mb=post_stats.get("current_footprint_mb", 0.0),
+                    max_footprint_mb=post_stats.get("max_footprint_mb", 0.0),
+                    allocation_delta_mb=allocation_delta,
+                    gpu_mem_samples=post_stats.get("gpu_mem_samples", 0.0),
+                    checkpoint_var_costs=var_costs if var_costs else None,
+                    status="ok",
+                ))
+                ckpt_total = sum(v.get("bytes", 0) for v in var_costs.values()) / (1024 * 1024) if var_costs else 0
+                log(f"  Footprint: {post_stats.get('current_footprint_mb', 0):.1f}MB, "
+                    f"Delta: {allocation_delta:.1f}MB, Checkpoint: {ckpt_total:.1f}MB")
+
+        # Get final stats
+        final_stats = get_scalene_memory_stats(kernel_client)
+        results.totals = {
+            "final_footprint_mb": final_stats.get("current_footprint_mb", 0.0),
+            "max_footprint_mb": final_stats.get("max_footprint_mb", 0.0),
+            "total_allocation_mb": final_stats.get("total_malloc_mb", 0.0) - before_stats.get("total_malloc_mb", 0.0),
+            "gpu_mem_samples": final_stats.get("gpu_mem_samples", 0.0),
+        }
+
+        log(f"FlowBook Memory: Final footprint {final_stats.get('current_footprint_mb', 0):.1f}MB, "
+            f"Max {final_stats.get('max_footprint_mb', 0):.1f}MB")
+
+        # Disable Scalene tracking
+        disable_scalene_tracking(kernel_client)
 
     finally:
         cleanup_kernel(kernel_manager, kernel_client)
@@ -874,10 +1246,9 @@ class CompareBaselineCommand(NotebookCommand):
             help="Timeout in seconds per cell (default: 300)",
         )
         subparser.add_argument(
-            "--extra-cells", "-e",
-            type=int,
-            default=0,
-            help="Number of additional random cells to re-execute after initial pass (default: 0)",
+            "--skip-memory",
+            action="store_true",
+            help="Skip memory measurement phases (timing only)",
         )
         return subparser
 
@@ -890,7 +1261,12 @@ class CompareBaselineCommand(NotebookCommand):
         **kwargs,
     ) -> ProcessingResult:
         """
-        Run notebook on both baseline and FlowBook kernels, compare results.
+        Run notebook using 4-phase execution for timing and memory comparison.
+
+        Phase 1: FlowBook timing (Scalene OFF)
+        Phase 2: Baseline timing (Scalene OFF)
+        Phase 3: Baseline memory (Scalene ON) - if Scalene available
+        Phase 4: FlowBook memory (Scalene ON) - if Scalene available
 
         Args:
             notebook_content: Notebook JSON
@@ -903,63 +1279,90 @@ class CompareBaselineCommand(NotebookCommand):
             ProcessingResult with comparison metadata
         """
         cell_timeout = kwargs.get("timeout", 300.0)
-        extra_cells = kwargs.get("extra_cells", 0)
+        skip_memory = kwargs.get("skip_memory", False)
         notebook_path = kwargs.get("notebook_path", "unknown.ipynb")
 
-        # Pre-generate random rerun sequence so both kernels execute the same cells
         cells = notebook_content.get("cells", [])
         code_cells = [c for c in cells if c.get("cell_type") == "code"]
-        rerun_indices: List[int] = []
-        if extra_cells > 0:
-            executable_indices = [i for i, c in enumerate(code_cells)
-                                  if c.get("source", "").strip()]
-            if executable_indices:
-                rerun_indices = random.choices(executable_indices, k=extra_cells)
+
+        # Check if Scalene is available for memory phases
+        scalene_available = _is_scalene_available() and not skip_memory
 
         with self.timing_context() as get_elapsed:
-            log(f"Starting baseline vs FlowBook comparison...")
+            log(f"Starting 4-phase baseline vs FlowBook comparison...")
             log(f"Notebook: {notebook_path}")
             log(f"Cell timeout: {cell_timeout}s")
-            if extra_cells > 0:
-                log(f"Extra cells: {extra_cells}")
+            log(f"Scalene available: {scalene_available}")
             log("")
 
-            # Run FlowBook first to avoid cold-cache bias
-            # (baseline would otherwise warm OS file cache, giving FlowBook unfair advantage)
+            # ============================================================
+            # PHASE 1: FlowBook Timing (Scalene OFF)
+            # ============================================================
             log("=" * 60)
-            log("FLOWBOOK EXECUTION (flowbook_kernel)")
+            log("PHASE 1: FLOWBOOK TIMING (Scalene OFF)")
             log("=" * 60)
-            flowbook_results = run_flowbook_execution(notebook_content, cell_timeout, rerun_indices)
+            flowbook_timing = run_flowbook_timing(notebook_content, cell_timeout)
             log("")
 
-            # Run baseline second (benefits from warmed caches - conservative overhead estimate)
+            # ============================================================
+            # PHASE 2: Baseline Timing (Scalene OFF)
+            # ============================================================
             log("=" * 60)
-            log("BASELINE EXECUTION (python3)")
+            log("PHASE 2: BASELINE TIMING (Scalene OFF)")
             log("=" * 60)
-            baseline_results = run_baseline_execution(notebook_content, cell_timeout, rerun_indices)
+            baseline_timing = run_baseline_timing(notebook_content, cell_timeout)
             log("")
 
-            # Build comparison result
-            cells = notebook_content.get("cells", [])
-            code_cells = [c for c in cells if c.get("cell_type") == "code"]
+            # ============================================================
+            # PHASE 3: Baseline Memory (Scalene ON) - if available
+            # ============================================================
+            baseline_memory = None
+            if scalene_available:
+                log("=" * 60)
+                log("PHASE 3: BASELINE MEMORY (Scalene ON)")
+                log("=" * 60)
+                baseline_memory = run_baseline_memory(notebook_content, cell_timeout)
+                log("")
 
+            # ============================================================
+            # PHASE 4: FlowBook Memory (Scalene ON) - if available
+            # ============================================================
+            flowbook_memory = None
+            if scalene_available:
+                log("=" * 60)
+                log("PHASE 4: FLOWBOOK MEMORY (Scalene ON)")
+                log("=" * 60)
+                flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout)
+                log("")
+
+            # Build comparison result with new structure
             comparison = ComparisonResult(
-                version="1.0",
+                version="2.0",
                 notebook_path=str(notebook_path),
                 timestamp=datetime.now().isoformat(),
                 kernels={
-                    "baseline": baseline_results,
-                    "flowbook": flowbook_results,
+                    "baseline": KernelResults(
+                        kernel_name="baseline_scalene_kernel",
+                        timing=baseline_timing,
+                        memory=baseline_memory,
+                    ),
+                    "flowbook": KernelResults(
+                        kernel_name="flowbook_kernel",
+                        timing=flowbook_timing,
+                        memory=flowbook_memory,
+                    ),
                 },
+                scalene_available=scalene_available,
                 metadata={
                     "num_cells": len(code_cells),
                     "timeout_seconds": cell_timeout,
-                    "extra_cells": extra_cells,
                 }
             )
 
             # Convert to dict for JSON serialization
             def to_dict(obj):
+                if obj is None:
+                    return None
                 if hasattr(obj, '__dict__'):
                     result = {}
                     for key, value in obj.__dict__.items():
@@ -974,7 +1377,7 @@ class CompareBaselineCommand(NotebookCommand):
 
             comparison_dict = to_dict(comparison)
 
-            # Save JSON output in the same directory as the timings file
+            # Save JSON output
             from flowbook.util.output import output as global_output
             timings_dir = Path(global_output.timings_file).parent
             notebook_stem = Path(notebook_path).stem
@@ -983,31 +1386,46 @@ class CompareBaselineCommand(NotebookCommand):
             with open(json_output_path, "w") as f:
                 json.dump(comparison_dict, f, indent=2)
 
+            # Print summary
             log("=" * 60)
             log("SUMMARY")
             log("=" * 60)
-            baseline_total = baseline_results.totals.get("cell_runtime_ms", 0)
-            flowbook_runtime = flowbook_results.totals.get("cell_runtime_ms", 0)
-            flowbook_state = flowbook_results.totals.get("state_duration_ms", 0)
-            flowbook_check = flowbook_results.totals.get("check_duration_ms", 0)
-            flowbook_total = flowbook_runtime + flowbook_state + flowbook_check
+
+            baseline_total = baseline_timing.totals.get("cell_runtime_ms", 0)
+            flowbook_runtime = flowbook_timing.totals.get("cell_runtime_ms", 0)
+            flowbook_state = flowbook_timing.totals.get("state_duration_ms", 0)
+            flowbook_check = flowbook_timing.totals.get("check_duration_ms", 0)
 
             if baseline_total > 0:
-                slowdown = flowbook_total / baseline_total
                 state_overhead_pct = (flowbook_state / baseline_total) * 100
                 check_overhead_pct = (flowbook_check / baseline_total) * 100
             else:
-                slowdown = 0.0
                 state_overhead_pct = 0.0
                 check_overhead_pct = 0.0
 
-            log(f"Baseline runtime:     {baseline_total:,.1f}ms")
-            log(f"FlowBook runtime:     {flowbook_runtime:,.1f}ms")
-            log(f"FlowBook state time:  {flowbook_state:,.1f}ms ({state_overhead_pct:.1f}%)")
-            log(f"FlowBook check time:  {flowbook_check:,.1f}ms ({check_overhead_pct:.1f}%)")
-            log(f"FlowBook total:       {flowbook_total:,.1f}ms")
-            log(f"Slowdown:             {slowdown:.2f}x")
+            log("TIMING:")
+            log(f"  Baseline runtime:     {baseline_total:,.1f}ms")
+            log(f"  FlowBook runtime:     {flowbook_runtime:,.1f}ms")
+            log(f"  FlowBook state time:  {flowbook_state:,.1f}ms ({state_overhead_pct:.1f}%)")
+            log(f"  FlowBook check time:  {flowbook_check:,.1f}ms ({check_overhead_pct:.1f}%)")
             log("")
+
+            if scalene_available and baseline_memory and flowbook_memory:
+                baseline_mem = baseline_memory.totals.get("final_footprint_mb", 0)
+                flowbook_mem = flowbook_memory.totals.get("final_footprint_mb", 0)
+                baseline_gpu = baseline_memory.totals.get("gpu_mem_samples", 0)
+                flowbook_gpu = flowbook_memory.totals.get("gpu_mem_samples", 0)
+                mem_overhead = flowbook_mem - baseline_mem
+
+                log("MEMORY (from Scalene):")
+                log(f"  Baseline footprint:   {baseline_mem:,.1f}MB")
+                log(f"  FlowBook footprint:   {flowbook_mem:,.1f}MB")
+                log(f"  Memory overhead:      {mem_overhead:+,.1f}MB")
+                if baseline_gpu > 0 or flowbook_gpu > 0:
+                    log(f"  Baseline GPU:         {baseline_gpu:,.0f} samples")
+                    log(f"  FlowBook GPU:         {flowbook_gpu:,.0f} samples")
+                log("")
+
             log(f"Results saved to: {json_output_path}")
             log("")
 
@@ -1023,7 +1441,7 @@ class CompareBaselineCommand(NotebookCommand):
                 "flowbook_runtime_ms": flowbook_runtime,
                 "flowbook_state_ms": flowbook_state,
                 "flowbook_check_ms": flowbook_check,
-                "slowdown": slowdown,
+                "scalene_available": scalene_available,
             },
             total_cost=0.0,
             total_time=total_time,

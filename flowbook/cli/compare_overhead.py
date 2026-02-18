@@ -248,7 +248,7 @@ class AggregateStats:
 
 
 def load_comparison_json(file_path: str) -> Dict[str, Any]:
-    """Load and validate a comparison JSON file."""
+    """Load and validate a comparison JSON file (v1.0 or v2.0 format)."""
     with open(file_path) as f:
         data = json.load(f)
 
@@ -258,7 +258,18 @@ def load_comparison_json(file_path: str) -> Dict[str, Any]:
     if "baseline" not in data["kernels"] or "flowbook" not in data["kernels"]:
         raise ValueError(f"Invalid comparison file: missing baseline or flowbook results in {file_path}")
 
+    # Detect version
+    version = data.get("version", "1.0")
+    data["_version"] = version
+
     return data
+
+
+def is_v2_format(data: Dict[str, Any]) -> bool:
+    """Check if data is v2.0 format (with separate timing/memory)."""
+    # Check both _version (set by load_comparison_json) and version (in raw JSON)
+    version = data.get("_version") or data.get("version", "1.0")
+    return str(version).startswith("2")
 
 
 def extract_warnings(data: Dict[str, Any]) -> List[str]:
@@ -274,15 +285,18 @@ def extract_warnings(data: Dict[str, Any]) -> List[str]:
 
 
 def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
-    """Compute statistics from a single comparison file."""
+    """Compute statistics from a v2.0 comparison file."""
     notebook_path = data.get("notebook_path", file_path)
     notebook_name = Path(notebook_path).name
 
     baseline = data["kernels"]["baseline"]
     flowbook = data["kernels"]["flowbook"]
 
-    baseline_totals = baseline.get("totals", {})
-    flowbook_totals = flowbook.get("totals", {})
+    # v2.0 format has separate timing/memory
+    baseline_timing = baseline.get("timing", {})
+    flowbook_timing = flowbook.get("timing", {})
+    baseline_totals = baseline_timing.get("totals", {}) if baseline_timing else {}
+    flowbook_totals = flowbook_timing.get("totals", {}) if flowbook_timing else {}
 
     baseline_runtime = baseline_totals.get("cell_runtime_ms", 0.0)
     flowbook_runtime = flowbook_totals.get("cell_runtime_ms", 0.0)
@@ -299,8 +313,16 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         state_pct = 0.0
         check_pct = 0.0
 
-    baseline_memory = baseline_totals.get("final_user_ns_bytes", 0)
-    flowbook_memory = flowbook_totals.get("final_checkpoint_bytes", 0)
+    # Memory from v2.0 Scalene data
+    baseline_memory_data = baseline.get("memory", {})
+    flowbook_memory_data = flowbook.get("memory", {})
+    baseline_mem_totals = baseline_memory_data.get("totals", {}) if baseline_memory_data else {}
+    flowbook_mem_totals = flowbook_memory_data.get("totals", {}) if flowbook_memory_data else {}
+
+    # Convert MB to bytes for consistency with old format
+    mb_to_bytes = 1024 * 1024
+    baseline_memory = int(baseline_mem_totals.get("final_footprint_mb", 0) * mb_to_bytes)
+    flowbook_memory = int(flowbook_mem_totals.get("final_footprint_mb", 0) * mb_to_bytes)
     memory_overhead = flowbook_memory - baseline_memory if flowbook_memory > baseline_memory else 0
 
     if baseline_memory > 0:
@@ -308,31 +330,30 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     else:
         memory_pct = 0.0
 
-    num_cells = data.get("metadata", {}).get("num_cells", len(baseline.get("cells", [])))
+    num_cells = data.get("metadata", {}).get("num_cells", 0)
+    if num_cells == 0 and baseline_timing:
+        num_cells = len(baseline_timing.get("cells", []))
 
-    # Rerun stats
-    baseline_rerun_totals = baseline.get("rerun_totals", {})
-    flowbook_rerun_totals = flowbook.get("rerun_totals", {})
-    num_reruns = len(baseline.get("rerun_cells", []))
+    # No reruns in v2.0 format
+    num_reruns = 0
+    rerun_baseline_runtime = 0.0
+    rerun_flowbook_runtime = 0.0
+    rerun_state_overhead = 0.0
+    rerun_check_overhead = 0.0
+    rerun_flowbook_total = 0.0
+    rerun_final_checkpoint = 0
 
-    rerun_baseline_runtime = baseline_rerun_totals.get("cell_runtime_ms", 0.0)
-    rerun_flowbook_runtime = flowbook_rerun_totals.get("cell_runtime_ms", 0.0)
-    rerun_state_overhead = flowbook_rerun_totals.get("state_duration_ms", 0.0)
-    rerun_check_overhead = flowbook_rerun_totals.get("check_duration_ms", 0.0)
-    rerun_flowbook_total = rerun_flowbook_runtime
-    rerun_final_checkpoint = flowbook_rerun_totals.get("final_checkpoint_bytes", 0)
-
-    # Last cell overhead calculations
-    baseline_cells = baseline.get("cells", [])
-    flowbook_cells = flowbook.get("cells", [])
+    # Last cell overhead from timing data
+    baseline_timing_cells = baseline_timing.get("cells", []) if baseline_timing else []
+    flowbook_timing_cells = flowbook_timing.get("cells", []) if flowbook_timing else []
 
     last_cell_state_pct = 0.0
     last_cell_check_pct = 0.0
     last_cell_memory_pct = 0.0
 
-    if flowbook_cells and baseline_cells:
-        last_fc = flowbook_cells[-1]
-        last_bc = baseline_cells[-1]
+    if flowbook_timing_cells and baseline_timing_cells:
+        last_fc = flowbook_timing_cells[-1]
+        last_bc = baseline_timing_cells[-1]
 
         last_baseline_runtime = last_bc.get("cell_runtime_ms", 0.0)
         last_state = last_fc.get("state_duration_ms", 0.0)
@@ -342,12 +363,15 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             last_cell_state_pct = (last_state / last_baseline_runtime) * 100
             last_cell_check_pct = (last_check / last_baseline_runtime) * 100
 
-        last_user_ns = last_fc.get("user_ns_bytes", 0)
-        # Use checkpoint_details.total_bytes if available
-        last_details = last_fc.get("checkpoint_details") or {}
-        last_total = last_details.get("total_bytes", 0) or last_fc.get("user_ns_and_checkpoint_bytes", 0)
-        if last_user_ns > 0:
-            last_cell_memory_pct = ((last_total - last_user_ns) / last_user_ns) * 100
+    # Memory overhead from memory data
+    baseline_mem_cells = baseline_memory_data.get("cells", []) if baseline_memory_data else []
+    flowbook_mem_cells = flowbook_memory_data.get("cells", []) if flowbook_memory_data else []
+
+    if flowbook_mem_cells and baseline_mem_cells:
+        last_baseline_mem = baseline_mem_cells[-1].get("current_footprint_mb", 0)
+        last_flowbook_mem = flowbook_mem_cells[-1].get("current_footprint_mb", 0)
+        if last_baseline_mem > 0:
+            last_cell_memory_pct = ((last_flowbook_mem - last_baseline_mem) / last_baseline_mem) * 100
 
     return FileStats(
         notebook_path=notebook_path,
@@ -762,6 +786,100 @@ def extract_checkpoint_type_data(data: Dict[str, Any]) -> Optional[Dict[str, Any
     }
 
 
+def extract_checkpoint_type_data_v2(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Extract checkpoint type breakdown from v2.0 format.
+
+    Derives type information from checkpoint_var_costs which has:
+    {var_name: {bytes, type, module, pre_bytes, post_bytes}}
+
+    Groups by 'type' field to create by_type breakdown.
+
+    Returns dict with:
+        cells: list of cell indices
+        by_type: dict mapping type name to list of bytes per cell
+        types_ordered: list of type names ordered by total size descending
+        total_bytes: list of total checkpoint bytes per cell
+        initial_count: number of cells
+
+    Returns None if no checkpoint_var_costs data available.
+    """
+    if not is_v2_format(data):
+        return None
+
+    flowbook = data.get("kernels", {}).get("flowbook", {})
+    memory_data = flowbook.get("memory", {})
+    if not memory_data:
+        return None
+
+    memory_cells = memory_data.get("cells", [])
+
+    # Check if any cell has checkpoint_var_costs
+    has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
+    if not has_costs:
+        return None
+
+    # First pass: collect all type names
+    all_type_names: set = set()
+    for c in memory_cells:
+        costs = c.get("checkpoint_var_costs") or {}
+        for var_info in costs.values():
+            all_type_names.add(var_info.get("type", "unknown"))
+
+    if not all_type_names:
+        return None
+
+    # Initialize tracking
+    type_totals: Dict[str, int] = {t: 0 for t in all_type_names}
+    type_by_cell: Dict[str, List[int]] = {t: [] for t in all_type_names}
+    total_bytes: List[int] = []
+
+    # Second pass: collect data per cell
+    for c in memory_cells:
+        costs = c.get("checkpoint_var_costs") or {}
+        cell_type_totals: Dict[str, int] = {t: 0 for t in all_type_names}
+        cell_total = 0
+
+        for var_info in costs.values():
+            var_type = var_info.get("type", "unknown")
+            var_bytes = var_info.get("bytes", 0)
+            if var_type in cell_type_totals:
+                cell_type_totals[var_type] += var_bytes
+            cell_total += var_bytes
+
+        for t in all_type_names:
+            type_totals[t] += cell_type_totals[t]
+            type_by_cell[t].append(cell_type_totals[t])
+        total_bytes.append(cell_total)
+
+    # Order types by total size descending
+    types_ordered = sorted(type_totals.keys(), key=lambda t: type_totals[t], reverse=True)
+
+    # Limit to top types, aggregate rest as "other"
+    TOP_N = 6
+    if len(types_ordered) > TOP_N:
+        top_types = types_ordered[:TOP_N]
+        other_types = types_ordered[TOP_N:]
+
+        # Aggregate "other"
+        other_by_cell = [0] * len(memory_cells)
+        for t in other_types:
+            for i, v in enumerate(type_by_cell[t]):
+                other_by_cell[i] += v
+            del type_by_cell[t]
+
+        type_by_cell["other"] = other_by_cell
+        types_ordered = top_types + ["other"]
+
+    return {
+        "cells": list(range(1, len(memory_cells) + 1)),
+        "by_type": type_by_cell,
+        "types_ordered": types_ordered,
+        "total_bytes": total_bytes,
+        "initial_count": len(memory_cells),
+    }
+
+
 def plot_checkpoint_types(
     data: Dict[str, Any],
     output_path: Optional[str] = None,
@@ -1038,6 +1156,311 @@ def plot_combined(
         return fig
 
 
+def extract_checkpoint_var_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Extract per-variable checkpoint costs from v2.0 comparison data.
+
+    Returns dict with:
+        cells: list of cell indices
+        by_var: dict mapping variable name to list of bytes per cell
+        vars_ordered: list of variable names ordered by total size descending
+        initial_count: number of initial execution cells
+
+    Returns None if no checkpoint_var_costs data available.
+    """
+    if not is_v2_format(data):
+        return None
+
+    flowbook = data.get("kernels", {}).get("flowbook", {})
+    memory_data = flowbook.get("memory", {})
+    if not memory_data:
+        return None
+
+    memory_cells = memory_data.get("cells", [])
+
+    # Check if any cell has checkpoint_var_costs
+    has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
+    if not has_costs:
+        return None
+
+    # First pass: collect all variable names
+    all_var_names: set = set()
+    for c in memory_cells:
+        costs = c.get("checkpoint_var_costs") or {}
+        all_var_names.update(costs.keys())
+
+    # Initialize tracking
+    var_totals: Dict[str, int] = {v: 0 for v in all_var_names}
+    var_by_cell: Dict[str, List[int]] = {v: [] for v in all_var_names}
+
+    # Second pass: collect data
+    for c in memory_cells:
+        costs = c.get("checkpoint_var_costs") or {}
+
+        for var_name in all_var_names:
+            if var_name in costs:
+                var_bytes = costs[var_name].get("bytes", 0)
+                var_totals[var_name] += var_bytes
+                var_by_cell[var_name].append(var_bytes)
+            else:
+                var_by_cell[var_name].append(0)
+
+    # Order variables by total size descending
+    vars_ordered = sorted(var_totals.keys(), key=lambda v: var_totals[v], reverse=True)
+
+    # Limit to top variables, aggregate rest as "other"
+    TOP_N = 6
+    if len(vars_ordered) > TOP_N:
+        top_vars = vars_ordered[:TOP_N]
+        other_vars = vars_ordered[TOP_N:]
+
+        # Aggregate "other"
+        other_by_cell = [0] * len(memory_cells)
+        for v in other_vars:
+            for i, val in enumerate(var_by_cell[v]):
+                other_by_cell[i] += val
+            del var_by_cell[v]
+
+        var_by_cell["other"] = other_by_cell
+        vars_ordered = top_vars + ["other"]
+
+    return {
+        "cells": list(range(1, len(memory_cells) + 1)),
+        "by_var": var_by_cell,
+        "vars_ordered": vars_ordered,
+        "initial_count": len(memory_cells),
+    }
+
+
+def plot_combined_v2(
+    data: Dict[str, Any],
+    output_path: Optional[str] = None,
+    large_fonts: bool = True
+) -> Optional[Any]:
+    """
+    Create combined 4-panel plot for v2.0 data with Scalene memory:
+    - Panel 1: Timing (baseline vs flowbook cumulative time)
+    - Panel 2: Memory + GPU (Scalene data)
+    - Panel 3: Checkpoint by Type
+    - Panel 4: Checkpoint by Name (per-variable)
+
+    If output_path is provided, saves the plot and returns None.
+    If output_path is None, returns the figure for use with PdfPages.
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    sns.set_theme(style="whitegrid")
+    colors = sns.color_palette()
+
+    baseline = data["kernels"]["baseline"]
+    flowbook = data["kernels"]["flowbook"]
+
+    # Extract timing data
+    baseline_timing = baseline.get("timing", {})
+    flowbook_timing = flowbook.get("timing", {})
+    baseline_cells = baseline_timing.get("cells", []) if baseline_timing else []
+    flowbook_cells = flowbook_timing.get("cells", []) if flowbook_timing else []
+
+    # Extract memory data
+    baseline_memory = baseline.get("memory", {})
+    flowbook_memory = flowbook.get("memory", {})
+    baseline_mem_cells = baseline_memory.get("cells", []) if baseline_memory else []
+    flowbook_mem_cells = flowbook_memory.get("cells", []) if flowbook_memory else []
+
+    # Font sizes
+    label_size = 18 if large_fonts else 12
+    title_size = 20 if large_fonts else 14
+    legend_size = 14 if large_fonts else 10
+    tick_size = 14 if large_fonts else 10
+
+    # Determine number of panels
+    has_memory = bool(baseline_mem_cells and flowbook_mem_cells)
+    # For v2.0, derive type data from checkpoint_var_costs; for v1.0, use checkpoint_details
+    if is_v2_format(data):
+        type_data = extract_checkpoint_type_data_v2(data)
+    else:
+        type_data = extract_checkpoint_type_data(data)
+    var_data = extract_checkpoint_var_data(data)
+
+    n_panels = 1  # Always have timing
+    if has_memory:
+        n_panels += 1
+    if type_data:
+        n_panels += 1
+    if var_data:
+        n_panels += 1
+
+    # Use 2x2 grid layout for 4 panels, otherwise single row
+    if n_panels == 4:
+        fig, axes_2d = plt.subplots(2, 2, figsize=(14, 12))
+        axes = [axes_2d[0, 0], axes_2d[0, 1], axes_2d[1, 0], axes_2d[1, 1]]
+    else:
+        fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 6))
+        if n_panels == 1:
+            axes = [axes]
+
+    panel_idx = 0
+
+    # ========== Panel 1: Timing ==========
+    if baseline_cells and flowbook_cells:
+        ax = axes[panel_idx]
+        panel_idx += 1
+
+        # Align by cell_id
+        cell_data = {}
+        for c in baseline_cells:
+            cell_data[c["cell_id"]] = {"baseline_ms": c.get("cell_runtime_ms", 0)}
+        for c in flowbook_cells:
+            if c["cell_id"] in cell_data:
+                cell_data[c["cell_id"]]["flowbook_ms"] = c.get("cell_runtime_ms", 0)
+
+        cell_ids = list(cell_data.keys())
+        baseline_runtimes = [cell_data[cid].get("baseline_ms", 0) for cid in cell_ids]
+        flowbook_runtimes = [cell_data[cid].get("flowbook_ms", 0) for cid in cell_ids]
+
+        cells = np.arange(1, len(cell_ids) + 1)
+        baseline_cumsum = np.cumsum(baseline_runtimes)
+        flowbook_cumsum = np.cumsum(flowbook_runtimes)
+
+        ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label="Baseline")
+        ax.plot(cells, flowbook_cumsum / 1000, color=colors[1], linewidth=2, marker='o', markersize=4, label="FlowBook")
+
+        ax.set_xlabel("Cell Number", fontsize=label_size)
+        ax.set_ylabel("Cumulative Time (seconds)", fontsize=label_size)
+        ax.set_title("Timing Comparison", fontsize=title_size)
+        ax.legend(loc="upper left", fontsize=legend_size)
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax.set_xlim(left=1)
+        ax.set_ylim(bottom=0)
+        ax.tick_params(axis='both', labelsize=tick_size)
+
+        if baseline_cumsum[-1] > 0:
+            overhead_pct = (flowbook_cumsum[-1] - baseline_cumsum[-1]) / baseline_cumsum[-1] * 100
+            ax.annotate(f'{overhead_pct:.1f}% overhead',
+                        xy=(cells[-1], flowbook_cumsum[-1] / 1000),
+                        xytext=(5, 0), textcoords='offset points',
+                        fontsize=legend_size, va='center', ha='left', color=colors[1])
+
+    # ========== Panel 2: Memory + GPU ==========
+    if has_memory:
+        ax = axes[panel_idx]
+        panel_idx += 1
+
+        cells = np.arange(1, len(flowbook_mem_cells) + 1)
+        baseline_footprint = [c.get("current_footprint_mb", 0) for c in baseline_mem_cells]
+        flowbook_footprint = [c.get("current_footprint_mb", 0) for c in flowbook_mem_cells]
+        gpu_samples = [c.get("gpu_mem_samples", 0) for c in flowbook_mem_cells]
+
+        # Main memory (blue)
+        ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline Memory')
+        ax.fill_between(cells, baseline_footprint, flowbook_footprint, alpha=0.3, color=colors[1], label='FlowBook Overhead')
+        ax.plot(cells, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
+        ax.plot(cells, flowbook_footprint, color=colors[1], linewidth=2, marker='o', markersize=4)
+
+        # GPU memory (orange - secondary y-axis) if present
+        has_gpu = any(g > 0 for g in gpu_samples)
+        if has_gpu:
+            ax2 = ax.twinx()
+            ax2.plot(cells, gpu_samples, color='orange', linewidth=2, linestyle='--', marker='s', markersize=4, label='GPU Samples')
+            ax2.set_ylabel('GPU Samples', fontsize=label_size, color='orange')
+            ax2.tick_params(axis='y', labelcolor='orange', labelsize=tick_size)
+
+        ax.set_xlabel('Cell Number', fontsize=label_size)
+        ax.set_ylabel('Memory (MB)', fontsize=label_size)
+        ax.set_title('Memory + GPU', fontsize=title_size)
+        ax.legend(loc='upper left', fontsize=legend_size)
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax.set_xlim(left=1)
+        ax.set_ylim(bottom=0)
+        ax.tick_params(axis='both', labelsize=tick_size)
+
+    # ========== Panel 3: Checkpoint by Type (if available) ==========
+    if type_data is not None:
+        ax = axes[panel_idx]
+        panel_idx += 1
+        type_colors = sns.color_palette("husl", len(type_data["types_ordered"]))
+        type_cells = np.array(type_data["cells"])
+        mb = 1024 * 1024
+
+        # Get baseline memory for reference (same length as type_cells)
+        baseline_footprint = np.zeros(len(type_cells))
+        if has_memory and len(baseline_mem_cells) >= len(type_cells):
+            baseline_footprint = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells[:len(type_cells)]])
+
+        # Draw baseline memory first (bottom layer)
+        ax.fill_between(type_cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline Memory')
+
+        # Stack checkpoint types on top of baseline
+        stacked = [np.array(type_data["by_type"][t]) / mb for t in type_data["types_ordered"]]
+        cumulative = baseline_footprint.copy()
+        for i, (t, data_mb) in enumerate(zip(type_data["types_ordered"], stacked)):
+            ax.fill_between(type_cells, cumulative, cumulative + data_mb, alpha=0.7, color=type_colors[i], label=t)
+            cumulative = cumulative + data_mb
+
+        # Draw lines for baseline and total
+        ax.plot(type_cells, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
+        ax.plot(type_cells, cumulative, color='black', linewidth=1.5, linestyle='--', label='Total')
+
+        ax.set_xlabel("Cell Number", fontsize=label_size)
+        ax.set_ylabel("Memory (MB)", fontsize=label_size)
+        ax.set_title("Checkpoint by Type", fontsize=title_size)
+        ax.legend(loc="upper left", fontsize=legend_size - 4, ncol=2)
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax.set_xlim(left=1)
+        ax.set_ylim(bottom=0)
+        ax.tick_params(axis='both', labelsize=tick_size)
+
+    # ========== Panel 4: Checkpoint by Name (if available) ==========
+    if var_data is not None:
+        ax = axes[panel_idx]
+        panel_idx += 1
+        var_colors = sns.color_palette("husl", len(var_data["vars_ordered"]))
+        var_cells = np.array(var_data["cells"])
+        mb = 1024 * 1024
+
+        # Get baseline memory for reference (same length as var_cells)
+        baseline_footprint = np.zeros(len(var_cells))
+        if has_memory and len(baseline_mem_cells) >= len(var_cells):
+            baseline_footprint = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells[:len(var_cells)]])
+
+        # Draw baseline memory first (bottom layer)
+        ax.fill_between(var_cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline Memory')
+
+        # Stack checkpoint variables on top of baseline
+        stacked = [np.array(var_data["by_var"][v]) / mb for v in var_data["vars_ordered"]]
+        cumulative = baseline_footprint.copy()
+        for i, (v, data_mb) in enumerate(zip(var_data["vars_ordered"], stacked)):
+            ax.fill_between(var_cells, cumulative, cumulative + data_mb, alpha=0.7, color=var_colors[i], label=v)
+            cumulative = cumulative + data_mb
+
+        # Draw lines for baseline and total
+        ax.plot(var_cells, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
+        ax.plot(var_cells, cumulative, color='black', linewidth=1.5, linestyle='--', label='Total')
+
+        ax.set_xlabel("Cell Number", fontsize=label_size)
+        ax.set_ylabel("Memory (MB)", fontsize=label_size)
+        ax.set_title("Checkpoint by Variable", fontsize=title_size)
+        ax.legend(loc="upper left", fontsize=legend_size - 4, ncol=2)
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax.set_xlim(left=1)
+        ax.set_ylim(bottom=0)
+        ax.tick_params(axis='both', labelsize=tick_size)
+
+    # Add notebook name as figure title
+    notebook_name = Path(data.get("notebook_path", "notebook")).stem
+    fig.suptitle(notebook_name, fontsize=title_size + 2, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if output_path is not None:
+        plt.savefig(output_path, dpi=150)
+        plt.close()
+        print(f"Combined v2 plot saved to: {output_path}")
+        return None
+    else:
+        return fig
+
+
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -1168,7 +1591,7 @@ def main():
         for file_path, data in file_data.items():
             # Combined plot with all 3 panels side by side
             try:
-                fig = plot_combined(data, output_path=None, large_fonts=args.large_fonts)
+                fig = plot_combined_v2(data, output_path=None, large_fonts=args.large_fonts)
                 if fig is not None:
                     combined_figures.append(fig)
             except Exception as e:

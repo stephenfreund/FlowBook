@@ -11,13 +11,16 @@ import sys
 from jupyter_client.kernelspec import KernelSpecManager
 
 
-def install_kernel(package_dir: str, kernel_name: str) -> str:
+def install_kernel(
+    package_dir: str, kernel_name: str, spec_subdir: str = "kernelspec"
+) -> str:
     """
-    Install a kernel spec from package_dir/kernelspec/ with the given name.
+    Install a kernel spec from package_dir/<spec_subdir>/ with the given name.
 
     Args:
-        package_dir: Directory containing the kernelspec/ subdirectory
+        package_dir: Directory containing the kernel spec subdirectory
         kernel_name: Name to register the kernel as
+        spec_subdir: Name of subdirectory containing kernel.json (default: "kernelspec")
 
     Returns:
         Path to installed kernel spec directory
@@ -25,7 +28,7 @@ def install_kernel(package_dir: str, kernel_name: str) -> str:
     ksm = KernelSpecManager()
 
     # Path to our kernel spec
-    spec_dir = os.path.join(package_dir, "kernelspec")
+    spec_dir = os.path.join(package_dir, spec_subdir)
 
     # Install it
     dest = ksm.install_kernel_spec(

@@ -1562,5 +1562,128 @@ class TestCollectReachableIdsEdgeCases:
         assert id(b) in visited
 
 
+class TestCheckpointMemoryCosts:
+    """Tests for per-checkpoint memory cost tracking."""
+
+    def test_var_memory_costs_by_checkpoint_stored(self):
+        """Test that memory costs are stored keyed by checkpoint name."""
+        cp = MemoryCheckpoints()
+
+        # Manually set up some costs to simulate Scalene tracking
+        cp._last_var_memory_costs = {
+            'df': {'bytes': 1000, 'type': 'DataFrame', 'module': 'pandas'},
+            'arr': {'bytes': 500, 'type': 'ndarray', 'module': 'numpy'},
+        }
+
+        # Save a checkpoint - this should store costs by checkpoint name
+        user_ns = {'x': 1}  # Simple namespace
+        cp.save("_pre_abc1", user_ns)
+
+        # Clear last costs to simulate next checkpoint
+        cp._last_var_memory_costs = {
+            'df': {'bytes': 1200, 'type': 'DataFrame', 'module': 'pandas'},
+        }
+        cp.save("_post_abc1", user_ns)
+
+        # Check costs are stored by checkpoint name
+        assert "_pre_abc1" in cp._var_memory_costs_by_checkpoint
+        assert "_post_abc1" in cp._var_memory_costs_by_checkpoint
+
+    def test_get_var_memory_costs_for_checkpoint(self):
+        """Test getting costs for a specific checkpoint."""
+        cp = MemoryCheckpoints()
+
+        # Set up costs by checkpoint
+        cp._var_memory_costs_by_checkpoint = {
+            "_pre_abc1": {
+                'df': {'bytes': 1000, 'type': 'DataFrame', 'module': 'pandas'},
+            },
+            "_post_abc1": {
+                'df': {'bytes': 1200, 'type': 'DataFrame', 'module': 'pandas'},
+            },
+        }
+
+        pre_costs = cp.get_var_memory_costs_for_checkpoint("_pre_abc1")
+        assert pre_costs == {'df': {'bytes': 1000, 'type': 'DataFrame', 'module': 'pandas'}}
+
+        post_costs = cp.get_var_memory_costs_for_checkpoint("_post_abc1")
+        assert post_costs == {'df': {'bytes': 1200, 'type': 'DataFrame', 'module': 'pandas'}}
+
+        # Non-existent checkpoint returns empty dict
+        missing = cp.get_var_memory_costs_for_checkpoint("_pre_xyz")
+        assert missing == {}
+
+    def test_get_cell_checkpoint_costs_combined(self):
+        """Test getting combined pre + post costs for a cell."""
+        cp = MemoryCheckpoints()
+
+        # Set up pre and post costs for cell "abc1"
+        cp._var_memory_costs_by_checkpoint = {
+            "_pre_abc1": {
+                'df': {'bytes': 1000, 'type': 'DataFrame', 'module': 'pandas'},
+                'arr': {'bytes': 500, 'type': 'ndarray', 'module': 'numpy'},
+            },
+            "_post_abc1": {
+                'df': {'bytes': 1200, 'type': 'DataFrame', 'module': 'pandas'},
+                'new_var': {'bytes': 300, 'type': 'list', 'module': 'builtins'},
+            },
+        }
+
+        combined = cp.get_cell_checkpoint_costs("abc1")
+
+        # df should have combined bytes from pre + post
+        assert combined['df']['bytes'] == 2200  # 1000 + 1200
+        assert combined['df']['pre_bytes'] == 1000
+        assert combined['df']['post_bytes'] == 1200
+
+        # arr only in pre
+        assert combined['arr']['bytes'] == 500
+        assert combined['arr']['pre_bytes'] == 500
+        assert combined['arr']['post_bytes'] == 0
+
+        # new_var only in post
+        assert combined['new_var']['bytes'] == 300
+        assert combined['new_var']['pre_bytes'] == 0
+        assert combined['new_var']['post_bytes'] == 300
+
+    def test_get_cell_checkpoint_costs_no_data(self):
+        """Test getting costs for a cell with no checkpoint data."""
+        cp = MemoryCheckpoints()
+
+        result = cp.get_cell_checkpoint_costs("nonexistent")
+        assert result == {}
+
+    def test_get_all_checkpoint_costs(self):
+        """Test getting all checkpoint costs."""
+        cp = MemoryCheckpoints()
+
+        cp._var_memory_costs_by_checkpoint = {
+            "_pre_abc1": {'df': {'bytes': 1000}},
+            "_post_abc1": {'df': {'bytes': 1200}},
+            "_pre_def2": {'arr': {'bytes': 500}},
+        }
+
+        all_costs = cp.get_all_checkpoint_costs()
+
+        assert "_pre_abc1" in all_costs
+        assert "_post_abc1" in all_costs
+        assert "_pre_def2" in all_costs
+        assert len(all_costs) == 3
+
+    def test_clear_var_memory_costs_clears_all(self):
+        """Test that clear_var_memory_costs clears both storages."""
+        cp = MemoryCheckpoints()
+
+        cp._last_var_memory_costs = {'x': {'bytes': 100}}
+        cp._var_memory_costs_by_checkpoint = {
+            "_pre_abc1": {'df': {'bytes': 1000}},
+        }
+
+        cp.clear_var_memory_costs()
+
+        assert cp._last_var_memory_costs == {}
+        assert cp._var_memory_costs_by_checkpoint == {}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

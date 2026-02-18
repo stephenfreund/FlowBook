@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "python",
+    "-m",
+    "flowbook.baseline_scalene_kernel.launch_with_scalene",
+    "-f",
+    "{connection_file}"
+  ],
+  "display_name": "Baseline Scalene Kernel (with preload)",
+  "language": "python",
+  "metadata": {
+    "debugger": false
+  }
+}
