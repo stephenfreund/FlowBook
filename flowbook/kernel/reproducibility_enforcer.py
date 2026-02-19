@@ -1332,6 +1332,68 @@ class ReproducibilityEnforcer:
         self._stale_cells.add(cell_id)
         return self.get_stale_cells()
 
+    def get_execution_records_size(self) -> int:
+        """
+        Calculate approximate memory size of execution records in bytes.
+
+        This measures the overhead of storing per-cell execution metadata
+        including tracking data (reads, writes, column tracking).
+
+        Returns:
+            Approximate memory size in bytes.
+        """
+        import sys
+
+        total = sys.getsizeof(self.records)
+
+        for cell_id, record in self.records.items():
+            total += sys.getsizeof(cell_id)
+            total += sys.getsizeof(record)
+
+            # TrackingData contents
+            if hasattr(record, 'tracking') and record.tracking:
+                td = record.tracking
+                total += sys.getsizeof(td)
+
+                # Sets for reads/writes
+                if hasattr(td, 'reads'):
+                    total += sys.getsizeof(td.reads)
+                    for r in td.reads:
+                        total += sys.getsizeof(r)
+                if hasattr(td, 'writes'):
+                    total += sys.getsizeof(td.writes)
+                    for w in td.writes:
+                        total += sys.getsizeof(w)
+
+                # Column tracking dicts
+                for attr in ['column_reads', 'column_writes', 'column_reads_before_writes']:
+                    if hasattr(td, attr):
+                        d = getattr(td, attr)
+                        if d:
+                            total += sys.getsizeof(d)
+                            for k, v in d.items():
+                                total += sys.getsizeof(k) + sys.getsizeof(v)
+
+                # Structural tracking
+                if hasattr(td, 'structural_reads') and td.structural_reads:
+                    total += sys.getsizeof(td.structural_reads)
+                    for k, v in td.structural_reads.items():
+                        total += sys.getsizeof(k) + sys.getsizeof(v)
+
+            # structural_reads_values dict
+            if hasattr(record, 'structural_reads_values') and record.structural_reads_values:
+                total += sys.getsizeof(record.structural_reads_values)
+                for k, v in record.structural_reads_values.items():
+                    total += sys.getsizeof(k) + sys.getsizeof(v)
+
+            # typed_changes list
+            if hasattr(record, 'typed_changes') and record.typed_changes:
+                total += sys.getsizeof(record.typed_changes)
+                for change in record.typed_changes:
+                    total += sys.getsizeof(change)
+
+        return total
+
     def reset(self) -> None:
         """Clear all state. Called on kernel restart."""
         self.records.clear()

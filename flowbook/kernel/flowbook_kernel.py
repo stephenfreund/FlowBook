@@ -659,78 +659,42 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             )
 
     # =========================================================================
-    # Scalene memory tracking magic
+    # Memory introspection magic (using HeapSizer)
     # =========================================================================
 
     @line_magic
-    def scalene_memory(self, line: str) -> None:
+    def memory(self, line: str) -> None:
         """
-        Control Scalene-based memory tracking.
+        Show memory usage using HeapSizer heap traversal.
 
-        Scalene provides precise memory measurement by tracking malloc/free
-        at the native level. This magic command controls the tracker and
-        displays memory statistics.
+        HeapSizer provides accurate memory measurement by traversing the
+        object graph with proper handling of numpy views, pandas CoW, and
+        shared references.
 
         Usage:
-            %scalene_memory on      - Enable memory + GPU tracking
-            %scalene_memory off     - Disable tracking
-            %scalene_memory ?       - Show total memory + GPU stats
-            %scalene_memory vars    - Show per-variable memory breakdown
-            %scalene_memory vars 10 - Show top 10 variables by size
-            %scalene_memory ckpt    - Show checkpoint overhead breakdown
-            %scalene_memory reset   - Reset all statistics
-
-        Note: Scalene tracking requires the kernel to be launched with the
-        Scalene library preloaded via DYLD_INSERT_LIBRARIES (macOS) or
-        LD_PRELOAD (Linux).
+            %memory          - Show namespace summary
+            %memory vars     - Show per-variable memory breakdown
+            %memory vars 10  - Show top 10 variables by size
+            %memory ckpt     - Show checkpoint overhead breakdown
+            %memory cache    - Show deepcopy cache sizes
+            %memory internal - Show FlowBook internal overhead
         """
-        from flowbook.kernel_support.scalene_memory import ScaleneMemoryTracker
+        from flowbook.kernel_support.heap_size import HeapSizer
 
         cmd = line.strip().lower()
         args = cmd.split()
-        subcmd = args[0] if args else "?"
+        subcmd = args[0] if args else ""
 
-        if subcmd == "on":
-            if not ScaleneMemoryTracker.is_available():
-                self._display.display_icon_and_text(
-                    "❌", "Scalene not available. Launch kernel with Scalene preload."
-                )
-                return
-            if ScaleneMemoryTracker.start():
-                self._display.display_icon_and_text(
-                    "✅", "Scalene memory tracking enabled"
-                )
-            else:
-                self._display.display_icon_and_text(
-                    "❌", "Failed to start Scalene tracking"
-                )
+        if subcmd == "" or subcmd == "?" or subcmd == "status":
+            # Show namespace summary
+            sizer = HeapSizer()
+            user_ns = self.shell.user_ns
+            checkpointable = self._checkpoints.checkpointable_vars(user_ns)
+            ns_size = sizer.sizeof_namespace(checkpointable)
 
-        elif subcmd == "off":
-            if ScaleneMemoryTracker.stop():
-                self._display.display_icon_and_text(
-                    "✅", "Scalene memory tracking disabled"
-                )
-            else:
-                self._display.display_icon_and_text(
-                    "ℹ️", "Scalene tracking was not active"
-                )
-
-        elif subcmd == "?" or subcmd == "status":
-            if not ScaleneMemoryTracker.is_available():
-                self._display.display_icon_and_text(
-                    "ℹ️", "Scalene not available (kernel not launched with preload)"
-                )
-                return
-            tracking_status = "enabled" if ScaleneMemoryTracker.is_tracking() else "disabled"
-            stats = ScaleneMemoryTracker.get_memory()
-            msg = f"Tracking: {tracking_status}\n"
-            msg += f"Memory: current={stats['current_footprint_mb']:.1f} MB, "
-            msg += f"max={stats['max_footprint_mb']:.1f} MB, "
-            msg += f"net={stats['net_allocation_mb']:+.1f} MB"
-            gpu_samples = stats.get('gpu_samples', 0)
-            gpu_mem = stats.get('gpu_mem_samples', 0)
-            if gpu_samples > 0 or gpu_mem > 0:
-                msg += f"\nGPU: samples={gpu_samples:.0f}, mem={gpu_mem:.1f}"
+            msg = f"Namespace memory: {ns_size.total_bytes / (1024*1024):.1f} MB\n"
+            msg += f"Variables: {len(ns_size.by_variable)}\n"
+            msg += f"Types: {len(ns_size.by_type)}"
             self._display.display_icon_and_text("📊", msg)
 
         elif subcmd == "vars":
@@ -744,47 +708,36 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             self._show_var_memory_breakdown(limit)
 
         elif subcmd == "ckpt":
-            # Show checkpoint copy costs
+            # Show checkpoint costs
             self._show_checkpoint_memory_costs()
 
-        elif subcmd == "reset":
-            if ScaleneMemoryTracker.reset():
-                self._display.display_icon_and_text(
-                    "✅", "Scalene statistics reset"
-                )
-            else:
-                self._display.display_icon_and_text(
-                    "❌", "Failed to reset Scalene statistics"
-                )
+        elif subcmd == "cache":
+            # Show deepcopy cache sizes
+            self._show_cache_sizes()
+
+        elif subcmd == "internal":
+            # Show FlowBook internal overhead
+            self._show_internal_sizes()
 
         else:
             self._display.display_icon_and_text(
-                "❓", f"Unknown command: {subcmd}. Use on/off/?/vars/ckpt/reset"
+                "❓", f"Unknown command: {subcmd}. Use vars/ckpt/cache/internal"
             )
 
     def _show_var_memory_breakdown(self, limit: int = 20) -> None:
-        """Show per-variable memory breakdown from user namespace."""
-        import sys
+        """Show per-variable memory breakdown from user namespace using HeapSizer."""
+        from flowbook.kernel_support.heap_size import HeapSizer
 
+        sizer = HeapSizer()
         user_ns = self.shell.user_ns
         checkpointable = self._checkpoints.checkpointable_vars(user_ns)
+        ns_size = sizer.sizeof_namespace(checkpointable)
 
-        # Calculate sizes for each variable
+        # Build list of (name, type, size)
         var_sizes = []
-        for name, value in checkpointable.items():
-            try:
-                # Estimate size
-                if hasattr(value, 'nbytes'):
-                    size = value.nbytes
-                elif hasattr(value, 'memory_usage'):
-                    size = value.memory_usage(deep=True)
-                    if hasattr(size, 'sum'):
-                        size = size.sum()
-                else:
-                    size = sys.getsizeof(value)
-                var_sizes.append((name, type(value).__name__, size))
-            except Exception:
-                var_sizes.append((name, type(value).__name__, 0))
+        for name, size in ns_size.by_variable.items():
+            type_name = type(checkpointable[name]).__name__
+            var_sizes.append((name, type_name, size))
 
         # Sort by size descending
         var_sizes.sort(key=lambda x: x[2], reverse=True)
@@ -800,73 +753,61 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         self._display.display_icon_and_text("📊", "\n".join(lines))
 
     def _show_checkpoint_memory_costs(self) -> None:
-        """Show per-variable checkpoint copy costs (combined pre + post)."""
-        # Get all checkpoint costs
-        all_costs = self._checkpoints.memory.get_all_checkpoint_costs()
+        """Show checkpoint memory costs using HeapSizer."""
+        internal_sizes = self._checkpoints.memory.get_internal_sizes()
 
-        if not all_costs:
-            self._display.display_icon_and_text(
-                "ℹ️", "No checkpoint memory costs available.\n"
-                "Enable Scalene tracking (%scalene_memory on) before running cells."
-            )
-            return
-
-        # Group by cell ID (extract from _pre_xxx and _post_xxx)
-        cell_costs: dict = {}
-        for ckpt_name, costs in all_costs.items():
-            if ckpt_name.startswith("_pre_"):
-                cell_id = ckpt_name[5:]
-                if cell_id not in cell_costs:
-                    cell_costs[cell_id] = {'pre': {}, 'post': {}}
-                cell_costs[cell_id]['pre'] = costs
-            elif ckpt_name.startswith("_post_"):
-                cell_id = ckpt_name[6:]
-                if cell_id not in cell_costs:
-                    cell_costs[cell_id] = {'pre': {}, 'post': {}}
-                cell_costs[cell_id]['post'] = costs
-
-        if not cell_costs:
-            self._display.display_icon_and_text(
-                "ℹ️", "No cell checkpoint costs available.\n"
-                "Enable Scalene tracking (%scalene_memory on) before running cells."
-            )
-            return
-
-        lines = ["Checkpoint Memory Costs (measured by Scalene):"]
+        lines = ["Checkpoint Memory Costs (measured by HeapSizer):"]
         lines.append("")
+        lines.append(f"Checkpoint data:     {self._format_bytes(internal_sizes['checkpoints_total'])}")
+        lines.append(f"Deepcopy cache:      {self._format_bytes(internal_sizes['deepcopy_cache_total'])}")
+        lines.append(f"Reverse memo:        {self._format_bytes(internal_sizes['reverse_memo_total'])}")
+        lines.append(f"Alias index:         {self._format_bytes(internal_sizes['alias_index_total'])}")
+        lines.append(f"Var costs cache:     {self._format_bytes(internal_sizes['var_costs_cache'])}")
 
-        # Show combined per-variable costs (aggregate across all cells)
-        combined: dict = {}
-        for cell_id, cell_data in cell_costs.items():
-            for costs in [cell_data['pre'], cell_data['post']]:
-                for var_name, info in costs.items():
-                    if var_name not in combined:
-                        combined[var_name] = {
-                            'bytes': 0,
-                            'type': info['type'],
-                            'module': info.get('module', 'unknown')
-                        }
-                    combined[var_name]['bytes'] += info.get('bytes', 0)
-
-        # Sort by bytes descending
-        sorted_costs = sorted(combined.items(), key=lambda x: x[1]['bytes'], reverse=True)
-
-        # Calculate total
-        total_bytes = sum(c['bytes'] for _, c in sorted_costs)
-
-        lines.append(f"Total checkpoint overhead: {self._format_bytes(total_bytes)}")
-        lines.append(f"({len(cell_costs)} cells, pre + post checkpoints each)")
+        total = sum(internal_sizes.values())
         lines.append("")
-        lines.append("  Variable         Type            Total Alloc")
-        lines.append("  " + "─" * 48)
+        lines.append(f"Total overhead:      {self._format_bytes(total)}")
 
-        for name, info in sorted_costs[:20]:  # Top 20
-            size_str = self._format_bytes(info['bytes'])
-            type_name = info['type']
-            lines.append(f"  {name:<16} {type_name:<15} {size_str:>10}")
+        self._display.display_icon_and_text("📊", "\n".join(lines))
 
-        if len(sorted_costs) > 20:
-            lines.append(f"  ... and {len(sorted_costs) - 20} more variables")
+    def _show_cache_sizes(self) -> None:
+        """Show deepcopy cache sizes."""
+        from flowbook.kernel_support.deepcopy import (
+            get_container_cache_stats,
+            get_cache_sizes,
+            get_cached_objects_size,
+        )
+
+        stats = get_container_cache_stats()
+        sizes = get_cache_sizes()
+        total_cached = get_cached_objects_size()
+
+        lines = ["Deepcopy Cache Statistics:"]
+        lines.append("")
+        lines.append(f"List cache:    {stats['list_cache_size']} entries")
+        lines.append(f"Set cache:     {stats['set_cache_size']} entries")
+        lines.append(f"Dict cache:    {stats['dict_cache_size']} entries")
+        lines.append(f"ndarray cache: {stats['ndarray_cache_size']} entries")
+        lines.append("")
+        lines.append(f"Cache structure:     {self._format_bytes(sum(sizes.values()))}")
+        lines.append(f"Cached objects:      {self._format_bytes(total_cached)}")
+
+        self._display.display_icon_and_text("📊", "\n".join(lines))
+
+    def _show_internal_sizes(self) -> None:
+        """Show FlowBook internal memory overhead."""
+        internal_sizes = self._checkpoints.memory.get_internal_sizes()
+        overhead = self._checkpoints.memory.get_overhead_breakdown()
+
+        lines = ["FlowBook Internal Memory:"]
+        lines.append("")
+        lines.append("From HeapSizer:")
+        for key, value in internal_sizes.items():
+            lines.append(f"  {key}: {self._format_bytes(value)}")
+        lines.append("")
+        lines.append("From cached costs:")
+        for key, value in overhead.items():
+            lines.append(f"  {key}: {self._format_bytes(value)}")
 
         self._display.display_icon_and_text("📊", "\n".join(lines))
 
@@ -880,11 +821,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             return f"{size / (1024 * 1024):.1f} MB"
         else:
             return f"{size / (1024 * 1024 * 1024):.1f} GB"
-
-    @line_magic
-    def scalene(self, line: str) -> None:
-        """Alias for scalene_memory (backwards compatibility)."""
-        self.scalene_memory(line)
 
     @line_magic
     def tracking(self, line: str) -> None:

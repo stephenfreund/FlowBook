@@ -413,6 +413,134 @@ def get_list_cache_stats() -> Dict[str, int]:
     }
 
 
+def get_cache_sizes() -> Dict[str, int]:
+    """
+    Get memory sizes of all deepcopy caches in bytes.
+
+    This provides visibility into the memory overhead of the deepcopy
+    caching system, which can be significant for large notebooks.
+
+    Returns:
+        Dictionary with sizes in bytes for each cache:
+        - large_list_cache: Main list cache entries
+        - large_set_cache: Main set cache entries
+        - large_dict_cache: Main dict cache entries
+        - ndarray_cache: NumPy array cache entries
+        - primitive_list_copies: List copy references
+        - primitive_set_copies: Set copy references
+        - primitive_dict_copies: Dict copy references
+        - ndarray_copies: NumPy array copy references
+    """
+    import sys
+
+    def cache_size(cache: dict) -> int:
+        """Estimate size of a cache dictionary."""
+        total = sys.getsizeof(cache)
+        for k, v in cache.items():
+            total += 8  # id key
+            if isinstance(v, tuple):
+                total += sys.getsizeof(v)
+                # Don't count actual objects - they're user data
+        return total
+
+    return {
+        'large_list_cache': cache_size(_large_list_cache),
+        'large_set_cache': cache_size(_large_set_cache),
+        'large_dict_cache': cache_size(_large_dict_cache),
+        'ndarray_cache': cache_size(_ndarray_cache),
+        'primitive_list_copies': sys.getsizeof(_primitive_list_copies),
+        'primitive_set_copies': sys.getsizeof(_primitive_set_copies),
+        'primitive_dict_copies': sys.getsizeof(_primitive_dict_copies),
+        'ndarray_copies': sys.getsizeof(_ndarray_copies),
+    }
+
+
+def get_cached_object_ids() -> set:
+    """
+    Get IDs of all objects stored in deepcopy caches.
+
+    These objects are shared across multiple checkpoints and should not
+    be double-counted when measuring checkpoint memory. Instead, they
+    should be attributed to general cache overhead.
+
+    Returns:
+        Set of object IDs currently in any cache
+    """
+    cached_ids = set()
+
+    # Large container caches store tuples of (copy, original, ...)
+    for _, (cached_copy, _, _, _) in _large_list_cache.items():
+        cached_ids.add(id(cached_copy))
+
+    for _, (cached_copy, _, _, _) in _large_set_cache.items():
+        cached_ids.add(id(cached_copy))
+
+    for _, (cached_copy, _, _, _) in _large_dict_cache.items():
+        cached_ids.add(id(cached_copy))
+
+    for _, (cached_copy, _, _, _) in _ndarray_cache.items():
+        cached_ids.add(id(cached_copy))
+
+    # Primitive copy caches store copies directly
+    for copy_id, copy_obj in _primitive_list_copies.items():
+        cached_ids.add(id(copy_obj))
+
+    for copy_id, copy_obj in _primitive_set_copies.items():
+        cached_ids.add(id(copy_obj))
+
+    for copy_id, copy_obj in _primitive_dict_copies.items():
+        cached_ids.add(id(copy_obj))
+
+    for copy_id, copy_obj in _ndarray_copies.items():
+        cached_ids.add(id(copy_obj))
+
+    return cached_ids
+
+
+def get_cached_objects_size() -> int:
+    """
+    Get total memory size of all objects stored in deepcopy caches.
+
+    This measures the actual cached data, not just the cache structure.
+    Should be used to report cache overhead separately from checkpoint memory.
+
+    Returns:
+        Total bytes of cached objects
+    """
+    from flowbook.kernel_support.heap_size import HeapSizer
+
+    sizer = HeapSizer()
+    total = 0
+
+    # Large container caches
+    for _, (cached_copy, _, _, _) in _large_list_cache.items():
+        total += sizer.sizeof(cached_copy)
+
+    for _, (cached_copy, _, _, _) in _large_set_cache.items():
+        total += sizer.sizeof(cached_copy)
+
+    for _, (cached_copy, _, _, _) in _large_dict_cache.items():
+        total += sizer.sizeof(cached_copy)
+
+    for _, (cached_copy, _, _, _) in _ndarray_cache.items():
+        total += sizer.sizeof(cached_copy)
+
+    # Primitive copies (smaller objects, but count them)
+    for copy_id, copy_obj in _primitive_list_copies.items():
+        total += sizer.sizeof(copy_obj)
+
+    for copy_id, copy_obj in _primitive_set_copies.items():
+        total += sizer.sizeof(copy_obj)
+
+    for copy_id, copy_obj in _primitive_dict_copies.items():
+        total += sizer.sizeof(copy_obj)
+
+    for copy_id, copy_obj in _ndarray_copies.items():
+        total += sizer.sizeof(copy_obj)
+
+    return total
+
+
 def _prune_list_cache() -> None:
     """
     Remove stale entries from the list cache.
