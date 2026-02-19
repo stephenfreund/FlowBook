@@ -704,9 +704,13 @@ def plot_memory_comparison(
     print(f"Memory plot saved to: {output_path}")
 
 
-def extract_checkpoint_type_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def extract_checkpoint_type_data(data: Dict[str, Any], top_n: int = 10) -> Optional[Dict[str, Any]]:
     """
     Extract checkpoint type breakdown data from comparison JSON.
+
+    Args:
+        data: Comparison data dict
+        top_n: Number of top types to show individually (rest aggregated as "other")
 
     Returns dict with:
         cells: list of cell indices
@@ -762,10 +766,9 @@ def extract_checkpoint_type_data(data: Dict[str, Any]) -> Optional[Dict[str, Any
     types_ordered = sorted(type_totals.keys(), key=lambda t: type_totals[t], reverse=True)
 
     # Limit to top types, aggregate rest as "other"
-    TOP_N = 6
-    if len(types_ordered) > TOP_N:
-        top_types = types_ordered[:TOP_N]
-        other_types = types_ordered[TOP_N:]
+    if len(types_ordered) > top_n:
+        top_types = types_ordered[:top_n]
+        other_types = types_ordered[top_n:]
 
         # Aggregate "other"
         other_by_cell = [0] * len(all_cells)
@@ -786,23 +789,25 @@ def extract_checkpoint_type_data(data: Dict[str, Any]) -> Optional[Dict[str, Any
     }
 
 
-def extract_checkpoint_type_data_v2(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def extract_checkpoint_type_data_v2(data: Dict[str, Any], top_n: int = 10) -> Optional[Dict[str, Any]]:
     """
-    Extract checkpoint type breakdown from v2.0 format.
+    Extract CUMULATIVE checkpoint type breakdown from v2.0 format.
 
-    Derives type information from checkpoint_var_costs which has:
-    {var_name: {bytes, type, module, pre_bytes, post_bytes}}
+    Uses cumulative_by_type field when available (TRUE cumulative accounting for sharing).
+    Falls back to deriving from checkpoint_var_costs for backwards compatibility.
 
-    Groups by 'type' field to create by_type breakdown.
+    Args:
+        data: Comparison data dict
+        top_n: Number of top types to show individually (rest aggregated as "other")
 
     Returns dict with:
         cells: list of cell indices
-        by_type: dict mapping type name to list of bytes per cell
+        by_type: dict mapping type name to list of CUMULATIVE bytes per cell
         types_ordered: list of type names ordered by total size descending
-        total_bytes: list of total checkpoint bytes per cell
+        total_bytes: list of CUMULATIVE total checkpoint bytes per cell
         initial_count: number of cells
 
-    Returns None if no checkpoint_var_costs data available.
+    Returns None if no checkpoint data available.
     """
     if not is_v2_format(data):
         return None
@@ -814,54 +819,85 @@ def extract_checkpoint_type_data_v2(data: Dict[str, Any]) -> Optional[Dict[str, 
 
     memory_cells = memory_data.get("cells", [])
 
-    # Check if any cell has checkpoint_var_costs
-    has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
-    if not has_costs:
-        return None
+    # Check if we have the new cumulative_by_type field (TRUE cumulative)
+    has_cumulative = any(c.get("cumulative_by_type") for c in memory_cells)
 
-    # First pass: collect all type names
-    all_type_names: set = set()
-    for c in memory_cells:
-        costs = c.get("checkpoint_var_costs") or {}
-        for var_info in costs.values():
-            all_type_names.add(var_info.get("type", "unknown"))
+    if has_cumulative:
+        # Use TRUE cumulative data that accounts for memory sharing
+        all_type_names: set = set()
+        for c in memory_cells:
+            by_type = c.get("cumulative_by_type") or {}
+            all_type_names.update(by_type.keys())
 
-    if not all_type_names:
-        return None
+        if not all_type_names:
+            return None
 
-    # Initialize tracking
-    type_totals: Dict[str, int] = {t: 0 for t in all_type_names}
-    type_by_cell: Dict[str, List[int]] = {t: [] for t in all_type_names}
-    total_bytes: List[int] = []
+        type_by_cell: Dict[str, List[int]] = {t: [] for t in all_type_names}
+        total_bytes: List[int] = []
 
-    # Second pass: collect data per cell
-    for c in memory_cells:
-        costs = c.get("checkpoint_var_costs") or {}
-        cell_type_totals: Dict[str, int] = {t: 0 for t in all_type_names}
-        cell_total = 0
+        for c in memory_cells:
+            by_type = c.get("cumulative_by_type") or {}
+            cell_total = 0
 
-        for var_info in costs.values():
-            var_type = var_info.get("type", "unknown")
-            var_bytes = var_info.get("bytes", 0)
-            if var_type in cell_type_totals:
-                cell_type_totals[var_type] += var_bytes
-            cell_total += var_bytes
+            for t in all_type_names:
+                type_bytes = by_type.get(t, 0)
+                type_by_cell[t].append(type_bytes)
+                cell_total += type_bytes
 
-        for t in all_type_names:
-            type_totals[t] += cell_type_totals[t]
-            type_by_cell[t].append(cell_type_totals[t])
-        total_bytes.append(cell_total)
+            total_bytes.append(cell_total)
 
-    # Order types by total size descending
-    types_ordered = sorted(type_totals.keys(), key=lambda t: type_totals[t], reverse=True)
+        # Get final cumulative for ordering
+        type_final: Dict[str, int] = {t: type_by_cell[t][-1] if type_by_cell[t] else 0 for t in all_type_names}
+    else:
+        # Fall back to old method - derives from checkpoint_var_costs (may overcount)
+        has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
+        if not has_costs:
+            return None
+
+        # First pass: collect all type names
+        all_type_names = set()
+        for c in memory_cells:
+            costs = c.get("checkpoint_var_costs") or {}
+            for var_info in costs.values():
+                all_type_names.add(var_info.get("type", "unknown"))
+
+        if not all_type_names:
+            return None
+
+        # Initialize tracking - cumulative totals
+        type_cumulative: Dict[str, int] = {t: 0 for t in all_type_names}
+        type_by_cell = {t: [] for t in all_type_names}
+        total_bytes = []
+        cumulative_total = 0
+
+        # Second pass: collect CUMULATIVE data per cell (OLD method - overcounts sharing)
+        for c in memory_cells:
+            costs = c.get("checkpoint_var_costs") or {}
+            cell_total = 0
+
+            for var_info in costs.values():
+                var_type = var_info.get("type", "unknown")
+                var_bytes = var_info.get("bytes", 0)
+                if var_type in type_cumulative:
+                    type_cumulative[var_type] += var_bytes
+                cell_total += var_bytes
+
+            cumulative_total += cell_total
+            for t in all_type_names:
+                type_by_cell[t].append(type_cumulative[t])
+            total_bytes.append(cumulative_total)
+
+        type_final = type_cumulative
+
+    # Order types by total (final cumulative) size descending
+    types_ordered = sorted(type_final.keys(), key=lambda t: type_final[t], reverse=True)
 
     # Limit to top types, aggregate rest as "other"
-    TOP_N = 6
-    if len(types_ordered) > TOP_N:
-        top_types = types_ordered[:TOP_N]
-        other_types = types_ordered[TOP_N:]
+    if len(types_ordered) > top_n:
+        top_types = types_ordered[:top_n]
+        other_types = types_ordered[top_n:]
 
-        # Aggregate "other"
+        # Aggregate "other" - sum cumulative values from excluded types
         other_by_cell = [0] * len(memory_cells)
         for t in other_types:
             for i, v in enumerate(type_by_cell[t]):
@@ -1156,17 +1192,24 @@ def plot_combined(
         return fig
 
 
-def extract_checkpoint_var_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Optional[Dict[str, Any]]:
     """
-    Extract per-variable checkpoint costs from v2.0 comparison data.
+    Extract CUMULATIVE per-variable checkpoint costs from v2.0 comparison data.
+
+    Uses cumulative_by_var field when available (TRUE cumulative accounting for sharing).
+    Falls back to deriving from checkpoint_var_costs for backwards compatibility.
+
+    Args:
+        data: Comparison data dict
+        top_n: Number of top variables to show individually (rest aggregated as "other")
 
     Returns dict with:
         cells: list of cell indices
-        by_var: dict mapping variable name to list of bytes per cell
+        by_var: dict mapping variable name to list of CUMULATIVE bytes per cell
         vars_ordered: list of variable names ordered by total size descending
         initial_count: number of initial execution cells
 
-    Returns None if no checkpoint_var_costs data available.
+    Returns None if no checkpoint data available.
     """
     if not is_v2_format(data):
         return None
@@ -1178,43 +1221,68 @@ def extract_checkpoint_var_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]
 
     memory_cells = memory_data.get("cells", [])
 
-    # Check if any cell has checkpoint_var_costs
-    has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
-    if not has_costs:
-        return None
+    # Check if we have the new cumulative_by_var field (TRUE cumulative)
+    has_cumulative = any(c.get("cumulative_by_var") for c in memory_cells)
 
-    # First pass: collect all variable names
-    all_var_names: set = set()
-    for c in memory_cells:
-        costs = c.get("checkpoint_var_costs") or {}
-        all_var_names.update(costs.keys())
+    if has_cumulative:
+        # Use TRUE cumulative data that accounts for memory sharing
+        all_var_names: set = set()
+        for c in memory_cells:
+            by_var = c.get("cumulative_by_var") or {}
+            all_var_names.update(by_var.keys())
 
-    # Initialize tracking
-    var_totals: Dict[str, int] = {v: 0 for v in all_var_names}
-    var_by_cell: Dict[str, List[int]] = {v: [] for v in all_var_names}
+        if not all_var_names:
+            return None
 
-    # Second pass: collect data
-    for c in memory_cells:
-        costs = c.get("checkpoint_var_costs") or {}
+        var_by_cell: Dict[str, List[int]] = {v: [] for v in all_var_names}
 
-        for var_name in all_var_names:
-            if var_name in costs:
-                var_bytes = costs[var_name].get("bytes", 0)
-                var_totals[var_name] += var_bytes
+        for c in memory_cells:
+            by_var = c.get("cumulative_by_var") or {}
+
+            for var_name in all_var_names:
+                var_bytes = by_var.get(var_name, 0)
                 var_by_cell[var_name].append(var_bytes)
-            else:
-                var_by_cell[var_name].append(0)
 
-    # Order variables by total size descending
-    vars_ordered = sorted(var_totals.keys(), key=lambda v: var_totals[v], reverse=True)
+        # Get final cumulative for ordering
+        var_final: Dict[str, int] = {v: var_by_cell[v][-1] if var_by_cell[v] else 0 for v in all_var_names}
+    else:
+        # Fall back to old method - derives from checkpoint_var_costs (may overcount)
+        has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
+        if not has_costs:
+            return None
+
+        # First pass: collect all variable names
+        all_var_names = set()
+        for c in memory_cells:
+            costs = c.get("checkpoint_var_costs") or {}
+            all_var_names.update(costs.keys())
+
+        # Initialize tracking - cumulative totals per variable
+        var_cumulative: Dict[str, int] = {v: 0 for v in all_var_names}
+        var_by_cell = {v: [] for v in all_var_names}
+
+        # Second pass: collect CUMULATIVE data (OLD method - overcounts sharing)
+        for c in memory_cells:
+            costs = c.get("checkpoint_var_costs") or {}
+
+            for var_name in all_var_names:
+                if var_name in costs:
+                    var_bytes = costs[var_name].get("bytes", 0)
+                    var_cumulative[var_name] += var_bytes
+                # Append current cumulative value for this variable
+                var_by_cell[var_name].append(var_cumulative[var_name])
+
+        var_final = var_cumulative
+
+    # Order variables by final cumulative total size descending
+    vars_ordered = sorted(var_final.keys(), key=lambda v: var_final[v], reverse=True)
 
     # Limit to top variables, aggregate rest as "other"
-    TOP_N = 6
-    if len(vars_ordered) > TOP_N:
-        top_vars = vars_ordered[:TOP_N]
-        other_vars = vars_ordered[TOP_N:]
+    if len(vars_ordered) > top_n:
+        top_vars = vars_ordered[:top_n]
+        other_vars = vars_ordered[top_n:]
 
-        # Aggregate "other"
+        # Aggregate "other" - sum cumulative values from excluded variables
         other_by_cell = [0] * len(memory_cells)
         for v in other_vars:
             for i, val in enumerate(var_by_cell[v]):
@@ -1235,14 +1303,21 @@ def extract_checkpoint_var_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]
 def plot_combined_v2(
     data: Dict[str, Any],
     output_path: Optional[str] = None,
-    large_fonts: bool = True
+    large_fonts: bool = True,
+    top_n: int = 10
 ) -> Optional[Any]:
     """
-    Create combined 4-panel plot for v2.0 data with Scalene memory:
+    Create combined 4-panel plot for v2.0 data with HeapSizer memory:
     - Panel 1: Timing (baseline vs flowbook cumulative time)
-    - Panel 2: Memory + GPU (Scalene data)
+    - Panel 2: Memory (HeapSizer data)
     - Panel 3: Checkpoint by Type
     - Panel 4: Checkpoint by Name (per-variable)
+
+    Args:
+        data: Comparison data dict
+        output_path: If provided, saves to file; otherwise returns figure
+        large_fonts: Use larger fonts for paper-ready plots
+        top_n: Number of top types/variables to show individually
 
     If output_path is provided, saves the plot and returns None.
     If output_path is None, returns the figure for use with PdfPages.
@@ -1278,10 +1353,10 @@ def plot_combined_v2(
     has_memory = bool(baseline_mem_cells and flowbook_mem_cells)
     # For v2.0, derive type data from checkpoint_var_costs; for v1.0, use checkpoint_details
     if is_v2_format(data):
-        type_data = extract_checkpoint_type_data_v2(data)
+        type_data = extract_checkpoint_type_data_v2(data, top_n=top_n)
     else:
-        type_data = extract_checkpoint_type_data(data)
-    var_data = extract_checkpoint_var_data(data)
+        type_data = extract_checkpoint_type_data(data, top_n=top_n)
+    var_data = extract_checkpoint_var_data(data, top_n=top_n)
 
     n_panels = 1  # Always have timing
     if has_memory:
@@ -1348,15 +1423,77 @@ def plot_combined_v2(
         panel_idx += 1
 
         cells = np.arange(1, len(flowbook_mem_cells) + 1)
-        baseline_footprint = [c.get("current_footprint_mb", 0) for c in baseline_mem_cells]
-        flowbook_footprint = [c.get("current_footprint_mb", 0) for c in flowbook_mem_cells]
+        baseline_footprint = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells])
+        flowbook_footprint = np.array([c.get("current_footprint_mb", 0) for c in flowbook_mem_cells])
         gpu_samples = [c.get("gpu_mem_samples", 0) for c in flowbook_mem_cells]
 
-        # Main memory (blue)
-        ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline Memory')
-        ax.fill_between(cells, baseline_footprint, flowbook_footprint, alpha=0.3, color=colors[1], label='FlowBook Overhead')
-        ax.plot(cells, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
-        ax.plot(cells, flowbook_footprint, color=colors[1], linewidth=2, marker='o', markersize=4)
+        # Check if overhead_breakdown data is available
+        has_overhead_breakdown = any(
+            c.get("overhead_breakdown") for c in flowbook_mem_cells
+        )
+
+        if has_overhead_breakdown:
+            # Stacked overhead breakdown visualization
+            # Extract overhead categories per cell
+            checkpoints_mb = np.array([
+                (c.get("overhead_breakdown") or {}).get("checkpoints_mb", 0)
+                for c in flowbook_mem_cells
+            ])
+            execution_records_mb = np.array([
+                (c.get("overhead_breakdown") or {}).get("execution_records_mb", 0)
+                for c in flowbook_mem_cells
+            ])
+            tracking_metadata_mb = np.array([
+                (c.get("overhead_breakdown") or {}).get("tracking_metadata_mb", 0)
+                for c in flowbook_mem_cells
+            ])
+            other_mb = np.array([
+                (c.get("overhead_breakdown") or {}).get("other_mb", 0)
+                for c in flowbook_mem_cells
+            ])
+
+            # Colors for stacked areas
+            stack_colors = sns.color_palette("Set2", 5)
+
+            # Draw baseline memory first (gray base)
+            ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color='gray', label='Baseline Memory')
+
+            # Stack overhead categories on top of baseline
+            cumulative = baseline_footprint.copy()
+
+            # Checkpoints (largest)
+            next_level = cumulative + checkpoints_mb
+            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[0], label='Checkpoints')
+            cumulative = next_level
+
+            # Execution records
+            next_level = cumulative + execution_records_mb
+            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[1], label='Exec Records')
+            cumulative = next_level
+
+            # Tracking metadata
+            next_level = cumulative + tracking_metadata_mb
+            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[2], label='Tracking')
+            cumulative = next_level
+
+            # Other
+            next_level = cumulative + other_mb
+            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[3], label='Other')
+            cumulative = next_level  # Update cumulative to include all overhead
+
+            # Draw lines for reference
+            ax.plot(cells, baseline_footprint, color='gray', linewidth=2, linestyle='--')
+            # FlowBook Total should be top of stack (baseline + all overhead), not just namespace
+            ax.plot(cells, cumulative, color=colors[1], linewidth=2, marker='o', markersize=4, label='FlowBook Total')
+
+            ax.set_title('Memory Overhead Breakdown', fontsize=title_size)
+        else:
+            # Original visualization without breakdown
+            ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline Memory')
+            ax.fill_between(cells, baseline_footprint, flowbook_footprint, alpha=0.3, color=colors[1], label='FlowBook Overhead')
+            ax.plot(cells, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
+            ax.plot(cells, flowbook_footprint, color=colors[1], linewidth=2, marker='o', markersize=4)
+            ax.set_title('Memory + GPU', fontsize=title_size)
 
         # GPU memory (orange - secondary y-axis) if present
         has_gpu = any(g > 0 for g in gpu_samples)
@@ -1368,7 +1505,6 @@ def plot_combined_v2(
 
         ax.set_xlabel('Cell Number', fontsize=label_size)
         ax.set_ylabel('Memory (MB)', fontsize=label_size)
-        ax.set_title('Memory + GPU', fontsize=title_size)
         ax.legend(loc='upper left', fontsize=legend_size)
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
@@ -1508,6 +1644,12 @@ def main():
         action="store_true",
         help="Clear all cached remote files and exit"
     )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=10,
+        help="Number of top types/variables to show individually in plots (default: 10)"
+    )
 
     args = parser.parse_args()
 
@@ -1591,7 +1733,7 @@ def main():
         for file_path, data in file_data.items():
             # Combined plot with all 3 panels side by side
             try:
-                fig = plot_combined_v2(data, output_path=None, large_fonts=args.large_fonts)
+                fig = plot_combined_v2(data, output_path=None, large_fonts=args.large_fonts, top_n=args.top_n)
                 if fig is not None:
                     combined_figures.append(fig)
             except Exception as e:

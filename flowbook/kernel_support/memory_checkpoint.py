@@ -1883,40 +1883,28 @@ class MemoryCheckpoints:
             Tuple of (copied dictionary, memo dictionary for tracking copied objects,
                      dictionary of failed variables with their exceptions)
         """
-        # Import Scalene tracker (lazy import to avoid circular deps)
-        from flowbook.kernel_support.scalene_memory import ScaleneMemoryTracker
+        from flowbook.kernel_support.heap_size import HeapSizer
 
         copied = {}
         memo = {}
         failed = {}
         var_memory_costs = {}  # Per-variable memory tracking
 
-        # Check if Scalene tracking is available and enabled
-        track_memory = ScaleneMemoryTracker.is_tracking()
-        if track_memory:
-            log(f"Scalene tracking enabled for deepcopy of {len(variables)} variables")
-        else:
-            # Debug: check why tracking is disabled
-            available = ScaleneMemoryTracker.is_available()
-            enabled = ScaleneMemoryTracker._tracking_enabled
-            log(f"Scalene tracking disabled (available={available}, enabled={enabled})")
+        # Use HeapSizer for memory tracking
+        sizer = HeapSizer()
 
         loop_start = time.time()
         for k, v in variables.items():
             try:
                 start_time = time.time()
 
-                # Measure object size directly if tracking enabled
-                # This is more reliable than Scalene footprint delta which
-                # doesn't update in real-time during deepcopy operations
-                if track_memory:
-                    from flowbook.kernel_support.scalene_memory import get_object_size
-                    obj_size = get_object_size(v)
-                    var_memory_costs[k] = {
-                        'bytes': obj_size,
-                        'type': type(v).__name__,
-                        'module': type(v).__module__,
-                    }
+                # Measure object size using HeapSizer
+                obj_size = sizer.sizeof(v, owned_only=True)
+                var_memory_costs[k] = {
+                    'bytes': obj_size,
+                    'type': type(v).__name__,
+                    'module': type(v).__module__,
+                }
 
                 # Use custom deepcopy which handles pandas and functions specially
                 copied[k] = deepcopy(v, memo)
@@ -1955,10 +1943,9 @@ class MemoryCheckpoints:
             loop_duration_ms = (time.time() - loop_start) * 1000
             output.add_timing("deepcopy:loop_total", loop_duration_ms)
 
-        # Store memory costs for later retrieval (if tracking was enabled)
-        if track_memory and var_memory_costs:
+        # Store memory costs for later retrieval
+        if var_memory_costs:
             self._last_var_memory_costs = var_memory_costs
-            log(f"Scalene tracked memory for {len(var_memory_costs)} variables")
 
         return copied, memo, failed
 
@@ -2295,6 +2282,186 @@ class MemoryCheckpoints:
             Dictionary mapping checkpoint names to their per-variable costs.
         """
         return {k: v.copy() for k, v in self._var_memory_costs_by_checkpoint.items()}
+
+    def get_overhead_breakdown(self) -> dict[str, int]:
+        """
+        Calculate memory overhead breakdown by category.
+
+        Returns memory used by different FlowBook components in bytes:
+        - checkpoints: Variable copies stored in all checkpoints (from cached costs)
+        - tracking_metadata: Estimated size of internal tracking structures
+        - other: Rough estimate of other overhead
+
+        Returns:
+            Dict with keys 'checkpoints_bytes', 'tracking_metadata_bytes', 'other_bytes'
+        """
+        checkpoints_bytes = 0
+        num_vars = 0
+
+        # Single pass through cached costs - just sum the bytes values
+        for costs in self._var_memory_costs_by_checkpoint.values():
+            for cost_info in costs.values():
+                checkpoints_bytes += cost_info.get('bytes', 0)
+                num_vars += 1
+
+        # Estimate tracking metadata: ~200 bytes per variable entry (conservative)
+        tracking_metadata_bytes = num_vars * 200
+
+        # Estimate other overhead: ~1KB per checkpoint
+        other_bytes = len(self.saved) * 1024
+
+        return {
+            'checkpoints_bytes': checkpoints_bytes,
+            'tracking_metadata_bytes': tracking_metadata_bytes,
+            'other_bytes': other_bytes,
+        }
+
+    def get_checkpoint_size(
+        self, name: str, exclude_cached: bool = False
+    ) -> 'CheckpointSize':
+        """
+        Get detailed size breakdown for a checkpoint using HeapSizer.
+
+        This provides accurate memory measurement using heap traversal,
+        properly handling numpy views, pandas CoW, and shared references.
+
+        Args:
+            name: Checkpoint name (e.g., "_pre_abc1", "_post_abc1")
+            exclude_cached: If True, exclude objects in deepcopy caches.
+                Default is False to measure full checkpoint size including
+                cached objects (since those ARE part of checkpoint storage).
+
+        Returns:
+            CheckpointSize with total bytes, per-variable breakdown, per-type breakdown.
+            Returns empty CheckpointSize if checkpoint not found.
+        """
+        from flowbook.kernel_support.heap_size import HeapSizer, CheckpointSize
+
+        ckpt = self.saved.get(name)
+        if not ckpt:
+            return CheckpointSize(0, {}, {}, 0)
+
+        sizer = HeapSizer()
+        return sizer.sizeof_checkpoint(ckpt, exclude_cached=exclude_cached)
+
+    def get_total_checkpoint_size(self) -> 'AllCheckpointsSize':
+        """
+        Get total size of ALL checkpoints together, accounting for sharing.
+
+        This is the correct way to measure cumulative checkpoint memory because
+        checkpoints share objects via the deepcopy memo dict. Measuring each
+        checkpoint separately and summing would overcount shared memory.
+
+        Returns:
+            AllCheckpointsSize with:
+            - total_bytes: Deduplicated total memory
+            - by_variable: Memory by variable name
+            - by_type: Memory by type name
+            - by_checkpoint: Memory contribution per checkpoint
+        """
+        from flowbook.kernel_support.heap_size import HeapSizer, AllCheckpointsSize
+
+        if not self.saved:
+            return AllCheckpointsSize(0, {}, {}, {})
+
+        sizer = HeapSizer()
+        # Use exclude_cached=False to measure full checkpoint size including
+        # objects in the deepcopy cache, since those ARE part of checkpoint storage
+        return sizer.sizeof_all_checkpoints(self.saved, exclude_cached=False)
+
+    def get_cumulative_checkpoint_size_at_cell(self, cell_id: str) -> 'AllCheckpointsSize':
+        """
+        Get cumulative checkpoint size including all checkpoints up to and including
+        the given cell.
+
+        This measures all checkpoints from _pre_* to _post_{cell_id} together,
+        properly accounting for memory sharing between checkpoints.
+
+        Args:
+            cell_id: Cell ID (e.g., "abc1")
+
+        Returns:
+            AllCheckpointsSize with deduplicated cumulative memory
+        """
+        from flowbook.kernel_support.heap_size import HeapSizer, AllCheckpointsSize
+
+        # Get all checkpoint names up to and including this cell
+        post_name = f"_post_{cell_id}"
+        checkpoints_to_include = {}
+
+        # Include all checkpoints up to the target cell
+        for name, ckpt in self.saved.items():
+            checkpoints_to_include[name] = ckpt
+            if name == post_name:
+                break
+
+        if not checkpoints_to_include:
+            return AllCheckpointsSize(0, {}, {}, {})
+
+        sizer = HeapSizer()
+        # Use exclude_cached=False to measure full checkpoint size including
+        # objects in the deepcopy cache, since those ARE part of checkpoint storage
+        return sizer.sizeof_all_checkpoints(checkpoints_to_include, exclude_cached=False)
+
+    def get_internal_sizes(self) -> dict[str, int]:
+        """
+        Get sizes of FlowBook internal data structures using HeapSizer.
+
+        This provides accurate memory measurement of FlowBook's internal overhead,
+        separate from user data.
+
+        Returns:
+            Dictionary with sizes in bytes:
+            - checkpoints_total: Total size of all checkpoint user_ns data (excluding cached)
+            - deepcopy_cache_total: Size of objects in deepcopy caches (shared across checkpoints)
+            - reverse_memo_total: Size of reverse memo mappings
+            - alias_index_total: Size of deep alias detection indexes
+            - var_costs_cache: Size of cached memory cost data
+        """
+        import sys
+        from flowbook.kernel_support.heap_size import HeapSizer
+
+        sizer = HeapSizer()
+        sizes: dict[str, int] = {
+            'checkpoints_total': 0,
+            'deepcopy_cache_total': 0,
+            'reverse_memo_total': 0,
+            'alias_index_total': 0,
+            'var_costs_cache': 0,
+        }
+
+        # Measure deepcopy cache separately (shared across checkpoints)
+        try:
+            from flowbook.kernel_support.deepcopy import get_cached_objects_size
+            sizes['deepcopy_cache_total'] = get_cached_objects_size()
+        except ImportError:
+            pass
+
+        # Measure checkpoint contents
+        for name, ckpt in self.saved.items():
+            sizes['checkpoints_total'] += sizer.sizeof(ckpt.user_ns)
+
+            # Measure reverse_memo (dict of int -> int)
+            sizes['reverse_memo_total'] += sys.getsizeof(ckpt.reverse_memo)
+            sizes['reverse_memo_total'] += len(ckpt.reverse_memo) * 16  # Two ints per entry
+
+            # Measure alias index if built
+            if ckpt._alias_index_built:
+                sizes['alias_index_total'] += sys.getsizeof(ckpt._reachable_ids)
+                sizes['alias_index_total'] += sys.getsizeof(ckpt._id_to_vars)
+                sizes['alias_index_total'] += sys.getsizeof(ckpt._id_to_paths)
+                # Add set sizes
+                for var_ids in ckpt._reachable_ids.values():
+                    sizes['alias_index_total'] += sys.getsizeof(var_ids)
+                for var_set in ckpt._id_to_vars.values():
+                    sizes['alias_index_total'] += sys.getsizeof(var_set)
+
+            sizer.reset()  # Reset for next checkpoint
+
+        # Measure var costs cache
+        sizes['var_costs_cache'] = sizer.sizeof(self._var_memory_costs_by_checkpoint)
+
+        return sizes
 
     def clear_var_memory_costs(self) -> None:
         """Clear stored per-variable memory costs."""
