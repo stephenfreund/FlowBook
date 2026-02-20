@@ -481,7 +481,10 @@ class HeapSizer:
             for arr in df._mgr.arrays:
                 nd = self._get_backing_ndarray(arr)
                 if nd is not None:
-                    total += self._sizeof_ndarray(nd, owned_only)
+                    # Use _sizeof() to get proper object identity tracking via _seen_ids.
+                    # This ensures that shared ndarray objects across checkpoints
+                    # (e.g., pandas CoW) are only counted once.
+                    total += self._sizeof(nd, owned_only)
                 else:
                     # ExtensionArray without numpy backing
                     total += self._sizeof_extension_array(arr, owned_only)
@@ -501,7 +504,10 @@ class HeapSizer:
             values = series._values
             nd = self._get_backing_ndarray(values)
             if nd is not None:
-                total += self._sizeof_ndarray(nd, owned_only)
+                # Use _sizeof() to get proper object identity tracking via _seen_ids.
+                # This ensures that shared ndarray objects across checkpoints
+                # are only counted once.
+                total += self._sizeof(nd, owned_only)
             else:
                 total += self._sizeof_extension_array(values, owned_only)
         elif hasattr(series, 'values'):
@@ -650,7 +656,8 @@ class HeapSizer:
         total = 1024  # Model structure overhead estimate
         try:
             for w in model.get_weights():
-                total += self._sizeof_ndarray(w, owned_only)
+                # Use _sizeof() for proper object identity tracking
+                total += self._sizeof(w, owned_only)
         except Exception:
             pass
         return total
@@ -672,7 +679,8 @@ class HeapSizer:
         try:
             for name, param in model.state_dict().items():
                 if hasattr(param, 'numpy'):
-                    total += self._sizeof_ndarray(param.numpy(), owned_only)
+                    # Use _sizeof() for proper object identity tracking
+                    total += self._sizeof(param.numpy(), owned_only)
                 elif hasattr(param, 'nbytes'):
                     total += param.nbytes
                 elif hasattr(param, 'numel') and hasattr(param, 'element_size'):
