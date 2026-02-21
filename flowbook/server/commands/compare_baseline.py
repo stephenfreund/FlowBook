@@ -95,11 +95,10 @@ class MemoryCellMetrics:
     max_footprint_mb: float
     allocation_delta_mb: float
     gpu_mem_samples: float
-    checkpoint_var_costs: Optional[Dict[str, Any]] = None  # FlowBook only: per-cell var costs
+    checkpoint_var_costs: Optional[Dict[str, Any]] = None  # FlowBook only: per-cell var costs (includes deepcopy_ms)
     overhead_breakdown: Optional[Dict[str, float]] = None  # FlowBook only: {category: MB}
     cumulative_by_type: Optional[Dict[str, int]] = None  # FlowBook only: cumulative bytes by type
     cumulative_by_var: Optional[Dict[str, int]] = None  # FlowBook only: cumulative bytes by variable
-    cumulative_by_var_timing: Optional[Dict[str, float]] = None  # FlowBook only: cumulative ms by variable
     # Pre/post checkpoint breakdown for NO_POST analysis (accounts for sharing)
     pre_only_bytes: int = 0  # Bytes if only pre checkpoints existed (with sharing)
     post_savings_bytes: int = 0  # Memory saved by removing post checkpoints
@@ -1248,8 +1247,6 @@ def run_flowbook_memory(
         # Track cumulative checkpoint costs across all cells
         # Track var count for metadata overhead estimate
         cumulative_var_count = 0
-        # Track cumulative checkpoint timing per variable
-        cumulative_timing_by_var: Dict[str, float] = {}
 
         for idx, cell in enumerate(code_cells):
             cell_id = cell.get("id", f"cell_{idx}")
@@ -1289,15 +1286,8 @@ def run_flowbook_memory(
             max_footprint_mb = max(max_footprint_mb, current_mb)
 
             # Track variable count for metadata overhead estimate
-            # Update cumulative timing per variable
             if var_costs:
                 cumulative_var_count += len(var_costs)
-                for var_name, info in var_costs.items():
-                    deepcopy_ms = info.get('deepcopy_ms', 0)
-                    if var_name in cumulative_timing_by_var:
-                        cumulative_timing_by_var[var_name] += deepcopy_ms
-                    else:
-                        cumulative_timing_by_var[var_name] = deepcopy_ms
 
             # Build CUMULATIVE overhead breakdown
             # checkpoints_mb is the TRUE cumulative size accounting for sharing
@@ -1340,7 +1330,6 @@ def run_flowbook_memory(
                     overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
                     cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
                     cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
-                    cumulative_by_var_timing=cumulative_timing_by_var.copy() if cumulative_timing_by_var else None,
                     pre_only_bytes=pre_only_bytes,
                     post_savings_bytes=post_savings_bytes,
                     status="error",
@@ -1359,7 +1348,6 @@ def run_flowbook_memory(
                     overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
                     cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
                     cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
-                    cumulative_by_var_timing=cumulative_timing_by_var.copy() if cumulative_timing_by_var else None,
                     pre_only_bytes=pre_only_bytes,
                     post_savings_bytes=post_savings_bytes,
                     status="ok",

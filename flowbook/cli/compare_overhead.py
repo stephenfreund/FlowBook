@@ -1302,9 +1302,9 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
 
 def extract_checkpoint_timing_var_data(data: Dict[str, Any], top_n: int = 10) -> Optional[Dict[str, Any]]:
     """
-    Extract CUMULATIVE per-variable checkpoint TIMING from v2.0 comparison data.
+    Extract PER-CELL per-variable checkpoint TIMING from v2.0 comparison data.
 
-    Uses cumulative_by_var_timing field which tracks deepcopy time per variable.
+    Gets deepcopy_ms from checkpoint_var_costs for each cell (not cumulative).
 
     Args:
         data: Comparison data dict
@@ -1312,7 +1312,7 @@ def extract_checkpoint_timing_var_data(data: Dict[str, Any], top_n: int = 10) ->
 
     Returns dict with:
         cells: list of cell indices
-        by_var: dict mapping variable name to list of CUMULATIVE ms per cell
+        by_var: dict mapping variable name to list of ms per cell (NOT cumulative)
         vars_ordered: list of variable names ordered by total time descending
         initial_count: number of initial execution cells
 
@@ -1328,71 +1328,49 @@ def extract_checkpoint_timing_var_data(data: Dict[str, Any], top_n: int = 10) ->
 
     memory_cells = memory_data.get("cells", [])
 
-    # Check if we have cumulative_by_var_timing field
-    has_cumulative_timing = any(c.get("cumulative_by_var_timing") for c in memory_cells)
+    # Get timing from checkpoint_var_costs (deepcopy_ms field)
+    has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
+    if not has_costs:
+        return None
 
-    if has_cumulative_timing:
-        # Use cumulative timing data
-        all_var_names: set = set()
-        for c in memory_cells:
-            by_var_timing = c.get("cumulative_by_var_timing") or {}
-            all_var_names.update(by_var_timing.keys())
+    # First pass: collect all variable names and compute totals
+    all_var_names: set = set()
+    var_total: Dict[str, float] = {}
+    for c in memory_cells:
+        costs = c.get("checkpoint_var_costs") or {}
+        for var_name, info in costs.items():
+            all_var_names.add(var_name)
+            var_ms = info.get("deepcopy_ms", 0)
+            if var_name in var_total:
+                var_total[var_name] += var_ms
+            else:
+                var_total[var_name] = var_ms
 
-        if not all_var_names:
-            return None
+    if not all_var_names:
+        return None
 
-        var_by_cell: Dict[str, List[float]] = {v: [] for v in all_var_names}
+    # Second pass: collect PER-CELL timing data (not cumulative)
+    var_by_cell: Dict[str, List[float]] = {v: [] for v in all_var_names}
 
-        for c in memory_cells:
-            by_var_timing = c.get("cumulative_by_var_timing") or {}
+    for c in memory_cells:
+        costs = c.get("checkpoint_var_costs") or {}
 
-            for var_name in all_var_names:
-                var_ms = by_var_timing.get(var_name, 0)
-                var_by_cell[var_name].append(var_ms)
+        for var_name in all_var_names:
+            if var_name in costs:
+                var_ms = costs[var_name].get("deepcopy_ms", 0)
+            else:
+                var_ms = 0
+            var_by_cell[var_name].append(var_ms)
 
-        # Get final cumulative for ordering
-        var_final: Dict[str, float] = {v: var_by_cell[v][-1] if var_by_cell[v] else 0 for v in all_var_names}
-    else:
-        # Fall back to deriving from checkpoint_var_costs (deepcopy_ms field)
-        has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
-        if not has_costs:
-            return None
-
-        # First pass: collect all variable names
-        all_var_names = set()
-        for c in memory_cells:
-            costs = c.get("checkpoint_var_costs") or {}
-            all_var_names.update(costs.keys())
-
-        if not all_var_names:
-            return None
-
-        # Initialize tracking - cumulative totals per variable
-        var_cumulative: Dict[str, float] = {v: 0 for v in all_var_names}
-        var_by_cell = {v: [] for v in all_var_names}
-
-        # Second pass: collect CUMULATIVE timing data
-        for c in memory_cells:
-            costs = c.get("checkpoint_var_costs") or {}
-
-            for var_name in all_var_names:
-                if var_name in costs:
-                    var_ms = costs[var_name].get("deepcopy_ms", 0)
-                    var_cumulative[var_name] += var_ms
-                # Append current cumulative value for this variable
-                var_by_cell[var_name].append(var_cumulative[var_name])
-
-        var_final = var_cumulative
-
-    # Order variables by final cumulative total time descending
-    vars_ordered = sorted(var_final.keys(), key=lambda v: var_final[v], reverse=True)
+    # Order variables by total time descending
+    vars_ordered = sorted(var_total.keys(), key=lambda v: var_total[v], reverse=True)
 
     # Limit to top variables, aggregate rest as "other"
     if len(vars_ordered) > top_n:
         top_vars = vars_ordered[:top_n]
         other_vars = vars_ordered[top_n:]
 
-        # Aggregate "other" - sum cumulative values from excluded variables
+        # Aggregate "other" - sum per-cell values from excluded variables
         other_by_cell = [0.0] * len(memory_cells)
         for v in other_vars:
             for i, val in enumerate(var_by_cell[v]):
