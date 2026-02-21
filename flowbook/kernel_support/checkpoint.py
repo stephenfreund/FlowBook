@@ -91,6 +91,7 @@ class Checkpoint:
         column_rbw=None,
         structural_reads=None,
         structural_mode=None,
+        read_only_keys=None,
     ) -> CheckpointDiffResult:
         """Diff both memory and files in one call."""
         mem_diff = MemoryCheckpoint.diff(
@@ -101,6 +102,7 @@ class Checkpoint:
             column_rbw=column_rbw,
             structural_reads=structural_reads,
             structural_mode=structural_mode,
+            read_only_keys=read_only_keys,
         )
         file_diff = None
         if a.file is not None and b.file is not None:

@@ -1735,6 +1735,7 @@ class MemoryCheckpoint:
         column_rbw: Optional[Dict[str, Set[str]]] = None,
         structural_reads: Optional[Dict[str, Set[str]]] = None,
         structural_mode: Optional["StructuralTrackingMode"] = None,
+        read_only_keys: Optional[Set[str]] = None,
     ):
         """
         Compare two checkpoints and return structured diff results.
@@ -1754,6 +1755,10 @@ class MemoryCheckpoint:
                        (e.g., 'columns', 'shape', 'len'). Used with structural_mode.
             structural_mode: How to handle structural reads (OFF, WARN, ENFORCE).
                        If None, defaults to OFF.
+            read_only_keys: Optional set of keys that were only read (not written).
+                       These variables cannot have changed between a and b, so
+                       comparison is skipped entirely for a significant speedup
+                       on large read-only arrays.
 
         Returns:
             MemoryCheckpointDiffResult: Structured diff tree with only differences
@@ -1776,7 +1781,7 @@ class MemoryCheckpoint:
             )
 
         with timer(key="checkpoint_diff:compare", message="[diff] Compare namespaces"):
-            result = differ.diff(a.user_ns, b.user_ns, keys_to_include)
+            result = differ.diff(a.user_ns, b.user_ns, keys_to_include, read_only_keys)
 
         return result
 
