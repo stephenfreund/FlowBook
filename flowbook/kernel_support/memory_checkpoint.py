@@ -2233,6 +2233,7 @@ class MemoryCheckpoints:
                     'module': str,  # Module of the variable's type
                     'pre_bytes': int,   # Memory from pre-checkpoint
                     'post_bytes': int,  # Memory from post-checkpoint
+                    'deepcopy_ms': float,  # Combined pre + post deepcopy time in ms
                 }
             }
 
@@ -2258,14 +2259,17 @@ class MemoryCheckpoints:
                 'module': cost_info.get('module', 'unknown'),
                 'pre_bytes': cost_info.get('bytes', 0),
                 'post_bytes': 0,
+                'deepcopy_ms': cost_info.get('deepcopy_ms', 0),
             }
 
         # Add post-checkpoint costs
         for var_name, cost_info in post_costs.items():
             post_bytes = cost_info.get('bytes', 0)
+            post_deepcopy_ms = cost_info.get('deepcopy_ms', 0)
             if var_name in combined:
                 combined[var_name]['bytes'] += post_bytes
                 combined[var_name]['post_bytes'] = post_bytes
+                combined[var_name]['deepcopy_ms'] += post_deepcopy_ms
             else:
                 combined[var_name] = {
                     'bytes': post_bytes,
@@ -2273,6 +2277,7 @@ class MemoryCheckpoints:
                     'module': cost_info.get('module', 'unknown'),
                     'pre_bytes': 0,
                     'post_bytes': post_bytes,
+                    'deepcopy_ms': post_deepcopy_ms,
                 }
 
         return combined
