@@ -1300,6 +1300,116 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
     }
 
 
+def extract_checkpoint_timing_var_data(data: Dict[str, Any], top_n: int = 10) -> Optional[Dict[str, Any]]:
+    """
+    Extract CUMULATIVE per-variable checkpoint TIMING from v2.0 comparison data.
+
+    Uses cumulative_by_var_timing field which tracks deepcopy time per variable.
+
+    Args:
+        data: Comparison data dict
+        top_n: Number of top variables to show individually (rest aggregated as "other")
+
+    Returns dict with:
+        cells: list of cell indices
+        by_var: dict mapping variable name to list of CUMULATIVE ms per cell
+        vars_ordered: list of variable names ordered by total time descending
+        initial_count: number of initial execution cells
+
+    Returns None if no checkpoint timing data available.
+    """
+    if not is_v2_format(data):
+        return None
+
+    flowbook = data.get("kernels", {}).get("flowbook", {})
+    memory_data = flowbook.get("memory", {})
+    if not memory_data:
+        return None
+
+    memory_cells = memory_data.get("cells", [])
+
+    # Check if we have cumulative_by_var_timing field
+    has_cumulative_timing = any(c.get("cumulative_by_var_timing") for c in memory_cells)
+
+    if has_cumulative_timing:
+        # Use cumulative timing data
+        all_var_names: set = set()
+        for c in memory_cells:
+            by_var_timing = c.get("cumulative_by_var_timing") or {}
+            all_var_names.update(by_var_timing.keys())
+
+        if not all_var_names:
+            return None
+
+        var_by_cell: Dict[str, List[float]] = {v: [] for v in all_var_names}
+
+        for c in memory_cells:
+            by_var_timing = c.get("cumulative_by_var_timing") or {}
+
+            for var_name in all_var_names:
+                var_ms = by_var_timing.get(var_name, 0)
+                var_by_cell[var_name].append(var_ms)
+
+        # Get final cumulative for ordering
+        var_final: Dict[str, float] = {v: var_by_cell[v][-1] if var_by_cell[v] else 0 for v in all_var_names}
+    else:
+        # Fall back to deriving from checkpoint_var_costs (deepcopy_ms field)
+        has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
+        if not has_costs:
+            return None
+
+        # First pass: collect all variable names
+        all_var_names = set()
+        for c in memory_cells:
+            costs = c.get("checkpoint_var_costs") or {}
+            all_var_names.update(costs.keys())
+
+        if not all_var_names:
+            return None
+
+        # Initialize tracking - cumulative totals per variable
+        var_cumulative: Dict[str, float] = {v: 0 for v in all_var_names}
+        var_by_cell = {v: [] for v in all_var_names}
+
+        # Second pass: collect CUMULATIVE timing data
+        for c in memory_cells:
+            costs = c.get("checkpoint_var_costs") or {}
+
+            for var_name in all_var_names:
+                if var_name in costs:
+                    var_ms = costs[var_name].get("deepcopy_ms", 0)
+                    var_cumulative[var_name] += var_ms
+                # Append current cumulative value for this variable
+                var_by_cell[var_name].append(var_cumulative[var_name])
+
+        var_final = var_cumulative
+
+    # Order variables by final cumulative total time descending
+    vars_ordered = sorted(var_final.keys(), key=lambda v: var_final[v], reverse=True)
+
+    # Limit to top variables, aggregate rest as "other"
+    if len(vars_ordered) > top_n:
+        top_vars = vars_ordered[:top_n]
+        other_vars = vars_ordered[top_n:]
+
+        # Aggregate "other" - sum cumulative values from excluded variables
+        other_by_cell = [0.0] * len(memory_cells)
+        for v in other_vars:
+            for i, val in enumerate(var_by_cell[v]):
+                other_by_cell[i] += val
+            del var_by_cell[v]
+
+        var_by_cell["other"] = other_by_cell
+        vars_ordered = top_vars + ["other"]
+
+    return {
+        "cells": list(range(1, len(memory_cells) + 1)),
+        "by_var": var_by_cell,
+        "vars_ordered": vars_ordered,
+        "initial_count": len(memory_cells),
+    }
+
+
 def plot_combined_v2(
     data: Dict[str, Any],
     output_path: Optional[str] = None,
@@ -1351,17 +1461,15 @@ def plot_combined_v2(
 
     # Determine number of panels
     has_memory = bool(baseline_mem_cells and flowbook_mem_cells)
-    # For v2.0, derive type data from checkpoint_var_costs; for v1.0, use checkpoint_details
-    if is_v2_format(data):
-        type_data = extract_checkpoint_type_data_v2(data, top_n=top_n)
-    else:
-        type_data = extract_checkpoint_type_data(data, top_n=top_n)
+    # Extract timing by variable for Panel 3
+    timing_var_data = extract_checkpoint_timing_var_data(data, top_n=top_n)
+    # Extract memory by variable for Panel 4
     var_data = extract_checkpoint_var_data(data, top_n=top_n)
 
     n_panels = 1  # Always have timing
     if has_memory:
         n_panels += 1
-    if type_data:
+    if timing_var_data:
         n_panels += 1
     if var_data:
         n_panels += 1
@@ -1575,43 +1683,33 @@ def plot_combined_v2(
         ax.set_ylim(bottom=0)
         ax.tick_params(axis='both', labelsize=tick_size)
 
-    # ========== Panel 3: Checkpoint by Type (if available) ==========
-    if type_data is not None:
+    # ========== Panel 3: Checkpoint Time by Variable (if available) ==========
+    if timing_var_data is not None:
         ax = axes[panel_idx]
         panel_idx += 1
-        type_colors = sns.color_palette("husl", len(type_data["types_ordered"]))
-        type_cells = np.array(type_data["cells"])
-        mb = 1024 * 1024
+        var_colors = sns.color_palette("husl", len(timing_var_data["vars_ordered"]))
+        timing_cells = np.array(timing_var_data["cells"])
 
-        # Get baseline memory for reference (same length as type_cells)
-        baseline_footprint = np.zeros(len(type_cells))
-        if has_memory and len(baseline_mem_cells) >= len(type_cells):
-            baseline_footprint = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells[:len(type_cells)]])
+        # Stack checkpoint timing by variable (ms -> seconds)
+        stacked = [np.array(timing_var_data["by_var"][v]) / 1000 for v in timing_var_data["vars_ordered"]]
+        cumulative = np.zeros(len(timing_cells))
+        for i, (v, data_sec) in enumerate(zip(timing_var_data["vars_ordered"], stacked)):
+            ax.fill_between(timing_cells, cumulative, cumulative + data_sec, alpha=0.7, color=var_colors[i], label=v)
+            cumulative = cumulative + data_sec
 
-        # Draw baseline memory first (bottom layer)
-        ax.fill_between(type_cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline Memory')
-
-        # Stack checkpoint types on top of baseline
-        stacked = [np.array(type_data["by_type"][t]) / mb for t in type_data["types_ordered"]]
-        cumulative = baseline_footprint.copy()
-        for i, (t, data_mb) in enumerate(zip(type_data["types_ordered"], stacked)):
-            ax.fill_between(type_cells, cumulative, cumulative + data_mb, alpha=0.7, color=type_colors[i], label=t)
-            cumulative = cumulative + data_mb
-
-        # Draw lines for baseline and total
-        ax.plot(type_cells, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
-        ax.plot(type_cells, cumulative, color='black', linewidth=1.5, linestyle='--', label='Total')
+        # Draw total line
+        ax.plot(timing_cells, cumulative, color='black', linewidth=1.5, linestyle='--', label='Total')
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
-        ax.set_ylabel("Memory (MB)", fontsize=label_size)
-        ax.set_title("Checkpoint by Type", fontsize=title_size)
+        ax.set_ylabel("Checkpoint Time (seconds)", fontsize=label_size)
+        ax.set_title("Checkpoint Time by Variable", fontsize=title_size)
         ax.legend(loc="upper left", fontsize=legend_size - 4, ncol=2)
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
         ax.tick_params(axis='both', labelsize=tick_size)
 
-    # ========== Panel 4: Checkpoint by Name (if available) ==========
+    # ========== Panel 4: Checkpoint Memory by Variable (if available) ==========
     if var_data is not None:
         ax = axes[panel_idx]
         panel_idx += 1
@@ -1640,7 +1738,7 @@ def plot_combined_v2(
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Memory (MB)", fontsize=label_size)
-        ax.set_title("Checkpoint by Variable", fontsize=title_size)
+        ax.set_title("Checkpoint Memory by Variable", fontsize=title_size)
         ax.legend(loc="upper left", fontsize=legend_size - 4, ncol=2)
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)

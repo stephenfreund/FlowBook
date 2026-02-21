@@ -1900,17 +1900,20 @@ class MemoryCheckpoints:
 
                 # Measure object size using HeapSizer
                 obj_size = sizer.sizeof(v, owned_only=True)
-                var_memory_costs[k] = {
-                    'bytes': obj_size,
-                    'type': type(v).__name__,
-                    'module': type(v).__module__,
-                }
 
                 # Use custom deepcopy which handles pandas and functions specially
                 copied[k] = deepcopy(v, memo)
 
                 end_time = time.time()
                 duration_ms = (end_time - start_time) * 1000  # Convert to milliseconds
+
+                # Store both memory and timing costs per variable
+                var_memory_costs[k] = {
+                    'bytes': obj_size,
+                    'type': type(v).__name__,
+                    'module': type(v).__module__,
+                    'deepcopy_ms': duration_ms,  # Per-variable checkpoint timing
+                }
 
                 if _PROFILE_CHECKPOINT:
                     # Record timing keyed by type name (in milliseconds)
