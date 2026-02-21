@@ -1389,26 +1389,49 @@ def plot_combined_v2(
         for c in flowbook_cells:
             if c["cell_id"] in cell_data:
                 cell_data[c["cell_id"]]["flowbook_ms"] = c.get("cell_runtime_ms", 0)
+                cell_data[c["cell_id"]]["state_ms"] = c.get("state_duration_ms", 0)
+                cell_data[c["cell_id"]]["check_ms"] = c.get("check_duration_ms", 0)
 
         cell_ids = list(cell_data.keys())
         baseline_runtimes = [cell_data[cid].get("baseline_ms", 0) for cid in cell_ids]
         flowbook_runtimes = [cell_data[cid].get("flowbook_ms", 0) for cid in cell_ids]
+        state_times = [cell_data[cid].get("state_ms", 0) for cid in cell_ids]
+        check_times = [cell_data[cid].get("check_ms", 0) for cid in cell_ids]
 
         cells = np.arange(1, len(cell_ids) + 1)
         baseline_cumsum = np.cumsum(baseline_runtimes)
         flowbook_cumsum = np.cumsum(flowbook_runtimes)
 
-        ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label="Baseline")
-        ax.plot(cells, flowbook_cumsum / 1000, color=colors[1], linewidth=2, marker='o', markersize=4, label="FlowBook")
+        # Per-cell times (not cumulative)
+        state_per_cell = np.array(state_times)
+        check_per_cell = np.array(check_times)
+
+        # Left y-axis: cumulative time
+        ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label="Baseline (cumulative)")
+        ax.plot(cells, flowbook_cumsum / 1000, color=colors[1], linewidth=2, marker='o', markersize=4, label="FlowBook (cumulative)")
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Cumulative Time (seconds)", fontsize=label_size)
         ax.set_title("Timing Comparison", fontsize=title_size)
-        ax.legend(loc="upper left", fontsize=legend_size)
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
         ax.tick_params(axis='both', labelsize=tick_size)
+
+        # Right y-axis: per-cell state and check times as side-by-side bars
+        ax2 = ax.twinx()
+        bar_width = 0.35
+        ax2.bar(cells - bar_width/2, state_per_cell / 1000, alpha=0.4, color=colors[2], label="State (per cell)", width=bar_width)
+        ax2.bar(cells + bar_width/2, check_per_cell / 1000, alpha=0.4, color=colors[3], label="Check (per cell)", width=bar_width)
+        ax2.set_ylabel("Time per Cell (seconds)", fontsize=label_size)
+        ax2.tick_params(axis='y', labelsize=tick_size)
+        ax2.set_ylim(bottom=0)
+        ax2.grid(False)  # Disable grid lines on secondary axis
+
+        # Combined legend from both axes
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=legend_size)
 
         if baseline_cumsum[-1] > 0:
             overhead_pct = (flowbook_cumsum[-1] - baseline_cumsum[-1]) / baseline_cumsum[-1] * 100
