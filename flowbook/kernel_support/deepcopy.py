@@ -1713,6 +1713,14 @@ def _deepcopy_dataframe(df: pd.DataFrame, memo: dict[int, Any]) -> pd.DataFrame:
         # Shallow copy: CoW handles non-object columns efficiently
         df_copy = df.copy(deep=False)
 
+        # Deep copy the Index to ensure isolation between checkpoints
+        # Without this, df.copy(deep=False) shares the Index's underlying array
+        df_copy.index = _deepcopy_index(df.index, memo)
+
+        # Also deep copy column labels if they're an Index (not just strings)
+        if isinstance(df.columns, pd.Index) and not isinstance(df.columns, pd.RangeIndex):
+            df_copy.columns = _deepcopy_index(df.columns, memo)
+
         # Process remaining object columns
         # Use iloc to read columns (handles MultiIndex) but column name to write
         for i in range(len(df_copy.columns)):
@@ -1779,6 +1787,9 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
         # Shallow copy: CoW handles non-object Series efficiently
         series_copy = series.copy(deep=False)
 
+        # Deep copy the Index to ensure isolation between checkpoints
+        series_copy.index = _deepcopy_index(series.index, memo)
+
         # Process if still object dtype
         if series_copy.dtype == object:
             # In preserve mode, check if all values are immutable
@@ -1805,6 +1816,54 @@ def _deepcopy_series(series: pd.Series, memo: dict[int, Any]) -> pd.Series:
 
 
 d[pd.Series] = _deepcopy_series
+
+
+def _deepcopy_index(index: pd.Index, memo: dict[int, Any]) -> pd.Index:
+    """
+    Deep copy a pandas Index with proper data isolation.
+
+    This ensures that the Index's underlying data array is properly copied,
+    preventing shared memory between checkpoints. Without this handler,
+    df.copy(deep=False) shares Index data, which could lead to checkpoint
+    corruption if the Index is modified in place.
+
+    Uses memo for caching to avoid multiple copies of the same Index object
+    (e.g., when both df and df.groupby() reference the same Index).
+
+    Args:
+        index: Index to copy
+        memo: Shared memo dict for tracking copied objects
+
+    Returns:
+        Deep copy of the Index with isolated data
+    """
+    obj_id = id(index)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    # RangeIndex is special - it doesn't store data, just start/stop/step
+    # Creating a new RangeIndex with same parameters is sufficient
+    if isinstance(index, pd.RangeIndex):
+        # RangeIndex is immutable and doesn't have shared data
+        # Just create a new one with the same parameters
+        index_copy = pd.RangeIndex(
+            start=index.start,
+            stop=index.stop,
+            step=index.step,
+            name=index.name
+        )
+    else:
+        # For all other Index types, use copy(deep=True) which properly
+        # isolates the underlying data arrays
+        index_copy = index.copy(deep=True)
+
+    memo[obj_id] = index_copy
+    return index_copy
+
+
+# Register for base Index class - subclasses will also use this handler
+# due to MRO lookup in the dispatch logic
+d[pd.Index] = _deepcopy_index
 
 
 # CatBoost Pool handler - Pool explicitly blocks deepcopy, use slice workaround

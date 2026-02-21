@@ -535,6 +535,13 @@ class HeapSizer:
         total = 128  # Index wrapper overhead
 
         try:
+            # RangeIndex is special - it doesn't store data, just start/stop/step
+            # Accessing _data would materialize a full array, which we don't want
+            if isinstance(index, pd.RangeIndex):
+                # RangeIndex only stores start, stop, step (3 ints = 24 bytes)
+                # Plus some object overhead
+                return total + 100
+
             # Extract underlying numpy array for proper deduplication
             # Most Index types have a _data attribute containing the values
             backing_array = None
