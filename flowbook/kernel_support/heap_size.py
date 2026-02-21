@@ -380,6 +380,11 @@ class HeapSizer:
                 return self._sizeof_series(obj, owned_only)
             if isinstance(obj, pd.Index):
                 return self._sizeof_index(obj, owned_only)
+            # ExtensionArray (ArrowExtensionArray, StringArray, etc.)
+            # Check via api.extensions to handle all EA subclasses
+            if hasattr(pd.api, 'extensions') and hasattr(pd.api.extensions, 'ExtensionArray'):
+                if isinstance(obj, pd.api.extensions.ExtensionArray):
+                    return self._sizeof_extension_array(obj, owned_only)
 
         # Containers
         if isinstance(obj, dict):
@@ -486,8 +491,10 @@ class HeapSizer:
                     # (e.g., pandas CoW) are only counted once.
                     total += self._sizeof(nd, owned_only)
                 else:
-                    # ExtensionArray without numpy backing
-                    total += self._sizeof_extension_array(arr, owned_only)
+                    # ExtensionArray without numpy backing (e.g., ArrowExtensionArray
+                    # for StringDtype). Route through _sizeof() for identity tracking
+                    # to avoid double-counting shared arrays across checkpoints.
+                    total += self._sizeof(arr, owned_only)
 
         # Index and columns
         total += self._sizeof(df.index, owned_only)
@@ -509,7 +516,9 @@ class HeapSizer:
                 # are only counted once.
                 total += self._sizeof(nd, owned_only)
             else:
-                total += self._sizeof_extension_array(values, owned_only)
+                # ExtensionArray without numpy backing - route through _sizeof()
+                # for identity tracking to avoid double-counting.
+                total += self._sizeof(values, owned_only)
         elif hasattr(series, 'values'):
             total += self._sizeof(series.values, owned_only)
 
@@ -603,14 +612,43 @@ class HeapSizer:
         return None
 
     def _sizeof_extension_array(self, arr, owned_only: bool) -> int:
-        """Measure pandas ExtensionArray memory."""
+        """
+        Measure pandas ExtensionArray memory with proper deduplication.
+
+        ExtensionArrays (StringArray, ArrowExtensionArray, etc.) often share their
+        underlying data with copies via CoW. We extract the backing array and
+        measure IT (via _sizeof) to get proper identity tracking.
+        """
+        total = 64  # Wrapper overhead
+
+        # Try to extract backing array for proper deduplication
+        backing = self._get_backing_ndarray(arr)
+        if backing is not None:
+            # Has numpy backing - measure via _sizeof for identity tracking
+            total += self._sizeof(backing, owned_only)
+            return total
+
+        # For ArrowExtensionArray, extract the PyArrow chunked array
+        if hasattr(arr, '_ndarray'):
+            # StringArray, IntegerArray, etc. have _ndarray
+            backing_id = id(arr._ndarray)
+            if backing_id in self._seen_ids:
+                return total  # Already counted
+            self._seen_ids.add(backing_id)
+            try:
+                if hasattr(arr, 'memory_usage'):
+                    return total + int(arr.memory_usage())
+                if hasattr(arr, 'nbytes'):
+                    return total + int(arr.nbytes)
+            except Exception:
+                pass
+
+        # Fallback: use memory_usage or nbytes directly
         try:
-            # Try memory_usage if available
             if hasattr(arr, 'memory_usage'):
-                return int(arr.memory_usage())
-            # Try nbytes
+                return total + int(arr.memory_usage())
             if hasattr(arr, 'nbytes'):
-                return int(arr.nbytes) + 64
+                return total + int(arr.nbytes)
         except Exception:
             pass
         return sys.getsizeof(arr)

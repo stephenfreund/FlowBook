@@ -988,3 +988,248 @@ class TestDeduplication:
 
         # Should count buffer once
         assert ns_size.total_bytes < 100_000
+
+
+class TestExtensionArrayDeduplication:
+    """Tests for ExtensionArray (StringDtype, etc.) memory deduplication.
+
+    This is a regression test for an issue where StringDtype columns with
+    pd.options.future.infer_string = True caused memory overhead to grow
+    linearly across checkpoints instead of deduplicating shared arrays.
+    """
+
+    def test_string_array_identity_tracking(self):
+        """StringArray should be tracked by identity to avoid double-counting."""
+        arr = pd.array(['hello', 'world', 'test'] * 1000, dtype='string')
+
+        sizer = HeapSizer()
+        size1 = sizer.sizeof(arr)
+        size2 = sizer.sizeof(arr)
+
+        # First measurement should be non-zero
+        assert size1 > 0
+        # Second measurement of same object should be 0 (already counted)
+        assert size2 == 0
+
+    def test_string_array_underlying_ndarray_tracked(self):
+        """StringArray's underlying _ndarray should be tracked for dedup."""
+        arr = pd.array(['hello', 'world'] * 1000, dtype='string')
+
+        # Verify it has _ndarray attribute
+        assert hasattr(arr, '_ndarray'), "StringArray should have _ndarray"
+
+        sizer = HeapSizer()
+        size1 = sizer.sizeof(arr)
+
+        # Create a new wrapper around the same _ndarray (simulates CoW sharing)
+        # This is what happens when df.copy(deep=False) is used
+        arr2 = pd.array(['different'], dtype='string')  # Just to get the type
+        # Now measure the underlying array directly
+        sizer2 = HeapSizer()
+        underlying_size = sizer2.sizeof(arr._ndarray)
+        underlying_size2 = sizer2.sizeof(arr._ndarray)
+
+        assert underlying_size > 0
+        assert underlying_size2 == 0, "Same _ndarray should be deduplicated"
+
+    def test_dataframe_stringdtype_column_dedup(self):
+        """DataFrame with StringDtype columns should deduplicate across measurements."""
+        df = pd.DataFrame({
+            'name': pd.array(['Alice', 'Bob', 'Charlie'] * 1000, dtype='string'),
+            'city': pd.array(['NYC', 'LA', 'Chicago'] * 1000, dtype='string'),
+        })
+
+        sizer = HeapSizer()
+        size1 = sizer.sizeof(df)
+        size2 = sizer.sizeof(df)
+
+        assert size1 > 1000  # Meaningful size
+        assert size2 == 0, "Same DataFrame should return 0 on second measurement"
+
+    def test_dataframe_copy_shares_string_column_data(self):
+        """DataFrame.copy(deep=False) should share StringDtype column data."""
+        from flowbook.kernel_support.deepcopy import deepcopy
+
+        df = pd.DataFrame({
+            'name': pd.array(['Alice'] * 5000, dtype='string'),
+        })
+
+        # Simulate checkpoint deepcopy
+        df_copy = deepcopy(df, {})
+
+        # The underlying _ndarray should be shared
+        orig_arr = df._mgr.arrays[0]
+        copy_arr = df_copy._mgr.arrays[0]
+
+        assert hasattr(orig_arr, '_ndarray'), "Expected StringArray with _ndarray"
+        assert orig_arr._ndarray is copy_arr._ndarray, \
+            "Deepcopy should share underlying _ndarray for StringArray"
+
+    def test_checkpoint_deduplication_stringdtype(self):
+        """Cross-checkpoint measurement should deduplicate shared StringDtype arrays."""
+        from flowbook.kernel_support.deepcopy import deepcopy
+
+        df = pd.DataFrame({
+            'name': pd.array(['Alice'] * 10000, dtype='string'),
+            'city': pd.array(['NYC'] * 10000, dtype='string'),
+        })
+
+        # Create multiple "checkpoints" via deepcopy
+        df_copy1 = deepcopy(df, {})
+        df_copy2 = deepcopy(df, {})
+
+        # Measure all with a single sizer (simulating cross-checkpoint measurement)
+        sizer = HeapSizer()
+        size_orig = sizer.sizeof(df)
+        size_copy1 = sizer.sizeof(df_copy1)
+        size_copy2 = sizer.sizeof(df_copy2)
+
+        # Original should have full size
+        assert size_orig > 10000, f"Original should be substantial, got {size_orig}"
+
+        # Copies should have minimal overhead (wrapper only) since data is shared
+        assert size_copy1 < size_orig * 0.1, \
+            f"Copy1 should be much smaller ({size_copy1}) than original ({size_orig})"
+        assert size_copy2 < size_orig * 0.1, \
+            f"Copy2 should be much smaller ({size_copy2}) than original ({size_orig})"
+
+        # Total should be much less than 3x the original size
+        total = size_orig + size_copy1 + size_copy2
+        assert total < size_orig * 1.5, \
+            f"Total ({total}) should be < 1.5x original ({size_orig * 1.5})"
+
+    def test_nullable_integer_array_dedup(self):
+        """Nullable integer ExtensionArray should be deduplicated."""
+        arr = pd.array([1, 2, None, 4, 5] * 2000, dtype=pd.Int64Dtype())
+
+        sizer = HeapSizer()
+        size1 = sizer.sizeof(arr)
+        size2 = sizer.sizeof(arr)
+
+        assert size1 > 0
+        assert size2 == 0, "Same nullable int array should return 0 on second measurement"
+
+    def test_categorical_array_dedup(self):
+        """Categorical ExtensionArray should be deduplicated."""
+        arr = pd.Categorical(['a', 'b', 'c'] * 10000)
+
+        sizer = HeapSizer()
+        size1 = sizer.sizeof(arr)
+        size2 = sizer.sizeof(arr)
+
+        assert size1 > 0
+        assert size2 == 0, "Same Categorical should return 0 on second measurement"
+
+    def test_datetime_array_dedup(self):
+        """DatetimeArray should be deduplicated."""
+        arr = pd.array(pd.date_range('2020-01-01', periods=10000))
+
+        sizer = HeapSizer()
+        size1 = sizer.sizeof(arr)
+        size2 = sizer.sizeof(arr)
+
+        assert size1 > 0
+        assert size2 == 0, "Same DatetimeArray should return 0 on second measurement"
+
+    def test_extension_array_in_series_dedup(self):
+        """Series with ExtensionArray should deduplicate the backing array."""
+        s = pd.Series(pd.array(['hello'] * 5000, dtype='string'))
+
+        sizer = HeapSizer()
+        size1 = sizer.sizeof(s)
+        size2 = sizer.sizeof(s)
+
+        assert size1 > 0
+        assert size2 == 0, "Same Series should return 0 on second measurement"
+
+    def test_mixed_dtype_dataframe_dedup(self):
+        """DataFrame with mixed dtypes including ExtensionArrays should deduplicate."""
+        df = pd.DataFrame({
+            'int_col': np.arange(10000),
+            'float_col': np.random.randn(10000),
+            'str_col': pd.array(['test'] * 10000, dtype='string'),
+            'nullable_int': pd.array([1, 2, None] * 3333 + [4], dtype=pd.Int64Dtype()),
+        })
+
+        sizer = HeapSizer()
+        size1 = sizer.sizeof(df)
+        size2 = sizer.sizeof(df)
+
+        assert size1 > 100000  # Meaningful size for mixed data
+        assert size2 == 0, "Same DataFrame should return 0 on second measurement"
+
+
+class TestExtensionArrayRegression:
+    """Regression tests for the infer_string memory growth bug.
+
+    When pd.options.future.infer_string = True, string columns become StringDtype
+    backed by StringArray. Without proper deduplication, checkpoint overhead
+    grows linearly instead of staying constant.
+    """
+
+    def test_infer_string_dataframe_checkpoint_overhead(self):
+        """Verify that infer_string DataFrames don't cause linear memory growth."""
+        from flowbook.kernel_support.deepcopy import deepcopy
+
+        # Create DataFrame with string columns (like read_csv would with infer_string)
+        df = pd.DataFrame({
+            'name': ['Alice', 'Bob', 'Charlie'] * 5000,
+            'city': ['NYC', 'LA', 'Chicago'] * 5000,
+        })
+
+        # With infer_string, these would be StringDtype
+        # Even without it, test the deduplication behavior
+        df['name'] = df['name'].astype('string')
+        df['city'] = df['city'].astype('string')
+
+        # Simulate multiple checkpoints
+        checkpoints = [deepcopy(df, {}) for _ in range(5)]
+
+        # Measure total memory across all checkpoints
+        sizer = HeapSizer()
+        sizes = [sizer.sizeof(ckpt) for ckpt in [df] + checkpoints]
+
+        # First checkpoint should be large
+        assert sizes[0] > 50000, f"Original should be substantial, got {sizes[0]}"
+
+        # Subsequent checkpoints should have minimal overhead
+        for i, size in enumerate(sizes[1:], 1):
+            assert size < sizes[0] * 0.2, \
+                f"Checkpoint {i} size ({size}) should be << original ({sizes[0]})"
+
+        # Total should be much less than 6x the original (would be 6x without dedup)
+        total = sum(sizes)
+        assert total < sizes[0] * 2, \
+            f"Total ({total}) should be < 2x original ({sizes[0] * 2})"
+
+    def test_large_string_dataframe_no_memory_explosion(self):
+        """Large DataFrames with string columns shouldn't cause memory explosion."""
+        from flowbook.kernel_support.deepcopy import deepcopy
+
+        # Larger DataFrame
+        n_rows = 50000
+        df = pd.DataFrame({
+            'col1': pd.array(['value'] * n_rows, dtype='string'),
+            'col2': pd.array(['data'] * n_rows, dtype='string'),
+        })
+
+        # Create two checkpoints
+        ckpt1 = deepcopy(df, {})
+        ckpt2 = deepcopy(df, {})
+
+        sizer = HeapSizer()
+        orig_size = sizer.sizeof(df)
+        ckpt1_size = sizer.sizeof(ckpt1)
+        ckpt2_size = sizer.sizeof(ckpt2)
+
+        # Without the fix, this would be approximately:
+        # total ≈ orig_size * 3 (each checkpoint fully counted)
+        # With the fix:
+        # total ≈ orig_size + 2 * small_overhead
+
+        total = orig_size + ckpt1_size + ckpt2_size
+        expected_max = orig_size * 1.5  # Allow 50% overhead for wrappers
+
+        assert total < expected_max, \
+            f"Total memory ({total:,}) exceeds expected max ({expected_max:,}). " \
+            f"Breakdown: orig={orig_size:,}, ckpt1={ckpt1_size:,}, ckpt2={ckpt2_size:,}"
