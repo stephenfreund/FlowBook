@@ -519,18 +519,65 @@ class HeapSizer:
         return total
 
     def _sizeof_index(self, index, owned_only: bool) -> int:
-        """Measure pandas Index memory."""
+        """
+        Measure pandas Index memory with proper deduplication.
+
+        Extracts the underlying numpy array and measures it via _sizeof_ndarray,
+        which handles memory deduplication for shared arrays (e.g., from deepcopy).
+        This prevents double-counting Index memory across checkpoints when the
+        underlying data is shared.
+        """
         pd = _get_pandas()
+        np = _get_numpy()
         if pd is None:
             return 0
 
+        total = 128  # Index wrapper overhead
+
         try:
-            # Use pandas built-in memory_usage
-            usage = index.memory_usage(deep=True)
-            return int(usage)
+            # Extract underlying numpy array for proper deduplication
+            # Most Index types have a _data attribute containing the values
+            backing_array = None
+
+            if hasattr(index, '_data'):
+                data = index._data
+                # For NumericIndex, _data is typically an ndarray
+                if np is not None and isinstance(data, np.ndarray):
+                    backing_array = data
+                # For DatetimeIndex, _data is DatetimeArray with _ndarray
+                elif hasattr(data, '_ndarray'):
+                    backing_array = data._ndarray
+                # Some types have nested _data
+                elif hasattr(data, '_data') and isinstance(getattr(data, '_data', None), np.ndarray):
+                    backing_array = data._data
+
+            # Fallback: try .values or ._values
+            if backing_array is None and hasattr(index, '_values'):
+                vals = index._values
+                if np is not None and isinstance(vals, np.ndarray):
+                    backing_array = vals
+
+            if backing_array is None and hasattr(index, 'values'):
+                vals = index.values
+                if np is not None and isinstance(vals, np.ndarray):
+                    backing_array = vals
+
+            if backing_array is not None:
+                # Use _sizeof which goes through _sizeof_ndarray for deduplication
+                total += self._sizeof(backing_array, owned_only)
+            else:
+                # Fallback for complex Index types (MultiIndex, etc.)
+                try:
+                    usage = index.memory_usage(deep=True)
+                    total += int(usage) - 128  # Subtract wrapper already counted
+                except Exception:
+                    total += sys.getsizeof(index) - 128
+
         except Exception:
-            # Fallback
+            # Final fallback
             return sys.getsizeof(index)
+
+        return total
 
     def _get_backing_ndarray(self, arr):
         """Extract numpy array from pandas array types."""
