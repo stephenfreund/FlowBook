@@ -131,9 +131,21 @@ class BaselineKernel(IPythonKernel):
         if self.shell:
             self.shell.register_magics(MemoryMagics)
 
-            # Pre-import pandas to match FlowBook kernel behavior
+            # Pre-import pandas and enable same options as FlowBook kernel
+            # These are set in memory_checkpoint.py for FlowBook - we need them
+            # here for fair comparison
             try:
-                import pandas  # noqa: F401
+                import pandas as pd
+
+                # Enable copy-on-write mode for better performance with DataFrame copies
+                # (always enabled in pandas >= 3.0, but needs to be set for pandas 2.x)
+                if hasattr(pd.options.mode, 'copy_on_write'):
+                    pd.options.mode.copy_on_write = True
+
+                # Enable string inference so read_csv() returns StringDtype instead of object dtype
+                # (always enabled in pandas >= 3.0, but needs to be set for pandas 2.x)
+                if hasattr(pd.options, 'future') and hasattr(pd.options.future, 'infer_string'):
+                    pd.options.future.infer_string = True
             except ImportError:
                 pass
 
