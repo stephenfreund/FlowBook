@@ -84,6 +84,7 @@ class TimingCellMetrics:
     check_duration_ms: float  # FlowBook only
     status: str
     error: Optional[str] = None
+    is_rerun: bool = False
 
 
 @dataclass
@@ -104,6 +105,7 @@ class MemoryCellMetrics:
     post_savings_bytes: int = 0  # Memory saved by removing post checkpoints
     status: str = "ok"
     error: Optional[str] = None
+    is_rerun: bool = False
 
 
 @dataclass
@@ -111,6 +113,7 @@ class TimingResults:
     """Timing results from a notebook execution (Scalene OFF)."""
     kernel_name: str
     cells: List[TimingCellMetrics] = field(default_factory=list)
+    rerun_cells: List[TimingCellMetrics] = field(default_factory=list)
     totals: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -119,6 +122,7 @@ class MemoryResults:
     """Memory results from a notebook execution (Scalene ON)."""
     kernel_name: str
     cells: List[MemoryCellMetrics] = field(default_factory=list)
+    rerun_cells: List[MemoryCellMetrics] = field(default_factory=list)
     totals: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -915,6 +919,7 @@ except Exception:
 def run_baseline_timing(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
+    rerun_k: int = 0,
 ) -> TimingResults:
     """
     Run notebook on baseline kernel and collect TIMING metrics only (Scalene OFF).
@@ -986,11 +991,61 @@ def run_baseline_timing(
                 ))
                 log(f"  Runtime: {runtime_ms:.1f}ms")
 
+        # Execute reruns: run all cells k extra times (top-to-bottom)
+        rerun_runtime_ms = 0.0
+        if rerun_k > 0:
+            total_rerun_cells = rerun_k * len(code_cells)
+            log(f"Baseline Timing: Executing {rerun_k} rerun pass(es) ({total_rerun_cells} cell executions)...")
+            rerun_count = 0
+            for pass_num in range(rerun_k):
+                log(f"Baseline Timing: Rerun pass {pass_num + 1}/{rerun_k}...")
+                for idx, cell in enumerate(code_cells):
+                    cell_id = cell.get("id", f"cell_{idx}")
+                    source = cell.get("source", "")
+                    if isinstance(source, list):
+                        source = "".join(source)
+
+                    if not source.strip():
+                        continue
+
+                    rerun_count += 1
+                    log(f"Baseline Timing: Rerun {rerun_count}/{total_rerun_cells} - pass {pass_num+1}, cell {idx+1} ({cell_id})...")
+
+                    timing = execute_cell_baseline(kernel_client, source, cell_timeout)
+
+                    if timing.get("error"):
+                        log(f"  Rerun Error:\n{timing['error']}")
+                        results.rerun_cells.append(TimingCellMetrics(
+                            cell_id=cell_id,
+                            cell_index=idx,
+                            cell_runtime_ms=0.0,
+                            state_duration_ms=0.0,
+                            check_duration_ms=0.0,
+                            status="error",
+                            error=timing["error"],
+                            is_rerun=True,
+                        ))
+                    else:
+                        runtime_ms = timing["cell_runtime_ms"]
+                        rerun_runtime_ms += runtime_ms
+
+                        results.rerun_cells.append(TimingCellMetrics(
+                            cell_id=cell_id,
+                            cell_index=idx,
+                            cell_runtime_ms=runtime_ms,
+                            state_duration_ms=0.0,
+                            check_duration_ms=0.0,
+                            status="ok",
+                            is_rerun=True,
+                        ))
+                        log(f"  Rerun Runtime: {runtime_ms:.1f}ms")
+
         results.totals = {
             "cell_runtime_ms": total_runtime_ms,
+            "rerun_runtime_ms": rerun_runtime_ms,
         }
 
-        log(f"Baseline Timing: Total runtime {total_runtime_ms:.1f}ms")
+        log(f"Baseline Timing: Total runtime {total_runtime_ms:.1f}ms, Rerun runtime {rerun_runtime_ms:.1f}ms")
 
     finally:
         cleanup_kernel(kernel_manager, kernel_client)
@@ -1001,6 +1056,7 @@ def run_baseline_timing(
 def run_flowbook_timing(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
+    rerun_k: int = 0,
 ) -> TimingResults:
     """
     Run notebook on FlowBook kernel and collect TIMING metrics only (Scalene OFF).
@@ -1091,13 +1147,86 @@ def run_flowbook_timing(
                 ))
                 log(f"  Runtime: {runtime_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
 
+        # Execute reruns: run all cells k extra times (top-to-bottom)
+        rerun_runtime_ms = 0.0
+        rerun_state_ms = 0.0
+        rerun_check_ms = 0.0
+        if rerun_k > 0:
+            total_rerun_cells = rerun_k * len(code_cells)
+            log(f"FlowBook Timing: Executing {rerun_k} rerun pass(es) ({total_rerun_cells} cell executions)...")
+            rerun_count = 0
+            for pass_num in range(rerun_k):
+                log(f"FlowBook Timing: Rerun pass {pass_num + 1}/{rerun_k}...")
+                for idx, cell in enumerate(code_cells):
+                    cell_id = cell.get("id", f"cell_{idx}")
+                    source = cell.get("source", "")
+                    if isinstance(source, list):
+                        source = "".join(source)
+
+                    if not source.strip():
+                        continue
+
+                    rerun_count += 1
+                    log(f"FlowBook Timing: Rerun {rerun_count}/{total_rerun_cells} - pass {pass_num+1}, cell {idx+1} ({cell_id})...")
+
+                    timing = execute_cell_flowbook(
+                        kernel_client, source, cell_id, cell_order, cell_timeout
+                    )
+
+                    if timing.get("error") and timing.get("cell_runtime_ms") is None:
+                        log(f"  Rerun Error:\n{timing['error']}")
+                        results.rerun_cells.append(TimingCellMetrics(
+                            cell_id=cell_id,
+                            cell_index=idx,
+                            cell_runtime_ms=0.0,
+                            state_duration_ms=0.0,
+                            check_duration_ms=0.0,
+                            status="error",
+                            error=timing["error"],
+                            is_rerun=True,
+                        ))
+                    else:
+                        if timing.get("violation"):
+                            log(f"  Rerun Violation: {timing['violation']}")
+
+                        runtime_ms = timing["cell_runtime_ms"] or 0.0
+                        state_ms = timing["state_duration_ms"] or 0.0
+                        check_ms = timing["check_duration_ms"] or 0.0
+
+                        rerun_runtime_ms += runtime_ms
+                        rerun_state_ms += state_ms
+                        rerun_check_ms += check_ms
+
+                        status = "ok"
+                        if timing.get("error"):
+                            status = "error"
+                        elif timing.get("violation"):
+                            status = "violation"
+
+                        results.rerun_cells.append(TimingCellMetrics(
+                            cell_id=cell_id,
+                            cell_index=idx,
+                            cell_runtime_ms=runtime_ms,
+                            state_duration_ms=state_ms,
+                            check_duration_ms=check_ms,
+                            status=status,
+                            error=timing.get("violation") or timing.get("error"),
+                            is_rerun=True,
+                        ))
+                        log(f"  Rerun Runtime: {runtime_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
+
         results.totals = {
             "cell_runtime_ms": total_runtime_ms,
             "state_duration_ms": total_state_ms,
             "check_duration_ms": total_check_ms,
+            "rerun_runtime_ms": rerun_runtime_ms,
+            "rerun_state_ms": rerun_state_ms,
+            "rerun_check_ms": rerun_check_ms,
         }
 
         log(f"FlowBook Timing: Total runtime {total_runtime_ms:.1f}ms, state {total_state_ms:.1f}ms, check {total_check_ms:.1f}ms")
+        if rerun_k > 0:
+            log(f"FlowBook Timing: Rerun runtime {rerun_runtime_ms:.1f}ms, state {rerun_state_ms:.1f}ms, check {rerun_check_ms:.1f}ms")
 
     finally:
         cleanup_kernel(kernel_manager, kernel_client)
@@ -1108,6 +1237,7 @@ def run_flowbook_timing(
 def run_baseline_memory(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
+    rerun_k: int = 0,
 ) -> MemoryResults:
     """
     Run notebook on baseline kernel and collect MEMORY metrics using HeapSizer.
@@ -1189,6 +1319,63 @@ def run_baseline_memory(
                 ))
                 log(f"  Namespace: {current_mb:.1f}MB, Delta: {allocation_delta:.1f}MB")
 
+        # Execute reruns: run all cells k extra times (top-to-bottom)
+        if rerun_k > 0:
+            total_rerun_cells = rerun_k * len(code_cells)
+            log(f"Baseline Memory: Executing {rerun_k} rerun pass(es) ({total_rerun_cells} cell executions)...")
+            rerun_count = 0
+            for pass_num in range(rerun_k):
+                log(f"Baseline Memory: Rerun pass {pass_num + 1}/{rerun_k}...")
+                for idx, cell in enumerate(code_cells):
+                    cell_id = cell.get("id", f"cell_{idx}")
+                    source = cell.get("source", "")
+                    if isinstance(source, list):
+                        source = "".join(source)
+
+                    if not source.strip():
+                        continue
+
+                    rerun_count += 1
+                    log(f"Baseline Memory: Rerun {rerun_count}/{total_rerun_cells} - pass {pass_num+1}, cell {idx+1} ({cell_id})...")
+
+                    # Get namespace size before cell
+                    pre_stats = get_namespace_size(kernel_client)
+
+                    timing = execute_cell_baseline(kernel_client, source, cell_timeout)
+
+                    # Get namespace size after cell
+                    post_stats = get_namespace_size(kernel_client)
+
+                    current_mb = post_stats.get("total_mb", 0.0)
+                    max_footprint_mb = max(max_footprint_mb, current_mb)
+
+                    if timing.get("error"):
+                        log(f"  Rerun Error:\n{timing['error']}")
+                        results.rerun_cells.append(MemoryCellMetrics(
+                            cell_id=cell_id,
+                            cell_index=idx,
+                            current_footprint_mb=0.0,
+                            max_footprint_mb=0.0,
+                            allocation_delta_mb=0.0,
+                            gpu_mem_samples=0.0,
+                            status="error",
+                            error=timing["error"],
+                            is_rerun=True,
+                        ))
+                    else:
+                        allocation_delta = current_mb - pre_stats.get("total_mb", 0.0)
+                        results.rerun_cells.append(MemoryCellMetrics(
+                            cell_id=cell_id,
+                            cell_index=idx,
+                            current_footprint_mb=current_mb,
+                            max_footprint_mb=max_footprint_mb,
+                            allocation_delta_mb=allocation_delta,
+                            gpu_mem_samples=0.0,
+                            status="ok",
+                            is_rerun=True,
+                        ))
+                        log(f"  Rerun Namespace: {current_mb:.1f}MB, Delta: {allocation_delta:.1f}MB")
+
         # Get final stats
         final_stats = get_namespace_size(kernel_client)
         results.totals = {
@@ -1210,6 +1397,7 @@ def run_baseline_memory(
 def run_flowbook_memory(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
+    rerun_k: int = 0,
 ) -> MemoryResults:
     """
     Run notebook on FlowBook kernel and collect MEMORY metrics using HeapSizer.
@@ -1357,6 +1545,105 @@ def run_flowbook_memory(
                 savings_mb = post_savings_bytes / (1024 * 1024)
                 log(f"  Namespace: {current_mb:.1f}MB, Delta: {allocation_delta:.1f}MB, Checkpoints: {cumulative_ckpt:.1f}MB (pre-only: {pre_only_mb:.1f}MB, post-savings: {savings_mb:.1f}MB)")
 
+        # Execute reruns: run all cells k extra times (top-to-bottom)
+        if rerun_k > 0:
+            total_rerun_cells = rerun_k * len(code_cells)
+            log(f"FlowBook Memory: Executing {rerun_k} rerun pass(es) ({total_rerun_cells} cell executions)...")
+            rerun_count = 0
+            for pass_num in range(rerun_k):
+                log(f"FlowBook Memory: Rerun pass {pass_num + 1}/{rerun_k}...")
+                for idx, cell in enumerate(code_cells):
+                    cell_id = cell.get("id", f"cell_{idx}")
+                    source = cell.get("source", "")
+                    if isinstance(source, list):
+                        source = "".join(source)
+
+                    if not source.strip():
+                        continue
+
+                    rerun_count += 1
+                    log(f"FlowBook Memory: Rerun {rerun_count}/{total_rerun_cells} - pass {pass_num+1}, cell {idx+1} ({cell_id})...")
+
+                    # Get namespace size before cell
+                    pre_stats = get_namespace_size(kernel_client)
+
+                    timing = execute_cell_flowbook(
+                        kernel_client, source, cell_id, cell_order, cell_timeout
+                    )
+
+                    # Get namespace size after cell
+                    post_stats = get_namespace_size(kernel_client)
+
+                    # Get checkpoint variable costs
+                    var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id)
+
+                    # Get cumulative checkpoint size
+                    cumulative_size = get_flowbook_cumulative_checkpoint_size(kernel_client, cell_id)
+                    cumulative_checkpoint_bytes = cumulative_size.get('total_bytes', 0)
+
+                    # Get pre/post checkpoint breakdown
+                    pre_post_sizes = get_flowbook_pre_post_checkpoint_sizes(kernel_client, cell_id)
+                    pre_only_bytes = pre_post_sizes.get('pre_only_bytes', 0)
+                    post_savings_bytes = pre_post_sizes.get('post_savings_bytes', 0)
+
+                    current_mb = post_stats.get("total_mb", 0.0)
+                    max_footprint_mb = max(max_footprint_mb, current_mb)
+
+                    if var_costs:
+                        cumulative_var_count += len(var_costs)
+
+                    overhead_breakdown = {
+                        'checkpoints_mb': cumulative_checkpoint_bytes / (1024 * 1024),
+                        'execution_records_mb': 0.0,
+                        'tracking_metadata_mb': cumulative_var_count * 200 / (1024 * 1024),
+                        'other_mb': (len(code_cells) + rerun_count) * 0.001,
+                    }
+
+                    cumulative_by_type = cumulative_size.get('by_type', {})
+                    cumulative_by_var = cumulative_size.get('by_variable', {})
+
+                    if timing.get("error") and timing.get("cell_runtime_ms") is None:
+                        log(f"  Rerun Error:\n{timing['error']}")
+                        results.rerun_cells.append(MemoryCellMetrics(
+                            cell_id=cell_id,
+                            cell_index=idx,
+                            current_footprint_mb=0.0,
+                            max_footprint_mb=0.0,
+                            allocation_delta_mb=0.0,
+                            gpu_mem_samples=0.0,
+                            checkpoint_var_costs=None,
+                            overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
+                            cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
+                            cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
+                            pre_only_bytes=pre_only_bytes,
+                            post_savings_bytes=post_savings_bytes,
+                            status="error",
+                            error=timing["error"],
+                            is_rerun=True,
+                        ))
+                    else:
+                        allocation_delta = current_mb - pre_stats.get("total_mb", 0.0)
+                        results.rerun_cells.append(MemoryCellMetrics(
+                            cell_id=cell_id,
+                            cell_index=idx,
+                            current_footprint_mb=current_mb,
+                            max_footprint_mb=max_footprint_mb,
+                            allocation_delta_mb=allocation_delta,
+                            gpu_mem_samples=0.0,
+                            checkpoint_var_costs=var_costs if var_costs else None,
+                            overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
+                            cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
+                            cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
+                            pre_only_bytes=pre_only_bytes,
+                            post_savings_bytes=post_savings_bytes,
+                            status="ok",
+                            is_rerun=True,
+                        ))
+                        cumulative_ckpt = overhead_breakdown.get('checkpoints_mb', 0) if overhead_breakdown else 0
+                        pre_only_mb = pre_only_bytes / (1024 * 1024)
+                        savings_mb = post_savings_bytes / (1024 * 1024)
+                        log(f"  Rerun Namespace: {current_mb:.1f}MB, Delta: {allocation_delta:.1f}MB, Checkpoints: {cumulative_ckpt:.1f}MB (pre-only: {pre_only_mb:.1f}MB, post-savings: {savings_mb:.1f}MB)")
+
         # Get final stats
         final_stats = get_namespace_size(kernel_client)
         results.totals = {
@@ -1420,6 +1707,12 @@ class CompareBaselineCommand(NotebookCommand):
             action="store_true",
             help="Skip memory measurement phases (timing only)",
         )
+        subparser.add_argument(
+            "--rerun-k",
+            type=int,
+            default=0,
+            help="Number of extra top-to-bottom passes after initial run (default: 0)",
+        )
         return subparser
 
     async def process(
@@ -1450,6 +1743,7 @@ class CompareBaselineCommand(NotebookCommand):
         """
         cell_timeout = kwargs.get("timeout", 3600.0)
         skip_memory = kwargs.get("skip_memory", False)
+        rerun_k = kwargs.get("rerun_k", 0)
         notebook_path = kwargs.get("notebook_path", "unknown.ipynb")
 
         cells = notebook_content.get("cells", [])
@@ -1463,6 +1757,8 @@ class CompareBaselineCommand(NotebookCommand):
             log(f"Notebook: {notebook_path}")
             log(f"Cell timeout: {cell_timeout}s")
             log(f"HeapSizer available: {heapsizer_available}")
+            if rerun_k > 0:
+                log(f"Rerun passes: {rerun_k} (will execute all {len(code_cells)} cells {rerun_k} extra time(s))")
             log("")
 
             # ============================================================
@@ -1471,7 +1767,7 @@ class CompareBaselineCommand(NotebookCommand):
             log("=" * 60)
             log("PHASE 1: FLOWBOOK TIMING (Scalene OFF)")
             log("=" * 60)
-            flowbook_timing = run_flowbook_timing(notebook_content, cell_timeout)
+            flowbook_timing = run_flowbook_timing(notebook_content, cell_timeout, rerun_k)
             log("")
 
             # ============================================================
@@ -1480,7 +1776,7 @@ class CompareBaselineCommand(NotebookCommand):
             log("=" * 60)
             log("PHASE 2: BASELINE TIMING (Scalene OFF)")
             log("=" * 60)
-            baseline_timing = run_baseline_timing(notebook_content, cell_timeout)
+            baseline_timing = run_baseline_timing(notebook_content, cell_timeout, rerun_k)
             log("")
 
             # ============================================================
@@ -1491,7 +1787,7 @@ class CompareBaselineCommand(NotebookCommand):
                 log("=" * 60)
                 log("PHASE 3: BASELINE MEMORY (HeapSizer)")
                 log("=" * 60)
-                baseline_memory = run_baseline_memory(notebook_content, cell_timeout)
+                baseline_memory = run_baseline_memory(notebook_content, cell_timeout, rerun_k)
                 log("")
 
             # ============================================================
@@ -1502,10 +1798,17 @@ class CompareBaselineCommand(NotebookCommand):
                 log("=" * 60)
                 log("PHASE 4: FLOWBOOK MEMORY (HeapSizer)")
                 log("=" * 60)
-                flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout)
+                flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout, rerun_k)
                 log("")
 
             # Build comparison result with new structure
+            metadata_dict: Dict[str, Any] = {
+                "num_cells": len(code_cells),
+                "timeout_seconds": cell_timeout,
+            }
+            if rerun_k > 0:
+                metadata_dict["rerun_k"] = rerun_k
+
             comparison = ComparisonResult(
                 version="2.0",
                 notebook_path=str(notebook_path),
@@ -1523,10 +1826,7 @@ class CompareBaselineCommand(NotebookCommand):
                     ),
                 },
                 scalene_available=heapsizer_available,  # Keep field name for compatibility
-                metadata={
-                    "num_cells": len(code_cells),
-                    "timeout_seconds": cell_timeout,
-                }
+                metadata=metadata_dict,
             )
 
             # Convert to dict for JSON serialization
@@ -1589,6 +1889,20 @@ class CompareBaselineCommand(NotebookCommand):
                 log(f"  Baseline namespace:   {baseline_mem:,.1f}MB")
                 log(f"  FlowBook namespace:   {flowbook_mem:,.1f}MB")
                 log(f"  Memory overhead:      {mem_overhead:+,.1f}MB")
+                log("")
+
+            if rerun_k > 0:
+                rerun_baseline = baseline_timing.totals.get("rerun_runtime_ms", 0)
+                rerun_flowbook = flowbook_timing.totals.get("rerun_runtime_ms", 0)
+                rerun_state = flowbook_timing.totals.get("rerun_state_ms", 0)
+                rerun_check = flowbook_timing.totals.get("rerun_check_ms", 0)
+                total_rerun_cells = rerun_k * len(code_cells)
+
+                log(f"RERUN TIMING ({rerun_k} pass(es) x {len(code_cells)} cells = {total_rerun_cells} executions):")
+                log(f"  Baseline rerun:       {rerun_baseline:,.1f}ms")
+                log(f"  FlowBook rerun:       {rerun_flowbook:,.1f}ms")
+                log(f"  FlowBook state time:  {rerun_state:,.1f}ms")
+                log(f"  FlowBook check time:  {rerun_check:,.1f}ms")
                 log("")
 
             log(f"Results saved to: {json_output_path}")

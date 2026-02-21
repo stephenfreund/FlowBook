@@ -334,14 +334,25 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     if num_cells == 0 and baseline_timing:
         num_cells = len(baseline_timing.get("cells", []))
 
-    # No reruns in v2.0 format
-    num_reruns = 0
-    rerun_baseline_runtime = 0.0
-    rerun_flowbook_runtime = 0.0
-    rerun_state_overhead = 0.0
-    rerun_check_overhead = 0.0
-    rerun_flowbook_total = 0.0
+    # Extract rerun statistics from v2.0 format
+    rerun_baseline_cells = baseline_timing.get("rerun_cells", []) if baseline_timing else []
+    rerun_flowbook_cells = flowbook_timing.get("rerun_cells", []) if flowbook_timing else []
+    num_reruns = len(rerun_flowbook_cells)
+
+    rerun_baseline_runtime = sum(c.get("cell_runtime_ms", 0) for c in rerun_baseline_cells)
+    rerun_flowbook_runtime = sum(c.get("cell_runtime_ms", 0) for c in rerun_flowbook_cells)
+    rerun_state_overhead = sum(c.get("state_duration_ms", 0) for c in rerun_flowbook_cells)
+    rerun_check_overhead = sum(c.get("check_duration_ms", 0) for c in rerun_flowbook_cells)
+    rerun_flowbook_total = rerun_flowbook_runtime
+
+    # Get final checkpoint size from last rerun cell (if available)
     rerun_final_checkpoint = 0
+    flowbook_mem_rerun = flowbook_memory_data.get("rerun_cells", []) if flowbook_memory_data else []
+    if flowbook_mem_rerun:
+        last_rerun_mem = flowbook_mem_rerun[-1]
+        overhead_breakdown = last_rerun_mem.get("overhead_breakdown", {})
+        if overhead_breakdown:
+            rerun_final_checkpoint = int(overhead_breakdown.get("checkpoints_mb", 0) * 1024 * 1024)
 
     # Last cell overhead from timing data
     baseline_timing_cells = baseline_timing.get("cells", []) if baseline_timing else []
@@ -805,7 +816,7 @@ def extract_checkpoint_type_data_v2(data: Dict[str, Any], top_n: int = 10) -> Op
         by_type: dict mapping type name to list of CUMULATIVE bytes per cell
         types_ordered: list of type names ordered by total size descending
         total_bytes: list of CUMULATIVE total checkpoint bytes per cell
-        initial_count: number of cells
+        initial_count: number of initial cells (before reruns)
 
     Returns None if no checkpoint data available.
     """
@@ -817,7 +828,10 @@ def extract_checkpoint_type_data_v2(data: Dict[str, Any], top_n: int = 10) -> Op
     if not memory_data:
         return None
 
-    memory_cells = memory_data.get("cells", [])
+    initial_cells = memory_data.get("cells", [])
+    rerun_cells = memory_data.get("rerun_cells", [])
+    memory_cells = initial_cells + rerun_cells
+    initial_count = len(initial_cells)
 
     # Check if we have the new cumulative_by_type field (TRUE cumulative)
     has_cumulative = any(c.get("cumulative_by_type") for c in memory_cells)
@@ -912,7 +926,7 @@ def extract_checkpoint_type_data_v2(data: Dict[str, Any], top_n: int = 10) -> Op
         "by_type": type_by_cell,
         "types_ordered": types_ordered,
         "total_bytes": total_bytes,
-        "initial_count": len(memory_cells),
+        "initial_count": initial_count,
     }
 
 
@@ -1207,7 +1221,7 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
         cells: list of cell indices
         by_var: dict mapping variable name to list of CUMULATIVE bytes per cell
         vars_ordered: list of variable names ordered by total size descending
-        initial_count: number of initial execution cells
+        initial_count: number of initial execution cells (before reruns)
 
     Returns None if no checkpoint data available.
     """
@@ -1219,7 +1233,10 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
     if not memory_data:
         return None
 
-    memory_cells = memory_data.get("cells", [])
+    initial_cells = memory_data.get("cells", [])
+    rerun_cells = memory_data.get("rerun_cells", [])
+    memory_cells = initial_cells + rerun_cells
+    initial_count = len(initial_cells)
 
     # Check if we have the new cumulative_by_var field (TRUE cumulative)
     has_cumulative = any(c.get("cumulative_by_var") for c in memory_cells)
@@ -1305,7 +1322,7 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
         "by_var": var_by_cell,
         "vars_ordered": vars_ordered,
         "var_types": var_types,
-        "initial_count": len(memory_cells),
+        "initial_count": initial_count,
     }
 
 
@@ -1323,7 +1340,7 @@ def extract_checkpoint_timing_var_data(data: Dict[str, Any], top_n: int = 10) ->
         cells: list of cell indices
         by_var: dict mapping variable name to list of ms per cell (NOT cumulative)
         vars_ordered: list of variable names ordered by total time descending
-        initial_count: number of initial execution cells
+        initial_count: number of initial execution cells (before reruns)
 
     Returns None if no checkpoint timing data available.
     """
@@ -1335,7 +1352,10 @@ def extract_checkpoint_timing_var_data(data: Dict[str, Any], top_n: int = 10) ->
     if not memory_data:
         return None
 
-    memory_cells = memory_data.get("cells", [])
+    initial_cells = memory_data.get("cells", [])
+    rerun_cells = memory_data.get("rerun_cells", [])
+    memory_cells = initial_cells + rerun_cells
+    initial_count = len(initial_cells)
 
     # Get timing from checkpoint_var_costs (deepcopy_ms field)
     has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
@@ -1402,7 +1422,7 @@ def extract_checkpoint_timing_var_data(data: Dict[str, Any], top_n: int = 10) ->
         "by_var": var_by_cell,
         "vars_ordered": vars_ordered,
         "var_types": var_types,
-        "initial_count": len(memory_cells),
+        "initial_count": initial_count,
     }
 
 
@@ -1437,17 +1457,27 @@ def plot_combined_v2(
     baseline = data["kernels"]["baseline"]
     flowbook = data["kernels"]["flowbook"]
 
-    # Extract timing data
+    # Extract timing data (including reruns)
     baseline_timing = baseline.get("timing", {})
     flowbook_timing = flowbook.get("timing", {})
-    baseline_cells = baseline_timing.get("cells", []) if baseline_timing else []
-    flowbook_cells = flowbook_timing.get("cells", []) if flowbook_timing else []
+    baseline_initial_cells = baseline_timing.get("cells", []) if baseline_timing else []
+    flowbook_initial_cells = flowbook_timing.get("cells", []) if flowbook_timing else []
+    baseline_rerun_cells = baseline_timing.get("rerun_cells", []) if baseline_timing else []
+    flowbook_rerun_cells = flowbook_timing.get("rerun_cells", []) if flowbook_timing else []
+    baseline_cells = baseline_initial_cells + baseline_rerun_cells
+    flowbook_cells = flowbook_initial_cells + flowbook_rerun_cells
+    timing_initial_count = len(baseline_initial_cells)
 
-    # Extract memory data
+    # Extract memory data (including reruns)
     baseline_memory = baseline.get("memory", {})
     flowbook_memory = flowbook.get("memory", {})
-    baseline_mem_cells = baseline_memory.get("cells", []) if baseline_memory else []
-    flowbook_mem_cells = flowbook_memory.get("cells", []) if flowbook_memory else []
+    baseline_mem_initial = baseline_memory.get("cells", []) if baseline_memory else []
+    flowbook_mem_initial = flowbook_memory.get("cells", []) if flowbook_memory else []
+    baseline_mem_rerun = baseline_memory.get("rerun_cells", []) if baseline_memory else []
+    flowbook_mem_rerun = flowbook_memory.get("rerun_cells", []) if flowbook_memory else []
+    baseline_mem_cells = baseline_mem_initial + baseline_mem_rerun
+    flowbook_mem_cells = flowbook_mem_initial + flowbook_mem_rerun
+    memory_initial_count = len(baseline_mem_initial)
 
     # Font sizes
     label_size = 18 if large_fonts else 12
@@ -1509,6 +1539,8 @@ def plot_combined_v2(
         # Per-cell times (not cumulative)
         state_per_cell = np.array(state_times)
         check_per_cell = np.array(check_times)
+        # Total overhead = FlowBook time - Baseline time (can be negative if FlowBook is faster)
+        all_overhead_per_cell = np.array(flowbook_runtimes) - np.array(baseline_runtimes)
 
         # Left y-axis: cumulative time
         ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label="Baseline (cumulative)")
@@ -1516,20 +1548,27 @@ def plot_combined_v2(
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Cumulative Time (seconds)", fontsize=label_size)
-        ax.set_title("Timing Comparison", fontsize=title_size)
+        title = "Timing Comparison"
+        if timing_initial_count < len(cells):
+            title += f" (cells 1-{timing_initial_count} + {len(cells) - timing_initial_count} reruns)"
+        ax.set_title(title, fontsize=title_size)
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
         ax.tick_params(axis='both', labelsize=tick_size)
 
-        # Right y-axis: per-cell state and check times as side-by-side bars
+        # Add separator line for rerun phase
+        if timing_initial_count < len(cells):
+            ax.axvline(x=timing_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+
+        # Right y-axis: per-cell overhead times as side-by-side bars
         ax2 = ax.twinx()
-        bar_width = 0.35
-        ax2.bar(cells - bar_width/2, state_per_cell / 1000, alpha=0.4, color=colors[2], label="State (per cell)", width=bar_width)
-        ax2.bar(cells + bar_width/2, check_per_cell / 1000, alpha=0.4, color=colors[3], label="Check (per cell)", width=bar_width)
-        ax2.set_ylabel("Time per Cell (seconds)", fontsize=label_size)
+        bar_width = 0.25
+        ax2.bar(cells - bar_width, all_overhead_per_cell / 1000, alpha=0.4, color=colors[4], label="All Overhead", width=bar_width)
+        ax2.bar(cells, state_per_cell / 1000, alpha=0.4, color=colors[2], label="State (per cell)", width=bar_width)
+        ax2.bar(cells + bar_width, check_per_cell / 1000, alpha=0.4, color=colors[3], label="Check (per cell)", width=bar_width)
+        ax2.set_ylabel("Overhead per Cell (seconds)", fontsize=label_size)
         ax2.tick_params(axis='y', labelsize=tick_size)
-        ax2.set_ylim(bottom=0)
         ax2.grid(False)  # Disable grid lines on secondary axis
 
         # Combined legend from both axes
@@ -1673,6 +1712,11 @@ def plot_combined_v2(
 
         ax.set_xlabel('Cell Number', fontsize=label_size)
         ax.set_ylabel('Memory (MB)', fontsize=label_size)
+
+        # Add separator line for rerun phase
+        if memory_initial_count < len(cells):
+            ax.axvline(x=memory_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+
         ax.legend(loc='upper left', fontsize=legend_size - 2)
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
@@ -1700,9 +1744,17 @@ def plot_combined_v2(
         # Draw total line
         ax.plot(timing_cells, cumulative, color='black', linewidth=1.5, linestyle='--', label='Total')
 
+        # Add separator line for rerun phase
+        timing_var_initial_count = timing_var_data.get("initial_count", len(timing_cells))
+        if timing_var_initial_count < len(timing_cells):
+            ax.axvline(x=timing_var_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Checkpoint Time (seconds)", fontsize=label_size)
-        ax.set_title("Checkpoint Time by Variable", fontsize=title_size)
+        title = "Checkpoint Time by Variable"
+        if timing_var_initial_count < len(timing_cells):
+            title += f" (cells 1-{timing_var_initial_count} + {len(timing_cells) - timing_var_initial_count} reruns)"
+        ax.set_title(title, fontsize=title_size)
         ax.legend(loc="upper left", fontsize=legend_size - 4, ncol=2)
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
@@ -1740,9 +1792,17 @@ def plot_combined_v2(
         ax.plot(var_cells, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
         ax.plot(var_cells, cumulative, color='black', linewidth=1.5, linestyle='--', label='Total')
 
+        # Add separator line for rerun phase
+        var_initial_count = var_data.get("initial_count", len(var_cells))
+        if var_initial_count < len(var_cells):
+            ax.axvline(x=var_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Memory (MB)", fontsize=label_size)
-        ax.set_title("Checkpoint Memory by Variable", fontsize=title_size)
+        title = "Checkpoint Memory by Variable"
+        if var_initial_count < len(var_cells):
+            title += f" (cells 1-{var_initial_count} + {len(var_cells) - var_initial_count} reruns)"
+        ax.set_title(title, fontsize=title_size)
         ax.legend(loc="upper left", fontsize=legend_size - 4, ncol=2)
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
