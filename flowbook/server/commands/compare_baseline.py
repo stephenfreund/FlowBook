@@ -14,7 +14,7 @@ Memory measurement uses HeapSizer for accurate heap traversal with proper handli
 
 Usage via CLI:
     flowbook compare-baseline notebook.ipynb
-    flowbook compare-baseline notebook.ipynb --timeout 600
+    flowbook compare-baseline notebook.ipynb --timeout 3600
 """
 
 import argparse
@@ -1412,8 +1412,8 @@ class CompareBaselineCommand(NotebookCommand):
         subparser.add_argument(
             "--timeout",
             type=float,
-            default=600.0,
-            help="Timeout in seconds per cell (default: 600). Should be generous as FlowBook adds overhead.",
+            default=3600.0,
+            help="Timeout in seconds per cell (default: 3600). Should be generous as FlowBook adds overhead.",
         )
         subparser.add_argument(
             "--skip-memory",
@@ -1448,7 +1448,7 @@ class CompareBaselineCommand(NotebookCommand):
         Returns:
             ProcessingResult with comparison metadata
         """
-        cell_timeout = kwargs.get("timeout", 600.0)
+        cell_timeout = kwargs.get("timeout", 3600.0)
         skip_memory = kwargs.get("skip_memory", False)
         notebook_path = kwargs.get("notebook_path", "unknown.ipynb")
 
