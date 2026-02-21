@@ -2076,11 +2076,13 @@ class MemoryCheckpoints:
         if not name or not name.strip():
             raise ValueError("MemoryCheckpoint name cannot be empty or whitespace-only")
 
-        # Estimate size and warn if needed
-        if max_size_mb is not None:
+        # Filter variables ONCE and reuse (optimization: avoid redundant filtering)
+        with timer(key="checkpoint:filter_vars", message="Filtering variables"):
             checkpointable_vars = self.checkpointable_vars(user_ns)
             checkpointable_values = self.checkpointable_values(checkpointable_vars)
 
+        # Estimate size and warn if needed (reuses filtered values)
+        if max_size_mb is not None:
             estimated_bytes = self._estimate_size(checkpointable_values)
             estimated_mb = estimated_bytes / (1024 * 1024)
 
@@ -2088,12 +2090,9 @@ class MemoryCheckpoints:
                 log(f"WARNING: MemoryCheckpoint '{name}' estimated at {estimated_mb:.1f} MB (threshold: {max_size_mb} MB)")
                 log(f"         Large checkpoints may consume significant memory and time")
 
-        # Warn about user-defined classes if enabled
+        # Warn about user-defined classes if enabled (reuses filtered values)
         if self.warn_classes:
-            checkpointable_vars_temp = self.checkpointable_vars(user_ns)
-            checkpointable_values_temp = self.checkpointable_values(checkpointable_vars_temp)
-
-            for var_name, var_value in checkpointable_values_temp.items():
+            for var_name, var_value in checkpointable_values.items():
                 if self._is_user_defined_class(var_value):
                     log(f"WARNING: Variable '{var_name}' is a user-defined class ({var_value.__name__})")
                     log(f"         Class variables (mutable class attributes) will NOT be properly restored")
@@ -2102,10 +2101,6 @@ class MemoryCheckpoints:
         with timer(key="checkpoint:deep_copy", message="Deep copying user namespace"):
             saved = {}
             removed = {}
-
-            with timer(key="checkpoint:filter_vars", message="Filtering variables"):
-                checkpointable_vars = self.checkpointable_vars(user_ns)
-                checkpointable_values = self.checkpointable_values(checkpointable_vars)
 
             for k in checkpointable_vars.keys() - checkpointable_values.keys():
                 removed[k] = get_type_model(user_ns[k])
