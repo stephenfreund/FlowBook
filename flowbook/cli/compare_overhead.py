@@ -1432,6 +1432,24 @@ def plot_combined_v2(
             c.get("overhead_breakdown") for c in flowbook_mem_cells
         )
 
+        # Check if pre/post checkpoint breakdown is available
+        has_pre_post = any(
+            c.get("pre_only_bytes", 0) > 0 or c.get("post_savings_bytes", 0) > 0
+            for c in flowbook_mem_cells
+        )
+
+        # Extract pre/post checkpoint sizes (for NO_POST analysis)
+        # pre_only_mb: memory if only pre checkpoints existed (accounts for sharing)
+        # post_savings_mb: actual memory saved by removing post checkpoints
+        pre_only_mb = np.array([
+            c.get("pre_only_bytes", 0) / (1024 * 1024)
+            for c in flowbook_mem_cells
+        ])
+        post_savings_mb = np.array([
+            c.get("post_savings_bytes", 0) / (1024 * 1024)
+            for c in flowbook_mem_cells
+        ])
+
         if has_overhead_breakdown:
             # Stacked overhead breakdown visualization
             # Extract overhead categories per cell
@@ -1461,9 +1479,9 @@ def plot_combined_v2(
             # Stack overhead categories on top of baseline
             cumulative = baseline_footprint.copy()
 
-            # Checkpoints (largest)
+            # Checkpoints (largest) - show total checkpoint area
             next_level = cumulative + checkpoints_mb
-            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[0], label='Checkpoints')
+            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[0], label='Checkpoints (total)')
             cumulative = next_level
 
             # Execution records
@@ -1486,14 +1504,37 @@ def plot_combined_v2(
             # FlowBook Total should be top of stack (baseline + all overhead), not just namespace
             ax.plot(cells, cumulative, color=colors[1], linewidth=2, marker='o', markersize=4, label='FlowBook Total')
 
-            ax.set_title('Memory Overhead Breakdown', fontsize=title_size)
+            # Show pre-only line (what memory would be with NO post checkpoints)
+            if has_pre_post:
+                # Pre-only = baseline + pre_only checkpoints + other overhead (non-checkpoint)
+                other_overhead = execution_records_mb + tracking_metadata_mb + other_mb
+                pre_only_total = baseline_footprint + pre_only_mb + other_overhead
+                ax.plot(cells, pre_only_total, color='green', linewidth=2, linestyle=':', marker='s', markersize=3, label='Pre-Only (no post)')
+
+                # Annotate savings at end
+                if cumulative[-1] > 0 and post_savings_mb[-1] > 0:
+                    total_ckpt = checkpoints_mb[-1]
+                    savings_pct = (post_savings_mb[-1] / total_ckpt * 100) if total_ckpt > 0 else 0
+                    ax.annotate(f'Post savings: {post_savings_mb[-1]:.1f}MB ({savings_pct:.0f}%)',
+                                xy=(cells[-1], pre_only_total[-1]),
+                                xytext=(5, 10), textcoords='offset points',
+                                fontsize=legend_size - 2, va='bottom', ha='left',
+                                color='green')
+
+            ax.set_title('Memory Overhead (Total vs Pre-Only)', fontsize=title_size)
         else:
             # Original visualization without breakdown
             ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline Memory')
             ax.fill_between(cells, baseline_footprint, flowbook_footprint, alpha=0.3, color=colors[1], label='FlowBook Overhead')
             ax.plot(cells, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
             ax.plot(cells, flowbook_footprint, color=colors[1], linewidth=2, marker='o', markersize=4)
-            ax.set_title('Memory + GPU', fontsize=title_size)
+
+            # Show pre-only line if available
+            if has_pre_post:
+                pre_only_total = baseline_footprint + pre_only_mb
+                ax.plot(cells, pre_only_total, color='green', linewidth=2, linestyle=':', marker='s', markersize=3, label='Pre-Only (no post)')
+
+            ax.set_title('Memory (Total vs Pre-Only)', fontsize=title_size)
 
         # GPU memory (orange - secondary y-axis) if present
         has_gpu = any(g > 0 for g in gpu_samples)
@@ -1505,7 +1546,7 @@ def plot_combined_v2(
 
         ax.set_xlabel('Cell Number', fontsize=label_size)
         ax.set_ylabel('Memory (MB)', fontsize=label_size)
-        ax.legend(loc='upper left', fontsize=legend_size)
+        ax.legend(loc='upper left', fontsize=legend_size - 2)
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)

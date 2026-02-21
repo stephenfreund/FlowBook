@@ -98,6 +98,9 @@ class MemoryCellMetrics:
     overhead_breakdown: Optional[Dict[str, float]] = None  # FlowBook only: {category: MB}
     cumulative_by_type: Optional[Dict[str, int]] = None  # FlowBook only: cumulative bytes by type
     cumulative_by_var: Optional[Dict[str, int]] = None  # FlowBook only: cumulative bytes by variable
+    # Pre/post checkpoint breakdown for NO_POST analysis (accounts for sharing)
+    pre_only_bytes: int = 0  # Bytes if only pre checkpoints existed (with sharing)
+    post_savings_bytes: int = 0  # Memory saved by removing post checkpoints
     status: str = "ok"
     error: Optional[str] = None
 
@@ -724,6 +727,83 @@ def get_flowbook_cumulative_checkpoint_size(
     return {}
 
 
+def get_flowbook_pre_post_checkpoint_sizes(
+    kernel_client, cell_id: str, timeout: float = 30.0
+) -> Dict[str, Any]:
+    """Get separate pre and post checkpoint sizes for a cell.
+
+    This enables analyzing how much memory would be saved by eliminating
+    post checkpoints (NO_POST plan).
+
+    Args:
+        kernel_client: Kernel client to execute code on
+        cell_id: Cell ID to get checkpoint sizes for
+        timeout: Timeout in seconds
+
+    Returns:
+        Dict with:
+        - pre_bytes: Total bytes in _pre_* checkpoints only
+        - post_bytes: Total bytes in _post_* checkpoints only
+        - total_bytes: Total bytes in all checkpoints
+        - pre_checkpoint_count: Number of pre checkpoints
+        - post_checkpoint_count: Number of post checkpoints
+    """
+    expr = (
+        f"(__import__('flowbook.kernel_support.memory_checkpoint', fromlist=['MemoryCheckpoints'])"
+        f".MemoryCheckpoints._instance.get_pre_post_checkpoint_sizes_at_cell('{cell_id}') "
+        f"if hasattr(__import__('flowbook.kernel_support.memory_checkpoint', fromlist=['MemoryCheckpoints'])"
+        f".MemoryCheckpoints, '_instance') and "
+        f"__import__('flowbook.kernel_support.memory_checkpoint', fromlist=['MemoryCheckpoints'])"
+        f".MemoryCheckpoints._instance else {{'pre_bytes': 0, 'post_bytes': 0, 'total_bytes': 0, "
+        f"'pre_checkpoint_count': 0, 'post_checkpoint_count': 0}})"
+    )
+
+    msg_id = kernel_client.execute(
+        '',  # Empty code - no checkpoints created
+        user_expressions={'_pre_post_sizes': expr},
+        silent=True,
+    )
+
+    # Wait for idle on iopub
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            return {}
+        try:
+            msg = kernel_client.get_iopub_msg(timeout=1.0)
+        except Exception:
+            continue
+        if msg['parent_header'].get('msg_id') != msg_id:
+            continue
+        if msg['header']['msg_type'] == 'status':
+            if msg['content']['execution_state'] == 'idle':
+                break
+
+    # Get the execute_reply
+    try:
+        import ast
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                reply = kernel_client.get_shell_msg(timeout=1.0)
+            except Exception:
+                continue
+            if reply['parent_header'].get('msg_id') != msg_id:
+                continue
+            if reply['header']['msg_type'] != 'execute_reply':
+                continue
+
+            expr_result = reply['content'].get('user_expressions', {}).get('_pre_post_sizes', {})
+            if expr_result.get('status') == 'ok':
+                text = expr_result['data']['text/plain']
+                return ast.literal_eval(text)
+            break
+    except Exception as e:
+        log(f"Failed to get pre/post checkpoint sizes: {e}")
+
+    return {}
+
+
 def get_flowbook_overhead_breakdown(
     kernel_client, timeout: float = 30.0
 ) -> Dict[str, float]:
@@ -1187,6 +1267,11 @@ def run_flowbook_memory(
             cumulative_size = get_flowbook_cumulative_checkpoint_size(kernel_client, cell_id)
             cumulative_checkpoint_bytes = cumulative_size.get('total_bytes', 0)
 
+            # Get pre/post checkpoint breakdown for NO_POST analysis
+            pre_post_sizes = get_flowbook_pre_post_checkpoint_sizes(kernel_client, cell_id)
+            pre_only_bytes = pre_post_sizes.get('pre_only_bytes', 0)
+            post_savings_bytes = pre_post_sizes.get('post_savings_bytes', 0)
+
             current_mb = post_stats.get("total_mb", 0.0)
             max_footprint_mb = max(max_footprint_mb, current_mb)
 
@@ -1235,6 +1320,8 @@ def run_flowbook_memory(
                     overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
                     cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
                     cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
+                    pre_only_bytes=pre_only_bytes,
+                    post_savings_bytes=post_savings_bytes,
                     status="error",
                     error=timing["error"]
                 ))
@@ -1251,10 +1338,14 @@ def run_flowbook_memory(
                     overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
                     cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
                     cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
+                    pre_only_bytes=pre_only_bytes,
+                    post_savings_bytes=post_savings_bytes,
                     status="ok",
                 ))
                 cumulative_ckpt = overhead_breakdown.get('checkpoints_mb', 0) if overhead_breakdown else 0
-                log(f"  Namespace: {current_mb:.1f}MB, Delta: {allocation_delta:.1f}MB, Cumulative Checkpoints: {cumulative_ckpt:.1f}MB")
+                pre_only_mb = pre_only_bytes / (1024 * 1024)
+                savings_mb = post_savings_bytes / (1024 * 1024)
+                log(f"  Namespace: {current_mb:.1f}MB, Delta: {allocation_delta:.1f}MB, Checkpoints: {cumulative_ckpt:.1f}MB (pre-only: {pre_only_mb:.1f}MB, post-savings: {savings_mb:.1f}MB)")
 
         # Get final stats
         final_stats = get_namespace_size(kernel_client)

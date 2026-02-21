@@ -2403,6 +2403,71 @@ class MemoryCheckpoints:
         # objects in the deepcopy cache, since those ARE part of checkpoint storage
         return sizer.sizeof_all_checkpoints(checkpoints_to_include, exclude_cached=False)
 
+    def get_pre_post_checkpoint_sizes_at_cell(self, cell_id: str) -> dict:
+        """
+        Get separate sizes for pre and post checkpoints up to and including a cell.
+
+        This enables analyzing how much memory would be saved by eliminating
+        post checkpoints (NO_POST plan).
+
+        IMPORTANT: Pre and post checkpoints share memory via the deepcopy memo.
+        To get accurate savings from removing post checkpoints:
+        - total_bytes: All checkpoints measured together (accounts for all sharing)
+        - pre_only_bytes: Only pre checkpoints measured together (accounts for sharing within pre)
+        - post_savings_bytes: total_bytes - pre_only_bytes (actual memory saved by removing post)
+
+        Args:
+            cell_id: Cell ID (e.g., "abc1")
+
+        Returns:
+            Dict with:
+            - pre_only_bytes: Bytes if only _pre_* checkpoints existed (with sharing)
+            - total_bytes: Total bytes in all checkpoints (with sharing)
+            - post_savings_bytes: Memory saved by removing post checkpoints
+            - pre_checkpoint_count: Number of pre checkpoints
+            - post_checkpoint_count: Number of post checkpoints
+        """
+        from flowbook.kernel_support.heap_size import HeapSizer
+
+        post_name = f"_post_{cell_id}"
+
+        pre_checkpoints = {}
+        post_checkpoints = {}
+
+        # Collect checkpoints up to and including this cell
+        for name, ckpt in self.saved.items():
+            if name.startswith("_pre_"):
+                pre_checkpoints[name] = ckpt
+            elif name.startswith("_post_"):
+                post_checkpoints[name] = ckpt
+            # Stop after we've included the target cell's post checkpoint
+            if name == post_name:
+                break
+
+        sizer = HeapSizer()
+
+        # Measure all checkpoints together (true total with all sharing)
+        all_checkpoints = {**pre_checkpoints, **post_checkpoints}
+        total_size = sizer.sizeof_all_checkpoints(all_checkpoints, exclude_cached=False) if all_checkpoints else None
+        total_bytes = total_size.total_bytes if total_size else 0
+
+        sizer.reset()
+
+        # Measure only pre checkpoints (pre-only scenario with sharing within pre)
+        pre_size = sizer.sizeof_all_checkpoints(pre_checkpoints, exclude_cached=False) if pre_checkpoints else None
+        pre_only_bytes = pre_size.total_bytes if pre_size else 0
+
+        # Post savings = total - pre_only (actual memory saved by removing post)
+        post_savings_bytes = total_bytes - pre_only_bytes
+
+        return {
+            "pre_only_bytes": pre_only_bytes,
+            "total_bytes": total_bytes,
+            "post_savings_bytes": post_savings_bytes,
+            "pre_checkpoint_count": len(pre_checkpoints),
+            "post_checkpoint_count": len(post_checkpoints),
+        }
+
     def get_internal_sizes(self) -> dict[str, int]:
         """
         Get sizes of FlowBook internal data structures using HeapSizer.
