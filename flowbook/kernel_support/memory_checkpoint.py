@@ -928,6 +928,12 @@ from flowbook.util.output import log, output, timer
 if hasattr(pd.options.mode, 'copy_on_write'):
     pd.options.mode.copy_on_write = True
 
+# Enable string inference so read_csv() returns StringDtype instead of object dtype.
+# This avoids slow object->string conversion during checkpoint deepcopy.
+# (always enabled in pandas >= 3.0, but needs to be set for pandas 2.x)
+if hasattr(pd.options, 'future') and hasattr(pd.options.future, 'infer_string'):
+    pd.options.future.infer_string = True
+
 # Environment variable to enable detailed checkpoint profiling
 # Set FLOWBOOK_PROFILE_CHECKPOINT=1 to record deepcopy timings keyed by type
 _PROFILE_CHECKPOINT = os.environ.get("FLOWBOOK_PROFILE_CHECKPOINT", "0") == "1"
