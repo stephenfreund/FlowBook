@@ -14,7 +14,7 @@ Memory measurement uses HeapSizer for accurate heap traversal with proper handli
 
 Usage via CLI:
     flowbook compare-baseline notebook.ipynb
-    flowbook compare-baseline notebook.ipynb --timeout 300
+    flowbook compare-baseline notebook.ipynb --timeout 600
 """
 
 import argparse
@@ -25,6 +25,7 @@ import random
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
@@ -198,12 +199,14 @@ def create_baseline_kernel() -> Tuple[KernelManager, BlockingKernelClient]:
                     break
                 except Exception as e:
                     log(f"Error waiting for kernel to be ready: {e}")
+                    log(traceback.format_exc())
                     time.sleep(0.5)
 
             return kernel_manager, kernel_client
 
         except Exception as e:
             log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
+            log(traceback.format_exc())
             if kernel_manager is not None and kernel_manager.is_alive():
                 kernel_manager.shutdown_kernel(now=True)
                 while kernel_manager.is_alive():
@@ -269,12 +272,14 @@ def create_flowbook_kernel() -> Tuple[KernelManager, FlowbookKernelClient]:
                     break
                 except Exception as e:
                     log(f"Error waiting for kernel to be ready: {e}")
+                    log(traceback.format_exc())
                     time.sleep(0.5)
 
             return kernel_manager, kernel_client
 
         except Exception as e:
             log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
+            log(traceback.format_exc())
             if kernel_manager is not None and kernel_manager.is_alive():
                 kernel_manager.shutdown_kernel(now=True)
                 while kernel_manager.is_alive():
@@ -565,6 +570,7 @@ def get_namespace_size(kernel_client, timeout: float = 30.0) -> Dict[str, Any]:
                 break
     except Exception as e:
         log(f"Failed to get namespace size: {e}")
+        log(traceback.format_exc())
 
     return {"total_bytes": 0, "total_mb": 0.0, "by_variable": {}, "by_type": {}}
 
@@ -642,6 +648,7 @@ def get_flowbook_checkpoint_var_costs(
             break
     except Exception as e:
         log(f"Failed to get checkpoint var costs: {e}")
+        log(traceback.format_exc())
 
     return {}
 
@@ -723,6 +730,7 @@ def get_flowbook_cumulative_checkpoint_size(
             break
     except Exception as e:
         log(f"Failed to get cumulative checkpoint size: {e}")
+        log(traceback.format_exc())
 
     return {}
 
@@ -800,6 +808,7 @@ def get_flowbook_pre_post_checkpoint_sizes(
             break
     except Exception as e:
         log(f"Failed to get pre/post checkpoint sizes: {e}")
+        log(traceback.format_exc())
 
     return {}
 
@@ -898,6 +907,7 @@ except Exception:
             break
     except Exception as e:
         log(f"Failed to get overhead breakdown: {e}")
+        log(traceback.format_exc())
 
     return {}
 
@@ -1402,8 +1412,8 @@ class CompareBaselineCommand(NotebookCommand):
         subparser.add_argument(
             "--timeout",
             type=float,
-            default=300.0,
-            help="Timeout in seconds per cell (default: 300)",
+            default=600.0,
+            help="Timeout in seconds per cell (default: 600). Should be generous as FlowBook adds overhead.",
         )
         subparser.add_argument(
             "--skip-memory",
@@ -1438,7 +1448,7 @@ class CompareBaselineCommand(NotebookCommand):
         Returns:
             ProcessingResult with comparison metadata
         """
-        cell_timeout = kwargs.get("timeout", 300.0)
+        cell_timeout = kwargs.get("timeout", 600.0)
         skip_memory = kwargs.get("skip_memory", False)
         notebook_path = kwargs.get("notebook_path", "unknown.ipynb")
 
