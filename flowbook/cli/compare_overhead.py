@@ -1292,10 +1292,19 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
         var_by_cell["other"] = other_by_cell
         vars_ordered = top_vars + ["other"]
 
+    # Build var_types mapping from checkpoint_var_costs
+    var_types: Dict[str, str] = {}
+    for c in memory_cells:
+        costs = c.get("checkpoint_var_costs") or {}
+        for var_name, info in costs.items():
+            if var_name not in var_types and isinstance(info, dict):
+                var_types[var_name] = info.get("type", "?")
+
     return {
         "cells": list(range(1, len(memory_cells) + 1)),
         "by_var": var_by_cell,
         "vars_ordered": vars_ordered,
+        "var_types": var_types,
         "initial_count": len(memory_cells),
     }
 
@@ -1380,10 +1389,19 @@ def extract_checkpoint_timing_var_data(data: Dict[str, Any], top_n: int = 10) ->
         var_by_cell["other"] = other_by_cell
         vars_ordered = top_vars + ["other"]
 
+    # Build var_types mapping from checkpoint_var_costs
+    var_types: Dict[str, str] = {}
+    for c in memory_cells:
+        costs = c.get("checkpoint_var_costs") or {}
+        for var_name, info in costs.items():
+            if var_name not in var_types and isinstance(info, dict):
+                var_types[var_name] = info.get("type", "?")
+
     return {
         "cells": list(range(1, len(memory_cells) + 1)),
         "by_var": var_by_cell,
         "vars_ordered": vars_ordered,
+        "var_types": var_types,
         "initial_count": len(memory_cells),
     }
 
@@ -1667,12 +1685,16 @@ def plot_combined_v2(
         panel_idx += 1
         var_colors = sns.color_palette("husl", len(timing_var_data["vars_ordered"]))
         timing_cells = np.array(timing_var_data["cells"])
+        timing_var_types = timing_var_data.get("var_types", {})
 
         # Stack checkpoint timing by variable (ms -> seconds)
         stacked = [np.array(timing_var_data["by_var"][v]) / 1000 for v in timing_var_data["vars_ordered"]]
         cumulative = np.zeros(len(timing_cells))
         for i, (v, data_sec) in enumerate(zip(timing_var_data["vars_ordered"], stacked)):
-            ax.fill_between(timing_cells, cumulative, cumulative + data_sec, alpha=0.7, color=var_colors[i], label=v)
+            # Include type in legend label
+            var_type = timing_var_types.get(v, "")
+            label = f"{v} ({var_type})" if var_type else v
+            ax.fill_between(timing_cells, cumulative, cumulative + data_sec, alpha=0.7, color=var_colors[i], label=label)
             cumulative = cumulative + data_sec
 
         # Draw total line
@@ -1694,6 +1716,7 @@ def plot_combined_v2(
         var_colors = sns.color_palette("husl", len(var_data["vars_ordered"]))
         var_cells = np.array(var_data["cells"])
         mb = 1024 * 1024
+        mem_var_types = var_data.get("var_types", {})
 
         # Get baseline memory for reference (same length as var_cells)
         baseline_footprint = np.zeros(len(var_cells))
@@ -1707,7 +1730,10 @@ def plot_combined_v2(
         stacked = [np.array(var_data["by_var"][v]) / mb for v in var_data["vars_ordered"]]
         cumulative = baseline_footprint.copy()
         for i, (v, data_mb) in enumerate(zip(var_data["vars_ordered"], stacked)):
-            ax.fill_between(var_cells, cumulative, cumulative + data_mb, alpha=0.7, color=var_colors[i], label=v)
+            # Include type in legend label
+            var_type = mem_var_types.get(v, "")
+            label = f"{v} ({var_type})" if var_type else v
+            ax.fill_between(var_cells, cumulative, cumulative + data_mb, alpha=0.7, color=var_colors[i], label=label)
             cumulative = cumulative + data_mb
 
         # Draw lines for baseline and total
