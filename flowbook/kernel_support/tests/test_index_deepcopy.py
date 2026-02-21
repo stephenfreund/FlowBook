@@ -7,6 +7,7 @@ These tests verify that:
 3. HeapSizer correctly deduplicates Index memory across checkpoints
 4. GroupBy objects with shared Index references are handled correctly
 5. Various Index types (Int64, RangeIndex, DatetimeIndex, MultiIndex) work correctly
+6. Cross-checkpoint Index array caching reuses unchanged arrays
 """
 
 import pytest
@@ -15,7 +16,9 @@ import pandas as pd
 from copy import deepcopy as stdlib_deepcopy
 from typing import Dict, Any
 
-from flowbook.kernel_support.deepcopy import deepcopy
+from flowbook.kernel_support.deepcopy import (
+    deepcopy, clear_container_cache, _ndarray_cache
+)
 from flowbook.kernel_support.heap_size import HeapSizer
 from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 
@@ -456,3 +459,218 @@ class TestEdgeCases:
         # All should share the same Index
         assert copied['df'].index is copied['gb1'].obj.index
         assert copied['df'].index is copied['gb2'].obj.index
+
+
+# =============================================================================
+# CROSS-CHECKPOINT INDEX CACHING TESTS
+# =============================================================================
+
+class TestCrossCheckpointIndexCaching:
+    """Tests for cross-checkpoint Index array caching.
+
+    The ndarray cache allows Index backing arrays to be shared across
+    checkpoints when the original Index hasn't changed. This prevents
+    cumulative memory growth when checkpointing unchanged DataFrames.
+    """
+
+    @pytest.fixture(autouse=True)
+    def clear_caches(self):
+        """Clear ndarray cache before each test."""
+        clear_container_cache()
+        yield
+        clear_container_cache()
+
+    def test_int64_index_cache_hit(self):
+        """Int64Index backing array should be cached and reused across checkpoints."""
+        df = pd.DataFrame({'A': np.random.randn(10000)}, index=np.arange(10000))
+
+        # First checkpoint - cache miss
+        cp1 = deepcopy(df, {})
+        cache_size_after_cp1 = len(_ndarray_cache)
+
+        # Second checkpoint - should hit cache
+        cp2 = deepcopy(df, {})
+        cache_size_after_cp2 = len(_ndarray_cache)
+
+        # Cache should not grow (array reused)
+        assert cache_size_after_cp2 == cache_size_after_cp1
+
+        # Both checkpoints should share the same Index backing array
+        assert cp1.index._data is cp2.index._data
+
+    def test_int64_index_incremental_size_near_zero(self):
+        """Unchanged Index should add nearly zero incremental size."""
+        df = pd.DataFrame({'A': np.random.randn(10000)}, index=np.arange(10000))
+
+        cp1 = deepcopy(df, {})
+        cp2 = deepcopy(df, {})
+        cp3 = deepcopy(df, {})
+
+        # Measure cumulative size
+        sizer = HeapSizer()
+        size1 = sizer.sizeof(cp1.index)
+        size2_incr = sizer.sizeof(cp2.index)
+        size3_incr = sizer.sizeof(cp3.index)
+
+        # CP1 should have full Index size (~80KB for 10000 int64)
+        assert size1 > 70000
+
+        # CP2 and CP3 should have minimal incremental size (<1KB)
+        # because they share the same backing array
+        assert size2_incr < 1000
+        assert size3_incr < 1000
+
+    def test_datetime_index_cache_hit(self):
+        """DatetimeIndex backing array should be cached across checkpoints."""
+        df = pd.DataFrame(
+            {'A': np.random.randn(10000)},
+            index=pd.date_range('2020-01-01', periods=10000, freq='h')
+        )
+
+        cp1 = deepcopy(df, {})
+        cp2 = deepcopy(df, {})
+
+        # Both checkpoints should share the same backing array
+        assert cp1.index._data._ndarray is cp2.index._data._ndarray
+
+    def test_datetime_index_incremental_size(self):
+        """DatetimeIndex should have minimal incremental size across checkpoints."""
+        df = pd.DataFrame(
+            {'A': np.random.randn(10000)},
+            index=pd.date_range('2020-01-01', periods=10000, freq='h')
+        )
+
+        cp1 = deepcopy(df, {})
+        cp2 = deepcopy(df, {})
+
+        sizer = HeapSizer()
+        size1 = sizer.sizeof(cp1.index)
+        size2_incr = sizer.sizeof(cp2.index)
+
+        # CP1 should have full size
+        assert size1 > 70000
+
+        # CP2 should have minimal incremental size
+        assert size2_incr < 1000
+
+    def test_multiindex_cache_hit(self):
+        """MultiIndex codes and levels should be cached across checkpoints."""
+        df = pd.DataFrame(
+            {'A': np.random.randn(5000)},
+            index=pd.MultiIndex.from_arrays([
+                np.random.randint(0, 100, 5000),
+                np.random.randint(0, 50, 5000),
+            ])
+        )
+
+        cp1 = deepcopy(df, {})
+        cp2 = deepcopy(df, {})
+
+        # Codes should share memory (they go through ndarray cache)
+        # Note: np.asarray() may create a wrapper, so check shares_memory
+        cp1_codes = np.asarray(cp1.index.codes[0])
+        cp2_codes = np.asarray(cp2.index.codes[0])
+        assert np.shares_memory(cp1_codes, cp2_codes)
+
+    def test_timedelta_index_cache_hit(self):
+        """TimedeltaIndex backing array should be cached across checkpoints."""
+        df = pd.DataFrame(
+            {'A': np.random.randn(5000)},
+            index=pd.timedelta_range('1 day', periods=5000, freq='h')
+        )
+
+        cp1 = deepcopy(df, {})
+        cp2 = deepcopy(df, {})
+
+        # Both checkpoints should share the same backing array
+        assert cp1.index._data._ndarray is cp2.index._data._ndarray
+
+    def test_modified_index_creates_new_cache_entry(self):
+        """Modifying original Index should create new cache entry."""
+        # Create DataFrame with mutable index
+        arr = np.arange(1000)
+        df = pd.DataFrame({'A': np.random.randn(1000)}, index=arr)
+
+        cp1 = deepcopy(df, {})
+
+        # Modify the original array
+        arr[0] = 9999
+
+        cp2 = deepcopy(df, {})
+
+        # CP1 and CP2 should have different backing arrays
+        # (CP2 should not reuse CP1's array since content changed)
+        assert cp1.index._data is not cp2.index._data
+
+        # But each should be isolated from original
+        assert cp1.index[0] == 0
+        assert cp2.index[0] == 9999
+
+    def test_train_test_split_index_caching(self):
+        """Index from train_test_split should be cached across checkpoints."""
+        from sklearn.model_selection import train_test_split
+
+        df = pd.DataFrame({
+            'A': np.random.randn(10000),
+            'B': np.random.randn(10000),
+        }, index=np.arange(10000))
+
+        X_train, X_test = train_test_split(df, test_size=0.2, random_state=42)
+
+        # Create multiple checkpoints
+        checkpoints = []
+        for _ in range(3):
+            cp = deepcopy(X_train, {})
+            checkpoints.append(cp)
+
+        # All checkpoints should share the same Index backing array
+        assert checkpoints[0].index._data is checkpoints[1].index._data
+        assert checkpoints[1].index._data is checkpoints[2].index._data
+
+        # Verify cumulative size doesn't grow
+        sizer = HeapSizer()
+        size0 = sizer.sizeof(checkpoints[0])
+        size1_incr = sizer.sizeof(checkpoints[1])
+        size2_incr = sizer.sizeof(checkpoints[2])
+
+        # Incremental sizes should be minimal
+        assert size1_incr < size0 * 0.1  # Less than 10% of first checkpoint
+        assert size2_incr < size0 * 0.1
+
+    def test_index_isolation_with_caching(self):
+        """Cached Index should still be isolated from original."""
+        df = pd.DataFrame({'A': np.random.randn(1000)}, index=np.arange(1000))
+
+        cp1 = deepcopy(df, {})
+        cp2 = deepcopy(df, {})
+
+        # Even though cp1 and cp2 share the backing array,
+        # they should be isolated from the original
+
+        # Modifying original should not affect checkpoints
+        original_cp1_first = cp1.index[0]
+        df.index = df.index * 2  # Modify original index
+
+        assert cp1.index[0] == original_cp1_first
+        assert cp2.index[0] == original_cp1_first
+
+    def test_rangeindex_not_cached(self):
+        """RangeIndex should not use ndarray cache (no backing array)."""
+        df = pd.DataFrame({'A': np.random.randn(10000)})  # Default RangeIndex
+
+        initial_cache_size = len(_ndarray_cache)
+
+        cp1 = deepcopy(df, {})
+        cp2 = deepcopy(df, {})
+
+        # RangeIndex doesn't add to ndarray cache (no backing array)
+        # But the DataFrame column might
+        assert isinstance(cp1.index, pd.RangeIndex)
+        assert isinstance(cp2.index, pd.RangeIndex)
+
+        # RangeIndex objects should be different (recreated each time)
+        assert cp1.index is not cp2.index
+
+        # But they should have same parameters
+        assert cp1.index.start == cp2.index.start
+        assert cp1.index.stop == cp2.index.stop

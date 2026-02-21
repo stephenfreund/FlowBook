@@ -1820,7 +1820,7 @@ d[pd.Series] = _deepcopy_series
 
 def _deepcopy_index(index: pd.Index, memo: dict[int, Any]) -> pd.Index:
     """
-    Deep copy a pandas Index with proper data isolation.
+    Deep copy a pandas Index with proper data isolation and cross-checkpoint caching.
 
     This ensures that the Index's underlying data array is properly copied,
     preventing shared memory between checkpoints. Without this handler,
@@ -1829,6 +1829,9 @@ def _deepcopy_index(index: pd.Index, memo: dict[int, Any]) -> pd.Index:
 
     Uses memo for caching to avoid multiple copies of the same Index object
     (e.g., when both df and df.groupby() reference the same Index).
+
+    For cross-checkpoint efficiency, we extract the Index's backing array
+    and use the ndarray cache to avoid re-copying unchanged arrays.
 
     Args:
         index: Index to copy
@@ -1852,9 +1855,79 @@ def _deepcopy_index(index: pd.Index, memo: dict[int, Any]) -> pd.Index:
             step=index.step,
             name=index.name
         )
+        memo[obj_id] = index_copy
+        return index_copy
+
+    # For numeric Index types, use ndarray cache for cross-checkpoint deduplication
+    # This avoids re-copying the same unchanged Index data across checkpoints
+    if isinstance(index, pd.MultiIndex):
+        # MultiIndex: copy codes and levels separately
+        # Codes are small int8/int16 arrays, levels are Index objects
+        new_codes = []
+        for code_arr in index.codes:
+            # Use ndarray cache for codes (they're numpy arrays)
+            code_arr = np.asarray(code_arr)
+            new_codes.append(_deepcopy_ndarray(code_arr, memo))
+
+        new_levels = []
+        for level in index.levels:
+            new_levels.append(_deepcopy_index(level, memo))
+
+        index_copy = pd.MultiIndex(
+            levels=new_levels,
+            codes=new_codes,
+            names=index.names,
+            verify_integrity=False
+        )
+    elif hasattr(index, '_data') and isinstance(index._data, np.ndarray):
+        # Standard numeric Index (Int64Index, Float64Index, etc.)
+        # The backing array is directly at index._data
+        backing_array = _deepcopy_ndarray(index._data, memo)
+        # IMPORTANT: copy=False is required to avoid pd.Index making another copy
+        index_copy = pd.Index(backing_array, name=index.name, copy=False)
+    elif hasattr(index, '_data') and hasattr(index._data, '_ndarray'):
+        # DatetimeIndex, TimedeltaIndex, PeriodIndex
+        # These have _data which is a DatetimeArray/TimedeltaArray with _ndarray
+        backing_array = _deepcopy_ndarray(index._data._ndarray, memo)
+        # Reconstruct the DatetimeArray/TimedeltaArray and then the Index
+        # We need to use the proper constructor to preserve timezone, freq, etc.
+        # IMPORTANT: copy=False is required to avoid the Index making another copy
+        if isinstance(index, pd.DatetimeIndex):
+            # DatetimeIndex preserves tz and freq
+            index_copy = pd.DatetimeIndex(
+                backing_array,
+                tz=index.tz,
+                freq=index.freq,
+                name=index.name,
+                copy=False
+            )
+        elif isinstance(index, pd.TimedeltaIndex):
+            index_copy = pd.TimedeltaIndex(
+                backing_array,
+                freq=index.freq,
+                name=index.name,
+                copy=False
+            )
+        elif isinstance(index, pd.PeriodIndex):
+            # PeriodIndex needs different handling
+            index_copy = index.copy(deep=True)
+        else:
+            # Fallback for other datetime-like types
+            index_copy = index.copy(deep=True)
+    elif isinstance(index, pd.CategoricalIndex):
+        # CategoricalIndex: copy codes and categories separately
+        cat = index._data
+        new_codes = _deepcopy_ndarray(cat.codes, memo)
+        new_categories = _deepcopy_index(cat.categories, memo)
+        index_copy = pd.CategoricalIndex._simple_new(
+            pd.Categorical._simple_new(
+                new_codes,
+                dtype=pd.CategoricalDtype(categories=new_categories, ordered=cat.ordered)
+            ),
+            name=index.name
+        )
     else:
-        # For all other Index types, use copy(deep=True) which properly
-        # isolates the underlying data arrays
+        # Fallback for other Index types
         index_copy = index.copy(deep=True)
 
     memo[obj_id] = index_copy
