@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import copy
 import glob
 import hashlib
 import json
@@ -20,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,6 +30,158 @@ import numpy as np
 
 # Base directory for cached remote files
 CACHE_BASE_DIR = "/tmp/flowbook_compare_overhead"
+
+
+# =============================================================================
+# Trial Grouping and Averaging
+# =============================================================================
+
+
+def group_trial_files(file_paths: List[str]) -> Dict[str, List[str]]:
+    """Group trial files by notebook stem.
+
+    Files like 'notebook_comparison-1.json', 'notebook_comparison-2.json'
+    are grouped under key 'notebook_comparison'.
+
+    Args:
+        file_paths: List of file paths
+
+    Returns:
+        Dict mapping stem to list of file paths
+    """
+    groups: Dict[str, List[str]] = defaultdict(list)
+
+    for path in file_paths:
+        name = Path(path).stem
+        # Match pattern: name-N where N is a number (trial suffix)
+        match = re.match(r'^(.+)-(\d+)$', name)
+        if match:
+            stem = match.group(1)
+        else:
+            stem = name
+        groups[stem].append(path)
+
+    return dict(groups)
+
+
+def average_dict_values(dicts: List[Dict]) -> Dict:
+    """Average numeric values across dicts.
+
+    Args:
+        dicts: List of dicts to average
+
+    Returns:
+        Dict with averaged numeric values, non-numeric values taken from first dict
+    """
+    if not dicts:
+        return {}
+    if len(dicts) == 1:
+        return dicts[0]
+
+    result = {}
+    all_keys: set = set()
+    for d in dicts:
+        if d:
+            all_keys.update(d.keys())
+
+    for key in all_keys:
+        values = [d.get(key) for d in dicts if d and key in d]
+        if values and all(isinstance(v, (int, float)) and v is not None for v in values):
+            result[key] = sum(values) / len(values)
+        elif values:
+            result[key] = values[0]  # Non-numeric, use first
+
+    return result
+
+
+def average_cell_metrics(cells: List[Dict]) -> Dict:
+    """Average numeric fields across cell dicts.
+
+    Args:
+        cells: List of cell dicts from different trials
+
+    Returns:
+        Averaged cell dict
+    """
+    if len(cells) == 1:
+        return cells[0]
+
+    avg = {"cell_id": cells[0].get("cell_id"), "cell_index": cells[0].get("cell_index")}
+
+    numeric_fields = [
+        "execute_duration_ms", "code_duration_ms", "state_duration_ms", "check_duration_ms",
+        "cell_runtime_ms",  # For compatibility with older formats
+        "current_footprint_mb", "max_footprint_mb", "allocation_delta_mb", "gpu_mem_samples",
+        "pre_only_bytes", "post_savings_bytes",
+    ]
+    for field in numeric_fields:
+        values = [c.get(field) for c in cells if c.get(field) is not None]
+        if values:
+            avg[field] = sum(values) / len(values)
+
+    # Copy non-numeric fields from first cell
+    for key, val in cells[0].items():
+        if key not in avg:
+            avg[key] = val
+
+    return avg
+
+
+def average_trial_data(trial_datas: List[Dict]) -> Dict:
+    """Average metrics across multiple trial JSON dicts.
+
+    Args:
+        trial_datas: List of comparison data dicts from different trials
+
+    Returns:
+        Single dict with averaged per-cell values
+    """
+    if len(trial_datas) == 1:
+        return trial_datas[0]
+
+    # Use first trial as template
+    result = copy.deepcopy(trial_datas[0])
+    result["metadata"] = result.get("metadata", {})
+    result["metadata"]["averaged_trials"] = len(trial_datas)
+
+    # Average cells for each kernel/phase
+    for kernel in ["baseline", "flowbook"]:
+        for phase in ["timing", "memory"]:
+            phase_data = result.get("kernels", {}).get(kernel, {}).get(phase)
+            if not phase_data:
+                continue
+
+            for cell_list_key in ["cells", "rerun_cells"]:
+                if cell_list_key not in phase_data:
+                    continue
+
+                # Collect cells from all trials by (cell_id, cell_index)
+                all_cells_by_key: Dict[Tuple, List[Dict]] = defaultdict(list)
+                for trial in trial_datas:
+                    cells = trial.get("kernels", {}).get(kernel, {}).get(phase, {}).get(cell_list_key, [])
+                    for c in cells:
+                        key = (c.get("cell_id"), c.get("cell_index"))
+                        all_cells_by_key[key].append(c)
+
+                # Average each cell group
+                averaged_cells = []
+                for (cell_id, cell_index), trial_cells in sorted(
+                    all_cells_by_key.items(),
+                    key=lambda x: x[0][1] if x[0][1] is not None else 0
+                ):
+                    avg_cell = average_cell_metrics(trial_cells)
+                    averaged_cells.append(avg_cell)
+
+                phase_data[cell_list_key] = averaged_cells
+
+            # Average totals
+            all_totals = [
+                t.get("kernels", {}).get(kernel, {}).get(phase, {}).get("totals", {})
+                for t in trial_datas
+            ]
+            phase_data["totals"] = average_dict_values(all_totals)
+
+    return result
 
 
 def parse_remote_path(path: str) -> Tuple[bool, str, str, str]:
@@ -298,8 +452,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     baseline_totals = baseline_timing.get("totals", {}) if baseline_timing else {}
     flowbook_totals = flowbook_timing.get("totals", {}) if flowbook_timing else {}
 
-    baseline_runtime = baseline_totals.get("cell_runtime_ms", 0.0)
-    flowbook_runtime = flowbook_totals.get("cell_runtime_ms", 0.0)
+    # Support both v1.0 (cell_runtime_ms) and v2.0 (execute_duration_ms) key names
+    baseline_runtime = baseline_totals.get("cell_runtime_ms") or baseline_totals.get("execute_duration_ms", 0.0)
+    flowbook_runtime = flowbook_totals.get("cell_runtime_ms") or flowbook_totals.get("execute_duration_ms", 0.0)
     state_overhead = flowbook_totals.get("state_duration_ms", 0.0)
     check_overhead = flowbook_totals.get("check_duration_ms", 0.0)
     flowbook_total = flowbook_runtime
@@ -339,8 +494,8 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     rerun_flowbook_cells = flowbook_timing.get("rerun_cells", []) if flowbook_timing else []
     num_reruns = len(rerun_flowbook_cells)
 
-    rerun_baseline_runtime = sum(c.get("cell_runtime_ms", 0) for c in rerun_baseline_cells)
-    rerun_flowbook_runtime = sum(c.get("cell_runtime_ms", 0) for c in rerun_flowbook_cells)
+    rerun_baseline_runtime = sum(c.get("cell_runtime_ms") or c.get("execute_duration_ms", 0) for c in rerun_baseline_cells)
+    rerun_flowbook_runtime = sum(c.get("cell_runtime_ms") or c.get("execute_duration_ms", 0) for c in rerun_flowbook_cells)
     rerun_state_overhead = sum(c.get("state_duration_ms", 0) for c in rerun_flowbook_cells)
     rerun_check_overhead = sum(c.get("check_duration_ms", 0) for c in rerun_flowbook_cells)
     rerun_flowbook_total = rerun_flowbook_runtime
@@ -366,7 +521,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         last_fc = flowbook_timing_cells[-1]
         last_bc = baseline_timing_cells[-1]
 
-        last_baseline_runtime = last_bc.get("cell_runtime_ms", 0.0)
+        last_baseline_runtime = last_bc.get("cell_runtime_ms") or last_bc.get("execute_duration_ms", 0.0)
         last_state = last_fc.get("state_duration_ms", 0.0)
         last_check = last_fc.get("check_duration_ms", 0.0)
 
@@ -1966,26 +2121,46 @@ def main():
         print("Error: No files found matching the specified paths", file=sys.stderr)
         sys.exit(1)
 
-    # Load all files
+    # Group trial files by notebook stem
+    trial_groups = group_trial_files(resolved_files)
+
+    # Load all files, averaging trials when multiple exist for the same notebook
     stats_list: List[FileStats] = []
     file_data: Dict[str, Dict[str, Any]] = {}
 
-    for file_path in resolved_files:
-        if not os.path.exists(file_path):
-            print(f"Warning: File not found: {file_path}", file=sys.stderr)
+    for stem, trial_files in trial_groups.items():
+        # Filter to existing files
+        existing_files = [f for f in trial_files if os.path.exists(f)]
+        if not existing_files:
+            print(f"Warning: No files found for {stem}", file=sys.stderr)
             continue
 
         try:
-            data = load_comparison_json(file_path)
-            stats = compute_file_stats(data, file_path)
+            if len(existing_files) > 1:
+                # Multiple trials - load all and average
+                print(f"Averaging {len(existing_files)} trials for {stem}", file=sys.stderr)
+                trial_datas = []
+                for trial_file in sorted(existing_files):
+                    trial_data = load_comparison_json(trial_file)
+                    trial_datas.append(trial_data)
+                data = average_trial_data(trial_datas)
+                # Use stem as the representative path
+                representative_path = sorted(existing_files)[0]
+            else:
+                # Single file
+                representative_path = existing_files[0]
+                data = load_comparison_json(representative_path)
+
+            stats = compute_file_stats(data, representative_path)
             stats_list.append(stats)
-            file_data[file_path] = data
+            file_data[representative_path] = data
+
             # Print any memory measurement warnings
             warnings = extract_warnings(data)
             for w in warnings:
-                print(f"Memory warning ({Path(file_path).name}): {w}", file=sys.stderr)
+                print(f"Memory warning ({Path(representative_path).name}): {w}", file=sys.stderr)
         except Exception as e:
-            print(f"Warning: Error loading {file_path}: {e}", file=sys.stderr)
+            print(f"Warning: Error loading {stem}: {e}", file=sys.stderr)
             continue
 
     if not stats_list:

@@ -1759,6 +1759,12 @@ class CompareBaselineCommand(NotebookCommand):
             default=0,
             help="Number of extra top-to-bottom passes after initial run (default: 0)",
         )
+        subparser.add_argument(
+            "--trials",
+            type=int,
+            default=1,
+            help="Number of trials to run. Each trial saved to separate file (e.g., notebook-1.json, notebook-2.json)",
+        )
         return subparser
 
     async def process(
@@ -1790,6 +1796,7 @@ class CompareBaselineCommand(NotebookCommand):
         cell_timeout = kwargs.get("timeout", 3600.0)
         skip_memory = kwargs.get("skip_memory", False)
         rerun_k = kwargs.get("rerun_k", 0)
+        num_trials = kwargs.get("trials", 1)
         notebook_path = kwargs.get("notebook_path", "unknown.ipynb")
 
         cells = notebook_content.get("cells", [])
@@ -1798,6 +1805,19 @@ class CompareBaselineCommand(NotebookCommand):
         # Check if HeapSizer is available for memory phases
         heapsizer_available = _is_heapsizer_available() and not skip_memory
 
+        # Prepare output directory
+        from flowbook.util.output import output as global_output
+        timings_dir = Path(global_output.timings_file).parent
+        notebook_stem = Path(notebook_path).stem
+
+        # Track outputs across all trials
+        all_json_paths: List[Path] = []
+        last_baseline_total = 0.0
+        last_flowbook_execute = 0.0
+        last_flowbook_code = 0.0
+        last_flowbook_state = 0.0
+        last_flowbook_check = 0.0
+
         with self.timing_context() as get_elapsed:
             log(f"Starting 4-phase baseline vs FlowBook comparison...")
             log(f"Notebook: {notebook_path}")
@@ -1805,172 +1825,208 @@ class CompareBaselineCommand(NotebookCommand):
             log(f"HeapSizer available: {heapsizer_available}")
             if rerun_k > 0:
                 log(f"Rerun passes: {rerun_k} (will execute all {len(code_cells)} cells {rerun_k} extra time(s))")
+            if num_trials > 1:
+                log(f"Trials: {num_trials}")
             log("")
 
-            # ============================================================
-            # PHASE 1: FlowBook Timing (Scalene OFF)
-            # ============================================================
-            log("=" * 60)
-            log("PHASE 1: FLOWBOOK TIMING (Scalene OFF)")
-            log("=" * 60)
-            flowbook_timing = run_flowbook_timing(notebook_content, cell_timeout, rerun_k)
-            log("")
+            for trial_idx in range(1, num_trials + 1):
+                if num_trials > 1:
+                    log("=" * 60)
+                    log(f"TRIAL {trial_idx}/{num_trials}")
+                    log("=" * 60)
+                    log("")
 
-            # ============================================================
-            # PHASE 2: Baseline Timing (Scalene OFF)
-            # ============================================================
-            log("=" * 60)
-            log("PHASE 2: BASELINE TIMING (Scalene OFF)")
-            log("=" * 60)
-            baseline_timing = run_baseline_timing(notebook_content, cell_timeout, rerun_k)
-            log("")
-
-            # ============================================================
-            # PHASE 3: Baseline Memory (HeapSizer) - if available
-            # ============================================================
-            baseline_memory = None
-            if heapsizer_available:
+                # ============================================================
+                # PHASE 1: FlowBook Timing (Scalene OFF)
+                # ============================================================
                 log("=" * 60)
-                log("PHASE 3: BASELINE MEMORY (HeapSizer)")
+                log("PHASE 1: FLOWBOOK TIMING (Scalene OFF)")
                 log("=" * 60)
-                baseline_memory = run_baseline_memory(notebook_content, cell_timeout, rerun_k)
+                flowbook_timing = run_flowbook_timing(notebook_content, cell_timeout, rerun_k)
                 log("")
 
-            # ============================================================
-            # PHASE 4: FlowBook Memory (HeapSizer) - if available
-            # ============================================================
-            flowbook_memory = None
-            if heapsizer_available:
+                # ============================================================
+                # PHASE 2: Baseline Timing (Scalene OFF)
+                # ============================================================
                 log("=" * 60)
-                log("PHASE 4: FLOWBOOK MEMORY (HeapSizer)")
+                log("PHASE 2: BASELINE TIMING (Scalene OFF)")
                 log("=" * 60)
-                flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout, rerun_k)
+                baseline_timing = run_baseline_timing(notebook_content, cell_timeout, rerun_k)
                 log("")
 
-            # Build comparison result with new structure
-            metadata_dict: Dict[str, Any] = {
-                "num_cells": len(code_cells),
-                "timeout_seconds": cell_timeout,
-            }
-            if rerun_k > 0:
-                metadata_dict["rerun_k"] = rerun_k
+                # ============================================================
+                # PHASE 3: Baseline Memory (HeapSizer) - if available
+                # ============================================================
+                baseline_memory = None
+                if heapsizer_available:
+                    log("=" * 60)
+                    log("PHASE 3: BASELINE MEMORY (HeapSizer)")
+                    log("=" * 60)
+                    baseline_memory = run_baseline_memory(notebook_content, cell_timeout, rerun_k)
+                    log("")
 
-            comparison = ComparisonResult(
-                version="2.0",
-                notebook_path=str(notebook_path),
-                timestamp=datetime.now().isoformat(),
-                kernels={
-                    "baseline": KernelResults(
-                        kernel_name="baseline_kernel",
-                        timing=baseline_timing,
-                        memory=baseline_memory,
-                    ),
-                    "flowbook": KernelResults(
-                        kernel_name="flowbook_kernel",
-                        timing=flowbook_timing,
-                        memory=flowbook_memory,
-                    ),
-                },
-                scalene_available=heapsizer_available,  # Keep field name for compatibility
-                metadata=metadata_dict,
-            )
+                # ============================================================
+                # PHASE 4: FlowBook Memory (HeapSizer) - if available
+                # ============================================================
+                flowbook_memory = None
+                if heapsizer_available:
+                    log("=" * 60)
+                    log("PHASE 4: FLOWBOOK MEMORY (HeapSizer)")
+                    log("=" * 60)
+                    flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout, rerun_k)
+                    log("")
 
-            # Convert to dict for JSON serialization
-            def to_dict(obj):
-                if obj is None:
-                    return None
-                if hasattr(obj, '__dict__'):
-                    result = {}
-                    for key, value in obj.__dict__.items():
-                        result[key] = to_dict(value)
-                    return result
-                elif isinstance(obj, list):
-                    return [to_dict(item) for item in obj]
-                elif isinstance(obj, dict):
-                    return {k: to_dict(v) for k, v in obj.items()}
+                # Build comparison result with new structure
+                metadata_dict: Dict[str, Any] = {
+                    "num_cells": len(code_cells),
+                    "timeout_seconds": cell_timeout,
+                }
+                if rerun_k > 0:
+                    metadata_dict["rerun_k"] = rerun_k
+                if num_trials > 1:
+                    metadata_dict["trial"] = trial_idx
+                    metadata_dict["num_trials"] = num_trials
+
+                comparison = ComparisonResult(
+                    version="2.0",
+                    notebook_path=str(notebook_path),
+                    timestamp=datetime.now().isoformat(),
+                    kernels={
+                        "baseline": KernelResults(
+                            kernel_name="baseline_kernel",
+                            timing=baseline_timing,
+                            memory=baseline_memory,
+                        ),
+                        "flowbook": KernelResults(
+                            kernel_name="flowbook_kernel",
+                            timing=flowbook_timing,
+                            memory=flowbook_memory,
+                        ),
+                    },
+                    scalene_available=heapsizer_available,  # Keep field name for compatibility
+                    metadata=metadata_dict,
+                )
+
+                # Convert to dict for JSON serialization
+                def to_dict(obj):
+                    if obj is None:
+                        return None
+                    if hasattr(obj, '__dict__'):
+                        result = {}
+                        for key, value in obj.__dict__.items():
+                            result[key] = to_dict(value)
+                        return result
+                    elif isinstance(obj, list):
+                        return [to_dict(item) for item in obj]
+                    elif isinstance(obj, dict):
+                        return {k: to_dict(v) for k, v in obj.items()}
+                    else:
+                        return obj
+
+                comparison_dict = to_dict(comparison)
+
+                # Save JSON output - numbered for multi-trial
+                if num_trials > 1:
+                    json_output_path = timings_dir / f"{notebook_stem}_comparison-{trial_idx}.json"
                 else:
-                    return obj
+                    json_output_path = timings_dir / f"{notebook_stem}_comparison.json"
 
-            comparison_dict = to_dict(comparison)
+                with open(json_output_path, "w") as f:
+                    json.dump(comparison_dict, f, indent=2)
 
-            # Save JSON output
-            from flowbook.util.output import output as global_output
-            timings_dir = Path(global_output.timings_file).parent
-            notebook_stem = Path(notebook_path).stem
-            json_output_path = timings_dir / f"{notebook_stem}_comparison.json"
+                all_json_paths.append(json_output_path)
 
-            with open(json_output_path, "w") as f:
-                json.dump(comparison_dict, f, indent=2)
+                # Print summary for this trial
+                log("=" * 60)
+                if num_trials > 1:
+                    log(f"TRIAL {trial_idx} SUMMARY")
+                else:
+                    log("SUMMARY")
+                log("=" * 60)
 
-            # Print summary
-            log("=" * 60)
-            log("SUMMARY")
-            log("=" * 60)
+                baseline_total = baseline_timing.totals.get("execute_duration_ms", 0)
+                flowbook_execute = flowbook_timing.totals.get("execute_duration_ms", 0)
+                flowbook_code = flowbook_timing.totals.get("code_duration_ms", 0)
+                flowbook_state = flowbook_timing.totals.get("state_duration_ms", 0)
+                flowbook_check = flowbook_timing.totals.get("check_duration_ms", 0)
 
-            baseline_total = baseline_timing.totals.get("execute_duration_ms", 0)
-            flowbook_execute = flowbook_timing.totals.get("execute_duration_ms", 0)
-            flowbook_code = flowbook_timing.totals.get("code_duration_ms", 0)
-            flowbook_state = flowbook_timing.totals.get("state_duration_ms", 0)
-            flowbook_check = flowbook_timing.totals.get("check_duration_ms", 0)
+                # Track last trial for return value
+                last_baseline_total = baseline_total
+                last_flowbook_execute = flowbook_execute
+                last_flowbook_code = flowbook_code
+                last_flowbook_state = flowbook_state
+                last_flowbook_check = flowbook_check
 
-            if baseline_total > 0:
-                state_overhead_pct = (flowbook_state / baseline_total) * 100
-                check_overhead_pct = (flowbook_check / baseline_total) * 100
-            else:
-                state_overhead_pct = 0.0
-                check_overhead_pct = 0.0
+                if baseline_total > 0:
+                    state_overhead_pct = (flowbook_state / baseline_total) * 100
+                    check_overhead_pct = (flowbook_check / baseline_total) * 100
+                else:
+                    state_overhead_pct = 0.0
+                    check_overhead_pct = 0.0
 
-            log("TIMING:")
-            log(f"  Baseline code time:   {baseline_total:,.1f}ms")
-            log(f"  FlowBook execute:     {flowbook_execute:,.1f}ms")
-            log(f"  FlowBook code time:   {flowbook_code:,.1f}ms")
-            log(f"  FlowBook state time:  {flowbook_state:,.1f}ms ({state_overhead_pct:.1f}%)")
-            log(f"  FlowBook check time:  {flowbook_check:,.1f}ms ({check_overhead_pct:.1f}%)")
-            log("")
-
-            if heapsizer_available and baseline_memory and flowbook_memory:
-                baseline_mem = baseline_memory.totals.get("final_footprint_mb", 0)
-                flowbook_mem = flowbook_memory.totals.get("final_footprint_mb", 0)
-                mem_overhead = flowbook_mem - baseline_mem
-
-                log("MEMORY (from HeapSizer):")
-                log(f"  Baseline namespace:   {baseline_mem:,.1f}MB")
-                log(f"  FlowBook namespace:   {flowbook_mem:,.1f}MB")
-                log(f"  Memory overhead:      {mem_overhead:+,.1f}MB")
+                log("TIMING:")
+                log(f"  Baseline code time:   {baseline_total:,.1f}ms")
+                log(f"  FlowBook execute:     {flowbook_execute:,.1f}ms")
+                log(f"  FlowBook code time:   {flowbook_code:,.1f}ms")
+                log(f"  FlowBook state time:  {flowbook_state:,.1f}ms ({state_overhead_pct:.1f}%)")
+                log(f"  FlowBook check time:  {flowbook_check:,.1f}ms ({check_overhead_pct:.1f}%)")
                 log("")
 
-            if rerun_k > 0:
-                rerun_baseline = baseline_timing.totals.get("rerun_runtime_ms", 0)
-                rerun_flowbook_execute = flowbook_timing.totals.get("rerun_execute_ms", 0)
-                rerun_flowbook_code = flowbook_timing.totals.get("rerun_code_ms", 0)
-                rerun_state = flowbook_timing.totals.get("rerun_state_ms", 0)
-                rerun_check = flowbook_timing.totals.get("rerun_check_ms", 0)
-                total_rerun_cells = rerun_k * len(code_cells)
+                if heapsizer_available and baseline_memory and flowbook_memory:
+                    baseline_mem = baseline_memory.totals.get("final_footprint_mb", 0)
+                    flowbook_mem = flowbook_memory.totals.get("final_footprint_mb", 0)
+                    mem_overhead = flowbook_mem - baseline_mem
 
-                log(f"RERUN TIMING ({rerun_k} pass(es) x {len(code_cells)} cells = {total_rerun_cells} executions):")
-                log(f"  Baseline rerun:       {rerun_baseline:,.1f}ms")
-                log(f"  FlowBook execute:     {rerun_flowbook_execute:,.1f}ms")
-                log(f"  FlowBook code:        {rerun_flowbook_code:,.1f}ms")
-                log(f"  FlowBook state time:  {rerun_state:,.1f}ms")
-                log(f"  FlowBook check time:  {rerun_check:,.1f}ms")
+                    log("MEMORY (from HeapSizer):")
+                    log(f"  Baseline namespace:   {baseline_mem:,.1f}MB")
+                    log(f"  FlowBook namespace:   {flowbook_mem:,.1f}MB")
+                    log(f"  Memory overhead:      {mem_overhead:+,.1f}MB")
+                    log("")
+
+                if rerun_k > 0:
+                    rerun_baseline = baseline_timing.totals.get("rerun_runtime_ms", 0)
+                    rerun_flowbook_execute = flowbook_timing.totals.get("rerun_execute_ms", 0)
+                    rerun_flowbook_code = flowbook_timing.totals.get("rerun_code_ms", 0)
+                    rerun_state = flowbook_timing.totals.get("rerun_state_ms", 0)
+                    rerun_check = flowbook_timing.totals.get("rerun_check_ms", 0)
+                    total_rerun_cells = rerun_k * len(code_cells)
+
+                    log(f"RERUN TIMING ({rerun_k} pass(es) x {len(code_cells)} cells = {total_rerun_cells} executions):")
+                    log(f"  Baseline rerun:       {rerun_baseline:,.1f}ms")
+                    log(f"  FlowBook execute:     {rerun_flowbook_execute:,.1f}ms")
+                    log(f"  FlowBook code:        {rerun_flowbook_code:,.1f}ms")
+                    log(f"  FlowBook state time:  {rerun_state:,.1f}ms")
+                    log(f"  FlowBook check time:  {rerun_check:,.1f}ms")
+                    log("")
+
+                log(f"Results saved to: {json_output_path}")
                 log("")
 
-            log(f"Results saved to: {json_output_path}")
-            log("")
+            # Final summary for multi-trial runs
+            if num_trials > 1:
+                log("=" * 60)
+                log(f"COMPLETED {num_trials} TRIALS")
+                log("=" * 60)
+                for path in all_json_paths:
+                    log(f"  {path}")
+                log("")
 
             total_time = get_elapsed()
 
+        # Return the last trial's results (or single trial results)
         return ProcessingResult(
             notebook=notebook_content,
             metadata={
                 "status": "success",
                 "command": self.command_name,
-                "comparison_file": str(json_output_path),
-                "baseline_code_ms": baseline_total,
-                "flowbook_execute_ms": flowbook_execute,
-                "flowbook_code_ms": flowbook_code,
-                "flowbook_state_ms": flowbook_state,
-                "flowbook_check_ms": flowbook_check,
+                "comparison_file": str(all_json_paths[-1]) if all_json_paths else "",
+                "comparison_files": [str(p) for p in all_json_paths] if num_trials > 1 else None,
+                "num_trials": num_trials if num_trials > 1 else None,
+                "baseline_code_ms": last_baseline_total,
+                "flowbook_execute_ms": last_flowbook_execute,
+                "flowbook_code_ms": last_flowbook_code,
+                "flowbook_state_ms": last_flowbook_state,
+                "flowbook_check_ms": last_flowbook_check,
                 "scalene_available": heapsizer_available,  # Keep field name for compatibility
             },
             total_cost=0.0,
