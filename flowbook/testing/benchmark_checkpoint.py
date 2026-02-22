@@ -740,8 +740,6 @@ def _flowbook_measure_memory():
                             _cp_unique += _oh
             # Add overhead for the MemoryCheckpoint object itself
             _ckpt_meta_oh = _sys.getsizeof(_ckpt)
-            if hasattr(_ckpt, 'reverse_memo'):
-                _ckpt_meta_oh += _sys.getsizeof(_ckpt.reverse_memo)
             _cp_overhead += _ckpt_meta_oh
             _cp_unique += _ckpt_meta_oh
             _cp_overheads[_name] = _cp_overhead
@@ -780,10 +778,6 @@ def _flowbook_measure_memory():
                 _sharing.append(_info)
             _diag['sharing'] = _sharing
             _diag['var_overheads'] = _var_overheads
-            # Report reverse_memo size for last checkpoint
-            if hasattr(_last_ckpt, 'reverse_memo'):
-                _diag['reverse_memo_entries'] = len(_last_ckpt.reverse_memo)
-                _diag['reverse_memo_bytes'] = _sys.getsizeof(_last_ckpt.reverse_memo)
 
     # Use unique (deduplicated) overhead for the primary total so that
     # plots reflect actual memory footprint, not reference-counted refs.
@@ -1185,10 +1179,6 @@ def run_benchmark(
                         for var_name, var_oh, var_type in diag['var_overheads']:
                             if var_oh > 100_000:
                                 log(f"    {var_name} ({var_type}): {var_oh/mb:,.1f}MB")
-                    if 'reverse_memo_entries' in diag:
-                        rm_entries = diag['reverse_memo_entries']
-                        rm_bytes = diag['reverse_memo_bytes']
-                        log(f"  reverse_memo: {rm_entries:,} entries, {rm_bytes/mb:,.1f}MB hash table")
                     if 'sharing' in diag:
                         log(f"  Array sharing (last checkpoint):")
                         for info in diag['sharing']:

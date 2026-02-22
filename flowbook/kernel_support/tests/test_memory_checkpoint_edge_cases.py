@@ -530,39 +530,6 @@ class TestCheckpointDiff:
 
 
 # ============================================================================
-# ORIGINAL ID TRACKING TESTS
-# ============================================================================
-
-
-class TestOriginalIdTracking:
-    """Test get_original_id method."""
-
-    def test_get_original_id_with_known_id(self):
-        """Test get_original_id with ID in reverse_memo."""
-        original_list = [1, 2, 3]
-        memo = {id(original_list): original_list.copy()}
-        user_ns = {"lst": memo[id(original_list)]}
-
-        checkpoint = MemoryCheckpoint("test", user_ns, memo)
-
-        # Get original ID for the copied list
-        copied_id = id(user_ns["lst"])
-        original_id = checkpoint.get_original_id(copied_id)
-
-        assert original_id == id(original_list)
-
-    def test_get_original_id_with_unknown_id(self):
-        """Test get_original_id with unknown ID returns input."""
-        checkpoint = MemoryCheckpoint("test", {"x": 1}, {})
-
-        unknown_id = 99999999
-        result = checkpoint.get_original_id(unknown_id)
-
-        # Should return the input ID if not found
-        assert result == unknown_id
-
-
-# ============================================================================
 # TYPE MODELS TESTS
 # ============================================================================
 

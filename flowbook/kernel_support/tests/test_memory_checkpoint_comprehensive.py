@@ -176,8 +176,8 @@ class TestSharedReferences:
         # Should still be shared after restore
         assert user_ns['df'].iloc[0, 0] is user_ns['df'].iloc[0, 1]
 
-    def test_reverse_memo_tracking(self):
-        """Test that reverse_memo correctly tracks object identity."""
+    def test_shared_reference_preservation(self):
+        """Test that shared references are preserved in checkpoint copies."""
         cp = MemoryCheckpoints()
 
         shared = [1, 2, 3]
@@ -186,11 +186,7 @@ class TestSharedReferences:
         saved, removed = cp.save('test', user_ns)
         checkpoint = cp.get('test')
 
-        # The reverse_memo should track the copied shared list
-        copied_shared_id = id(checkpoint.user_ns['a'])
-        original_id = checkpoint.get_original_id(copied_shared_id)
-
-        # Both 'a' and 'b' should map to the same original ID
+        # Both 'a' and 'b' should point to the same copied list
         assert id(checkpoint.user_ns['a']) == id(checkpoint.user_ns['b'])
         # But 'c' should be different
         assert id(checkpoint.user_ns['a']) != id(checkpoint.user_ns['c'])

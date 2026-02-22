@@ -151,22 +151,6 @@ This filtering happens at checkpoint time and restore time to ensure
 consistency.
 
 
-4.6 Reverse Memo for Identity Tracking
---------------------------------------
-The MemoryCheckpoint class stores a reverse_memo mapping copied object IDs back
-to original memo keys. This enables:
-  - Tracking which objects are shared references vs. independent copies
-  - Diff algorithms to detect structural changes (aliasing)
-  - Debugging copy behavior
-
-Example:
-  original_list = [1, 2, 3]
-  namespace = {"a": original_list, "b": original_list}  # Same object
-
-After copying, both copies should point to the same copied list.
-The reverse_memo maps: id(copied_list) → id(original_list)
-
-
 5. IMPLEMENTATION DETAILS
 -------------------------
 
@@ -743,7 +727,7 @@ The alias index is built LAZILY on first query and stored in MemoryCheckpoint:
 
 12.5 Usage
 ~~~~~~~~~~
-  checkpoint = MemoryCheckpoint(name, user_ns, memo)
+  checkpoint = MemoryCheckpoint(name, user_ns)
 
   # Alias index is built lazily on first call
   accessed = {"a", "b"}
@@ -1499,13 +1483,11 @@ class MemoryCheckpoint:
     A snapshot of the kernel's user namespace at a point in time.
 
     MemoryCheckpoints store deep copies of variables along with metadata for
-    tracking object identity across copies (via reverse_memo) and deep
-    alias detection (via precomputed alias index).
+    deep alias detection (via precomputed alias index).
 
     Attributes:
         name: Identifier for this checkpoint
         user_ns: Deep-copied user namespace variables
-        reverse_memo: Maps copied object IDs back to original memo keys
 
     Deep Alias Detection Attributes (built lazily on first query, see section 12):
         _reachable_ids: Dict[var_name, Set[obj_id]] - all object IDs reachable
@@ -1529,7 +1511,6 @@ class MemoryCheckpoint:
         self,
         name: str,
         user_ns: dict[str, Any],
-        memo: dict[int, Any],
         cudf_origins: Optional['cudf_compat.CuDFOriginTracker'] = None,
     ):
         """
@@ -1538,12 +1519,10 @@ class MemoryCheckpoint:
         Args:
             name: Identifier for this checkpoint
             user_ns: Deep-copied user namespace variables
-            memo: Dictionary mapping original object IDs to their copies
             cudf_origins: Optional tracker for cudf object origins (for restore)
         """
         self.name = name
         self.user_ns = user_ns
-        self.reverse_memo = {id(v): k for k, v in memo.items()}
 
         # cuDF origin tracking (for restore)
         from flowbook.kernel_support import cudf_compat
@@ -1716,18 +1695,6 @@ class MemoryCheckpoint:
 
         return all_relevant_vars
 
-    def get_original_id(self, obj_id: int) -> int:
-        """
-        Map a copied object's ID back to its original memo key.
-
-        Args:
-            obj_id: ID of a copied object
-
-        Returns:
-            Original memo key, or obj_id if not found in memo
-        """
-        return self.reverse_memo.get(obj_id, obj_id)
-
     @staticmethod
     def diff(
         a: MemoryCheckpoint, b: MemoryCheckpoint, keys_to_include: set[str] | None = None,
@@ -1735,7 +1702,6 @@ class MemoryCheckpoint:
         column_rbw: Optional[Dict[str, Set[str]]] = None,
         structural_reads: Optional[Dict[str, Set[str]]] = None,
         structural_mode: Optional["StructuralTrackingMode"] = None,
-        read_only_keys: Optional[Set[str]] = None,
     ):
         """
         Compare two checkpoints and return structured diff results.
@@ -1755,10 +1721,6 @@ class MemoryCheckpoint:
                        (e.g., 'columns', 'shape', 'len'). Used with structural_mode.
             structural_mode: How to handle structural reads (OFF, WARN, ENFORCE).
                        If None, defaults to OFF.
-            read_only_keys: Optional set of keys that were only read (not written).
-                       These variables cannot have changed between a and b, so
-                       comparison is skipped entirely for a significant speedup
-                       on large read-only arrays.
 
         Returns:
             MemoryCheckpointDiffResult: Structured diff tree with only differences
@@ -1781,7 +1743,7 @@ class MemoryCheckpoint:
             )
 
         with timer(key="checkpoint_diff:compare", message="[diff] Compare namespaces"):
-            result = differ.diff(a.user_ns, b.user_ns, keys_to_include, read_only_keys)
+            result = differ.diff(a.user_ns, b.user_ns, keys_to_include)
 
         return result
 
@@ -2129,7 +2091,7 @@ class MemoryCheckpoints:
                 for k in failed:
                     removed[k] = get_type_model(checkpointable_values[k])
 
-            self.saved[name] = MemoryCheckpoint(name, cp, memo, cudf_origins)
+            self.saved[name] = MemoryCheckpoint(name, cp, cudf_origins)
 
         if self.sanity_check:
             with timer(key="checkpoint:sanity_check", message="Running sanity check"):
@@ -2493,7 +2455,6 @@ class MemoryCheckpoints:
             Dictionary with sizes in bytes:
             - checkpoints_total: Total size of all checkpoint user_ns data (excluding cached)
             - deepcopy_cache_total: Size of objects in deepcopy caches (shared across checkpoints)
-            - reverse_memo_total: Size of reverse memo mappings
             - alias_index_total: Size of deep alias detection indexes
             - var_costs_cache: Size of cached memory cost data
         """
@@ -2504,7 +2465,6 @@ class MemoryCheckpoints:
         sizes: dict[str, int] = {
             'checkpoints_total': 0,
             'deepcopy_cache_total': 0,
-            'reverse_memo_total': 0,
             'alias_index_total': 0,
             'var_costs_cache': 0,
         }
@@ -2519,10 +2479,6 @@ class MemoryCheckpoints:
         # Measure checkpoint contents
         for name, ckpt in self.saved.items():
             sizes['checkpoints_total'] += sizer.sizeof(ckpt.user_ns)
-
-            # Measure reverse_memo (dict of int -> int)
-            sizes['reverse_memo_total'] += sys.getsizeof(ckpt.reverse_memo)
-            sizes['reverse_memo_total'] += len(ckpt.reverse_memo) * 16  # Two ints per entry
 
             # Measure alias index if built
             if ckpt._alias_index_built:

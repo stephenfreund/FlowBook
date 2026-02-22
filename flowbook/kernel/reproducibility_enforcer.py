@@ -625,20 +625,6 @@ class ReproducibilityEnforcer:
         # Otherwise fall back to MemoryCheckpoint.diff (for plain MemoryCheckpoint objects)
         _is_combined = isinstance(pre_checkpoint, Checkpoint)
 
-        # ======================================================================
-        # OPTIMIZATION: Skip comparing read-only variables
-        # Variables that were only read (not written) cannot have changed between
-        # pre and post checkpoints. Skip their comparison for significant speedup
-        # on notebooks with large read-only arrays.
-        # ======================================================================
-        read_only_keys: Optional[Set[str]] = None
-        if OPT_ACCESSED_VARS_ONLY:
-            # Variables read but not written - these can't have changed
-            read_only_keys = set(tracking.reads_before_writes) - set(tracking.writes)
-            if read_only_keys:
-                from flowbook.util.output import log
-                log(f"[bwm] OPT_READ_ONLY: skipping diff for {len(read_only_keys)} read-only vars: {sorted(read_only_keys)}")
-
         with timer(key="bwm:checkpoint_diff", message=f"[bwm] Checkpoint.diff (pre vs post)"):
             if _is_combined:
                 total_diff = Checkpoint.diff(
@@ -649,7 +635,6 @@ class ReproducibilityEnforcer:
                     column_rbw=all_accessed_columns,
                     structural_reads={},
                     structural_mode=self._structural_mode,
-                    read_only_keys=read_only_keys,
                 )
                 current_diff = total_diff.memory
             else:
@@ -662,7 +647,6 @@ class ReproducibilityEnforcer:
                     column_rbw=all_accessed_columns,
                     structural_reads={},  # Empty - ConflictResolver handles this
                     structural_mode=self._structural_mode,
-                    read_only_keys=read_only_keys,
                 )
 
         # Check if diff was truncated - if so, return violation

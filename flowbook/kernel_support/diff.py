@@ -791,7 +791,6 @@ class Diff:
         a: Dict[str, Any],
         b: Dict[str, Any],
         keys_to_include: Set[str] | None = None,
-        read_only_keys: Set[str] | None = None,
     ) -> MemoryCheckpointDiffResult:
         """
         Compare two user namespaces.
@@ -800,10 +799,6 @@ class Diff:
             a: First namespace dictionary
             b: Second namespace dictionary
             keys_to_include: Optional set of keys to compare (default: all keys)
-            read_only_keys: Optional set of keys that were only read (not written).
-                           These variables cannot have changed between a and b, so
-                           comparison is skipped entirely for a significant speedup
-                           on large read-only arrays.
 
         Returns:
             MemoryCheckpointDiffResult instance containing diff trees for variables with differences.
@@ -812,10 +807,6 @@ class Diff:
         """
         if keys_to_include is None:
             keys_to_include = set(a.keys()) | set(b.keys())
-
-        # Remove read-only keys from comparison - they can't have changed
-        if read_only_keys:
-            keys_to_include = keys_to_include - read_only_keys
 
         # Reset identity tracking for each comparison
         self.id_map_a = {}

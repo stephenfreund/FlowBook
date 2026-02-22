@@ -760,7 +760,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         lines.append("")
         lines.append(f"Checkpoint data:     {self._format_bytes(internal_sizes['checkpoints_total'])}")
         lines.append(f"Deepcopy cache:      {self._format_bytes(internal_sizes['deepcopy_cache_total'])}")
-        lines.append(f"Reverse memo:        {self._format_bytes(internal_sizes['reverse_memo_total'])}")
         lines.append(f"Alias index:         {self._format_bytes(internal_sizes['alias_index_total'])}")
         lines.append(f"Var costs cache:     {self._format_bytes(internal_sizes['var_costs_cache'])}")
 
