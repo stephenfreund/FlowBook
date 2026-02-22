@@ -1688,6 +1688,15 @@ def plot_combined_v2(
                                 color='green')
 
             ax.set_title('Memory Overhead (Total vs Pre-Only)', fontsize=title_size)
+
+            # Annotate FlowBook overhead percentage at the end
+            if baseline_footprint[-1] > 0:
+                mem_overhead_pct = (cumulative[-1] - baseline_footprint[-1]) / baseline_footprint[-1] * 100
+                ax.annotate(f'{mem_overhead_pct:.1f}% overhead',
+                            xy=(cells[-1], cumulative[-1]),
+                            xytext=(5, 0), textcoords='offset points',
+                            fontsize=legend_size, va='center', ha='left',
+                            color=colors[1])
         else:
             # Original visualization without breakdown
             ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline Memory')
@@ -1701,6 +1710,15 @@ def plot_combined_v2(
                 ax.plot(cells, pre_only_total, color='green', linewidth=2, linestyle=':', marker='s', markersize=3, label='Pre-Only (no post)')
 
             ax.set_title('Memory (Total vs Pre-Only)', fontsize=title_size)
+
+            # Annotate FlowBook overhead percentage at the end
+            if baseline_footprint[-1] > 0:
+                mem_overhead_pct = (flowbook_footprint[-1] - baseline_footprint[-1]) / baseline_footprint[-1] * 100
+                ax.annotate(f'{mem_overhead_pct:.1f}% overhead',
+                            xy=(cells[-1], flowbook_footprint[-1]),
+                            xytext=(5, 0), textcoords='offset points',
+                            fontsize=legend_size, va='center', ha='left',
+                            color=colors[1])
 
         # GPU memory (orange - secondary y-axis) if present
         has_gpu = any(g > 0 for g in gpu_samples)
