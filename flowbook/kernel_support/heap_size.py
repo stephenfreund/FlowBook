@@ -740,7 +740,7 @@ class HeapSizer:
                 total += self._sizeof_dict(obj_dict, owned_only)
 
         # __slots__
-        if hasattr(obj, '__slots__'):
+        if hasattr(obj, '__slots__') and obj.__slots__ is not None:
             for slot in obj.__slots__:
                 try:
                     val = getattr(obj, slot, None)

@@ -1574,13 +1574,28 @@ def plot_combined_v2(
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
         ax.tick_params(axis='both', labelsize=tick_size)
-        ax.legend(loc="lower right", fontsize=legend_size)
 
         # Add separator line for rerun phase
         if timing_initial_count < len(cells):
-            ax.axvline(x=timing_initial_count + 0.5, color='red', linestyle='--', linewidth=2)
+            ax.axvline(x=timing_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
 
-        # Add timing breakdown text box in upper-left (no overlap with legend now)
+        # Right y-axis: per-cell FlowBook overhead as bar chart
+        ax2 = ax.twinx()
+        # Overhead per cell = state + check + other (everything except code time)
+        overhead_per_cell = state_arr + check_arr + other_arr
+        bar_width = 0.6
+        ax2.bar(cells, overhead_per_cell / 1000, alpha=0.3, color='gray', label="Overhead/Cell", width=bar_width)
+        ax2.set_ylabel("Overhead per Cell (seconds)", fontsize=label_size)
+        ax2.tick_params(axis='y', labelsize=tick_size)
+        ax2.grid(False)  # Disable grid lines on secondary axis
+        ax2.set_ylim(bottom=0)
+
+        # Combined legend from both axes
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=legend_size)
+
+        # Add timing breakdown text box
         total_baseline_s = baseline_cumsum[-1] / 1000
         total_code_s = code_cumsum[-1] / 1000
         total_state_s = state_cumsum[-1] / 1000
@@ -1588,9 +1603,9 @@ def plot_combined_v2(
         total_other_s = other_cumsum[-1] / 1000
         total_flowbook_s = total_code_s + total_state_s + total_check_s + total_other_s
 
-        textstr = f'Baseline: {total_baseline_s:.2f}s\n\nFlowBook:\n  Code: {total_code_s:.2f}s\n  State: {total_state_s:.2f}s\n  Check: {total_check_s:.2f}s\n  Other: {total_other_s:.2f}s\n  Total: {total_flowbook_s:.2f}s'
+        textstr = f'Baseline: {total_baseline_s:.2f}s\nFlowBook: {total_flowbook_s:.2f}s'
         props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=legend_size,
+        ax.text(0.02, 0.70, textstr, transform=ax.transAxes, fontsize=legend_size,
                 verticalalignment='top', horizontalalignment='left', bbox=props)
 
         if baseline_cumsum[-1] > 0:
