@@ -1009,9 +1009,17 @@ def deepcopy_cudf(obj: Any, memo: Dict[int, Any]) -> Any:
         if cached_deepcopy is not None:
             # Fast path: O(1) shallow copy of cached deepcopy
             # Safe because: CoW protects data, Index is immutable, cache is read-only
+            from flowbook.util.output import log
+            log(f"cudf cache HIT for {type(obj).__name__} id={obj_id} - using shallow copy")
             result = _shallow_copy_for_checkpoint(cached_deepcopy)
             memo[obj_id] = result
             return result
+        else:
+            from flowbook.util.output import log
+            log(f"cudf cache partial HIT for {type(obj).__name__} id={obj_id} - pandas cached but no deepcopy")
+    else:
+        from flowbook.util.output import log
+        log(f"cudf cache MISS for {type(obj).__name__} id={obj_id} - fingerprint changed or not cached")
 
     # Cache MISS or no deepcopy cached - do full conversion + deepcopy
     pandas_copy = to_pandas_cached(obj)
@@ -1022,6 +1030,8 @@ def deepcopy_cudf(obj: Any, memo: Dict[int, Any]) -> Any:
     # Cache the deepcopy for future HITs
     if is_cache_hit or cache.has_valid_cache(obj):
         cache.cache_deepcopy(obj_id, result)
+        from flowbook.util.output import log
+        log(f"cudf cache stored deepcopy for {type(obj).__name__} id={obj_id}")
 
     memo[obj_id] = result
     return result
