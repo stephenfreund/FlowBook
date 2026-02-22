@@ -658,6 +658,151 @@ class TestCudfCheckpointCache:
 
 
 @pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
+class TestTwoLevelCaching:
+    """Test two-level caching optimization for cudf deepcopy."""
+
+    def test_cache_hit_returns_shallow_copy(self):
+        """Cache HIT should return O(1) shallow copy of cached deepcopy."""
+        import cudf
+        import numpy as np
+        import time
+
+        # Enable CoW which is required for shallow copy safety
+        pd.options.mode.copy_on_write = True
+
+        try:
+            gdf = cudf.DataFrame({f'c{i}': np.random.randn(100_000) for i in range(20)})
+
+            # Clear cache to start fresh
+            cudf_compat.get_checkpoint_cache().clear()
+
+            # First deepcopy - cache miss, does full conversion + deepcopy
+            memo1 = {}
+            t1 = time.perf_counter()
+            result1 = cudf_compat.deepcopy_cudf(gdf, memo1)
+            first_time = time.perf_counter() - t1
+
+            # Second deepcopy - cache hit, should be much faster
+            memo2 = {}
+            t2 = time.perf_counter()
+            result2 = cudf_compat.deepcopy_cudf(gdf, memo2)
+            second_time = time.perf_counter() - t2
+
+            # Cache hit should be at least 5x faster
+            assert second_time < first_time / 5, (
+                f"Cache hit should be faster. First: {first_time*1000:.1f}ms, "
+                f"Second: {second_time*1000:.1f}ms"
+            )
+
+            # Results should be independent (CoW protects the data)
+            original_c0 = result2['c0'].values.copy()
+            result1.loc[:, 'c0'] = 0  # Modify result1
+            # result2 should be unchanged due to CoW
+            assert np.allclose(result2['c0'].values, original_c0)
+        finally:
+            pd.options.mode.copy_on_write = False
+
+    def test_results_are_independent_with_cow(self):
+        """Multiple cache HITs should return independent copies (CoW safety)."""
+        import cudf
+
+        # Enable CoW which is required for shallow copy safety
+        pd.options.mode.copy_on_write = True
+
+        try:
+            gdf = cudf.DataFrame({'a': [1, 2, 3], 'b': [4.0, 5.0, 6.0]})
+
+            cudf_compat.get_checkpoint_cache().clear()
+
+            memo1 = {}
+            result1 = cudf_compat.deepcopy_cudf(gdf, memo1)
+
+            memo2 = {}
+            result2 = cudf_compat.deepcopy_cudf(gdf, memo2)
+
+            memo3 = {}
+            result3 = cudf_compat.deepcopy_cudf(gdf, memo3)
+
+            # Modify result1
+            result1['a'] = [10, 20, 30]
+
+            # result2 and result3 should be unaffected (CoW protects them)
+            assert result2['a'].tolist() == [1, 2, 3]
+            assert result3['a'].tolist() == [1, 2, 3]
+        finally:
+            pd.options.mode.copy_on_write = False
+
+    def test_cache_invalidated_on_data_change(self):
+        """When data changes, deepcopy cache should be invalidated."""
+        import cudf
+
+        gdf = cudf.DataFrame({'a': [1, 2, 3]})
+
+        cudf_compat.get_checkpoint_cache().clear()
+
+        # First deepcopy
+        memo1 = {}
+        result1 = cudf_compat.deepcopy_cudf(gdf, memo1)
+        assert result1['a'].tolist() == [1, 2, 3]
+
+        # Modify the cudf data
+        gdf['a'] = [100, 200, 300]
+
+        # Second deepcopy should get new data (cache invalidated)
+        memo2 = {}
+        result2 = cudf_compat.deepcopy_cudf(gdf, memo2)
+        assert result2['a'].tolist() == [100, 200, 300]
+
+    def test_deepcopy_cache_methods(self):
+        """Test the new cache methods directly."""
+        import cudf
+
+        cache = cudf_compat.CuDFCheckpointCache()
+        gdf = cudf.DataFrame({'a': [1, 2, 3]})
+        obj_id = id(gdf)
+
+        # Initially no cached deepcopy
+        assert cache.get_deepcopied(obj_id) is None
+
+        # Convert to pandas first (so fingerprint is cached)
+        pdf = cache.get_or_convert(gdf)
+
+        # Now has valid cache
+        assert cache.has_valid_cache(gdf)
+
+        # Cache a deepcopy
+        cache.cache_deepcopy(obj_id, pdf.copy())
+        assert cache.get_deepcopied(obj_id) is not None
+
+        # Modify data - should invalidate both caches
+        gdf['a'] = [10, 20, 30]
+        assert not cache.has_valid_cache(gdf)  # This clears the cache entry
+        # After invalidation, deepcopy cache should also be cleared
+        assert cache.get_deepcopied(obj_id) is None
+
+    def test_clear_clears_both_caches(self):
+        """cache.clear() should clear both pandas cache and deepcopy cache."""
+        import cudf
+
+        cache = cudf_compat.CuDFCheckpointCache()
+        gdf = cudf.DataFrame({'a': [1, 2, 3]})
+        obj_id = id(gdf)
+
+        # Populate both caches
+        pdf = cache.get_or_convert(gdf)
+        cache.cache_deepcopy(obj_id, pdf)
+
+        assert cache.has_valid_cache(gdf)
+        assert cache.get_deepcopied(obj_id) is not None
+
+        # Clear
+        cache.clear()
+
+        assert not cache.has_valid_cache(gdf)
+        assert cache.get_deepcopied(obj_id) is None
+
+
+@pytest.mark.skipif(not cudf_compat.has_cudf(), reason="cuDF not installed")
 class TestCudfProxyDetection:
     """Test proxy detection with cudf.pandas mode (if available)."""
 
