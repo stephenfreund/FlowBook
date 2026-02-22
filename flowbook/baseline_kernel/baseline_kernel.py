@@ -8,6 +8,7 @@ Features:
 - Standard IPython kernel behavior
 - %memory magic command (same as FlowBook)
 - Memory reporting in same format as FlowBook for comparison
+- Kernel-side timing reported via metadata (for fair timing comparison)
 
 Does NOT include:
 - Reproducibility tracking
@@ -16,6 +17,7 @@ Does NOT include:
 - Any FlowBook-specific features
 """
 
+import time
 from typing import Any, Dict, Optional
 
 from ipykernel.ipkernel import IPythonKernel
@@ -149,7 +151,7 @@ class BaselineKernel(IPythonKernel):
             except ImportError:
                 pass
 
-    def do_execute(
+    async def do_execute(
         self,
         code: str,
         silent: bool,
@@ -159,13 +161,15 @@ class BaselineKernel(IPythonKernel):
         *,
         cell_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Execute code with standard IPython behavior.
+        """Execute code with standard IPython behavior and timing.
 
-        No special memory tracking is done during execution - use %memory
-        magic to inspect memory at any time.
+        Reports kernel-side execution time via display_data metadata
+        for fair comparison with FlowBook kernel.
         """
-        # Execute code normally
-        return super().do_execute(
+        start_time = time.perf_counter()
+
+        # Execute code normally (IPythonKernel.do_execute is async)
+        result = await super().do_execute(
             code,
             silent,
             store_history,
@@ -173,3 +177,22 @@ class BaselineKernel(IPythonKernel):
             allow_stdin,
             cell_id=cell_id,
         )
+
+        code_duration_ms = (time.perf_counter() - start_time) * 1000
+
+        # Emit timing metadata (same pattern as FlowBook kernel)
+        if not silent:
+            self.send_response(
+                self.iopub_socket,
+                "display_data",
+                {
+                    "data": {"text/plain": f"✓ Code: {code_duration_ms:.0f} ms"},
+                    "metadata": {
+                        "baseline": {
+                            "code_duration_ms": code_duration_ms,
+                        }
+                    },
+                },
+            )
+
+        return result

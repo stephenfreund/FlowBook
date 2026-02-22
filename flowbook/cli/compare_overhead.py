@@ -1516,35 +1516,53 @@ def plot_combined_v2(
         ax = axes[panel_idx]
         panel_idx += 1
 
-        # Align by cell_id
+        # Align by cell_id - use execute_duration_ms and code_duration_ms
         cell_data = {}
         for c in baseline_cells:
-            cell_data[c["cell_id"]] = {"baseline_ms": c.get("cell_runtime_ms", 0)}
+            # Baseline: execute_duration_ms equals code_duration_ms (no FlowBook overhead)
+            cell_data[c["cell_id"]] = {"baseline_ms": c.get("execute_duration_ms", c.get("cell_runtime_ms", 0))}
         for c in flowbook_cells:
             if c["cell_id"] in cell_data:
-                cell_data[c["cell_id"]]["flowbook_ms"] = c.get("cell_runtime_ms", 0)
+                cell_data[c["cell_id"]]["execute_ms"] = c.get("execute_duration_ms", c.get("cell_runtime_ms", 0))
+                cell_data[c["cell_id"]]["code_ms"] = c.get("code_duration_ms", 0)
                 cell_data[c["cell_id"]]["state_ms"] = c.get("state_duration_ms", 0)
                 cell_data[c["cell_id"]]["check_ms"] = c.get("check_duration_ms", 0)
 
         cell_ids = list(cell_data.keys())
         baseline_runtimes = [cell_data[cid].get("baseline_ms", 0) for cid in cell_ids]
-        flowbook_runtimes = [cell_data[cid].get("flowbook_ms", 0) for cid in cell_ids]
+        flowbook_execute = [cell_data[cid].get("execute_ms", 0) for cid in cell_ids]
+        flowbook_code = [cell_data[cid].get("code_ms", 0) for cid in cell_ids]
         state_times = [cell_data[cid].get("state_ms", 0) for cid in cell_ids]
         check_times = [cell_data[cid].get("check_ms", 0) for cid in cell_ids]
 
         cells = np.arange(1, len(cell_ids) + 1)
-        baseline_cumsum = np.cumsum(baseline_runtimes)
-        flowbook_cumsum = np.cumsum(flowbook_runtimes)
 
-        # Per-cell times (not cumulative)
-        state_per_cell = np.array(state_times)
-        check_per_cell = np.array(check_times)
-        # Total overhead = FlowBook time - Baseline time (can be negative if FlowBook is faster)
-        all_overhead_per_cell = np.array(flowbook_runtimes) - np.array(baseline_runtimes)
+        # Per-cell arrays
+        baseline_arr = np.array(baseline_runtimes)
+        code_arr = np.array(flowbook_code)
+        state_arr = np.array(state_times)
+        check_arr = np.array(check_times)
+        execute_arr = np.array(flowbook_execute)
+        # Other overhead = execute - (code + state + check)
+        other_arr = execute_arr - (code_arr + state_arr + check_arr)
+        other_arr = np.maximum(other_arr, 0)  # Clamp to non-negative
 
-        # Left y-axis: cumulative time
-        ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label="Baseline (cumulative)")
-        ax.plot(cells, flowbook_cumsum / 1000, color=colors[1], linewidth=2, marker='o', markersize=4, label="FlowBook (cumulative)")
+        # Cumulative times
+        baseline_cumsum = np.cumsum(baseline_arr)
+        # FlowBook cumulative: code + state + check + other (same as execute)
+        code_cumsum = np.cumsum(code_arr)
+        state_cumsum = np.cumsum(state_arr)
+        check_cumsum = np.cumsum(check_arr)
+        other_cumsum = np.cumsum(other_arr)
+
+        # Left y-axis: cumulative time - baseline line and FlowBook stacked areas
+        ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label="Baseline")
+
+        # FlowBook as stacked area: code (bottom) + state + check + other (top)
+        ax.fill_between(cells, 0, code_cumsum / 1000, alpha=0.3, color=colors[1], label="FlowBook Code")
+        ax.fill_between(cells, code_cumsum / 1000, (code_cumsum + state_cumsum) / 1000, alpha=0.4, color=colors[2], label="State")
+        ax.fill_between(cells, (code_cumsum + state_cumsum) / 1000, (code_cumsum + state_cumsum + check_cumsum) / 1000, alpha=0.4, color=colors[3], label="Check")
+        ax.fill_between(cells, (code_cumsum + state_cumsum + check_cumsum) / 1000, (code_cumsum + state_cumsum + check_cumsum + other_cumsum) / 1000, alpha=0.4, color=colors[4], label="Other")
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Cumulative Time (seconds)", fontsize=label_size)
@@ -1556,30 +1574,29 @@ def plot_combined_v2(
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
         ax.tick_params(axis='both', labelsize=tick_size)
+        ax.legend(loc="lower right", fontsize=legend_size)
 
         # Add separator line for rerun phase
         if timing_initial_count < len(cells):
-            ax.axvline(x=timing_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+            ax.axvline(x=timing_initial_count + 0.5, color='red', linestyle='--', linewidth=2)
 
-        # Right y-axis: per-cell overhead times as side-by-side bars
-        ax2 = ax.twinx()
-        bar_width = 0.25
-        ax2.bar(cells - bar_width, all_overhead_per_cell / 1000, alpha=0.4, color=colors[4], label="All Overhead", width=bar_width)
-        ax2.bar(cells, state_per_cell / 1000, alpha=0.4, color=colors[2], label="State (per cell)", width=bar_width)
-        ax2.bar(cells + bar_width, check_per_cell / 1000, alpha=0.4, color=colors[3], label="Check (per cell)", width=bar_width)
-        ax2.set_ylabel("Overhead per Cell (seconds)", fontsize=label_size)
-        ax2.tick_params(axis='y', labelsize=tick_size)
-        ax2.grid(False)  # Disable grid lines on secondary axis
+        # Add timing breakdown text box in upper-left (no overlap with legend now)
+        total_baseline_s = baseline_cumsum[-1] / 1000
+        total_code_s = code_cumsum[-1] / 1000
+        total_state_s = state_cumsum[-1] / 1000
+        total_check_s = check_cumsum[-1] / 1000
+        total_other_s = other_cumsum[-1] / 1000
+        total_flowbook_s = total_code_s + total_state_s + total_check_s + total_other_s
 
-        # Combined legend from both axes
-        lines1, labels1 = ax.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=legend_size)
+        textstr = f'Baseline: {total_baseline_s:.2f}s\n\nFlowBook:\n  Code: {total_code_s:.2f}s\n  State: {total_state_s:.2f}s\n  Check: {total_check_s:.2f}s\n  Other: {total_other_s:.2f}s\n  Total: {total_flowbook_s:.2f}s'
+        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
+        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=legend_size,
+                verticalalignment='top', horizontalalignment='left', bbox=props)
 
         if baseline_cumsum[-1] > 0:
-            overhead_pct = (flowbook_cumsum[-1] - baseline_cumsum[-1]) / baseline_cumsum[-1] * 100
+            overhead_pct = (total_flowbook_s * 1000 - baseline_cumsum[-1]) / baseline_cumsum[-1] * 100
             ax.annotate(f'{overhead_pct:.1f}% overhead',
-                        xy=(cells[-1], flowbook_cumsum[-1] / 1000),
+                        xy=(cells[-1], total_flowbook_s),
                         xytext=(5, 0), textcoords='offset points',
                         fontsize=legend_size, va='center', ha='left', color=colors[1])
 

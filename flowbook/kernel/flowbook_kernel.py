@@ -1129,11 +1129,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                         cell_id=self._cell_id,
                                     )
                                 execution_time = run_timer.duration()
-                        with timer(
-                            key="kernel:get_tracking_data",
-                            message="Get tracking data",
-                        ):
-                            tracking = user_ns.get_tracking_data()
+                            with timer(
+                                key="kernel:get_tracking_data",
+                                message="Get tracking data",
+                            ):
+                                tracking = user_ns.get_tracking_data()
                     else:
                         with timer(key="kernel:execute") as run_timer:
                             result = await self._ipython_do_execute(
@@ -1271,12 +1271,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         post_ms = post_timer.duration()
                         state_ms = pre_ms + post_ms
                         self._display_execution_result(
-                            # execution_time,
-                            time.perf_counter() * 1000 - start_time,
-                            state_ms,
-                            check_timer.duration(),
-                            tracking,
-                            sdc_result,
+                            execute_duration_ms=time.perf_counter() * 1000 - start_time,
+                            code_duration_ms=execution_time or 0.0,
+                            state_duration_ms=state_ms,
+                            check_duration_ms=check_timer.duration(),
+                            tracking=tracking,
+                            sdc_result=sdc_result,
                             pre_state_ms=pre_ms,
                             post_state_ms=post_ms,
                         )
@@ -1485,9 +1485,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
     def _display_execution_result(
         self,
-        run_duration: float,
-        state_duration: float,
-        check_duration: float,
+        execute_duration_ms: float,
+        code_duration_ms: float,
+        state_duration_ms: float,
+        check_duration_ms: float,
         tracking,
         sdc_result,
         pre_state_ms: float = 0.0,
@@ -1545,9 +1546,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             structural_warnings=structural_warnings,
             file_reads=file_rbw,  # File reads (separate from variables)
             file_writes=file_writes_list,  # File writes (separate from variables)
-            run_duration_ms=run_duration,
-            state_duration_ms=state_duration,
-            check_duration_ms=check_duration,
+            execute_duration_ms=execute_duration_ms,
+            code_duration_ms=code_duration_ms,
+            state_duration_ms=state_duration_ms,
+            check_duration_ms=check_duration_ms,
             cell_is_contaminated=(
                 sdc_result.cell_is_contaminated if sdc_result else False
             ),
@@ -1561,11 +1563,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             self._send_structural_warnings(structural_warnings)
 
         # Build display text
-        state_detail = f"State: {state_duration:.0f} ms (pre={pre_state_ms:.0f}, post={post_state_ms:.0f})"
+        state_detail = f"State: {state_duration_ms:.0f} ms (pre={pre_state_ms:.0f}, post={post_state_ms:.0f})"
         parts = [
-            f"Run: {run_duration:.0f} ms",
+            f"Execute: {execute_duration_ms:.0f} ms",
+            f"Code: {code_duration_ms:.0f} ms",
             state_detail,
-            f"Check: {check_duration:.0f} ms",
+            f"Check: {check_duration_ms:.0f} ms",
         ]
 
         # Variable reads (separate from file reads)

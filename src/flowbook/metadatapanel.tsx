@@ -112,7 +112,8 @@ const ReproducibilityMetadataDisplay: React.FC<
       </div>
 
       {/* Timing Info */}
-      {(metadata.run_duration_ms !== undefined ||
+      {(metadata.execute_duration_ms !== undefined ||
+        metadata.code_duration_ms !== undefined ||
         metadata.state_duration_ms !== undefined ||
         metadata.check_duration_ms !== undefined) && (
         <>
@@ -121,9 +122,15 @@ const ReproducibilityMetadataDisplay: React.FC<
             <div className="flowbook-metadata-item">
               <strong>Timing:</strong>
               <ul className="flowbook-timing-list">
-                {metadata.run_duration_ms !== undefined && (
+                {metadata.execute_duration_ms !== undefined && (
                   <li>
-                    Run: <code>{metadata.run_duration_ms.toFixed(0)} ms</code>
+                    Execute:{' '}
+                    <code>{metadata.execute_duration_ms.toFixed(0)} ms</code>
+                  </li>
+                )}
+                {metadata.code_duration_ms !== undefined && (
+                  <li>
+                    Code: <code>{metadata.code_duration_ms.toFixed(0)} ms</code>
                   </li>
                 )}
                 {metadata.state_duration_ms !== undefined && (

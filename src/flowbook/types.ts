@@ -28,7 +28,8 @@ export interface IReproducibilityMetadata {
   file_reads?: string[];
   file_writes?: string[];
   // Timing information (in milliseconds)
-  run_duration_ms?: number;
+  execute_duration_ms?: number;  // Total time in _do_execute_impl
+  code_duration_ms?: number;  // Time for _ipython_do_execute (user code)
   state_duration_ms?: number;
   check_duration_ms?: number;
   // Forward contamination flag (EXEC-CONTAMINATED)

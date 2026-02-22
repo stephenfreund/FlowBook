@@ -104,7 +104,8 @@ class ReproducibilityMetadata:
     file_reads: List[str] = field(default_factory=list)  # absolute file paths read
     file_writes: List[str] = field(default_factory=list)  # absolute file paths written
     # Timing information (in milliseconds)
-    run_duration_ms: float = 0.0  # Code execution time
+    execute_duration_ms: float = 0.0  # Total time in _do_execute_impl
+    code_duration_ms: float = 0.0  # Time for _ipython_do_execute (user code)
     state_duration_ms: float = 0.0  # Checkpoint time (pre + post)
     check_duration_ms: float = 0.0  # SDC check time
     cell_is_contaminated: bool = False  # [EXEC-CONTAMINATED] True if forward-contaminated
@@ -129,7 +130,8 @@ class ReproducibilityMetadata:
                 "structural_warnings": self.structural_warnings,
                 "file_reads": self.file_reads,
                 "file_writes": self.file_writes,
-                "run_duration_ms": self.run_duration_ms,
+                "execute_duration_ms": self.execute_duration_ms,
+                "code_duration_ms": self.code_duration_ms,
                 "state_duration_ms": self.state_duration_ms,
                 "check_duration_ms": self.check_duration_ms,
                 "cell_is_contaminated": self.cell_is_contaminated,

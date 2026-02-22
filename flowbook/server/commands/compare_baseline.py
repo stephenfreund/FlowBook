@@ -80,7 +80,8 @@ class TimingCellMetrics:
     """Timing metrics for a single cell execution (Scalene OFF)."""
     cell_id: str
     cell_index: int
-    cell_runtime_ms: float
+    execute_duration_ms: float  # Total time in _do_execute_impl (FlowBook) or client timing (baseline)
+    code_duration_ms: float  # Time for _ipython_do_execute (FlowBook only, 0 for baseline)
     state_duration_ms: float  # FlowBook only
     check_duration_ms: float  # FlowBook only
     status: str
@@ -337,12 +338,13 @@ def execute_cell_baseline(
     Execute a cell on the baseline kernel and measure execution time.
 
     Returns:
-        Dict with cell_runtime_ms and optional error
+        Dict with cell_runtime_ms (kernel-reported) and optional error
     """
     start = time.perf_counter()
 
     msg_id = kernel_client.execute(source)
 
+    baseline_metadata = None
     error_msg = None
     start_time = time.time()
 
@@ -359,6 +361,12 @@ def execute_cell_baseline(
             continue
 
         msg_type = msg["header"]["msg_type"]
+
+        # Look for display_data with baseline metadata (kernel-reported timing)
+        if msg_type == "display_data":
+            output_meta = msg.get("content", {}).get("metadata", {})
+            if "baseline" in output_meta:
+                baseline_metadata = output_meta["baseline"]
 
         if msg_type == "error":
             content = msg["content"]
@@ -377,9 +385,18 @@ def execute_cell_baseline(
     except Exception:
         pass
 
+    # Fallback to client-side timing if kernel metadata not available
     elapsed = time.perf_counter() - start
 
-    return {"cell_runtime_ms": elapsed * 1000, "error": error_msg}
+    if baseline_metadata:
+        # Use kernel-reported timing for fair comparison with FlowBook
+        return {
+            "cell_runtime_ms": baseline_metadata.get("code_duration_ms", elapsed * 1000),
+            "error": error_msg
+        }
+    else:
+        # Fallback to client-side timing (should only happen on old kernels)
+        return {"cell_runtime_ms": elapsed * 1000, "error": error_msg}
 
 
 def execute_cell_flowbook(
@@ -393,7 +410,7 @@ def execute_cell_flowbook(
     Execute a cell on the flowbook_kernel and measure execution time.
 
     Returns:
-        Dict with cell_runtime_ms (client-side), state_duration_ms, check_duration_ms, and optional error
+        Dict with execute_duration_ms, code_duration_ms, state_duration_ms, check_duration_ms, and optional error
     """
     # Set cell order for reproducibility tracking
     kernel_client.set_cell_order(cell_order)
@@ -410,7 +427,8 @@ def execute_cell_flowbook(
     while True:
         if time.time() - start_time > timeout:
             return {
-                "cell_runtime_ms": None,
+                "execute_duration_ms": None,
+                "code_duration_ms": None,
                 "state_duration_ms": None,
                 "check_duration_ms": None,
                 "error": f"Timeout after {timeout}s"
@@ -460,8 +478,9 @@ def execute_cell_flowbook(
             violation_msg = violation.get("message", "Reproducibility violation")
 
         return {
-            # Use client-side timing for fair comparison with baseline
-            "cell_runtime_ms": elapsed * 1000,
+            # Use kernel-reported timing for accuracy
+            "execute_duration_ms": flowbook_metadata.get("execute_duration_ms", elapsed * 1000),
+            "code_duration_ms": flowbook_metadata.get("code_duration_ms", 0.0),
             "state_duration_ms": flowbook_metadata.get("state_duration_ms", 0.0),
             "check_duration_ms": flowbook_metadata.get("check_duration_ms", 0.0),
             "error": error_msg,
@@ -470,7 +489,8 @@ def execute_cell_flowbook(
         }
     else:
         return {
-            "cell_runtime_ms": elapsed * 1000,
+            "execute_duration_ms": elapsed * 1000,
+            "code_duration_ms": 0.0,
             "state_duration_ms": None,
             "check_duration_ms": None,
             "error": error_msg or "No flowbook metadata received",
@@ -972,7 +992,8 @@ def run_baseline_timing(
                 results.cells.append(TimingCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
-                    cell_runtime_ms=0.0,
+                    execute_duration_ms=0.0,
+                    code_duration_ms=0.0,
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
                     status="error",
@@ -985,7 +1006,8 @@ def run_baseline_timing(
                 results.cells.append(TimingCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
-                    cell_runtime_ms=runtime_ms,
+                    execute_duration_ms=runtime_ms,
+                    code_duration_ms=runtime_ms,  # For baseline, code time equals total time
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
                     status="ok",
@@ -1019,7 +1041,8 @@ def run_baseline_timing(
                         results.rerun_cells.append(TimingCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
-                            cell_runtime_ms=0.0,
+                            execute_duration_ms=0.0,
+                            code_duration_ms=0.0,
                             state_duration_ms=0.0,
                             check_duration_ms=0.0,
                             status="error",
@@ -1033,7 +1056,8 @@ def run_baseline_timing(
                         results.rerun_cells.append(TimingCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
-                            cell_runtime_ms=runtime_ms,
+                            execute_duration_ms=runtime_ms,
+                            code_duration_ms=runtime_ms,  # For baseline, code time equals total time
                             state_duration_ms=0.0,
                             check_duration_ms=0.0,
                             status="ok",
@@ -1042,7 +1066,8 @@ def run_baseline_timing(
                         log(f"  Rerun Runtime: {runtime_ms:.1f}ms")
 
         results.totals = {
-            "cell_runtime_ms": total_runtime_ms,
+            "execute_duration_ms": total_runtime_ms,
+            "code_duration_ms": total_runtime_ms,  # For baseline, code time equals total time
             "rerun_runtime_ms": rerun_runtime_ms,
         }
 
@@ -1089,7 +1114,8 @@ def run_flowbook_timing(
         _wait_for_idle(kernel_client)
         log("FlowBook Timing: continue_after_violation enabled")
 
-        total_runtime_ms = 0.0
+        total_execute_ms = 0.0
+        total_code_ms = 0.0
         total_state_ms = 0.0
         total_check_ms = 0.0
 
@@ -1108,12 +1134,13 @@ def run_flowbook_timing(
                 kernel_client, source, cell_id, cell_order, cell_timeout
             )
 
-            if timing.get("error") and timing.get("cell_runtime_ms") is None:
+            if timing.get("error") and timing.get("execute_duration_ms") is None:
                 log(f"  Error:\n{timing['error']}")
                 results.cells.append(TimingCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
-                    cell_runtime_ms=0.0,
+                    execute_duration_ms=0.0,
+                    code_duration_ms=0.0,
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
                     status="error",
@@ -1123,11 +1150,13 @@ def run_flowbook_timing(
                 if timing.get("violation"):
                     log(f"  Violation: {timing['violation']}")
 
-                runtime_ms = timing["cell_runtime_ms"] or 0.0
+                execute_ms = timing["execute_duration_ms"] or 0.0
+                code_ms = timing["code_duration_ms"] or 0.0
                 state_ms = timing["state_duration_ms"] or 0.0
                 check_ms = timing["check_duration_ms"] or 0.0
 
-                total_runtime_ms += runtime_ms
+                total_execute_ms += execute_ms
+                total_code_ms += code_ms
                 total_state_ms += state_ms
                 total_check_ms += check_ms
 
@@ -1140,16 +1169,18 @@ def run_flowbook_timing(
                 results.cells.append(TimingCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
-                    cell_runtime_ms=runtime_ms,
+                    execute_duration_ms=execute_ms,
+                    code_duration_ms=code_ms,
                     state_duration_ms=state_ms,
                     check_duration_ms=check_ms,
                     status=status,
                     error=timing.get("violation") or timing.get("error"),
                 ))
-                log(f"  Runtime: {runtime_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
+                log(f"  Execute: {execute_ms:.1f}ms, Code: {code_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
 
         # Execute reruns: run all cells k extra times (top-to-bottom)
-        rerun_runtime_ms = 0.0
+        rerun_execute_ms = 0.0
+        rerun_code_ms = 0.0
         rerun_state_ms = 0.0
         rerun_check_ms = 0.0
         if rerun_k > 0:
@@ -1174,12 +1205,13 @@ def run_flowbook_timing(
                         kernel_client, source, cell_id, cell_order, cell_timeout
                     )
 
-                    if timing.get("error") and timing.get("cell_runtime_ms") is None:
+                    if timing.get("error") and timing.get("execute_duration_ms") is None:
                         log(f"  Rerun Error:\n{timing['error']}")
                         results.rerun_cells.append(TimingCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
-                            cell_runtime_ms=0.0,
+                            execute_duration_ms=0.0,
+                            code_duration_ms=0.0,
                             state_duration_ms=0.0,
                             check_duration_ms=0.0,
                             status="error",
@@ -1190,11 +1222,13 @@ def run_flowbook_timing(
                         if timing.get("violation"):
                             log(f"  Rerun Violation: {timing['violation']}")
 
-                        runtime_ms = timing["cell_runtime_ms"] or 0.0
+                        execute_ms = timing["execute_duration_ms"] or 0.0
+                        code_ms = timing["code_duration_ms"] or 0.0
                         state_ms = timing["state_duration_ms"] or 0.0
                         check_ms = timing["check_duration_ms"] or 0.0
 
-                        rerun_runtime_ms += runtime_ms
+                        rerun_execute_ms += execute_ms
+                        rerun_code_ms += code_ms
                         rerun_state_ms += state_ms
                         rerun_check_ms += check_ms
 
@@ -1207,27 +1241,30 @@ def run_flowbook_timing(
                         results.rerun_cells.append(TimingCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
-                            cell_runtime_ms=runtime_ms,
+                            execute_duration_ms=execute_ms,
+                            code_duration_ms=code_ms,
                             state_duration_ms=state_ms,
                             check_duration_ms=check_ms,
                             status=status,
                             error=timing.get("violation") or timing.get("error"),
                             is_rerun=True,
                         ))
-                        log(f"  Rerun Runtime: {runtime_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
+                        log(f"  Rerun Execute: {execute_ms:.1f}ms, Code: {code_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
 
         results.totals = {
-            "cell_runtime_ms": total_runtime_ms,
+            "execute_duration_ms": total_execute_ms,
+            "code_duration_ms": total_code_ms,
             "state_duration_ms": total_state_ms,
             "check_duration_ms": total_check_ms,
-            "rerun_runtime_ms": rerun_runtime_ms,
+            "rerun_execute_ms": rerun_execute_ms,
+            "rerun_code_ms": rerun_code_ms,
             "rerun_state_ms": rerun_state_ms,
             "rerun_check_ms": rerun_check_ms,
         }
 
-        log(f"FlowBook Timing: Total runtime {total_runtime_ms:.1f}ms, state {total_state_ms:.1f}ms, check {total_check_ms:.1f}ms")
+        log(f"FlowBook Timing: Total execute {total_execute_ms:.1f}ms, code {total_code_ms:.1f}ms, state {total_state_ms:.1f}ms, check {total_check_ms:.1f}ms")
         if rerun_k > 0:
-            log(f"FlowBook Timing: Rerun runtime {rerun_runtime_ms:.1f}ms, state {rerun_state_ms:.1f}ms, check {rerun_check_ms:.1f}ms")
+            log(f"FlowBook Timing: Rerun execute {rerun_execute_ms:.1f}ms, code {rerun_code_ms:.1f}ms, state {rerun_state_ms:.1f}ms, check {rerun_check_ms:.1f}ms")
 
     finally:
         cleanup_kernel(kernel_manager, kernel_client)
@@ -1870,8 +1907,9 @@ class CompareBaselineCommand(NotebookCommand):
             log("SUMMARY")
             log("=" * 60)
 
-            baseline_total = baseline_timing.totals.get("cell_runtime_ms", 0)
-            flowbook_runtime = flowbook_timing.totals.get("cell_runtime_ms", 0)
+            baseline_total = baseline_timing.totals.get("execute_duration_ms", 0)
+            flowbook_execute = flowbook_timing.totals.get("execute_duration_ms", 0)
+            flowbook_code = flowbook_timing.totals.get("code_duration_ms", 0)
             flowbook_state = flowbook_timing.totals.get("state_duration_ms", 0)
             flowbook_check = flowbook_timing.totals.get("check_duration_ms", 0)
 
@@ -1883,8 +1921,9 @@ class CompareBaselineCommand(NotebookCommand):
                 check_overhead_pct = 0.0
 
             log("TIMING:")
-            log(f"  Baseline runtime:     {baseline_total:,.1f}ms")
-            log(f"  FlowBook runtime:     {flowbook_runtime:,.1f}ms")
+            log(f"  Baseline code time:   {baseline_total:,.1f}ms")
+            log(f"  FlowBook execute:     {flowbook_execute:,.1f}ms")
+            log(f"  FlowBook code time:   {flowbook_code:,.1f}ms")
             log(f"  FlowBook state time:  {flowbook_state:,.1f}ms ({state_overhead_pct:.1f}%)")
             log(f"  FlowBook check time:  {flowbook_check:,.1f}ms ({check_overhead_pct:.1f}%)")
             log("")
@@ -1902,14 +1941,16 @@ class CompareBaselineCommand(NotebookCommand):
 
             if rerun_k > 0:
                 rerun_baseline = baseline_timing.totals.get("rerun_runtime_ms", 0)
-                rerun_flowbook = flowbook_timing.totals.get("rerun_runtime_ms", 0)
+                rerun_flowbook_execute = flowbook_timing.totals.get("rerun_execute_ms", 0)
+                rerun_flowbook_code = flowbook_timing.totals.get("rerun_code_ms", 0)
                 rerun_state = flowbook_timing.totals.get("rerun_state_ms", 0)
                 rerun_check = flowbook_timing.totals.get("rerun_check_ms", 0)
                 total_rerun_cells = rerun_k * len(code_cells)
 
                 log(f"RERUN TIMING ({rerun_k} pass(es) x {len(code_cells)} cells = {total_rerun_cells} executions):")
                 log(f"  Baseline rerun:       {rerun_baseline:,.1f}ms")
-                log(f"  FlowBook rerun:       {rerun_flowbook:,.1f}ms")
+                log(f"  FlowBook execute:     {rerun_flowbook_execute:,.1f}ms")
+                log(f"  FlowBook code:        {rerun_flowbook_code:,.1f}ms")
                 log(f"  FlowBook state time:  {rerun_state:,.1f}ms")
                 log(f"  FlowBook check time:  {rerun_check:,.1f}ms")
                 log("")
@@ -1925,8 +1966,9 @@ class CompareBaselineCommand(NotebookCommand):
                 "status": "success",
                 "command": self.command_name,
                 "comparison_file": str(json_output_path),
-                "baseline_runtime_ms": baseline_total,
-                "flowbook_runtime_ms": flowbook_runtime,
+                "baseline_code_ms": baseline_total,
+                "flowbook_execute_ms": flowbook_execute,
+                "flowbook_code_ms": flowbook_code,
                 "flowbook_state_ms": flowbook_state,
                 "flowbook_check_ms": flowbook_check,
                 "scalene_available": heapsizer_available,  # Keep field name for compatibility
