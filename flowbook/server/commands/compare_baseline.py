@@ -1765,6 +1765,12 @@ class CompareBaselineCommand(NotebookCommand):
             default=1,
             help="Number of trials to run. Each trial saved to separate file (e.g., notebook-1.json, notebook-2.json)",
         )
+        subparser.add_argument(
+            "--start",
+            type=int,
+            default=1,
+            help="Starting trial number (default: 1). Use negative numbers for counting down (e.g., --trials 3 --start -4 produces -4, -3, -2)",
+        )
         return subparser
 
     async def process(
@@ -1797,6 +1803,7 @@ class CompareBaselineCommand(NotebookCommand):
         skip_memory = kwargs.get("skip_memory", False)
         rerun_k = kwargs.get("rerun_k", 0)
         num_trials = kwargs.get("trials", 1)
+        start_trial = kwargs.get("start", 1)
         notebook_path = kwargs.get("notebook_path", "unknown.ipynb")
 
         cells = notebook_content.get("cells", [])
@@ -1826,13 +1833,16 @@ class CompareBaselineCommand(NotebookCommand):
             if rerun_k > 0:
                 log(f"Rerun passes: {rerun_k} (will execute all {len(code_cells)} cells {rerun_k} extra time(s))")
             if num_trials > 1:
-                log(f"Trials: {num_trials}")
+                log(f"Trials: {num_trials} (starting at {start_trial})")
             log("")
 
-            for trial_idx in range(1, num_trials + 1):
+            # Generate trial numbers: start_trial, start_trial+1, ..., start_trial+num_trials-1
+            trial_numbers = list(range(start_trial, start_trial + num_trials))
+
+            for trial_num in trial_numbers:
                 if num_trials > 1:
                     log("=" * 60)
-                    log(f"TRIAL {trial_idx}/{num_trials}")
+                    log(f"TRIAL {trial_num} ({trial_numbers.index(trial_num) + 1}/{num_trials})")
                     log("=" * 60)
                     log("")
 
@@ -1884,7 +1894,7 @@ class CompareBaselineCommand(NotebookCommand):
                 if rerun_k > 0:
                     metadata_dict["rerun_k"] = rerun_k
                 if num_trials > 1:
-                    metadata_dict["trial"] = trial_idx
+                    metadata_dict["trial"] = trial_num
                     metadata_dict["num_trials"] = num_trials
 
                 comparison = ComparisonResult(
@@ -1927,7 +1937,7 @@ class CompareBaselineCommand(NotebookCommand):
 
                 # Save JSON output - numbered for multi-trial
                 if num_trials > 1:
-                    json_output_path = timings_dir / f"{notebook_stem}_comparison-{trial_idx}.json"
+                    json_output_path = timings_dir / f"{notebook_stem}_comparison{trial_num}.json"
                 else:
                     json_output_path = timings_dir / f"{notebook_stem}_comparison.json"
 
@@ -1939,7 +1949,7 @@ class CompareBaselineCommand(NotebookCommand):
                 # Print summary for this trial
                 log("=" * 60)
                 if num_trials > 1:
-                    log(f"TRIAL {trial_idx} SUMMARY")
+                    log(f"TRIAL {trial_num} SUMMARY")
                 else:
                     log("SUMMARY")
                 log("=" * 60)

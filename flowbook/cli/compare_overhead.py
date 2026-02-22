@@ -382,6 +382,8 @@ class FileStats:
     rerun_check_overhead_ms: float = 0.0
     rerun_flowbook_total_ms: float = 0.0
     rerun_final_checkpoint_bytes: int = 0
+    # Number of trials averaged (1 = single trial)
+    num_trials: int = 1
 
 
 @dataclass
@@ -489,6 +491,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     if num_cells == 0 and baseline_timing:
         num_cells = len(baseline_timing.get("cells", []))
 
+    # Get number of trials that were averaged (1 = single trial, >1 = averaged)
+    num_trials = data.get("metadata", {}).get("averaged_trials", 1)
+
     # Extract rerun statistics from v2.0 format
     rerun_baseline_cells = baseline_timing.get("rerun_cells", []) if baseline_timing else []
     rerun_flowbook_cells = flowbook_timing.get("rerun_cells", []) if flowbook_timing else []
@@ -565,6 +570,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         rerun_check_overhead_ms=rerun_check_overhead,
         rerun_flowbook_total_ms=rerun_flowbook_total,
         rerun_final_checkpoint_bytes=rerun_final_checkpoint,
+        num_trials=num_trials,
     )
 
 
@@ -611,42 +617,42 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
 def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
     """Format results as ASCII table."""
     lines = []
-    lines.append("=" * 100)
+    lines.append("=" * 110)
     lines.append("FLOWBOOK OVERHEAD COMPARISON")
-    lines.append("=" * 100)
+    lines.append("=" * 110)
     lines.append(f"Notebooks: {aggregate.num_files}")
-    lines.append("=" * 100)
+    lines.append("=" * 110)
     lines.append("")
 
     # Header
-    header = f"{'Notebook':<30} {'Cells':>5} {'Baseline':>10} {'FlowBook':>10} {'State':>8} {'Check':>8} {'Slowdown':>10}"
+    header = f"{'Notebook':<30} {'Cells':>5} {'Trials':>6} {'Baseline':>10} {'FlowBook':>10} {'State':>8} {'Check':>8} {'Slowdown':>10}"
     lines.append(header)
-    lines.append("-" * 100)
+    lines.append("-" * 110)
 
     # Per-file rows
     for s in stats_list:
         name = s.notebook_name[:28] if len(s.notebook_name) > 28 else s.notebook_name
-        row = f"{name:<30} {s.num_cells:>5} {s.baseline_runtime_ms:>9.0f}ms {s.flowbook_total_ms:>9.0f}ms {s.state_overhead_ms:>7.0f}ms {s.check_overhead_ms:>7.0f}ms {s.slowdown:>9.2f}x"
+        row = f"{name:<30} {s.num_cells:>5} {s.num_trials:>6} {s.baseline_runtime_ms:>9.0f}ms {s.flowbook_total_ms:>9.0f}ms {s.state_overhead_ms:>7.0f}ms {s.check_overhead_ms:>7.0f}ms {s.slowdown:>9.2f}x"
         lines.append(row)
 
-    lines.append("-" * 100)
+    lines.append("-" * 110)
     lines.append("")
 
     # Show rerun stats if any file has reruns
     has_reruns = any(s.num_reruns > 0 for s in stats_list)
     if has_reruns:
         lines.append("RERUN STATISTICS")
-        lines.append("-" * 100)
-        header = f"{'Notebook':<30} {'Reruns':>6} {'Baseline':>10} {'FlowBook':>10} {'State':>8} {'Check':>8} {'Final Ckpt':>12}"
+        lines.append("-" * 110)
+        header = f"{'Notebook':<30} {'Reruns':>6} {'Trials':>6} {'Baseline':>10} {'FlowBook':>10} {'State':>8} {'Check':>8} {'Final Ckpt':>12}"
         lines.append(header)
-        lines.append("-" * 100)
+        lines.append("-" * 110)
         for s in stats_list:
             if s.num_reruns > 0:
                 name = s.notebook_name[:28] if len(s.notebook_name) > 28 else s.notebook_name
                 ckpt_mb = s.rerun_final_checkpoint_bytes / (1024 * 1024)
-                row = f"{name:<30} {s.num_reruns:>6} {s.rerun_baseline_runtime_ms:>9.0f}ms {s.rerun_flowbook_total_ms:>9.0f}ms {s.rerun_state_overhead_ms:>7.0f}ms {s.rerun_check_overhead_ms:>7.0f}ms {ckpt_mb:>10.1f}MB"
+                row = f"{name:<30} {s.num_reruns:>6} {s.num_trials:>6} {s.rerun_baseline_runtime_ms:>9.0f}ms {s.rerun_flowbook_total_ms:>9.0f}ms {s.rerun_state_overhead_ms:>7.0f}ms {s.rerun_check_overhead_ms:>7.0f}ms {ckpt_mb:>10.1f}MB"
                 lines.append(row)
-        lines.append("-" * 100)
+        lines.append("-" * 110)
         lines.append("")
 
     # Aggregate statistics
@@ -662,7 +668,7 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
     lines.append(f"  Mean State Overhead:   {aggregate.state_overhead_pct_mean:.1f}%")
     lines.append(f"  Mean Check Overhead:   {aggregate.check_overhead_pct_mean:.1f}%")
     lines.append(f"  Mean Memory Overhead:  {aggregate.memory_overhead_pct_mean:.1f}%")
-    lines.append("=" * 100)
+    lines.append("=" * 110)
 
     return "\n".join(lines)
 
@@ -675,6 +681,7 @@ def format_json_output(stats_list: List[FileStats], aggregate: AggregateStats) -
                 "notebook_path": s.notebook_path,
                 "notebook_name": s.notebook_name,
                 "num_cells": s.num_cells,
+                "num_trials": s.num_trials,
                 "baseline_runtime_ms": s.baseline_runtime_ms,
                 "flowbook_runtime_ms": s.flowbook_runtime_ms,
                 "state_overhead_ms": s.state_overhead_ms,
@@ -711,11 +718,11 @@ def format_json_output(stats_list: List[FileStats], aggregate: AggregateStats) -
 def format_csv(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
     """Format results as CSV."""
     lines = []
-    lines.append("notebook,cells,baseline_ms,flowbook_ms,state_ms,check_ms,slowdown,state_pct,check_pct,memory_pct")
+    lines.append("notebook,cells,trials,baseline_ms,flowbook_ms,state_ms,check_ms,slowdown,state_pct,check_pct,memory_pct")
 
     for s in stats_list:
         lines.append(
-            f'"{s.notebook_name}",{s.num_cells},{s.baseline_runtime_ms:.1f},{s.flowbook_total_ms:.1f},'
+            f'"{s.notebook_name}",{s.num_cells},{s.num_trials},{s.baseline_runtime_ms:.1f},{s.flowbook_total_ms:.1f},'
             f'{s.state_overhead_ms:.1f},{s.check_overhead_ms:.1f},{s.slowdown:.3f},'
             f'{s.state_overhead_pct:.1f},{s.check_overhead_pct:.1f},{s.memory_overhead_pct:.1f}'
         )
