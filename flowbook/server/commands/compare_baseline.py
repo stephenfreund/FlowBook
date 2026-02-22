@@ -38,6 +38,7 @@ from flowbook import make_kernels
 from flowbook.kernel.flowbook_client import FlowbookKernelClient
 from flowbook.server.base import NotebookCommand, ProcessingResult
 from flowbook.server.config import FlowbookConfig
+from flowbook.util.gpu_memory import get_gpu_memory_mb
 from flowbook.util.output import log
 
 
@@ -1302,19 +1303,20 @@ def run_baseline_memory(
                     current_footprint_mb=0.0,
                     max_footprint_mb=0.0,
                     allocation_delta_mb=0.0,
-                    gpu_mem_samples=0.0,
+                    gpu_mem_samples=get_gpu_memory_mb(),
                     status="error",
                     error=timing["error"]
                 ))
             else:
                 allocation_delta = current_mb - pre_stats.get("total_mb", 0.0)
+                gpu_mem = get_gpu_memory_mb()
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
                     current_footprint_mb=current_mb,
                     max_footprint_mb=max_footprint_mb,
                     allocation_delta_mb=allocation_delta,
-                    gpu_mem_samples=0.0,  # GPU tracking not supported without Scalene
+                    gpu_mem_samples=gpu_mem,
                     status="ok",
                 ))
                 log(f"  Namespace: {current_mb:.1f}MB, Delta: {allocation_delta:.1f}MB")
@@ -1357,20 +1359,21 @@ def run_baseline_memory(
                             current_footprint_mb=0.0,
                             max_footprint_mb=0.0,
                             allocation_delta_mb=0.0,
-                            gpu_mem_samples=0.0,
+                            gpu_mem_samples=get_gpu_memory_mb(),
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
                         ))
                     else:
                         allocation_delta = current_mb - pre_stats.get("total_mb", 0.0)
+                        gpu_mem = get_gpu_memory_mb()
                         results.rerun_cells.append(MemoryCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
                             current_footprint_mb=current_mb,
                             max_footprint_mb=max_footprint_mb,
                             allocation_delta_mb=allocation_delta,
-                            gpu_mem_samples=0.0,
+                            gpu_mem_samples=gpu_mem,
                             status="ok",
                             is_rerun=True,
                         ))
@@ -1378,15 +1381,16 @@ def run_baseline_memory(
 
         # Get final stats
         final_stats = get_namespace_size(kernel_client)
+        final_gpu_mem = get_gpu_memory_mb()
         results.totals = {
             "final_footprint_mb": final_stats.get("total_mb", 0.0),
             "max_footprint_mb": max_footprint_mb,
             "total_allocation_mb": final_stats.get("total_mb", 0.0) - before_stats.get("total_mb", 0.0),
-            "gpu_mem_samples": 0.0,
+            "gpu_mem_samples": final_gpu_mem,
         }
 
         log(f"Baseline Memory: Final namespace {final_stats.get('total_mb', 0):.1f}MB, "
-            f"Max {max_footprint_mb:.1f}MB")
+            f"Max {max_footprint_mb:.1f}MB" + (f", GPU {final_gpu_mem:.1f}MB" if final_gpu_mem > 0 else ""))
 
     finally:
         cleanup_kernel(kernel_manager, kernel_client)
@@ -1505,6 +1509,8 @@ def run_flowbook_memory(
             cumulative_by_type = cumulative_size.get('by_type', {})
             cumulative_by_var = cumulative_size.get('by_variable', {})
 
+            gpu_mem = get_gpu_memory_mb()
+
             if timing.get("error") and timing.get("cell_runtime_ms") is None:
                 log(f"  Error:\n{timing['error']}")
                 results.cells.append(MemoryCellMetrics(
@@ -1513,7 +1519,7 @@ def run_flowbook_memory(
                     current_footprint_mb=0.0,
                     max_footprint_mb=0.0,
                     allocation_delta_mb=0.0,
-                    gpu_mem_samples=0.0,
+                    gpu_mem_samples=gpu_mem,
                     checkpoint_var_costs=None,
                     overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
                     cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
@@ -1531,7 +1537,7 @@ def run_flowbook_memory(
                     current_footprint_mb=current_mb,
                     max_footprint_mb=max_footprint_mb,
                     allocation_delta_mb=allocation_delta,
-                    gpu_mem_samples=0.0,  # GPU tracking not supported without Scalene
+                    gpu_mem_samples=gpu_mem,
                     checkpoint_var_costs=var_costs if var_costs else None,
                     overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
                     cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
@@ -1602,6 +1608,8 @@ def run_flowbook_memory(
                     cumulative_by_type = cumulative_size.get('by_type', {})
                     cumulative_by_var = cumulative_size.get('by_variable', {})
 
+                    gpu_mem = get_gpu_memory_mb()
+
                     if timing.get("error") and timing.get("cell_runtime_ms") is None:
                         log(f"  Rerun Error:\n{timing['error']}")
                         results.rerun_cells.append(MemoryCellMetrics(
@@ -1610,7 +1618,7 @@ def run_flowbook_memory(
                             current_footprint_mb=0.0,
                             max_footprint_mb=0.0,
                             allocation_delta_mb=0.0,
-                            gpu_mem_samples=0.0,
+                            gpu_mem_samples=gpu_mem,
                             checkpoint_var_costs=None,
                             overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
                             cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
@@ -1629,7 +1637,7 @@ def run_flowbook_memory(
                             current_footprint_mb=current_mb,
                             max_footprint_mb=max_footprint_mb,
                             allocation_delta_mb=allocation_delta,
-                            gpu_mem_samples=0.0,
+                            gpu_mem_samples=gpu_mem,
                             checkpoint_var_costs=var_costs if var_costs else None,
                             overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
                             cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
@@ -1646,15 +1654,16 @@ def run_flowbook_memory(
 
         # Get final stats
         final_stats = get_namespace_size(kernel_client)
+        final_gpu_mem = get_gpu_memory_mb()
         results.totals = {
             "final_footprint_mb": final_stats.get("total_mb", 0.0),
             "max_footprint_mb": max_footprint_mb,
             "total_allocation_mb": final_stats.get("total_mb", 0.0) - before_stats.get("total_mb", 0.0),
-            "gpu_mem_samples": 0.0,
+            "gpu_mem_samples": final_gpu_mem,
         }
 
         log(f"FlowBook Memory: Final namespace {final_stats.get('total_mb', 0):.1f}MB, "
-            f"Max {max_footprint_mb:.1f}MB")
+            f"Max {max_footprint_mb:.1f}MB" + (f", GPU {final_gpu_mem:.1f}MB" if final_gpu_mem > 0 else ""))
 
     finally:
         cleanup_kernel(kernel_manager, kernel_client)

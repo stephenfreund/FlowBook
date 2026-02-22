@@ -1591,7 +1591,7 @@ def plot_combined_v2(
         cells = np.arange(1, len(flowbook_mem_cells) + 1)
         baseline_footprint = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells])
         flowbook_footprint = np.array([c.get("current_footprint_mb", 0) for c in flowbook_mem_cells])
-        gpu_samples = [c.get("gpu_mem_samples", 0) for c in flowbook_mem_cells]
+        baseline_gpu = np.array([c.get("gpu_mem_samples", 0) for c in baseline_mem_cells])
 
         # Check if overhead_breakdown data is available
         has_overhead_breakdown = any(
@@ -1639,15 +1639,23 @@ def plot_combined_v2(
             # Colors for stacked areas
             stack_colors = sns.color_palette("Set2", 5)
 
-            # Draw baseline memory first (gray base)
-            ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color='gray', label='Baseline Memory')
+            # Check for GPU memory
+            has_gpu = any(g > 0 for g in baseline_gpu)
 
-            # Stack overhead categories on top of baseline
+            # Layer 1: Baseline CPU memory (bottom - gray)
+            ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color='gray', label='Baseline CPU')
+
+            # Layer 2: GPU memory (middle - orange, stacked on baseline)
             cumulative = baseline_footprint.copy()
+            if has_gpu:
+                next_level = cumulative + baseline_gpu
+                ax.fill_between(cells, cumulative, next_level, alpha=0.4, color='orange', label='GPU Memory')
+                cumulative = next_level
 
-            # Checkpoints (largest) - show total checkpoint area
+            # Layer 3: FlowBook overhead categories (top - stacked on GPU)
+            # Checkpoints (largest)
             next_level = cumulative + checkpoints_mb
-            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[0], label='Checkpoints (total)')
+            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[0], label='Checkpoints')
             cumulative = next_level
 
             # Execution records
@@ -1663,18 +1671,18 @@ def plot_combined_v2(
             # Other
             next_level = cumulative + other_mb
             ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[3], label='Other')
-            cumulative = next_level  # Update cumulative to include all overhead
+            cumulative = next_level
 
             # Draw lines for reference
             ax.plot(cells, baseline_footprint, color='gray', linewidth=2, linestyle='--')
-            # FlowBook Total should be top of stack (baseline + all overhead), not just namespace
-            ax.plot(cells, cumulative, color=colors[1], linewidth=2, marker='o', markersize=4, label='FlowBook Total')
+            ax.plot(cells, cumulative, color=colors[1], linewidth=2, marker='o', markersize=4, label='Total')
 
             # Show pre-only line (what memory would be with NO post checkpoints)
             if has_pre_post:
-                # Pre-only = baseline + pre_only checkpoints + other overhead (non-checkpoint)
+                # Pre-only = baseline + GPU + pre_only checkpoints + other overhead (non-checkpoint)
                 other_overhead = execution_records_mb + tracking_metadata_mb + other_mb
-                pre_only_total = baseline_footprint + pre_only_mb + other_overhead
+                gpu_component = baseline_gpu if has_gpu else np.zeros_like(baseline_footprint)
+                pre_only_total = baseline_footprint + gpu_component + pre_only_mb + other_overhead
                 ax.plot(cells, pre_only_total, color='green', linewidth=2, linestyle=':', marker='s', markersize=3, label='Pre-Only (no post)')
 
                 # Annotate savings at end
@@ -1698,35 +1706,44 @@ def plot_combined_v2(
                             fontsize=legend_size, va='center', ha='left',
                             color=colors[1])
         else:
-            # Original visualization without breakdown
-            ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline Memory')
-            ax.fill_between(cells, baseline_footprint, flowbook_footprint, alpha=0.3, color=colors[1], label='FlowBook Overhead')
+            # Original visualization without detailed breakdown
+            # Check for GPU memory
+            has_gpu = any(g > 0 for g in baseline_gpu)
+
+            # Layer 1: Baseline CPU memory (bottom - gray)
+            ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline CPU')
+            cumulative = baseline_footprint.copy()
+
+            # Layer 2: GPU memory (middle - orange)
+            if has_gpu:
+                next_level = cumulative + baseline_gpu
+                ax.fill_between(cells, cumulative, next_level, alpha=0.4, color='orange', label='GPU Memory')
+                cumulative = next_level
+
+            # Layer 3: FlowBook overhead (top)
+            flowbook_overhead = flowbook_footprint - baseline_footprint
+            flowbook_overhead = np.maximum(flowbook_overhead, 0)  # Ensure non-negative
+            next_level = cumulative + flowbook_overhead
+            ax.fill_between(cells, cumulative, next_level, alpha=0.3, color=colors[1], label='FlowBook Overhead')
+
             ax.plot(cells, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
-            ax.plot(cells, flowbook_footprint, color=colors[1], linewidth=2, marker='o', markersize=4)
+            ax.plot(cells, next_level, color=colors[1], linewidth=2, marker='o', markersize=4, label='Total')
 
             # Show pre-only line if available
             if has_pre_post:
-                pre_only_total = baseline_footprint + pre_only_mb
+                pre_only_total = baseline_footprint + (baseline_gpu if has_gpu else 0) + pre_only_mb
                 ax.plot(cells, pre_only_total, color='green', linewidth=2, linestyle=':', marker='s', markersize=3, label='Pre-Only (no post)')
 
             ax.set_title('Memory (Total vs Pre-Only)', fontsize=title_size)
 
             # Annotate FlowBook overhead percentage at the end
             if baseline_footprint[-1] > 0:
-                mem_overhead_pct = (flowbook_footprint[-1] - baseline_footprint[-1]) / baseline_footprint[-1] * 100
+                mem_overhead_pct = (next_level[-1] - baseline_footprint[-1]) / baseline_footprint[-1] * 100
                 ax.annotate(f'{mem_overhead_pct:.1f}% overhead',
-                            xy=(cells[-1], flowbook_footprint[-1]),
+                            xy=(cells[-1], next_level[-1]),
                             xytext=(5, 0), textcoords='offset points',
                             fontsize=legend_size, va='center', ha='left',
                             color=colors[1])
-
-        # GPU memory (orange - secondary y-axis) if present
-        has_gpu = any(g > 0 for g in gpu_samples)
-        if has_gpu:
-            ax2 = ax.twinx()
-            ax2.plot(cells, gpu_samples, color='orange', linewidth=2, linestyle='--', marker='s', markersize=4, label='GPU Samples')
-            ax2.set_ylabel('GPU Samples', fontsize=label_size, color='orange')
-            ax2.tick_params(axis='y', labelcolor='orange', labelsize=tick_size)
 
         ax.set_xlabel('Cell Number', fontsize=label_size)
         ax.set_ylabel('Memory (MB)', fontsize=label_size)
