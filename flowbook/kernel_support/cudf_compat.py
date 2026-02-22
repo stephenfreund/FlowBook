@@ -604,11 +604,23 @@ class CuDFCheckpointCache:
 
     The cache uses weak references to cuDF objects as keys, so entries
     are automatically removed when the cuDF object is garbage collected.
+
+    Two-Level Caching:
+    - Level 1 (_cache): GPU→pandas conversion cache
+    - Level 2 (_deepcopy_cache): Stores already-deepcopied pandas for O(1) reuse
+
+    On cache HIT, we return a shallow copy of the cached deepcopy, which is
+    safe because:
+    1. pandas CoW protects data buffers (mutations create new arrays)
+    2. pandas Index is immutable ("Index does not support mutable operations")
+    3. cudf object columns contain only immutable types (strings, tuples)
     """
 
     def __init__(self):
         # Maps id(cudf_obj) -> (fingerprint, pandas_copy, weak_ref)
         self._cache: Dict[int, tuple] = {}
+        # Maps id(cudf_obj) -> deepcopied pandas object
+        self._deepcopy_cache: Dict[int, Any] = {}
 
     def _fingerprint(self, obj: Any) -> Optional[tuple]:
         """
@@ -616,7 +628,10 @@ class CuDFCheckpointCache:
 
         This runs on the GPU and is much faster than a full GPU→CPU copy.
         The fingerprint includes shape, dtypes, and a hash of the data.
+
+        Handles both native cudf objects and cudf.pandas proxy objects.
         """
+        # Handle native cudf types
         if is_cudf_dataframe(obj):
             try:
                 data_hash = obj.hash_values().sum()
@@ -642,6 +657,59 @@ class CuDFCheckpointCache:
                 data_hash = None
             return ('Index', len(obj), str(obj.dtype), data_hash)
 
+        # Handle cudf.pandas proxy objects
+        if _is_proxy_dataframe(obj):
+            unwrapped = unwrap_cudf_proxy(obj)
+            if is_cudf_dataframe(unwrapped):
+                try:
+                    data_hash = unwrapped.hash_values().sum()
+                    if hasattr(data_hash, 'item'):
+                        data_hash = data_hash.item()
+                except Exception:
+                    data_hash = None
+                return ('ProxyDataFrame', unwrapped.shape,
+                        tuple(unwrapped.dtypes.items()), data_hash)
+            else:
+                # Proxy with pandas slow object - use shape/dtype
+                try:
+                    return ('ProxyDataFrame', obj.shape, tuple(obj.dtypes.items()), None)
+                except (AttributeError, TypeError):
+                    return None
+
+        if _is_proxy_series(obj):
+            unwrapped = unwrap_cudf_proxy(obj)
+            if is_cudf_series(unwrapped):
+                try:
+                    data_hash = unwrapped.hash_values().sum()
+                    if hasattr(data_hash, 'item'):
+                        data_hash = data_hash.item()
+                except Exception:
+                    data_hash = None
+                return ('ProxySeries', len(unwrapped), str(unwrapped.dtype), data_hash)
+            else:
+                try:
+                    return ('ProxySeries', len(obj), str(obj.dtype), None)
+                except (AttributeError, TypeError):
+                    return None
+
+        if _is_proxy_index(obj):
+            unwrapped = unwrap_cudf_proxy(obj)
+            if is_cudf_index(unwrapped):
+                try:
+                    data_hash = hash(str(unwrapped[:10].to_pandas()))
+                except Exception:
+                    data_hash = None
+                return ('ProxyIndex', len(unwrapped), str(unwrapped.dtype), data_hash)
+            else:
+                try:
+                    data_hash = hash(str(obj[:10]))
+                except Exception:
+                    data_hash = None
+                try:
+                    return ('ProxyIndex', len(obj), str(obj.dtype), data_hash)
+                except (AttributeError, TypeError):
+                    return None
+
         return None
 
     def get_cached(self, obj: Any) -> Optional[Any]:
@@ -649,6 +717,7 @@ class CuDFCheckpointCache:
         Get cached pandas copy if object hasn't changed.
 
         Returns None if not in cache or fingerprint changed.
+        Also invalidates the deepcopy cache when data changes.
         """
         obj_id = id(obj)
 
@@ -661,15 +730,29 @@ class CuDFCheckpointCache:
         ref_obj = weak_ref()
         if ref_obj is None or ref_obj is not obj:
             del self._cache[obj_id]
+            self._deepcopy_cache.pop(obj_id, None)  # Invalidate deepcopy cache
             return None
 
         # Verify fingerprint matches
         current_fp = self._fingerprint(obj)
         if current_fp != cached_fp:
             del self._cache[obj_id]
+            self._deepcopy_cache.pop(obj_id, None)  # Invalidate deepcopy cache
             return None
 
         return pandas_copy
+
+    def has_valid_cache(self, obj: Any) -> bool:
+        """Check if we have a valid cached copy without triggering conversion."""
+        return self.get_cached(obj) is not None
+
+    def get_deepcopied(self, obj_id: int) -> Optional[Any]:
+        """Get the cached deepcopied version if available."""
+        return self._deepcopy_cache.get(obj_id)
+
+    def cache_deepcopy(self, obj_id: int, deepcopied: Any) -> None:
+        """Cache the deepcopied version for future use."""
+        self._deepcopy_cache[obj_id] = deepcopied
 
     def cache(self, obj: Any, pandas_copy: Any) -> None:
         """Store a pandas copy in the cache."""
@@ -708,8 +791,9 @@ class CuDFCheckpointCache:
         return pandas_copy
 
     def clear(self) -> None:
-        """Clear the cache."""
+        """Clear both caches."""
         self._cache.clear()
+        self._deepcopy_cache.clear()
 
 
 # Global cache instance
@@ -853,9 +937,41 @@ def from_pandas(obj: Any, target_type: type) -> Any:
 # Deepcopy Support
 # =============================================================================
 
+import os
+
+_DISABLE_DEEPCOPY_CACHE = os.environ.get('FLOWBOOK_DISABLE_CUDF_DEEPCOPY_CACHE', '0') == '1'
+
+
+def _shallow_copy_for_checkpoint(df: Any) -> Any:
+    """
+    Create a shallow copy suitable for checkpointing.
+
+    This is O(1) and safe because:
+    1. pandas CoW: data buffers are copy-on-write, mutations create new arrays
+    2. pandas Index is IMMUTABLE: "Index does not support mutable operations"
+    3. cudf object columns: contain only immutable types (strings, tuples)
+       per RAPIDS docs: "cuDF does not support the arbitrary object dtype"
+    4. Cached copy is read-only: only used for diff/comparison, never modified
+    """
+    import pandas as pd
+
+    if isinstance(df, (pd.DataFrame, pd.Series)):
+        return df.copy(deep=False)
+    elif isinstance(df, pd.Index):
+        return df.copy()
+    else:
+        return df
+
+
 def deepcopy_cudf(obj: Any, memo: Dict[int, Any]) -> Any:
     """
     Deep copy a cuDF object by converting to pandas (CPU memory).
+
+    Uses two-level caching for performance:
+    1. cudf cache: GPU→pandas conversion (avoids GPU transfer)
+    2. deepcopy cache: pandas deepcopy result (avoids redundant deepcopy)
+
+    On cache HIT, returns a shallow copy of the cached deepcopy (fast with CoW).
 
     Args:
         obj: cuDF DataFrame, Series, or Index
@@ -865,15 +981,44 @@ def deepcopy_cudf(obj: Any, memo: Dict[int, Any]) -> Any:
         pandas equivalent (stored in CPU memory)
     """
     obj_id = id(obj)
+
+    # Level 0: Check memo (same checkpoint, same object)
     if obj_id in memo:
         return memo[obj_id]
 
-    # Convert to pandas using cache
+    # Rollback path: skip optimization if disabled
+    if _DISABLE_DEEPCOPY_CACHE:
+        pandas_copy = to_pandas_cached(obj)
+        from flowbook.kernel_support.deepcopy import deepcopy as flowbook_deepcopy
+        result = flowbook_deepcopy(pandas_copy, memo)
+        memo[obj_id] = result
+        return result
+
+    cache = get_checkpoint_cache()
+
+    # Level 1: Check if cudf cache has valid entry (data unchanged)
+    is_cache_hit = cache.has_valid_cache(obj)
+
+    if is_cache_hit:
+        # Level 2: Check if we have a cached deepcopy
+        cached_deepcopy = cache.get_deepcopied(obj_id)
+
+        if cached_deepcopy is not None:
+            # Fast path: O(1) shallow copy of cached deepcopy
+            # Safe because: CoW protects data, Index is immutable, cache is read-only
+            result = _shallow_copy_for_checkpoint(cached_deepcopy)
+            memo[obj_id] = result
+            return result
+
+    # Cache MISS or no deepcopy cached - do full conversion + deepcopy
     pandas_copy = to_pandas_cached(obj)
 
-    # The pandas copy may need its own deep copy (e.g., object columns)
     from flowbook.kernel_support.deepcopy import deepcopy as flowbook_deepcopy
     result = flowbook_deepcopy(pandas_copy, memo)
+
+    # Cache the deepcopy for future HITs
+    if is_cache_hit or cache.has_valid_cache(obj):
+        cache.cache_deepcopy(obj_id, result)
 
     memo[obj_id] = result
     return result
