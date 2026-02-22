@@ -659,56 +659,56 @@ class CuDFCheckpointCache:
 
         # Handle cudf.pandas proxy objects
         if _is_proxy_dataframe(obj):
-            unwrapped = unwrap_cudf_proxy(obj)
-            if is_cudf_dataframe(unwrapped):
-                try:
-                    data_hash = unwrapped.hash_values().sum()
-                    if hasattr(data_hash, 'item'):
-                        data_hash = data_hash.item()
-                except Exception:
-                    data_hash = None
-                return ('ProxyDataFrame', unwrapped.shape,
-                        tuple(unwrapped.dtypes.items()), data_hash)
-            else:
-                # Proxy with pandas slow object - use shape/dtype
-                try:
+            try:
+                unwrapped = unwrap_cudf_proxy(obj)
+                if is_cudf_dataframe(unwrapped):
+                    try:
+                        data_hash = unwrapped.hash_values().sum()
+                        if hasattr(data_hash, 'item'):
+                            data_hash = data_hash.item()
+                    except Exception:
+                        data_hash = None
+                    return ('ProxyDataFrame', unwrapped.shape,
+                            tuple(unwrapped.dtypes.items()), data_hash)
+                else:
+                    # Proxy with pandas slow object - use shape/dtype
                     return ('ProxyDataFrame', obj.shape, tuple(obj.dtypes.items()), None)
-                except (AttributeError, TypeError):
-                    return None
+            except Exception:
+                return None
 
         if _is_proxy_series(obj):
-            unwrapped = unwrap_cudf_proxy(obj)
-            if is_cudf_series(unwrapped):
-                try:
-                    data_hash = unwrapped.hash_values().sum()
-                    if hasattr(data_hash, 'item'):
-                        data_hash = data_hash.item()
-                except Exception:
-                    data_hash = None
-                return ('ProxySeries', len(unwrapped), str(unwrapped.dtype), data_hash)
-            else:
-                try:
+            try:
+                unwrapped = unwrap_cudf_proxy(obj)
+                if is_cudf_series(unwrapped):
+                    try:
+                        data_hash = unwrapped.hash_values().sum()
+                        if hasattr(data_hash, 'item'):
+                            data_hash = data_hash.item()
+                    except Exception:
+                        data_hash = None
+                    return ('ProxySeries', len(unwrapped), str(unwrapped.dtype), data_hash)
+                else:
                     return ('ProxySeries', len(obj), str(obj.dtype), None)
-                except (AttributeError, TypeError):
-                    return None
+            except Exception:
+                return None
 
         if _is_proxy_index(obj):
-            unwrapped = unwrap_cudf_proxy(obj)
-            if is_cudf_index(unwrapped):
-                try:
-                    data_hash = hash(str(unwrapped[:10].to_pandas()))
-                except Exception:
-                    data_hash = None
-                return ('ProxyIndex', len(unwrapped), str(unwrapped.dtype), data_hash)
-            else:
-                try:
-                    data_hash = hash(str(obj[:10]))
-                except Exception:
-                    data_hash = None
-                try:
+            try:
+                unwrapped = unwrap_cudf_proxy(obj)
+                if is_cudf_index(unwrapped):
+                    try:
+                        data_hash = hash(str(unwrapped[:10].to_pandas()))
+                    except Exception:
+                        data_hash = None
+                    return ('ProxyIndex', len(unwrapped), str(unwrapped.dtype), data_hash)
+                else:
+                    try:
+                        data_hash = hash(str(obj[:10]))
+                    except Exception:
+                        data_hash = None
                     return ('ProxyIndex', len(obj), str(obj.dtype), data_hash)
-                except (AttributeError, TypeError):
-                    return None
+            except Exception:
+                return None
 
         return None
 
@@ -952,12 +952,15 @@ def _shallow_copy_for_checkpoint(df: Any) -> Any:
     3. cudf object columns: contain only immutable types (strings, tuples)
        per RAPIDS docs: "cuDF does not support the arbitrary object dtype"
     4. Cached copy is read-only: only used for diff/comparison, never modified
-    """
-    import pandas as pd
 
-    if isinstance(df, (pd.DataFrame, pd.Series)):
+    Note: We use type name checks instead of isinstance because in cudf.pandas mode,
+    `pd.DataFrame` is the proxy class, but the cached object is a real pandas DataFrame.
+    """
+    type_name = type(df).__name__
+
+    if type_name in ('DataFrame', 'Series'):
         return df.copy(deep=False)
-    elif isinstance(df, pd.Index):
+    elif 'Index' in type_name:
         return df.copy()
     else:
         return df

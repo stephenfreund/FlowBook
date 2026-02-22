@@ -563,9 +563,18 @@ class HeapSizer:
                 # For DatetimeIndex, _data is DatetimeArray with _ndarray
                 elif hasattr(data, '_ndarray'):
                     backing_array = data._ndarray
-                # Some types have nested _data
-                elif hasattr(data, '_data') and isinstance(getattr(data, '_data', None), np.ndarray):
-                    backing_array = data._data
+                # Check for PyArrow-backed arrays (use _pa_array, not deprecated _data)
+                elif hasattr(data, '_pa_array'):
+                    # Arrow arrays - skip numpy extraction, will use fallback sizing
+                    pass
+                # Some types have nested _data (legacy path with warning suppression)
+                elif hasattr(data, '_data'):
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('ignore', category=FutureWarning)
+                        nested = getattr(data, '_data', None)
+                        if isinstance(nested, np.ndarray):
+                            backing_array = nested
 
             # Fallback: try .values or ._values
             if backing_array is None and hasattr(index, '_values'):
@@ -597,6 +606,8 @@ class HeapSizer:
 
     def _get_backing_ndarray(self, arr):
         """Extract numpy array from pandas array types."""
+        import warnings
+
         np = _get_numpy()
         if np is None:
             return None
@@ -605,10 +616,22 @@ class HeapSizer:
             return arr
         if hasattr(arr, '_ndarray'):  # DatetimeArray, TimedeltaArray
             return arr._ndarray
-        if hasattr(arr, '_data') and hasattr(arr._data, '_ndarray'):
-            return arr._data._ndarray
-        if hasattr(arr, '_data') and isinstance(arr._data, np.ndarray):
-            return arr._data
+
+        # Check for PyArrow-backed arrays first (ArrowStringArray, etc.)
+        # These use _pa_array instead of _data (which is deprecated)
+        if hasattr(arr, '_pa_array'):
+            # Arrow arrays don't have numpy backing - return None to use fallback sizing
+            return None
+
+        # Legacy path for older pandas array types
+        # Suppress FutureWarning for deprecated _data attribute access
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=FutureWarning)
+            if hasattr(arr, '_data') and hasattr(arr._data, '_ndarray'):
+                return arr._data._ndarray
+            if hasattr(arr, '_data') and isinstance(arr._data, np.ndarray):
+                return arr._data
+
         return None
 
     def _sizeof_extension_array(self, arr, owned_only: bool) -> int:
