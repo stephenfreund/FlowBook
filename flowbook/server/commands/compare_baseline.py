@@ -1937,7 +1937,7 @@ class CompareBaselineCommand(NotebookCommand):
 
                 # Save JSON output - numbered for multi-trial
                 if num_trials > 1:
-                    json_output_path = timings_dir / f"{notebook_stem}_comparison{trial_num}.json"
+                    json_output_path = timings_dir / f"{notebook_stem}_comparison-{trial_num}.json"
                 else:
                     json_output_path = timings_dir / f"{notebook_stem}_comparison.json"
 
