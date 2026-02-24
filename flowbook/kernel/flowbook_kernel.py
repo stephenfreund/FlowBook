@@ -433,15 +433,13 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         # Pending EXEC-RESTORE flag: set by %exec_restore, consumed by _do_execute_impl
         self._pending_exec_restore: Optional[str] = None
 
-    def start(self) -> None:
-        """Start the kernel and initialize tracking infrastructure.
+        # Ensure filesystem magics are registered
+        self._ensure_fs_magics()
 
-        We do tracking initialization here (instead of lazily in _do_execute_impl)
-        so that the initial checkpoint cost doesn't appear in first-cell timing.
-        """
-        super().start()
-        # Initialize tracking and take initial state checkpoint (σ_0)
-        # This is done here so the overhead isn't charged to the first cell
+        # Ensure VFS patches are applied to user namespace
+        self._ensure_vfs_namespace_patched()
+
+        # Ensure tracking is initialized (done lazily on first execution)
         self._ensure_tracking_initialized()
 
     # =========================================================================
@@ -769,10 +767,18 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
         lines = ["Checkpoint Memory Costs (measured by HeapSizer):"]
         lines.append("")
-        lines.append(f"Checkpoint data:     {self._format_bytes(internal_sizes['checkpoints_total'])}")
-        lines.append(f"Deepcopy cache:      {self._format_bytes(internal_sizes['deepcopy_cache_total'])}")
-        lines.append(f"Alias index:         {self._format_bytes(internal_sizes['alias_index_total'])}")
-        lines.append(f"Var costs cache:     {self._format_bytes(internal_sizes['var_costs_cache'])}")
+        lines.append(
+            f"Checkpoint data:     {self._format_bytes(internal_sizes['checkpoints_total'])}"
+        )
+        lines.append(
+            f"Deepcopy cache:      {self._format_bytes(internal_sizes['deepcopy_cache_total'])}"
+        )
+        lines.append(
+            f"Alias index:         {self._format_bytes(internal_sizes['alias_index_total'])}"
+        )
+        lines.append(
+            f"Var costs cache:     {self._format_bytes(internal_sizes['var_costs_cache'])}"
+        )
 
         total = sum(internal_sizes.values())
         lines.append("")
@@ -968,15 +974,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
         with timer(message=f"do_execute: {self._cell_id}"):
             try:
-                # Ensure filesystem magics are registered
-                self._ensure_fs_magics()
-
-                # Ensure VFS patches are applied to user namespace
-                self._ensure_vfs_namespace_patched()
-
-                # Ensure tracking is initialized (done lazily on first execution)
-                self._ensure_tracking_initialized()
-
                 # Update cell order if provided in metadata
                 if cell_meta and "cell_order" in cell_meta:
                     self._enforcer.set_cell_order(cell_meta["cell_order"])
