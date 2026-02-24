@@ -442,6 +442,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         # Ensure tracking is initialized (done lazily on first execution)
         self._ensure_tracking_initialized()
 
+        # Pre-load cudf if available (import takes ~3s for CUDA init)
+        # Doing this here avoids charging the overhead to the first cell
+        from flowbook.kernel_support.cudf_compat import has_cudf
+        has_cudf()
+
     # =========================================================================
     # Magic Commands
     # =========================================================================
