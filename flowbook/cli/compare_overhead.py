@@ -22,7 +22,7 @@ import shutil
 import subprocess
 import sys
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -384,6 +384,10 @@ class FileStats:
     rerun_final_checkpoint_bytes: int = 0
     # Number of trials averaged (1 = single trial)
     num_trials: int = 1
+    # Per-cell data for aggregate statistics
+    per_cell_checkpoint_overhead_ms: List[float] = field(default_factory=list)
+    per_cell_total_overhead_ms: List[float] = field(default_factory=list)
+    per_cell_memory_overhead_mb: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -391,6 +395,7 @@ class AggregateStats:
     """Aggregate statistics across multiple files."""
     num_files: int
     total_cells: int
+    # Overall slowdown
     slowdown_mean: float
     slowdown_median: float
     slowdown_std: float
@@ -398,9 +403,31 @@ class AggregateStats:
     slowdown_max: float
     slowdown_p90: float
     slowdown_p95: float
+    # Overall overhead percentages
     state_overhead_pct_mean: float
     check_overhead_pct_mean: float
     memory_overhead_pct_mean: float
+    memory_overhead_pct_median: float = 0.0
+    memory_overhead_pct_p90: float = 0.0
+    memory_overhead_pct_p95: float = 0.0
+    # Per-cell checkpoint overhead (ms)
+    checkpoint_overhead_per_cell_mean: float = 0.0
+    checkpoint_overhead_per_cell_median: float = 0.0
+    checkpoint_overhead_per_cell_p90: float = 0.0
+    checkpoint_overhead_per_cell_p95: float = 0.0
+    # Per-cell total overhead (ms)
+    total_overhead_per_cell_mean: float = 0.0
+    total_overhead_per_cell_median: float = 0.0
+    total_overhead_per_cell_p90: float = 0.0
+    total_overhead_per_cell_p95: float = 0.0
+    # Per-cell memory overhead (MB)
+    memory_overhead_per_cell_mean: float = 0.0
+    memory_overhead_per_cell_median: float = 0.0
+    memory_overhead_per_cell_p90: float = 0.0
+    memory_overhead_per_cell_p95: float = 0.0
+    # Raw per-cell data for histograms
+    all_total_overhead_per_cell: List[float] = field(default_factory=list)
+    all_memory_overhead_per_cell: List[float] = field(default_factory=list)
 
 
 def load_comparison_json(file_path: str) -> Dict[str, Any]:
@@ -544,6 +571,38 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         if last_baseline_mem > 0:
             last_cell_memory_pct = ((last_flowbook_mem - last_baseline_mem) / last_baseline_mem) * 100
 
+    # Collect per-cell overhead data for aggregate statistics
+    per_cell_checkpoint_overhead_ms: List[float] = []
+    per_cell_total_overhead_ms: List[float] = []
+    per_cell_memory_overhead_mb: List[float] = []
+
+    # Per-cell timing overhead (checkpoint = state_duration_ms, total = state + check + other)
+    for fc in flowbook_timing_cells:
+        state_ms = fc.get("state_duration_ms", 0.0)
+        check_ms = fc.get("check_duration_ms", 0.0)
+        execute_ms = fc.get("execute_duration_ms") or fc.get("cell_runtime_ms", 0.0)
+        # If code_duration_ms is not available, derive it (so other_ms = 0)
+        code_ms = fc.get("code_duration_ms")
+        if code_ms is None:
+            code_ms = max(execute_ms - state_ms - check_ms, 0)
+        other_ms = max(execute_ms - (code_ms + state_ms + check_ms), 0)
+        per_cell_checkpoint_overhead_ms.append(state_ms)
+        per_cell_total_overhead_ms.append(state_ms + check_ms + other_ms)
+
+    # Per-cell memory overhead (from cumulative_by_var - compute delta between consecutive cells)
+    prev_cumulative = 0
+    for fc in flowbook_mem_cells:
+        cumulative_by_var = fc.get("cumulative_by_var", {})
+        if cumulative_by_var:
+            # Sum all variable cumulative values at this cell
+            total_cumulative = sum(cumulative_by_var.values())
+            # Per-cell is the delta from previous cell
+            per_cell_bytes = max(0, total_cumulative - prev_cumulative)
+            per_cell_memory_overhead_mb.append(per_cell_bytes / (1024 * 1024))
+            prev_cumulative = total_cumulative
+        else:
+            per_cell_memory_overhead_mb.append(0.0)
+
     return FileStats(
         notebook_path=notebook_path,
         notebook_name=notebook_name,
@@ -571,6 +630,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         rerun_flowbook_total_ms=rerun_flowbook_total,
         rerun_final_checkpoint_bytes=rerun_final_checkpoint,
         num_trials=num_trials,
+        per_cell_checkpoint_overhead_ms=per_cell_checkpoint_overhead_ms,
+        per_cell_total_overhead_ms=per_cell_total_overhead_ms,
+        per_cell_memory_overhead_mb=per_cell_memory_overhead_mb,
     )
 
 
@@ -598,6 +660,20 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
     check_pcts = np.array([s.last_cell_check_overhead_pct for s in stats_list])
     memory_pcts = np.array([s.last_cell_memory_overhead_pct for s in stats_list])
 
+    # Collect all per-cell data across all files for aggregate per-cell statistics
+    all_checkpoint_overhead = []
+    all_total_overhead = []
+    all_memory_overhead = []
+    for s in stats_list:
+        all_checkpoint_overhead.extend(s.per_cell_checkpoint_overhead_ms)
+        all_total_overhead.extend(s.per_cell_total_overhead_ms)
+        all_memory_overhead.extend(s.per_cell_memory_overhead_mb)
+
+    # Compute per-cell statistics
+    checkpoint_arr = np.array(all_checkpoint_overhead) if all_checkpoint_overhead else np.array([0.0])
+    total_arr = np.array(all_total_overhead) if all_total_overhead else np.array([0.0])
+    memory_arr = np.array(all_memory_overhead) if all_memory_overhead else np.array([0.0])
+
     return AggregateStats(
         num_files=len(stats_list),
         total_cells=sum(s.num_cells for s in stats_list),
@@ -611,6 +687,27 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
         state_overhead_pct_mean=float(np.mean(state_pcts)),
         check_overhead_pct_mean=float(np.mean(check_pcts)),
         memory_overhead_pct_mean=float(np.mean(memory_pcts)),
+        memory_overhead_pct_median=float(np.median(memory_pcts)),
+        memory_overhead_pct_p90=float(np.percentile(memory_pcts, 90)),
+        memory_overhead_pct_p95=float(np.percentile(memory_pcts, 95)),
+        # Per-cell checkpoint overhead (ms)
+        checkpoint_overhead_per_cell_mean=float(np.mean(checkpoint_arr)),
+        checkpoint_overhead_per_cell_median=float(np.median(checkpoint_arr)),
+        checkpoint_overhead_per_cell_p90=float(np.percentile(checkpoint_arr, 90)),
+        checkpoint_overhead_per_cell_p95=float(np.percentile(checkpoint_arr, 95)),
+        # Per-cell total overhead (ms)
+        total_overhead_per_cell_mean=float(np.mean(total_arr)),
+        total_overhead_per_cell_median=float(np.median(total_arr)),
+        total_overhead_per_cell_p90=float(np.percentile(total_arr, 90)),
+        total_overhead_per_cell_p95=float(np.percentile(total_arr, 95)),
+        # Per-cell memory overhead (MB)
+        memory_overhead_per_cell_mean=float(np.mean(memory_arr)),
+        memory_overhead_per_cell_median=float(np.median(memory_arr)),
+        memory_overhead_per_cell_p90=float(np.percentile(memory_arr, 90)),
+        memory_overhead_per_cell_p95=float(np.percentile(memory_arr, 95)),
+        # Raw per-cell data for histograms
+        all_total_overhead_per_cell=list(total_arr),
+        all_memory_overhead_per_cell=list(memory_arr),
     )
 
 
@@ -667,7 +764,30 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
     lines.append("")
     lines.append(f"  Mean State Overhead:   {aggregate.state_overhead_pct_mean:.1f}%")
     lines.append(f"  Mean Check Overhead:   {aggregate.check_overhead_pct_mean:.1f}%")
-    lines.append(f"  Mean Memory Overhead:  {aggregate.memory_overhead_pct_mean:.1f}%")
+    lines.append("")
+    lines.append("MEMORY OVERHEAD")
+    lines.append(f"  Mean Memory Overhead:    {aggregate.memory_overhead_pct_mean:.1f}%")
+    lines.append(f"  Median Memory Overhead:  {aggregate.memory_overhead_pct_median:.1f}%")
+    lines.append(f"  P90 Memory Overhead:     {aggregate.memory_overhead_pct_p90:.1f}%")
+    lines.append(f"  P95 Memory Overhead:     {aggregate.memory_overhead_pct_p95:.1f}%")
+    lines.append("")
+    lines.append("PER-CELL CHECKPOINT OVERHEAD (ms)")
+    lines.append(f"  Mean:   {aggregate.checkpoint_overhead_per_cell_mean:.2f}ms")
+    lines.append(f"  Median: {aggregate.checkpoint_overhead_per_cell_median:.2f}ms")
+    lines.append(f"  P90:    {aggregate.checkpoint_overhead_per_cell_p90:.2f}ms")
+    lines.append(f"  P95:    {aggregate.checkpoint_overhead_per_cell_p95:.2f}ms")
+    lines.append("")
+    lines.append("PER-CELL TOTAL OVERHEAD (ms)")
+    lines.append(f"  Mean:   {aggregate.total_overhead_per_cell_mean:.2f}ms")
+    lines.append(f"  Median: {aggregate.total_overhead_per_cell_median:.2f}ms")
+    lines.append(f"  P90:    {aggregate.total_overhead_per_cell_p90:.2f}ms")
+    lines.append(f"  P95:    {aggregate.total_overhead_per_cell_p95:.2f}ms")
+    lines.append("")
+    lines.append("PER-CELL MEMORY OVERHEAD (MB)")
+    lines.append(f"  Mean:   {aggregate.memory_overhead_per_cell_mean:.2f}MB")
+    lines.append(f"  Median: {aggregate.memory_overhead_per_cell_median:.2f}MB")
+    lines.append(f"  P90:    {aggregate.memory_overhead_per_cell_p90:.2f}MB")
+    lines.append(f"  P95:    {aggregate.memory_overhead_per_cell_p95:.2f}MB")
     lines.append("=" * 110)
 
     return "\n".join(lines)
@@ -1422,8 +1542,8 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
                 var_bytes = by_var.get(var_name, 0)
                 var_by_cell[var_name].append(var_bytes)
 
-        # Get final cumulative for ordering
-        var_final: Dict[str, int] = {v: var_by_cell[v][-1] if var_by_cell[v] else 0 for v in all_var_names}
+        # Get MAX cumulative for ordering (captures peak contribution, not just final)
+        var_max: Dict[str, int] = {v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names}
     else:
         # Fall back to old method - derives from checkpoint_var_costs (may overcount)
         has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
@@ -1451,10 +1571,11 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
                 # Append current cumulative value for this variable
                 var_by_cell[var_name].append(var_cumulative[var_name])
 
-        var_final = var_cumulative
+        # Get MAX cumulative for ordering (captures peak contribution)
+        var_max = {v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names}
 
-    # Order variables by final cumulative total size descending
-    vars_ordered = sorted(var_final.keys(), key=lambda v: var_final[v], reverse=True)
+    # Order variables by MAX cumulative size descending (not final - captures vars that get cleaned up)
+    vars_ordered = sorted(var_max.keys(), key=lambda v: var_max[v], reverse=True)
 
     # Limit to top variables, aggregate rest as "other"
     if len(vars_ordered) > top_n:
@@ -1595,11 +1716,10 @@ def plot_combined_v2(
     top_n: int = 10
 ) -> Optional[Any]:
     """
-    Create combined 4-panel plot for v2.0 data with HeapSizer memory:
-    - Panel 1: Timing (baseline vs flowbook cumulative time)
-    - Panel 2: Memory (HeapSizer data)
-    - Panel 3: Checkpoint by Type
-    - Panel 4: Checkpoint by Name (per-variable)
+    Create combined 6-panel plot (2x3 grid) for v2.0 data with HeapSizer memory:
+    - Row 1: Timing Comparison | Checkpoint Time by Variable
+    - Row 2: Memory Overhead | Checkpoint Memory by Variable
+    - Row 3: Overhead Time per Cell | Checkpoint Memory Overhead per Cell
 
     Args:
         data: Comparison data dict
@@ -1647,77 +1767,61 @@ def plot_combined_v2(
     legend_size = 14 if large_fonts else 10
     tick_size = 14 if large_fonts else 10
 
-    # Determine number of panels
+    # Check data availability
     has_memory = bool(baseline_mem_cells and flowbook_mem_cells)
-    # Extract timing by variable for Panel 3
     timing_var_data = extract_checkpoint_timing_var_data(data, top_n=top_n)
-    # Extract memory by variable for Panel 4
     var_data = extract_checkpoint_var_data(data, top_n=top_n)
 
-    n_panels = 1  # Always have timing
-    if has_memory:
-        n_panels += 1
-    if timing_var_data:
-        n_panels += 1
-    if var_data:
-        n_panels += 1
+    # Always use 2x3 grid layout
+    fig, axes_2d = plt.subplots(3, 2, figsize=(14, 18))
+    axes = [
+        axes_2d[0, 0], axes_2d[0, 1],  # Row 1: Timing, Checkpoint Time by Variable
+        axes_2d[1, 0], axes_2d[1, 1],  # Row 2: Memory, Checkpoint Memory by Variable
+        axes_2d[2, 0], axes_2d[2, 1],  # Row 3: Overhead per Cell, Memory Overhead per Cell
+    ]
 
-    # Use 2x2 grid layout for 4 panels, otherwise single row
-    if n_panels == 4:
-        fig, axes_2d = plt.subplots(2, 2, figsize=(14, 12))
-        axes = [axes_2d[0, 0], axes_2d[0, 1], axes_2d[1, 0], axes_2d[1, 1]]
-    else:
-        fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 6))
-        if n_panels == 1:
-            axes = [axes]
-
-    panel_idx = 0
-
-    # ========== Panel 1: Timing ==========
+    # Prepare shared data for timing
+    cell_data_map = {}
     if baseline_cells and flowbook_cells:
-        ax = axes[panel_idx]
-        panel_idx += 1
-
-        # Align by cell_id - use execute_duration_ms and code_duration_ms
-        cell_data = {}
         for c in baseline_cells:
-            # Baseline: execute_duration_ms equals code_duration_ms (no FlowBook overhead)
-            cell_data[c["cell_id"]] = {"baseline_ms": c.get("execute_duration_ms", c.get("cell_runtime_ms", 0))}
+            cell_data_map[c["cell_id"]] = {"baseline_ms": c.get("execute_duration_ms", c.get("cell_runtime_ms", 0))}
         for c in flowbook_cells:
-            if c["cell_id"] in cell_data:
-                cell_data[c["cell_id"]]["execute_ms"] = c.get("execute_duration_ms", c.get("cell_runtime_ms", 0))
-                cell_data[c["cell_id"]]["code_ms"] = c.get("code_duration_ms", 0)
-                cell_data[c["cell_id"]]["state_ms"] = c.get("state_duration_ms", 0)
-                cell_data[c["cell_id"]]["check_ms"] = c.get("check_duration_ms", 0)
+            if c["cell_id"] in cell_data_map:
+                execute_ms = c.get("execute_duration_ms", c.get("cell_runtime_ms", 0))
+                state_ms = c.get("state_duration_ms", 0)
+                check_ms = c.get("check_duration_ms", 0)
+                # If code_duration_ms is not available, derive it from execute - state - check
+                # This ensures "other" overhead is 0 when we don't have a separate code timing
+                code_ms = c.get("code_duration_ms")
+                if code_ms is None:
+                    code_ms = max(execute_ms - state_ms - check_ms, 0)
+                cell_data_map[c["cell_id"]]["execute_ms"] = execute_ms
+                cell_data_map[c["cell_id"]]["code_ms"] = code_ms
+                cell_data_map[c["cell_id"]]["state_ms"] = state_ms
+                cell_data_map[c["cell_id"]]["check_ms"] = check_ms
 
-        cell_ids = list(cell_data.keys())
-        baseline_runtimes = [cell_data[cid].get("baseline_ms", 0) for cid in cell_ids]
-        flowbook_execute = [cell_data[cid].get("execute_ms", 0) for cid in cell_ids]
-        flowbook_code = [cell_data[cid].get("code_ms", 0) for cid in cell_ids]
-        state_times = [cell_data[cid].get("state_ms", 0) for cid in cell_ids]
-        check_times = [cell_data[cid].get("check_ms", 0) for cid in cell_ids]
+    cell_ids = list(cell_data_map.keys())
+    cells = np.arange(1, len(cell_ids) + 1) if cell_ids else np.array([])
 
-        cells = np.arange(1, len(cell_ids) + 1)
+    # Arrays for timing data
+    baseline_arr = np.array([cell_data_map[cid].get("baseline_ms", 0) for cid in cell_ids]) if cell_ids else np.array([])
+    code_arr = np.array([cell_data_map[cid].get("code_ms", 0) for cid in cell_ids]) if cell_ids else np.array([])
+    state_arr = np.array([cell_data_map[cid].get("state_ms", 0) for cid in cell_ids]) if cell_ids else np.array([])
+    check_arr = np.array([cell_data_map[cid].get("check_ms", 0) for cid in cell_ids]) if cell_ids else np.array([])
+    execute_arr = np.array([cell_data_map[cid].get("execute_ms", 0) for cid in cell_ids]) if cell_ids else np.array([])
+    other_arr = np.maximum(execute_arr - (code_arr + state_arr + check_arr), 0) if cell_ids else np.array([])
 
-        # Per-cell arrays
-        baseline_arr = np.array(baseline_runtimes)
-        code_arr = np.array(flowbook_code)
-        state_arr = np.array(state_times)
-        check_arr = np.array(check_times)
-        execute_arr = np.array(flowbook_execute)
-        # Other overhead = execute - (code + state + check)
-        other_arr = execute_arr - (code_arr + state_arr + check_arr)
-        other_arr = np.maximum(other_arr, 0)  # Clamp to non-negative
+    # Cumulative sums
+    baseline_cumsum = np.cumsum(baseline_arr) if len(baseline_arr) > 0 else np.array([])
+    code_cumsum = np.cumsum(code_arr) if len(code_arr) > 0 else np.array([])
+    state_cumsum = np.cumsum(state_arr) if len(state_arr) > 0 else np.array([])
+    check_cumsum = np.cumsum(check_arr) if len(check_arr) > 0 else np.array([])
+    other_cumsum = np.cumsum(other_arr) if len(other_arr) > 0 else np.array([])
 
-        # Cumulative times
-        baseline_cumsum = np.cumsum(baseline_arr)
-        # FlowBook cumulative: code + state + check + other (same as execute)
-        code_cumsum = np.cumsum(code_arr)
-        state_cumsum = np.cumsum(state_arr)
-        check_cumsum = np.cumsum(check_arr)
-        other_cumsum = np.cumsum(other_arr)
-
-        # Left y-axis: cumulative time - baseline line and FlowBook stacked areas
+    # ========== Panel 1: Timing Comparison (top-left) ==========
+    ax = axes[0]
+    if len(cells) > 0:
+        # Plot baseline line
         ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label="Baseline")
 
         # FlowBook as stacked area: code (bottom) + state + check + other (top)
@@ -1741,237 +1845,51 @@ def plot_combined_v2(
         if timing_initial_count < len(cells):
             ax.axvline(x=timing_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
 
-        # Right y-axis: per-cell FlowBook overhead as bar chart
-        ax2 = ax.twinx()
-        # Overhead per cell = state + check + other (everything except code time)
-        overhead_per_cell = state_arr + check_arr + other_arr
-        bar_width = 0.6
-        ax2.bar(cells, overhead_per_cell / 1000, alpha=0.3, color='gray', label="Overhead/Cell", width=bar_width)
-        ax2.set_ylabel("Overhead per Cell (seconds)", fontsize=label_size)
-        ax2.tick_params(axis='y', labelsize=tick_size)
-        ax2.grid(False)  # Disable grid lines on secondary axis
-        ax2.set_ylim(bottom=0)
-
-        # Combined legend from both axes
-        lines1, labels1 = ax.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=legend_size)
+        ax.legend(loc="upper left", fontsize=legend_size)
 
         # Add timing breakdown text box
-        total_baseline_s = baseline_cumsum[-1] / 1000
         total_code_s = code_cumsum[-1] / 1000
         total_state_s = state_cumsum[-1] / 1000
         total_check_s = check_cumsum[-1] / 1000
         total_other_s = other_cumsum[-1] / 1000
         total_flowbook_s = total_code_s + total_state_s + total_check_s + total_other_s
+        total_baseline_s = baseline_cumsum[-1] / 1000
 
         textstr = f'Baseline: {total_baseline_s:.2f}s\nFlowBook: {total_flowbook_s:.2f}s'
         props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
         ax.text(0.02, 0.70, textstr, transform=ax.transAxes, fontsize=legend_size,
                 verticalalignment='top', horizontalalignment='left', bbox=props)
 
-        if baseline_cumsum[-1] > 0:
-            overhead_pct = (total_flowbook_s * 1000 - baseline_cumsum[-1]) / baseline_cumsum[-1] * 100
-            ax.annotate(f'{overhead_pct:.1f}% overhead',
+        # Annotate overhead percentage relative to FlowBook Code time
+        total_overhead_s = total_state_s + total_check_s + total_other_s
+        if total_code_s > 0:
+            overhead_pct = (total_overhead_s / total_code_s) * 100
+            ax.annotate(f'{overhead_pct:.1f}% overhead (vs code)',
                         xy=(cells[-1], total_flowbook_s),
                         xytext=(5, 0), textcoords='offset points',
                         fontsize=legend_size, va='center', ha='left', color=colors[1])
+    else:
+        ax.text(0.5, 0.5, 'No timing data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Timing Comparison", fontsize=title_size)
 
-    # ========== Panel 2: Memory + GPU ==========
-    if has_memory:
-        ax = axes[panel_idx]
-        panel_idx += 1
-
-        cells = np.arange(1, len(flowbook_mem_cells) + 1)
-        baseline_footprint = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells])
-        flowbook_footprint = np.array([c.get("current_footprint_mb", 0) for c in flowbook_mem_cells])
-        baseline_gpu = np.array([c.get("gpu_mem_samples", 0) for c in baseline_mem_cells])
-
-        # Check if overhead_breakdown data is available
-        has_overhead_breakdown = any(
-            c.get("overhead_breakdown") for c in flowbook_mem_cells
-        )
-
-        # Check if pre/post checkpoint breakdown is available
-        has_pre_post = any(
-            c.get("pre_only_bytes", 0) > 0 or c.get("post_savings_bytes", 0) > 0
-            for c in flowbook_mem_cells
-        )
-
-        # Extract pre/post checkpoint sizes (for NO_POST analysis)
-        # pre_only_mb: memory if only pre checkpoints existed (accounts for sharing)
-        # post_savings_mb: actual memory saved by removing post checkpoints
-        pre_only_mb = np.array([
-            c.get("pre_only_bytes", 0) / (1024 * 1024)
-            for c in flowbook_mem_cells
-        ])
-        post_savings_mb = np.array([
-            c.get("post_savings_bytes", 0) / (1024 * 1024)
-            for c in flowbook_mem_cells
-        ])
-
-        if has_overhead_breakdown:
-            # Stacked overhead breakdown visualization
-            # Extract overhead categories per cell
-            checkpoints_mb = np.array([
-                (c.get("overhead_breakdown") or {}).get("checkpoints_mb", 0)
-                for c in flowbook_mem_cells
-            ])
-            execution_records_mb = np.array([
-                (c.get("overhead_breakdown") or {}).get("execution_records_mb", 0)
-                for c in flowbook_mem_cells
-            ])
-            tracking_metadata_mb = np.array([
-                (c.get("overhead_breakdown") or {}).get("tracking_metadata_mb", 0)
-                for c in flowbook_mem_cells
-            ])
-            other_mb = np.array([
-                (c.get("overhead_breakdown") or {}).get("other_mb", 0)
-                for c in flowbook_mem_cells
-            ])
-
-            # Colors for stacked areas
-            stack_colors = sns.color_palette("Set2", 5)
-
-            # Check for GPU memory
-            has_gpu = any(g > 0 for g in baseline_gpu)
-
-            # Layer 1: Baseline CPU memory (bottom - gray)
-            ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color='gray', label='Baseline CPU')
-
-            # Layer 2: GPU memory (middle - orange, stacked on baseline)
-            cumulative = baseline_footprint.copy()
-            if has_gpu:
-                next_level = cumulative + baseline_gpu
-                ax.fill_between(cells, cumulative, next_level, alpha=0.4, color='orange', label='GPU Memory')
-                cumulative = next_level
-
-            # Layer 3: FlowBook overhead categories (top - stacked on GPU)
-            # Checkpoints (largest)
-            next_level = cumulative + checkpoints_mb
-            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[0], label='Checkpoints')
-            cumulative = next_level
-
-            # Execution records
-            next_level = cumulative + execution_records_mb
-            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[1], label='Exec Records')
-            cumulative = next_level
-
-            # Tracking metadata
-            next_level = cumulative + tracking_metadata_mb
-            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[2], label='Tracking')
-            cumulative = next_level
-
-            # Other
-            next_level = cumulative + other_mb
-            ax.fill_between(cells, cumulative, next_level, alpha=0.5, color=stack_colors[3], label='Other')
-            cumulative = next_level
-
-            # Draw lines for reference
-            ax.plot(cells, baseline_footprint, color='gray', linewidth=2, linestyle='--')
-            ax.plot(cells, cumulative, color=colors[1], linewidth=2, marker='o', markersize=4, label='Total')
-
-            # Show pre-only line (what memory would be with NO post checkpoints)
-            if has_pre_post:
-                # Pre-only = baseline + GPU + pre_only checkpoints + other overhead (non-checkpoint)
-                other_overhead = execution_records_mb + tracking_metadata_mb + other_mb
-                gpu_component = baseline_gpu if has_gpu else np.zeros_like(baseline_footprint)
-                pre_only_total = baseline_footprint + gpu_component + pre_only_mb + other_overhead
-                ax.plot(cells, pre_only_total, color='green', linewidth=2, linestyle=':', marker='s', markersize=3, label='Pre-Only (no post)')
-
-                # Annotate savings at end
-                if cumulative[-1] > 0 and post_savings_mb[-1] > 0:
-                    total_ckpt = checkpoints_mb[-1]
-                    savings_pct = (post_savings_mb[-1] / total_ckpt * 100) if total_ckpt > 0 else 0
-                    ax.annotate(f'Post savings: {post_savings_mb[-1]:.1f}MB ({savings_pct:.0f}%)',
-                                xy=(cells[-1], pre_only_total[-1]),
-                                xytext=(5, 10), textcoords='offset points',
-                                fontsize=legend_size - 2, va='bottom', ha='left',
-                                color='green')
-
-            ax.set_title('Memory Overhead (Total vs Pre-Only)', fontsize=title_size)
-
-            # Annotate FlowBook overhead percentage at the end
-            if baseline_footprint[-1] > 0:
-                mem_overhead_pct = (cumulative[-1] - baseline_footprint[-1]) / baseline_footprint[-1] * 100
-                ax.annotate(f'{mem_overhead_pct:.1f}% overhead',
-                            xy=(cells[-1], cumulative[-1]),
-                            xytext=(5, 0), textcoords='offset points',
-                            fontsize=legend_size, va='center', ha='left',
-                            color=colors[1])
-        else:
-            # Original visualization without detailed breakdown
-            # Check for GPU memory
-            has_gpu = any(g > 0 for g in baseline_gpu)
-
-            # Layer 1: Baseline CPU memory (bottom - gray)
-            ax.fill_between(cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline CPU')
-            cumulative = baseline_footprint.copy()
-
-            # Layer 2: GPU memory (middle - orange)
-            if has_gpu:
-                next_level = cumulative + baseline_gpu
-                ax.fill_between(cells, cumulative, next_level, alpha=0.4, color='orange', label='GPU Memory')
-                cumulative = next_level
-
-            # Layer 3: FlowBook overhead (top)
-            flowbook_overhead = flowbook_footprint - baseline_footprint
-            flowbook_overhead = np.maximum(flowbook_overhead, 0)  # Ensure non-negative
-            next_level = cumulative + flowbook_overhead
-            ax.fill_between(cells, cumulative, next_level, alpha=0.3, color=colors[1], label='FlowBook Overhead')
-
-            ax.plot(cells, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
-            ax.plot(cells, next_level, color=colors[1], linewidth=2, marker='o', markersize=4, label='Total')
-
-            # Show pre-only line if available
-            if has_pre_post:
-                pre_only_total = baseline_footprint + (baseline_gpu if has_gpu else 0) + pre_only_mb
-                ax.plot(cells, pre_only_total, color='green', linewidth=2, linestyle=':', marker='s', markersize=3, label='Pre-Only (no post)')
-
-            ax.set_title('Memory (Total vs Pre-Only)', fontsize=title_size)
-
-            # Annotate FlowBook overhead percentage at the end
-            if baseline_footprint[-1] > 0:
-                mem_overhead_pct = (next_level[-1] - baseline_footprint[-1]) / baseline_footprint[-1] * 100
-                ax.annotate(f'{mem_overhead_pct:.1f}% overhead',
-                            xy=(cells[-1], next_level[-1]),
-                            xytext=(5, 0), textcoords='offset points',
-                            fontsize=legend_size, va='center', ha='left',
-                            color=colors[1])
-
-        ax.set_xlabel('Cell Number', fontsize=label_size)
-        ax.set_ylabel('Memory (MB)', fontsize=label_size)
-
-        # Add separator line for rerun phase
-        if memory_initial_count < len(cells):
-            ax.axvline(x=memory_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
-
-        ax.legend(loc='upper left', fontsize=legend_size - 2)
-        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
-        ax.set_xlim(left=1)
-        ax.set_ylim(bottom=0)
-        ax.tick_params(axis='both', labelsize=tick_size)
-
-    # ========== Panel 3: Checkpoint Time by Variable (if available) ==========
+    # ========== Panel 2: Checkpoint Time by Variable (top-right) ==========
+    ax = axes[1]
     if timing_var_data is not None:
-        ax = axes[panel_idx]
-        panel_idx += 1
         var_colors = sns.color_palette("husl", len(timing_var_data["vars_ordered"]))
         timing_cells = np.array(timing_var_data["cells"])
         timing_var_types = timing_var_data.get("var_types", {})
 
         # Stack checkpoint timing by variable (ms -> seconds)
         stacked = [np.array(timing_var_data["by_var"][v]) / 1000 for v in timing_var_data["vars_ordered"]]
-        cumulative = np.zeros(len(timing_cells))
+        cumulative_timing = np.zeros(len(timing_cells))
         for i, (v, data_sec) in enumerate(zip(timing_var_data["vars_ordered"], stacked)):
-            # Include type in legend label
             var_type = timing_var_types.get(v, "")
             label = f"{v} ({var_type})" if var_type else v
-            ax.fill_between(timing_cells, cumulative, cumulative + data_sec, alpha=0.7, color=var_colors[i], label=label)
-            cumulative = cumulative + data_sec
+            ax.fill_between(timing_cells, cumulative_timing, cumulative_timing + data_sec, alpha=0.7, color=var_colors[i], label=label)
+            cumulative_timing = cumulative_timing + data_sec
 
         # Draw total line
-        ax.plot(timing_cells, cumulative, color='black', linewidth=1.5, linestyle='--', label='Total')
+        ax.plot(timing_cells, cumulative_timing, color='black', linewidth=1.5, linestyle='--', label='Total')
 
         # Add separator line for rerun phase
         timing_var_initial_count = timing_var_data.get("initial_count", len(timing_cells))
@@ -1988,38 +1906,151 @@ def plot_combined_v2(
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
-        ax.tick_params(axis='both', labelsize=tick_size)
+    else:
+        ax.text(0.5, 0.5, 'No checkpoint timing data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Checkpoint Time by Variable", fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
 
-    # ========== Panel 4: Checkpoint Memory by Variable (if available) ==========
+    # ========== Panel 3: Memory Overhead (middle-left) ==========
+    ax = axes[2]
+    if has_memory:
+        mem_cells_arr = np.arange(1, len(flowbook_mem_cells) + 1)
+        baseline_footprint = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells])
+        flowbook_footprint = np.array([c.get("current_footprint_mb", 0) for c in flowbook_mem_cells])
+        baseline_gpu = np.array([c.get("gpu_mem_samples", 0) for c in baseline_mem_cells])
+
+        has_overhead_breakdown = any(c.get("overhead_breakdown") for c in flowbook_mem_cells)
+
+        if has_overhead_breakdown:
+            checkpoints_mb = np.array([
+                (c.get("overhead_breakdown") or {}).get("checkpoints_mb", 0)
+                for c in flowbook_mem_cells
+            ])
+            execution_records_mb = np.array([
+                (c.get("overhead_breakdown") or {}).get("execution_records_mb", 0)
+                for c in flowbook_mem_cells
+            ])
+            tracking_metadata_mb = np.array([
+                (c.get("overhead_breakdown") or {}).get("tracking_metadata_mb", 0)
+                for c in flowbook_mem_cells
+            ])
+            other_overhead_mb = np.array([
+                (c.get("overhead_breakdown") or {}).get("other_mb", 0)
+                for c in flowbook_mem_cells
+            ])
+
+            stack_colors = sns.color_palette("Set2", 5)
+            has_gpu = any(g > 0 for g in baseline_gpu)
+
+            # Layer 1: Baseline CPU memory (bottom - gray)
+            ax.fill_between(mem_cells_arr, 0, baseline_footprint, alpha=0.3, color='gray', label='Baseline CPU')
+            cumulative_mem = baseline_footprint.copy()
+
+            # Layer 2: GPU memory (if present)
+            if has_gpu:
+                next_level = cumulative_mem + baseline_gpu
+                ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.4, color='orange', label='GPU Memory')
+                cumulative_mem = next_level
+
+            # Layer 3: FlowBook overhead categories
+            next_level = cumulative_mem + checkpoints_mb
+            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.5, color=stack_colors[0], label='Checkpoints')
+            cumulative_mem = next_level
+
+            next_level = cumulative_mem + execution_records_mb
+            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.5, color=stack_colors[1], label='Exec Records')
+            cumulative_mem = next_level
+
+            next_level = cumulative_mem + tracking_metadata_mb
+            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.5, color=stack_colors[2], label='Tracking')
+            cumulative_mem = next_level
+
+            next_level = cumulative_mem + other_overhead_mb
+            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.5, color=stack_colors[3], label='Other')
+            cumulative_mem = next_level
+
+            # Draw baseline line for reference
+            ax.plot(mem_cells_arr, baseline_footprint, color='gray', linewidth=2, linestyle='--')
+
+            # Calculate and annotate PEAK overhead percentage
+            peak_overhead = np.max(cumulative_mem - baseline_footprint)
+            peak_idx = np.argmax(cumulative_mem - baseline_footprint)
+            if baseline_footprint[peak_idx] > 0:
+                peak_overhead_pct = peak_overhead / baseline_footprint[peak_idx] * 100
+                ax.annotate(f'{peak_overhead_pct:.1f}% peak overhead',
+                            xy=(mem_cells_arr[peak_idx], cumulative_mem[peak_idx]),
+                            xytext=(5, 5), textcoords='offset points',
+                            fontsize=legend_size, va='bottom', ha='left', color=colors[1])
+        else:
+            has_gpu = any(g > 0 for g in baseline_gpu)
+            ax.fill_between(mem_cells_arr, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline CPU')
+            cumulative_mem = baseline_footprint.copy()
+
+            if has_gpu:
+                next_level = cumulative_mem + baseline_gpu
+                ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.4, color='orange', label='GPU Memory')
+                cumulative_mem = next_level
+
+            flowbook_overhead_mem = np.maximum(flowbook_footprint - baseline_footprint, 0)
+            next_level = cumulative_mem + flowbook_overhead_mem
+            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.3, color=colors[1], label='FlowBook Overhead')
+            cumulative_mem = next_level
+
+            ax.plot(mem_cells_arr, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
+
+            # Calculate and annotate PEAK overhead percentage
+            peak_overhead = np.max(cumulative_mem - baseline_footprint)
+            peak_idx = np.argmax(cumulative_mem - baseline_footprint)
+            if baseline_footprint[peak_idx] > 0:
+                peak_overhead_pct = peak_overhead / baseline_footprint[peak_idx] * 100
+                ax.annotate(f'{peak_overhead_pct:.1f}% peak overhead',
+                            xy=(mem_cells_arr[peak_idx], cumulative_mem[peak_idx]),
+                            xytext=(5, 5), textcoords='offset points',
+                            fontsize=legend_size, va='bottom', ha='left', color=colors[1])
+
+        ax.set_title('Memory Overhead', fontsize=title_size)
+        ax.set_xlabel('Cell Number', fontsize=label_size)
+        ax.set_ylabel('Memory (MB)', fontsize=label_size)
+
+        if memory_initial_count < len(mem_cells_arr):
+            ax.axvline(x=memory_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+
+        ax.legend(loc='upper left', fontsize=legend_size - 2)
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax.set_xlim(left=1)
+        ax.set_ylim(bottom=0)
+    else:
+        ax.text(0.5, 0.5, 'No memory data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Memory Overhead", fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
+
+    # ========== Panel 4: Checkpoint Memory by Variable (middle-right) ==========
+    ax = axes[3]
     if var_data is not None:
-        ax = axes[panel_idx]
-        panel_idx += 1
         var_colors = sns.color_palette("husl", len(var_data["vars_ordered"]))
         var_cells = np.array(var_data["cells"])
         mb = 1024 * 1024
         mem_var_types = var_data.get("var_types", {})
 
-        # Get baseline memory for reference (same length as var_cells)
-        baseline_footprint = np.zeros(len(var_cells))
+        # Get baseline memory for reference
+        baseline_footprint_var = np.zeros(len(var_cells))
         if has_memory and len(baseline_mem_cells) >= len(var_cells):
-            baseline_footprint = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells[:len(var_cells)]])
+            baseline_footprint_var = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells[:len(var_cells)]])
 
         # Draw baseline memory first (bottom layer)
-        ax.fill_between(var_cells, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline Memory')
+        ax.fill_between(var_cells, 0, baseline_footprint_var, alpha=0.3, color=colors[0], label='Baseline Memory')
 
         # Stack checkpoint variables on top of baseline
         stacked = [np.array(var_data["by_var"][v]) / mb for v in var_data["vars_ordered"]]
-        cumulative = baseline_footprint.copy()
+        cumulative_var = baseline_footprint_var.copy()
         for i, (v, data_mb) in enumerate(zip(var_data["vars_ordered"], stacked)):
-            # Include type in legend label
             var_type = mem_var_types.get(v, "")
             label = f"{v} ({var_type})" if var_type else v
-            ax.fill_between(var_cells, cumulative, cumulative + data_mb, alpha=0.7, color=var_colors[i], label=label)
-            cumulative = cumulative + data_mb
+            ax.fill_between(var_cells, cumulative_var, cumulative_var + data_mb, alpha=0.7, color=var_colors[i], label=label)
+            cumulative_var = cumulative_var + data_mb
 
-        # Draw lines for baseline and total
-        ax.plot(var_cells, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
-        ax.plot(var_cells, cumulative, color='black', linewidth=1.5, linestyle='--', label='Total')
+        # Draw baseline line
+        ax.plot(var_cells, baseline_footprint_var, color=colors[0], linewidth=2, marker='o', markersize=4)
 
         # Add separator line for rerun phase
         var_initial_count = var_data.get("initial_count", len(var_cells))
@@ -2036,17 +2067,216 @@ def plot_combined_v2(
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
-        ax.tick_params(axis='both', labelsize=tick_size)
+    else:
+        ax.text(0.5, 0.5, 'No checkpoint memory data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Checkpoint Memory by Variable", fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
+
+    # ========== Panel 5: Overhead Time per Cell (bottom-left) ==========
+    ax = axes[4]
+    if len(cells) > 0:
+        # Overhead per cell = state + check + other (everything except code time)
+        overhead_per_cell = state_arr + check_arr + other_arr
+        bar_width = 0.6
+
+        # Stacked bar chart with breakdown
+        ax.bar(cells, state_arr / 1000, width=bar_width, alpha=0.7, color=colors[2], label='State')
+        ax.bar(cells, check_arr / 1000, width=bar_width, alpha=0.7, color=colors[3], label='Check', bottom=state_arr / 1000)
+        ax.bar(cells, other_arr / 1000, width=bar_width, alpha=0.7, color=colors[4], label='Other', bottom=(state_arr + check_arr) / 1000)
+
+        ax.set_xlabel("Cell Number", fontsize=label_size)
+        ax.set_ylabel("Overhead per Cell (seconds)", fontsize=label_size)
+        title = "Overhead Time per Cell"
+        if timing_initial_count < len(cells):
+            title += f" (cells 1-{timing_initial_count} + {len(cells) - timing_initial_count} reruns)"
+        ax.set_title(title, fontsize=title_size)
+
+        if timing_initial_count < len(cells):
+            ax.axvline(x=timing_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+
+        ax.legend(loc="upper right", fontsize=legend_size)
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax.set_xlim(left=0.5, right=len(cells) + 0.5)
+        ax.set_ylim(bottom=0)
+    else:
+        ax.text(0.5, 0.5, 'No timing data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Overhead Time per Cell", fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
+
+    # ========== Panel 6: Checkpoint Memory Overhead per Cell (bottom-right) ==========
+    ax = axes[5]
+    if var_data is not None:
+        # Use the same data as Panel 4: sum cumulative values across all variables per cell
+        # Then compute per-cell checkpoint size as delta from previous cell
+        mb = 1024 * 1024
+        var_cells = np.array(var_data["cells"])
+
+        # Compute total cumulative checkpoint size at each cell
+        total_cumulative = np.zeros(len(var_cells))
+        for v in var_data["vars_ordered"]:
+            total_cumulative += np.array(var_data["by_var"][v]) / mb
+
+        # Compute per-cell checkpoint size (delta from previous)
+        per_cell_mem = np.zeros(len(var_cells))
+        per_cell_mem[0] = total_cumulative[0]  # First cell: all of it
+        for i in range(1, len(var_cells)):
+            per_cell_mem[i] = max(0, total_cumulative[i] - total_cumulative[i-1])
+
+        bar_width = 0.6
+        ax.bar(var_cells, per_cell_mem, width=bar_width, alpha=0.7, color='#66c2a5')
+
+        ax.set_xlabel("Cell Number", fontsize=label_size)
+        ax.set_ylabel("Checkpoint Size (MB)", fontsize=label_size)
+
+        var_initial_count = var_data.get("initial_count", len(var_cells))
+        title = "Checkpoint Memory per Cell"
+        if var_initial_count < len(var_cells):
+            title += f" (cells 1-{var_initial_count} + {len(var_cells) - var_initial_count} reruns)"
+        ax.set_title(title, fontsize=title_size)
+
+        if var_initial_count < len(var_cells):
+            ax.axvline(x=var_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+            ax.legend(loc="upper right", fontsize=legend_size)
+
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax.set_xlim(left=0.5, right=len(var_cells) + 0.5)
+        ax.set_ylim(bottom=0)
+    else:
+        ax.text(0.5, 0.5, 'No memory data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Checkpoint Memory per Cell", fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
 
     # Add notebook name as figure title
     notebook_name = Path(data.get("notebook_path", "notebook")).stem
     fig.suptitle(notebook_name, fontsize=title_size + 2, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
 
     if output_path is not None:
         plt.savefig(output_path, dpi=150)
         plt.close()
         print(f"Combined v2 plot saved to: {output_path}")
+        return None
+    else:
+        return fig
+
+
+def plot_overhead_histograms(
+    aggregate: "AggregateStats",
+    output_path: Optional[str] = None,
+    large_fonts: bool = True
+) -> Optional[Any]:
+    """
+    Create histogram plots for per-cell overhead distributions.
+
+    Creates two histograms:
+    - Total overhead per cell (ms)
+    - Memory overhead per cell (MB)
+
+    Outliers are removed using the IQR method (1.5 * IQR).
+
+    Args:
+        aggregate: AggregateStats with per-cell data
+        output_path: If provided, saves to file; otherwise returns figure
+        large_fonts: Use larger fonts for paper-ready plots
+
+    Returns:
+        Figure if output_path is None, else None
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    sns.set_theme(style="whitegrid")
+
+    # Font sizes
+    label_size = 18 if large_fonts else 12
+    title_size = 20 if large_fonts else 14
+    tick_size = 14 if large_fonts else 10
+
+    total_overhead = np.array(aggregate.all_total_overhead_per_cell)
+    memory_overhead = np.array(aggregate.all_memory_overhead_per_cell)
+
+    def remove_outliers_iqr(data: np.ndarray) -> np.ndarray:
+        """Remove outliers using IQR method (1.5 * IQR)."""
+        if len(data) == 0:
+            return data
+        q1 = np.percentile(data, 25)
+        q3 = np.percentile(data, 75)
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+        return data[(data >= lower_bound) & (data <= upper_bound)]
+
+    # Remove outliers
+    total_overhead_filtered = remove_outliers_iqr(total_overhead)
+    memory_overhead_filtered = remove_outliers_iqr(memory_overhead)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Histogram 1: Total Overhead per Cell
+    ax = axes[0]
+    if len(total_overhead_filtered) > 0:
+        # Convert ms to seconds for better readability if values are large
+        if np.max(total_overhead_filtered) > 1000:
+            data_plot = total_overhead_filtered / 1000
+            xlabel = "Total Overhead per Cell (seconds)"
+        else:
+            data_plot = total_overhead_filtered
+            xlabel = "Total Overhead per Cell (ms)"
+
+        ax.hist(data_plot, bins=30, alpha=0.7, color='steelblue', edgecolor='black')
+        ax.axvline(np.median(data_plot), color='red', linestyle='--', linewidth=2, label=f'Median: {np.median(data_plot):.2f}')
+        ax.axvline(np.mean(data_plot), color='orange', linestyle='-', linewidth=2, label=f'Mean: {np.mean(data_plot):.2f}')
+        ax.set_xlabel(xlabel, fontsize=label_size)
+        ax.set_ylabel("Frequency", fontsize=label_size)
+        ax.set_title("Total Overhead per Cell Distribution", fontsize=title_size)
+        ax.legend(fontsize=tick_size)
+
+        # Add stats text box
+        n_total = len(total_overhead)
+        n_filtered = len(total_overhead_filtered)
+        outliers_removed = n_total - n_filtered
+        textstr = f'N={n_filtered} (removed {outliers_removed} outliers)'
+        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
+        ax.text(0.98, 0.95, textstr, transform=ax.transAxes, fontsize=tick_size,
+                verticalalignment='top', horizontalalignment='right', bbox=props)
+    else:
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Total Overhead per Cell Distribution", fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
+
+    # Histogram 2: Memory Overhead per Cell
+    ax = axes[1]
+    if len(memory_overhead_filtered) > 0:
+        ax.hist(memory_overhead_filtered, bins=30, alpha=0.7, color='seagreen', edgecolor='black')
+        ax.axvline(np.median(memory_overhead_filtered), color='red', linestyle='--', linewidth=2,
+                   label=f'Median: {np.median(memory_overhead_filtered):.2f}MB')
+        ax.axvline(np.mean(memory_overhead_filtered), color='orange', linestyle='-', linewidth=2,
+                   label=f'Mean: {np.mean(memory_overhead_filtered):.2f}MB')
+        ax.set_xlabel("Memory Overhead per Cell (MB)", fontsize=label_size)
+        ax.set_ylabel("Frequency", fontsize=label_size)
+        ax.set_title("Memory Overhead per Cell Distribution", fontsize=title_size)
+        ax.legend(fontsize=tick_size)
+
+        # Add stats text box
+        n_total = len(memory_overhead)
+        n_filtered = len(memory_overhead_filtered)
+        outliers_removed = n_total - n_filtered
+        textstr = f'N={n_filtered} (removed {outliers_removed} outliers)'
+        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
+        ax.text(0.98, 0.95, textstr, transform=ax.transAxes, fontsize=tick_size,
+                verticalalignment='top', horizontalalignment='right', bbox=props)
+    else:
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Memory Overhead per Cell Distribution", fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
+
+    fig.suptitle("Per-Cell Overhead Distributions (Outliers Removed)", fontsize=title_size + 2, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if output_path is not None:
+        plt.savefig(output_path, dpi=150)
+        plt.close()
+        print(f"Histogram plot saved to: {output_path}")
         return None
     else:
         return fig
@@ -2221,6 +2451,14 @@ def main():
                 for fig in combined_figures:
                     pdf.savefig(fig, dpi=150)
                     plt.close(fig)
+
+                # Add histogram plots at the end if we have aggregate data
+                if aggregate.all_total_overhead_per_cell or aggregate.all_memory_overhead_per_cell:
+                    hist_fig = plot_overhead_histograms(aggregate, output_path=None, large_fonts=args.large_fonts)
+                    if hist_fig is not None:
+                        pdf.savefig(hist_fig, dpi=150)
+                        plt.close(hist_fig)
+
             print(f"Combined overhead plots saved to: {combined_path}")
 
 

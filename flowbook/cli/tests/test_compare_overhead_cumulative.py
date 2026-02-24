@@ -286,8 +286,8 @@ class TestExtractCheckpointVarDataWithNewFormat:
         # Should use cumulative_by_var values (500, 800)
         assert result["by_var"]["df"] == [500, 800]
 
-    def test_variables_ordered_by_final_size(self):
-        """Test that variables are ordered by final cumulative size."""
+    def test_variables_ordered_by_max_size(self):
+        """Test that variables are ordered by maximum cumulative size across all cells."""
         cells = [
             create_cell_with_new_format(
                 "cell1", 0,
@@ -308,6 +308,44 @@ class TestExtractCheckpointVarDataWithNewFormat:
         assert result is not None
         # Should be ordered: large_df, medium_arr, tiny_list
         assert result["vars_ordered"] == ["large_df", "medium_arr", "tiny_list"]
+
+    def test_variables_ordered_by_max_not_final(self):
+        """Test that variables are ordered by MAX value, not final value.
+
+        This tests the case where a variable has a high value in the middle
+        but is deleted/replaced by the end, so its final value is lower.
+        """
+        cells = [
+            create_cell_with_new_format(
+                "cell1", 0,
+                checkpoint_var_costs={},
+                cumulative_by_type={},
+                cumulative_by_var={
+                    "temp_large": 10000000,  # 10MB - large initially
+                    "persistent": 1000000,   # 1MB
+                },
+                checkpoints_mb=11.0
+            ),
+            create_cell_with_new_format(
+                "cell2", 1,
+                checkpoint_var_costs={},
+                cumulative_by_type={},
+                cumulative_by_var={
+                    "temp_large": 100,       # Now tiny (was deleted/replaced)
+                    "persistent": 2000000,   # 2MB - grew
+                },
+                checkpoints_mb=2.0
+            ),
+        ]
+        data = create_v2_comparison_data(cells)
+
+        result = extract_checkpoint_var_data(data)
+
+        assert result is not None
+        # temp_large should still be first because its MAX was 10MB
+        # even though its final value is only 100 bytes
+        # persistent MAX is 2MB, so it comes second
+        assert result["vars_ordered"] == ["temp_large", "persistent"]
 
     def test_top_n_limits_variables(self):
         """Test that top_n limits the number of variables shown."""

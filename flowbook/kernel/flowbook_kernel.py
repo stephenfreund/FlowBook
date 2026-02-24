@@ -433,6 +433,17 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         # Pending EXEC-RESTORE flag: set by %exec_restore, consumed by _do_execute_impl
         self._pending_exec_restore: Optional[str] = None
 
+    def start(self) -> None:
+        """Start the kernel and initialize tracking infrastructure.
+
+        We do tracking initialization here (instead of lazily in _do_execute_impl)
+        so that the initial checkpoint cost doesn't appear in first-cell timing.
+        """
+        super().start()
+        # Initialize tracking and take initial state checkpoint (σ_0)
+        # This is done here so the overhead isn't charged to the first cell
+        self._ensure_tracking_initialized()
+
     # =========================================================================
     # Magic Commands
     # =========================================================================

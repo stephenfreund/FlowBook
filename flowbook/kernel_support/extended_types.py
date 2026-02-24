@@ -250,9 +250,10 @@ def get_type_model(obj: Any, _seen: Optional[set] = None) -> TypeModel:
 
     # --- pandas DataFrame / Series ---
     if isinstance(obj, pd.DataFrame):
+        # Use obj.dtypes to handle duplicate column names (obj[col] returns DataFrame for duplicates)
         cols = [
-            DataFrameColumn(name=str(col), dtype=str(obj[col].dtype))
-            for col in obj.columns
+            DataFrameColumn(name=str(col), dtype=str(dtype))
+            for col, dtype in zip(obj.columns, obj.dtypes)
         ]
         return DataFrameType(kind="DataFrame", n_rows=len(obj), columns=cols)
     if isinstance(obj, pd.Series):

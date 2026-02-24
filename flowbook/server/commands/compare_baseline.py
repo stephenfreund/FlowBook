@@ -14,7 +14,7 @@ Memory measurement uses HeapSizer for accurate heap traversal with proper handli
 
 Usage via CLI:
     flowbook compare-baseline notebook.ipynb
-    flowbook compare-baseline notebook.ipynb --timeout 3600
+    flowbook compare-baseline notebook.ipynb --timeout 3600  # optional timeout
 """
 
 import argparse
@@ -332,7 +332,7 @@ def cleanup_kernel(kernel_manager, kernel_client) -> None:
 def execute_cell_baseline(
     kernel_client: BlockingKernelClient,
     source: str,
-    timeout: float = 300.0
+    timeout: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Execute a cell on the baseline kernel and measure execution time.
@@ -349,7 +349,7 @@ def execute_cell_baseline(
     start_time = time.time()
 
     while True:
-        if time.time() - start_time > timeout:
+        if timeout is not None and time.time() - start_time > timeout:
             return {"cell_runtime_ms": None, "error": f"Timeout after {timeout}s"}
 
         try:
@@ -404,7 +404,7 @@ def execute_cell_flowbook(
     source: str,
     cell_id: str,
     cell_order: List[str],
-    timeout: float = 300.0
+    timeout: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Execute a cell on the flowbook_kernel and measure execution time.
@@ -425,7 +425,7 @@ def execute_cell_flowbook(
     start_time = time.time()
 
     while True:
-        if time.time() - start_time > timeout:
+        if timeout is not None and time.time() - start_time > timeout:
             return {
                 "execute_duration_ms": None,
                 "code_duration_ms": None,
@@ -1745,8 +1745,8 @@ class CompareBaselineCommand(NotebookCommand):
         subparser.add_argument(
             "--timeout",
             type=float,
-            default=3600.0,
-            help="Timeout in seconds per cell (default: 3600). Should be generous as FlowBook adds overhead.",
+            default=None,
+            help="Timeout in seconds per cell (default: no timeout).",
         )
         subparser.add_argument(
             "--skip-memory",
@@ -1828,7 +1828,7 @@ class CompareBaselineCommand(NotebookCommand):
         with self.timing_context() as get_elapsed:
             log(f"Starting 4-phase baseline vs FlowBook comparison...")
             log(f"Notebook: {notebook_path}")
-            log(f"Cell timeout: {cell_timeout}s")
+            log(f"Cell timeout: {cell_timeout}s" if cell_timeout else "Cell timeout: none")
             log(f"HeapSizer available: {heapsizer_available}")
             if rerun_k > 0:
                 log(f"Rerun passes: {rerun_k} (will execute all {len(code_cells)} cells {rerun_k} extra time(s))")
