@@ -1114,6 +1114,18 @@ def run_flowbook_timing(
         _wait_for_idle(kernel_client)
         log("FlowBook Timing: continue_after_violation enabled")
 
+        # Run a warm-up cell to trigger lazy initialization (cudf import, tracking patches, etc.)
+        # This ensures the overhead doesn't appear in the first real cell
+        log("FlowBook Timing: Running warm-up cell...")
+        warmup_result = execute_cell_flowbook(
+            kernel_client,
+            "_warmup_var_ = 1; del _warmup_var_",  # Trigger tracking pipeline, then clean up
+            "_warmup_",
+            ["_warmup_"],
+            timeout=60.0
+        )
+        log(f"FlowBook Timing: Warm-up complete (took {warmup_result.get('execute_duration_ms', 0):.0f}ms)")
+
         total_execute_ms = 0.0
         total_code_ms = 0.0
         total_state_ms = 0.0
@@ -1468,6 +1480,17 @@ def run_flowbook_memory(
         # Enable continue_after_violation
         kernel_client.execute("%continue_after_violation on", silent=True)
         _wait_for_idle(kernel_client)
+
+        # Run a warm-up cell to trigger lazy initialization (cudf import, tracking patches, etc.)
+        log("FlowBook Memory: Running warm-up cell...")
+        warmup_result = execute_cell_flowbook(
+            kernel_client,
+            "_warmup_var_ = 1; del _warmup_var_",  # Trigger tracking pipeline, then clean up
+            "_warmup_",
+            ["_warmup_"],
+            timeout=60.0
+        )
+        log(f"FlowBook Memory: Warm-up complete (took {warmup_result.get('execute_duration_ms', 0):.0f}ms)")
 
         # Get initial namespace size
         before_stats = get_namespace_size(kernel_client)
