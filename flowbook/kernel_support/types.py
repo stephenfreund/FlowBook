@@ -176,6 +176,7 @@ DiffSourceType = Literal[
     "catboost_pool",  # CatBoost Pool (ML dataset container)
     "keras_model",    # Keras/TensorFlow neural network model
     "pytorch_model",  # PyTorch nn.Module neural network model
+    "lightgbm_model", # LightGBM gradient boosting model
 ]
 
 
