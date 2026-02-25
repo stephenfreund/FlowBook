@@ -307,6 +307,7 @@ class ReproducibilityEnforcer:
         self.seq_counter: int = 0
         self._cell_order: List[str] = []
         self._stale_cells: Set[str] = set()  # Cache for absolute staleness state
+        self._orphaned_locs: Set[str] = set()  # [§1.8.5] Orphaned locations from edited cells
         self._structural_mode = structural_mode
         # New declarative conflict resolver
         self._conflict_resolver = ConflictResolver(
@@ -345,7 +346,12 @@ class ReproducibilityEnforcer:
             return cell_id
 
     def _prune_deleted_cells(self) -> None:
-        """Remove records for cells no longer in notebook."""
+        """Remove records for cells no longer in notebook.
+
+        Note: We do NOT clear orphaned_locs here because the orphaned values
+        may still be in the store. They'll be cleared when another cell writes
+        to those locations.
+        """
         current = set(self._cell_order)
         deleted = [c for c in self.records if c not in current]
         for c in deleted:
@@ -416,11 +422,12 @@ class ReproducibilityEnforcer:
                 output.add_timing("sdc:backward_mutation_no_violation", t.duration())
 
 
-        # Check forward dependency (reading from later cells that already executed)
+        # Check forward dependency (reading from later cells that already executed, or orphaned)
         forward_violation = None
+        orphaned_reads: List[str] = []
         if my_position >= 0:
             with timer(key="sdc:forward_dependency", message=f"[sdc] Forward dependency check for {cell_id}") as t:
-                forward_violation = self._check_forward_dependency(
+                forward_violation, orphaned_reads = self._check_forward_dependency(
                     cell_id, my_position, tracking
                 )
 
@@ -505,6 +512,15 @@ class ReproducibilityEnforcer:
             if current_diff.differences:
                 changed_vars = list(current_diff.differences.keys())
 
+            # [§1.8.5] Clear orphaned status for locations this cell wrote
+            # Executing a cell "claims" orphaned locations it writes
+            if changed_vars:
+                cleared_orphans = self._orphaned_locs & set(changed_vars)
+                if cleared_orphans:
+                    self._orphaned_locs -= cleared_orphans
+                    from flowbook.util.output import log
+                    log(f"[EXEC] Cell {cell_id} cleared orphaned locations: {cleared_orphans}")
+
             # Extract column-level changes from diff result
             column_changed = _extract_column_changes(current_diff, tracking)
 
@@ -547,6 +563,7 @@ class ReproducibilityEnforcer:
             structural_warnings=structural_warnings,
             forward_violation=forward_violation,
             cell_is_contaminated=(forward_violation is not None),
+            orphaned_reads=orphaned_reads,
         )
 
     def _check_backward_mutation(
@@ -814,13 +831,13 @@ class ReproducibilityEnforcer:
         cell_id: str,
         my_position: int,
         tracking: TrackingData,
-    ) -> Optional[ReproducibilityViolation]:
+    ) -> Tuple[Optional[ReproducibilityViolation], List[str]]:
         """
-        Check if current cell reads from a later cell — FwdContaminated (Def 1.8.3).
+        Check if current cell reads from a later cell or orphaned location — FwdContaminated (Def 1.8.3).
 
-        A forward dependency occurs when a cell reads a variable that a later
-        cell (in document order) has already written. This means the reading
-        cell is seeing "future" state that wouldn't exist in top-to-bottom order.
+        A forward dependency occurs when a cell reads:
+        1. A variable that a later cell (in document order) has already written, OR
+        2. An orphaned location — a residual value from code that was edited (§1.8.5)
 
         Uses cached typed_changes from each cell's execution record, avoiding
         expensive checkpoint diffs. The typed_changes are computed once during
@@ -832,12 +849,36 @@ class ReproducibilityEnforcer:
             tracking: TrackingData with reads for this cell
 
         Returns:
-            ReproducibilityViolation with violation_type="forward_dependency" if detected, None otherwise
+            Tuple of:
+            - ReproducibilityViolation with violation_type="forward_dependency" if detected, None otherwise
+            - List of orphaned locations that were read (for metadata)
         """
+        # [§1.8.5] Check orphan contamination first
+        orphan_overlap = tracking.reads_before_writes & self._orphaned_locs
+        if orphan_overlap:
+            reading_alpha = self._cell_id_to_alpha(cell_id)
+            conflict_names = sorted(orphan_overlap)
+            message = (
+                f"⚠️ Forward contamination: Cell {reading_alpha} reads orphaned "
+                f"location(s) {conflict_names}.\n"
+                f"These values were written by code that has since been edited.\n"
+                f"Re-run the cell(s) that write to {conflict_names} to clear contamination."
+            )
+            return (
+                ReproducibilityViolation(
+                    mutating_cell="<edited>",  # No specific cell — the code was edited away
+                    affected_cell=cell_id,
+                    variables=conflict_names,
+                    message=message,
+                    violation_type="forward_dependency",
+                ),
+                list(orphan_overlap),
+            )
+
         # Convert current cell's reads to typed AccessEvents
         my_read_events = tracking.to_read_events()
         if not my_read_events:
-            return None
+            return (None, [])
 
         # Check later cells (in document order) that already executed
         for later_cell_id in self._cell_order[my_position + 1:]:
@@ -876,12 +917,15 @@ class ReproducibilityEnforcer:
                         reading_alpha, writing_alpha, conflicts
                     )
 
-                    return ReproducibilityViolation(
-                        mutating_cell=later_cell_id,
-                        affected_cell=cell_id,
-                        variables=conflicts,
-                        message=message,
-                        violation_type="forward_dependency",
+                    return (
+                        ReproducibilityViolation(
+                            mutating_cell=later_cell_id,
+                            affected_cell=cell_id,
+                            variables=conflicts,
+                            message=message,
+                            violation_type="forward_dependency",
+                        ),
+                        [],  # No orphaned reads in this case
                     )
 
         # File forward dependency: current cell reads files that a later cell wrote
@@ -898,15 +942,18 @@ class ReproducibilityEnforcer:
                     message = format_forward_dependency_message(
                         reading_alpha, writing_alpha, conflict_names
                     )
-                    return ReproducibilityViolation(
-                        mutating_cell=later_cell_id,
-                        affected_cell=cell_id,
-                        variables=conflict_names,
-                        message=message,
-                        violation_type="forward_dependency",
+                    return (
+                        ReproducibilityViolation(
+                            mutating_cell=later_cell_id,
+                            affected_cell=cell_id,
+                            variables=conflict_names,
+                            message=message,
+                            violation_type="forward_dependency",
+                        ),
+                        [],  # No orphaned reads in this case
                     )
 
-        return None
+        return (None, [])
 
     def _update_staleness_incremental(
         self,
@@ -1111,7 +1158,31 @@ class ReproducibilityEnforcer:
 
         Cell is always fresh. No backward/forward checks. StaleFwd delta
         is computed against the old live store (before restore).
+
+        NOTE: Orphan contamination check still applies in restore mode (§1.8.5).
+        If the cell reads an orphaned location, it is marked contaminated.
         """
+        # [§1.8.5] Check orphan contamination (still applies in restore mode)
+        orphan_overlap = tracking.reads_before_writes & self._orphaned_locs
+        orphan_violation = None
+        orphaned_reads: List[str] = []
+        if orphan_overlap:
+            reading_alpha = self._cell_id_to_alpha(cell_id)
+            conflict_names = sorted(orphan_overlap)
+            orphaned_reads = list(orphan_overlap)
+            message = (
+                f"⚠️ Forward contamination: Cell {reading_alpha} reads orphaned "
+                f"location(s) {conflict_names} (even in restore mode).\n"
+                f"Re-run the cell(s) that write to {conflict_names} to clear contamination."
+            )
+            orphan_violation = ReproducibilityViolation(
+                mutating_cell="<edited>",
+                affected_cell=cell_id,
+                variables=conflict_names,
+                message=message,
+                violation_type="forward_dependency",
+            )
+
         # Capture structural read values
         structural_read_values = {}
         if namespace is not None and tracking.structural_reads:
@@ -1138,6 +1209,14 @@ class ReproducibilityEnforcer:
             column_changed = _extract_column_changes(current_diff, tracking)
             from flowbook.kernel.change_detector import detect_changes
             typed_changes = detect_changes(current_diff)
+
+        # [§1.8.5] Clear orphaned status for locations this cell wrote
+        if changed_vars:
+            cleared_orphans = self._orphaned_locs & set(changed_vars)
+            if cleared_orphans:
+                self._orphaned_locs -= cleared_orphans
+                from flowbook.util.output import log
+                log(f"[EXEC-RESTORE] Cell {cell_id} cleared orphaned locations: {cleared_orphans}")
 
         # Update record
         self.records[cell_id] = ReproducibilityExecutionRecord(
@@ -1220,9 +1299,10 @@ class ReproducibilityEnforcer:
             changed_variables=changed_vars,
             column_changed=column_changed,
             structural_warnings=structural_warnings,
-            forward_violation=None,
-            cell_is_contaminated=False,
+            forward_violation=orphan_violation,
+            cell_is_contaminated=(orphan_violation is not None),
             exec_mode="restore",
+            orphaned_reads=orphaned_reads,
         )
 
     def get_stale_cells(self) -> List[str]:
@@ -1236,6 +1316,19 @@ class ReproducibilityEnforcer:
             List of cell IDs that are currently stale (in document order)
         """
         return [cid for cid in self._cell_order if cid in self._stale_cells]
+
+    def get_orphaned_locations(self) -> List[str]:
+        """
+        Get the current set of orphaned locations (§1.8.5).
+
+        Orphaned locations are variables that were written by a cell whose
+        code has since changed. Values at these locations don't correspond
+        to any current cell's behavior.
+
+        Returns:
+            List of orphaned variable names (sorted for determinism).
+        """
+        return sorted(self._orphaned_locs)
 
     def compute_all_stale_cells(self, current_checkpoint: Checkpoint) -> List[str]:
         """
@@ -1321,15 +1414,44 @@ class ReproducibilityEnforcer:
         return f"{POST_CHECKPOINT_PREFIX}{prev_cell_id}"
 
     def mark_cell_edited(self, cell_id: str) -> List[str]:
-        """[EDIT] Mark edited cell stale (§2.3).
+        """[EDIT] Mark edited cell stale and orphan its written locations (§2.3, §1.8.5).
 
-        Only marks the edited cell itself stale.
-        Downstream propagation deferred to execution time (StaleFwd).
+        When a cell is edited:
+        1. The cell itself is marked stale (existing behavior)
+        2. All locations in Δ(σ^pre, σ^post) become orphaned (§1.8.5)
+
+        Orphaned locations persist until a cell writes to them with current code.
+        This prevents contamination from residual values of old code.
+
         Returns current stale cells list.
         """
         if cell_id not in self.records:
             return self.get_stale_cells()  # Unexecuted cell — no-op
+
+        # Mark cell stale (existing)
         self._stale_cells.add(cell_id)
+
+        # [§1.8.5] Add cell's changed locations to orphaned set
+        # Use checkpoint diff (Δ) not trace WS for completeness (§3.2)
+        pre_name = f"{PRE_CHECKPOINT_PREFIX}{cell_id}"
+        post_name = f"{POST_CHECKPOINT_PREFIX}{cell_id}"
+
+        if self.checkpoints.exists(pre_name) and self.checkpoints.exists(post_name):
+            pre_checkpoint = self.checkpoints.get(pre_name)
+            post_checkpoint = self.checkpoints.get(post_name)
+            # Compute Δ(σ^pre, σ^post) — what this cell actually changed
+            # use_leq=False captures both modifications AND creations
+            diff_result = MemoryCheckpoint.diff(
+                pre_checkpoint,
+                post_checkpoint,
+                use_leq=False,  # Include creations, not just modifications
+            )
+            if diff_result.differences:
+                changed_vars = set(diff_result.differences.keys())
+                self._orphaned_locs |= changed_vars
+                from flowbook.util.output import log
+                log(f"[EDIT] Cell {cell_id} edited, orphaned locations: {changed_vars}")
+
         return self.get_stale_cells()
 
     def get_execution_records_size(self) -> int:
@@ -1400,6 +1522,7 @@ class ReproducibilityEnforcer:
         self.seq_counter = 0
         self._cell_order = []
         self._stale_cells.clear()
+        self._orphaned_locs.clear()  # [§1.8.5] Clear orphaned locations
 
 
 def _extract_column_changes(

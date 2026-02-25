@@ -79,6 +79,7 @@ class ReproducibilityResult:
     forward_violation: Optional[ReproducibilityViolation] = None  # Forward dependency violation (if any)
     cell_is_contaminated: bool = False  # [EXEC-CONTAMINATED] True if cell executed but is forward-contaminated
     exec_mode: str = "live"  # [EXEC-RESTORE] "live" or "restore"
+    orphaned_reads: List[str] = field(default_factory=list)  # [§1.8.5] Locations read that were orphaned
 
 
 @dataclass
@@ -110,6 +111,7 @@ class ReproducibilityMetadata:
     check_duration_ms: float = 0.0  # SDC check time
     cell_is_contaminated: bool = False  # [EXEC-CONTAMINATED] True if forward-contaminated
     exec_mode: str = "live"  # [EXEC-RESTORE] "live" or "restore"
+    orphaned_locations: List[str] = field(default_factory=list)  # [§1.8.5] Current orphaned locations
 
     def to_display_metadata(self) -> dict:
         """Format for display in output metadata."""
@@ -136,5 +138,6 @@ class ReproducibilityMetadata:
                 "check_duration_ms": self.check_duration_ms,
                 "cell_is_contaminated": self.cell_is_contaminated,
                 "exec_mode": self.exec_mode,
+                "orphaned_locations": self.orphaned_locations,
             }
         }

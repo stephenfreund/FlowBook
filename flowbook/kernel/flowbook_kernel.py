@@ -1190,12 +1190,20 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 #     self._warn_non_deepcopyable_objects()
 
                 # Take post-execution snapshot
+                # Use incremental checkpointing if we have tracking data
                 with timer(
                     key="kernel:checkpoint", message="Post-execution checkpoint"
                 ) as post_timer:
-                    post_checkpoint = self._take_checkpoint(
-                        f"{POST_CHECKPOINT_PREFIX}{self._cell_id}"
-                    )
+                    pre_name = f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
+                    post_name = f"{POST_CHECKPOINT_PREFIX}{self._cell_id}"
+                    if tracking:
+                        # Get accessed variables from tracking (reads + writes)
+                        accessed_vars = tracking.reads_before_writes | tracking.writes
+                        post_checkpoint = self._take_checkpoint_incremental(
+                            post_name, accessed_vars, pre_name
+                        )
+                    else:
+                        post_checkpoint = self._take_checkpoint(post_name)
 
                 # Run Reproducibility check if we have tracking data and cell_id
                 if tracking and self._cell_id:
@@ -1567,6 +1575,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 sdc_result.cell_is_contaminated if sdc_result else False
             ),
             exec_mode=sdc_result.exec_mode if sdc_result else "live",
+            orphaned_locations=self._enforcer.get_orphaned_locations(),  # [§1.8.5]
         )
 
         # Log and display structural warnings

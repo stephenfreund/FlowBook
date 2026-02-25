@@ -899,6 +899,10 @@ from flowbook.kernel_support.deepcopy import (
     _has_mutable_defaults,
     is_primitive_container,
     _LARGE_LIST_THRESHOLD,
+    _large_list_cache,
+    _large_dict_cache,
+    _large_set_cache,
+    _ndarray_cache,
 )
 from flowbook.kernel_support.diff import Diff
 from flowbook.kernel_support.opaque import OpaqueRegistry
@@ -940,6 +944,54 @@ SYSTEM_VARIABLES = {
     # Built-in function that may be patched by VFS for file tracking
     "open",
 }
+
+
+# =============================================================================
+# LEAF OBJECT DETECTION FOR INCREMENTAL CHECKPOINTING
+# =============================================================================
+
+
+def _is_known_leaf_object(v: Any) -> bool:
+    """
+    Check if an object is a "leaf" object with no internal pointers to other
+    Python objects. Leaf objects can be safely reused without deep copying
+    because they cannot alias other objects in the namespace.
+
+    A leaf object is one where:
+    - Modifying it cannot affect other Python objects
+    - Its identity (id) uniquely identifies its state
+
+    Returns True for:
+    - Numeric ndarrays (dtype.kind != 'O') that own their data (base is None)
+    - Primitive containers cached in deepcopy module (lists/dicts/sets with only primitives)
+    - Scalar primitives (None, bool, int, float, complex, str, bytes)
+
+    Returns False for:
+    - Object-dtype ndarrays (contain Python object pointers)
+    - Arrays that are views of other arrays (base is not None)
+    - DataFrames, Series (contain multiple arrays and complex internal state)
+    - User-defined classes (may have arbitrary internal state)
+    - Uncached containers (may contain non-primitive elements)
+    """
+    obj_id = id(v)
+
+    # Numeric ndarray that owns its data
+    if isinstance(v, np.ndarray):
+        return v.dtype.kind != 'O' and v.base is None
+
+    # Primitive container cached by deepcopy module
+    if isinstance(v, list) and obj_id in _large_list_cache:
+        return True
+    if isinstance(v, dict) and obj_id in _large_dict_cache:
+        return True
+    if isinstance(v, set) and obj_id in _large_set_cache:
+        return True
+
+    # Scalar primitives (always leaf)
+    if v is None or isinstance(v, (bool, int, float, complex, str, bytes)):
+        return True
+
+    return False
 
 
 # =============================================================================
@@ -1512,6 +1564,7 @@ class MemoryCheckpoint:
         name: str,
         user_ns: dict[str, Any],
         cudf_origins: Optional['cudf_compat.CuDFOriginTracker'] = None,
+        original_ids: Optional[Dict[str, int]] = None,
     ):
         """
         Create a new checkpoint.
@@ -1520,9 +1573,17 @@ class MemoryCheckpoint:
             name: Identifier for this checkpoint
             user_ns: Deep-copied user namespace variables
             cudf_origins: Optional tracker for cudf object origins (for restore)
+            original_ids: Optional mapping from variable names to original object IDs
+                (before deep copy). Used for incremental checkpointing to detect
+                which objects can be reused without comparison.
         """
         self.name = name
         self.user_ns = user_ns
+
+        # Original object IDs for incremental checkpointing (var_name -> id(original))
+        # When set, enables identity-based short-circuit during diff:
+        # if checkpoint has same original_id as live object, diff can skip comparison
+        self._original_ids: Dict[str, int] = original_ids or {}
 
         # cuDF origin tracking (for restore)
         from flowbook.kernel_support import cudf_compat
@@ -2079,9 +2140,16 @@ class MemoryCheckpoints:
                 for k, v in checkpointable_values.items():
                     cudf_origins.record(k, v)
 
+            # Track original IDs before deep copy (for incremental checkpointing)
+            original_ids = {k: id(v) for k, v in checkpointable_values.items()}
+
             # Use helper to deep copy all variables
             with timer(key="checkpoint:deepcopy", message="Deep copying variables"):
                 cp, memo, failed = self._deep_copy_user_ns(checkpointable_values)
+
+            # Remove failed variables from original_ids
+            for k in failed:
+                original_ids.pop(k, None)
 
             # Store memory costs keyed by checkpoint name (if Scalene tracking was enabled)
             if self._last_var_memory_costs:
@@ -2096,7 +2164,7 @@ class MemoryCheckpoints:
                 for k in failed:
                     removed[k] = get_type_model(checkpointable_values[k])
 
-            self.saved[name] = MemoryCheckpoint(name, cp, cudf_origins)
+            self.saved[name] = MemoryCheckpoint(name, cp, cudf_origins, original_ids)
 
         if self.sanity_check:
             with timer(key="checkpoint:sanity_check", message="Running sanity check"):
@@ -2107,6 +2175,237 @@ class MemoryCheckpoints:
                     raise ValueError(f"Sanity check failed: {diff_result.differences}")
 
         return saved, removed
+
+    def save_incremental(
+        self,
+        name: str,
+        user_ns: dict[str, Any],
+        accessed_vars: Set[str],
+        prior_checkpoint_name: str,
+        max_size_mb: int | None = 1000,
+    ) -> tuple[dict[str, TypeModel], dict[str, TypeModel]]:
+        """
+        Save a checkpoint with incremental optimization for untouched variables.
+
+        This is an optimized version of save() that reuses deep copies from a prior
+        checkpoint for variables that were not accessed during cell execution AND
+        are known "leaf" objects (objects with no internal pointers to other Python
+        objects that could create aliasing issues).
+
+        The optimization works by:
+        1. Expanding accessed_vars with deep aliases from prior checkpoint
+        2. For variables NOT in expanded set with same id as prior AND is_leaf:
+           - Reuse the deep copy from prior checkpoint (no copy needed)
+           - Store original_id for identity short-circuit during diff
+        3. For all other variables: deep copy as usual
+
+        Args:
+            name: Identifier for this checkpoint
+            user_ns: User namespace dictionary to checkpoint
+            accessed_vars: Set of variable names that were accessed (read or written)
+                during the cell execution. Typically from TrackingDict.
+            prior_checkpoint_name: Name of the prior checkpoint to use for
+                alias expansion and value reuse
+            max_size_mb: Warn if estimated checkpoint size exceeds this many MB
+
+        Returns:
+            Tuple of (saved variables with type models, removed variables with type models)
+
+        Raises:
+            ValueError: If checkpoint name is empty
+            KeyError: If prior_checkpoint_name doesn't exist
+        """
+        # Validate inputs
+        if not name or not name.strip():
+            raise ValueError("MemoryCheckpoint name cannot be empty or whitespace-only")
+
+        prior_cp = self.saved.get(prior_checkpoint_name)
+        if prior_cp is None:
+            # Fallback to regular save if prior checkpoint doesn't exist
+            log(f"Prior checkpoint '{prior_checkpoint_name}' not found, using regular save")
+            return self.save(name, user_ns, max_size_mb)
+
+        # Filter variables ONCE and reuse
+        with timer(key="checkpoint:filter_vars", message="Filtering variables"):
+            checkpointable_vars = self.checkpointable_vars(user_ns)
+            checkpointable_values = self.checkpointable_values(checkpointable_vars)
+
+        # Expand accessed_vars with deep aliases using prior checkpoint's index
+        with timer(key="checkpoint:expand_aliases", message="Expanding aliases"):
+            expanded_accessed = self._expand_accessed_vars(
+                accessed_vars, prior_cp, checkpointable_values
+            )
+
+        # Determine which variables can be reused vs must be copied
+        with timer(key="checkpoint:classify_vars", message="Classifying variables"):
+            reusable_vars: Dict[str, Any] = {}  # var_name -> prior checkpoint value
+            must_copy_vars: Dict[str, Any] = {}  # var_name -> current value
+            original_ids: Dict[str, int] = {}  # var_name -> id(current value)
+
+            for var_name, current_value in checkpointable_values.items():
+                current_id = id(current_value)
+
+                # Check if variable can be reused from prior checkpoint
+                if self._can_reuse_from_prior(
+                    var_name, current_value, current_id, expanded_accessed, prior_cp
+                ):
+                    reusable_vars[var_name] = prior_cp.user_ns[var_name]
+                    # Track original ID for identity short-circuit during diff
+                    original_ids[var_name] = current_id
+                else:
+                    must_copy_vars[var_name] = current_value
+
+        # Log reuse statistics
+        total_vars = len(checkpointable_values)
+        reused_count = len(reusable_vars)
+        if reused_count > 0:
+            log(f"Incremental checkpoint: reusing {reused_count}/{total_vars} variables")
+
+        # Size warning (only for variables that need copying)
+        if max_size_mb is not None and must_copy_vars:
+            estimated_bytes = self._estimate_size(must_copy_vars)
+            estimated_mb = estimated_bytes / (1024 * 1024)
+            if estimated_mb > max_size_mb:
+                log(f"WARNING: Incremental checkpoint '{name}' copying ~{estimated_mb:.1f} MB")
+
+        # Deep copy only the variables that need it
+        with timer(key="checkpoint:deep_copy", message="Deep copying modified variables"):
+            saved = {}
+            removed = {}
+
+            for k in checkpointable_vars.keys() - checkpointable_values.keys():
+                removed[k] = get_type_model(user_ns[k])
+
+            # Record cudf origins before deep copy
+            with timer(key="checkpoint:cudf_origins", message="Recording cudf origins"):
+                from flowbook.kernel_support import cudf_compat
+                cudf_origins = cudf_compat.CuDFOriginTracker()
+                for k, v in checkpointable_values.items():
+                    cudf_origins.record(k, v)
+
+            # Deep copy only variables that need it
+            with timer(key="checkpoint:deepcopy", message="Deep copying variables"):
+                copied, memo, failed = self._deep_copy_user_ns(must_copy_vars)
+
+            # Merge reused variables into the checkpoint
+            cp = dict(copied)
+            cp.update(reusable_vars)
+
+            # Store memory costs if available
+            if self._last_var_memory_costs:
+                self._var_memory_costs_by_checkpoint[name] = self._last_var_memory_costs.copy()
+
+            # Track type models
+            with timer(key="checkpoint:type_models", message="Generating type models"):
+                for k in cp:
+                    saved[k] = get_type_model(checkpointable_values[k])
+                for k in failed:
+                    removed[k] = get_type_model(checkpointable_values[k])
+
+            self.saved[name] = MemoryCheckpoint(name, cp, cudf_origins, original_ids)
+
+        if self.sanity_check:
+            with timer(key="checkpoint:sanity_check", message="Running sanity check"):
+                original = {k: v for k, v in checkpointable_values.items() if k in saved}
+                differ = Diff(strict=False, report_close=False, atol=1e-5, rtol=1e-5)
+                diff_result = differ.diff(original, cp)
+                if diff_result.differences:
+                    raise ValueError(f"Sanity check failed: {diff_result.differences}")
+
+        return saved, removed
+
+    def _expand_accessed_vars(
+        self,
+        accessed_vars: Set[str],
+        prior_cp: MemoryCheckpoint,
+        current_values: Dict[str, Any],
+    ) -> Set[str]:
+        """
+        Expand accessed variables to include all deep aliases from prior checkpoint.
+
+        Uses the prior checkpoint's precomputed alias index to find variables that
+        share internal references with any accessed variable.
+
+        Args:
+            accessed_vars: Set of directly accessed variable names
+            prior_cp: Prior checkpoint with alias index
+            current_values: Current variable values (for logging)
+
+        Returns:
+            Expanded set including all deep aliases
+        """
+        # Ensure alias index is built
+        prior_cp._build_alias_index()
+
+        # Start with directly accessed vars (intersected with current namespace)
+        expanded = set(accessed_vars) & set(current_values.keys())
+
+        # Find all object IDs reachable from accessed variables
+        accessed_ids: Set[int] = set()
+        for var_name in list(expanded):
+            if var_name in prior_cp._reachable_ids:
+                accessed_ids.update(prior_cp._reachable_ids[var_name])
+
+        # Find all variables that share any of these IDs
+        for obj_id in accessed_ids:
+            if obj_id in prior_cp._id_to_vars:
+                for alias_var in prior_cp._id_to_vars[obj_id]:
+                    if alias_var in current_values and alias_var not in expanded:
+                        expanded.add(alias_var)
+
+        return expanded
+
+    def _can_reuse_from_prior(
+        self,
+        var_name: str,
+        current_value: Any,
+        current_id: int,
+        expanded_accessed: Set[str],
+        prior_cp: MemoryCheckpoint,
+    ) -> bool:
+        """
+        Check if a variable's value can be reused from the prior checkpoint.
+
+        A variable can be reused if:
+        1. It was NOT accessed (including deep aliases) during cell execution
+        2. It exists in the prior checkpoint
+        3. It has the same object identity as in prior checkpoint (same id)
+        4. It is a known "leaf" object (no internal pointers that could alias)
+
+        Args:
+            var_name: Name of the variable
+            current_value: Current value in namespace
+            current_id: id(current_value)
+            expanded_accessed: Set of accessed variables (expanded with aliases)
+            prior_cp: Prior checkpoint to potentially reuse from
+
+        Returns:
+            True if the variable can be safely reused
+        """
+        # Must not have been accessed
+        if var_name in expanded_accessed:
+            return False
+
+        # Must exist in prior checkpoint
+        if var_name not in prior_cp.user_ns:
+            return False
+
+        # Must have same object identity
+        prior_original_id = prior_cp._original_ids.get(var_name)
+        if prior_original_id is not None:
+            # Prior checkpoint was also incremental - check against its original
+            if prior_original_id != current_id:
+                return False
+        else:
+            # Prior checkpoint was regular - we can't verify identity, must copy
+            # This is conservative but safe
+            return False
+
+        # Must be a leaf object (no internal pointers)
+        if not _is_known_leaf_object(current_value):
+            return False
+
+        return True
 
     def restore(self, name: str, user_ns: dict[str, Any]) -> None:
         """

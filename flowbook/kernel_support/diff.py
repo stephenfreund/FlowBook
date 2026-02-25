@@ -980,6 +980,10 @@ class Diff:
         Compare two values, dispatching to type-specific methods.
         Returns None if equal, otherwise returns DiffNode with differences.
         """
+        # Fast path: same object means definitely equal (identity short-circuit)
+        # This eliminates O(n) comparison for reused objects in incremental checkpoints
+        if val_a is val_b:
+            return None
 
         ta = type(val_a)
         tb = type(val_b)

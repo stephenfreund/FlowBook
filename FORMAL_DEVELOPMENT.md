@@ -120,7 +120,7 @@ strengthen this to _the_ sequential execution.)
 
 A runtime monitor configuration is a tuple:
 
-    C = ⟨Σ, Rec, T⟩
+    C = ⟨Σ, Rec, T, Orphaned⟩
 
 where:
 
@@ -133,11 +133,13 @@ where:
 
 - T : Trace — the concatenation of accepted execution traces.
 
+- Orphaned : P(Loc) — set of orphaned locations (see §1.8.5).
+
 We write Obs_i for RBW(t_i) when Rec[i] ≠ ⊥.
 
 **Initial configuration:**
 
-    C₀ = ⟨σ_init, λi. ⊥, ε⟩
+    C₀ = ⟨σ_init, λi. ⊥, ε, ∅⟩
 
 ### 1.7 Monitor Invariant
 
@@ -189,21 +191,29 @@ writes, making the problem worse.
 **Definition 1.8.3 (Forward Contamination).** After executing cell i with
 trace t:
 
-    FwdContaminated(Rec, t, i) ≡
-      ∃k > i.  Rec[k] ≠ ⊥
-             ∧  RBW(t) ∩ Δ(σ^pre_k, σ^post_k) ≠ ∅
+    FwdContaminated(Rec, t, i, Orphaned) ≡
+      (∃k > i.  Rec[k] ≠ ⊥  ∧  RBW(t) ∩ Δ(σ^pre_k, σ^post_k) ≠ ∅)
+      ∨ (RBW(t) ∩ Orphaned ≠ ∅)
 
-Forward contamination means cell i read a location that a later cell k
-previously modified. Because cells are executed out of order, the live store
-when cell i runs may contain writes from cells that appear later in notebook
-order. In a clean top-to-bottom execution, those cells have not yet run when
-cell i executes, so cell i should not observe their effects.
+Forward contamination occurs when cell i reads:
+1. A location that a later cell k previously modified (existing rule), OR
+2. An orphaned location — a residual value from code that was edited (§1.8.5)
+
+Because cells are executed out of order, the live store when cell i runs may
+contain writes from cells that appear later in notebook order, or residual
+writes from code that no longer exists. In a clean top-to-bottom execution of
+the current program, those values would not be present.
 
 > _Note._ This check examines all executed cells k > i, regardless of status. A
 > stale cell k's effects may still be present in the live store: cell k's
 > writes persist until overwritten. The check uses Δ(σ^pre_k, σ^post_k) — the
 > locations cell k actually changed — rather than WS(t_k), since a write that
 > replays the same value does not contaminate cell i's reads.
+
+> _Note._ The orphan check uses RBW(t), the trace-derived read set. This is
+> consistent with the existing contamination check. A cell reading an orphaned
+> location cannot produce prefix-consistent output because the orphaned value
+> has no correspondence in any sequential execution of the current program.
 
 **Definition 1.8.4 (Prefix Checkpoint).** For cell i, the _prefix checkpoint_
 is:
@@ -214,6 +224,27 @@ is:
 
 This is the post-checkpoint of the immediately preceding cell, representing
 the store that cell i would receive in a top-to-bottom execution.
+
+**Definition 1.8.5 (Orphaned Locations).** A location ℓ is _orphaned_ if it was
+modified by a cell execution whose code has since changed. Orphaned locations
+represent residual values in the store that no current cell's trace explains.
+
+The set Orphaned ⊆ Loc is maintained as follows:
+
+1. _Initial state:_ Orphaned₀ = ∅
+
+2. _After execution:_ When cell i executes successfully with Δ = Δ(σ^pre_i, σ^post_i):
+
+       Orphaned' = Orphaned \ Δ
+
+   Executing a cell "claims" any orphaned locations it writes, removing their
+   orphaned status.
+
+3. _After edit:_ See §2.3 (EDIT transition).
+
+> _Note._ Orphaned locations use Δ (checkpoint diff), not WS(t) (trace write
+> set), because Δ captures all actual changes including unmonitored writes
+> (§3.2). This ensures soundness even when the trace is incomplete.
 
 #### Transition Rules
 
@@ -227,11 +258,12 @@ contamination:
     Σ ⇓_{Cᵢ} (Σ', t)
     Δ = Δ(Σ, Σ')
     ¬BackConflict(Rec, Δ, i)
-    ¬FwdContaminated(Rec, t, i)
+    ¬FwdContaminated(Rec, t, i, Orphaned)
     Rec₁ = StaleFwd(Rec, Δ, i)
     Rec₂ = Rec₁[i ↦ (Σ, Σ', t, fresh)]
+    Orphaned' = Orphaned \ Δ
     ─────────────────────────────────────
-    ⟨Σ, Rec, T⟩  ⟹  ⟨Σ', Rec₂, T · t⟩
+    ⟨Σ, Rec, T, Orphaned⟩  ⟹  ⟨Σ', Rec₂, T · t, Orphaned'⟩
 
 **(EXEC-CONTAMINATED)** Execute cell i from the live store; no backward
 conflict, but forward contamination detected:
@@ -239,15 +271,16 @@ conflict, but forward contamination detected:
     Σ ⇓_{Cᵢ} (Σ', t)
     Δ = Δ(Σ, Σ')
     ¬BackConflict(Rec, Δ, i)
-    FwdContaminated(Rec, t, i)
+    FwdContaminated(Rec, t, i, Orphaned)
     Rec₁ = StaleFwd(Rec, Δ, i)
     Rec₂ = Rec₁[i ↦ (Σ, Σ', t, stale)]
+    Orphaned' = Orphaned \ Δ
     ─────────────────────────────────────
-    ⟨Σ, Rec, T⟩  ⟹  ⟨Σ', Rec₂, T · t⟩
+    ⟨Σ, Rec, T, Orphaned⟩  ⟹  ⟨Σ', Rec₂, T · t, Orphaned'⟩
 
 Cell i's execution proceeds — its effects enter the store and forward
 staleness propagates — but cell i is recorded as stale because its reads are
-contaminated by later cells' writes.
+contaminated by later cells' writes (or by orphaned locations).
 
 **(EXEC-REJECT)** Execute cell i from the live store; backward conflict
 detected:
@@ -256,9 +289,9 @@ detected:
     Δ = Δ(Σ, Σ')
     BackConflict(Rec, Δ, i)
     ─────────────────────────────────────
-    ⟨Σ, Rec, T⟩  ⟹  ⟨Σ, Rec, T⟩
+    ⟨Σ, Rec, T, Orphaned⟩  ⟹  ⟨Σ, Rec, T, Orphaned⟩
 
-Rejected executions produce no state change.
+Rejected executions produce no state change (including Orphaned).
 
 **(EXEC-RESTORE)** Execute cell i from the prefix checkpoint; the immediate
 predecessor must be fresh:
@@ -271,14 +304,20 @@ predecessor must be fresh:
     Rec₂ = StaleBack(Rec₁, Δ, i)
     Rec₃ = WriterCheck(Rec₂, t, i)
     Rec₄ = Rec₃[i ↦ (σ_pre, Σ', t, fresh)]
+    Orphaned' = Orphaned \ Δ
     ─────────────────────────────────────
-    ⟨Σ, Rec, T⟩  ⟹  ⟨Σ', Rec₄, T · t⟩
+    ⟨Σ, Rec, T, Orphaned⟩  ⟹  ⟨Σ', Rec₄, T · t, Orphaned'⟩
 
 EXEC-RESTORE bypasses the live store entirely: cell i executes from
 σ^post\_{i-1}, the post-checkpoint of cell i−1. Cell i reads from a store
 that reflects the predecessor's output rather than the fully contaminated
-live store. No forward contamination check is needed (see Remark below
-Theorem 1.10.1 for the scope of the prefix consistency guarantee).
+live store.
+
+> _Note._ Orphan contamination (RBW(t) ∩ Orphaned ≠ ∅) still applies in restore
+> mode. If cell i reads an orphaned location, the cell is marked contaminated
+> even though it ran from a clean prefix. This is because the orphaned value
+> may still influence the cell's computation if the prefix checkpoint doesn't
+> overwrite it.
 
 The precondition that the immediate predecessor cell i-1 is fresh ensures that
 σ^post\_{i-1} is a valid prefix store. EXEC-RESTORE is therefore only available
@@ -535,7 +574,7 @@ The notebook program is now mutable:
 
 ### 2.2 Extended Configuration
 
-    C = ⟨P, ver, Σ, Rec, T⟩
+    C = ⟨P, ver, Σ, Rec, T, Orphaned⟩
 
 Records include a version stamp:
 
@@ -550,8 +589,10 @@ ver_i = ver(i) for a record to be considered valid.
 
     P' = P[i ↦ C_new]
     ver' = ver[i ↦ ver(i) + 1]
+    Orphaned' = Orphaned ∪ Δ(σ^pre_i, σ^post_i)   if Rec[i] ≠ ⊥
+              = Orphaned                          otherwise
     ─────────────────────────────────────────────
-    ⟨P, ver, Σ, Rec, T⟩  ⟹  ⟨P', ver', Σ, Rec', T⟩
+    ⟨P, ver, Σ, Rec, T, Orphaned⟩  ⟹  ⟨P', ver', Σ, Rec', T, Orphaned'⟩
 
 where Rec' is defined by:
 
@@ -563,7 +604,11 @@ where Rec' is defined by:
    produced by cell i's old code; when i is re-executed, those values may
    change).
 
-3. _All other records unchanged._
+3. _Orphaned locations:_ All locations in Δ(σ^pre_i, σ^post_i) — the locations
+   cell i actually changed — become orphaned. These persist until a cell
+   writes to them with current code (see §1.8.5).
+
+4. _All other records unchanged._
 
 The live store Σ is unchanged: no execution occurs, so no backward conflict
 check is needed.
@@ -573,6 +618,10 @@ check is needed.
 > cells marked stale may not actually need re-execution. This is sound
 > (over-approximate) but not precise. Precision is recovered when i is
 > re-executed and its new write set is recorded.
+
+> _Note._ Orphaned locations use Δ (checkpoint diff), not WS(t) (trace write
+> set), because Δ captures all actual changes including unmonitored writes
+> (§3.2). This ensures soundness even when the trace is incomplete.
 
 ### 2.4 Execution with Edits
 
@@ -663,12 +712,13 @@ The monitor provides four transition rules:
 | EXEC-REJECT       | live Σ                   | BackConflict                     | (no change)   | (no change)                        |
 | EXEC-RESTORE      | checkpoint σ^post\_{i-1} | cell i-1 fresh                   | fresh         | StaleBack + StaleFwd + WriterCheck |
 
-And enforces three runtime checks:
+And enforces four runtime checks:
 
 | Check                 | Condition                                                       | Direction | Response          |
 | --------------------- | --------------------------------------------------------------- | --------- | ----------------- |
 | Backward conflict     | cell i wrote to ℓ read by earlier fresh k                       | k < i     | Reject (rollback) |
 | Forward contamination | cell i read ℓ written by later executed k                       | k > i     | Accept as stale   |
+| Orphan contamination  | cell i read ℓ ∈ Orphaned (residual from edited cell)            | —         | Accept as stale   |
 | Forward staleness     | cell i wrote to ℓ read by later fresh k                         | k > i     | Mark k stale      |
 | Writer check          | (EXEC-RESTORE only) later k writes to ℓ read by restored cell i | k > i     | Mark k stale      |
 
@@ -704,6 +754,7 @@ through n need to be re-run in order."
 | Obs_i                    | §1.6       | `record.tracking.reads_before_writes` in `kernel/reproducibility_enforcer.py` |
 | Rec[i]                   | §1.6       | `ReproducibilityExecutionRecord` in `kernel/models.py`                        |
 | fresh/stale status       | §1.6       | `_stale_cells: Set[str]` in `ReproducibilityEnforcer`                         |
+| Orphaned                 | §1.8.5     | `_orphaned_locs: Set[str]` in `ReproducibilityEnforcer`                       |
 | exec_mode (live/restore) | §1.8       | `ReproducibilityResult.exec_mode` in `kernel/models.py`                       |
 | cell_is_contaminated     | §1.8       | `ReproducibilityResult.cell_is_contaminated` in `kernel/models.py`            |
 
@@ -716,7 +767,8 @@ through n need to be re-run in order."
 | StaleBack                | §1.8 (EXEC-RESTORE) | Backward staleness loop in `_check_exec_restore()` in `kernel/reproducibility_enforcer.py`                 |
 | WriterCheck              | §1.8 (EXEC-RESTORE) | Writer-conflict loop in `_check_exec_restore()` in `kernel/reproducibility_enforcer.py`                    |
 | BackConflict             | Def 1.8.2           | `_check_backward_mutation()` in `kernel/reproducibility_enforcer.py`                                       |
-| FwdContaminated          | Def 1.8.3           | `_check_forward_dependency()` in `kernel/reproducibility_enforcer.py`                                      |
+| FwdContaminated          | Def 1.8.3           | `_check_forward_dependency()` in `kernel/reproducibility_enforcer.py` (includes orphan check)              |
+| Orphaned                 | Def 1.8.5           | `_orphaned_locs` + `mark_cell_edited()` in `kernel/reproducibility_enforcer.py`                            |
 | PrefixStore              | Def 1.8.4           | `get_prefix_checkpoint_name()` in `kernel/reproducibility_enforcer.py`                                     |
 | Conflict rule evaluation | Def 1.8.2, 1.8.3    | `CONFLICT_RULES` table in `kernel/conflict_rules.py` + `ConflictResolver` in `kernel/conflict_resolver.py` |
 

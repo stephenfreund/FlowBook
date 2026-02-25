@@ -144,6 +144,50 @@ class Checkpoints:
         )
         return total, removed
 
+    def save_incremental(
+        self,
+        name: str,
+        user_ns: dict,
+        accessed_vars: Set[str],
+        prior_checkpoint_name: str,
+        write_paths: Optional[Set[str]] = None,
+        vfs=None,
+        max_size_mb=None,
+    ) -> Tuple[Checkpoint, dict]:
+        """
+        Save memory + file checkpoint with incremental optimization.
+
+        Reuses deep copies from prior checkpoint for untouched leaf objects.
+
+        Args:
+            name: Checkpoint name
+            user_ns: User namespace dict
+            accessed_vars: Variables accessed during cell execution
+            prior_checkpoint_name: Name of prior checkpoint for reuse
+            write_paths: Paths of files written
+            vfs: Virtual file system
+            max_size_mb: Size warning threshold
+
+        Returns:
+            Tuple of (Checkpoint, removed_vars dict)
+        """
+        saved, removed = self.memory.save_incremental(
+            name, user_ns, accessed_vars, prior_checkpoint_name, max_size_mb=max_size_mb
+        )
+
+        file_cp = None
+        if self.file._enabled and write_paths is not None:
+            from flowbook.util.output import timer
+            n_files = len(write_paths) if write_paths else 0
+            with timer(key="checkpoint:file_save", message=f"File checkpoint ({n_files} files)"):
+                file_cp = self.file.save(name, write_paths, vfs=vfs)
+
+        total = Checkpoint(
+            memory=self.memory.saved[name],
+            file=file_cp,
+        )
+        return total, removed
+
     def restore(self, name: str, user_ns: dict, vfs=None) -> None:
         """Restore memory + file checkpoint."""
         self.memory.restore(name, user_ns)
