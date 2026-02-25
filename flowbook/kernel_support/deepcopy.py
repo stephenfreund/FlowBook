@@ -2227,22 +2227,25 @@ def reset_pytorch_deepcopy_handler():
 
 def _deepcopy_lightgbm_model(model, memo: dict[int, Any]):
     """
-    Deep copy a LightGBM model using fast string serialization.
+    Deep copy a LightGBM model by sharing the immutable booster.
+
+    Key insight: Fitted LightGBM models have an immutable tree ensemble.
+    The _Booster object cannot be modified after fit() - trees can't be
+    added, splits can't be changed. So we can SHARE the booster reference
+    and only copy the mutable sklearn wrapper attributes.
 
     For fitted models (with booster_):
-    - Serializes the booster to a string via model_to_string()
-    - Reconstructs a new model with the same parameters
-    - Rebuilds the booster from the string
-    - Copies sklearn fitted attributes
+    - SHARES the _Booster reference (it's immutable!)
+    - Only copies the sklearn wrapper's __dict__ attributes
+    - O(1) for the booster, O(num_attrs) for the wrapper
 
     For unfitted models:
     - Falls back to standard deepcopy (just copies parameters)
 
-    This is ~10x faster than standard deepcopy for large models because
-    it avoids traversing millions of Python objects in the tree structure.
+    This is much faster than serialization because we avoid any
+    booster copying entirely.
     """
     import copy
-    import lightgbm as lgb
 
     model_id = id(model)
     if model_id in memo:
@@ -2255,31 +2258,19 @@ def _deepcopy_lightgbm_model(model, memo: dict[int, Any]):
         memo[model_id] = result
         return result
 
-    # Fitted model - use fast string serialization
-    model_str = model.booster_.model_to_string()
+    # Fitted model - SHARE the immutable booster, copy wrapper only
+    # Use __new__ to create instance without calling __init__
+    new_model = object.__new__(model.__class__)
 
-    # Create new instance with same parameters
-    new_model = model.__class__(**model.get_params())
+    # Share the immutable booster reference (this is the key optimization!)
+    new_model._Booster = model._Booster
 
-    # Reconstruct booster from string
-    # Note: booster_ is a read-only property in sklearn API, only set _Booster
-    new_model._Booster = lgb.Booster(model_str=model_str)
-
-    # Copy all fitted attributes that are actual instance variables (not properties)
-    # LightGBM's sklearn API has many read-only properties (booster_, feature_name_, etc.)
-    # that derive their values from _Booster. We only need to copy attributes that
-    # exist in __dict__ (actual instance variables).
-    #
-    # Skip parameters and internal state that get recreated:
-    skip_attrs = {'_Booster', 'get_params'}
-
+    # Copy all __dict__ attributes except _Booster
     for attr, val in model.__dict__.items():
-        if attr in skip_attrs:
-            continue
         if attr == '_Booster':
-            continue  # Already set
+            continue  # Already shared
 
-        # Deep copy mutable attributes
+        # Deep copy mutable attributes for isolation
         if isinstance(val, (list, dict, np.ndarray)):
             new_model.__dict__[attr] = copy.deepcopy(val, memo)
         else:

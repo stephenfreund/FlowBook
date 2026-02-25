@@ -2837,19 +2837,26 @@ class Diff:
                     message=f"LightGBM parameters mismatch at {path}",
                 )
         else:
-            # Both fitted - compare model strings
-            str_a = val_a.booster_.model_to_string()
-            str_b = val_b.booster_.model_to_string()
+            # Both fitted - use POINTER COMPARISON first (O(1))
+            # Since our deepcopy shares the immutable _Booster, same pointer = same model
+            if val_a._Booster is val_b._Booster:
+                # Same booster reference - trivially equal, no comparison needed
+                pass
+            else:
+                # Different booster objects - need string comparison
+                # (happens when comparing models from different training runs)
+                str_a = val_a.booster_.model_to_string()
+                str_b = val_b.booster_.model_to_string()
 
-            if str_a != str_b:
-                # Models are different - don't include full strings in diff
-                # (they can be very large)
-                children["_booster"] = ValueComparison(
-                    status="different",
-                    value1=f"<LightGBM model with {val_a.booster_.num_trees()} trees>",
-                    value2=f"<LightGBM model with {val_b.booster_.num_trees()} trees>",
-                    message=f"LightGBM model trees differ at {path}",
-                )
+                if str_a != str_b:
+                    # Models are different - don't include full strings in diff
+                    # (they can be very large)
+                    children["_booster"] = ValueComparison(
+                        status="different",
+                        value1=f"<LightGBM model with {val_a.booster_.num_trees()} trees>",
+                        value2=f"<LightGBM model with {val_b.booster_.num_trees()} trees>",
+                        message=f"LightGBM model trees differ at {path}",
+                    )
 
         if children:
             return CompoundDiff(source_type="lightgbm_model", children=children, truncated=False)
