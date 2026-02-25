@@ -381,6 +381,44 @@ def _register_pytorch_dispatch_if_needed():
         pass
 
 
+# LightGBM models - add to dispatch table if available
+# We register lazily to avoid import-time side effects
+_lightgbm_dispatch_registered = False
+
+
+def _is_lightgbm_model(x) -> bool:
+    """Check if x is a LightGBM model without importing lightgbm.
+
+    Uses module name checking to avoid the lightgbm import (~1s).
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    # Check for lightgbm module
+    if not module.startswith('lightgbm'):
+        return False
+    # Check for sklearn estimator classes
+    return cls.__name__ in ('LGBMRegressor', 'LGBMClassifier', 'LGBMRanker', 'LGBMModel')
+
+
+def _register_lightgbm_dispatch_if_needed():
+    """Register LightGBM model types in dispatch table lazily."""
+    global _lightgbm_dispatch_registered
+    if _lightgbm_dispatch_registered:
+        return
+    _lightgbm_dispatch_registered = True
+
+    try:
+        import lightgbm as lgb
+        _COMPARE_DISPATCH[lgb.LGBMRegressor] = "_compare_lightgbm_model"
+        _COMPARE_DISPATCH[lgb.LGBMClassifier] = "_compare_lightgbm_model"
+        _COMPARE_DISPATCH[lgb.LGBMRanker] = "_compare_lightgbm_model"
+    except ImportError:
+        pass
+
+
 # Cache for subclass dispatch lookups
 _DISPATCH_CACHE: Dict[type, Optional[str]] = {}
 
@@ -1210,6 +1248,11 @@ class Diff:
                     _register_pytorch_dispatch_if_needed()
                     _DISPATCH_CACHE[t] = "_compare_pytorch_model"
                     result = self._compare_pytorch_model(val_a, val_b, path)
+                elif _is_lightgbm_model(val_a):
+                    # LightGBM model - call comparison directly
+                    _register_lightgbm_dispatch_if_needed()
+                    _DISPATCH_CACHE[t] = "_compare_lightgbm_model"
+                    result = self._compare_lightgbm_model(val_a, val_b, path)
                 elif isinstance(val_a, dict):
                     # Handle dict subclasses (OrderedDict, Counter, defaultdict, etc.)
                     _DISPATCH_CACHE[t] = "_compare_dict"
@@ -2736,6 +2779,76 @@ class Diff:
 
         if children:
             return CompoundDiff(source_type="pytorch_model", children=children, truncated=False)
+        return None
+
+    def _compare_lightgbm_model(
+        self, val_a, val_b, path: str
+    ) -> Optional[DiffNode]:
+        """
+        Compare LightGBM model objects using their model string representation.
+
+        For fitted models, the booster's model_to_string() provides a complete
+        representation of the tree ensemble. Comparing these strings is much
+        faster than traversing the Python object graph.
+
+        Models are compared by:
+        - Fitted status (both must be fitted or both unfitted)
+        - Model string (for fitted models)
+        - Parameters (for unfitted models)
+
+        Returns None if models are equal, CompoundDiff with differences otherwise.
+        """
+        children: Dict[str, DiffNode] = {}
+
+        # Check type match
+        if type(val_a) != type(val_b):
+            return ValueComparison(
+                status="different",
+                value1=type(val_a).__name__,
+                value2=type(val_b).__name__,
+                message=f"LightGBM model type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}",
+            )
+
+        # Check fitted status
+        a_fitted = hasattr(val_a, 'booster_') and val_a.booster_ is not None
+        b_fitted = hasattr(val_b, 'booster_') and val_b.booster_ is not None
+
+        if a_fitted != b_fitted:
+            return ValueComparison(
+                status="different",
+                value1="fitted" if a_fitted else "unfitted",
+                value2="fitted" if b_fitted else "unfitted",
+                message=f"LightGBM fitted status mismatch at {path}: {'fitted' if a_fitted else 'unfitted'} vs {'fitted' if b_fitted else 'unfitted'}",
+            )
+
+        if not a_fitted:
+            # Both unfitted - compare parameters only
+            params_a = val_a.get_params()
+            params_b = val_b.get_params()
+            if params_a != params_b:
+                children["_params"] = ValueComparison(
+                    status="different",
+                    value1=str(params_a),
+                    value2=str(params_b),
+                    message=f"LightGBM parameters mismatch at {path}",
+                )
+        else:
+            # Both fitted - compare model strings
+            str_a = val_a.booster_.model_to_string()
+            str_b = val_b.booster_.model_to_string()
+
+            if str_a != str_b:
+                # Models are different - don't include full strings in diff
+                # (they can be very large)
+                children["_booster"] = ValueComparison(
+                    status="different",
+                    value1=f"<LightGBM model with {val_a.booster_.num_trees()} trees>",
+                    value2=f"<LightGBM model with {val_b.booster_.num_trees()} trees>",
+                    message=f"LightGBM model trees differ at {path}",
+                )
+
+        if children:
+            return CompoundDiff(source_type="lightgbm_model", children=children, truncated=False)
         return None
 
     def _compare_groupby(self, val_a, val_b, path: str) -> Optional[ValueComparison]:
