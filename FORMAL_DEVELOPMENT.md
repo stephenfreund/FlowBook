@@ -120,7 +120,7 @@ strengthen this to _the_ sequential execution.)
 
 A runtime monitor configuration is a tuple:
 
-    C = ⟨Σ, Rec, T, Orphaned⟩
+    C = ⟨Σ, Rec, T, Prov⟩
 
 where:
 
@@ -133,13 +133,13 @@ where:
 
 - T : Trace — the concatenation of accepted execution traces.
 
-- Orphaned : P(Loc) — set of orphaned locations (see §1.8.5).
+- Prov : Loc → CellId_⊥ — provenance map tracking which cell last wrote each location (see §1.8.5).
 
 We write Obs_i for RBW(t_i) when Rec[i] ≠ ⊥.
 
 **Initial configuration:**
 
-    C₀ = ⟨σ_init, λi. ⊥, ε, ∅⟩
+    C₀ = ⟨σ_init, λi. ⊥, ε, λℓ. ⊥⟩
 
 ### 1.7 Monitor Invariant
 
@@ -191,29 +191,26 @@ writes, making the problem worse.
 **Definition 1.8.3 (Forward Contamination).** After executing cell i with
 trace t:
 
-    FwdContaminated(Rec, t, i, Orphaned) ≡
-      (∃k > i.  Rec[k] ≠ ⊥  ∧  RBW(t) ∩ Δ(σ^pre_k, σ^post_k) ≠ ∅)
-      ∨ (RBW(t) ∩ Orphaned ≠ ∅)
+    FwdContaminated(Rec, t, i, Prov) ≡
+      ∃ℓ ∈ RBW(t).  Prov(ℓ) = k  ∧  k > i
 
-Forward contamination occurs when cell i reads:
-1. A location that a later cell k previously modified (existing rule), OR
-2. An orphaned location — a residual value from code that was edited (§1.8.5)
+Forward contamination occurs when cell i reads a location ℓ whose provenance
+points to a cell k that appears AFTER i in document order.
+
+This unified check handles both scenarios:
+1. A location written by a later cell k that already executed
+2. A residual value from a cell that was edited (provenance persists after edit)
 
 Because cells are executed out of order, the live store when cell i runs may
-contain writes from cells that appear later in notebook order, or residual
-writes from code that no longer exists. In a clean top-to-bottom execution of
-the current program, those values would not be present.
+contain writes from cells that appear later in notebook order. When a cell is
+edited, its previous writes remain in the store with provenance pointing to
+that cell. In a clean top-to-bottom execution of the current program, those
+values would not be present.
 
-> _Note._ This check examines all executed cells k > i, regardless of status. A
-> stale cell k's effects may still be present in the live store: cell k's
-> writes persist until overwritten. The check uses Δ(σ^pre_k, σ^post_k) — the
-> locations cell k actually changed — rather than WS(t_k), since a write that
-> replays the same value does not contaminate cell i's reads.
-
-> _Note._ The orphan check uses RBW(t), the trace-derived read set. This is
-> consistent with the existing contamination check. A cell reading an orphaned
-> location cannot produce prefix-consistent output because the orphaned value
-> has no correspondence in any sequential execution of the current program.
+> _Note._ Provenance uses cell position, not execution time. Even if cell k
+> was edited after writing ℓ, Prov(ℓ) = k persists until another cell writes ℓ.
+> This correctly detects contamination from residual values: if k > i and
+> Prov(ℓ) = k, cell i reading ℓ is contaminated regardless of k's current code.
 
 **Definition 1.8.4 (Prefix Checkpoint).** For cell i, the _prefix checkpoint_
 is:
@@ -225,26 +222,31 @@ is:
 This is the post-checkpoint of the immediately preceding cell, representing
 the store that cell i would receive in a top-to-bottom execution.
 
-**Definition 1.8.5 (Orphaned Locations).** A location ℓ is _orphaned_ if it was
-modified by a cell execution whose code has since changed. Orphaned locations
-represent residual values in the store that no current cell's trace explains.
+**Definition 1.8.5 (Provenance).** The provenance map Prov : Loc → CellId_⊥
+records which cell last wrote each location.
 
-The set Orphaned ⊆ Loc is maintained as follows:
+    Prov(ℓ) = i  iff cell i was the last cell to execute and write location ℓ
 
-1. _Initial state:_ Orphaned₀ = ∅
+Provenance is maintained as follows:
+
+1. _Initial state:_ Prov₀ = λℓ. ⊥ (no provenance for any location)
 
 2. _After execution:_ When cell i executes successfully with Δ = Δ(σ^pre_i, σ^post_i):
 
-       Orphaned' = Orphaned \ Δ
+       ∀ℓ ∈ Δ.  Prov'(ℓ) = i
 
-   Executing a cell "claims" any orphaned locations it writes, removing their
-   orphaned status.
+   Executing a cell updates provenance for all locations it writes.
 
-3. _After edit:_ See §2.3 (EDIT transition).
+3. _After edit:_ Provenance is NOT modified on edit. If cell i wrote ℓ, then i
+   is edited, Prov(ℓ) = i persists. This correctly enables forward contamination
+   detection: if an earlier cell j reads ℓ where Prov(ℓ) = i > j, cell j is
+   contaminated by a residual value.
 
-> _Note._ Orphaned locations use Δ (checkpoint diff), not WS(t) (trace write
-> set), because Δ captures all actual changes including unmonitored writes
-> (§3.2). This ensures soundness even when the trace is incomplete.
+> _Note._ Provenance persists until overwritten, not until the cell is edited.
+> This is simpler than orphan tracking (no special edit handling) and more
+> informative (we know which cell wrote each value). The key insight: when
+> cell i is edited and re-run with different writes, its old writes still have
+> Prov pointing to i, correctly triggering contamination for earlier cells.
 
 #### Transition Rules
 
@@ -258,12 +260,12 @@ contamination:
     Σ ⇓_{Cᵢ} (Σ', t)
     Δ = Δ(Σ, Σ')
     ¬BackConflict(Rec, Δ, i)
-    ¬FwdContaminated(Rec, t, i, Orphaned)
+    ¬FwdContaminated(Rec, t, i, Prov)
     Rec₁ = StaleFwd(Rec, Δ, i)
     Rec₂ = Rec₁[i ↦ (Σ, Σ', t, fresh)]
-    Orphaned' = Orphaned \ Δ
+    Prov' = Prov[ℓ ↦ i | ℓ ∈ Δ]
     ─────────────────────────────────────
-    ⟨Σ, Rec, T, Orphaned⟩  ⟹  ⟨Σ', Rec₂, T · t, Orphaned'⟩
+    ⟨Σ, Rec, T, Prov⟩  ⟹  ⟨Σ', Rec₂, T · t, Prov'⟩
 
 **(EXEC-CONTAMINATED)** Execute cell i from the live store; no backward
 conflict, but forward contamination detected:
@@ -271,16 +273,16 @@ conflict, but forward contamination detected:
     Σ ⇓_{Cᵢ} (Σ', t)
     Δ = Δ(Σ, Σ')
     ¬BackConflict(Rec, Δ, i)
-    FwdContaminated(Rec, t, i, Orphaned)
+    FwdContaminated(Rec, t, i, Prov)
     Rec₁ = StaleFwd(Rec, Δ, i)
     Rec₂ = Rec₁[i ↦ (Σ, Σ', t, stale)]
-    Orphaned' = Orphaned \ Δ
+    Prov' = Prov[ℓ ↦ i | ℓ ∈ Δ]
     ─────────────────────────────────────
-    ⟨Σ, Rec, T, Orphaned⟩  ⟹  ⟨Σ', Rec₂, T · t, Orphaned'⟩
+    ⟨Σ, Rec, T, Prov⟩  ⟹  ⟨Σ', Rec₂, T · t, Prov'⟩
 
 Cell i's execution proceeds — its effects enter the store and forward
 staleness propagates — but cell i is recorded as stale because its reads are
-contaminated by later cells' writes (or by orphaned locations).
+contaminated (provenance points to a later cell).
 
 **(EXEC-REJECT)** Execute cell i from the live store; backward conflict
 detected:
@@ -289,9 +291,9 @@ detected:
     Δ = Δ(Σ, Σ')
     BackConflict(Rec, Δ, i)
     ─────────────────────────────────────
-    ⟨Σ, Rec, T, Orphaned⟩  ⟹  ⟨Σ, Rec, T, Orphaned⟩
+    ⟨Σ, Rec, T, Prov⟩  ⟹  ⟨Σ, Rec, T, Prov⟩
 
-Rejected executions produce no state change (including Orphaned).
+Rejected executions produce no state change (including Prov).
 
 **(EXEC-RESTORE)** Execute cell i from the prefix checkpoint; the immediate
 predecessor must be fresh:
@@ -304,20 +306,19 @@ predecessor must be fresh:
     Rec₂ = StaleBack(Rec₁, Δ, i)
     Rec₃ = WriterCheck(Rec₂, t, i)
     Rec₄ = Rec₃[i ↦ (σ_pre, Σ', t, fresh)]
-    Orphaned' = Orphaned \ Δ
+    Prov' = Prov[ℓ ↦ i | ℓ ∈ Δ]
     ─────────────────────────────────────
-    ⟨Σ, Rec, T, Orphaned⟩  ⟹  ⟨Σ', Rec₄, T · t, Orphaned'⟩
+    ⟨Σ, Rec, T, Prov⟩  ⟹  ⟨Σ', Rec₄, T · t, Prov'⟩
 
 EXEC-RESTORE bypasses the live store entirely: cell i executes from
 σ^post\_{i-1}, the post-checkpoint of cell i−1. Cell i reads from a store
 that reflects the predecessor's output rather than the fully contaminated
 live store.
 
-> _Note._ Orphan contamination (RBW(t) ∩ Orphaned ≠ ∅) still applies in restore
-> mode. If cell i reads an orphaned location, the cell is marked contaminated
-> even though it ran from a clean prefix. This is because the orphaned value
-> may still influence the cell's computation if the prefix checkpoint doesn't
-> overwrite it.
+> _Note._ Provenance contamination still applies in restore mode. If cell i
+> reads location ℓ where Prov(ℓ) = k > i, the cell is marked contaminated
+> even though it ran from a clean prefix. This handles residual values from
+> edited cells that persist in the prefix checkpoint.
 
 The precondition that the immediate predecessor cell i-1 is fresh ensures that
 σ^post\_{i-1} is a valid prefix store. EXEC-RESTORE is therefore only available
@@ -574,7 +575,7 @@ The notebook program is now mutable:
 
 ### 2.2 Extended Configuration
 
-    C = ⟨P, ver, Σ, Rec, T, Orphaned⟩
+    C = ⟨P, ver, Σ, Rec, T, Prov⟩
 
 Records include a version stamp:
 
@@ -589,10 +590,8 @@ ver_i = ver(i) for a record to be considered valid.
 
     P' = P[i ↦ C_new]
     ver' = ver[i ↦ ver(i) + 1]
-    Orphaned' = Orphaned ∪ Δ(σ^pre_i, σ^post_i)   if Rec[i] ≠ ⊥
-              = Orphaned                          otherwise
     ─────────────────────────────────────────────
-    ⟨P, ver, Σ, Rec, T, Orphaned⟩  ⟹  ⟨P', ver', Σ, Rec', T, Orphaned'⟩
+    ⟨P, ver, Σ, Rec, T, Prov⟩  ⟹  ⟨P', ver', Σ, Rec', T, Prov⟩
 
 where Rec' is defined by:
 
@@ -604,9 +603,9 @@ where Rec' is defined by:
    produced by cell i's old code; when i is re-executed, those values may
    change).
 
-3. _Orphaned locations:_ All locations in Δ(σ^pre_i, σ^post_i) — the locations
-   cell i actually changed — become orphaned. These persist until a cell
-   writes to them with current code (see §1.8.5).
+3. _Provenance unchanged:_ Prov is NOT modified on edit. If cell i wrote ℓ,
+   Prov(ℓ) = i persists. This correctly enables forward contamination detection
+   when earlier cells read residual values (see §1.8.5).
 
 4. _All other records unchanged._
 
@@ -619,9 +618,10 @@ check is needed.
 > (over-approximate) but not precise. Precision is recovered when i is
 > re-executed and its new write set is recorded.
 
-> _Note._ Orphaned locations use Δ (checkpoint diff), not WS(t) (trace write
-> set), because Δ captures all actual changes including unmonitored writes
-> (§3.2). This ensures soundness even when the trace is incomplete.
+> _Note._ Provenance is not modified on edit because residual values persist in
+> the store. When cell i is edited from "x = 1" to "y = 1" and re-run, x still
+> has value 1 with Prov(x) = i. If an earlier cell j reads x, j is correctly
+> marked contaminated because Prov(x) = i > j.
 
 ### 2.4 Execution with Edits
 
@@ -714,13 +714,12 @@ The monitor provides four transition rules:
 
 And enforces four runtime checks:
 
-| Check                 | Condition                                                       | Direction | Response          |
-| --------------------- | --------------------------------------------------------------- | --------- | ----------------- |
-| Backward conflict     | cell i wrote to ℓ read by earlier fresh k                       | k < i     | Reject (rollback) |
-| Forward contamination | cell i read ℓ written by later executed k                       | k > i     | Accept as stale   |
-| Orphan contamination  | cell i read ℓ ∈ Orphaned (residual from edited cell)            | —         | Accept as stale   |
-| Forward staleness     | cell i wrote to ℓ read by later fresh k                         | k > i     | Mark k stale      |
-| Writer check          | (EXEC-RESTORE only) later k writes to ℓ read by restored cell i | k > i     | Mark k stale      |
+| Check                    | Condition                                                       | Direction | Response          |
+| ------------------------ | --------------------------------------------------------------- | --------- | ----------------- |
+| Backward conflict        | cell i wrote to ℓ read by earlier fresh k                       | k < i     | Reject (rollback) |
+| Provenance contamination | cell i read ℓ where Prov(ℓ) = k > i                             | k > i     | Accept as stale   |
+| Forward staleness        | cell i wrote to ℓ read by later fresh k                         | k > i     | Mark k stale      |
+| Writer check             | (EXEC-RESTORE only) later k writes to ℓ read by restored cell i | k > i     | Mark k stale      |
 
 **Recovery from forward contamination.** When cell i is stale due to forward
 contamination, the recovery path is to re-execute cells i, i+1, …, n in
@@ -754,7 +753,7 @@ through n need to be re-run in order."
 | Obs_i                    | §1.6       | `record.tracking.reads_before_writes` in `kernel/reproducibility_enforcer.py` |
 | Rec[i]                   | §1.6       | `ReproducibilityExecutionRecord` in `kernel/models.py`                        |
 | fresh/stale status       | §1.6       | `_stale_cells: Set[str]` in `ReproducibilityEnforcer`                         |
-| Orphaned                 | §1.8.5     | `_orphaned_locs: Set[str]` in `ReproducibilityEnforcer`                       |
+| Prov                     | §1.8.5     | `ProvenanceMap` in `kernel/models.py`, `_provenance` in `ReproducibilityEnforcer` |
 | exec_mode (live/restore) | §1.8       | `ReproducibilityResult.exec_mode` in `kernel/models.py`                       |
 | cell_is_contaminated     | §1.8       | `ReproducibilityResult.cell_is_contaminated` in `kernel/models.py`            |
 
@@ -767,8 +766,8 @@ through n need to be re-run in order."
 | StaleBack                | §1.8 (EXEC-RESTORE) | Backward staleness loop in `_check_exec_restore()` in `kernel/reproducibility_enforcer.py`                 |
 | WriterCheck              | §1.8 (EXEC-RESTORE) | Writer-conflict loop in `_check_exec_restore()` in `kernel/reproducibility_enforcer.py`                    |
 | BackConflict             | Def 1.8.2           | `_check_backward_mutation()` in `kernel/reproducibility_enforcer.py`                                       |
-| FwdContaminated          | Def 1.8.3           | `_check_forward_dependency()` in `kernel/reproducibility_enforcer.py` (includes orphan check)              |
-| Orphaned                 | Def 1.8.5           | `_orphaned_locs` + `mark_cell_edited()` in `kernel/reproducibility_enforcer.py`                            |
+| FwdContaminated          | Def 1.8.3           | `_check_forward_dependency()` in `kernel/reproducibility_enforcer.py` (provenance-based)                   |
+| Prov                     | Def 1.8.5           | `_provenance: ProvenanceMap` in `kernel/reproducibility_enforcer.py`                                       |
 | PrefixStore              | Def 1.8.4           | `get_prefix_checkpoint_name()` in `kernel/reproducibility_enforcer.py`                                     |
 | Conflict rule evaluation | Def 1.8.2, 1.8.3    | `CONFLICT_RULES` table in `kernel/conflict_rules.py` + `ConflictResolver` in `kernel/conflict_resolver.py` |
 

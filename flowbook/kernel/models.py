@@ -79,7 +79,6 @@ class ReproducibilityResult:
     forward_violation: Optional[ReproducibilityViolation] = None  # Forward dependency violation (if any)
     cell_is_contaminated: bool = False  # [EXEC-CONTAMINATED] True if cell executed but is forward-contaminated
     exec_mode: str = "live"  # [EXEC-RESTORE] "live" or "restore"
-    orphaned_reads: List[str] = field(default_factory=list)  # [§1.8.5] Locations read that were orphaned
 
 
 @dataclass
@@ -111,7 +110,6 @@ class ReproducibilityMetadata:
     check_duration_ms: float = 0.0  # SDC check time
     cell_is_contaminated: bool = False  # [EXEC-CONTAMINATED] True if forward-contaminated
     exec_mode: str = "live"  # [EXEC-RESTORE] "live" or "restore"
-    orphaned_locations: List[str] = field(default_factory=list)  # [§1.8.5] Current orphaned locations
 
     def to_display_metadata(self) -> dict:
         """Format for display in output metadata."""
@@ -138,6 +136,60 @@ class ReproducibilityMetadata:
                 "check_duration_ms": self.check_duration_ms,
                 "cell_is_contaminated": self.cell_is_contaminated,
                 "exec_mode": self.exec_mode,
-                "orphaned_locations": self.orphaned_locations,
             }
+        }
+
+
+@dataclass
+class ProvenanceMap:
+    """
+    Tracks which cell wrote each location (§1.8.5).
+
+    Provenance persists until overwritten by another cell's execution.
+    This enables detection of forward contamination even after cells are edited.
+
+    When cell C writes x, then C is edited to write y and re-executed:
+    - Prov["x"] = C (from old execution, NOT cleared on edit)
+    - Prov["y"] = C (new)
+    - When B (earlier cell) reads x: Prov["x"] = C, C is after B → contaminated
+
+    When A (earlier cell) re-executes and writes x:
+    - Prov["x"] = A (updated)
+    - Now B reads x: A is before B → OK
+    """
+
+    # Variable-level: var_name -> cell_id that last wrote it
+    variables: Dict[str, str] = field(default_factory=dict)
+
+    # Column-level: var_name -> col_name -> cell_id
+    columns: Dict[str, Dict[str, str]] = field(default_factory=dict)
+
+    def update_variable(self, var: str, cell_id: str) -> None:
+        """Record that cell_id wrote variable var."""
+        self.variables[var] = cell_id
+
+    def update_column(self, var: str, col: str, cell_id: str) -> None:
+        """Record that cell_id wrote column col of variable var."""
+        if var not in self.columns:
+            self.columns[var] = {}
+        self.columns[var][col] = cell_id
+
+    def get_variable_writer(self, var: str) -> Optional[str]:
+        """Get the cell_id that last wrote variable var, or None."""
+        return self.variables.get(var)
+
+    def get_column_writer(self, var: str, col: str) -> Optional[str]:
+        """Get the cell_id that last wrote column col of var, or None."""
+        return self.columns.get(var, {}).get(col)
+
+    def clear(self) -> None:
+        """Clear all provenance (used on kernel reset)."""
+        self.variables.clear()
+        self.columns.clear()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dict for debugging/serialization."""
+        return {
+            "variables": dict(self.variables),
+            "columns": {v: dict(c) for v, c in self.columns.items()},
         }

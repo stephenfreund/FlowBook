@@ -1575,7 +1575,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 sdc_result.cell_is_contaminated if sdc_result else False
             ),
             exec_mode=sdc_result.exec_mode if sdc_result else "live",
-            orphaned_locations=self._enforcer.get_orphaned_locations(),  # [§1.8.5]
         )
 
         # Log and display structural warnings
