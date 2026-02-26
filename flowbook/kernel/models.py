@@ -140,6 +140,43 @@ class ReproducibilityMetadata:
 
 
 @dataclass
+class MovedCell:
+    """Record of a cell that changed position in notebook order."""
+
+    cell_id: str
+    old_position: int
+    new_position: int
+
+    @property
+    def moved_forward(self) -> bool:
+        """True if cell moved to a later position (old < new)."""
+        return self.old_position < self.new_position
+
+    @property
+    def moved_backward(self) -> bool:
+        """True if cell moved to an earlier position (new < old)."""
+        return self.new_position < self.old_position
+
+
+@dataclass
+class OrderDelta:
+    """Delta between old and new cell order."""
+
+    deleted: List[str]  # Cell IDs in old order but not in new
+    inserted: List[str]  # Cell IDs in new order but not in old
+    moved: List[MovedCell]  # Cells that changed position
+
+
+@dataclass
+class OrderChangeResult:
+    """Result of processing a cell order change."""
+
+    newly_stale: List[str]  # Cells marked stale by this order change
+    warnings: List[str]  # Human-readable warnings
+    delta: OrderDelta  # The computed delta
+
+
+@dataclass
 class ProvenanceMap:
     """
     Tracks which cell wrote each location (§1.8.5).

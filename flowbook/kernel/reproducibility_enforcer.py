@@ -205,7 +205,15 @@ from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 from flowbook.kernel_support.types import MemoryCheckpointDiffResult, DiffNode, ValueComparison, CompoundDiff
 from flowbook.util.cell_index import index_to_alpha
 
-from flowbook.kernel.models import ProvenanceMap, ReproducibilityExecutionRecord, ReproducibilityResult, ReproducibilityViolation
+from flowbook.kernel.models import (
+    MovedCell,
+    OrderChangeResult,
+    OrderDelta,
+    ProvenanceMap,
+    ReproducibilityExecutionRecord,
+    ReproducibilityResult,
+    ReproducibilityViolation,
+)
 
 # Conflict resolution imports
 from flowbook.kernel.access_events import StructuralRead, VariableRead
@@ -331,10 +339,293 @@ class ReproducibilityEnforcer:
     def cell_order(self) -> List[str]:
         return self._cell_order
 
-    def set_cell_order(self, order: List[str]) -> None:
-        """Update notebook structure. Called via magic or metadata."""
+    def set_cell_order(self, order: List[str]) -> OrderChangeResult:
+        """Update notebook structure. Called via magic or metadata.
+
+        Implements DELETE, INSERT, and MOVE transitions (§2.4-§2.6).
+
+        Args:
+            order: New cell order (list of cell IDs)
+
+        Returns:
+            OrderChangeResult with newly_stale cells, warnings, and delta
+        """
+        from flowbook.util.output import log
+
+        old_order = self._cell_order
+        delta = self._compute_order_delta(old_order, order)
+
+        # Update order first (needed for position lookups in handlers)
         self._cell_order = order
-        self._prune_deleted_cells()
+
+        all_newly_stale: List[str] = []
+        all_warnings: List[str] = []
+
+        # Handle deletions (§2.4)
+        if delta.deleted:
+            newly_stale, warnings = self._handle_deletions(delta.deleted, old_order)
+            all_newly_stale.extend(newly_stale)
+            all_warnings.extend(warnings)
+            # Prune records for deleted cells
+            for cell_id in delta.deleted:
+                self.records.pop(cell_id, None)
+                self._stale_cells.discard(cell_id)
+
+        # Handle moves (§2.6)
+        if delta.moved:
+            newly_stale, warnings = self._handle_moves(delta.moved, old_order)
+            all_newly_stale.extend(newly_stale)
+            all_warnings.extend(warnings)
+
+        # INSERT (§2.5): no action needed (new cells have no records)
+
+        if all_newly_stale:
+            log(f"[ORDER] Cells marked stale: {all_newly_stale}")
+
+        return OrderChangeResult(
+            newly_stale=all_newly_stale,
+            warnings=all_warnings,
+            delta=delta,
+        )
+
+    def _compute_order_delta(
+        self, old_order: List[str], new_order: List[str]
+    ) -> OrderDelta:
+        """Compute delta between old and new cell order.
+
+        Args:
+            old_order: Previous cell order
+            new_order: New cell order
+
+        Returns:
+            OrderDelta with deleted, inserted, and moved cells
+        """
+        old_set = set(old_order)
+        new_set = set(new_order)
+
+        deleted = [c for c in old_order if c not in new_set]
+        inserted = [c for c in new_order if c not in old_set]
+
+        # Build position maps for cells that exist in both orders
+        old_positions = {c: i for i, c in enumerate(old_order)}
+        new_positions = {c: i for i, c in enumerate(new_order)}
+
+        # Find moved cells: cells in both orders whose relative position changed
+        # We use a stable algorithm: for each cell, check if its position changed
+        # relative to cells that were adjacent to it
+        moved: List[MovedCell] = []
+        common_cells = old_set & new_set
+
+        for cell_id in common_cells:
+            old_pos = old_positions[cell_id]
+            new_pos = new_positions[cell_id]
+            if old_pos != new_pos:
+                moved.append(MovedCell(cell_id=cell_id, old_position=old_pos, new_position=new_pos))
+
+        return OrderDelta(deleted=deleted, inserted=inserted, moved=moved)
+
+    def _handle_deletions(
+        self, deleted_cells: List[str], old_order: List[str]
+    ) -> tuple:
+        """Handle DELETE transitions (§2.4).
+
+        For each deleted cell with an execution record:
+        - Find cells that read the deleted cell's writes
+        - Mark them stale
+
+        Args:
+            deleted_cells: List of deleted cell IDs
+            old_order: Cell order before deletion
+
+        Returns:
+            Tuple of (newly_stale cell IDs, warnings)
+        """
+        from flowbook.util.output import log
+
+        newly_stale: List[str] = []
+        warnings: List[str] = []
+
+        for deleted_id in deleted_cells:
+            if deleted_id not in self.records:
+                continue  # No execution record, nothing to propagate
+
+            record = self.records[deleted_id]
+            deleted_writes = record.tracking.writes
+
+            if not deleted_writes:
+                continue  # Deleted cell didn't write anything
+
+            # Find cells that read what the deleted cell wrote
+            for cell_id, other_record in self.records.items():
+                if cell_id == deleted_id:
+                    continue
+                if cell_id in self._stale_cells:
+                    continue  # Already stale
+
+                other_reads = other_record.tracking.reads_before_writes
+                overlap = deleted_writes & other_reads
+
+                if overlap:
+                    self._stale_cells.add(cell_id)
+                    newly_stale.append(cell_id)
+                    alpha_deleted = self._cell_id_to_alpha(deleted_id)
+                    alpha_other = self._cell_id_to_alpha(cell_id)
+                    warning = (
+                        f"Cell @{alpha_other} marked stale: "
+                        f"deleted cell @{alpha_deleted} wrote {sorted(overlap)}"
+                    )
+                    warnings.append(warning)
+                    log(f"[DELETE] {warning}")
+
+        return (newly_stale, warnings)
+
+    def _handle_moves(
+        self, moved_cells: List[MovedCell], old_order: List[str]
+    ) -> tuple:
+        """Handle MOVE transitions (§2.6).
+
+        Move forward (p < q):
+            - Crossed cells that read moved cell's writes → stale (lost dependency)
+            - Moved cell that reads from crossed cells' writes → stale (gains input)
+
+        Move backward (q < p):
+            - Moved cell that reads from crossed cells' writes → stale (forward contamination)
+            - Crossed cells that read moved cell's writes → stale (gains input)
+
+        IMPORTANT: "Crossed" means cells whose relative order to the moved cell
+        actually changed. If all cells shift together (e.g., due to insertion),
+        they don't cross each other.
+
+        Args:
+            moved_cells: List of MovedCell records
+            old_order: Cell order before moves
+
+        Returns:
+            Tuple of (newly_stale cell IDs, warnings)
+        """
+        from flowbook.util.output import log
+
+        newly_stale: List[str] = []
+        warnings: List[str] = []
+        new_order = self._cell_order
+
+        # Build position maps
+        old_positions = {c: i for i, c in enumerate(old_order)}
+        new_positions = {c: i for i, c in enumerate(new_order)}
+
+        for move in moved_cells:
+            cell_id = move.cell_id
+
+            if cell_id not in self.records:
+                continue  # No execution record, nothing to check
+
+            record = self.records[cell_id]
+            cell_reads = record.tracking.reads_before_writes
+            cell_writes = record.tracking.writes
+
+            old_pos = move.old_position
+            new_pos = move.new_position
+
+            # Determine truly crossed cells: cells whose relative order to cell_id changed
+            # A cell is "crossed" if:
+            #   - It was AFTER cell_id in old order but is now BEFORE in new order, OR
+            #   - It was BEFORE cell_id in old order but is now AFTER in new order
+            crossed_ids = []
+            for other_id in self.records:
+                if other_id == cell_id:
+                    continue
+                if other_id not in old_positions or other_id not in new_positions:
+                    continue  # Cell was deleted or inserted, not moved
+
+                other_old_pos = old_positions[other_id]
+                other_new_pos = new_positions[other_id]
+
+                # Check if relative order flipped
+                was_after = other_old_pos > old_pos
+                is_after = other_new_pos > new_pos
+
+                if was_after != is_after:
+                    crossed_ids.append(other_id)
+
+            for other_id in crossed_ids:
+                if other_id not in self.records:
+                    continue
+
+                other_record = self.records[other_id]
+                other_reads = other_record.tracking.reads_before_writes
+                other_writes = other_record.tracking.writes
+
+                # Determine direction of crossing for this specific pair
+                other_old_pos = old_positions[other_id]
+                other_new_pos = new_positions[other_id]
+                was_after = other_old_pos > old_pos
+                # is_after = other_new_pos > new_pos  # Must be opposite of was_after
+
+                if was_after:
+                    # other_id was after cell_id, now before: cell_id moved forward past other_id
+                    # (Ex1) Crossed cells that read moved cell's writes → stale
+                    overlap1 = other_reads & cell_writes
+                    if overlap1 and other_id not in self._stale_cells:
+                        self._stale_cells.add(other_id)
+                        newly_stale.append(other_id)
+                        alpha_moved = self._cell_id_to_alpha(cell_id)
+                        alpha_other = self._cell_id_to_alpha(other_id)
+                        warning = (
+                            f"Cell @{alpha_other} marked stale: "
+                            f"cell @{alpha_moved} moved forward past it, "
+                            f"lost dependency on {sorted(overlap1)}"
+                        )
+                        warnings.append(warning)
+                        log(f"[MOVE] {warning}")
+
+                    # (Ex2) Moved cell reads from crossed cells' writes → stale
+                    overlap2 = cell_reads & other_writes
+                    if overlap2 and cell_id not in self._stale_cells:
+                        self._stale_cells.add(cell_id)
+                        newly_stale.append(cell_id)
+                        alpha_moved = self._cell_id_to_alpha(cell_id)
+                        alpha_other = self._cell_id_to_alpha(other_id)
+                        warning = (
+                            f"Cell @{alpha_moved} marked stale: "
+                            f"moved forward past @{alpha_other}, "
+                            f"now reads {sorted(overlap2)} from it"
+                        )
+                        warnings.append(warning)
+                        log(f"[MOVE] {warning}")
+
+                else:
+                    # other_id was before cell_id, now after: cell_id moved backward past other_id
+                    # (Ex3) Moved cell reads from crossed cells' writes → stale
+                    overlap3 = cell_reads & other_writes
+                    if overlap3 and cell_id not in self._stale_cells:
+                        self._stale_cells.add(cell_id)
+                        newly_stale.append(cell_id)
+                        alpha_moved = self._cell_id_to_alpha(cell_id)
+                        alpha_other = self._cell_id_to_alpha(other_id)
+                        warning = (
+                            f"Cell @{alpha_moved} marked stale: "
+                            f"moved backward before @{alpha_other}, "
+                            f"forward contamination on {sorted(overlap3)}"
+                        )
+                        warnings.append(warning)
+                        log(f"[MOVE] {warning}")
+
+                    # (Ex4) Crossed cells that read moved cell's writes → stale
+                    overlap4 = other_reads & cell_writes
+                    if overlap4 and other_id not in self._stale_cells:
+                        self._stale_cells.add(other_id)
+                        newly_stale.append(other_id)
+                        alpha_moved = self._cell_id_to_alpha(cell_id)
+                        alpha_other = self._cell_id_to_alpha(other_id)
+                        warning = (
+                            f"Cell @{alpha_other} marked stale: "
+                            f"cell @{alpha_moved} moved backward before it, "
+                            f"gains input from {sorted(overlap4)}"
+                        )
+                        warnings.append(warning)
+                        log(f"[MOVE] {warning}")
+
+        return (newly_stale, warnings)
 
     def _cell_id_to_alpha(self, cell_id: str) -> str:
         """Convert cell ID to @A notation using cell_order position."""
@@ -344,19 +635,6 @@ class ReproducibilityEnforcer:
         except ValueError:
             # Cell not in order, just return the ID
             return cell_id
-
-    def _prune_deleted_cells(self) -> None:
-        """Remove records for cells no longer in notebook.
-
-        Note: We do NOT clear provenance here because values written by
-        deleted cells may still be in the store. Provenance persists until
-        another cell writes to those locations.
-        """
-        current = set(self._cell_order)
-        deleted = [c for c in self.records if c not in current]
-        for c in deleted:
-            del self.records[c]
-            self._stale_cells.discard(c)  # Also remove from stale cache
 
     def check(
         self,

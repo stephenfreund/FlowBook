@@ -623,7 +623,87 @@ check is needed.
 > has value 1 with Prov(x) = i. If an earlier cell j reads x, j is correctly
 > marked contaminated because Prov(x) = i > j.
 
-### 2.4 Execution with Edits
+### 2.4 DELETE Transition
+
+**(DELETE)** Remove cell i from notebook:
+
+    Cells' := Cells \ {i}
+    ─────────────────────────────────────────────
+    ⟨Cells, P, ver, Σ, Rec, T, Prov⟩  ⟹  ⟨Cells', P, ver, Σ, Rec', T, Prov⟩
+
+where Rec' is defined by:
+
+1. _Downstream staleness:_ For each fresh cell j (j ≠ i) where
+   Obs_j ∩ WS(t_i) ≠ ∅, set status_j := stale (cell j read values written
+   by deleted cell i; those values are now orphaned).
+
+2. _Record removal:_ Remove Rec[i].
+
+3. _Provenance unchanged:_ Prov is NOT modified. Values written by i persist
+   in the store with Prov(ℓ) = i, enabling deleted_cell_dependency detection.
+
+> _Note._ DELETE marks cells stale that depended on the deleted cell's writes.
+> This is conservative: the values may still be in the store, but the cell
+> that produced them is gone. Re-execution will either recreate the values
+> (if another cell writes them) or reveal the missing dependency.
+
+### 2.5 INSERT Transition
+
+**(INSERT)** Insert new cell X at position j:
+
+    Cells' := Cells ∪ {X}
+    Rec[X] := ⊥
+    ─────────────────────────────────────────────
+    ⟨Cells, P, ver, Σ, Rec, T, Prov⟩  ⟹  ⟨Cells', P', ver, Σ, Rec, T, Prov⟩
+
+No staleness changes occur. Cell X has no execution record (WS = ∅), so it
+cannot invalidate any existing cell's reads.
+
+### 2.6 MOVE Transition
+
+**(MOVE)** Move cell i from position p to position q:
+
+Let Crossed = cells between old and new position (exclusive of i).
+
+**Move forward (p < q):**
+
+Crossed cells are those at positions (p, q] in the old order.
+
+1. _Crossed cells lose upstream dependency (Example 1):_
+   For fresh k ∈ Crossed where Obs_k ∩ WS(t_i) ≠ ∅:
+       status_k := stale
+
+   Cell k read from cell i, but i is now after k. In a top-to-bottom
+   execution, k would no longer receive i's values.
+
+2. _Moved cell gains new input (Example 2):_
+   If Obs_i ∩ (⋃_{k ∈ Crossed} WS(t_k)) ≠ ∅:
+       status_i := stale
+
+   Cell i now reads from crossed cells that were previously after it.
+
+**Move backward (q < p):**
+
+Crossed cells are those at positions [q, p) in the old order.
+
+3. _Moved cell has forward contamination (Example 3):_
+   If Obs_i ∩ (⋃_{k ∈ Crossed} WS(t_k)) ≠ ∅:
+       status_i := stale
+
+   Cell i read from cells that are now after it. Those values came from
+   cells that should execute later in document order.
+
+4. _Crossed cells gain new input (Example 4):_
+   For fresh k ∈ Crossed where Obs_k ∩ WS(t_i) ≠ ∅:
+       status_k := stale
+
+   Crossed cells now come after the moved cell and may read its values.
+
+> _Note._ MOVE is atomic: all staleness is computed before any status changes.
+> Circular dependencies are not an error — they result in multiple cells
+> being marked stale, which is handled by forward contamination on execution.
+
+### 2.7 Execution with Edits
 
 Execution of cell i uses P(i) (the current code) and records ver_i = ver(i).
 The backward conflict, forward contamination, forward staleness, and restore
@@ -632,17 +712,17 @@ rules from Part I apply unchanged.
 A cell's record is considered fresh only if its version stamp matches the
 current program version: Rec[i].ver_i = ver(i).
 
-### 2.5 Quiescence
+### 2.8 Quiescence
 
-**Definition 2.5.1.** A configuration ⟨P, ver, Σ, Rec, T⟩ is _quiescent_ iff:
+**Definition 2.8.1.** A configuration ⟨P, ver, Σ, Rec, T⟩ is _quiescent_ iff:
 
 1. For all i ∈ {1..n}: Rec[i] ≠ ⊥.
 2. For all i: Rec[i].status = fresh.
 3. For all i: Rec[i].ver_i = ver(i).
 
-### 2.6 Main Theorem
+### 2.9 Main Theorem
 
-**Theorem 2.6.1 (Quiescence ⟹ Reproducibility).** If execution reaches a
+**Theorem 2.9.1 (Quiescence ⟹ Reproducibility).** If execution reaches a
 quiescent configuration ⟨P_f, ver_f, Σ, Rec, T⟩, then for the final program
 P_f, there exists a sequential execution of P_f(1), …, P_f(n) from σ_init
 producing stores σ₀, …, σₙ such that:
@@ -701,7 +781,7 @@ _Proof._
 | 1.4.5      | Delta–Write Containment          | Store deltas are contained in write sets                    |
 | 1.9.1      | Invariant Preservation           | Cons is preserved by every monitor transition               |
 | **1.10.1** | **Prefix-Consistent Reads**      | **Fresh cells' observations match a sequential prefix**     |
-| **2.6.1**  | **Quiescence ⟹ Reproducibility** | **No stale cells implies reproducibility of final program** |
+| **2.9.1**  | **Quiescence ⟹ Reproducibility** | **No stale cells implies reproducibility of final program** |
 
 The monitor provides four transition rules:
 
@@ -780,7 +860,11 @@ through n need to be re-run in order."
 | EXEC-REJECT       | §1.8       | `_do_execute_impl()` backward branch in `kernel/flowbook_kernel.py`                                                                                                                                                            |
 | EXEC-RESTORE      | §1.8       | `can_exec_restore()` + `check(is_exec_restore=True)` in `kernel/reproducibility_enforcer.py`; `%exec_restore` magic + pending flag in `kernel/flowbook_kernel.py`; `flowbook:exec-restore` command in `src/flowbook/plugin.ts` |
 | EDIT              | §2.3       | `mark_cell_edited()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                   |
-| Quiescence        | Def 2.5.1  | All cells executed and `_stale_cells` empty                                                                                                                                                                                    |
+| DELETE            | §2.4       | `_handle_deletions()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                  |
+| INSERT            | §2.5       | (no-op in `set_cell_order()`) — new cells have no records                                                                                                                                                                      |
+| MOVE              | §2.6       | `_handle_moves()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                      |
+| OrderDelta        | §2.4-2.6   | `OrderDelta`, `MovedCell`, `OrderChangeResult` in `kernel/models.py`; `_compute_order_delta()` in `kernel/reproducibility_enforcer.py`                                                                                         |
+| Quiescence        | Def 2.8.1  | All cells executed and `_stale_cells` empty                                                                                                                                                                                    |
 
 ### Extensions Beyond Formal Spec
 
