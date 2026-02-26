@@ -22,7 +22,6 @@ import {
 import { indexToAlpha } from '../cellindexutils';
 
 export class ReproducibilityExecutionHookManager {
-  private _app: JupyterFrontEnd;
   private _tracker: INotebookTracker;
   private _highlighter: ReproducibilityCellHighlighter;
   private _editTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
@@ -32,11 +31,10 @@ export class ReproducibilityExecutionHookManager {
   private _silentEditMsgIds: Set<string> = new Set();
 
   constructor(
-    app: JupyterFrontEnd,
+    _app: JupyterFrontEnd,
     tracker: INotebookTracker,
     highlighter: ReproducibilityCellHighlighter
   ) {
-    this._app = app;
     this._tracker = tracker;
     this._highlighter = highlighter;
     this._setupHooks();
@@ -428,6 +426,41 @@ export class ReproducibilityExecutionHookManager {
       this._clearViolationOutput(cell);
     }
 
+    // If there's a writer_violation, store it on the writer cell
+    // This makes the writer cell's metadata identical to what it would be
+    // if the writer had executed after the reader (backward mutation case)
+    if (reproducibilityMetadata.writer_violation) {
+      const wv = reproducibilityMetadata.writer_violation;
+      const writerCell = this._findCell(panel, wv.mutating_cell);
+      if (writerCell) {
+        // Build IViolationInfo - same structure as for normal violations
+        const mutIdx = cellOrder.indexOf(wv.mutating_cell);
+        const affIdx = cellOrder.indexOf(wv.affected_cell);
+        const mutRef = mutIdx >= 0 ? indexToAlpha(mutIdx) : wv.mutating_cell;
+        const affRef = affIdx >= 0 ? indexToAlpha(affIdx) : wv.affected_cell;
+
+        const writerViolationInfo: IViolationInfo = {
+          type: wv.violation_type || 'backward_mutation',
+          mutating_cell: wv.mutating_cell,
+          affected_cell: wv.affected_cell,
+          variables: wv.variables,
+          message: `Cell ${mutRef} modified ${wv.variables.map(v => '`' + v + '`').join(', ')} read by ${affRef}`,
+          structural_reads_detail: (wv as any).structural_reads_detail,
+          changes_detail: (wv as any).changes_detail
+        };
+
+        // Store in metadata - SAME as if this cell had executed and caused the error
+        writerCell.model.setMetadata('flowbook_violation', writerViolationInfo);
+
+        // Add violation notice to outputs - SAME display as normal backward violation
+        this._updateViolationOutput(writerCell, writerViolationInfo, cellOrder);
+
+        console.log(
+          `ReproducibilityExecutionHook: Stored writer_violation on cell ${wv.mutating_cell}`
+        );
+      }
+    }
+
     console.log(
       `ReproducibilityExecutionHook: Extracted metadata for cell ${cell.model.id}:`,
       reproducibilityMetadata
@@ -502,9 +535,6 @@ export class ReproducibilityExecutionHookManager {
 
     // Update staleness manager (triggers signal → CellHighlighter)
     stalenessManager.updateFromMetadata(metadata);
-
-    // Notify command system so context menu items re-evaluate isEnabled
-    this._app.commands.notifyCommandChanged('flowbook:exec-restore');
   }
 
   /**
@@ -643,21 +673,40 @@ export class ReproducibilityExecutionHookManager {
     const affRef = affIdx >= 0 ? indexToAlpha(affIdx) : violation.affected_cell;
     const vars = violation.variables.map(v => '`' + v + '`').join(', ');
 
-    // Different message format for forward contamination vs backward violation
-    const isForwardContamination = violation.type === 'forward_dependency';
+    // Different message format based on violation type
+    // If mutating cell is no longer in notebook, treat as deleted cell dependency
+    const mutatingCellDeleted = mutIdx < 0 && violation.mutating_cell !== '<deleted>';
+    const isForwardContamination =
+      violation.type === 'forward_dependency' && !mutatingCellDeleted;
+    const isDeletedCellDependency =
+      violation.type === 'deleted_cell_dependency' || mutatingCellDeleted;
     let message: string;
     let noticeOutput: IOutput;
 
-    if (isForwardContamination) {
-      // Forward contamination: reading cell read from later writing cell
-      message = `${vars} written by downstream cell ${mutRef}`;
-      const hint = 'Right-click → "Run with upstream state" to fix';
-      const htmlMessage = message.replace(/`([^`]+)`/g, '<code>$1</code>');
+    if (isDeletedCellDependency) {
+      // Deleted cell dependency: reading a variable written by a cell that was deleted
+      const htmlVars = vars.replace(/`([^`]+)`/g, '<code>$1</code>');
+      message = `${vars} written by a deleted cell. Re-run an upstream cell that defines these variables.`;
       noticeOutput = {
         output_type: 'display_data',
         data: {
-          'text/html': `<div class="flowbook-contamination-notice">\u26a0\ufe0f <b>Contaminated</b>: ${htmlMessage}. ${hint}.</div>`,
-          'text/plain': `\u26a0\ufe0f Contaminated: ${message}. ${hint}.`
+          'text/html': `<div class="flowbook-violation-notice"><b>\u274c Deleted Cell Dependency: ${htmlVars} written by a deleted cell. Re-run an upstream cell that defines these variables.</b></div>`,
+          'text/plain': `\u274c Deleted Cell Dependency: ${message}`
+        },
+        metadata: {
+          flowbook_violation_notice: true,
+          flowbook_is_contamination: true
+        }
+      };
+    } else if (isForwardContamination) {
+      // Forward contamination: reading cell read from later writing cell
+      const htmlVars = vars.replace(/`([^`]+)`/g, '<code>$1</code>');
+      message = `${vars} written by downstream cell ${mutRef}. Re-run upstream cells to restore reproducible values.`;
+      noticeOutput = {
+        output_type: 'display_data',
+        data: {
+          'text/html': `<div class="flowbook-violation-notice"><b>\u274c Forward Contamination: ${htmlVars} written by downstream cell ${mutRef}. Re-run upstream cells to restore reproducible values.</b></div>`,
+          'text/plain': `\u274c Forward Contamination: ${message}`
         },
         metadata: { flowbook_violation_notice: true, flowbook_is_contamination: true }
       };
@@ -715,7 +764,8 @@ export class ReproducibilityExecutionHookManager {
     const allOutputs: IOutput[] = [];
 
     // First, add staleness notice if present (but skip if contamination - it already implies stale)
-    if (!isForwardContamination) {
+    const isContaminationLike = isForwardContamination || isDeletedCellDependency;
+    if (!isContaminationLike) {
       for (let i = 0; i < outputs.length; i++) {
         const out = outputs.get(i).toJSON() as IOutput;
         if ((out as any).metadata?.flowbook_staleness_notice === true) {
@@ -742,12 +792,15 @@ export class ReproducibilityExecutionHookManager {
         (out as any).metadata?.flowbook_staleness_notice === true;
       const isKernelError =
         out.output_type === 'error' &&
-        (out as any).ename === 'ReproducibilityViolation';
+        ((out as any).ename === 'ReproducibilityViolation' ||
+          (out as any).ename === 'ForwardContamination');
+      const plainText = (out as any).data?.['text/plain'] || '';
       const isKernelBriefViolation =
         out.output_type === 'display_data' &&
-        ((out as any).data?.['text/plain'] || '').includes(
-          'Backward violation'
-        );
+        (plainText.includes('Backward violation') ||
+          plainText.includes('Forward contamination') ||
+          plainText.includes('Forward Contamination') ||
+          plainText.includes('Deleted cell conflict'));
       // Stream text can be string or string[] - normalize to string
       const streamText = Array.isArray((out as any).text)
         ? (out as any).text.join('')
@@ -755,10 +808,11 @@ export class ReproducibilityExecutionHookManager {
       const isKernelContaminationStderr =
         out.output_type === 'stream' &&
         (out as any).name === 'stderr' &&
-        streamText.includes('Forward Contamination');
+        (streamText.includes('Forward Contamination') ||
+          streamText.includes('Deleted cell'));
       // Also filter staleness notice if showing contamination (contamination implies stale)
       const skipStalenessForContamination =
-        isStalenessNotice && isForwardContamination;
+        isStalenessNotice && isContaminationLike;
 
       if (
         !isViolationNotice &&

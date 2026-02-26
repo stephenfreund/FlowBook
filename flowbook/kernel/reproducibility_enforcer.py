@@ -424,6 +424,7 @@ class ReproducibilityEnforcer:
 
         # Check forward dependency (reading from later cells via provenance)
         forward_violation = None
+        writer_violation = None
         if my_position >= 0:
             with timer(key="sdc:forward_dependency", message=f"[sdc] Forward dependency check for {cell_id}") as t:
                 forward_violation = self._check_forward_dependency(
@@ -432,6 +433,26 @@ class ReproducibilityEnforcer:
 
             if forward_violation is not None:
                 output.add_timing("sdc:forward_dependency_violation", t.duration())
+                # Mark the contaminated cell as stale so future BackConflict checks skip it
+                # (even though the kernel will block this execution with an error)
+                self._stale_cells.add(cell_id)
+
+                # Create a backward_mutation violation for the writer cell
+                # This makes the writer cell's metadata identical to what it would be
+                # if the writer had executed after the reader (backward mutation case)
+                writer_cell = forward_violation.mutating_cell
+                if writer_cell and writer_cell != "<later>":
+                    writer_alpha = self._cell_id_to_alpha(writer_cell)
+                    reader_alpha = self._cell_id_to_alpha(cell_id)
+                    writer_violation = ReproducibilityViolation(
+                        mutating_cell=writer_cell,
+                        affected_cell=cell_id,
+                        variables=forward_violation.variables,
+                        message=format_backward_mutation_message(
+                            writer_alpha, reader_alpha, forward_violation.variables
+                        ),
+                        violation_type="backward_mutation",
+                    )
             else:
                 output.add_timing("sdc:forward_dependency_no_violation", t.duration())
 
@@ -465,11 +486,10 @@ class ReproducibilityEnforcer:
                 typed_changes=typed_changes,
             )
 
-            # [EXEC-CONTAMINATED / EXEC-ACCEPT] (Formal rules §1.8)
-            if forward_violation is not None:
-                self._stale_cells.add(cell_id)    # EXEC-CONTAMINATED: cell recorded stale
-            else:
-                self._stale_cells.discard(cell_id) # EXEC-ACCEPT: cell recorded fresh
+            # [EXEC-ACCEPT/CONTAMINATED] Mark cell fresh only if no forward contamination
+            # If forward_violation is set, the cell is contaminated and should stay stale
+            if forward_violation is None:
+                self._stale_cells.discard(cell_id)
 
             # Reuse diff from backward mutation check, or compute if not available
             if current_diff is None:
@@ -566,7 +586,7 @@ class ReproducibilityEnforcer:
             column_changed=column_changed,
             structural_warnings=structural_warnings,
             forward_violation=forward_violation,
-            cell_is_contaminated=(forward_violation is not None),
+            writer_violation=writer_violation,
         )
 
     def _check_backward_mutation(
@@ -911,7 +931,9 @@ class ReproducibilityEnforcer:
         # This catches residual values from cells that were edited (their typed_changes
         # no longer reflect old writes, but provenance persists)
         provenance_conflicts: List[str] = []
+        deleted_cell_conflicts: List[str] = []  # Variables written by deleted cells
         writer_cell_for_message: Optional[str] = None
+        deleted_writer_cell: Optional[str] = None  # Track a deleted cell for messaging
 
         for read_var in (tracking.reads_before_writes or set()):
             # Skip if this variable is covered by a later cell's typed_changes
@@ -929,26 +951,39 @@ class ReproducibilityEnforcer:
                             writer_cell_for_message = writer_cell
                 except ValueError:
                     # Writer cell no longer in notebook but provenance persists
-                    provenance_conflicts.append(read_var)
+                    # This is a problem: the value came from a deleted cell
+                    deleted_cell_conflicts.append(read_var)
+                    if deleted_writer_cell is None:
+                        deleted_writer_cell = writer_cell
+
+        # Deleted cell conflicts are a distinct problem: the value source is gone
+        if deleted_cell_conflicts:
+            reading_alpha = self._cell_id_to_alpha(cell_id)
+            conflict_names = sorted(set(deleted_cell_conflicts))
+            vars_str = format_variable_list(conflict_names)
+            message = (
+                f"⚠️ Deleted cell conflict: Cell {reading_alpha} reads {vars_str} "
+                f"written by cell {deleted_writer_cell} which is no longer in the notebook."
+            )
+            return ReproducibilityViolation(
+                mutating_cell=deleted_writer_cell or "<deleted>",
+                affected_cell=cell_id,
+                variables=conflict_names,
+                message=message,
+                violation_type="deleted_cell_dependency",
+            )
 
         if provenance_conflicts:
             reading_alpha = self._cell_id_to_alpha(cell_id)
             conflict_names = sorted(set(provenance_conflicts))
 
-            if writer_cell_for_message:
-                writing_alpha = self._cell_id_to_alpha(writer_cell_for_message)
-                message = format_forward_dependency_message(
-                    reading_alpha, writing_alpha, conflict_names
-                )
-            else:
-                # Writer cell was deleted
-                message = (
-                    f"⚠️ Forward contamination: Cell {reading_alpha} reads "
-                    f"{conflict_names} written by a cell later in document order."
-                )
+            writing_alpha = self._cell_id_to_alpha(writer_cell_for_message)
+            message = format_forward_dependency_message(
+                reading_alpha, writing_alpha, conflict_names
+            )
 
             return ReproducibilityViolation(
-                mutating_cell=writer_cell_for_message or "<later>",
+                mutating_cell=writer_cell_for_message,
                 affected_cell=cell_id,
                 variables=conflict_names,
                 message=message,
@@ -1313,8 +1348,6 @@ class ReproducibilityEnforcer:
             column_changed=column_changed,
             structural_warnings=structural_warnings,
             forward_violation=None,
-            cell_is_contaminated=False,
-            exec_mode="restore",
         )
 
     def get_stale_cells(self) -> List[str]:
@@ -1949,14 +1982,16 @@ def format_forward_dependency_message(
     variables: List[str],
 ) -> str:
     """
-    Format a forward dependency violation message.
+    Format a forward dependency (contamination) error message.
 
     A forward dependency occurs when a cell reads a variable that a later cell
-    (in document order) has already written. This means the reading cell is
-    seeing "future" state that wouldn't exist in top-to-bottom order.
+    (in document order) has already written. This means the reading cell would
+    see "future" state that wouldn't exist in top-to-bottom order.
+
+    Forward contamination now blocks execution with an error.
 
     Args:
-        reading_cell_alpha: Cell that read the variable (@A notation)
+        reading_cell_alpha: Cell that attempted to read the variable (@A notation)
         writing_cell_alpha: Later cell that wrote the variable (@A notation)
         variables: List of affected variable names
 
@@ -1966,20 +2001,50 @@ def format_forward_dependency_message(
     vars_str = format_variable_list(variables)
 
     lines = [
-        "⚠️ Forward Contamination",
+        "❌ Forward Contamination",
         "",
         f"Cell {reading_cell_alpha} reads {vars_str} which was written by "
         f"downstream cell {writing_cell_alpha}.",
         "",
-        f"Cell {reading_cell_alpha} executed successfully but is marked stale "
-        "because it read out-of-order state that would not exist in a "
-        "top-to-bottom run.",
+        "Execution blocked because this cell would read out-of-order state "
+        "that would not exist in a top-to-bottom run.",
         "",
-        'Fix: Right-click the cell and select "Run with upstream state", '
-        "or re-run cells in notebook order.",
+        "Fix: Re-run upstream cells to restore reproducible values for these variables.",
     ]
 
     return "\n".join(lines)
+
+
+def format_backward_mutation_message(
+    mutating_cell_alpha: str,
+    affected_cell_alpha: str,
+    variables: List[str],
+) -> str:
+    """
+    Format a backward mutation error message.
+
+    A backward mutation occurs when a cell modifies a variable that an
+    earlier cell (in document order) reads. This creates a hidden dependency
+    where the earlier cell depends on the later cell having run first.
+
+    This format is used both for:
+    1. Direct backward mutation (writer runs after reader)
+    2. Writer violation on forward contamination (writer ran before reader)
+
+    Args:
+        mutating_cell_alpha: Cell that modified the variable (@A notation)
+        affected_cell_alpha: Earlier cell that reads the variable (@A notation)
+        variables: List of affected variable names
+
+    Returns:
+        Formatted message string
+    """
+    vars_str = format_variable_list(variables)
+
+    return (
+        f"Cell {mutating_cell_alpha} modified {vars_str} which Cell {affected_cell_alpha} "
+        f"(earlier) reads."
+    )
 
 
 def format_truncation_error(

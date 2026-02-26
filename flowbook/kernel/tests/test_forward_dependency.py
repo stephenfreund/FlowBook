@@ -618,7 +618,7 @@ class TestForwardDependencyMessageFormatting:
         assert "@C" in message
         assert "x" in message
         assert "top-to-bottom" in message
-        assert "Run with upstream state" in message
+        assert "Re-run upstream cells" in message
 
     def test_message_format_multiple_variables(self):
         """Test message formatting with multiple variables."""
@@ -830,15 +830,17 @@ class TestForwardDependencyStaleness:
 
     def test_staleness_after_forward_dependency_with_continue(self):
         """
-        When a forward dependency is detected, the cell is marked stale (EXEC-CONTAMINATED).
+        When a forward dependency is detected, the violation is recorded and
+        a writer_violation is created for the writer cell.
 
         Scenario:
         - Cell D executes first, writes x
         - Cell B executes second, reads x (forward dependency on D)
-        - B is marked stale because it's forward-contaminated
+        - Forward violation is detected, writer_violation is created for D
 
-        Since B is stale, re-executing D does NOT trigger backward violation
-        against B (BackConflict only checks fresh cells per Def 1.8.2).
+        Note: In the new model, forward contamination blocks execution at the
+        kernel level (error). The enforcer detects the violation but the cell
+        is not automatically added to stale_cells (the kernel handles rejection).
         """
         # Cell D writes x
         self._save_pre_checkpoint("d", {})
@@ -861,11 +863,17 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        # Forward violation detected, B is contaminated and stale
+        # Forward violation detected - D caused the conflict
         assert result_b.forward_violation is not None
         assert result_b.forward_violation.mutating_cell == "d"
-        assert result_b.cell_is_contaminated is True
-        assert "b" in result_b.stale_cells
+        # cell_is_contaminated removed - forward_violation presence indicates contamination
+        assert result_b.forward_violation is not None
+        # Writer violation is created for the writer cell (same format as backward mutation)
+        assert result_b.writer_violation is not None
+        assert result_b.writer_violation.mutating_cell == "d"
+        assert result_b.writer_violation.affected_cell == "b"
+        assert "x" in result_b.writer_violation.variables
+        assert result_b.writer_violation.violation_type == "backward_mutation"
 
         # Now re-execute D with different value
         # B is stale (contaminated), so BackConflict skips it — no violation
@@ -1042,7 +1050,7 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # Cell B reads x (forward dependency) → contaminated/stale
+        # Cell B reads x (forward dependency) → contaminated
         self._save_pre_checkpoint("b", {"x": 10})
         post_b = self._make_post_checkpoint("post_b", {"x": 10, "y": 20})
         result_b = self.sdc.check(
@@ -1053,8 +1061,11 @@ class TestForwardDependencyStaleness:
         )
         assert result_b.forward_violation is not None
         assert result_b.forward_violation.mutating_cell == "c"
-        assert result_b.cell_is_contaminated is True
-        assert "b" in result_b.stale_cells
+        # Writer violation is created for the writer cell (same format as backward mutation)
+        assert result_b.writer_violation is not None
+        assert result_b.writer_violation.mutating_cell == "c"
+        assert result_b.writer_violation.affected_cell == "b"
+        assert result_b.writer_violation.violation_type == "backward_mutation"
 
         # Re-run C with different value
         # B is stale (contaminated), so BackConflict skips it
@@ -1090,7 +1101,7 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # Cell B reads x (forward dependency → contaminated/stale)
+        # Cell B reads x (forward dependency → contaminated)
         self._save_pre_checkpoint("b", {"x": 10})
         post_b = self._make_post_checkpoint("post_b", {"x": 10, "y": 20})
         result_b = self.sdc.check(
@@ -1100,8 +1111,11 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
         assert result_b.forward_violation is not None
-        assert result_b.cell_is_contaminated is True
-        assert "b" in result_b.stale_cells
+        # Writer violation is created for the writer cell (same format as backward mutation)
+        assert result_b.writer_violation is not None
+        assert result_b.writer_violation.mutating_cell == "c"
+        assert result_b.writer_violation.affected_cell == "b"
+        assert result_b.writer_violation.violation_type == "backward_mutation"
 
         # Re-run C with SAME value — no violation, no new staleness
         self._save_pre_checkpoint("c", {"x": 10, "y": 20})
@@ -1260,9 +1274,11 @@ class TestForwardDependencyColumnStaleness:
         )
         assert result_b.forward_violation is not None
 
-        # B is contaminated (stale) from forward dependency
-        assert result_b.cell_is_contaminated is True
-        assert "b" in result_b.stale_cells
+        # Writer violation is created for the writer cell (same format as backward mutation)
+        assert result_b.writer_violation is not None
+        assert result_b.writer_violation.mutating_cell == "c"
+        assert result_b.writer_violation.affected_cell == "b"
+        assert result_b.writer_violation.violation_type == "backward_mutation"
 
         # Re-run C with different price values
         # B is stale (contaminated), so BackConflict skips it — no violation
@@ -1283,8 +1299,6 @@ class TestForwardDependencyColumnStaleness:
 
         # No backward violation — B is stale so BackConflict skips it
         assert result_c2.violation is None
-        # B is still stale from contamination
-        assert "b" in result_c2.stale_cells
 
     def test_no_column_staleness_different_columns(self):
         """
@@ -1413,12 +1427,15 @@ class TestForwardContaminationExecContaminated:
         # Forward violation detected
         assert result_b.forward_violation is not None
         # Cell is contaminated
-        assert result_b.cell_is_contaminated is True
+        # cell_is_contaminated removed - forward_violation presence indicates contamination
+        assert result_b.forward_violation is not None
 
-    def test_forward_contaminated_cell_is_stale(self):
-        """A forward-contaminated cell should be recorded as stale.
+    def test_forward_contaminated_cell_is_detected(self):
+        """A forward-contaminated cell should have forward_violation set.
 
-        After EXEC-CONTAMINATED, the cell itself should appear in stale_cells.
+        Note: In the new model, forward contamination blocks execution at the
+        kernel level (error), so the cell is NOT added to stale_cells by the
+        enforcer. The kernel handles rejection.
         """
         # Cell C writes x
         self._save_pre_checkpoint("c", {})
@@ -1441,8 +1458,14 @@ class TestForwardContaminationExecContaminated:
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        # Cell B itself should be in stale_cells
-        assert "b" in result_b.stale_cells
+        # Forward violation is detected
+        assert result_b.forward_violation is not None
+        assert result_b.forward_violation.mutating_cell == "c"
+        # Writer violation is created for the writer cell (same format as backward mutation)
+        assert result_b.writer_violation is not None
+        assert result_b.writer_violation.mutating_cell == "c"
+        assert result_b.writer_violation.affected_cell == "b"
+        assert result_b.writer_violation.violation_type == "backward_mutation"
 
     def test_forward_contamination_still_propagates_stalefwd(self):
         """StaleFwd should still mark downstream cells stale after EXEC-CONTAMINATED.
@@ -1482,7 +1505,8 @@ class TestForwardContaminationExecContaminated:
         )
 
         # B is contaminated
-        assert result_b.cell_is_contaminated is True
+        # cell_is_contaminated removed - forward_violation presence indicates contamination
+        assert result_b.forward_violation is not None
         # D should be stale because B changed y which D reads
         assert "d" in result_b.stale_cells
 
@@ -1545,6 +1569,7 @@ class TestForwardContaminationExecContaminated:
         )
 
         # Not contaminated
-        assert result_a.cell_is_contaminated is False
+        # cell_is_contaminated removed - forward_violation absence indicates no contamination
+        assert result_a.forward_violation is None
         # Not stale
         assert "a" not in result_a.stale_cells

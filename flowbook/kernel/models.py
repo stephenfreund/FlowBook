@@ -69,16 +69,16 @@ class ReproducibilityExecutionRecord:
 
 @dataclass
 class ReproducibilityResult:
-    """Result of monitor check — determines transition rule (EXEC-ACCEPT/CONTAMINATED/REJECT)."""
+    """Result of monitor check — determines transition rule (EXEC-ACCEPT/REJECT)."""
 
-    violation: Optional[ReproducibilityViolation]  # Primary violation (backward mutation)
+    violation: Optional[ReproducibilityViolation]  # Primary violation (backward mutation or forward dependency)
     stale_cells: List[str]  # cell IDs that need re-execution (document order)
     changed_variables: List[str]  # variables that changed value
     column_changed: Dict[str, List[str]] = field(default_factory=dict)  # var -> [changed columns]
     structural_warnings: List[str] = field(default_factory=list)  # warnings from WARN mode
     forward_violation: Optional[ReproducibilityViolation] = None  # Forward dependency violation (if any)
-    cell_is_contaminated: bool = False  # [EXEC-CONTAMINATED] True if cell executed but is forward-contaminated
-    exec_mode: str = "live"  # [EXEC-RESTORE] "live" or "restore"
+    # Writer violation: backward_mutation violation to store on writer cell (for forward contamination)
+    writer_violation: Optional[ReproducibilityViolation] = None
 
 
 @dataclass
@@ -108,8 +108,8 @@ class ReproducibilityMetadata:
     code_duration_ms: float = 0.0  # Time for _ipython_do_execute (user code)
     state_duration_ms: float = 0.0  # Checkpoint time (pre + post)
     check_duration_ms: float = 0.0  # SDC check time
-    cell_is_contaminated: bool = False  # [EXEC-CONTAMINATED] True if forward-contaminated
-    exec_mode: str = "live"  # [EXEC-RESTORE] "live" or "restore"
+    # Writer violation: backward_mutation violation to store on writer cell (for forward contamination)
+    writer_violation: Optional[Dict[str, Any]] = None
 
     def to_display_metadata(self) -> dict:
         """Format for display in output metadata."""
@@ -134,8 +134,7 @@ class ReproducibilityMetadata:
                 "code_duration_ms": self.code_duration_ms,
                 "state_duration_ms": self.state_duration_ms,
                 "check_duration_ms": self.check_duration_ms,
-                "cell_is_contaminated": self.cell_is_contaminated,
-                "exec_mode": self.exec_mode,
+                "writer_violation": self.writer_violation,
             }
         }
 

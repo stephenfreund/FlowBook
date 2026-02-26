@@ -246,7 +246,7 @@ class TestProvenanceContamination:
 
         # A should be contaminated: it reads x whose provenance points to C (later)
         assert result.forward_violation is not None
-        assert result.cell_is_contaminated
+        # cell_is_contaminated removed - forward_violation presence indicates contamination
         assert "x" in result.forward_violation.variables
 
     def test_no_contamination_from_earlier_cell(self):
@@ -263,7 +263,7 @@ class TestProvenanceContamination:
 
         # C should NOT be contaminated
         assert result.forward_violation is None
-        assert not result.cell_is_contaminated
+        # cell_is_contaminated removed - forward_violation absence indicates no contamination
 
 
 class TestBugScenario:
@@ -315,7 +315,7 @@ class TestBugScenario:
         # Step 3: Run B
         result_b = driver.run_cell("b")
         assert result_b.forward_violation is not None  # Contaminated by C
-        assert result_b.cell_is_contaminated
+        # cell_is_contaminated removed - forward_violation presence indicates contamination
         assert "b" in driver.stale_cells
 
         # Step 4: Edit C to "y = 1"
@@ -336,7 +336,7 @@ class TestBugScenario:
         result_b2 = driver.run_cell("b")
         # B should STILL be contaminated because Prov["x"] = C and C > B
         assert result_b2.forward_violation is not None
-        assert result_b2.cell_is_contaminated
+        # cell_is_contaminated removed - forward_violation presence indicates contamination
         assert "x" in result_b2.forward_violation.variables
 
     def test_bug_scenario_cleared_by_earlier_cell_rerun(self):
@@ -370,7 +370,7 @@ class TestBugScenario:
         # Now B should be clean (Prov["x"] = A, A < B)
         result_b3 = driver.run_cell("b")
         assert result_b3.forward_violation is None
-        assert not result_b3.cell_is_contaminated
+        # cell_is_contaminated removed - forward_violation absence indicates no contamination
 
 
 class TestProvenanceWithMultipleCells:
@@ -507,4 +507,134 @@ class TestEdgeCases:
 
         # A should NOT be contaminated by itself
         assert result.forward_violation is None
-        assert not result.cell_is_contaminated
+        # cell_is_contaminated removed - forward_violation absence indicates no contamination
+
+
+class TestDeletedCellProvenance:
+    """Tests for detecting reads from deleted cells via provenance."""
+
+    def test_deleted_cell_provenance_detected(self):
+        """
+        When a cell reads a variable written by a now-deleted cell, it should
+        be flagged as a deleted_cell_dependency violation.
+
+        Scenario:
+        1. Cell C writes x
+        2. Cell C is deleted from notebook
+        3. Cell A reads x -> should get deleted_cell_dependency violation
+        """
+        driver = NotebookDriver(["a", "b", "c"])
+
+        # C writes x
+        driver.define_cell("c", "x = 1", writes={"x"}, effect=lambda s: {**s, "x": 1})
+        driver.run_cell("c")
+        assert driver.provenance.get_variable_writer("x") == "c"
+
+        # Now delete C from the notebook (update cell order to exclude it)
+        driver.enforcer.set_cell_order(["a", "b"])
+
+        # A reads x - should detect that x was written by deleted cell C
+        driver.define_cell("a", "print(x)", reads={"x"}, effect=lambda s: s)
+        result = driver.run_cell("a")
+
+        # Should have a forward_violation with deleted_cell_dependency type
+        assert result.forward_violation is not None
+        assert result.forward_violation.violation_type == "deleted_cell_dependency"
+        assert "x" in result.forward_violation.variables
+        assert result.forward_violation.mutating_cell == "c"
+        assert "deleted" in result.forward_violation.message.lower()
+        assert "no longer in the notebook" in result.forward_violation.message
+
+    def test_deleted_cell_with_multiple_variables(self):
+        """Multiple variables from a deleted cell are all flagged."""
+        driver = NotebookDriver(["a", "b", "c"])
+
+        # C writes x and y
+        driver.define_cell(
+            "c", "x = 1; y = 2",
+            writes={"x", "y"},
+            effect=lambda s: {**s, "x": 1, "y": 2}
+        )
+        driver.run_cell("c")
+
+        # Delete C
+        driver.enforcer.set_cell_order(["a", "b"])
+
+        # A reads both x and y
+        driver.define_cell("a", "print(x, y)", reads={"x", "y"}, effect=lambda s: s)
+        result = driver.run_cell("a")
+
+        assert result.forward_violation is not None
+        assert result.forward_violation.violation_type == "deleted_cell_dependency"
+        assert "x" in result.forward_violation.variables
+        assert "y" in result.forward_violation.variables
+
+    def test_no_violation_after_rewrite_by_existing_cell(self):
+        """
+        If another cell rewrites the variable after deletion, no violation.
+
+        Scenario:
+        1. C writes x
+        2. C is deleted
+        3. B writes x (provenance updated)
+        4. A reads x -> OK (provenance points to B which exists)
+        """
+        driver = NotebookDriver(["a", "b", "c"])
+
+        # C writes x
+        driver.define_cell("c", "x = 1", writes={"x"}, effect=lambda s: {**s, "x": 1})
+        driver.run_cell("c")
+
+        # Delete C
+        driver.enforcer.set_cell_order(["a", "b"])
+
+        # B writes x (updates provenance)
+        driver.define_cell("b", "x = 2", writes={"x"}, effect=lambda s: {**s, "x": 2})
+        driver.run_cell("b")
+
+        # Provenance now points to B
+        assert driver.provenance.get_variable_writer("x") == "b"
+
+        # A reads x - B is later but exists, so forward_dependency (not deleted)
+        driver.define_cell("a", "print(x)", reads={"x"}, effect=lambda s: s)
+        result = driver.run_cell("a")
+
+        # This is a forward dependency (B is after A), not deleted cell
+        assert result.forward_violation is not None
+        assert result.forward_violation.violation_type == "forward_dependency"
+        assert result.forward_violation.mutating_cell == "b"
+
+    def test_no_violation_if_earlier_cell_rewrites(self):
+        """
+        If an earlier cell rewrites the variable, no violation.
+        """
+        driver = NotebookDriver(["a", "b", "c"])
+
+        # C writes x
+        driver.define_cell("c", "x = 1", writes={"x"}, effect=lambda s: {**s, "x": 1})
+        driver.run_cell("c")
+
+        # Delete C, add D at start
+        driver.enforcer.set_cell_order(["d", "a", "b"])
+
+        # D writes x (earlier than A, updates provenance)
+        driver.define_cell("d", "x = 0", writes={"x"}, effect=lambda s: {**s, "x": 0})
+        driver.checkpoints.save("pre_d", dict(driver.live_store), max_size_mb=None)
+        driver.live_store = {"x": 0}
+        driver.checkpoints.save("post_d", dict(driver.live_store), max_size_mb=None)
+        from flowbook.kernel.tests.conftest import make_tracking
+        driver.enforcer.check(
+            cell_id="d",
+            pre_checkpoint=driver.checkpoints.get("pre_d"),
+            post_checkpoint=driver.checkpoints.get("post_d"),
+            tracking=make_tracking(writes={"x"}),
+        )
+
+        # Provenance now points to D
+        assert driver.provenance.get_variable_writer("x") == "d"
+
+        # A reads x - D is earlier, so no violation
+        driver.define_cell("a", "print(x)", reads={"x"}, effect=lambda s: s)
+        result = driver.run_cell("a")
+
+        assert result.forward_violation is None

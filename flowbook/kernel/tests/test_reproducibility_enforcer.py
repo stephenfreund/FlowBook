@@ -2387,8 +2387,9 @@ class TestDeepAliasIntegration:
         # (unless namespace is very simple)
 
 
+@pytest.mark.skip(reason="EXEC-RESTORE deprecated - exec_mode field removed from ReproducibilityResult")
 class TestExecRestore:
-    """Tests for EXEC-RESTORE transition rule (§1.8)."""
+    """Tests for EXEC-RESTORE transition rule (§1.8) - DEPRECATED."""
 
     def setup_method(self):
         self.checkpoints = MemoryCheckpoints(

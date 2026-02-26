@@ -240,7 +240,10 @@ export class ReproducibilityCellHighlighter {
         const out = outputs.get(i).toJSON() as IOutput;
         const meta = (out as any).metadata || {};
         // Keep outputs that are NOT flowbook notices
-        if (!meta.flowbook_staleness_notice && !meta.flowbook_violation_notice) {
+        if (
+          !meta.flowbook_staleness_notice &&
+          !meta.flowbook_violation_notice
+        ) {
           cleanOutputs.push(out);
         }
       }
@@ -249,9 +252,11 @@ export class ReproducibilityCellHighlighter {
         outputs.fromJSON(cleanOutputs);
       }
 
-      // Remove staleness CSS class
+      // Remove staleness CSS classes
       cell.node.classList.remove('flowbook-stale-cell');
       cell.node.classList.remove('flowbook-unexecuted-cell');
+      cell.node.classList.remove('flowbook-cell-stale');
+      cell.node.classList.remove('flowbook-cell-unexecuted');
     });
   }
 
@@ -513,21 +518,40 @@ export class ReproducibilityCellHighlighter {
         affIdx >= 0 ? indexToAlpha(affIdx) : violation.affected_cell;
       const vars = violation.variables.map(v => '`' + v + '`').join(', ');
 
-      // Different message format for forward contamination vs backward violation
-      const isForwardContamination = violation.type === 'forward_dependency';
+      // Different message format based on violation type
+      // If mutating cell is no longer in notebook, treat as deleted cell dependency
+      const mutatingCellDeleted = mutIdx < 0 && violation.mutating_cell !== '<deleted>';
+      const isForwardContamination =
+        violation.type === 'forward_dependency' && !mutatingCellDeleted;
+      const isDeletedCellDependency =
+        violation.type === 'deleted_cell_dependency' || mutatingCellDeleted;
+      const isContaminationLike = isForwardContamination || isDeletedCellDependency;
       let plainText: string;
       let noticeOutput: IOutput;
 
-      if (isForwardContamination) {
-        // Forward contamination: reading cell read from later writing cell
-        const message = `${vars} written by downstream cell ${mutRef}`;
-        const hint = 'Right-click → "Run with upstream state" to fix';
-        plainText = `\u26a0\ufe0f Contaminated: ${message}. ${hint}.`;
-        const htmlMessage = message.replace(/`([^`]+)`/g, '<code>$1</code>');
+      if (isDeletedCellDependency) {
+        // Deleted cell dependency: reading a variable written by a cell that was deleted
+        const htmlVars = vars.replace(/`([^`]+)`/g, '<code>$1</code>');
+        plainText = `\u274c Deleted Cell Dependency: ${vars} written by a deleted cell. Re-run an upstream cell that defines these variables.`;
         noticeOutput = {
           output_type: 'display_data',
           data: {
-            'text/html': `<div class="flowbook-contamination-notice">\u26a0\ufe0f <b>Contaminated</b>: ${htmlMessage}. ${hint}.</div>`,
+            'text/html': `<div class="flowbook-violation-notice"><b>\u274c Deleted Cell Dependency: ${htmlVars} written by a deleted cell. Re-run an upstream cell that defines these variables.</b></div>`,
+            'text/plain': plainText
+          },
+          metadata: {
+            flowbook_violation_notice: true,
+            flowbook_is_contamination: true
+          }
+        };
+      } else if (isForwardContamination) {
+        // Forward contamination: reading cell read from later writing cell
+        const htmlVars = vars.replace(/`([^`]+)`/g, '<code>$1</code>');
+        plainText = `\u274c Forward Contamination: ${vars} written by downstream cell ${mutRef}. Re-run upstream cells to restore reproducible values.`;
+        noticeOutput = {
+          output_type: 'display_data',
+          data: {
+            'text/html': `<div class="flowbook-violation-notice"><b>\u274c Forward Contamination: ${htmlVars} written by downstream cell ${mutRef}. Re-run upstream cells to restore reproducible values.</b></div>`,
             'text/plain': plainText
           },
           metadata: { flowbook_violation_notice: true, flowbook_is_contamination: true }
@@ -593,7 +617,7 @@ export class ReproducibilityCellHighlighter {
       const allOutputs: IOutput[] = [];
 
       // First, add staleness notice if present (but skip if contamination - it already implies stale)
-      if (!isForwardContamination) {
+      if (!isContaminationLike) {
         for (let i = 0; i < outputs.length; i++) {
           const out = outputs.get(i).toJSON() as IOutput;
           if ((out as any).metadata?.flowbook_staleness_notice === true) {
@@ -611,7 +635,7 @@ export class ReproducibilityCellHighlighter {
       // - Staleness notice (already added)
       // - Kernel's ReproducibilityViolation error
       // - Kernel's brief "Backward violation" display_data
-      // - Kernel's "Forward Contamination" stderr stream
+      // - Kernel's "Forward Contamination" or "Deleted cell" stderr stream
       for (let i = 0; i < outputs.length; i++) {
         const out = outputs.get(i).toJSON() as IOutput;
         const isViolationNotice =
@@ -621,11 +645,12 @@ export class ReproducibilityCellHighlighter {
         const isKernelError =
           out.output_type === 'error' &&
           (out as any).ename === 'ReproducibilityViolation';
+        const plainText = (out as any).data?.['text/plain'] || '';
         const isKernelBriefViolation =
           out.output_type === 'display_data' &&
-          ((out as any).data?.['text/plain'] || '').includes(
-            'Backward violation'
-          );
+          (plainText.includes('Backward violation') ||
+            plainText.includes('Forward contamination') ||
+            plainText.includes('Deleted cell conflict'));
         // Stream text can be string or string[] - normalize to string
         const streamText = Array.isArray((out as any).text)
           ? (out as any).text.join('')
@@ -633,7 +658,8 @@ export class ReproducibilityCellHighlighter {
         const isKernelContaminationStderr =
           out.output_type === 'stream' &&
           (out as any).name === 'stderr' &&
-          streamText.includes('Forward Contamination');
+          (streamText.includes('Forward Contamination') ||
+            streamText.includes('Deleted cell'));
 
         if (
           !isViolationNotice &&
