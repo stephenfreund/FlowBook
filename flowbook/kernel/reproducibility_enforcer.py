@@ -224,7 +224,6 @@ from flowbook.util.output import output, timer
 
 # Checkpoint naming constants
 PRE_CHECKPOINT_PREFIX = "_pre_"
-POST_CHECKPOINT_PREFIX = "_post_"
 
 # ============================================================================
 # OPTIMIZATION FLAGS (controlled via environment variables)
@@ -640,30 +639,25 @@ class ReproducibilityEnforcer:
         self,
         cell_id: str,
         pre_checkpoint,
-        post_checkpoint,
+        namespace: dict,
         tracking: TrackingData,
         continue_on_violation: bool = False,
-        namespace: Optional[dict] = None,
-        is_exec_restore: bool = False,
-        old_live_checkpoint=None,
     ) -> ReproducibilityResult:
         """
         Main entry point. Call after cell execution.
 
-        Implements EXEC-ACCEPT, EXEC-CONTAMINATED, EXEC-REJECT, and EXEC-RESTORE
+        Implements EXEC-ACCEPT, EXEC-CONTAMINATED, and EXEC-REJECT
         transition rules from the formalism (§1.8).
 
         Args:
             cell_id: ID of the cell that just executed
-            pre_checkpoint: Snapshot before execution (Checkpoint or Checkpoint)
-            post_checkpoint: Snapshot after execution (Checkpoint or Checkpoint)
+            pre_checkpoint: Snapshot before execution (Checkpoint)
+            namespace: Live user namespace dict (post-execution state).
+                      We diff pre_checkpoint against this directly instead of
+                      creating a post-checkpoint, eliminating ~50% of checkpoint
+                      overhead by avoiding the second deep copy.
             tracking: TrackingData with reads/writes
             continue_on_violation: If True, compute staleness even when violation detected
-            namespace: Optional user namespace for capturing structural read values
-            is_exec_restore: [EXEC-RESTORE] If True, skip backward/forward checks,
-                always mark fresh, compute StaleFwd using old_live_checkpoint
-            old_live_checkpoint: [EXEC-RESTORE] Checkpoint of old live store for
-                computing StaleFwd delta as diff(old_live, post)
 
         Returns:
             ReproducibilityResult with violation info, absolute set of stale cells, and changed variables
@@ -677,13 +671,6 @@ class ReproducibilityEnforcer:
             # Cell not in order list - can't enforce reproducibility
             my_position = -1
 
-        # [EXEC-RESTORE] Skip backward/forward checks, always mark fresh (§1.8)
-        if is_exec_restore and my_position >= 0:
-            return self._check_exec_restore(
-                cell_id, my_position, pre_checkpoint, post_checkpoint,
-                tracking, namespace, old_live_checkpoint,
-            )
-
         # Rule 3: Check backward mutation (also returns diff and typed_changes for reuse)
         violation = None
         current_diff = None
@@ -691,7 +678,7 @@ class ReproducibilityEnforcer:
         if my_position >= 0:
             with timer(key="sdc:backward_mutation", message=f"[sdc] Backward mutation check for {cell_id}") as t:
                 violation, current_diff, typed_changes = self._check_backward_mutation(
-                    cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
+                    cell_id, my_position, pre_checkpoint, namespace, tracking
                 )
 
             if violation is not None:
@@ -776,10 +763,9 @@ class ReproducibilityEnforcer:
                 # for prior cells are handled in staleness computation.
                 # Extract memory checkpoints if we have Checkpoints
                 _pre_mem = pre_checkpoint.memory if isinstance(pre_checkpoint, Checkpoint) else pre_checkpoint
-                _post_mem = post_checkpoint.memory if isinstance(post_checkpoint, Checkpoint) else post_checkpoint
                 current_diff = MemoryCheckpoint.diff(
                     _pre_mem,
-                    _post_mem,
+                    namespace,  # Diff against live namespace
                     use_leq=True,
                     column_rbw=tracking.column_reads_before_writes,
                     structural_reads={},  # Empty - no intra-cell structural warnings
@@ -827,31 +813,13 @@ class ReproducibilityEnforcer:
             column_changed = _extract_column_changes(current_diff, tracking)
 
             # Update staleness INCREMENTALLY (only check cells below that might have become stale)
-            # Extract changed file paths from the diff (if available)
-            _changed_file_paths = None
-            if current_diff is not None:
-                # Check if we have a total_diff from backward mutation check
-                # If pre_checkpoint is Checkpoint, we computed total_diff there
-                _is_total_cp = isinstance(pre_checkpoint, Checkpoint)
-                if _is_total_cp and hasattr(pre_checkpoint, 'file') and pre_checkpoint.file is not None:
-                    # Re-diff files for staleness (or reuse from backward mutation)
-                    total_diff_for_staleness = Checkpoint.diff(
-                        pre_checkpoint, post_checkpoint,
-                        use_leq=True,
-                        column_rbw=tracking.column_reads_before_writes,
-                        structural_reads={},
-                        structural_mode=self._structural_mode,
-                    )
-                    if total_diff_for_staleness.has_file_changes:
-                        _changed_file_paths = total_diff_for_staleness.changed_file_paths
-
-            # Use memory checkpoint for staleness diff
-            _staleness_cp = post_checkpoint.memory if isinstance(post_checkpoint, Checkpoint) else post_checkpoint
+            # Use file_writes from tracking for file staleness (no post-checkpoint to diff)
+            _changed_file_paths = tracking.file_writes if tracking.file_writes else None
 
             # Also captures structural warnings from affected cells
             with timer(key="sdc:staleness", message=f"[sdc] Staleness update for {cell_id}"):
                 stale, staleness_warnings = self._update_staleness_incremental(
-                    _staleness_cp, set(changed_vars), column_changed, cell_id, my_position,
+                    namespace, set(changed_vars), column_changed, cell_id, my_position,
                     changed_file_paths=_changed_file_paths,
                 )
             # Merge warnings from staleness checks
@@ -872,7 +840,7 @@ class ReproducibilityEnforcer:
         cell_id: str,
         my_position: int,
         pre_checkpoint,
-        post_checkpoint,
+        namespace: dict,
         tracking: TrackingData,
     ) -> Tuple[Optional[ReproducibilityViolation], MemoryCheckpointDiffResult, List]:
         """
@@ -885,6 +853,13 @@ class ReproducibilityEnforcer:
 
         Includes column-aware conflict detection for DataFrames: modifying
         df['price'] doesn't conflict with a cell that only reads df['quantity'].
+
+        Args:
+            cell_id: ID of the cell that just executed
+            my_position: Position in document order
+            pre_checkpoint: Snapshot before execution (Checkpoint)
+            namespace: Live user namespace dict (post-execution state)
+            tracking: TrackingData with reads/writes
 
         Returns:
             Tuple of (violation, diff_result, typed_changes):
@@ -939,15 +914,15 @@ class ReproducibilityEnforcer:
                 log(f"[bwm]   deep_aliases_added={sorted(set(expanded_sorted) - set(accessed_sorted))}")
         # ======================================================================
 
-        # Use Checkpoint.diff if pre_checkpoint is combined Checkpoint (produces CheckpointDiffResult with file diff)
-        # Otherwise fall back to MemoryCheckpoint.diff (for plain MemoryCheckpoint objects)
+        # Diff pre_checkpoint against live namespace
+        # Checkpoint.diff now accepts raw dict for argument b
         _is_combined = isinstance(pre_checkpoint, Checkpoint)
 
-        with timer(key="bwm:checkpoint_diff", message=f"[bwm] Checkpoint.diff (pre vs post)"):
+        with timer(key="bwm:checkpoint_diff", message=f"[bwm] Checkpoint.diff (pre vs namespace)"):
             if _is_combined:
                 total_diff = Checkpoint.diff(
                     pre_checkpoint,
-                    post_checkpoint,
+                    namespace,  # Diff against live namespace
                     keys_to_include=keys_to_include,
                     use_leq=False,
                     column_rbw=all_accessed_columns,
@@ -959,7 +934,7 @@ class ReproducibilityEnforcer:
                 total_diff = None
                 current_diff = MemoryCheckpoint.diff(
                     pre_checkpoint,
-                    post_checkpoint,
+                    namespace,  # Diff against live namespace
                     keys_to_include=keys_to_include,
                     use_leq=False,  # Detect creations for forward dependency caching
                     column_rbw=all_accessed_columns,
@@ -1294,7 +1269,7 @@ class ReproducibilityEnforcer:
 
     def _update_staleness_incremental(
         self,
-        current_checkpoint: Checkpoint,
+        current_namespace: dict,
         changed_vars: Set[str],
         column_changed: Dict[str, List[str]],
         just_executed: str,
@@ -1312,7 +1287,7 @@ class ReproducibilityEnforcer:
         - Cells whose reads don't overlap with changed variables/columns
 
         Args:
-            current_checkpoint: The current state of the namespace
+            current_namespace: The current live user namespace dict
             changed_vars: Set of variable names that changed in this execution
             column_changed: Dict mapping var names to lists of changed column names
             just_executed: The cell_id that just executed (already marked fresh)
@@ -1363,7 +1338,7 @@ class ReproducibilityEnforcer:
             with timer(key="sdc:staleness_diff", message=f"[staleness] Diff for cell {cell_id}"):
                 diff_result = MemoryCheckpoint.diff(
                     pre_checkpoint,
-                    current_checkpoint,
+                    current_namespace,  # Diff against live namespace
                     keys_to_include=record.tracking.reads_before_writes,
                     use_leq=True,
                     column_rbw=record.tracking.column_reads_before_writes,
@@ -1481,153 +1456,6 @@ class ReproducibilityEnforcer:
         # All overlapping vars have column info and no column overlap
         return False
 
-    def _check_exec_restore(
-        self,
-        cell_id: str,
-        my_position: int,
-        pre_checkpoint,
-        post_checkpoint,
-        tracking: TrackingData,
-        namespace: Optional[dict],
-        old_live_checkpoint,
-    ) -> ReproducibilityResult:
-        """[EXEC-RESTORE] Execute from prefix checkpoint (§1.8).
-
-        Cell is always fresh. No backward/forward contamination checks.
-        StaleFwd delta is computed against the old live store (before restore).
-
-        NOTE: Provenance contamination does NOT apply in restore mode because
-        the cell executes from the PREFIX checkpoint (σ^post_{i-1}), not from
-        the live store. Values come from the clean prefix state, not from
-        later cells. This is the whole point of EXEC-RESTORE: to escape
-        forward contamination by running from clean state.
-        """
-        # Capture structural read values
-        structural_read_values = {}
-        if namespace is not None and tracking.structural_reads:
-            structural_read_values = capture_structural_read_values(
-                namespace, tracking.structural_reads
-            )
-
-        # Compute diff for change detection (needed for staleness propagation)
-        _pre_mem = pre_checkpoint.memory if isinstance(pre_checkpoint, Checkpoint) else pre_checkpoint
-        _post_mem = post_checkpoint.memory if isinstance(post_checkpoint, Checkpoint) else post_checkpoint
-        current_diff = MemoryCheckpoint.diff(
-            _pre_mem, _post_mem, use_leq=True,
-            column_rbw=tracking.column_reads_before_writes,
-            structural_reads={},
-            structural_mode=self._structural_mode,
-        )
-
-        typed_changes = []
-        changed_vars = []
-        column_changed = {}
-
-        if current_diff.differences:
-            changed_vars = list(current_diff.differences.keys())
-            column_changed = _extract_column_changes(current_diff, tracking)
-            from flowbook.kernel.change_detector import detect_changes
-            typed_changes = detect_changes(current_diff)
-
-        # [§1.8.5] Update provenance for written locations
-        if changed_vars:
-            for var in changed_vars:
-                self._provenance.update_variable(var, cell_id)
-            from flowbook.util.output import log
-            log(f"[EXEC-RESTORE] Cell {cell_id} updated provenance for: {set(changed_vars)}")
-
-        # Update column-level provenance
-        if tracking.column_writes:
-            for var, cols in tracking.column_writes.items():
-                for col in cols:
-                    self._provenance.update_column(var, col, cell_id)
-
-        # Update record
-        self.records[cell_id] = ReproducibilityExecutionRecord(
-            cell_id=cell_id,
-            tracking=tracking,
-            execution_seq=self.seq_counter,
-            structural_reads_values=structural_read_values,
-            typed_changes=typed_changes,
-        )
-
-        # [EXEC-RESTORE] Cell is always fresh
-        self._stale_cells.discard(cell_id)
-
-        # Compute StaleFwd using delta against old live store
-        stale = []
-        structural_warnings = []
-        delta_changed_vars = set()
-        if old_live_checkpoint is not None:
-            # Delta = diff(old_live, post) — what changed from the user's perspective
-            _old_live_mem = old_live_checkpoint.memory if isinstance(old_live_checkpoint, Checkpoint) else old_live_checkpoint
-            restore_diff = MemoryCheckpoint.diff(
-                _old_live_mem, _post_mem, use_leq=True,
-                column_rbw=tracking.column_reads_before_writes,
-                structural_reads={},
-                structural_mode=self._structural_mode,
-            )
-            if restore_diff.differences:
-                restore_changed_vars = set(restore_diff.differences.keys())
-                delta_changed_vars = restore_changed_vars
-                restore_column_changed = _extract_column_changes(restore_diff, tracking)
-                stale, structural_warnings = self._update_staleness_incremental(
-                    _post_mem, restore_changed_vars, restore_column_changed,
-                    cell_id, my_position,
-                )
-        else:
-            # No old live checkpoint — use standard diff for staleness
-            if changed_vars:
-                delta_changed_vars = set(changed_vars)
-                _staleness_cp = post_checkpoint.memory if isinstance(post_checkpoint, Checkpoint) else post_checkpoint
-                stale, structural_warnings = self._update_staleness_incremental(
-                    _staleness_cp, delta_changed_vars, column_changed,
-                    cell_id, my_position,
-                )
-
-        # [EXEC-RESTORE §1.8] StaleBack: mark earlier fresh cells stale
-        # if their reads overlap with Δ(Σ, Σ').
-        #
-        # In EXEC-ACCEPT/CONTAMINATED, BackConflict rejects cell i if it
-        # modifies locations read by fresh cells k < i. EXEC-RESTORE has
-        # no BackConflict (cell i runs from the prefix checkpoint, not Σ),
-        # so we mark k stale instead.
-        if delta_changed_vars:
-            for earlier_cell_id in self._cell_order[:my_position]:
-                if earlier_cell_id in self.records and earlier_cell_id not in self._stale_cells:
-                    earlier_reads = self.records[earlier_cell_id].tracking.reads_before_writes
-                    if earlier_reads & delta_changed_vars:
-                        self._stale_cells.add(earlier_cell_id)
-
-        # [EXEC-RESTORE §1.8] Mark later cells that would cause BackConflict.
-        #
-        # StaleFwd (above) marks later cells that READ changed variables.
-        # But it misses later cells that WRITE to variables this cell reads:
-        # re-running such a cell would trigger BackConflict (it mutates a
-        # location that a fresh earlier cell depends on).  Mark those stale
-        # so the user sees them highlighted and knows they need attention.
-        cell_reads = tracking.reads_before_writes
-        if cell_reads:
-            for later_cell_id in self._cell_order[my_position + 1:]:
-                if later_cell_id in self.records and later_cell_id not in self._stale_cells:
-                    later_writes = self.records[later_cell_id].tracking.writes
-                    if later_writes & cell_reads:
-                        self._stale_cells.add(later_cell_id)
-
-        # Re-sort stale list by document order
-        stale = [cid for cid in self._cell_order if cid in self._stale_cells]
-
-        # EXEC-RESTORE always produces fresh cells - no forward contamination possible
-        # because the cell ran from a clean prefix checkpoint (pristine state)
-        return ReproducibilityResult(
-            violation=None,
-            stale_cells=stale,
-            changed_variables=changed_vars,
-            column_changed=column_changed,
-            structural_warnings=structural_warnings,
-            forward_violation=None,
-        )
-
     def get_stale_cells(self) -> List[str]:
         """
         Get the current set of stale cells (in document order).
@@ -1653,7 +1481,7 @@ class ReproducibilityEnforcer:
         """
         return self._provenance
 
-    def compute_all_stale_cells(self, current_checkpoint: Checkpoint) -> List[str]:
+    def compute_all_stale_cells(self, current_namespace: dict) -> List[str]:
         """
         Recompute staleness for ALL cells from scratch.
 
@@ -1662,7 +1490,7 @@ class ReproducibilityEnforcer:
         accuracy (e.g., after external namespace modifications).
 
         Args:
-            current_checkpoint: The current state of the namespace
+            current_namespace: The current live user namespace dict
 
         Returns:
             List of cell IDs that are currently stale (in document order)
@@ -1676,7 +1504,7 @@ class ReproducibilityEnforcer:
 
             diff_result = MemoryCheckpoint.diff(
                 pre_checkpoint,
-                current_checkpoint,
+                current_namespace,
                 keys_to_include=record.tracking.reads_before_writes,
                 use_leq=True,
                 column_rbw=record.tracking.column_reads_before_writes,
@@ -1688,53 +1516,6 @@ class ReproducibilityEnforcer:
                 self._stale_cells.add(cell_id)
 
         return [cid for cid in self._cell_order if cid in self._stale_cells]
-
-    def can_exec_restore(self, cell_id: str) -> bool:
-        """[EXEC-RESTORE precondition] (§1.8)
-
-        True iff the immediate predecessor (cell i-1) has a fresh record,
-        which guarantees its post-checkpoint (the prefix store) is valid.
-        For the first cell in document order, always returns True (restore
-        to initial state).
-
-        Cells earlier than the immediate predecessor may be unexecuted
-        (e.g. executed with cell_id=None) — this is acceptable because the
-        prefix store depends only on σ^post_{i-1}.
-        """
-        try:
-            my_position = self._cell_order.index(cell_id)
-        except ValueError:
-            return False
-
-        if my_position == 0:
-            return True  # First cell — restore to initial state
-
-        prev_cell_id = self._cell_order[my_position - 1]
-        # Immediate predecessor must have been executed
-        if prev_cell_id not in self.records:
-            return False
-        # Immediate predecessor must be fresh (not stale)
-        if prev_cell_id in self._stale_cells:
-            return False
-
-        return True
-
-    def get_prefix_checkpoint_name(self, cell_id: str) -> Optional[str]:
-        """[PrefixStore] (Def 1.8.4)
-
-        Returns the post-checkpoint name of the cell immediately before cell_id
-        in document order (σ^post_{i-1}), or None if cell_id is the first cell.
-        """
-        try:
-            my_position = self._cell_order.index(cell_id)
-        except ValueError:
-            return None
-
-        if my_position == 0:
-            return None  # First cell — restore to empty/initial state
-
-        prev_cell_id = self._cell_order[my_position - 1]
-        return f"{POST_CHECKPOINT_PREFIX}{prev_cell_id}"
 
     def mark_cell_edited(self, cell_id: str) -> List[str]:
         """[EDIT] Mark edited cell stale (§2.3).

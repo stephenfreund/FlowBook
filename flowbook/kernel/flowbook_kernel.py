@@ -380,7 +380,6 @@ from flowbook.kernel.models import ReproducibilityMetadata
 from flowbook.kernel.reproducibility_enforcer import (
     ReproducibilityEnforcer,
     PRE_CHECKPOINT_PREFIX,
-    POST_CHECKPOINT_PREFIX,
 )
 
 
@@ -1059,36 +1058,18 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                     self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
                     return result
 
-                # Warn about non-deepcopyable objects after successful execution
-                # with timer(key="warn_non_deepcopyable", message="Warn non-deepcopyable"):
-                #     self._warn_non_deepcopyable_objects()
-
-                # Take post-execution snapshot
-                # Use incremental checkpointing if we have tracking data
-                with timer(
-                    key="kernel:checkpoint", message="Post-execution checkpoint"
-                ) as post_timer:
-                    pre_name = f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
-                    post_name = f"{POST_CHECKPOINT_PREFIX}{self._cell_id}"
-                    if tracking:
-                        # Get accessed variables from tracking (reads + writes)
-                        accessed_vars = tracking.reads_before_writes | tracking.writes
-                        post_checkpoint = self._take_checkpoint_incremental(
-                            post_name, accessed_vars, pre_name
-                        )
-                    else:
-                        post_checkpoint = self._take_checkpoint(post_name)
-
                 # Run Reproducibility check if we have tracking data and cell_id
+                # NOTE: We diff pre_checkpoint against the live namespace (user_ns)
+                # instead of creating a post-checkpoint. This eliminates ~50% of
+                # checkpoint overhead by avoiding the second deep copy.
                 if tracking and self._cell_id:
                     with timer(key="kernel:check") as check_timer:
                         sdc_result = self._enforcer.check(
                             cell_id=self._cell_id,
                             pre_checkpoint=pre_checkpoint,
-                            post_checkpoint=post_checkpoint,
+                            namespace=self.shell.user_ns,
                             tracking=tracking,
                             continue_on_violation=self._continue_after_violation,
-                            namespace=self.shell.user_ns,  # For capturing structural read values
                         )
 
                     # Handle violations (backward mutation and/or forward dependency)

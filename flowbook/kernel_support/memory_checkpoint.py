@@ -1758,18 +1758,23 @@ class MemoryCheckpoint:
 
     @staticmethod
     def diff(
-        a: MemoryCheckpoint, b: MemoryCheckpoint, keys_to_include: set[str] | None = None,
+        a: MemoryCheckpoint,
+        b: "MemoryCheckpoint | dict",
+        keys_to_include: set[str] | None = None,
         use_leq: bool = False,
         column_rbw: Optional[Dict[str, Set[str]]] = None,
         structural_reads: Optional[Dict[str, Set[str]]] = None,
         structural_mode: Optional["StructuralTrackingMode"] = None,
     ):
         """
-        Compare two checkpoints and return structured diff results.
+        Compare a checkpoint against another checkpoint or a raw namespace dict.
 
         Args:
-            a: First checkpoint to compare
-            b: Second checkpoint to compare
+            a: First checkpoint to compare (pre-execution state)
+            b: Second checkpoint or raw namespace dict to compare (post-execution state).
+               Accepts raw dict to support diffing against live namespace without
+               creating a post-checkpoint (optimization: eliminates ~50% of checkpoint
+               overhead by avoiding the second deep copy).
             keys_to_include: Optional set of keys to limit comparison to
             use_leq: If True, use leq mode where extra keys in b are allowed
                      and DataFrames in b can have extra columns
@@ -1803,8 +1808,12 @@ class MemoryCheckpoint:
                 structural_mode=structural_mode,
             )
 
+        # Support both MemoryCheckpoint and raw dict for argument b
+        a_ns = a.user_ns
+        b_ns = b.user_ns if isinstance(b, MemoryCheckpoint) else b
+
         with timer(key="checkpoint_diff:compare", message="[diff] Compare namespaces"):
-            result = differ.diff(a.user_ns, b.user_ns, keys_to_include)
+            result = differ.diff(a_ns, b_ns, keys_to_include)
 
         return result
 

@@ -38,11 +38,6 @@ class TestReproducibilityEnforcerBaseline:
         """Save a pre-checkpoint for a cell."""
         checkpoints.save(f"_pre_{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, checkpoints, name, namespace):
-        """Create and return a post-checkpoint."""
-        checkpoints.save(name, namespace, max_size_mb=None)
-        return checkpoints.saved[name]
-
     def test_no_backward_mutation_without_structural(self):
         """No backward mutation when earlier cell doesn't read what we modify."""
         checkpoints = MemoryCheckpoints()
@@ -52,28 +47,26 @@ class TestReproducibilityEnforcerBaseline:
         # Cell A reads 'x', writes nothing
         ns_a = {'x': 10, 'y': 20}
         self._save_pre_checkpoint(checkpoints, 'cell_a', ns_a)
-        post_a = self._make_post_checkpoint(checkpoints, 'post_a', ns_a)
 
         tracking_a = TrackingData(
             reads_before_writes={'x'},
             writes=set(),
         )
 
-        result_a = enforcer.check('cell_a', checkpoints.saved['_pre_cell_a'], post_a, tracking_a)
+        result_a = enforcer.check('cell_a', checkpoints.saved['_pre_cell_a'], ns_a, tracking_a)
         assert result_a.violation is None
 
         # Cell B modifies 'y' (not read by cell A)
         ns_b_pre = {'x': 10, 'y': 20}
         ns_b_post = {'x': 10, 'y': 999}
         self._save_pre_checkpoint(checkpoints, 'cell_b', ns_b_pre)
-        post_b = self._make_post_checkpoint(checkpoints, 'post_b', ns_b_post)
 
         tracking_b = TrackingData(
             reads_before_writes={'y'},
             writes={'y'},
         )
 
-        result_b = enforcer.check('cell_b', checkpoints.saved['_pre_cell_b'], post_b, tracking_b)
+        result_b = enforcer.check('cell_b', checkpoints.saved['_pre_cell_b'], ns_b_post, tracking_b)
         assert result_b.violation is None
 
     def test_backward_mutation_detected(self):
@@ -85,28 +78,26 @@ class TestReproducibilityEnforcerBaseline:
         # Cell A reads 'x'
         ns_a = {'x': 10}
         self._save_pre_checkpoint(checkpoints, 'cell_a', ns_a)
-        post_a = self._make_post_checkpoint(checkpoints, 'post_a', ns_a)
 
         tracking_a = TrackingData(
             reads_before_writes={'x'},
             writes=set(),
         )
 
-        result_a = enforcer.check('cell_a', checkpoints.saved['_pre_cell_a'], post_a, tracking_a)
+        result_a = enforcer.check('cell_a', checkpoints.saved['_pre_cell_a'], ns_a, tracking_a)
         assert result_a.violation is None
 
         # Cell B modifies 'x' (read by cell A)
         ns_b_pre = {'x': 10}
         ns_b_post = {'x': 999}
         self._save_pre_checkpoint(checkpoints, 'cell_b', ns_b_pre)
-        post_b = self._make_post_checkpoint(checkpoints, 'post_b', ns_b_post)
 
         tracking_b = TrackingData(
             reads_before_writes={'x'},
             writes={'x'},
         )
 
-        result_b = enforcer.check('cell_b', checkpoints.saved['_pre_cell_b'], post_b, tracking_b)
+        result_b = enforcer.check('cell_b', checkpoints.saved['_pre_cell_b'], ns_b_post, tracking_b)
         assert result_b.violation is not None
         assert 'x' in result_b.violation.variables
 

@@ -23,7 +23,6 @@ from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel.reproducibility_enforcer import (
     ReproducibilityEnforcer,
     PRE_CHECKPOINT_PREFIX,
-    POST_CHECKPOINT_PREFIX,
 )
 from flowbook.kernel.tests.conftest import make_tracking
 
@@ -138,11 +137,6 @@ class NotebookDriver:
         # Execute the cell (apply its effect to the live store)
         self.live_store = cell_def["effect"](dict(self.live_store))
 
-        # Take post-checkpoint
-        post_name = f"{POST_CHECKPOINT_PREFIX}{cell_id}"
-        self.checkpoints.save(post_name, dict(self.live_store), max_size_mb=None)
-        post_checkpoint = self.checkpoints.get(post_name)
-
         # Create tracking data
         tracking = make_tracking(
             reads=cell_def["reads"],
@@ -150,11 +144,11 @@ class NotebookDriver:
             column_writes=cell_def["column_writes"],
         )
 
-        # Run the check
+        # Run the check (pass live_store directly as namespace)
         result = self.enforcer.check(
             cell_id=cell_id,
             pre_checkpoint=pre_checkpoint,
-            post_checkpoint=post_checkpoint,
+            namespace=dict(self.live_store),
             tracking=tracking,
         )
 
@@ -621,12 +615,11 @@ class TestDeletedCellProvenance:
         driver.define_cell("d", "x = 0", writes={"x"}, effect=lambda s: {**s, "x": 0})
         driver.checkpoints.save("pre_d", dict(driver.live_store), max_size_mb=None)
         driver.live_store = {"x": 0}
-        driver.checkpoints.save("post_d", dict(driver.live_store), max_size_mb=None)
         from flowbook.kernel.tests.conftest import make_tracking
         driver.enforcer.check(
             cell_id="d",
             pre_checkpoint=driver.checkpoints.get("pre_d"),
-            post_checkpoint=driver.checkpoints.get("post_d"),
+            namespace=dict(driver.live_store),
             tracking=make_tracking(writes={"x"}),
         )
 

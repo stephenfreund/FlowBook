@@ -85,25 +85,48 @@ class Checkpoint:
     @staticmethod
     def diff(
         a: "Checkpoint",
-        b: "Checkpoint",
+        b: "Checkpoint | MemoryCheckpoint | dict",
         keys_to_include=None,
         use_leq: bool = False,
         column_rbw=None,
         structural_reads=None,
         structural_mode=None,
     ) -> CheckpointDiffResult:
-        """Diff both memory and files in one call."""
+        """Diff both memory and files in one call.
+
+        Args:
+            a: First checkpoint to compare (pre-execution state)
+            b: Second checkpoint, MemoryCheckpoint, or raw namespace dict.
+               Accepts raw dict to support diffing against live namespace without
+               creating a post-checkpoint.
+
+        Returns:
+            CheckpointDiffResult with memory diff and optional file diff.
+            File diff is only computed when both a and b are full Checkpoints
+            with file checkpoints.
+        """
+        # Extract memory component from b (supports Checkpoint, MemoryCheckpoint, or raw dict)
+        if isinstance(b, Checkpoint):
+            b_mem = b.memory
+        elif isinstance(b, MemoryCheckpoint):
+            b_mem = b
+        else:
+            # b is a raw dict (live namespace)
+            b_mem = b
+
         mem_diff = MemoryCheckpoint.diff(
             a.memory,
-            b.memory,
+            b_mem,
             keys_to_include=keys_to_include,
             use_leq=use_leq,
             column_rbw=column_rbw,
             structural_reads=structural_reads,
             structural_mode=structural_mode,
         )
+
+        # File diff only available when both are full Checkpoints
         file_diff = None
-        if a.file is not None and b.file is not None:
+        if isinstance(b, Checkpoint) and a.file is not None and b.file is not None:
             file_diff = FileCheckpoints.diff(a.file, b.file)
         return CheckpointDiffResult(memory=mem_diff, file=file_diff)
 
