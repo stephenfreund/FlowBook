@@ -7,7 +7,7 @@ export interface IReproducibilityViolation {
   affected_cell: string;
   variables: string[];
   message: string;
-  violation_type?: 'backward_mutation' | 'forward_dependency';
+  violation_type?: 'backward_mutation' | 'forward_dependency' | 'deleted_cell_dependency';
 }
 
 export interface IReproducibilityMetadata {
@@ -32,10 +32,8 @@ export interface IReproducibilityMetadata {
   code_duration_ms?: number;  // Time for _ipython_do_execute (user code)
   state_duration_ms?: number;
   check_duration_ms?: number;
-  // Forward contamination flag (EXEC-CONTAMINATED)
-  cell_is_contaminated?: boolean;
-  // Execution mode (EXEC-RESTORE)
-  exec_mode?: 'live' | 'restore';
+  // Writer violation: backward_mutation violation to store on writer cell (for forward contamination)
+  writer_violation?: IReproducibilityViolation;
   // Proposed fix for violations
   proposed_fix?: IProposedFix;
 }
@@ -49,7 +47,7 @@ export interface IReproducibilityCellState {
 }
 
 export interface IStalenessReason {
-  type: string; // "variable_modified" | "source_edited" | "contaminated" | "writer_conflict" | "unknown"
+  type: string; // "variable_modified" | "source_edited" | "writer_conflict" | "unknown"
   causing_cell?: string; // actual cell ID
   variables?: string[];
   columns?: { [key: string]: string[] };
