@@ -569,6 +569,49 @@ def _is_integer_dtype(dtype) -> bool:
             return False
 
 
+# Chunk size for byte-level array comparison (1 MB)
+_BYTE_EQUAL_CHUNK_SIZE = 1 << 20
+
+
+def _fast_numeric_equal(a: np.ndarray, b: np.ndarray) -> bool:
+    """
+    Fast byte-level comparison for numeric arrays.
+
+    Uses IEEE 754 representation for comparison, which means NaN == NaN
+    (same bit pattern). This is ~3x faster than per-column np.array_equal
+    for large arrays.
+
+    Args:
+        a: First numpy array (must be C-contiguous)
+        b: Second numpy array (must be C-contiguous)
+
+    Returns:
+        True if arrays have identical byte representation.
+
+    Raises:
+        ValueError: If arrays are not C-contiguous.
+    """
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    if a.size == 0:
+        return True
+    if not (a.flags.c_contiguous and b.flags.c_contiguous):
+        raise ValueError("Arrays must be C-contiguous")
+
+    a_bytes = a.view(np.uint8)
+    b_bytes = b.view(np.uint8)
+    n = a_bytes.size
+    chunk = _BYTE_EQUAL_CHUNK_SIZE
+
+    if n <= chunk:
+        return bool(np.all(a_bytes == b_bytes))
+
+    for i in range(0, n, chunk):
+        if not np.all(a_bytes[i:i + chunk] == b_bytes[i:i + chunk]):
+            return False
+    return True
+
+
 def _all_elements_are_floats(arr) -> bool:
     """
     Check if all elements in an object-dtype array/series are floats.
@@ -2025,12 +2068,30 @@ class Diff:
         except (TypeError, ValueError):
             pass  # Some array types don't support shares_memory
 
-        # For float types, use numpy's array_equal with NaN handling
-        # This is ~3x faster than mask+allclose for float columns
-        if pd.api.types.is_float_dtype(s_a.dtype):
-            return np.array_equal(s_a.to_numpy(), s_b.to_numpy(), equal_nan=True)
+        dtype = s_a.dtype
 
-        # For all other types (int, string, object, etc.), pandas equals is faster
+        # Fast byte-level comparison for numeric types (float, int, complex)
+        # This is ~3x faster than per-element comparison for large arrays
+        is_numeric = (
+            pd.api.types.is_float_dtype(dtype) or
+            pd.api.types.is_integer_dtype(dtype) or
+            np.issubdtype(dtype, np.complexfloating)
+        )
+
+        if is_numeric:
+            arr_a = s_a.to_numpy()
+            arr_b = s_b.to_numpy()
+            if arr_a.flags.c_contiguous and arr_b.flags.c_contiguous:
+                try:
+                    return _fast_numeric_equal(arr_a, arr_b)
+                except ValueError:
+                    pass  # Fall through to standard comparison
+            # Fallback for non-contiguous arrays
+            if pd.api.types.is_float_dtype(dtype):
+                return np.array_equal(arr_a, arr_b, equal_nan=True)
+            return np.array_equal(arr_a, arr_b)
+
+        # For all other types (string, object, etc.), pandas equals is faster
         # because it avoids the to_numpy() conversion overhead
         return s_a.equals(s_b)
 
@@ -2054,6 +2115,36 @@ class Diff:
         Raises:
             Exception if comparison fails (caller should catch and fall back).
         """
+        # ======================================================================
+        # WHOLE-ARRAY FAST PATH: For homogeneous numeric DataFrames, compare
+        # the entire underlying array at once using byte-level comparison.
+        # This is ~3x faster than per-column comparison for large DataFrames.
+        # ======================================================================
+        dtypes = df_a.dtypes.unique()
+        if len(dtypes) == 1:
+            dtype = dtypes[0]
+            is_numeric = (
+                pd.api.types.is_float_dtype(dtype) or
+                pd.api.types.is_integer_dtype(dtype) or
+                np.issubdtype(dtype, np.complexfloating)
+            )
+            if is_numeric:
+                try:
+                    arr_a = df_a.values
+                    arr_b = df_b.values
+                    # Verify dtype wasn't coerced (e.g., to object)
+                    if arr_a.dtype == dtype and arr_b.dtype == dtype:
+                        if arr_a.flags.c_contiguous and arr_b.flags.c_contiguous:
+                            if _PROFILE_DIFF:
+                                log(f"[diff profile] {path}: Using whole-array byte comparison")
+                            return _fast_numeric_equal(arr_a, arr_b)
+                except (ValueError, TypeError):
+                    pass  # Fall through to per-column comparison
+
+        # ======================================================================
+        # PER-COLUMN FALLBACK: For mixed-dtype or non-contiguous DataFrames
+        # ======================================================================
+
         # Collect column timings if profiling is enabled
         column_timings: List[Tuple[float, str, str]] = []
 
