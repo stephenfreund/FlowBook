@@ -1206,6 +1206,10 @@ def deepcopy(x, memo=None):
                     _keep_alive(x, memo)
                 return y
 
+        # NOTE: sklearn Stacking estimators use standard deepcopy (no custom handler)
+        # because fitted model objects are mutable. The diff optimization in diff.py
+        # still provides O(1) comparison when the same object reference is used.
+
         if issubclass(cls, type):
             y = _deepcopy_atomic(x, memo)
         else:
@@ -2439,24 +2443,27 @@ def _deepcopy_shap_explanation(explanation, memo: dict[int, Any]):
 
 def _deepcopy_shap_tree_explainer(explainer, memo: dict[int, Any]):
     """
-    Deep copy a SHAP TreeExplainer by sharing the entire object.
+    Deep copy a SHAP TreeExplainer using standard deepcopy.
 
-    TreeExplainer wraps a model's tree structure and computes internal
-    representations during __init__. After initialization:
-    - The model reference is read-only
-    - The internal tree structures are immutable
-    - The masker and feature_names are configuration
+    NOTE: We previously shared the entire object assuming immutability, but
+    TreeExplainer objects could theoretically be modified. For correctness,
+    we now use standard deepcopy. The diff optimization in diff.py still
+    provides O(1) identity comparison when the same object reference exists.
 
-    Since TreeExplainer is effectively immutable after creation, we can
-    SHARE the entire object. This enables O(1) pointer comparison in diff.
-
-    Note: This is safe because TreeExplainer doesn't have mutable state
-    that users would modify between cells.
+    TreeExplainer contains:
+    - model: Reference to the fitted model (will be shared via memo if same object)
+    - Internal tree structures computed during __init__
+    - masker and feature_names configuration
     """
-    # TreeExplainer is immutable after init - share the entire object
-    # We still add to memo to handle multiple references
-    memo[id(explainer)] = explainer
-    return explainer
+    import copy
+    obj_id = id(explainer)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    # Use standard deepcopy - memo will naturally share immutable objects
+    result = copy.deepcopy(explainer, memo)
+    memo[obj_id] = result
+    return result
 
 
 # Flag to track if we've registered SHAP handlers (done lazily on first use)
@@ -2636,6 +2643,32 @@ def reset_target_encoder_deepcopy_handler():
             del _deepcopy_dispatch[TargetEncoder]
     except ImportError:
         pass
+
+
+# =============================================================================
+# sklearn StackingRegressor/Classifier - diff optimization only
+# =============================================================================
+# NOTE: Unlike SHAP/TargetEncoder arrays which are truly immutable, fitted sklearn
+# model objects CAN be modified in place (partial_fit, attribute assignment, etc.).
+# Therefore, we do NOT share model objects in deepcopy - only use identity-based
+# comparison in diff.py for fast O(1) checks when objects ARE the same.
+#
+# The diff optimization is still valuable: when comparing checkpoints where the
+# model hasn't changed (same object reference), we get O(1) comparison instead
+# of expensive deep comparison of model internals.
+
+def _is_sklearn_stacking_estimator(x) -> bool:
+    """Check if x is a sklearn StackingRegressor or StackingClassifier.
+
+    Uses module name checking to avoid the sklearn import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    # Check for sklearn ensemble module and Stacking classes
+    return 'sklearn' in module and cls.__name__ in ('StackingRegressor', 'StackingClassifier')
 
 
 # =============================================================================

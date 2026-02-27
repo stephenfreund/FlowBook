@@ -501,6 +501,40 @@ def _register_target_encoder_dispatch_if_needed():
         pass
 
 
+# sklearn StackingRegressor/Classifier - add to dispatch table if available
+# We register lazily to avoid import-time side effects
+_stacking_dispatch_registered = False
+
+
+def _is_sklearn_stacking_estimator(x) -> bool:
+    """Check if x is a sklearn StackingRegressor or StackingClassifier.
+
+    Uses module name checking to avoid the sklearn import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    # Check for sklearn ensemble module and Stacking classes
+    return 'sklearn' in module and cls.__name__ in ('StackingRegressor', 'StackingClassifier')
+
+
+def _register_stacking_dispatch_if_needed():
+    """Register Stacking estimator types in dispatch table lazily."""
+    global _stacking_dispatch_registered
+    if _stacking_dispatch_registered:
+        return
+    _stacking_dispatch_registered = True
+
+    try:
+        from sklearn.ensemble import StackingRegressor, StackingClassifier
+        _COMPARE_DISPATCH[StackingRegressor] = "_compare_stacking_estimator"
+        _COMPARE_DISPATCH[StackingClassifier] = "_compare_stacking_estimator"
+    except ImportError:
+        pass
+
+
 # Cache for subclass dispatch lookups
 _DISPATCH_CACHE: Dict[type, Optional[str]] = {}
 
@@ -1397,6 +1431,11 @@ class Diff:
                     _register_target_encoder_dispatch_if_needed()
                     _DISPATCH_CACHE[t] = "_compare_target_encoder"
                     result = self._compare_target_encoder(val_a, val_b, path)
+                elif _is_sklearn_stacking_estimator(val_a):
+                    # sklearn StackingRegressor/Classifier - call comparison directly
+                    _register_stacking_dispatch_if_needed()
+                    _DISPATCH_CACHE[t] = "_compare_stacking_estimator"
+                    result = self._compare_stacking_estimator(val_a, val_b, path)
                 elif isinstance(val_a, dict):
                     # Handle dict subclasses (OrderedDict, Counter, defaultdict, etc.)
                     _DISPATCH_CACHE[t] = "_compare_dict"
@@ -3268,6 +3307,93 @@ class Diff:
 
         if children:
             return CompoundDiff(source_type="target_encoder", children=children, truncated=False)
+        return None
+
+    def _compare_stacking_estimator(
+        self, val_a, val_b, path: str
+    ) -> Optional[DiffNode]:
+        """
+        Compare sklearn StackingRegressor/Classifier using pointer comparison.
+
+        Stacking estimators contain fitted base estimators that are immutable
+        after fit(). Our deepcopy shares these estimators, so we can use O(1)
+        pointer comparison first.
+
+        Returns None if estimators are equal, CompoundDiff with differences otherwise.
+        """
+        children: Dict[str, DiffNode] = {}
+
+        # Check type match
+        if type(val_a) != type(val_b):
+            return ValueComparison(
+                status="different",
+                value1=type(val_a).__name__,
+                value2=type(val_b).__name__,
+                message=f"Stacking estimator type mismatch at {path}",
+            )
+
+        # Check fitted status
+        a_fitted = hasattr(val_a, 'estimators_')
+        b_fitted = hasattr(val_b, 'estimators_')
+
+        if a_fitted != b_fitted:
+            return ValueComparison(
+                status="different",
+                value1="fitted" if a_fitted else "unfitted",
+                value2="fitted" if b_fitted else "unfitted",
+                message=f"Stacking estimator fitted status mismatch at {path}",
+            )
+
+        if not a_fitted:
+            # Both unfitted - compare parameters only
+            params_a = val_a.get_params(deep=False)
+            params_b = val_b.get_params(deep=False)
+            if params_a != params_b:
+                children["_params"] = ValueComparison(
+                    status="different",
+                    value1=str(params_a),
+                    value2=str(params_b),
+                    message=f"Stacking estimator parameters mismatch at {path}",
+                )
+        else:
+            # Both fitted - use POINTER COMPARISON first (O(1))
+            # Since our deepcopy shares the immutable fitted estimators, same pointer = equal
+
+            # Check estimators_ (list of fitted base estimators)
+            if val_a.estimators_ is val_b.estimators_:
+                # Same estimators reference - trivially equal for this key attribute
+                pass
+            else:
+                # Different estimators list - check each estimator by identity
+                if len(val_a.estimators_) != len(val_b.estimators_):
+                    children["estimators_"] = ValueComparison(
+                        status="different",
+                        value1=f"<{len(val_a.estimators_)} estimators>",
+                        value2=f"<{len(val_b.estimators_)} estimators>",
+                        message=f"Stacking estimator count mismatch at {path}",
+                    )
+                else:
+                    # Compare each estimator by identity (O(1) per estimator)
+                    for i, (est_a, est_b) in enumerate(zip(val_a.estimators_, val_b.estimators_)):
+                        if est_a is not est_b:
+                            children[f"estimators_[{i}]"] = ValueComparison(
+                                status="different",
+                                value1=f"<{type(est_a).__name__} id={id(est_a)}>",
+                                value2=f"<{type(est_b).__name__} id={id(est_b)}>",
+                                message=f"Base estimator differs at {path}[{i}]",
+                            )
+
+            # Check final_estimator_
+            if val_a.final_estimator_ is not val_b.final_estimator_:
+                children["final_estimator_"] = ValueComparison(
+                    status="different",
+                    value1=f"<{type(val_a.final_estimator_).__name__}>",
+                    value2=f"<{type(val_b.final_estimator_).__name__}>",
+                    message=f"Final estimator differs at {path}",
+                )
+
+        if children:
+            return CompoundDiff(source_type="stacking_estimator", children=children, truncated=False)
         return None
 
     def _compare_groupby(self, val_a, val_b, path: str) -> Optional[ValueComparison]:

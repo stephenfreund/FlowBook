@@ -179,6 +179,7 @@ DiffSourceType = Literal[
     "lightgbm_model", # LightGBM gradient boosting model
     "shap_explanation",   # SHAP Explanation object
     "target_encoder",     # sklearn TargetEncoder
+    "stacking_estimator", # sklearn StackingRegressor/Classifier
 ]
 
 
