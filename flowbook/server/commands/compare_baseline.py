@@ -3,8 +3,8 @@ Compare baseline (python3) vs FlowBook kernel execution with timing and memory m
 
 4-Phase Execution:
   Phase 1: FlowBook timing - collect cell_runtime_ms, state_duration_ms, check_duration_ms
-  Phase 2: Baseline timing - collect cell_runtime_ms
-  Phase 3: Baseline memory (HeapSizer) - collect namespace_size_mb
+  Phase 2: Baseline timing - collect cell_runtime_ms (skipped by default, use --run-baseline)
+  Phase 3: Baseline memory (HeapSizer) - collect namespace_size_mb (skipped by default)
   Phase 4: FlowBook memory (HeapSizer) - collect namespace_size_mb, checkpoint overhead
 
 Memory measurement uses HeapSizer for accurate heap traversal with proper handling of:
@@ -13,8 +13,9 @@ Memory measurement uses HeapSizer for accurate heap traversal with proper handli
 - Object deduplication across shared references
 
 Usage via CLI:
-    flowbook compare-baseline notebook.ipynb
-    flowbook compare-baseline notebook.ipynb --timeout 3600  # optional timeout
+    flowbook compare-baseline notebook.ipynb                    # FlowBook only (default)
+    flowbook compare-baseline notebook.ipynb --run-baseline     # Include baseline comparison
+    flowbook compare-baseline notebook.ipynb --timeout 3600     # optional timeout
 """
 
 import argparse
@@ -1777,6 +1778,11 @@ class CompareBaselineCommand(NotebookCommand):
             help="Skip memory measurement phases (timing only)",
         )
         subparser.add_argument(
+            "--run-baseline",
+            action="store_true",
+            help="Run baseline kernel (skipped by default)",
+        )
+        subparser.add_argument(
             "--rerun-k",
             type=int,
             default=0,
@@ -1824,6 +1830,7 @@ class CompareBaselineCommand(NotebookCommand):
         """
         cell_timeout = kwargs.get("timeout", 3600.0)
         skip_memory = kwargs.get("skip_memory", False)
+        run_baseline = kwargs.get("run_baseline", False)
         rerun_k = kwargs.get("rerun_k", 0)
         num_trials = kwargs.get("trials", 1)
         start_trial = kwargs.get("start", 1)
@@ -1849,10 +1856,14 @@ class CompareBaselineCommand(NotebookCommand):
         last_flowbook_check = 0.0
 
         with self.timing_context() as get_elapsed:
-            log(f"Starting 4-phase baseline vs FlowBook comparison...")
+            if run_baseline:
+                log(f"Starting 4-phase baseline vs FlowBook comparison...")
+            else:
+                log(f"Starting FlowBook-only comparison (use --run-baseline to include baseline)...")
             log(f"Notebook: {notebook_path}")
             log(f"Cell timeout: {cell_timeout}s" if cell_timeout else "Cell timeout: none")
             log(f"HeapSizer available: {heapsizer_available}")
+            log(f"Run baseline: {run_baseline}")
             if rerun_k > 0:
                 log(f"Rerun passes: {rerun_k} (will execute all {len(code_cells)} cells {rerun_k} extra time(s))")
             if num_trials > 1:
@@ -1879,23 +1890,35 @@ class CompareBaselineCommand(NotebookCommand):
                 log("")
 
                 # ============================================================
-                # PHASE 2: Baseline Timing (Scalene OFF)
+                # PHASE 2: Baseline Timing (Scalene OFF) - if run_baseline
                 # ============================================================
-                log("=" * 60)
-                log("PHASE 2: BASELINE TIMING (Scalene OFF)")
-                log("=" * 60)
-                baseline_timing = run_baseline_timing(notebook_content, cell_timeout, rerun_k)
-                log("")
+                baseline_timing = None
+                if run_baseline:
+                    log("=" * 60)
+                    log("PHASE 2: BASELINE TIMING (Scalene OFF)")
+                    log("=" * 60)
+                    baseline_timing = run_baseline_timing(notebook_content, cell_timeout, rerun_k)
+                    log("")
+                else:
+                    log("=" * 60)
+                    log("PHASE 2: BASELINE TIMING - SKIPPED (use --run-baseline to enable)")
+                    log("=" * 60)
+                    log("")
 
                 # ============================================================
-                # PHASE 3: Baseline Memory (HeapSizer) - if available
+                # PHASE 3: Baseline Memory (HeapSizer) - if available and run_baseline
                 # ============================================================
                 baseline_memory = None
-                if heapsizer_available:
+                if heapsizer_available and run_baseline:
                     log("=" * 60)
                     log("PHASE 3: BASELINE MEMORY (HeapSizer)")
                     log("=" * 60)
                     baseline_memory = run_baseline_memory(notebook_content, cell_timeout, rerun_k)
+                    log("")
+                elif heapsizer_available:
+                    log("=" * 60)
+                    log("PHASE 3: BASELINE MEMORY - SKIPPED (use --run-baseline to enable)")
+                    log("=" * 60)
                     log("")
 
                 # ============================================================
@@ -1977,7 +2000,7 @@ class CompareBaselineCommand(NotebookCommand):
                     log("SUMMARY")
                 log("=" * 60)
 
-                baseline_total = baseline_timing.totals.get("execute_duration_ms", 0)
+                baseline_total = baseline_timing.totals.get("execute_duration_ms", 0) if baseline_timing else 0
                 flowbook_execute = flowbook_timing.totals.get("execute_duration_ms", 0)
                 flowbook_code = flowbook_timing.totals.get("code_duration_ms", 0)
                 flowbook_state = flowbook_timing.totals.get("state_duration_ms", 0)
@@ -1990,34 +2013,43 @@ class CompareBaselineCommand(NotebookCommand):
                 last_flowbook_state = flowbook_state
                 last_flowbook_check = flowbook_check
 
-                if baseline_total > 0:
-                    state_overhead_pct = (flowbook_state / baseline_total) * 100
-                    check_overhead_pct = (flowbook_check / baseline_total) * 100
-                else:
-                    state_overhead_pct = 0.0
-                    check_overhead_pct = 0.0
-
                 log("TIMING:")
-                log(f"  Baseline code time:   {baseline_total:,.1f}ms")
-                log(f"  FlowBook execute:     {flowbook_execute:,.1f}ms")
-                log(f"  FlowBook code time:   {flowbook_code:,.1f}ms")
-                log(f"  FlowBook state time:  {flowbook_state:,.1f}ms ({state_overhead_pct:.1f}%)")
-                log(f"  FlowBook check time:  {flowbook_check:,.1f}ms ({check_overhead_pct:.1f}%)")
+                if baseline_timing:
+                    if baseline_total > 0:
+                        state_overhead_pct = (flowbook_state / baseline_total) * 100
+                        check_overhead_pct = (flowbook_check / baseline_total) * 100
+                    else:
+                        state_overhead_pct = 0.0
+                        check_overhead_pct = 0.0
+                    log(f"  Baseline code time:   {baseline_total:,.1f}ms")
+                    log(f"  FlowBook execute:     {flowbook_execute:,.1f}ms")
+                    log(f"  FlowBook code time:   {flowbook_code:,.1f}ms")
+                    log(f"  FlowBook state time:  {flowbook_state:,.1f}ms ({state_overhead_pct:.1f}%)")
+                    log(f"  FlowBook check time:  {flowbook_check:,.1f}ms ({check_overhead_pct:.1f}%)")
+                else:
+                    log(f"  Baseline:             SKIPPED")
+                    log(f"  FlowBook execute:     {flowbook_execute:,.1f}ms")
+                    log(f"  FlowBook code time:   {flowbook_code:,.1f}ms")
+                    log(f"  FlowBook state time:  {flowbook_state:,.1f}ms")
+                    log(f"  FlowBook check time:  {flowbook_check:,.1f}ms")
                 log("")
 
-                if heapsizer_available and baseline_memory and flowbook_memory:
-                    baseline_mem = baseline_memory.totals.get("final_footprint_mb", 0)
+                if heapsizer_available and flowbook_memory:
                     flowbook_mem = flowbook_memory.totals.get("final_footprint_mb", 0)
-                    mem_overhead = flowbook_mem - baseline_mem
-
                     log("MEMORY (from HeapSizer):")
-                    log(f"  Baseline namespace:   {baseline_mem:,.1f}MB")
-                    log(f"  FlowBook namespace:   {flowbook_mem:,.1f}MB")
-                    log(f"  Memory overhead:      {mem_overhead:+,.1f}MB")
+                    if baseline_memory:
+                        baseline_mem = baseline_memory.totals.get("final_footprint_mb", 0)
+                        mem_overhead = flowbook_mem - baseline_mem
+                        log(f"  Baseline namespace:   {baseline_mem:,.1f}MB")
+                        log(f"  FlowBook namespace:   {flowbook_mem:,.1f}MB")
+                        log(f"  Memory overhead:      {mem_overhead:+,.1f}MB")
+                    else:
+                        log(f"  Baseline:             SKIPPED")
+                        log(f"  FlowBook namespace:   {flowbook_mem:,.1f}MB")
                     log("")
 
                 if rerun_k > 0:
-                    rerun_baseline = baseline_timing.totals.get("rerun_runtime_ms", 0)
+                    rerun_baseline = baseline_timing.totals.get("rerun_runtime_ms", 0) if baseline_timing else 0
                     rerun_flowbook_execute = flowbook_timing.totals.get("rerun_execute_ms", 0)
                     rerun_flowbook_code = flowbook_timing.totals.get("rerun_code_ms", 0)
                     rerun_state = flowbook_timing.totals.get("rerun_state_ms", 0)
@@ -2025,7 +2057,10 @@ class CompareBaselineCommand(NotebookCommand):
                     total_rerun_cells = rerun_k * len(code_cells)
 
                     log(f"RERUN TIMING ({rerun_k} pass(es) x {len(code_cells)} cells = {total_rerun_cells} executions):")
-                    log(f"  Baseline rerun:       {rerun_baseline:,.1f}ms")
+                    if baseline_timing:
+                        log(f"  Baseline rerun:       {rerun_baseline:,.1f}ms")
+                    else:
+                        log(f"  Baseline rerun:       SKIPPED")
                     log(f"  FlowBook execute:     {rerun_flowbook_execute:,.1f}ms")
                     log(f"  FlowBook code:        {rerun_flowbook_code:,.1f}ms")
                     log(f"  FlowBook state time:  {rerun_state:,.1f}ms")

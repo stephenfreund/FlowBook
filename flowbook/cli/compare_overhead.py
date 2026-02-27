@@ -403,6 +403,7 @@ class AggregateStats:
     slowdown_max: float
     slowdown_p90: float
     slowdown_p95: float
+    slowdown_p99: float
     # Overall overhead percentages
     state_overhead_pct_mean: float
     check_overhead_pct_mean: float
@@ -413,18 +414,27 @@ class AggregateStats:
     # Per-cell checkpoint overhead (ms)
     checkpoint_overhead_per_cell_mean: float = 0.0
     checkpoint_overhead_per_cell_median: float = 0.0
+    checkpoint_overhead_per_cell_min: float = 0.0
+    checkpoint_overhead_per_cell_max: float = 0.0
     checkpoint_overhead_per_cell_p90: float = 0.0
     checkpoint_overhead_per_cell_p95: float = 0.0
+    checkpoint_overhead_per_cell_p99: float = 0.0
     # Per-cell total overhead (ms)
     total_overhead_per_cell_mean: float = 0.0
     total_overhead_per_cell_median: float = 0.0
+    total_overhead_per_cell_min: float = 0.0
+    total_overhead_per_cell_max: float = 0.0
     total_overhead_per_cell_p90: float = 0.0
     total_overhead_per_cell_p95: float = 0.0
+    total_overhead_per_cell_p99: float = 0.0
     # Per-cell memory overhead (MB)
     memory_overhead_per_cell_mean: float = 0.0
     memory_overhead_per_cell_median: float = 0.0
+    memory_overhead_per_cell_min: float = 0.0
+    memory_overhead_per_cell_max: float = 0.0
     memory_overhead_per_cell_p90: float = 0.0
     memory_overhead_per_cell_p95: float = 0.0
+    memory_overhead_per_cell_p99: float = 0.0
     # Raw per-cell data for histograms
     all_total_overhead_per_cell: List[float] = field(default_factory=list)
     all_memory_overhead_per_cell: List[float] = field(default_factory=list)
@@ -649,6 +659,7 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
             slowdown_max=0.0,
             slowdown_p90=0.0,
             slowdown_p95=0.0,
+            slowdown_p99=0.0,
             state_overhead_pct_mean=0.0,
             check_overhead_pct_mean=0.0,
             memory_overhead_pct_mean=0.0,
@@ -684,6 +695,7 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
         slowdown_max=float(np.max(slowdowns)),
         slowdown_p90=float(np.percentile(slowdowns, 90)),
         slowdown_p95=float(np.percentile(slowdowns, 95)),
+        slowdown_p99=float(np.percentile(slowdowns, 99)),
         state_overhead_pct_mean=float(np.mean(state_pcts)),
         check_overhead_pct_mean=float(np.mean(check_pcts)),
         memory_overhead_pct_mean=float(np.mean(memory_pcts)),
@@ -693,18 +705,27 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
         # Per-cell checkpoint overhead (ms)
         checkpoint_overhead_per_cell_mean=float(np.mean(checkpoint_arr)),
         checkpoint_overhead_per_cell_median=float(np.median(checkpoint_arr)),
+        checkpoint_overhead_per_cell_min=float(np.min(checkpoint_arr)),
+        checkpoint_overhead_per_cell_max=float(np.max(checkpoint_arr)),
         checkpoint_overhead_per_cell_p90=float(np.percentile(checkpoint_arr, 90)),
         checkpoint_overhead_per_cell_p95=float(np.percentile(checkpoint_arr, 95)),
+        checkpoint_overhead_per_cell_p99=float(np.percentile(checkpoint_arr, 99)),
         # Per-cell total overhead (ms)
         total_overhead_per_cell_mean=float(np.mean(total_arr)),
         total_overhead_per_cell_median=float(np.median(total_arr)),
+        total_overhead_per_cell_min=float(np.min(total_arr)),
+        total_overhead_per_cell_max=float(np.max(total_arr)),
         total_overhead_per_cell_p90=float(np.percentile(total_arr, 90)),
         total_overhead_per_cell_p95=float(np.percentile(total_arr, 95)),
+        total_overhead_per_cell_p99=float(np.percentile(total_arr, 99)),
         # Per-cell memory overhead (MB)
         memory_overhead_per_cell_mean=float(np.mean(memory_arr)),
         memory_overhead_per_cell_median=float(np.median(memory_arr)),
+        memory_overhead_per_cell_min=float(np.min(memory_arr)),
+        memory_overhead_per_cell_max=float(np.max(memory_arr)),
         memory_overhead_per_cell_p90=float(np.percentile(memory_arr, 90)),
         memory_overhead_per_cell_p95=float(np.percentile(memory_arr, 95)),
+        memory_overhead_per_cell_p99=float(np.percentile(memory_arr, 99)),
         # Raw per-cell data for histograms
         all_total_overhead_per_cell=list(total_arr),
         all_memory_overhead_per_cell=list(memory_arr),
@@ -752,6 +773,31 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
         lines.append("-" * 110)
         lines.append("")
 
+    # Per-benchmark overhead table
+    lines.append("PER-BENCHMARK OVERHEAD SUMMARY")
+    lines.append("-" * 110)
+    header = f"{'Notebook':<30} {'Total OH Mean':>12} {'Total OH Med':>12} {'Total OH Max':>12} {'Mem OH Mean':>12} {'Mem OH Med':>12} {'Mem OH Max':>12}"
+    lines.append(header)
+    lines.append("-" * 110)
+    for s in stats_list:
+        name = s.notebook_name[:28] if len(s.notebook_name) > 28 else s.notebook_name
+        if s.per_cell_total_overhead_ms:
+            total_mean = np.mean(s.per_cell_total_overhead_ms)
+            total_med = np.median(s.per_cell_total_overhead_ms)
+            total_max = np.max(s.per_cell_total_overhead_ms)
+        else:
+            total_mean = total_med = total_max = 0.0
+        if s.per_cell_memory_overhead_mb:
+            mem_mean = np.mean(s.per_cell_memory_overhead_mb)
+            mem_med = np.median(s.per_cell_memory_overhead_mb)
+            mem_max = np.max(s.per_cell_memory_overhead_mb)
+        else:
+            mem_mean = mem_med = mem_max = 0.0
+        row = f"{name:<30} {total_mean:>10.1f}ms {total_med:>10.1f}ms {total_max:>10.1f}ms {mem_mean:>10.1f}MB {mem_med:>10.1f}MB {mem_max:>10.1f}MB"
+        lines.append(row)
+    lines.append("-" * 110)
+    lines.append("")
+
     # Aggregate statistics
     lines.append(f"AGGREGATE (N={aggregate.num_files})")
     lines.append(f"  Mean Slowdown:      {aggregate.slowdown_mean:.3f}x")
@@ -761,33 +807,34 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
     lines.append(f"  Max Slowdown:       {aggregate.slowdown_max:.3f}x")
     lines.append(f"  P90 Slowdown:       {aggregate.slowdown_p90:.3f}x")
     lines.append(f"  P95 Slowdown:       {aggregate.slowdown_p95:.3f}x")
-    lines.append("")
-    lines.append(f"  Mean State Overhead:   {aggregate.state_overhead_pct_mean:.1f}%")
-    lines.append(f"  Mean Check Overhead:   {aggregate.check_overhead_pct_mean:.1f}%")
-    lines.append("")
-    lines.append("MEMORY OVERHEAD")
-    lines.append(f"  Mean Memory Overhead:    {aggregate.memory_overhead_pct_mean:.1f}%")
-    lines.append(f"  Median Memory Overhead:  {aggregate.memory_overhead_pct_median:.1f}%")
-    lines.append(f"  P90 Memory Overhead:     {aggregate.memory_overhead_pct_p90:.1f}%")
-    lines.append(f"  P95 Memory Overhead:     {aggregate.memory_overhead_pct_p95:.1f}%")
+    lines.append(f"  P99 Slowdown:       {aggregate.slowdown_p99:.3f}x")
     lines.append("")
     lines.append("PER-CELL CHECKPOINT OVERHEAD (ms)")
     lines.append(f"  Mean:   {aggregate.checkpoint_overhead_per_cell_mean:.2f}ms")
     lines.append(f"  Median: {aggregate.checkpoint_overhead_per_cell_median:.2f}ms")
+    lines.append(f"  Min:    {aggregate.checkpoint_overhead_per_cell_min:.2f}ms")
+    lines.append(f"  Max:    {aggregate.checkpoint_overhead_per_cell_max:.2f}ms")
     lines.append(f"  P90:    {aggregate.checkpoint_overhead_per_cell_p90:.2f}ms")
     lines.append(f"  P95:    {aggregate.checkpoint_overhead_per_cell_p95:.2f}ms")
+    lines.append(f"  P99:    {aggregate.checkpoint_overhead_per_cell_p99:.2f}ms")
     lines.append("")
     lines.append("PER-CELL TOTAL OVERHEAD (ms)")
     lines.append(f"  Mean:   {aggregate.total_overhead_per_cell_mean:.2f}ms")
     lines.append(f"  Median: {aggregate.total_overhead_per_cell_median:.2f}ms")
+    lines.append(f"  Min:    {aggregate.total_overhead_per_cell_min:.2f}ms")
+    lines.append(f"  Max:    {aggregate.total_overhead_per_cell_max:.2f}ms")
     lines.append(f"  P90:    {aggregate.total_overhead_per_cell_p90:.2f}ms")
     lines.append(f"  P95:    {aggregate.total_overhead_per_cell_p95:.2f}ms")
+    lines.append(f"  P99:    {aggregate.total_overhead_per_cell_p99:.2f}ms")
     lines.append("")
     lines.append("PER-CELL MEMORY OVERHEAD (MB)")
     lines.append(f"  Mean:   {aggregate.memory_overhead_per_cell_mean:.2f}MB")
     lines.append(f"  Median: {aggregate.memory_overhead_per_cell_median:.2f}MB")
+    lines.append(f"  Min:    {aggregate.memory_overhead_per_cell_min:.2f}MB")
+    lines.append(f"  Max:    {aggregate.memory_overhead_per_cell_max:.2f}MB")
     lines.append(f"  P90:    {aggregate.memory_overhead_per_cell_p90:.2f}MB")
     lines.append(f"  P95:    {aggregate.memory_overhead_per_cell_p95:.2f}MB")
+    lines.append(f"  P99:    {aggregate.memory_overhead_per_cell_p99:.2f}MB")
     lines.append("=" * 110)
 
     return "\n".join(lines)
@@ -826,6 +873,7 @@ def format_json_output(stats_list: List[FileStats], aggregate: AggregateStats) -
                 "max": aggregate.slowdown_max,
                 "p90": aggregate.slowdown_p90,
                 "p95": aggregate.slowdown_p95,
+                "p99": aggregate.slowdown_p99,
             },
             "state_overhead_pct_mean": aggregate.state_overhead_pct_mean,
             "check_overhead_pct_mean": aggregate.check_overhead_pct_mean,
