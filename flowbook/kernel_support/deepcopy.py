@@ -1170,6 +1170,42 @@ def deepcopy(x, memo=None):
                     _keep_alive(x, memo)
                 return y
 
+        # Check if this is a SHAP Explanation - register handlers lazily
+        if _is_shap_explanation(x):
+            _register_shap_handlers_if_needed()
+            # Retry dispatch after registration
+            copier = _deepcopy_dispatch.get(cls)
+            if copier is not None:
+                y = copier(x, memo)
+                if y is not x:
+                    memo[d] = y
+                    _keep_alive(x, memo)
+                return y
+
+        # Check if this is a SHAP TreeExplainer - register handlers lazily
+        if _is_shap_tree_explainer(x):
+            _register_shap_handlers_if_needed()
+            # Retry dispatch after registration
+            copier = _deepcopy_dispatch.get(cls)
+            if copier is not None:
+                y = copier(x, memo)
+                if y is not x:
+                    memo[d] = y
+                    _keep_alive(x, memo)
+                return y
+
+        # Check if this is a sklearn TargetEncoder - register handlers lazily
+        if _is_sklearn_target_encoder(x):
+            _register_target_encoder_handlers_if_needed()
+            # Retry dispatch after registration
+            copier = _deepcopy_dispatch.get(cls)
+            if copier is not None:
+                y = copier(x, memo)
+                if y is not x:
+                    memo[d] = y
+                    _keep_alive(x, memo)
+                return y
+
         if issubclass(cls, type):
             y = _deepcopy_atomic(x, memo)
         else:
@@ -2331,6 +2367,273 @@ def reset_lightgbm_deepcopy_handler():
         for cls in (lgb.LGBMRegressor, lgb.LGBMClassifier, lgb.LGBMRanker):
             if cls in _deepcopy_dispatch:
                 del _deepcopy_dispatch[cls]
+    except ImportError:
+        pass
+
+
+# =============================================================================
+# SHAP handlers - uses identity-based optimization for immutable objects
+# =============================================================================
+# SHAP Explanation objects contain large numpy arrays (values, base_values, data)
+# that are immutable after creation. SHAP TreeExplainer wraps a model's tree
+# structures that are also immutable after initialization.
+#
+# Key insight: These objects are read-only after creation, so we can SHARE
+# references instead of copying, then use O(1) pointer comparison in diff.
+
+def _deepcopy_shap_explanation(explanation, memo: dict[int, Any]):
+    """
+    Deep copy a SHAP Explanation by sharing immutable arrays.
+
+    SHAP Explanation objects contain:
+    - values: numpy array of SHAP values (immutable after computation)
+    - base_values: numpy array of base values (immutable)
+    - data: numpy array of feature data (immutable)
+    - feature_names, output_names: lists (typically immutable)
+
+    We SHARE all numpy arrays since they're immutable after creation,
+    and only deep copy the metadata attributes.
+
+    This enables O(1) pointer comparison in diff for unchanged Explanations.
+    """
+    import copy
+
+    exp_id = id(explanation)
+    if exp_id in memo:
+        return memo[exp_id]
+
+    # Create new instance without __init__
+    new_exp = object.__new__(type(explanation))
+    memo[exp_id] = new_exp
+
+    # Attributes that contain immutable numpy arrays - SHARE these
+    immutable_array_attrs = {
+        'values', 'base_values', 'data', 'display_data',
+        'main_effects', 'hierarchical_values', 'clustering',
+        'output_indexes'
+    }
+
+    # Copy all attributes from __dict__
+    for attr, val in explanation.__dict__.items():
+        if attr in immutable_array_attrs and isinstance(val, np.ndarray):
+            # SHARE reference to immutable numpy array (key optimization!)
+            new_exp.__dict__[attr] = val
+        elif attr == 'feature_names' or attr == 'output_names':
+            # These are typically lists of strings - can shallow copy
+            if isinstance(val, list):
+                new_exp.__dict__[attr] = val.copy()
+            else:
+                new_exp.__dict__[attr] = val
+        elif isinstance(val, np.ndarray):
+            # Other arrays - share by default (they're likely immutable too)
+            new_exp.__dict__[attr] = val
+        elif isinstance(val, (list, dict)):
+            # Mutable containers - deep copy for safety
+            new_exp.__dict__[attr] = copy.deepcopy(val, memo)
+        else:
+            # Primitives and other immutables
+            new_exp.__dict__[attr] = val
+
+    return new_exp
+
+
+def _deepcopy_shap_tree_explainer(explainer, memo: dict[int, Any]):
+    """
+    Deep copy a SHAP TreeExplainer by sharing the entire object.
+
+    TreeExplainer wraps a model's tree structure and computes internal
+    representations during __init__. After initialization:
+    - The model reference is read-only
+    - The internal tree structures are immutable
+    - The masker and feature_names are configuration
+
+    Since TreeExplainer is effectively immutable after creation, we can
+    SHARE the entire object. This enables O(1) pointer comparison in diff.
+
+    Note: This is safe because TreeExplainer doesn't have mutable state
+    that users would modify between cells.
+    """
+    # TreeExplainer is immutable after init - share the entire object
+    # We still add to memo to handle multiple references
+    memo[id(explainer)] = explainer
+    return explainer
+
+
+# Flag to track if we've registered SHAP handlers (done lazily on first use)
+_shap_handlers_registered = False
+
+
+def _is_shap_explanation(x) -> bool:
+    """Check if x is a SHAP Explanation without importing shap.
+
+    Uses module name checking to avoid the shap import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    # Check for shap module and Explanation class
+    return 'shap' in module and cls.__name__ == 'Explanation'
+
+
+def _is_shap_tree_explainer(x) -> bool:
+    """Check if x is a SHAP TreeExplainer without importing shap.
+
+    Uses module name checking to avoid the shap import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    # Check for shap explainers module and TreeExplainer class
+    return 'shap' in module and cls.__name__ == 'TreeExplainer'
+
+
+def _register_shap_handlers_if_needed():
+    """Register SHAP handlers lazily to avoid import-time side effects.
+
+    SHAP import can be slow and trigger matplotlib backend setup.
+    Only register when we know we're dealing with SHAP objects.
+    """
+    global _shap_handlers_registered
+    if _shap_handlers_registered:
+        return
+    _shap_handlers_registered = True
+
+    try:
+        from shap import Explanation
+        from shap.explainers import Tree as TreeExplainer
+        _deepcopy_dispatch[Explanation] = _deepcopy_shap_explanation
+        _deepcopy_dispatch[TreeExplainer] = _deepcopy_shap_tree_explainer
+    except ImportError:
+        pass  # SHAP not installed
+
+
+def reset_shap_deepcopy_handler():
+    """Reset the SHAP deepcopy handler registration. For testing."""
+    global _shap_handlers_registered
+    _shap_handlers_registered = False
+    # Also remove from dispatch table
+    try:
+        from shap import Explanation
+        from shap.explainers import Tree as TreeExplainer
+        if Explanation in _deepcopy_dispatch:
+            del _deepcopy_dispatch[Explanation]
+        if TreeExplainer in _deepcopy_dispatch:
+            del _deepcopy_dispatch[TreeExplainer]
+    except ImportError:
+        pass
+
+
+# =============================================================================
+# sklearn TargetEncoder handler - uses identity-based optimization for fitted arrays
+# =============================================================================
+# TargetEncoder from sklearn.preprocessing stores fitted state in numpy arrays
+# (encodings_, categories_, target_mean_) that are immutable after fit().
+#
+# Key insight: Fitted arrays are read-only after fit(), so we can SHARE
+# references instead of copying, then use O(1) pointer comparison in diff.
+
+def _deepcopy_target_encoder(encoder, memo: dict[int, Any]):
+    """
+    Deep copy a sklearn TargetEncoder by sharing fitted arrays.
+
+    TargetEncoder has two states:
+    1. Unfitted: Only has hyperparameters - use standard deepcopy
+    2. Fitted: Has encodings_, categories_, target_mean_ arrays that are
+       immutable after fit()
+
+    For fitted encoders, we SHARE the immutable fitted arrays and only
+    copy the hyperparameters. This enables O(1) pointer comparison in diff.
+    """
+    import copy
+
+    enc_id = id(encoder)
+    if enc_id in memo:
+        return memo[enc_id]
+
+    # Check if encoder is fitted (has encodings_ attribute)
+    if not hasattr(encoder, 'encodings_'):
+        # Unfitted encoder - use standard deepcopy
+        result = copy.deepcopy(encoder, memo)
+        memo[enc_id] = result
+        return result
+
+    # Fitted encoder - SHARE immutable fitted arrays, copy parameters
+    new_enc = object.__new__(type(encoder))
+    memo[enc_id] = new_enc
+
+    # Fitted attributes to SHARE (immutable after fit)
+    immutable_fitted_attrs = {
+        'encodings_', 'categories_', 'target_mean_',
+        '_infrequent_indices', 'feature_names_in_', 'n_features_in_'
+    }
+
+    # Copy all attributes from __dict__
+    for attr, val in encoder.__dict__.items():
+        if attr in immutable_fitted_attrs:
+            # SHARE reference to immutable fitted data (key optimization!)
+            new_enc.__dict__[attr] = val
+        elif isinstance(val, np.ndarray):
+            # Other arrays (should be rare) - share by default
+            new_enc.__dict__[attr] = val
+        elif isinstance(val, (list, dict)):
+            # Mutable containers - deep copy for safety
+            new_enc.__dict__[attr] = copy.deepcopy(val, memo)
+        else:
+            # Primitives and other immutables
+            new_enc.__dict__[attr] = val
+
+    return new_enc
+
+
+# Flag to track if we've registered TargetEncoder handlers
+_target_encoder_handlers_registered = False
+
+
+def _is_sklearn_target_encoder(x) -> bool:
+    """Check if x is a sklearn TargetEncoder without importing sklearn.
+
+    Uses module name checking to avoid the sklearn import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    # Check for sklearn preprocessing module and TargetEncoder class
+    return 'sklearn' in module and cls.__name__ == 'TargetEncoder'
+
+
+def _register_target_encoder_handlers_if_needed():
+    """Register TargetEncoder handlers lazily to avoid import-time side effects.
+
+    sklearn import can be slow. Only register when we know we're dealing
+    with TargetEncoder objects.
+    """
+    global _target_encoder_handlers_registered
+    if _target_encoder_handlers_registered:
+        return
+    _target_encoder_handlers_registered = True
+
+    try:
+        from sklearn.preprocessing import TargetEncoder
+        _deepcopy_dispatch[TargetEncoder] = _deepcopy_target_encoder
+    except ImportError:
+        pass  # sklearn not installed or TargetEncoder not available
+
+
+def reset_target_encoder_deepcopy_handler():
+    """Reset the TargetEncoder deepcopy handler registration. For testing."""
+    global _target_encoder_handlers_registered
+    _target_encoder_handlers_registered = False
+    # Also remove from dispatch table
+    try:
+        from sklearn.preprocessing import TargetEncoder
+        if TargetEncoder in _deepcopy_dispatch:
+            del _deepcopy_dispatch[TargetEncoder]
     except ImportError:
         pass
 
