@@ -370,6 +370,7 @@ class FileStats:
     flowbook_memory_bytes: int
     memory_overhead_bytes: int
     memory_overhead_pct: float
+    memory_overhead_ratio: float  # flowbook_memory / baseline_memory (like slowdown for time)
     # Last cell overhead percentages
     last_cell_state_overhead_pct: float = 0.0
     last_cell_check_overhead_pct: float = 0.0
@@ -411,6 +412,15 @@ class AggregateStats:
     memory_overhead_pct_median: float = 0.0
     memory_overhead_pct_p90: float = 0.0
     memory_overhead_pct_p95: float = 0.0
+    # Memory overhead ratio (like slowdown)
+    memory_overhead_mean: float = 0.0
+    memory_overhead_median: float = 0.0
+    memory_overhead_std: float = 0.0
+    memory_overhead_min: float = 0.0
+    memory_overhead_max: float = 0.0
+    memory_overhead_p90: float = 0.0
+    memory_overhead_p95: float = 0.0
+    memory_overhead_p99: float = 0.0
     # Per-cell checkpoint overhead (ms)
     checkpoint_overhead_per_cell_mean: float = 0.0
     checkpoint_overhead_per_cell_median: float = 0.0
@@ -502,6 +512,11 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         slowdown = flowbook_total / baseline_runtime
         state_pct = (state_overhead / baseline_runtime) * 100
         check_pct = (check_overhead / baseline_runtime) * 100
+    elif flowbook_runtime > 0:
+        # No baseline: compute slowdown as overhead ratio relative to flowbook execution time
+        slowdown = (flowbook_runtime + state_overhead + check_overhead) / flowbook_runtime
+        state_pct = (state_overhead / flowbook_runtime) * 100
+        check_pct = (check_overhead / flowbook_runtime) * 100
     else:
         slowdown = 0.0
         state_pct = 0.0
@@ -519,10 +534,40 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     flowbook_memory = int(flowbook_mem_totals.get("final_footprint_mb", 0) * mb_to_bytes)
     memory_overhead = flowbook_memory - baseline_memory if flowbook_memory > baseline_memory else 0
 
-    if baseline_memory > 0:
+    # Check if FlowBook JSON has precomputed memory_overhead_ratio (new format)
+    if "memory_overhead_ratio" in flowbook_mem_totals:
+        # Use precomputed ratio: (base_namespace + checkpoint_overhead) / base_namespace
+        memory_overhead_ratio = flowbook_mem_totals["memory_overhead_ratio"]
+        # Compute memory_pct from the ratio (ratio - 1.0 is the fractional overhead)
+        memory_pct = (memory_overhead_ratio - 1.0) * 100
+        # For baseline_memory, use base_namespace_mb if no baseline kernel was run
+        if baseline_memory == 0:
+            baseline_memory = int(flowbook_mem_totals.get("base_namespace_mb", 0) * mb_to_bytes)
+            memory_overhead = int(flowbook_mem_totals.get("total_overhead_mb", 0) * mb_to_bytes)
+    elif baseline_memory > 0:
         memory_pct = (memory_overhead / baseline_memory) * 100
+        memory_overhead_ratio = flowbook_memory / baseline_memory
     else:
-        memory_pct = 0.0
+        # No baseline and no precomputed ratio: compute ratio from checkpoint overhead
+        # Get checkpoint overhead from last memory cell's overhead_breakdown
+        flowbook_mem_cells = flowbook_memory_data.get("cells", []) if flowbook_memory_data else []
+        checkpoint_overhead_mb = 0.0
+        if flowbook_mem_cells:
+            last_mem_cell = flowbook_mem_cells[-1]
+            overhead_breakdown = last_mem_cell.get("overhead_breakdown", {})
+            checkpoint_overhead_mb = overhead_breakdown.get("checkpoints_mb", 0.0)
+
+        flowbook_memory_mb = flowbook_memory / mb_to_bytes if flowbook_memory > 0 else 0.0
+
+        if flowbook_memory_mb > 0 and checkpoint_overhead_mb > 0:
+            # No baseline: report checkpoint/total as the overhead ratio
+            # This shows what fraction of total memory is checkpoint overhead
+            # 0.0 = no overhead, 1.0 = all memory is checkpoints
+            memory_overhead_ratio = checkpoint_overhead_mb / flowbook_memory_mb
+            memory_pct = memory_overhead_ratio * 100
+        else:
+            memory_pct = 0.0
+            memory_overhead_ratio = 0.0
 
     num_cells = data.get("metadata", {}).get("num_cells", 0)
     if num_cells == 0 and baseline_timing:
@@ -629,6 +674,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         flowbook_memory_bytes=flowbook_memory,
         memory_overhead_bytes=memory_overhead,
         memory_overhead_pct=memory_pct,
+        memory_overhead_ratio=memory_overhead_ratio,
         last_cell_state_overhead_pct=last_cell_state_pct,
         last_cell_check_overhead_pct=last_cell_check_pct,
         last_cell_memory_overhead_pct=last_cell_memory_pct,
@@ -666,6 +712,7 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
         )
 
     slowdowns = np.array([s.slowdown for s in stats_list])
+    memory_overhead_ratios = np.array([s.memory_overhead_ratio for s in stats_list])
     # Use last cell overhead percentages for aggregate stats
     state_pcts = np.array([s.last_cell_state_overhead_pct for s in stats_list])
     check_pcts = np.array([s.last_cell_check_overhead_pct for s in stats_list])
@@ -702,6 +749,15 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
         memory_overhead_pct_median=float(np.median(memory_pcts)),
         memory_overhead_pct_p90=float(np.percentile(memory_pcts, 90)),
         memory_overhead_pct_p95=float(np.percentile(memory_pcts, 95)),
+        # Memory overhead ratio (like slowdown)
+        memory_overhead_mean=float(np.mean(memory_overhead_ratios)),
+        memory_overhead_median=float(np.median(memory_overhead_ratios)),
+        memory_overhead_std=float(np.std(memory_overhead_ratios)),
+        memory_overhead_min=float(np.min(memory_overhead_ratios)),
+        memory_overhead_max=float(np.max(memory_overhead_ratios)),
+        memory_overhead_p90=float(np.percentile(memory_overhead_ratios, 90)),
+        memory_overhead_p95=float(np.percentile(memory_overhead_ratios, 95)),
+        memory_overhead_p99=float(np.percentile(memory_overhead_ratios, 99)),
         # Per-cell checkpoint overhead (ms)
         checkpoint_overhead_per_cell_mean=float(np.mean(checkpoint_arr)),
         checkpoint_overhead_per_cell_median=float(np.median(checkpoint_arr)),
@@ -835,6 +891,30 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
     lines.append(f"  P90:    {aggregate.memory_overhead_per_cell_p90:.2f}MB")
     lines.append(f"  P95:    {aggregate.memory_overhead_per_cell_p95:.2f}MB")
     lines.append(f"  P99:    {aggregate.memory_overhead_per_cell_p99:.2f}MB")
+    # Check if we have baseline memory data (ratio > 0 and not ~1.0 from checkpoint fraction)
+    has_baseline_memory = any(s.baseline_memory_bytes > 0 for s in stats_list)
+    lines.append("")
+    if has_baseline_memory:
+        lines.append("MEMORY OVERHEAD")
+        lines.append(f"AGGREGATE (N={aggregate.num_files})")
+        lines.append(f"  Mean Overhead:      {aggregate.memory_overhead_mean:.3f}x")
+        lines.append(f"  Median Overhead:    {aggregate.memory_overhead_median:.3f}x")
+        lines.append(f"  Std Dev:            {aggregate.memory_overhead_std:.3f}")
+        lines.append(f"  Min Overhead:       {aggregate.memory_overhead_min:.3f}x")
+        lines.append(f"  Max Overhead:       {aggregate.memory_overhead_max:.3f}x")
+        lines.append(f"  P90 Overhead:       {aggregate.memory_overhead_p90:.3f}x")
+        lines.append(f"  P95 Overhead:       {aggregate.memory_overhead_p95:.3f}x")
+        lines.append(f"  P99 Overhead:       {aggregate.memory_overhead_p99:.3f}x")
+    else:
+        # No baseline memory - show checkpoint overhead in MB instead
+        total_checkpoint_mb = sum(s.flowbook_memory_bytes for s in stats_list) / (1024 * 1024)
+        lines.append("CHECKPOINT MEMORY")
+        lines.append(f"AGGREGATE (N={aggregate.num_files})")
+        lines.append(f"  Total:              {total_checkpoint_mb:.2f}MB")
+        lines.append(f"  Per-Cell Mean:      {aggregate.memory_overhead_per_cell_mean:.2f}MB")
+        lines.append(f"  Per-Cell Median:    {aggregate.memory_overhead_per_cell_median:.2f}MB")
+        lines.append(f"  Per-Cell Max:       {aggregate.memory_overhead_per_cell_max:.2f}MB")
+        lines.append(f"  Per-Cell P99:       {aggregate.memory_overhead_per_cell_p99:.2f}MB")
     lines.append("=" * 110)
 
     return "\n".join(lines)

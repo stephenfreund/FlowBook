@@ -1149,9 +1149,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         and result.get("status") != "error"
                         and not skip_display
                     ):
-                        pre_ms = pre_timer.duration()
-                        post_ms = post_timer.duration()
-                        state_ms = pre_ms + post_ms
+                        state_ms = pre_timer.duration()
                         self._display_execution_result(
                             execute_duration_ms=time.perf_counter() * 1000 - start_time,
                             code_duration_ms=execution_time or 0.0,
@@ -1159,8 +1157,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             check_duration_ms=check_timer.duration(),
                             tracking=tracking,
                             sdc_result=sdc_result,
-                            pre_state_ms=pre_ms,
-                            post_state_ms=post_ms,
                         )
 
                 return result
@@ -1369,8 +1365,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         check_duration_ms: float,
         tracking,
         sdc_result,
-        pre_state_ms: float = 0.0,
-        post_state_ms: float = 0.0,
     ) -> None:
         """Display execution timing and Reproducibility metadata."""
         # Build metadata for display
@@ -1442,7 +1436,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             self._send_structural_warnings(structural_warnings)
 
         # Build display text
-        state_detail = f"State: {state_duration_ms:.0f} ms (pre={pre_state_ms:.0f}, post={post_state_ms:.0f})"
+        state_detail = f"State: {state_duration_ms:.0f} ms"
         parts = [
             f"Execute: {execute_duration_ms:.0f} ms",
             f"Code: {code_duration_ms:.0f} ms",
