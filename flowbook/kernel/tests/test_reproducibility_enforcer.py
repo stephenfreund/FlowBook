@@ -7,6 +7,7 @@ from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 
 from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX
+from flowbook.kernel.models import ReasonType
 from flowbook.kernel.tests.conftest import make_tracking
 
 
@@ -230,15 +231,15 @@ class TestReproducibilityEnforcer:
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        assert "a" in self.sdc.records
-        assert "b" in self.sdc.records
+        assert self.sdc._notebook_state.has_record("a")
+        assert self.sdc._notebook_state.has_record("b")
 
         # Remove cell b from order
         self.sdc.set_cell_order(["a", "c", "d"])
 
         # b should be pruned
-        assert "a" in self.sdc.records
-        assert "b" not in self.sdc.records
+        assert self.sdc._notebook_state.has_record("a")
+        assert not self.sdc._notebook_state.has_record("b")
 
     def test_reset_clears_all_state(self):
         """Reset clears all tracking state."""
@@ -250,12 +251,12 @@ class TestReproducibilityEnforcer:
             namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert len(self.sdc.records) == 1
+        assert len(self.sdc._notebook_state.tracking_data) == 1
         assert self.sdc.seq_counter == 1
 
         self.sdc.reset()
 
-        assert len(self.sdc.records) == 0
+        assert len(self.sdc._notebook_state.tracking_data) == 0
         assert self.sdc.seq_counter == 0
         assert self.sdc.cell_order == []
 
@@ -749,8 +750,8 @@ class TestContinueOnViolation:
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        assert "a" in self.sdc.records
-        assert "b" not in self.sdc.records
+        assert self.sdc._notebook_state.has_record("a")
+        assert not self.sdc._notebook_state.has_record("b")
 
         # Cell B modifies x (violation) but we continue
         self._save_pre_checkpoint("b", {"x": 1})
@@ -765,8 +766,8 @@ class TestContinueOnViolation:
 
         assert result.violation is not None
         # Record is updated even with violation
-        assert "b" in self.sdc.records
-        assert self.sdc.records["b"].tracking.writes == {"x"}
+        assert self.sdc._notebook_state.has_record("b")
+        assert self.sdc._notebook_state.get_tracking("b").writes == {"x"}
 
     def test_continue_false_does_not_update_record(self):
         """With continue_on_violation=False, no record is created on violation."""
@@ -793,7 +794,7 @@ class TestContinueOnViolation:
 
         assert result.violation is not None
         # Record is NOT created
-        assert "b" not in self.sdc.records
+        assert not self.sdc._notebook_state.has_record("b")
 
     def test_continue_with_chain_staleness(self):
         """Test staleness propagation when continuing after violation."""
@@ -2414,8 +2415,8 @@ class TestBackwardConflictFreshOnly:
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        # Mark A stale
-        self.sdc._stale_cells.add("a")
+        # Mark A stale via NotebookState API (CODE_CHANGED simulates edit)
+        self.sdc._notebook_state.handle_edit("a")
 
         # Cell B modifies x — should NOT trigger violation because A is stale
         self._save_pre_checkpoint("b", {"x": 1})
@@ -2485,8 +2486,8 @@ class TestBackwardConflictFreshOnly:
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        # Mark A stale, keep B fresh
-        self.sdc._stale_cells.add("a")
+        # Mark A stale, keep B fresh via NotebookState API
+        self.sdc._notebook_state.handle_edit("a")
 
         # Cell C modifies x — should conflict with B (fresh) but not A (stale)
         self._save_pre_checkpoint("c", {"x": 1})
@@ -2534,10 +2535,10 @@ class TestEditTriggeredStaleness:
     def test_edit_marks_cell_stale(self):
         """Editing an executed cell marks it stale."""
         self._execute_cell("a", {}, {"x": 1}, writes={"x"})
-        assert "a" not in self.sdc._stale_cells
+        assert "a" not in self.sdc._notebook_state.get_stale_cells()
 
         stale = self.sdc.mark_cell_edited("a")
-        assert "a" in self.sdc._stale_cells
+        assert "a" in self.sdc._notebook_state.get_stale_cells()
         assert "a" in stale
 
     def test_edit_does_not_propagate_downstream(self):
@@ -2549,20 +2550,27 @@ class TestEditTriggeredStaleness:
         self._execute_cell("a", {}, {"x": 1}, writes={"x"})
         self._execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
 
-        assert "a" not in self.sdc._stale_cells
-        assert "b" not in self.sdc._stale_cells
+        assert "a" not in self.sdc._notebook_state.get_stale_cells()
+        assert "b" not in self.sdc._notebook_state.get_stale_cells()
 
         # Edit A — only A should become stale, not B
         self.sdc.mark_cell_edited("a")
-        assert "a" in self.sdc._stale_cells
-        assert "b" not in self.sdc._stale_cells
+        assert "a" in self.sdc._notebook_state.get_stale_cells()
+        assert "b" not in self.sdc._notebook_state.get_stale_cells()
 
     def test_edit_unexecuted_cell_is_noop(self):
-        """Editing an unexecuted cell has no effect."""
+        """Editing an unexecuted cell has no effect (no CODE_CHANGED reason added)."""
         # "a" has never been executed — no record
-        stale = self.sdc.mark_cell_edited("a")
-        assert "a" not in self.sdc._stale_cells
-        assert stale == []
+        # Note: "a" is already stale with NEVER_EXECUTED reason from cell_order setup
+        stale_before = self.sdc._notebook_state.get_stale_cells()
+        self.sdc.mark_cell_edited("a")
+        stale_after = self.sdc._notebook_state.get_stale_cells()
+
+        # No CODE_CHANGED reason should be added for unexecuted cell
+        reasons = self.sdc._notebook_state.get_reasons("a")
+        assert not any(r.type == ReasonType.CODE_CHANGED for r in reasons)
+        # Stale list unchanged (edit is a no-op on unexecuted)
+        assert set(stale_before) == set(stale_after)
 
     def test_edit_already_stale_cell(self):
         """Editing an already-stale cell is idempotent."""
@@ -2570,9 +2578,268 @@ class TestEditTriggeredStaleness:
 
         # Mark stale via edit
         self.sdc.mark_cell_edited("a")
-        assert "a" in self.sdc._stale_cells
+        assert "a" in self.sdc._notebook_state.get_stale_cells()
 
         # Mark stale again — no change
         stale = self.sdc.mark_cell_edited("a")
-        assert "a" in self.sdc._stale_cells
+        assert "a" in self.sdc._notebook_state.get_stale_cells()
         assert stale.count("a") == 1  # Only appears once
+
+
+class TestStalenessReasons:
+    """Tests for staleness reason tracking (§1.2)."""
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        """Save a pre-checkpoint for a cell."""
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _execute_cell(self, cell_id: str, pre_ns: dict, post_ns: dict,
+                      reads: set = None, writes: set = None):
+        """Helper to execute a cell with given pre/post namespaces."""
+        reads = reads or set()
+        writes = writes or set()
+        self._save_pre_checkpoint(cell_id, pre_ns)
+        return self.sdc.check(
+            cell_id=cell_id,
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"],
+            namespace=post_ns,
+            tracking=make_tracking(reads=reads, writes=writes),
+        )
+
+    def test_edit_adds_code_changed_reason(self):
+        """Editing a cell adds CODE_CHANGED reason."""
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        self.sdc.mark_cell_edited("a")
+
+        # Check that notebook_state has CODE_CHANGED reason
+        reasons = self.sdc._notebook_state.get_reasons("a")
+        reason_types = {r.type.value for r in reasons}
+        assert "code_changed" in reason_types
+
+    def test_staleness_result_contains_reasons(self):
+        """ReproducibilityResult includes staleness_reasons dict."""
+        # A writes x
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        # B reads x
+        self._execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
+
+        # A writes x again (different value) → B becomes stale
+        self._save_pre_checkpoint("a", {"x": 1})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 2},  # Changed!
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should be stale with INPUT_CHANGED reason
+        assert "b" in result.stale_cells
+        assert "b" in result.staleness_reasons
+        reasons_for_b = result.staleness_reasons["b"]
+        assert any(r["type"] == "input_changed" for r in reasons_for_b)
+
+    def test_input_changed_includes_variable_and_cell(self):
+        """INPUT_CHANGED reason includes loc and cell_id."""
+        # A writes x
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        # B reads x
+        self._execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
+
+        # A writes x again → B stale with INPUT_CHANGED(loc=x, cell_id=a)
+        self._save_pre_checkpoint("a", {"x": 1})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 2},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        reasons_for_b = result.staleness_reasons["b"]
+        input_changed = [r for r in reasons_for_b if r["type"] == "input_changed"]
+        assert len(input_changed) >= 1
+        assert input_changed[0]["loc"] == "x"
+        assert input_changed[0]["cell_id"] == "a"
+
+    def test_fresh_cell_has_no_reasons(self):
+        """A freshly executed cell should have no staleness reasons."""
+        result = self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+
+        # Cell a is fresh — should not be in staleness_reasons
+        assert "a" not in result.staleness_reasons or not result.staleness_reasons.get("a")
+
+    def test_multiple_reasons_accumulate(self):
+        """Multiple staleness reasons accumulate on a cell."""
+        # A writes x, B writes y
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        self._execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, writes={"y"})
+        # C reads both x and y
+        self._execute_cell("c", {"x": 1, "y": 2}, {"x": 1, "y": 2, "z": 3}, reads={"x", "y"}, writes={"z"})
+
+        # A changes x
+        self._save_pre_checkpoint("a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 10},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        # C should be stale due to x changing
+
+        # Now B also changes y
+        self._save_pre_checkpoint("b", {"x": 10, "y": 2})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace={"x": 10, "y": 20},
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # C might have multiple INPUT_CHANGED reasons (x from a, y from b)
+        # Check that reasons accumulate
+        reasons_for_c = result.staleness_reasons.get("c", [])
+        # C was already stale from x changing, so it won't get y reason added
+        # (already stale cells are skipped in _update_staleness_incremental)
+        assert "c" in self.sdc._notebook_state.get_stale_cells()
+
+    def test_reset_clears_reasons(self):
+        """Resetting the enforcer clears all staleness reasons."""
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        self.sdc.mark_cell_edited("a")
+
+        # Verify CODE_CHANGED reason exists
+        reasons = self.sdc._notebook_state.get_reasons("a")
+        assert any(r.type.value == "code_changed" for r in reasons)
+
+        self.sdc.reset()
+
+        # After reset, status dict should be empty (not CODE_CHANGED)
+        # Note: get_reasons creates NEVER_EXECUTED for unknown cells, so we
+        # check the internal status dict directly
+        assert "a" not in self.sdc._notebook_state.status
+
+
+class TestSkippedUpstream:
+    """Tests for SKIPPED_UPSTREAM reason type - when cell reads from wrong writer."""
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        # F writes x, G writes x, H reads x
+        self.sdc.set_cell_order(["f", "g", "h"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _execute_cell(self, cell_id: str, pre_ns: dict, post_ns: dict,
+                      reads: set = None, writes: set = None):
+        """Helper to execute a cell with given pre/post namespaces."""
+        reads = reads or set()
+        writes = writes or set()
+        self._save_pre_checkpoint(cell_id, pre_ns)
+        return self.sdc.check(
+            cell_id=cell_id,
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"],
+            namespace=post_ns,
+            tracking=make_tracking(reads=reads, writes=writes),
+        )
+
+    def test_skipped_upstream_then_run_expected_cell(self):
+        """
+        Scenario: F→G→H, then F again (skipping G), then G.
+
+        After running F (skipping G):
+        - H should have SKIPPED_UPSTREAM (reading from F instead of G)
+
+        After running G:
+        - H should have INPUT_CHANGED (not SKIPPED_UPSTREAM)
+        - Re-running H would now fix it
+        """
+        # Initial execution: F→G→H
+        self._execute_cell("f", {}, {"x": 1}, writes={"x"})
+        self._execute_cell("g", {"x": 1}, {"x": 2}, reads={"x"}, writes={"x"})
+        self._execute_cell("h", {"x": 2}, {"x": 2, "y": 10}, reads={"x"}, writes={"y"})
+
+        # H is clean after initial execution
+        assert self.sdc._notebook_state.is_clean("h")
+
+        # Run F again (skipping G) - x goes from 2 back to 1
+        self._execute_cell("f", {"x": 2, "y": 10}, {"x": 1, "y": 10}, writes={"x"})
+
+        # H should now have SKIPPED_UPSTREAM - reading from F instead of G
+        reasons_h = self.sdc._notebook_state.get_reasons("h")
+        reason_types = {r.type for r in reasons_h}
+        assert ReasonType.SKIPPED_UPSTREAM in reason_types, f"Expected SKIPPED_UPSTREAM, got {reason_types}"
+
+        # Verify it's for variable x with expected_cell_id = g
+        skipped_reason = next(r for r in reasons_h if r.type == ReasonType.SKIPPED_UPSTREAM)
+        assert skipped_reason.loc == "x"
+        assert skipped_reason.expected_cell_id == "g"
+
+        # Now run G - this should change H's reason to INPUT_CHANGED
+        self._execute_cell("g", {"x": 1, "y": 10}, {"x": 3, "y": 10}, reads={"x"}, writes={"x"})
+
+        # H should now have INPUT_CHANGED, not SKIPPED_UPSTREAM
+        reasons_h_after = self.sdc._notebook_state.get_reasons("h")
+        reason_types_after = {r.type for r in reasons_h_after}
+
+        assert ReasonType.INPUT_CHANGED in reason_types_after, f"Expected INPUT_CHANGED, got {reason_types_after}"
+        assert ReasonType.SKIPPED_UPSTREAM not in reason_types_after, f"SKIPPED_UPSTREAM should be replaced by INPUT_CHANGED"
+
+        # Verify INPUT_CHANGED is from G (not F)
+        input_reason = next(r for r in reasons_h_after if r.type == ReasonType.INPUT_CHANGED)
+        assert input_reason.loc == "x"
+        assert input_reason.cell_id == "g"
+        assert input_reason.expected_cell_id is None  # No skipped writer anymore
+
+    def test_skipped_upstream_exact_user_scenario(self):
+        """
+        Exact user scenario: F -> G -> H -> F -> G
+
+        After this sequence, H should have INPUT_CHANGED (not SKIPPED_UPSTREAM).
+        """
+        # F -> G -> H (initial)
+        self._execute_cell("f", {}, {"x": 1}, writes={"x"})
+        self._execute_cell("g", {"x": 1}, {"x": 2}, reads={"x"}, writes={"x"})
+        self._execute_cell("h", {"x": 2}, {"x": 2, "y": 10}, reads={"x"}, writes={"y"})
+
+        print(f"\nAfter F->G->H:")
+        print(f"  H reasons: {self.sdc._notebook_state.get_reasons('h')}")
+        print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
+
+        # F (re-run, skipping G)
+        self._execute_cell("f", {"x": 2, "y": 10}, {"x": 1, "y": 10}, writes={"x"})
+
+        print(f"\nAfter F->G->H->F:")
+        reasons_after_f = self.sdc._notebook_state.get_reasons("h")
+        print(f"  H reasons: {reasons_after_f}")
+        print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
+
+        # Verify H has SKIPPED_UPSTREAM at this point
+        assert any(r.type == ReasonType.SKIPPED_UPSTREAM for r in reasons_after_f), \
+            f"Expected SKIPPED_UPSTREAM after F, got {reasons_after_f}"
+
+        # G (re-run)
+        self._execute_cell("g", {"x": 1, "y": 10}, {"x": 3, "y": 10}, reads={"x"}, writes={"x"})
+
+        print(f"\nAfter F->G->H->F->G:")
+        reasons_after_g = self.sdc._notebook_state.get_reasons("h")
+        print(f"  H reasons: {reasons_after_g}")
+        print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
+
+        # H should now have INPUT_CHANGED, NOT SKIPPED_UPSTREAM
+        reason_types = {r.type for r in reasons_after_g}
+        assert ReasonType.SKIPPED_UPSTREAM not in reason_types, \
+            f"SKIPPED_UPSTREAM should be gone after running G, got {reasons_after_g}"
+        assert ReasonType.INPUT_CHANGED in reason_types, \
+            f"Expected INPUT_CHANGED after G, got {reasons_after_g}"

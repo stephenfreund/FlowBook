@@ -298,7 +298,7 @@ DESIGN IMPROVEMENTS:
 3. STRUCTURAL ATTRIBUTE VALUES
    Currently: Capture values at read time for better error messages
    Improvement: Show before/after values in all violation messages
-   Status: Partially implemented (structural_reads_values in ReproducibilityExecutionRecord)
+   Status: Partially implemented (structural_reads_values in NotebookState)
 
 4. ASYNC EXECUTION SUPPORT
    Currently: Assumes synchronous execution
@@ -459,21 +459,63 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         self._enforcer.set_cell_order(cell_order)
 
     @line_magic
+    def flowbook_sync(self, line: str) -> None:
+        """
+        Sync current staleness state to frontend.
+
+        Sends reproducibility metadata for all cells, including never_executed cells.
+        Called by frontend on notebook load to initialize staleness display.
+
+        Usage:
+            %flowbook_sync
+        """
+        state = self._enforcer._notebook_state
+
+        # Build metadata with current staleness state
+        metadata = ReproducibilityMetadata(
+            cell_id="",  # No specific cell
+            execution_seq=self._enforcer.seq_counter,
+            reads=[],
+            writes=[],
+            changed_variables=[],
+            stale_cells=state.get_stale_cells(),
+            violation=None,
+            cell_order=self._enforcer.cell_order,
+            staleness_reasons=state.get_all_reasons(),
+        )
+
+        # Send to frontend via display_data (same format as execution metadata)
+        self._display.display_icon_and_text(
+            "🔄",
+            "Synced",
+            metadata=metadata.to_display_metadata(),
+        )
+
+    @line_magic
     def flowbook_status(self, line: str) -> None:
         """Display current Reproducibility state."""
+        state = self._enforcer._notebook_state
         order = self._enforcer.cell_order
-        records = self._enforcer.records
+
+        # Get executed cells (those with tracking data)
+        executed_cells = list(state.tracking_data.keys())
 
         status_lines = [
             f"Cell order: {order}",
-            f"Executed cells: {list(records.keys())}",
+            f"Executed cells: {executed_cells}",
             f"Execution counter: {self._enforcer.seq_counter}",
+            f"Stale cells: {state.get_stale_cells()}",
         ]
 
-        for cell_id, record in records.items():
+        for cell_id in executed_cells:
+            reads = state.reads.get(cell_id, set())
+            writes = state.writes.get(cell_id, set())
+            seq = state.execution_seq.get(cell_id, 0)
+            reasons = state.get_reasons(cell_id)
+            status = "clean" if state.is_clean(cell_id) else f"stale({[r.type.value for r in reasons]})"
             status_lines.append(
-                f"  {cell_id}: reads={sorted(record.reads)}, "
-                f"writes={sorted(record.writes)}, seq={record.execution_seq}"
+                f"  {cell_id}: reads={sorted(reads)}, writes={sorted(writes)}, "
+                f"seq={seq}, status={status}"
             )
 
         self._display.display_icon_and_text(
@@ -555,6 +597,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         stale_cells = self._enforcer.mark_cell_edited(cell_id)
         if cell_id in [c for c in stale_cells]:
             # Send updated staleness info to frontend
+            staleness_reasons = self._enforcer._notebook_state.get_all_reasons()
             metadata = ReproducibilityMetadata(
                 cell_id=cell_id,
                 execution_seq=self._enforcer.seq_counter,
@@ -564,6 +607,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 stale_cells=stale_cells,
                 violation=None,
                 cell_order=self._enforcer.cell_order,
+                staleness_reasons=staleness_reasons,
             )
             self._display.display_icon_and_text(
                 "✏️",
@@ -1317,6 +1361,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 stale_cells=self._enforcer.get_stale_cells(),
                 violation=None,
                 cell_order=self._enforcer.cell_order,
+                staleness_reasons=self._enforcer._notebook_state.get_all_reasons(),
             )
             # Use display_icon_and_text with metadata to send to frontend
             self._display.display_icon_and_text(
@@ -1427,6 +1472,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 if (sdc_result and sdc_result.writer_violation)
                 else None
             ),
+            staleness_reasons=sdc_result.staleness_reasons if sdc_result else {},
         )
 
         # Log and display structural warnings
@@ -1509,6 +1555,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             stale_cells=self._enforcer.get_stale_cells(),
             violation=violation.to_dict(),
             cell_order=self._enforcer.cell_order,
+            staleness_reasons=self._enforcer._notebook_state.get_all_reasons(),
         )
         self._display.display_icon_and_text(
             "❌",
@@ -1544,6 +1591,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             violation=violation.to_dict(),
             cell_order=self._enforcer.cell_order,
             writer_violation=writer_violation.to_dict() if writer_violation else None,
+            staleness_reasons=self._enforcer._notebook_state.get_all_reasons(),
         )
         self._display.display_icon_and_text(
             "❌",

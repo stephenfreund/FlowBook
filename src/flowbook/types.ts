@@ -7,7 +7,10 @@ export interface IReproducibilityViolation {
   affected_cell: string;
   variables: string[];
   message: string;
-  violation_type?: 'backward_mutation' | 'forward_dependency' | 'deleted_cell_dependency';
+  violation_type?:
+    | 'backward_mutation'
+    | 'forward_dependency'
+    | 'deleted_cell_dependency';
 }
 
 export interface IReproducibilityMetadata {
@@ -28,12 +31,16 @@ export interface IReproducibilityMetadata {
   file_reads?: string[];
   file_writes?: string[];
   // Timing information (in milliseconds)
-  execute_duration_ms?: number;  // Total time in _do_execute_impl
-  code_duration_ms?: number;  // Time for _ipython_do_execute (user code)
+  execute_duration_ms?: number; // Total time in _do_execute_impl
+  code_duration_ms?: number; // Time for _ipython_do_execute (user code)
   state_duration_ms?: number;
   check_duration_ms?: number;
   // Writer violation: backward_mutation violation to store on writer cell (for forward contamination)
   writer_violation?: IReproducibilityViolation;
+  // Staleness reasons per cell: { cell_id: [reason, ...] }
+  staleness_reasons?: { [cell_id: string]: IBackendStalenessReason[] };
+  // Whether this cell is contaminated (reads from later cell)
+  cell_is_contaminated?: boolean;
   // Proposed fix for violations
   proposed_fix?: IProposedFix;
 }
@@ -46,13 +53,67 @@ export interface IReproducibilityCellState {
   isStale: boolean;
 }
 
-export interface IStalenessReason {
-  type: string; // "variable_modified" | "source_edited" | "writer_conflict" | "unknown"
+/**
+ * Reason types from the formal model (§1.2).
+ * Maps to ReasonType enum in flowbook/kernel/models.py
+ */
+export type BackendReasonType =
+  | 'never_executed' // Cell has never been run
+  | 'code_changed' // Cell source code was edited
+  | 'input_changed' // A variable this cell reads was modified by another cell
+  | 'write_conflict' // Another cell wrote to a variable this cell also writes
+  | 'reads_from_later' // Cell reads a value written by a later cell (forward contamination)
+  | 'source_deleted' // The cell that wrote a variable this cell reads was deleted
+  | 'order_changed' // Cell order changed affecting data flow
+  | 'skipped_upstream'; // Cell reads from wrong writer; re-running won't help, run expected cell first
+
+/**
+ * Frontend-computed reason types with human-readable formatting.
+ * These are computed by executionhook.ts from kernel metadata.
+ */
+export type FrontendReasonType =
+  | 'source_edited' // Source code was edited (mapped from code_changed)
+  | 'variable_modified' // A variable was modified (mapped from input_changed)
+  | 'writer_conflict' // This cell writes what another cell reads
+  | 'unknown'; // Fallback for unclassified staleness
+
+/**
+ * Union of all reason types (backend + frontend).
+ */
+export type ReasonType = BackendReasonType | FrontendReasonType;
+
+/**
+ * Backend reason from kernel (as sent in staleness_reasons).
+ * Minimal structure matching flowbook/kernel/models.py Reason dataclass.
+ */
+export interface IBackendStalenessReason {
+  type: BackendReasonType;
+  loc?: string; // Variable or location involved (e.g., "x", "df")
+  cell_id?: string; // Cell that caused the staleness (actual ID, not @position)
+  expected_cell_id?: string; // For skipped writer: cell that should have provided the value
+}
+
+/**
+ * Frontend-computed reason with rich context for UI display.
+ * Built from kernel metadata by executionhook.ts.
+ */
+export interface IFrontendStalenessReason {
+  type: FrontendReasonType;
   causing_cell?: string; // actual cell ID
   variables?: string[];
   columns?: { [key: string]: string[] };
   message: string; // human-readable (@A notation)
 }
+
+/**
+ * Union type for staleness reasons - can be either backend or frontend format.
+ * Use type guards to distinguish:
+ *   'message' in reason → IFrontendStalenessReason
+ *   otherwise → IBackendStalenessReason
+ */
+export type IStalenessReason =
+  | IBackendStalenessReason
+  | IFrontendStalenessReason;
 
 export interface IViolationInfo {
   type: string; // "backward_mutation" | "forward_dependency" | "truncation"

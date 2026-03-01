@@ -16,7 +16,7 @@ import { Kernel, KernelMessage } from '@jupyterlab/services';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import {
   IReproducibilityMetadata,
-  IStalenessReason,
+  IFrontendStalenessReason,
   IViolationInfo
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
@@ -229,32 +229,27 @@ export class ReproducibilityExecutionHookManager {
       return;
     }
 
-    // Only process messages from our silent %cell_edited executions.
-    // Regular cell execution metadata is handled by _onCellExecuted.
-    const parentHeader = msg.parent_header;
-    const parentMsgId = 'msg_id' in parentHeader ? parentHeader.msg_id : '';
-
-    console.log(
-      'ReproducibilityExecutionHook: IOPub display_data received, parentMsgId =',
-      parentMsgId,
-      ', tracked =',
-      this._silentEditMsgIds.has(parentMsgId),
-      ', trackedIds =',
-      [...this._silentEditMsgIds]
-    );
-
-    if (!this._silentEditMsgIds.has(parentMsgId)) {
-      return;
-    }
-    this._silentEditMsgIds.delete(parentMsgId);
-
     const content = (msg as KernelMessage.IDisplayDataMsg).content;
     const flowbook = content.metadata?.flowbook as
       | IReproducibilityMetadata
       | undefined;
+
+    // Process any display_data with flowbook metadata (from %cell_edited, %flowbook_sync, etc.)
     if (!flowbook) {
       return;
     }
+
+    // Track which messages we've processed from our silent executions
+    const parentHeader = msg.parent_header;
+    const parentMsgId = 'msg_id' in parentHeader ? parentHeader.msg_id : '';
+    if (this._silentEditMsgIds.has(parentMsgId)) {
+      this._silentEditMsgIds.delete(parentMsgId);
+    }
+
+    console.log(
+      'ReproducibilityExecutionHook: IOPub flowbook metadata received, stale_cells =',
+      flowbook.stale_cells
+    );
 
     const panel = this._tracker.currentWidget;
     if (!panel) {
@@ -262,11 +257,6 @@ export class ReproducibilityExecutionHookManager {
     }
 
     this._processMetadataUpdate(panel, flowbook);
-
-    console.log(
-      'ReproducibilityExecutionHook: IOPub cell_edited update, stale_cells =',
-      flowbook.stale_cells
-    );
   }
 
   /**
@@ -501,18 +491,64 @@ export class ReproducibilityExecutionHookManager {
       // Compute newly-stale cells
       const newlyStale = [...newStaleSet].filter(id => !oldStale.has(id));
 
+      console.log(
+        'ReproducibilityExecutionHook: staleness_reasons from backend:',
+        metadata.staleness_reasons
+      );
+      console.log(
+        'ReproducibilityExecutionHook: newlyStale cells:',
+        newlyStale
+      );
+
       // Compute reason for each newly-stale cell
+      // Prefer backend-provided staleness_reasons, fall back to local computation
       for (const staleCellId of newlyStale) {
-        const reason = this._computeStalenessReason(
-          panel,
-          staleCellId,
-          metadata,
-          cellOrder
+        // Skip empty cells - they are always clean
+        const staleCell = this._findCell(panel, staleCellId);
+        if (staleCell) {
+          const codeModel = staleCell.model as ICodeCellModel;
+          const source = codeModel.sharedModel.getSource();
+          const isEmpty = !source || source.trim() === '';
+          if (isEmpty) {
+            console.log(
+              `ReproducibilityExecutionHook: cell ${staleCellId} is empty, skipping staleness reason`
+            );
+            continue;
+          }
+        }
+
+        const backendReasons = metadata.staleness_reasons?.[staleCellId];
+        let reason: IFrontendStalenessReason;
+
+        console.log(
+          `ReproducibilityExecutionHook: cell ${staleCellId} backendReasons:`,
+          backendReasons
         );
+
+        if (backendReasons && backendReasons.length > 0) {
+          // Use backend reason - convert to frontend format for cell metadata
+          reason = this._backendReasonToFrontend(backendReasons[0], cellOrder);
+          console.log(
+            `ReproducibilityExecutionHook: cell ${staleCellId} using backend reason:`,
+            reason
+          );
+        } else {
+          // Fall back to local computation
+          reason = this._computeStalenessReason(
+            panel,
+            staleCellId,
+            metadata,
+            cellOrder
+          );
+          console.log(
+            `ReproducibilityExecutionHook: cell ${staleCellId} using local reason:`,
+            reason
+          );
+        }
+
         stalenessManager.setReason(staleCellId, reason);
 
-        // Store structured metadata on the cell
-        const staleCell = this._findCell(panel, staleCellId);
+        // Store structured metadata on the cell (staleCell already found above)
         if (staleCell) {
           staleCell.model.setMetadata('flowbook_staleness', reason);
         }
@@ -538,6 +574,125 @@ export class ReproducibilityExecutionHookManager {
   }
 
   /**
+   * Convert a backend staleness reason to frontend format.
+   * Maps backend reason types to frontend types with human-readable messages.
+   */
+  private _backendReasonToFrontend(
+    backendReason: { type: string; loc?: string; cell_id?: string; expected_cell_id?: string },
+    cellOrder: string[]
+  ): IFrontendStalenessReason {
+    const cellId = backendReason.cell_id;
+    const expectedCellId = backendReason.expected_cell_id;
+    const loc = backendReason.loc;
+
+    let causingRef = '';
+    if (cellId) {
+      const causingIdx = cellOrder.indexOf(cellId);
+      causingRef = causingIdx >= 0 ? indexToAlpha(causingIdx) : cellId;
+    }
+
+    let expectedRef = '';
+    if (expectedCellId) {
+      const expectedIdx = cellOrder.indexOf(expectedCellId);
+      expectedRef = expectedIdx >= 0 ? indexToAlpha(expectedIdx) : expectedCellId;
+    }
+
+    switch (backendReason.type) {
+      case 'never_executed':
+        return {
+          type: 'unknown', // Use 'unknown' for non-variable-specific reasons
+          message: 'Cell has never been executed'
+        };
+      case 'code_changed':
+        return {
+          type: 'source_edited',
+          message: 'Source code was edited'
+        };
+      case 'input_changed':
+        // Normal case: show "x modified by @F"
+        if (loc && causingRef) {
+          return {
+            type: 'variable_modified',
+            causing_cell: cellId,
+            variables: [loc],
+            message: `\`${loc}\` modified by ${causingRef}`
+          };
+        }
+        return {
+          type: 'variable_modified',
+          causing_cell: cellId,
+          message: causingRef
+            ? `Input modified by ${causingRef}`
+            : 'Input was modified'
+        };
+      case 'skipped_upstream':
+        // Re-running won't help - need to run the expected cell first
+        if (loc && expectedRef) {
+          return {
+            type: 'variable_modified',
+            causing_cell: cellId,
+            variables: [loc],
+            message: `Run ${expectedRef} first (\`${loc}\` is from wrong source)`
+          };
+        }
+        return {
+          type: 'variable_modified',
+          causing_cell: cellId,
+          message: expectedRef
+            ? `Run ${expectedRef} first`
+            : 'Upstream cell was skipped'
+        };
+      case 'write_conflict':
+        if (loc && causingRef) {
+          return {
+            type: 'writer_conflict',
+            causing_cell: cellId,
+            variables: [loc],
+            message: `Write conflict on \`${loc}\` with ${causingRef}`
+          };
+        }
+        return {
+          type: 'writer_conflict',
+          causing_cell: cellId,
+          message: 'Write conflict detected'
+        };
+      case 'reads_from_later':
+        if (loc && causingRef) {
+          return {
+            type: 'unknown',
+            causing_cell: cellId,
+            message: `Reads \`${loc}\` from later cell ${causingRef}`
+          };
+        }
+        return {
+          type: 'unknown',
+          causing_cell: cellId,
+          message: 'Reads from a later cell'
+        };
+      case 'source_deleted':
+        return {
+          type: 'unknown',
+          message: loc
+            ? `Source of \`${loc}\` was deleted`
+            : 'Source cell was deleted'
+        };
+      case 'order_changed':
+        return {
+          type: 'unknown',
+          message: 'Cell order changed'
+        };
+      default:
+        return {
+          type: 'unknown',
+          causing_cell: cellId,
+          message: causingRef
+            ? `Dependencies changed by ${causingRef}`
+            : 'Cell is stale'
+        };
+    }
+  }
+
+  /**
    * Compute why a cell became stale.
    */
   private _computeStalenessReason(
@@ -545,7 +700,7 @@ export class ReproducibilityExecutionHookManager {
     staleCellId: string,
     metadata: IReproducibilityMetadata,
     cellOrder: string[]
-  ): IStalenessReason {
+  ): IFrontendStalenessReason {
     const causingCellId = metadata.cell_id;
 
     // Edit case: the cell that triggered the update is the stale cell itself
@@ -675,7 +830,8 @@ export class ReproducibilityExecutionHookManager {
 
     // Different message format based on violation type
     // If mutating cell is no longer in notebook, treat as deleted cell dependency
-    const mutatingCellDeleted = mutIdx < 0 && violation.mutating_cell !== '<deleted>';
+    const mutatingCellDeleted =
+      mutIdx < 0 && violation.mutating_cell !== '<deleted>';
     const isForwardContamination =
       violation.type === 'forward_dependency' && !mutatingCellDeleted;
     const isDeletedCellDependency =
@@ -708,7 +864,10 @@ export class ReproducibilityExecutionHookManager {
           'text/html': `<div class="flowbook-violation-notice"><b>\u274c Forward Contamination: ${htmlVars} written by downstream cell ${mutRef}. Re-run upstream cells to restore reproducible values.</b></div>`,
           'text/plain': `\u274c Forward Contamination: ${message}`
         },
-        metadata: { flowbook_violation_notice: true, flowbook_is_contamination: true }
+        metadata: {
+          flowbook_violation_notice: true,
+          flowbook_is_contamination: true
+        }
       };
     } else {
       // Backward violation: build detailed message
@@ -718,21 +877,29 @@ export class ReproducibilityExecutionHookManager {
       // Header line
       const headerMsg = `Cell ${mutRef} modified ${vars} which Cell ${affRef} (earlier) reads.`;
       const headerHtml = headerMsg.replace(/`([^`]+)`/g, '<code>$1</code>');
-      htmlParts.push(`<div class="flowbook-violation-header">\u274c <b>Not Reproducible</b>: ${headerHtml}</div>`);
+      htmlParts.push(
+        `<div class="flowbook-violation-header">\u274c <b>Not Reproducible</b>: ${headerHtml}</div>`
+      );
       plainParts.push(`\u274c Not Reproducible: ${headerMsg}`);
 
       // What the earlier cell reads (structural_reads_detail)
       if (violation.structural_reads_detail) {
         const readsHtml: string[] = [];
         const readsPlain: string[] = [];
-        for (const [varName, attrs] of Object.entries(violation.structural_reads_detail)) {
+        for (const [varName, attrs] of Object.entries(
+          violation.structural_reads_detail
+        )) {
           for (const [attr, value] of Object.entries(attrs)) {
-            readsHtml.push(`<li><code>${varName}.${attr}</code> \u2192 ${this._escapeHtml(String(value))}</li>`);
+            readsHtml.push(
+              `<li><code>${varName}.${attr}</code> \u2192 ${this._escapeHtml(String(value))}</li>`
+            );
             readsPlain.push(`  \u2022 ${varName}.${attr} \u2192 ${value}`);
           }
         }
         if (readsHtml.length > 0) {
-          htmlParts.push(`<div class="flowbook-violation-section"><b>What Cell ${affRef} read:</b><ul>${readsHtml.join('')}</ul></div>`);
+          htmlParts.push(
+            `<div class="flowbook-violation-section"><b>What Cell ${affRef} read:</b><ul>${readsHtml.join('')}</ul></div>`
+          );
           plainParts.push(`What Cell ${affRef} read:`);
           plainParts.push(...readsPlain);
         }
@@ -740,9 +907,13 @@ export class ReproducibilityExecutionHookManager {
 
       // What this cell changed (changes_detail)
       if (violation.changes_detail && violation.changes_detail.length > 0) {
-        const changesHtml = violation.changes_detail.map(c => `<li>${this._escapeHtml(c)}</li>`).join('');
+        const changesHtml = violation.changes_detail
+          .map(c => `<li>${this._escapeHtml(c)}</li>`)
+          .join('');
         const changesPlain = violation.changes_detail.map(c => `  \u2022 ${c}`);
-        htmlParts.push(`<div class="flowbook-violation-section"><b>What Cell ${mutRef} changed:</b><ul>${changesHtml}</ul></div>`);
+        htmlParts.push(
+          `<div class="flowbook-violation-section"><b>What Cell ${mutRef} changed:</b><ul>${changesHtml}</ul></div>`
+        );
         plainParts.push(`What Cell ${mutRef} changed:`);
         plainParts.push(...changesPlain);
       }
@@ -764,7 +935,8 @@ export class ReproducibilityExecutionHookManager {
     const allOutputs: IOutput[] = [];
 
     // First, add staleness notice if present (but skip if contamination - it already implies stale)
-    const isContaminationLike = isForwardContamination || isDeletedCellDependency;
+    const isContaminationLike =
+      isForwardContamination || isDeletedCellDependency;
     if (!isContaminationLike) {
       for (let i = 0; i < outputs.length; i++) {
         const out = outputs.get(i).toJSON() as IOutput;
