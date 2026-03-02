@@ -1318,19 +1318,24 @@ def run_flowbook_timing(
                         ))
                         log(f"  Rerun Execute: {execute_ms:.1f}ms, Code: {code_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
 
-        # Compute checking summary
+        # Compute checking summary (exclude never_executed cells - they are empty code cells)
         clean_count = 0
         stale_count = 0
         reason_counts: Dict[str, int] = {}
         for cell in results.cells:
             if cell.checking_result:
+                # Skip cells that only have never_executed reason (empty code cells)
+                reasons = cell.checking_result.reasons
+                if reasons and all(r.get("type") == "never_executed" for r in reasons):
+                    continue
                 if cell.checking_result.cell_status == "clean":
                     clean_count += 1
                 else:
                     stale_count += 1
-                    for reason in cell.checking_result.reasons:
+                    for reason in reasons:
                         rtype = reason.get("type", "unknown")
-                        reason_counts[rtype] = reason_counts.get(rtype, 0) + 1
+                        if rtype != "never_executed":  # Don't count never_executed
+                            reason_counts[rtype] = reason_counts.get(rtype, 0) + 1
 
         results.totals = {
             "execute_duration_ms": total_execute_ms,
@@ -2167,7 +2172,7 @@ class CompareBaselineCommand(NotebookCommand):
                     log(f"  FlowBook check time:  {rerun_check:,.1f}ms")
                     log("")
 
-                # Checking results summary
+                # Checking results summary (exclude never_executed - empty code cells)
                 if flowbook_timing and flowbook_timing.cells:
                     clean_count = 0
                     stale_count = 0
@@ -2175,13 +2180,18 @@ class CompareBaselineCommand(NotebookCommand):
 
                     for cell in flowbook_timing.cells:
                         if cell.checking_result:
+                            # Skip cells that only have never_executed reason (empty code cells)
+                            reasons = cell.checking_result.reasons
+                            if reasons and all(r.get("type") == "never_executed" for r in reasons):
+                                continue
                             if cell.checking_result.cell_status == "clean":
                                 clean_count += 1
                             else:
                                 stale_count += 1
-                                for reason in cell.checking_result.reasons:
+                                for reason in reasons:
                                     rtype = reason.get("type", "unknown")
-                                    reason_counts[rtype] = reason_counts.get(rtype, 0) + 1
+                                    if rtype != "never_executed":  # Don't count never_executed
+                                        reason_counts[rtype] = reason_counts.get(rtype, 0) + 1
 
                     log("CHECKING RESULTS:")
                     log(f"  Clean cells:          {clean_count}")
