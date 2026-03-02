@@ -1,15 +1,167 @@
 """
 Data models for Reproducibility.
+
+This module defines the core data structures for the reproducibility system,
+mapping to the formal specification in main.tex and FORMAL_DEVELOPMENT.md.
 """
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Dict, FrozenSet, List, Optional, Set, TYPE_CHECKING, Union
 
 from flowbook.kernel_support.models import TrackingData
 
 if TYPE_CHECKING:
     from flowbook.kernel.changes import Change
+
+
+# =============================================================================
+# Location Types (Formal: ℓ ∈ Loc)
+# =============================================================================
+# These types implement the formal location specification:
+#   ℓ ∈ Loc ::= Var(x) | Col(df, c) | File(path) | Structural(df, attr)
+#
+# Formal ref: main.tex §1, FORMAL_DEVELOPMENT.md §1.1, §8.1-8.3
+# =============================================================================
+
+
+class LocType(str, Enum):
+    """Type of location in the formal model."""
+
+    VAR = "var"           # Variable: Var(x)
+    COLUMN = "column"     # DataFrame column: Col(df, c)
+    FILE = "file"         # File path: File(path)
+    STRUCTURAL = "struct" # Structural attribute: Structural(df, attr)
+
+
+@dataclass(frozen=True)
+class Loc:
+    """
+    A location in the formal model.
+
+    Formal ref: main.tex §1, FORMAL_DEVELOPMENT.md §1.1
+
+    Locations represent the granular units of state that cells read and write.
+    The formal model uses: ℓ ∈ Loc ::= Var(x) | Col(df, c) | File(path) | Structural(df, attr)
+
+    Examples:
+        Loc.var("x")                    # Variable x
+        Loc.column("df", "price")       # Column df['price']
+        Loc.file("/path/to/data.csv")   # File
+        Loc.structural("df", "shape")   # Structural attribute df.shape
+    """
+
+    type: LocType
+    name: str
+    qualifier: Optional[str] = None  # For columns/structural: the variable name
+
+    @classmethod
+    def var(cls, name: str) -> "Loc":
+        """Create a variable location: Var(name)."""
+        return cls(type=LocType.VAR, name=name)
+
+    @classmethod
+    def column(cls, var: str, col: str) -> "Loc":
+        """Create a column location: Col(var, col)."""
+        return cls(type=LocType.COLUMN, name=col, qualifier=var)
+
+    @classmethod
+    def file(cls, path: str) -> "Loc":
+        """Create a file location: File(path)."""
+        return cls(type=LocType.FILE, name=path)
+
+    @classmethod
+    def structural(cls, var: str, attr: str) -> "Loc":
+        """Create a structural attribute location: Structural(var, attr)."""
+        return cls(type=LocType.STRUCTURAL, name=attr, qualifier=var)
+
+    def __str__(self) -> str:
+        if self.type == LocType.VAR:
+            return f"Var({self.name})"
+        elif self.type == LocType.COLUMN:
+            return f"Col({self.qualifier}, {self.name})"
+        elif self.type == LocType.FILE:
+            return f"File({self.name})"
+        else:
+            return f"Structural({self.qualifier}, {self.name})"
+
+
+# Type alias for a set of locations
+LocSet = FrozenSet[Loc]
+
+
+def tracking_to_read_locs(tracking: TrackingData) -> LocSet:
+    """
+    Convert TrackingData reads to a set of Loc objects.
+
+    Formal ref: Rᵢ in main.tex, FORMAL_DEVELOPMENT.md §1.2
+
+    This creates the unified read set Rᵢ that includes:
+    - Variable reads (Var)
+    - Column reads (Col)
+    - File reads (File)
+    - Structural reads (Structural)
+    """
+    locs: Set[Loc] = set()
+
+    # Variable reads
+    for var in tracking.reads_before_writes:
+        locs.add(Loc.var(var))
+
+    # Column reads
+    for var, cols in tracking.column_reads_before_writes.items():
+        for col in cols:
+            locs.add(Loc.column(var, col))
+
+    # File reads
+    for path in tracking.file_reads_before_writes:
+        locs.add(Loc.file(path))
+
+    # Structural reads
+    for var, attrs in tracking.structural_reads.items():
+        for attr in attrs:
+            locs.add(Loc.structural(var, attr))
+
+    return frozenset(locs)
+
+
+def tracking_to_write_locs(tracking: TrackingData) -> LocSet:
+    """
+    Convert TrackingData writes to a set of Loc objects.
+
+    Formal ref: Wᵢ in main.tex, FORMAL_DEVELOPMENT.md §1.2
+
+    This creates the unified write set Wᵢ that includes:
+    - Variable writes (Var)
+    - Column writes (Col)
+    - File writes (File)
+    """
+    locs: Set[Loc] = set()
+
+    # Variable writes
+    for var in tracking.writes:
+        locs.add(Loc.var(var))
+
+    # Column writes
+    for var, cols in tracking.column_writes.items():
+        for col in cols:
+            locs.add(Loc.column(var, col))
+
+    # File writes
+    for path in tracking.file_writes:
+        locs.add(Loc.file(path))
+
+    return frozenset(locs)
+
+
+def locs_intersect(a: LocSet, b: LocSet) -> bool:
+    """Check if two location sets have any overlap."""
+    return bool(a & b)
+
+
+def get_var_locs(locs: LocSet) -> Set[str]:
+    """Extract just the variable names from a LocSet."""
+    return {loc.name for loc in locs if loc.type == LocType.VAR}
 
 
 # =============================================================================

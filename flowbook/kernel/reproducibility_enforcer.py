@@ -249,6 +249,269 @@ OPT_CONFLICT_LOOP_SKIP = _env_flag("FLOWBOOK_OPT_CONFLICT_LOOP_SKIP", default=Tr
 OPT_ACCESSED_VARS_ONLY = _env_flag("FLOWBOOK_OPT_ACCESSED_VARS_ONLY", default=True)
 
 
+# ============================================================================
+# FORMAL PREDICATE HELPERS
+# ============================================================================
+# These functions implement the formal predicates from main.tex and
+# FORMAL_DEVELOPMENT.md §3.2-3.3. They provide a direct mapping between
+# the formal specification and the implementation.
+#
+# Notation:
+#   R, W = read/write sets indexed by cell position
+#   i, j = cell positions in document order
+#   n = total number of cells
+#
+# Location types (Loc):
+#   Var(x)           - Variable
+#   Col(df, c)       - DataFrame column
+#   File(path)       - File path
+#   Structural(df, a) - Structural attribute
+#
+# The predicates below work with Set[str] for backward compatibility.
+# For full Loc-based predicates, see flowbook.kernel.models:
+#   tracking_to_read_locs(), tracking_to_write_locs(), locs_intersect()
+# ============================================================================
+
+
+def _writes_in_range(
+    notebook_state: "NotebookState",
+    cell_order: List[str],
+    start: int,
+    end: int,
+) -> Set[str]:
+    """
+    Compute W_{start..end} = ⋃_{k ∈ [start..end]} Wₖ
+
+    Formal ref: FORMAL_DEVELOPMENT.md §1.3
+    """
+    result: Set[str] = set()
+    for k in range(start, min(end + 1, len(cell_order))):
+        cell_id = cell_order[k]
+        tracking = notebook_state.get_tracking(cell_id)
+        if tracking is not None:
+            result.update(tracking.writes)
+    return result
+
+
+def _reads_in_range(
+    notebook_state: "NotebookState",
+    cell_order: List[str],
+    start: int,
+    end: int,
+) -> Set[str]:
+    """
+    Compute R_{start..end} = ⋃_{k ∈ [start..end]} Rₖ
+
+    Formal ref: FORMAL_DEVELOPMENT.md §1.3
+    """
+    result: Set[str] = set()
+    for k in range(start, min(end + 1, len(cell_order))):
+        cell_id = cell_order[k]
+        tracking = notebook_state.get_tracking(cell_id)
+        if tracking is not None:
+            result.update(tracking.reads_before_writes)
+    return result
+
+
+def _overwritten(
+    notebook_state: "NotebookState",
+    cell_order: List[str],
+    i: int,
+) -> Set[str]:
+    """
+    Overwritten(W, i) ≝ W_{i+1..n}
+
+    The set of locations written by cells after position i.
+
+    Formal ref: main.tex Definition (Overwritten), FORMAL_DEVELOPMENT.md §1.4.1
+    """
+    return _writes_in_range(notebook_state, cell_order, i + 1, len(cell_order) - 1)
+
+
+def _forward_stale(
+    R_j: Set[str],
+    W_j: Set[str],
+    W_i: Set[str],
+    i: int,
+    j: int,
+) -> bool:
+    """
+    ForwardStale(R, W, i, j) ≝ j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+
+    Cell j (after i) becomes stale if i wrote to a location that j reads or writes.
+
+    Formal ref: main.tex §Staleness predicates, FORMAL_DEVELOPMENT.md §3.3
+
+    Args:
+        R_j: Read set of cell j
+        W_j: Write set of cell j
+        W_i: Write set of cell i (the executing cell)
+        i: Position of executing cell
+        j: Position of cell to check
+
+    Returns:
+        True if cell j should become stale due to cell i's execution
+    """
+    if j <= i:
+        return False
+    return bool(W_i & (R_j | W_j))
+
+
+def _backward_stale(
+    W_old: Dict[str, Set[str]],
+    W_new_i: Set[str],
+    W_old_i: Set[str],
+    last_writer_func,
+    i: int,
+    j: int,
+) -> bool:
+    """
+    BackwardStale(W, W', i, j) ≝ j < i ∧ j = LastWriter(W, i, y) for some y ∈ Wᵢ \ W'ᵢ
+
+    Cell j (before i) becomes stale if it was the last writer of a location
+    that cell i no longer writes (i.e., i's write set shrank).
+
+    Formal ref: main.tex §Staleness predicates, FORMAL_DEVELOPMENT.md §3.3
+
+    Args:
+        W_old: Old write sets by cell_id
+        W_new_i: New write set of cell i
+        W_old_i: Old write set of cell i
+        last_writer_func: Function(var, cell_id) -> last writer cell_id
+        i: Position of executing cell
+        j: Position of cell to check
+
+    Returns:
+        True if cell j should become stale due to cell i's changed writes
+    """
+    if j >= i:
+        return False
+    # Find locations that i used to write but no longer writes
+    removed_writes = W_old_i - W_new_i
+    for y in removed_writes:
+        # Check if j was the last writer of y before cell i
+        writer = last_writer_func(y, i)
+        if writer is not None and writer == j:
+            return True
+    return False
+
+
+def _reads_residual_write(
+    R_j: Set[str],
+    w: Set[str],
+) -> bool:
+    """
+    ReadsResidualWrite(R', w, j) ≝ R'ⱼ ∩ w ≠ ∅
+
+    Cell j becomes stale if it reads from deleted cell's writes.
+
+    Formal ref: main.tex §Staleness predicates, FORMAL_DEVELOPMENT.md §3.3
+
+    Args:
+        R_j: Read set of cell j (in the shifted state after deletion)
+        w: Write set of the deleted cell (captured before deletion)
+
+    Returns:
+        True if cell j reads any location written by the deleted cell
+    """
+    return bool(R_j & w)
+
+
+def _write_before_read(
+    R_i: Set[str],
+    W_before_i: Set[str],
+) -> bool:
+    """
+    WriteBeforeRead(R, W, i) ≝ Rᵢ ⊆ W_{1..i-1}
+
+    All reads come from writes by earlier cells.
+
+    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
+
+    Args:
+        R_i: Read set of cell i
+        W_before_i: Union of write sets of cells 1..i-1
+
+    Returns:
+        True if the validity predicate holds
+    """
+    return R_i <= W_before_i
+
+
+def _no_read_before_write(
+    R_i: Set[str],
+    W_after_i: Set[str],
+) -> bool:
+    """
+    NoReadBeforeWrite(R, W, i) ≝ Rᵢ ∩ W_{i+1..n} = ∅
+
+    Cell i does not read locations that will be written by later cells.
+    (This detects forward contamination at the variable level.)
+
+    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
+
+    Args:
+        R_i: Read set of cell i
+        W_after_i: Union of write sets of cells i+1..n
+
+    Returns:
+        True if the validity predicate holds
+    """
+    return not bool(R_i & W_after_i)
+
+
+def _no_write_after_read(
+    W_i: Set[str],
+    R_before_i: Set[str],
+) -> bool:
+    """
+    NoWriteAfterRead(R, W, i) ≝ Wᵢ ∩ R_{1..i-1} = ∅
+
+    Cell i does not write locations that earlier cells read.
+    (This is the backward mutation check at the variable level.)
+
+    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
+
+    Args:
+        W_i: Write set of cell i
+        R_before_i: Union of read sets of cells 1..i-1
+
+    Returns:
+        True if the validity predicate holds (no backward mutation)
+    """
+    return not bool(W_i & R_before_i)
+
+
+def _no_read_and_write(
+    R_i: Set[str],
+    W_i: Set[str],
+) -> bool:
+    """
+    NoReadAndWrite(R, W, i) ≝ Rᵢ ∩ Wᵢ = ∅
+
+    Cell i does not both read and write the same location.
+    (This simplifies reasoning; actual impl allows read-then-write.)
+
+    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
+
+    Note: The implementation uses reads_before_writes which already
+    excludes locations that are written before being read.
+
+    Args:
+        R_i: Read set of cell i
+        W_i: Write set of cell i
+
+    Returns:
+        True if the validity predicate holds
+    """
+    return not bool(R_i & W_i)
+
+
+# ============================================================================
+# ALIAS EXPANSION
+# ============================================================================
+
+
 def _expand_with_deep_aliases(
     accessed_vars: Set[str],
     pre_checkpoint,
@@ -428,14 +691,20 @@ class ReproducibilityEnforcer:
     def _handle_deletions(
         self, deleted_cells: List[str], old_order: List[str]
     ) -> tuple:
-        """Handle DELETE transitions (§2.4).
+        """Handle DELETE transitions — Inst-Delete rule.
 
-        For each deleted cell with an execution record:
-        - Find cells that read the deleted cell's writes
-        - Mark them stale
+        Formal ref: ReadsResidualWrite(R', w, j) in main.tex §Staleness predicates,
+                    FORMAL_DEVELOPMENT.md §3.3, §3.5 [Inst-Delete]
+
+        The formal predicate is: R'ⱼ ∩ w ≠ ∅
+        Where w = Wᵢ (the deleted cell's writes) captured before deletion.
+
+        For each deleted cell i with an execution record:
+        - Capture w = Wᵢ (the deleted cell's writes)
+        - For each remaining cell j: if ReadsResidualWrite(R', w, j), mark j stale
 
         Args:
-            deleted_cells: List of deleted cell IDs
+            deleted_cells: List of deleted cell IDs (cell i being deleted)
             old_order: Cell order before deletion
 
         Returns:
@@ -491,7 +760,12 @@ class ReproducibilityEnforcer:
     def _handle_moves(
         self, moved_cells: List[MovedCell], old_order: List[str]
     ) -> tuple:
-        """Handle MOVE transitions (§2.6).
+        """Handle MOVE transitions — Inst-Move-Down/Up rules.
+
+        Formal ref: main.tex §3.5 [Inst-Move-Down], [Inst-Move-Up],
+                    FORMAL_DEVELOPMENT.md §3.5
+
+        Move is the composition of Inst-Delete followed by Inst-Insert.
 
         Move forward (p < q):
             - Crossed cells that read moved cell's writes → stale (lost dependency)
@@ -909,10 +1183,16 @@ class ReproducibilityEnforcer:
         tracking: TrackingData,
     ) -> Tuple[Optional[ReproducibilityViolation], MemoryCheckpointDiffResult, List]:
         """
-        Check if current cell causes a backward mutation — BackConflict (Def 1.8.2).
+        Check if current cell causes a backward mutation.
+
+        Formal ref: NoWriteAfterRead(R, W, i) in main.tex §Validity predicates,
+                    FORMAL_DEVELOPMENT.md §3.2
+
+        The formal predicate is: Wᵢ ∩ R_{1..i-1} = ∅
+        This method implements a refined version with column-level granularity.
 
         A backward mutation occurs when a cell modifies a variable that an
-        earlier FRESH cell (in notebook order) reads. Stale cells are excluded
+        earlier CLEAN cell (in notebook order) reads. STALE cells are excluded
         from the check per the formal definition. This prevents hidden dependencies
         where earlier cells depend on later cells having run first.
 
@@ -921,10 +1201,10 @@ class ReproducibilityEnforcer:
 
         Args:
             cell_id: ID of the cell that just executed
-            my_position: Position in document order
+            my_position: Position in document order (i in formal notation)
             pre_checkpoint: Snapshot before execution (Checkpoint)
             namespace: Live user namespace dict (post-execution state)
-            tracking: TrackingData with reads/writes
+            tracking: TrackingData with reads/writes (Rᵢ, Wᵢ)
 
         Returns:
             Tuple of (violation, diff_result, typed_changes):
@@ -1174,7 +1454,13 @@ class ReproducibilityEnforcer:
         tracking: TrackingData,
     ) -> Optional[ReproducibilityViolation]:
         """
-        Check if current cell reads from a later cell — FwdContaminated (Def 1.8.3).
+        Check if current cell reads from a later cell (forward contamination).
+
+        Formal ref: NoReadBeforeWrite(R, W, i) in main.tex §Validity predicates,
+                    FORMAL_DEVELOPMENT.md §3.2
+
+        The formal predicate is: Rᵢ ∩ W_{i+1..n} = ∅
+        This method implements a refined version with column-level granularity.
 
         A forward dependency (contamination) occurs when:
         1. A cell reads a variable that a later cell (in document order) already wrote
@@ -1182,12 +1468,12 @@ class ReproducibilityEnforcer:
 
         Uses two complementary checks:
         - typed_changes loop: Column-level precision for current writes (via ConflictResolver)
-        - Provenance check: Catches residual values from edited cells (§1.8.5)
+        - Provenance check: Catches residual values from edited cells
 
         Args:
-            cell_id: ID of the cell that just executed (the reading cell)
-            my_position: Position in document order
-            tracking: TrackingData with reads for this cell
+            cell_id: ID of the cell that just executed (cell i, the reading cell)
+            my_position: Position in document order (i in formal notation)
+            tracking: TrackingData with reads for this cell (Rᵢ)
 
         Returns:
             ReproducibilityViolation with violation_type="forward_dependency" if detected, None otherwise
@@ -1341,21 +1627,27 @@ class ReproducibilityEnforcer:
         changed_file_paths: Optional[Set[str]] = None,
     ) -> Tuple[List[str], List[str]]:
         """
-        Incrementally update staleness — StaleFwd (Def 1.8.1).
+        Incrementally update staleness for forward propagation.
+
+        Formal ref: ForwardStale(R, W, i, j) in main.tex §Staleness predicates,
+                    FORMAL_DEVELOPMENT.md §3.3
+
+        The formal predicate is: j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+        This method implements ForwardStale by checking each cell j > i.
 
         Only checks cells BELOW the executed cell in document order (forward propagation).
         Cells above are not checked - backward dependencies are handled by violation detection.
 
         Skips cells that don't need checking:
-        - Cells already marked stale
+        - Cells already marked STALE
         - Cells whose reads don't overlap with changed variables/columns
 
         Args:
             current_namespace: The current live user namespace dict
-            changed_vars: Set of variable names that changed in this execution
+            changed_vars: Set of variable names that changed (Wᵢ in formal notation)
             column_changed: Dict mapping var names to lists of changed column names
-            just_executed: The cell_id that just executed (already marked fresh)
-            my_position: Position of the executed cell in document order
+            just_executed: The cell_id that just executed (cell i, already marked CLEAN)
+            my_position: Position of the executed cell (i in formal notation)
             changed_file_paths: Optional set of file paths that changed
 
         Returns:

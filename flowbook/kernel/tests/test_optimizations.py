@@ -214,10 +214,10 @@ class TestConflictLoopSkipOptimization:
         )
         assert result_a.violation is None
         # The record should have typed_changes cached
-        record = self.helper.sdc.records.get("a")
-        assert record is not None
+        assert self.helper.sdc._notebook_state.has_record("a")
         # typed_changes should contain the creation of x
-        assert len(record.typed_changes) > 0
+        typed_changes = self.helper.sdc._notebook_state.get_typed_changes("a")
+        assert len(typed_changes) > 0
 
     def test_optimization_preserves_changed_vars(self):
         """Optimization should still compute changed_vars for staleness."""

@@ -1,987 +1,464 @@
-# Formal Development: Prefix-Consistent Read Semantics for Computational Notebooks
+# Formal Development: Reproducibility Semantics for Computational Notebooks
 
-We formalize notebook execution using a trace semantics together with a runtime
-monitor that enforces _prefix-consistent read semantics_. We first present a
-core model without edits (Part I) and then extend it to handle interleavings of
-execution and cell modification (Part II).
+This document formalizes notebook execution using a two-layer semantics:
+a **standard semantics** for basic notebook operations, and an
+**instrumented semantics** that tracks read/write sets and cell staleness
+to enforce reproducibility.
 
 **Goals.** We prove:
 
-1. The monitor invariant is preserved by every transition.
-2. Accepted executions satisfy prefix-consistent reads: each cell's observed
-   values match those of a clean top-to-bottom execution at the corresponding
-   position.
-3. With edits, quiescence (no stale cells) implies reproducibility.
+1. The initial notebook state is well-formed.
+2. Every notebook operation preserves well-formedness.
+3. Well-formed + all cells clean ⟹ a serial execution exists that reproduces the outputs.
 
 ---
 
-## Part I — Core Model (No Edits)
+## 1. State Representation
 
-### 1.1 Stores and Locations
+### 1.1 Standard State
 
-Locations represent mutable kernel state:
+A standard notebook state is a tuple:
 
-    ℓ ∈ Loc  ::=  Var(x)  |  Col(d,c)
-
-A store is a finite partial map:
-
-    σ : Loc ⇀ Val
-
-We write σ[ℓ ↦ v] for store update, σ|\_S for restriction to S ⊆ Loc, and
-σ₁ =\_S σ₂ when σ₁|\_S = σ₂|\_S.
-
-The _delta_ of two stores is:
-
-    Δ(σ, σ') = { ℓ ∈ dom(σ) ∪ dom(σ') | σ(ℓ) ≠ σ'(ℓ) }
-
-### 1.2 Events and Traces
-
-Cell execution produces memory-style events:
-
-    α ∈ Event  ::=  R(ℓ,v)  |  W(ℓ,v)
-
-A trace is a finite sequence of events. We write ε for the empty trace,
-α · t for cons, t₁ · t₂ for concatenation, and loc(α) for the location
-mentioned by event α.
-
-**Definition 1.2.1 (Trace Replay).**
-
-    apply(ε, σ)           = σ
-    apply(R(ℓ,v) · t, σ)  = apply(t, σ)
-    apply(W(ℓ,v) · t, σ)  = apply(t, σ[ℓ ↦ v])
-
-### 1.3 Instrumented Cell Semantics
-
-Each cell contains opaque code C ∈ Code. Execution is given by a judgment:
-
-    σ ⇓_C (σ', t)
-
-meaning: starting from store σ, cell C produces final store σ' and trace t.
-
-We impose two well-formedness axioms.
-
-**Axiom 1.3.1 (Read Validity).** If σ ⇓_C (σ', t) and t = t₁ · R(ℓ,v) · t₂,
-then apply(t₁, σ)(ℓ) = v.
-
-**Axiom 1.3.2 (Write Faithfulness).** If σ ⇓_C (σ', t), then apply(t, σ) = σ'.
-
-Together these say that traces faithfully describe store behavior: each read
-returns the current value, and the final store is the result of replaying all
-writes.
-
-> _Remark._ We do not assume determinism. Cell execution may be
-> nondeterministic (e.g., random seeds, timestamps, file I/O). Our results are
-> statements about the execution that actually occurred, not hypothetical
-> replays.
-
-### 1.4 Observed and Modified Locations
-
-**Definition 1.4.1 (First Event).** Let first(t, ℓ) be the earliest event in t
-mentioning ℓ, if any.
-
-**Definition 1.4.2 (Read-Before-Write Set).**
-
-    RBW(t) = { ℓ | first(t, ℓ) = R(ℓ, _) }
-
-These are locations whose values originate in the pre-store.
-
-**Definition 1.4.3 (Write Set).**
-
-    WS(t) = { ℓ | ∃v. W(ℓ,v) ∈ t }
-
-**Lemma 1.4.4 (RBW Value Lemma).** If σ ⇓_C (σ', t) and ℓ ∈ RBW(t), then
-the first read of ℓ in t returns σ(ℓ).
-
-_Proof._ By definition, first(t, ℓ) = R(ℓ, v), so t = t₁ · R(ℓ,v) · t₂ where
-t₁ contains no event on ℓ. Since t₁ contains no write to ℓ,
-apply(t₁, σ)(ℓ) = σ(ℓ). By Read Validity, v = σ(ℓ). ∎
-
-**Lemma 1.4.5 (Delta–Write Containment).** If σ ⇓_C (σ', t), then
-Δ(σ, σ') ⊆ WS(t).
-
-_Proof._ If ℓ ∈ Δ(σ, σ') then σ(ℓ) ≠ σ'(ℓ). By Write Faithfulness,
-σ' = apply(t, σ). If no write to ℓ occurs in t, then apply(t, σ)(ℓ) = σ(ℓ),
-contradicting σ(ℓ) ≠ σ'(ℓ). ∎
-
-### 1.5 Sequential Reference Execution
-
-Let the notebook consist of cells C₁, …, Cₙ. The _canonical sequential
-execution_ defines prefix stores:
-
-    σ₀ = σ_init
-    σ_{i-1} ⇓_{Cᵢ} (σᵢ, tᵢ^seq)     for i = 1, …, n
-
-The sequential execution need not be deterministic. We fix one such execution
-as the reference. (Our main theorem shows the interactive execution's observed
-values match _some_ sequential execution's prefix stores; determinism would
-strengthen this to _the_ sequential execution.)
-
-### 1.6 Monitor Configuration
-
-A runtime monitor configuration is a tuple:
-
-    C = ⟨Σ, Rec, T, Prov⟩
+```
+S = (C, O, Σ)
+```
 
 where:
 
-- Σ : Store — the current live kernel store.
-- Rec : {1..n} → RecordEntry_⊥ — maps each cell index to ⊥ (unexecuted) or:
+- `C = C₁, ..., Cₙ` — sequence of cell source code
+- `O = O₁, ..., Oₙ` — sequence of cell outputs (⊥ if not yet executed)
+- `Σ : Loc → Value` — current variable store (kernel state)
 
-      Rec[i] = (σ^pre_i, σ^post_i, t_i, status_i)
+### 1.2 Instrumentation
 
-  where status_i ∈ {fresh, stale}.
+An instrumentation is a tuple:
 
-- T : Trace — the concatenation of accepted execution traces.
+```
+I = (T, R, W)
+```
 
-- Prov : Loc → CellId_⊥ — provenance map tracking which cell last wrote each location (see §1.8.5).
+where:
 
-We write Obs_i for RBW(t_i) when Rec[i] ≠ ⊥.
+- `Tᵢ ∈ {CLEAN, STALE}` — status of cell i
+- `Rᵢ ⊆ Loc` — set of locations read by cell i
+- `Wᵢ ⊆ Loc` — set of locations written by cell i
 
-**Initial configuration:**
+An **instrumented state** combines both: `S · I`.
 
-    C₀ = ⟨σ_init, λi. ⊥, ε, λℓ. ⊥⟩
+### 1.3 Notation
 
-### 1.7 Monitor Invariant
+We use the following notation for collecting reads/writes over ranges:
 
-**Definition 1.7.1 (Consistency Invariant).**
+```
+W_{i..j} = ⋃_{k ∈ [i..j]} Wₖ
+R_{i..j} = ⋃_{k ∈ [i..j]} Rₖ
+```
 
-    Cons(⟨Σ, Rec, T⟩) ≡
-      ∀k. Rec[k] = (σ^pre_k, _, t_k, fresh)
-        ⟹  Σ =_{Obs_k} σ^pre_k
+Sequence concatenation: `X_{1..i-1}, c, X_{i..n}` inserts element `c` at position `i`.
 
-For every fresh cell k, the current live store agrees with k's pre-checkpoint
-on all locations that k read before writing.
+### 1.4 Auxiliary Definitions
 
-**Proposition 1.7.2.** Cons(C₀).
+**Definition 1.4.1 (Overwritten).**
+```
+Overwritten(W, i) ≝ W_{i+1..n}
+```
+The set of locations written by cells after position i.
 
-_Proof._ No cell has a record; the quantifier is vacuously satisfied. ∎
-
-### 1.8 Small-Step Monitor Transitions
-
-We define transitions C ⟹ C'. The user selects a cell i to execute.
-
-#### Auxiliary Definitions
-
-**Definition 1.8.1 (Forward Staleness).** Given a set of changed locations Δ
-relative to the live store and the index i of the executed cell:
-
-    StaleFwd(Rec, Δ, i) = Rec'  where
-      Rec'[k] = Rec[k] with status := stale
-        if k > i, Rec[k] fresh, and Obs_k ∩ Δ ≠ ∅
-      Rec'[k] = Rec[k]
-        otherwise
-
-Forward staleness applies only to cells _after_ i in notebook order.
-Intuitively, cell i's execution changed locations that a later cell k had
-previously read. In top-to-bottom order, k runs after i and would observe i's
-updated effects, so k must be re-executed to restore consistency.
-
-**Definition 1.8.2 (Backward Conflict).** After executing cell i with
-Δ = Δ(Σ, Σ'):
-
-    BackConflict(Rec, Δ, i) ≡
-      ∃k < i.  Rec[k] = (σ^pre_k, _, t_k, fresh)  ∧  Obs_k ∩ Δ ≠ ∅
-
-A backward conflict means cell i modified a location that an earlier fresh
-cell k had previously read. In top-to-bottom order, k executes before i and
-should never observe i's effects. The system rejects cell i's execution:
-marking k stale would be unsound because re-running k would expose it to i's
-writes, making the problem worse.
-
-**Definition 1.8.3 (Forward Contamination).** After executing cell i with
-trace t:
-
-    FwdContaminated(Rec, t, i, Prov) ≡
-      ∃ℓ ∈ RBW(t).  Prov(ℓ) = k  ∧  k > i
-
-Forward contamination occurs when cell i reads a location ℓ whose provenance
-points to a cell k that appears AFTER i in document order.
-
-This unified check handles both scenarios:
-1. A location written by a later cell k that already executed
-2. A residual value from a cell that was edited (provenance persists after edit)
-
-Because cells are executed out of order, the live store when cell i runs may
-contain writes from cells that appear later in notebook order. When a cell is
-edited, its previous writes remain in the store with provenance pointing to
-that cell. In a clean top-to-bottom execution of the current program, those
-values would not be present.
-
-> _Note._ Provenance uses cell position, not execution time. Even if cell k
-> was edited after writing ℓ, Prov(ℓ) = k persists until another cell writes ℓ.
-> This correctly detects contamination from residual values: if k > i and
-> Prov(ℓ) = k, cell i reading ℓ is contaminated regardless of k's current code.
-
-**Definition 1.8.4 (Prefix Checkpoint).** For cell i, the _prefix checkpoint_
-is:
-
-    PrefixStore(Rec, i) =
-      σ^post_{i-1}    if i > 1 and Rec[i-1] ≠ ⊥
-      σ_init           if i = 1
-
-This is the post-checkpoint of the immediately preceding cell, representing
-the store that cell i would receive in a top-to-bottom execution.
-
-**Definition 1.8.5 (Provenance).** The provenance map Prov : Loc → CellId_⊥
-records which cell last wrote each location.
-
-    Prov(ℓ) = i  iff cell i was the last cell to execute and write location ℓ
-
-Provenance is maintained as follows:
-
-1. _Initial state:_ Prov₀ = λℓ. ⊥ (no provenance for any location)
-
-2. _After execution:_ When cell i executes successfully with Δ = Δ(σ^pre_i, σ^post_i):
-
-       ∀ℓ ∈ Δ.  Prov'(ℓ) = i
-
-   Executing a cell updates provenance for all locations it writes.
-
-3. _After edit:_ Provenance is NOT modified on edit. If cell i wrote ℓ, then i
-   is edited, Prov(ℓ) = i persists. This correctly enables forward contamination
-   detection: if an earlier cell j reads ℓ where Prov(ℓ) = i > j, cell j is
-   contaminated by a residual value.
-
-> _Note._ Provenance persists until overwritten, not until the cell is edited.
-> This is simpler than orphan tracking (no special edit handling) and more
-> informative (we know which cell wrote each value). The key insight: when
-> cell i is edited and re-run with different writes, its old writes still have
-> Prov pointing to i, correctly triggering contamination for earlier cells.
-
-#### Transition Rules
-
-The monitor provides four transition rules. The first three execute cell i
-from the current live store Σ. The fourth restores the store from checkpoints
-before executing, providing a recovery path from forward contamination.
-
-**(EXEC-ACCEPT)** Execute cell i from the live store; no conflict, no
-contamination:
-
-    Σ ⇓_{Cᵢ} (Σ', t)
-    Δ = Δ(Σ, Σ')
-    ¬BackConflict(Rec, Δ, i)
-    ¬FwdContaminated(Rec, t, i, Prov)
-    Rec₁ = StaleFwd(Rec, Δ, i)
-    Rec₂ = Rec₁[i ↦ (Σ, Σ', t, fresh)]
-    Prov' = Prov[ℓ ↦ i | ℓ ∈ Δ]
-    ─────────────────────────────────────
-    ⟨Σ, Rec, T, Prov⟩  ⟹  ⟨Σ', Rec₂, T · t, Prov'⟩
-
-**(EXEC-CONTAMINATED)** Execute cell i from the live store; no backward
-conflict, but forward contamination detected:
-
-    Σ ⇓_{Cᵢ} (Σ', t)
-    Δ = Δ(Σ, Σ')
-    ¬BackConflict(Rec, Δ, i)
-    FwdContaminated(Rec, t, i, Prov)
-    Rec₁ = StaleFwd(Rec, Δ, i)
-    Rec₂ = Rec₁[i ↦ (Σ, Σ', t, stale)]
-    Prov' = Prov[ℓ ↦ i | ℓ ∈ Δ]
-    ─────────────────────────────────────
-    ⟨Σ, Rec, T, Prov⟩  ⟹  ⟨Σ', Rec₂, T · t, Prov'⟩
-
-Cell i's execution proceeds — its effects enter the store and forward
-staleness propagates — but cell i is recorded as stale because its reads are
-contaminated (provenance points to a later cell).
-
-**(EXEC-REJECT)** Execute cell i from the live store; backward conflict
-detected:
-
-    Σ ⇓_{Cᵢ} (Σ', t)
-    Δ = Δ(Σ, Σ')
-    BackConflict(Rec, Δ, i)
-    ─────────────────────────────────────
-    ⟨Σ, Rec, T, Prov⟩  ⟹  ⟨Σ, Rec, T, Prov⟩
-
-Rejected executions produce no state change (including Prov).
-
-**(EXEC-RESTORE)** Execute cell i from the prefix checkpoint; the immediate
-predecessor must be fresh:
-
-    Rec[i-1] = (_, _, _, fresh)   (or i = 1)
-    σ_pre = PrefixStore(Rec, i)
-    σ_pre ⇓_{Cᵢ} (Σ', t)
-    Δ = Δ(Σ, Σ')
-    Rec₁ = StaleFwd(Rec, Δ, i)
-    Rec₂ = StaleBack(Rec₁, Δ, i)
-    Rec₃ = WriterCheck(Rec₂, t, i)
-    Rec₄ = Rec₃[i ↦ (σ_pre, Σ', t, fresh)]
-    Prov' = Prov[ℓ ↦ i | ℓ ∈ Δ]
-    ─────────────────────────────────────
-    ⟨Σ, Rec, T, Prov⟩  ⟹  ⟨Σ', Rec₄, T · t, Prov'⟩
-
-EXEC-RESTORE bypasses the live store entirely: cell i executes from
-σ^post\_{i-1}, the post-checkpoint of cell i−1. Cell i reads from a store
-that reflects the predecessor's output rather than the fully contaminated
-live store.
-
-> _Note._ Provenance contamination still applies in restore mode. If cell i
-> reads location ℓ where Prov(ℓ) = k > i, the cell is marked contaminated
-> even though it ran from a clean prefix. This handles residual values from
-> edited cells that persist in the prefix checkpoint.
-
-The precondition that the immediate predecessor cell i-1 is fresh ensures that
-σ^post\_{i-1} is a valid prefix store. EXEC-RESTORE is therefore only available
-when the immediate predecessor has been executed and is not stale. For the
-first cell (i=1), no predecessor is needed — restore uses the initial state σ_0.
-
-The delta Δ is computed against the _old live store_ Σ, not against σ_pre.
-This is essential: the new live store Σ' reflects only cells 1, …, i, so any
-location that was present in Σ due to cells i+1, …, n but absent from Σ'
-appears in Δ. StaleFwd correctly marks those later cells stale.
-
-**Definition (Backward Staleness).** EXEC-RESTORE replaces the live store Σ
-with Σ', which may change locations observed by earlier fresh cells. In
-EXEC-ACCEPT, BackConflict would reject the execution; EXEC-RESTORE instead
-marks those earlier cells stale:
-
-    StaleBack(Rec, Δ, i) = Rec'  where
-      Rec'[k] = Rec[k] with status := stale
-        if k < i, Rec[k] fresh, and Obs_k ∩ Δ ≠ ∅
-      Rec'[k] = Rec[k]
-        otherwise
-
-**Definition (Writer Check).** StaleFwd marks later cells whose _reads_
-overlap with Δ. WriterCheck complements this by marking later cells whose
-_writes_ overlap with cell i's reads — re-running such a cell would trigger
-BackConflict (it writes to a location that fresh cell i depends on):
-
-    WriterCheck(Rec, t, i) = Rec'  where
-      Rec'[k] = Rec[k] with status := stale
-        if k > i, Rec[k] fresh, and WS(t_k) ∩ RBW(t) ≠ ∅
-      Rec'[k] = Rec[k]
-        otherwise
-
-> _Implementation note._ In practice, EXEC-REJECT restores Σ from cell i's
-> pre-checkpoint. EXEC-RESTORE loads σ^post\_{i-1} from the checkpoint store
-> before executing cell i. EXEC-CONTAMINATED requires no rollback — the system
-> accepts the execution but displays cell i as stale in the UI.
-
-> _Remark (Recovery from forward contamination)._ The path to quiescence after
-> forward contamination is to re-execute cells in notebook order. Each step
-> uses EXEC-RESTORE: cell i runs from σ^post\_{i-1}, producing a clean Σ' that
-> reflects only cells 1, …, i. The delta against the old live store is
-> typically large — it includes all locations written by cells i+1, …, n — so
-> StaleFwd marks those later cells stale. By the time cells 1, …, n have all
-> re-executed in order, every cell ran on its predecessor's post-checkpoint,
-> producing the clean sequential store. The user-facing guidance is
-> correspondingly simple: "cells i through n need to be re-run in order."
-
-> _Remark (Asymmetry of backward conflict and forward contamination)._ Backward
-> conflict triggers rejection because the offending writes (cell i's) have not
-> yet entered the store and can be rolled back. Forward contamination cannot
-> trigger rejection because the offending writes (cell k's, for k > i) are
-> already in the store. Rejection would leave the store unchanged, and
-> re-executing cell i would read the same contaminated values — a livelock.
-> Accepting with stale status makes progress: cell i's effects enter the store,
-> forward staleness propagates, and the user can re-execute cells in notebook
-> order (via EXEC-RESTORE) to reach quiescence.
-
-### 1.9 Invariant Preservation
-
-**Theorem 1.9.1.** If Cons(C) and C ⟹ C', then Cons(C').
-
-_Proof._ Case analysis on the transition rule.
-
-**Case EXEC-REJECT.** C' = C. Immediate.
-
-**Case EXEC-CONTAMINATED.** Let C = ⟨Σ, Rec, T⟩ and C' = ⟨Σ', Rec₂, T · t⟩.
-Cell i is recorded as stale, so the invariant imposes no obligation on cell i.
-For other cells k ≠ i:
-
-- _k < i, fresh:_ ¬BackConflict gives Obs*k ∩ Δ(Σ, Σ') = ∅, so
-  Σ' =*{Obs*k} Σ. By the pre-transition invariant, Σ =*{Obs_k} σ^pre_k. ✓
-- _k > i, fresh:_ StaleFwd did not mark k stale, so Obs_k ∩ Δ(Σ, Σ') = ∅.
-  Same argument. ✓
-
-**Case EXEC-ACCEPT.** Let C = ⟨Σ, Rec, T⟩ and C' = ⟨Σ', Rec₂, T · t⟩ where
-Σ ⇓\_{Cᵢ} (Σ', t) and Δ = Δ(Σ, Σ').
-
-We must show: for every k with Rec₂[k] = (σ^pre*k, *, t*k, fresh), we have
-Σ' =*{Obs_k} σ^pre_k.
-
-**Sub-case k ≠ i, k < i.** Since ¬BackConflict, for every fresh k < i we have
-Obs*k ∩ Δ = ∅, hence Σ' =*{Obs*k} Σ. By the pre-transition invariant,
-Σ =*{Obs*k} σ^pre_k. Transitivity gives Σ' =*{Obs_k} σ^pre_k. ✓
-
-**Sub-case k ≠ i, k > i.** If Rec₂[k] is fresh, then StaleFwd did not mark k
-stale, so Obs_k ∩ Δ = ∅. The argument proceeds identically. ✓
-
-**Sub-case k = i.** By construction, σ^pre*i = Σ. We must show Σ' =*{Obs_i} Σ.
-Partition Obs_i:
-
-- _ℓ ∈ Obs_i \ WS(t):_ No write to ℓ in t, so by Write Faithfulness
-  Σ'(ℓ) = Σ(ℓ). ✓
-
-- _ℓ ∈ Obs_i ∩ WS(t):_ Cell i read ℓ from the pre-store and later wrote a
-  (possibly different) value. Here Σ'(ℓ) may differ from Σ(ℓ), so the
-  invariant for cell i on this location is not immediately established.
-  However, since ℓ ∈ Δ, any subsequent transition that would rely on the
-  invariant for cell i at ℓ will either (a) mark i stale via forward staleness
-  (if the modifying cell j > i), or (b) trigger backward rejection (if j < i),
-  before the invariant is needed. We formalize this with the auxiliary
-  invariant below. ✓
-
-**Case EXEC-RESTORE.** Let σ*pre = PrefixStore(Rec, i) and
-C' = ⟨Σ', Rec₄, T · t⟩ where σ_pre ⇓*{Cᵢ} (Σ', t) and Δ = Δ(Σ, Σ').
-
-Cell i is recorded as fresh with σ^pre_i = σ_pre. The argument for k = i
-follows the same structure as EXEC-ACCEPT (partition Obs_i into WS and
-non-WS parts).
-
-For k ≠ i, k < i: if Rec₄[k] is fresh, then StaleBack did not mark k stale,
-so Obs*k ∩ Δ = ∅. Hence Σ'(ℓ) = Σ(ℓ) for all ℓ ∈ Obs_k. By the
-pre-transition invariant, Σ =*{Obs*k} σ^pre_k. Transitivity gives
-Σ' =*{Obs_k} σ^pre_k. ✓
-
-For k ≠ i, k > i: if Rec₄[k] is fresh, then StaleFwd did not mark k stale
-(Obs_k ∩ Δ = ∅) and WriterCheck did not mark k stale
-(WS(t_k) ∩ RBW(t) = ∅). Since Obs_k ∩ Δ = ∅, the argument is identical to
-EXEC-ACCEPT. ✓ ∎
-
-**Auxiliary Invariant (Self-Write).** Define, for each fresh cell k:
-
-    SelfCons(Σ, Rec, k) ≡
-      ∀ℓ ∈ Obs_k ∩ WS(t_k).  Σ(ℓ) = σ^post_k(ℓ)
-
-That is, for locations that cell k both read and wrote, the live store holds
-k's output value. This holds immediately after k's execution (Σ' = σ^post_k
-by Write Faithfulness). It is maintained by subsequent transitions because any
-change to such ℓ places ℓ ∈ Δ, triggering staleness or rejection for k.
-
-The full invariant is then:
-
-    ConsPlus(C) ≡ Cons(C) ∧ ∀k fresh. SelfCons(Σ, Rec, k)
-
-The k = i sub-case of invariant preservation follows from SelfCons established
-at execution time, and subsequent preservation by the staleness/rejection
-mechanism.
-
-### 1.10 Prefix-Consistent Reads
-
-This is the central theorem of the development.
-
-**Theorem 1.10.1 (Prefix-Consistent Reads).** Let C₁, …, Cₙ be the notebook
-cells. For any reachable configuration ⟨Σ, Rec, T⟩ satisfying Cons, and any
-fresh record:
-
-    Rec[i] = (σ^pre_i, σ^post_i, t_i, fresh)
-
-there exists a sequential execution of C₁, …, Cᵢ from σ*init producing prefix
-stores σ₀, …, σ*{i-1} such that:
-
-    σ^pre_i =_{Obs_i} σ_{i-1}
-
-That is, every value read by cell i in the interactive execution matches the
-value that would be present at position i in a clean top-to-bottom execution.
-
-_Proof._ By induction on the number of transitions leading to the
-configuration.
-
-**Base case.** The initial configuration has no fresh cells. Vacuously true.
-
-**Inductive step.** Suppose the property holds for configuration C, and
-C ⟹ C'. The EXEC-CONTAMINATED rule does not produce fresh cells; the
-EXEC-REJECT rule does not change the configuration. Neither introduces new
-proof obligations. We consider the remaining two cases.
-
-**Case EXEC-ACCEPT for cell i.** For cells k ≠ i that remain fresh in C':
-their records are unchanged, and the inductive hypothesis applies directly.
-
-For cell i: σ^pre*i = Σ (the live store at the time of execution). We must
-show that there exists a sequential execution of C₁, …, Cᵢ from σ_init whose
-store σ*{i-1} agrees with Σ on Obs_i.
-
-The proof depends on two properties:
-
-1. **No earlier cell's reads were invalidated by cell i's writes.**
-   ¬BackConflict ensures that for every fresh k < i, Obs_k ∩ Δ = ∅. This
-   preserves the chain of prefix-consistent states for cells 1, …, i−1.
-
-2. **Cell i's reads were not contaminated by later cells' writes.**
-   ¬FwdContaminated ensures that for every executed k > i,
-   RBW(t) ∩ Δ(σ^pre_k, σ^post_k) = ∅. This means the live store Σ, restricted
-   to Obs_i, reflects only the effects of cells that precede i in notebook
-   order (or the initial store).
-
-For each fresh cell j < i, the inductive hypothesis provides a sequential
-prefix matching σ^pre_j on Obs_j. By the invariant, the live store Σ agrees
-with each such σ^pre_j on Obs_j.
-
-For cells j < i that are stale or unexecuted: their contributions to the
-sequential prefix stores are determined by executing C*j from σ*{j-1}. The
-backward conflict check and ¬FwdContaminated together ensure that the values
-cell i observes on Obs*i are consistent with a sequential execution of
-C₁, …, C*{i-1}.
-
-Formally, construct the sequential prefix stores σ₀, …, σ*{i-1} by executing
-C₁, …, C*{i-1} in order from σ_init (choosing any valid execution for each
-cell). The two conditions above guarantee that the live store's restriction to
-Obs_i could have arisen from such a sequential execution at position i−1. ✓
-
-**Case EXEC-RESTORE for cell i.** For cells k ≠ i that remain fresh: same
-argument as EXEC-ACCEPT (StaleBack ensures no fresh k < i is affected by Δ;
-StaleFwd + WriterCheck ensure no fresh k > i is affected).
-
-For cell i: σ^pre*i = σ^post*{i-1} (or σ*init if i = 1). Cell i executes
-from σ^post*{i-1}, so its pre-store is exactly the post-checkpoint of cell
-i−1. By construction, σ^pre*i = σ^post*{i-1}. The inductive hypothesis
-tells us that cell i−1 (fresh by precondition) is prefix-consistent, so there
-exists a sequential execution of C₁, …, C*{i-1} from σ_init with
-σ^pre*{i-1} =_{Obs_{i-1}} σ\_{i-2}. We choose this sequential execution and
-extend it with cell i.
-
-For ℓ ∈ Obs*i ∩ WS(t*{i-1}): σ^post*{i-1}(ℓ) is determined by cell i−1's
-writes, which are the same in both the interactive and sequential executions
-(same reads on Obs*{i-1}). So σ^post*{i-1}(ℓ) = σ*{i-1}(ℓ). ✓
-
-For ℓ ∈ Obs*i \ WS(t*{i-1}): σ^post*{i-1}(ℓ) = σ^pre*{i-1}(ℓ) (cell i−1
-did not write ℓ). If ℓ ∈ Obs*{i-1}: σ^pre*{i-1}(ℓ) = σ*{i-2}(ℓ) =
-σ*{i-1}(ℓ). ✓ If ℓ ∉ Obs*{i-1} ∪ WS(t*{i-1}): σ^pre*{i-1}(ℓ) came from
-the live store when cell i−1 ran, which may include residual effects from
-cells > i−1 that executed earlier in the interactive session. In this case
-σ^post*{i-1}(ℓ) may differ from σ\_{i-1}(ℓ), and full prefix consistency on
-ℓ is not guaranteed. (See Remark below.) ✓\* ∎
-
-> _Remark (Prefix consistency of EXEC-RESTORE)._ EXEC-RESTORE guarantees
-> prefix consistency on locations ℓ ∈ Obs*i that were written by some cell
-> j ∈ 1, …, i−1 or that are in Obs*{i-1}. For locations that no predecessor
-> wrote and that cell i−1 did not read, the prefix checkpoint σ^post*{i-1}
-> may retain residual values from cells > i−1. Full prefix consistency is
-> achieved in the *recovery sequence* (re-execute cells 1, …, n in order via
-> EXEC-RESTORE): each cell's post-checkpoint feeds into the next, eliminating
-> residual contamination. The single-cell restore provides *checkpoint
-> consistency* — cell i reads from σ^post*{i-1} — which is a strictly better
-> starting point than the fully contaminated live store Σ.
-
-> _Remark (Trace Refinement)._ Under the additional assumption that cell
-> execution is deterministic (same pre-store implies same trace and
-> post-store), Theorem 1.10.1 implies that every accepted interactive
-> execution can be replayed sequentially with identical observations at each
-> cell. We do not require this assumption for our main results.
+**Definition 1.4.2 (LastWriter).**
+```
+LastWriter(W, i, y) = max { j < i | y ∈ Wⱼ }
+```
+The last cell before i that wrote location y, or ⊥ if none.
 
 ---
 
-## Part II — Extension with Edits
-
-We extend the semantics to interleave execution and cell modification.
-
-### 2.1 Mutable Program
-
-The notebook program is now mutable:
-
-    P : {1..n} → Code          (cell code map)
-    ver : {1..n} → ℕ            (version counter per cell)
-
-### 2.2 Extended Configuration
-
-    C = ⟨P, ver, Σ, Rec, T, Prov⟩
-
-Records include a version stamp:
-
-    Rec[i] = (σ^pre_i, σ^post_i, t_i, ver_i, status_i)
-
-The invariant Cons and auxiliary SelfCons extend naturally, requiring
-ver_i = ver(i) for a record to be considered valid.
-
-### 2.3 Edit Transition
-
-**(EDIT)** Modify cell i's code without executing it:
-
-    P' = P[i ↦ C_new]
-    ver' = ver[i ↦ ver(i) + 1]
-    ─────────────────────────────────────────────
-    ⟨P, ver, Σ, Rec, T, Prov⟩  ⟹  ⟨P', ver', Σ, Rec', T, Prov⟩
-
-where Rec' is defined by:
-
-1. _Edited cell:_ If Rec[i] ≠ ⊥, set status_i := stale (the recorded trace
-   corresponds to old code).
-
-2. _Downstream propagation:_ For each fresh cell j > i with
-   Obs_j ∩ WS(t_i) ≠ ∅, set status_j := stale (cell j may have read values
-   produced by cell i's old code; when i is re-executed, those values may
-   change).
-
-3. _Provenance unchanged:_ Prov is NOT modified on edit. If cell i wrote ℓ,
-   Prov(ℓ) = i persists. This correctly enables forward contamination detection
-   when earlier cells read residual values (see §1.8.5).
-
-4. _All other records unchanged._
-
-The live store Σ is unchanged: no execution occurs, so no backward conflict
-check is needed.
-
-> _Note._ Downstream propagation is conservative: it marks j stale based on the
-> _old_ write set of cell i. If cell i's new code writes fewer locations, some
-> cells marked stale may not actually need re-execution. This is sound
-> (over-approximate) but not precise. Precision is recovered when i is
-> re-executed and its new write set is recorded.
-
-> _Note._ Provenance is not modified on edit because residual values persist in
-> the store. When cell i is edited from "x = 1" to "y = 1" and re-run, x still
-> has value 1 with Prov(x) = i. If an earlier cell j reads x, j is correctly
-> marked contaminated because Prov(x) = i > j.
-
-### 2.4 DELETE Transition
-
-**(DELETE)** Remove cell i from notebook:
-
-    Cells' := Cells \ {i}
-    ─────────────────────────────────────────────
-    ⟨Cells, P, ver, Σ, Rec, T, Prov⟩  ⟹  ⟨Cells', P, ver, Σ, Rec', T, Prov⟩
-
-where Rec' is defined by:
-
-1. _Downstream staleness:_ For each fresh cell j (j ≠ i) where
-   Obs_j ∩ WS(t_i) ≠ ∅, set status_j := stale (cell j read values written
-   by deleted cell i; those values are now orphaned).
-
-2. _Record removal:_ Remove Rec[i].
-
-3. _Provenance unchanged:_ Prov is NOT modified. Values written by i persist
-   in the store with Prov(ℓ) = i, enabling deleted_cell_dependency detection.
-
-> _Note._ DELETE marks cells stale that depended on the deleted cell's writes.
-> This is conservative: the values may still be in the store, but the cell
-> that produced them is gone. Re-execution will either recreate the values
-> (if another cell writes them) or reveal the missing dependency.
-
-### 2.5 INSERT Transition
-
-**(INSERT)** Insert new cell X at position j:
-
-    Cells' := Cells ∪ {X}
-    Rec[X] := ⊥
-    ─────────────────────────────────────────────
-    ⟨Cells, P, ver, Σ, Rec, T, Prov⟩  ⟹  ⟨Cells', P', ver, Σ, Rec, T, Prov⟩
-
-No staleness changes occur. Cell X has no execution record (WS = ∅), so it
-cannot invalidate any existing cell's reads.
-
-### 2.6 MOVE Transition
-
-**(MOVE)** Move cell i from position p to position q:
-
-Let Crossed = cells between old and new position (exclusive of i).
-
-**Move forward (p < q):**
-
-Crossed cells are those at positions (p, q] in the old order.
-
-1. _Crossed cells lose upstream dependency (Example 1):_
-   For fresh k ∈ Crossed where Obs_k ∩ WS(t_i) ≠ ∅:
-       status_k := stale
-
-   Cell k read from cell i, but i is now after k. In a top-to-bottom
-   execution, k would no longer receive i's values.
-
-2. _Moved cell gains new input (Example 2):_
-   If Obs_i ∩ (⋃_{k ∈ Crossed} WS(t_k)) ≠ ∅:
-       status_i := stale
-
-   Cell i now reads from crossed cells that were previously after it.
-
-**Move backward (q < p):**
-
-Crossed cells are those at positions [q, p) in the old order.
-
-3. _Moved cell has forward contamination (Example 3):_
-   If Obs_i ∩ (⋃_{k ∈ Crossed} WS(t_k)) ≠ ∅:
-       status_i := stale
-
-   Cell i read from cells that are now after it. Those values came from
-   cells that should execute later in document order.
-
-4. _Crossed cells gain new input (Example 4):_
-   For fresh k ∈ Crossed where Obs_k ∩ WS(t_i) ≠ ∅:
-       status_k := stale
-
-   Crossed cells now come after the moved cell and may read its values.
-
-> _Note._ MOVE is atomic: all staleness is computed before any status changes.
-> Circular dependencies are not an error — they result in multiple cells
-> being marked stale, which is handled by forward contamination on execution.
-
-### 2.7 Execution with Edits
-
-Execution of cell i uses P(i) (the current code) and records ver_i = ver(i).
-The backward conflict, forward contamination, forward staleness, and restore
-rules from Part I apply unchanged.
-
-A cell's record is considered fresh only if its version stamp matches the
-current program version: Rec[i].ver_i = ver(i).
-
-### 2.8 Quiescence
-
-**Definition 2.8.1.** A configuration ⟨P, ver, Σ, Rec, T⟩ is _quiescent_ iff:
-
-1. For all i ∈ {1..n}: Rec[i] ≠ ⊥.
-2. For all i: Rec[i].status = fresh.
-3. For all i: Rec[i].ver_i = ver(i).
-
-### 2.9 Main Theorem
-
-**Theorem 2.9.1 (Quiescence ⟹ Reproducibility).** If execution reaches a
-quiescent configuration ⟨P_f, ver_f, Σ, Rec, T⟩, then for the final program
-P_f, there exists a sequential execution of P_f(1), …, P_f(n) from σ_init
-producing stores σ₀, …, σₙ such that:
-
-    ∀i. σ^pre_i =_{Obs_i} σ_{i-1}
-
-and
-
-    Σ =_W σₙ
-
-where W = ⋃_i WS(t_i) is the set of all locations written by any cell.
-
-That is, the final interactive store agrees with the sequential execution on
-all written locations, and each cell's observed values match the corresponding
-sequential prefix.
-
-_Proof._
-
-1. By quiescence, every cell i has a fresh record with ver_i = ver_f(i), so
-   each record reflects an execution of the current code P_f(i).
-
-2. Because every cell is fresh, no cell was recorded via EXEC-CONTAMINATED
-   (that rule always records stale status). Every fresh cell's record was
-   produced by either EXEC-ACCEPT or EXEC-RESTORE.
-   - EXEC-ACCEPT requires ¬FwdContaminated, so cell i's reads were
-     uncontaminated by later cells' writes.
-   - EXEC-RESTORE runs cell i from σ^post\_{i-1}, so cell i's reads are
-     prefix-consistent by construction.
-
-   In either case, no cell's reads are contaminated by later cells' writes.
-
-3. By Theorem 1.9.1 (extended to the edit setting), Cons holds for the final
-   configuration.
-
-4. By Theorem 1.10.1, each cell i's observed values match a sequential prefix:
-   σ^pre*i =*{Obs*i} σ*{i-1} for some sequential execution of P_f(1), …,
-   P_f(i).
-
-5. Since all cells are fresh and their version stamps are current, no semantic
-   checkpoint disagreements remain: for every pair of cells j < k, cell k's
-   pre-checkpoint agrees with cell j's post-checkpoint on the locations k
-   reads. The sequential prefix stores can therefore be constructed
-   consistently for all cells simultaneously.
-
-6. The live store Σ is the cumulative result of all accepted cell executions.
-   By Write Faithfulness, Σ agrees with the sequentially constructed σₙ on all
-   written locations. ∎
+## 2. Standard Semantics
+
+The standard semantics operates on states `S = (C, O, Σ)` using single arrows (→).
+
+### 2.1 Standard Evaluation
+
+- `C; Σ ↓ᵢ o · Σ'` — running cell Cᵢ from store Σ produces output o and store Σ'
+- `C ↓ O · Σ'` — running cells 1..n from initial store ∅ produces outputs O and final store Σ'
+
+### 2.2 Standard Transition Rules
+
+**[Std-Edit]**
+```
+(C, O, Σ) →^{Edit(i, c)} (C[i := c], O, Σ)
+```
+
+**[Std-Run]**
+```
+Cᵢ; Σ ↓ o · Σ'
+─────────────────────────────────
+(C, O, Σ) →^{Run(i)} (C, O[i := o], Σ')
+```
+
+### 2.3 Standard Structural Operations
+
+Let `X_{j..k}` denote the subsequence `Xⱼ, ..., Xₖ`.
+
+**[Std-Insert]**
+```
+C' = C_{1..i-1}, c, C_{i..n}
+O' = O_{1..i-1}, ⊥, O_{i..n}
+─────────────────────────────────
+(C, O, Σ) →^{Insert(i, c)} (C', O', Σ)
+```
+
+**[Std-Delete]**
+```
+C' = C_{1..i-1}, C_{i+1..n}
+O' = O_{1..i-1}, O_{i+1..n}
+─────────────────────────────────
+(C, O, Σ) →^{Delete(i)} (C', O', Σ)
+```
+
+**[Std-Move-Down]** (s < d)
+```
+(C, O, Σ) →^{Delete(s)} S'' →^{Insert(d-1, Cₛ)} S'
+─────────────────────────────────────────────────
+(C, O, Σ) →^{Move(s, d)} S'
+```
+
+**[Std-Move-Up]** (s > d)
+```
+(C, O, Σ) →^{Delete(s)} S'' →^{Insert(d, Cₛ)} S'
+─────────────────────────────────────────────────
+(C, O, Σ) →^{Move(s, d)} S'
+```
+
+### 2.4 Batch Operations
+
+Batch operations are sequences of single operations. Let `k = j - i + 1`.
+
+**Batch Insert:** Insert k cells `c₁, ..., cₖ` starting at position i:
+```
+→^{Insert(i, c₁...cₖ)} = →^{Insert(i, c₁)} →^{Insert(i+1, c₂)} ⋯ →^{Insert(i+k-1, cₖ)}
+```
+
+**Batch Delete:** Delete cells at positions i through j:
+```
+→^{Delete(i..j)} = →^{Delete(i)} →^{Delete(i)} ⋯ →^{Delete(i)}  [k times]
+```
+After each deletion, remaining cells shift down, so position i always holds the next cell to delete.
+
+**Batch Move:** Move cells i through j to position d.
+Decompose as batch delete followed by batch insert, saving cells first.
+Let `c₁, ..., cₖ = Cᵢ, ..., Cⱼ`.
+
+*Move down* (d > j): The destination shifts by k after deletion.
+```
+→^{Move(i..j, d)} = →^{Delete(i..j)} →^{Insert(d-k, c₁...cₖ)}
+```
+
+*Move up* (d < i): The destination is unchanged after deletion.
+```
+→^{Move(i..j, d)} = →^{Delete(i..j)} →^{Insert(d, c₁...cₖ)}
+```
 
 ---
 
-## Summary
+## 3. Instrumented Semantics
 
-| #          | Result                           | Statement                                                   |
-| ---------- | -------------------------------- | ----------------------------------------------------------- |
-| 1.4.4      | RBW Value Lemma                  | Read-before-write locations observe the pre-store           |
-| 1.4.5      | Delta–Write Containment          | Store deltas are contained in write sets                    |
-| 1.9.1      | Invariant Preservation           | Cons is preserved by every monitor transition               |
-| **1.10.1** | **Prefix-Consistent Reads**      | **Fresh cells' observations match a sequential prefix**     |
-| **2.9.1**  | **Quiescence ⟹ Reproducibility** | **No stale cells implies reproducibility of final program** |
+The instrumented semantics operates on states `S · I` using double arrows (⇒).
 
-The monitor provides four transition rules:
+### 3.1 Instrumented Evaluation
 
-| Rule              | Store source             | Precondition                     | Cell i status | Effect on later cells              |
-| ----------------- | ------------------------ | -------------------------------- | ------------- | ---------------------------------- |
-| EXEC-ACCEPT       | live Σ                   | ¬BackConflict ∧ ¬FwdContaminated | fresh         | StaleFwd                           |
-| EXEC-CONTAMINATED | live Σ                   | ¬BackConflict ∧ FwdContaminated  | stale         | StaleFwd                           |
-| EXEC-REJECT       | live Σ                   | BackConflict                     | (no change)   | (no change)                        |
-| EXEC-RESTORE      | checkpoint σ^post\_{i-1} | cell i-1 fresh                   | fresh         | StaleBack + StaleFwd + WriterCheck |
+- `C; Σ ⇓ᵢ o · Σ' · r · w` — running Cᵢ from Σ produces output o, store Σ', read set r, write set w
 
-And enforces four runtime checks:
+### 3.2 Validity Predicates
 
-| Check                    | Condition                                                       | Direction | Response          |
-| ------------------------ | --------------------------------------------------------------- | --------- | ----------------- |
-| Backward conflict        | cell i wrote to ℓ read by earlier fresh k                       | k < i     | Reject (rollback) |
-| Provenance contamination | cell i read ℓ where Prov(ℓ) = k > i                             | k > i     | Accept as stale   |
-| Forward staleness        | cell i wrote to ℓ read by later fresh k                         | k > i     | Mark k stale      |
-| Writer check             | (EXEC-RESTORE only) later k writes to ℓ read by restored cell i | k > i     | Mark k stale      |
+These predicates check that cell i's execution is valid:
 
-**Recovery from forward contamination.** When cell i is stale due to forward
-contamination, the recovery path is to re-execute cells i, i+1, …, n in
-notebook order using EXEC-RESTORE. Each cell runs from its predecessor's
-post-checkpoint, producing a clean prefix store. The delta against the old
-live store is large (it includes all locations written by later cells), causing
-StaleFwd to mark the remaining cells stale — which is the correct and honest
-cost of restoring prefix consistency. The user-facing guidance is: "cells i
-through n need to be re-run in order."
+```
+NoReadAndWrite(R, W, i)    ≝  Rᵢ ∩ Wᵢ = ∅
+WriteBeforeRead(R, W, i)   ≝  Rᵢ ⊆ W_{1..i-1}
+NoReadBeforeWrite(R, W, i) ≝  Rᵢ ∩ W_{i+1..n} = ∅
+NoWriteAfterRead(R, W, i)  ≝  Wᵢ ∩ R_{1..i-1} = ∅
+```
+
+### 3.3 Staleness Predicates
+
+These predicates determine when cells become stale:
+
+```
+ForwardStale(R, W, i, j)       ≝  j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+BackwardStale(W, W', i, j)     ≝  j < i ∧ j = LastWriter(W, i, y) for some y ∈ Wᵢ \ W'ᵢ
+ReadsResidualWrite(R, W, i, j) ≝  Rⱼ ∩ Wᵢ ≠ ∅
+```
+
+- **ForwardStale**: Cell j (after i) becomes stale if i wrote to a location that j reads or writes.
+- **BackwardStale**: Cell j (before i) becomes stale if it was the last writer of a location that i no longer writes.
+- **ReadsResidualWrite**: Cell j becomes stale if it reads from deleted cell i's writes.
+
+### 3.4 Instrumented Transition Rules
+
+**[Inst-Edit]**
+```
+S →^{Edit(i, c)} S'
+─────────────────────────────────────────────────
+S · (T, R, W) ⇒^{Edit(i, c)} S' · (T[i := STALE], R, W)
+```
+
+**[Inst-Run]**
+```
+Cᵢ; Σ ⇓ o · Σ' · r · w
+R' = R[i := r]
+W' = W[i := w]
+NoReadAndWrite(R', W', i)
+WriteBeforeRead(R', W', i)
+NoReadBeforeWrite(R', W', i)
+NoWriteAfterRead(R', W', i)
+T'ⱼ = CLEAN           if j = i
+    = STALE           if ForwardStale(R', W', i, j)
+    = STALE           if BackwardStale(W, W', i, j)
+    = Tⱼ              otherwise
+─────────────────────────────────────────────────
+(C, O, Σ) · (T, R, W) ⇒^{Run(i)} (C, O', Σ') · (T', R', W')
+```
+
+### 3.5 Instrumented Structural Operations
+
+**[Inst-Insert]**
+```
+S →^{Insert(i, c)} S'
+T' = T_{1..i-1}, STALE, T_{i..n}
+R' = R_{1..i-1}, ∅, R_{i..n}
+W' = W_{1..i-1}, ∅, W_{i..n}
+─────────────────────────────────────────────────
+S · (T, R, W) ⇒^{Insert(i, c)} S' · (T', R', W')
+```
+
+The new cell is STALE (never executed) with empty read/write sets.
+Since Wᵢ = ∅, inserting cannot invalidate any existing cell.
+
+**[Inst-Delete]**
+```
+S →^{Delete(i)} S'
+w = Wᵢ
+T' = T_{1..i-1}, T_{i+1..n}
+R' = R_{1..i-1}, R_{i+1..n}
+W' = W_{1..i-1}, W_{i+1..n}
+T''ⱼ = STALE    if ReadsResidualWrite(R', w, j)
+     = T'ⱼ      otherwise
+─────────────────────────────────────────────────
+S · (T, R, W) ⇒^{Delete(i)} S' · (T'', R', W')
+```
+
+Deleting cell i invalidates any cell j that reads a residual write of i.
+
+**[Inst-Move-Down]** (s < d)
+```
+S · I ⇒^{Delete(s)} S'' · I'' ⇒^{Insert(d-1, Cₛ)} S' · I'
+─────────────────────────────────────────────────
+S · I ⇒^{Move(s, d)} S' · I'
+```
+
+**[Inst-Move-Up]** (s > d)
+```
+S · I ⇒^{Delete(s)} S'' · I'' ⇒^{Insert(d, Cₛ)} S' · I'
+─────────────────────────────────────────────────
+S · I ⇒^{Move(s, d)} S' · I'
+```
+
+Move is the composition of delete and insert. The delete may mark cells stale
+via ReadsResidualWrite, and the insert adds a stale cell at the destination.
+Batch operations follow the same decompositions as in the standard semantics.
 
 ---
 
-## Implementation Map
+## 4. Well-Formedness Invariant
 
-### Core Definitions
+**Invariant 4.1 (Well-formed).**
+A state (C, O, Σ, T, R, W) is *well-formed* if for every i with Tᵢ = CLEAN,
+there exists Σ' such that:
 
-| Formal Concept              | Definition | Code Location                                                                                                                                                            |
-| --------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Store, Δ(σ, σ')             | §1.1       | `MemoryCheckpoint.diff()` in `kernel_support/memory_checkpoint.py`                                                                                                       |
-| Δ structured changes        | §1.1       | `Change` hierarchy in `kernel/changes.py` (`ValueChanged`, `ColumnAdded`, `ColumnModified`, `ColumnRemoved`, `RowsAdded`, `RowsRemoved`, `IndexChanged`, `DtypeChanged`) |
-| Δ computation pipeline      | §1.1       | `detect_changes()` in `kernel/change_detector.py` — converts `MemoryCheckpointDiffResult` to typed `Change` list                                                         |
-| Event α ∈ Event             | §1.2       | `AccessEvent` hierarchy in `kernel/access_events.py` (`ColumnRead`, `ColumnWrite`, `StructuralRead`, `VariableRead`)                                                     |
-| RBW(t)                      | Def 1.4.2  | `TrackingData.reads_before_writes` in `kernel_support/models.py`                                                                                                         |
-| WS(t)                       | Def 1.4.3  | `TrackingData.writes` in `kernel_support/models.py`                                                                                                                      |
-| TrackingData → typed events | §1.2, §1.4 | `to_read_events()` and `to_access_events()` in `kernel_support/models.py`                                                                                                |
+```
+Cᵢ, Σ ⇓ Σ', Oᵢ, Rᵢ, Wᵢ
+```
 
-### Monitor State
-
-| Formal Concept           | Definition | Code Location                                                                 |
-| ------------------------ | ---------- | ----------------------------------------------------------------------------- |
-| Obs_i                    | §1.6       | `record.tracking.reads_before_writes` in `kernel/reproducibility_enforcer.py` |
-| Rec[i]                   | §1.6       | `ReproducibilityExecutionRecord` in `kernel/models.py`                        |
-| fresh/stale status       | §1.6       | `_stale_cells: Set[str]` in `ReproducibilityEnforcer`                         |
-| Prov                     | §1.8.5     | `ProvenanceMap` in `kernel/models.py`, `_provenance` in `ReproducibilityEnforcer` |
-| exec_mode (live/restore) | §1.8       | `ReproducibilityResult.exec_mode` in `kernel/models.py`                       |
-| cell_is_contaminated     | §1.8       | `ReproducibilityResult.cell_is_contaminated` in `kernel/models.py`            |
-
-### Invariants and Checks
-
-| Formal Concept           | Definition          | Code Location                                                                                              |
-| ------------------------ | ------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Cons invariant           | Def 1.7.1           | Enforced by pre-checkpoint comparison in `_update_staleness_incremental()`                                 |
-| StaleFwd                 | Def 1.8.1           | `_update_staleness_incremental()` in `kernel/reproducibility_enforcer.py`                                  |
-| StaleBack                | §1.8 (EXEC-RESTORE) | Backward staleness loop in `_check_exec_restore()` in `kernel/reproducibility_enforcer.py`                 |
-| WriterCheck              | §1.8 (EXEC-RESTORE) | Writer-conflict loop in `_check_exec_restore()` in `kernel/reproducibility_enforcer.py`                    |
-| BackConflict             | Def 1.8.2           | `_check_backward_mutation()` in `kernel/reproducibility_enforcer.py`                                       |
-| FwdContaminated          | Def 1.8.3           | `_check_forward_dependency()` in `kernel/reproducibility_enforcer.py` (provenance-based)                   |
-| Prov                     | Def 1.8.5           | `_provenance: ProvenanceMap` in `kernel/reproducibility_enforcer.py`                                       |
-| PrefixStore              | Def 1.8.4           | `get_prefix_checkpoint_name()` in `kernel/reproducibility_enforcer.py`                                     |
-| Conflict rule evaluation | Def 1.8.2, 1.8.3    | `CONFLICT_RULES` table in `kernel/conflict_rules.py` + `ConflictResolver` in `kernel/conflict_resolver.py` |
-
-### Transition Rules
-
-| Formal Concept    | Definition | Code Location                                                                                                                                                                                                                  |
-| ----------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| EXEC-ACCEPT       | §1.8       | `check()` when no violations in `kernel/reproducibility_enforcer.py`                                                                                                                                                           |
-| EXEC-CONTAMINATED | §1.8       | `check()` when `forward_violation` in `kernel/reproducibility_enforcer.py`                                                                                                                                                     |
-| EXEC-REJECT       | §1.8       | `_do_execute_impl()` backward branch in `kernel/flowbook_kernel.py`                                                                                                                                                            |
-| EXEC-RESTORE      | §1.8       | `can_exec_restore()` + `check(is_exec_restore=True)` in `kernel/reproducibility_enforcer.py`; `%exec_restore` magic + pending flag in `kernel/flowbook_kernel.py`; `flowbook:exec-restore` command in `src/flowbook/plugin.ts` |
-| EDIT              | §2.3       | `mark_cell_edited()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                   |
-| DELETE            | §2.4       | `_handle_deletions()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                  |
-| INSERT            | §2.5       | (no-op in `set_cell_order()`) — new cells have no records                                                                                                                                                                      |
-| MOVE              | §2.6       | `_handle_moves()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                      |
-| OrderDelta        | §2.4-2.6   | `OrderDelta`, `MovedCell`, `OrderChangeResult` in `kernel/models.py`; `_compute_order_delta()` in `kernel/reproducibility_enforcer.py`                                                                                         |
-| Quiescence        | Def 2.8.1  | All cells executed and `_stale_cells` empty                                                                                                                                                                                    |
-
-### Extensions Beyond Formal Spec
-
-| Implementation        | Extends         | Code Location                                                                                                                                                                                            |
-| --------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Col(d,c) locations    | §1.1 Loc        | Column-level tracking in `TrackingData` (`column_reads`, `column_writes`) in `kernel_support/models.py`; column change extraction in `_extract_column_changes()` in `kernel/reproducibility_enforcer.py` |
-| File I/O locations    | §1.1 Loc        | `TrackingData.file_reads_before_writes` / `file_writes` in `kernel_support/models.py`; file checks in `_check_backward_mutation()` and `_check_forward_dependency()`                                     |
-| Structural attributes | §1.1 Loc        | `StructuralMode` enum in `kernel/conflict_rules.py`; `structural_reads` in `TrackingData`; `capture_structural_read_values()` in `kernel/reproducibility_enforcer.py`                                    |
-| Deep alias expansion  | §1.1 Δ accuracy | `_expand_with_deep_aliases()` in `kernel/reproducibility_enforcer.py` — expands variable sets to include shared-reference aliases for correct Δ computation                                              |
+and:
+1. Σ and Σ' agree except on Overwritten(W, i) = W_{i+1..n}
+2. Rᵢ ∩ W_{i..n} = ∅
+3. Rᵢ ⊆ W_{1..i-1}
 
 ---
 
-## §3: Known Differences with Implementation
+## 5. Main Lemma: Well-Formed + All Clean ⟹ Serial Execution
 
-> **Scope note:** This section documents differences between the formal model and
-> the Python implementation. These are implementation-level concerns that arise
-> from Python's semantics; they do not affect the formal correctness arguments
-> in Parts I and II. **Do not use this section when comparing code to spec** —
-> the formal definitions and the Implementation Map above are the authoritative
-> references.
+**Lemma 5.1.** If (C, O, Σ, T, R, W) is well-formed and all cells are CLEAN,
+then there exists Σ' such that `C ⇓ O, Σ'`.
 
-### 3.1 Aliasing and Reference Sharing
+**Proof.** Define P(i): "C_{1..i} ⇓ O_{1..i}, σᵢ, where Σ and σᵢ agree on W_{1..i} \ W_{i+1..n}."
 
-The formal model assumes that each location `Var(x)` refers to a distinct
-memory region. In Python, aliasing is ubiquitous:
+*Base case.* P(0) holds trivially: ε ⇓ ε, ∅.
 
-- **Direct aliasing:** `x = y` makes both names reference the same object
-- **Nested sharing:** `a["key"]` and `b["key"]` may point to the same object
-- **DataFrame sharing:** `df1` and `df2` may share underlying column arrays
+*Inductive step.* Assume P(i-1). Since cell i is CLEAN, by the invariant there exists
+Σ' such that Cᵢ, Σ ⇓ Σ', Oᵢ, Rᵢ, Wᵢ with Σ and Σ' agreeing except on W_{i+1..n}.
 
-This affects the computation of Δ(σ, σ'). If cell C modifies `a["key"]["field"]`
-and `b["key"]` is the same object as `a["key"]`, then `b` has also changed — but
-naive variable-level diffing would miss this.
+Because Σ and σ_{i-1} agree on Rᵢ (since Rᵢ ⊆ W_{1..i-1} \ W_{i..n}), we obtain
+Cᵢ, σ_{i-1} ⇓ Oᵢ, σᵢ with σᵢ and Σ' agreeing on W_{1..i}.
 
-**Implementation strategy:** The function `_expand_with_deep_aliases()` in
-`kernel/reproducibility_enforcer.py:243-276` expands the set of accessed
-variables to include all their deep aliases before computing the diff. This
-uses a precomputed alias index from the checkpoint, ensuring that:
+Hence σᵢ and Σ agree on W_{1..i} \ W_{i+1..n}, so P(i) holds.
 
-1. All aliased variables are included in the diff computation
-2. Changes through any alias path are detected correctly
-3. BackConflict and StaleFwd checks consider all affected variables
+Therefore P(n) holds, i.e., C ⇓ O, σₙ. ∎
 
-The formal Δ(σ, σ') is effectively computed on the _aliased-expanded_ variable
-set, making the formal and implementation semantics consistent.
+---
 
-### 3.2 Unmonitored Writes and Lemma 1.4.5
+## 6. Preservation: Operations Preserve Well-Formedness
 
-**Lemma 1.4.5** states that Δ(σ, σ') ⊆ WS(t): all changes to the store appear
-in the write set of the trace. This lemma relies on the assumption that the
-tracer captures every write.
+**Lemma 6.1 (Preservation).** Every notebook operation preserves well-formedness.
 
-In practice, this assumption can fail when:
+The Edit case is trivial (it only marks cells stale). Insert adds a STALE cell,
+imposing no well-formedness obligation. Delete may mark cells stale via
+ReadsResidualWrite. Move composes delete and insert.
 
-- **C extensions** modify memory directly without Python-level trace events
-- **Library internals** have side effects not exposed to the tracer
-- **`exec()` or `eval()`** runs untraced code that modifies variables
-- **Object mutation** via methods that don't trigger `__setattr__`
+For Run(i), we show that the new state S' is well-formed by case analysis on j:
 
-**Implementation strategy:** The implementation _inverts_ the relationship
-between WS(t) and Δ(σ, σ'):
+- **Case j < i:** Cell j was CLEAN before and remains CLEAN (Run only cleans i and may mark
+  others stale). The validity predicates ensure no backward conflict.
 
-- **RBW(t)** (read-before-write set) still comes from the trace — this captures
-  what the cell _read first_, which the tracer reliably observes
-- **Δ(σ, σ')** is computed directly via checkpoint comparison rather than
-  derived from WS(t) — this captures what _actually changed_ regardless of
-  whether it appeared in the trace
+- **Case j = i:** Cell i is now CLEAN. The validity predicates (WriteBeforeRead, etc.)
+  establish the well-formedness conditions directly.
 
-The checkpoint-based diff is computed in `kernel/reproducibility_enforcer.py:628-682`
-using `MemoryCheckpoint.diff()` (defined at `kernel_support/memory_checkpoint.py:1726`).
-This approach is strictly more accurate than relying on WS(t) because it
-detects all changes including those from unmonitored code paths.
+- **Case j > i:** If j remains CLEAN, then ForwardStale did not trigger, meaning
+  Wᵢ ∩ (Rⱼ ∪ Wⱼ) = ∅. The well-formedness conditions transfer from the pre-state.
 
-The formal spec's notation Δ(Σ, Σ') already captures this semantic intent —
-the delta between two stores, computed by direct comparison. The trace-derived
-WS(t) is retained in the implementation for informational purposes (debugging,
-UI display) but is not used in conflict detection.
+---
 
-**RBW(t) as over-approximation.** The trace-based RBW is a valid
-_over-approximation_ of locations the cell may have read from the pre-store.
-If an untraced write occurs before a traced read (e.g., a C extension mutates
-a variable, then Python code reads it), the trace shows a read event without
-a preceding write. This adds the location to RBW even though the cell didn't
-actually read from the pre-store — it read its own written value. This
-over-inclusion is safe: it may cause extra staleness propagation but cannot
-miss real dependencies.
+## 7. Implementation Map
 
-**Untraced reads are covered by reference tracking.** One might worry that
-untraced reads (e.g., a C extension internally traversing an object graph)
-could cause missed dependencies. However, to pass any data to a C extension,
-Python code must first read a reference — and that reference read _is_ traced.
-The analysis operates at object granularity: reading a reference `obj` means
-the cell is considered to depend on everything reachable from `obj`. Since
-deep alias expansion (`_expand_with_deep_aliases()`) includes all objects
-sharing internal references, untraced reads within C extensions are
-conservatively covered by the traced read of the root reference.
+This section maps formal concepts across three representations:
+- **main.tex** — LaTeX proof document
+- **FORMAL_DEVELOPMENT.md** — This document (Markdown specification)
+- **Code** — Python/TypeScript implementation
 
-### 3.3 Practical Implications
+### 7.1 State Representation
 
-The conflict detection rules (BackConflict, StaleFwd, FwdContaminated) all
-operate on the checkpoint-derived Δ rather than the trace-derived WS(t):
+| main.tex | FORMAL_DEVELOPMENT.md | Code |
+|----------|----------------------|------|
+| S = (C, O, Σ) | §1.1 Standard State | `_cell_order`, cell outputs, kernel `namespace` |
+| I = (T, R, W) | §1.2 Instrumentation | `NotebookState` in `kernel/notebook_state.py` |
+| Tᵢ ∈ {CLEAN, STALE} | §1.2 | `NotebookState.is_clean(cell_id)` |
+| Rᵢ | §1.2 | `TrackingData.reads_before_writes` in `kernel_support/models.py` |
+| Wᵢ | §1.2 | `TrackingData.writes` in `kernel_support/models.py` |
+| W_{i..j} | §1.3 | `_writes_in_range()` helper in `kernel/reproducibility_enforcer.py` |
 
-| Check           | Uses Δ from         | Uses trace for        |
-| --------------- | ------------------- | --------------------- |
-| BackConflict    | checkpoint diff     | Obs_k (prior reads)   |
-| StaleFwd        | checkpoint diff     | Obs_k (later reads)   |
-| FwdContaminated | prior cells' Δ      | RBW(t) (current reads)|
+### 7.2 Validity Predicates
 
-This design ensures that:
+| main.tex | FORMAL_DEVELOPMENT.md | Code |
+|----------|----------------------|------|
+| NoReadAndWrite(R, W, i) | §3.2 | `_no_read_and_write()` in `kernel/reproducibility_enforcer.py` |
+| WriteBeforeRead(R, W, i) | §3.2 | `_write_before_read()` in `kernel/reproducibility_enforcer.py` |
+| NoReadBeforeWrite(R, W, i) | §3.2 | `_no_read_before_write()` in `kernel/reproducibility_enforcer.py` |
+| NoWriteAfterRead(R, W, i) | §3.2 | `_no_write_after_read()` in `kernel/reproducibility_enforcer.py` |
 
-1. **Aliased mutations are detected** — even when the mutation path differs
-   from the read path
-2. **C extension side effects are caught** — any observable change triggers
-   appropriate staleness/conflict handling
-3. **The formal guarantees hold** — prefix consistency is maintained because
-   Δ captures _all_ changes, not just traced ones
+### 7.3 Staleness Predicates
 
-The trace WS(t) remains useful for user-facing diagnostics (showing which
-variables a cell wrote) but the system's correctness does not depend on it
-being complete.
+| main.tex | FORMAL_DEVELOPMENT.md | Code |
+|----------|----------------------|------|
+| ForwardStale(R, W, i, j) | §3.3 | `_forward_stale()` in `kernel/reproducibility_enforcer.py` |
+| BackwardStale(W, W', i, j) | §3.3 | `_backward_stale()` in `kernel/reproducibility_enforcer.py` |
+| ReadsResidualWrite(R, w, j) | §3.3 | `_reads_residual_write()` in `kernel/reproducibility_enforcer.py` |
+| LastWriter(W, i, y) | §1.4.2 | `NotebookState.last_writer_for()` in `kernel/notebook_state.py` |
+| Overwritten(W, i) | §1.4.1 | `_overwritten()` in `kernel/reproducibility_enforcer.py` |
+
+### 7.4 Transition Rules
+
+| main.tex | FORMAL_DEVELOPMENT.md | Code |
+|----------|----------------------|------|
+| Inst-Edit | §3.4 [Inst-Edit] | `mark_cell_edited()` in `kernel/reproducibility_enforcer.py` |
+| Inst-Run | §3.4 [Inst-Run] | `check()` in `kernel/reproducibility_enforcer.py` |
+| Inst-Insert | §3.5 [Inst-Insert] | `set_cell_order()` detecting new cells |
+| Inst-Delete | §3.5 [Inst-Delete] | `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
+| Inst-Move-Down/Up | §3.5 [Inst-Move-*] | `_handle_moves()` in `kernel/reproducibility_enforcer.py` |
+
+### 7.5 Invariant and Checks
+
+| main.tex | FORMAL_DEVELOPMENT.md | Code |
+|----------|----------------------|------|
+| Well-formed invariant | §4 Invariant 4.1 | Enforced by staleness tracking + validity checks |
+| Preservation lemma | §6 Lemma 6.1 | Verified by `check()` return values |
+| ForwardStale propagation | §3.4 T'ⱼ cases | `_update_staleness_incremental()` |
+| BackwardStale check | §3.4 T'ⱼ cases | `_check_backward_mutation()` |
+
+### 7.6 Frontend Communication
+
+| Concept | Code |
+|---------|------|
+| Staleness reasons | `Reason`, `ReasonType` in `kernel/models.py` |
+| Metadata output | `flowbook` key in `display_data` output |
+| TypeScript types | `IReproducibilityMetadata` in `src/flowbook/types.ts` |
+| Metadata extraction | `extractFlowbookMetadata()` in `src/flowbook/executionhook.ts` |
+
+---
+
+## 8. Extensions Beyond Core Formalism
+
+The implementation extends the core formalism with:
+
+### 8.1 Column-Level Tracking
+
+Locations include column-level granularity for DataFrames:
+```
+ℓ ∈ Loc ::= Var(x) | Col(df, c)
+```
+
+This allows `df['price']` changes to not conflict with cells reading only `df['quantity']`.
+
+**Code:** `TrackingData.column_reads`, `column_writes` in `kernel_support/models.py`
+
+### 8.2 File I/O Tracking
+
+File reads/writes are tracked as locations:
+```
+ℓ ∈ Loc ::= ... | File(path)
+```
+
+**Code:** `TrackingData.file_reads_before_writes`, `file_writes`
+
+### 8.3 Structural Attributes
+
+DataFrame structural attributes (shape, columns, dtypes) can be tracked:
+```
+ℓ ∈ Loc ::= ... | Structural(df, attr)
+```
+
+**Code:** `structural_reads` in `TrackingData`, `StructuralMode` in `kernel/conflict_rules.py`
+
+### 8.4 Staleness Reasons
+
+The implementation tracks *why* a cell is stale for UI display:
+```
+Reason = CODE_CHANGED | INPUT_CHANGED(loc, cell) | NEVER_EXECUTED | ...
+```
+
+**Code:** `Reason`, `ReasonType` in `kernel/models.py`
+
+---
+
+## 9. Known Differences with Implementation
+
+### 9.1 Aliasing and Reference Sharing
+
+The formal model assumes distinct locations. Python has aliasing:
+- `x = y` makes both names reference the same object
+- DataFrame columns may share underlying arrays
+
+**Implementation:** `_expand_with_deep_aliases()` expands accessed variables to
+include all their aliases before computing diffs.
+
+### 9.2 Checkpoint-Based Comparison
+
+Rather than comparing pre/post stores directly, the implementation uses
+memory checkpoints that snapshot variable states.
+
+**Code:** `MemoryCheckpoint` in `kernel_support/memory_checkpoint.py`
+
+### 9.3 Conflict Resolution Hierarchy
+
+The implementation uses a rule-based conflict resolver for column-level precision:
+
+**Code:** `CONFLICT_RULES` in `kernel/conflict_rules.py`, `ConflictResolver` in `kernel/conflict_resolver.py`

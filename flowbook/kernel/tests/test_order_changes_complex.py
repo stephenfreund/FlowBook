@@ -208,7 +208,7 @@ class TestCopyPasteScenarios:
         result = self.helper.sdc.set_cell_order(["a", "a_copy", "b", "c", "d"])
 
         assert "a_copy" in result.delta.inserted
-        assert "a_copy" not in self.helper.sdc.records  # No execution record
+        assert not self.helper.sdc._notebook_state.has_record("a_copy")  # No execution record
         # No staleness - the new cell hasn't run yet
         assert result.newly_stale == []
 

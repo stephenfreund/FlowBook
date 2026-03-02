@@ -24,7 +24,6 @@ from flowbook.kernel_support.models import TrackingData
 
 from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX, format_forward_dependency_message
 from flowbook.kernel.tests.conftest import make_tracking
-from flowbook.kernel.models import ReproducibilityExecutionRecord
 
 
 class TestForwardDependencyBasic:
@@ -903,11 +902,13 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # Both B and C read x, so both should be stale
+        # Both B and C read x, so both should be stale (plus d, e never executed)
         assert "b" in result_a2.stale_cells
         assert "c" in result_a2.stale_cells
+        assert "d" in result_a2.stale_cells  # Never executed
+        assert "e" in result_a2.stale_cells  # Never executed
         # Should be in document order
-        assert result_a2.stale_cells == ["b", "c"]
+        assert result_a2.stale_cells == ["b", "c", "d", "e"]
 
     def test_forward_dependency_transitive_staleness(self):
         """
@@ -968,9 +969,9 @@ class TestForwardDependencyStaleness:
         assert result_a.forward_violation is not None
 
         # All cells (A, B, C) are forward-contaminated → stale
-        assert "a" in self.sdc._stale_cells
-        assert "b" in self.sdc._stale_cells
-        assert "c" in self.sdc._stale_cells
+        assert "a" in self.sdc._notebook_state.get_stale_cells()
+        assert "b" in self.sdc._notebook_state.get_stale_cells()
+        assert "c" in self.sdc._notebook_state.get_stale_cells()
 
         # Now re-run D with different x
         # C reads x but is stale (EXEC-CONTAMINATED), so BackConflict skips it
@@ -1152,12 +1153,13 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # B, C, D all read x, so all should be stale
+        # B, C, D all read x, so all should be stale (plus e never executed)
         # Should be in document order
         assert "b" in result_a2.stale_cells
         assert "c" in result_a2.stale_cells
         assert "d" in result_a2.stale_cells
-        assert result_a2.stale_cells == ["b", "c", "d"]
+        assert "e" in result_a2.stale_cells  # Never executed
+        assert result_a2.stale_cells == ["b", "c", "d", "e"]
 
 
 class TestForwardDependencyColumnStaleness:

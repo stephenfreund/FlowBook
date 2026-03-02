@@ -15,10 +15,10 @@ import { KernelDetector } from '../shared/kerneldetection';
 /**
  * Extension that adds "Run Next Stale" button to the notebook toolbar
  */
-export class FlowbookToolbarExtension
-  implements
-    DocumentRegistry.IWidgetExtension<NotebookPanel, DocumentRegistry.IModel>
-{
+export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtension<
+  NotebookPanel,
+  DocumentRegistry.IModel
+> {
   private _highlighter: ReproducibilityCellHighlighter | null = null;
   private _kernelDetector: KernelDetector;
 

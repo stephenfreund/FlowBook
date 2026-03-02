@@ -156,13 +156,28 @@ class NotebookDriver:
 
     @property
     def provenance(self):
-        """Get the current provenance map."""
-        return self.enforcer.get_provenance()
+        """Get provenance map interface wrapping NotebookState.last_writer."""
+        return ProvenanceAdapter(self.enforcer._notebook_state)
 
     @property
     def stale_cells(self) -> list:
         """Get the current set of stale cells."""
         return self.enforcer.get_stale_cells()
+
+
+class ProvenanceAdapter:
+    """Adapter to provide ProvenanceMap-like interface over NotebookState.last_writer."""
+
+    def __init__(self, notebook_state):
+        self._ns = notebook_state
+
+    def get_variable_writer(self, var: str):
+        """Get which cell last wrote a variable."""
+        return self._ns.last_writer.get(var)
+
+    def get_column_writer(self, var: str, col: str):
+        """Get which cell last wrote a column of a variable."""
+        return self._ns.get_column_writer(var, col)
 
 
 class TestProvenanceBasic:

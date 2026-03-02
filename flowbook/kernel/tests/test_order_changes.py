@@ -92,7 +92,7 @@ class TestDeleteTransition:
         result = self.helper.sdc.set_cell_order(["a", "c", "d"])
 
         assert "c" in result.newly_stale
-        assert "b" not in self.helper.sdc.records  # Record pruned
+        assert not self.helper.sdc._notebook_state.has_record("b")  # Record pruned
 
     def test_delete_unexecuted_cell_no_staleness(self):
         """Deleting an unexecuted cell doesn't mark anything stale."""
@@ -307,8 +307,8 @@ class TestMoveEdgeCases:
             reads={"x"}, writes={"y"}
         )
 
-        # Mark B stale manually
-        self.helper.sdc._stale_cells.add("b")
+        # Mark B stale manually via NotebookState (simulating CODE_CHANGED)
+        self.helper.sdc._notebook_state.handle_edit("b")
 
         # Move that could make B stale
         result = self.helper.sdc.set_cell_order(["b", "a", "c", "d"])
