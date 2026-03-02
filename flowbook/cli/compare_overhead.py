@@ -1965,7 +1965,8 @@ def plot_combined_v2(
     tick_size = 14 if large_fonts else 10
 
     # Check data availability
-    has_memory = bool(baseline_mem_cells and flowbook_mem_cells)
+    has_memory = bool(flowbook_mem_cells)  # FlowBook memory data is sufficient
+    has_baseline_memory = bool(baseline_mem_cells)
     timing_var_data = extract_checkpoint_timing_var_data(data, top_n=top_n)
     var_data = extract_checkpoint_var_data(data, top_n=top_n)
 
@@ -1979,7 +1980,9 @@ def plot_combined_v2(
 
     # Prepare shared data for timing
     cell_data_map = {}
+    has_baseline = bool(baseline_cells)
     if baseline_cells and flowbook_cells:
+        # Both baseline and flowbook available - align by cell_id
         for c in baseline_cells:
             cell_data_map[c["cell_id"]] = {"baseline_ms": c.get("execute_duration_ms", c.get("cell_runtime_ms", 0))}
         for c in flowbook_cells:
@@ -1996,6 +1999,22 @@ def plot_combined_v2(
                 cell_data_map[c["cell_id"]]["code_ms"] = code_ms
                 cell_data_map[c["cell_id"]]["state_ms"] = state_ms
                 cell_data_map[c["cell_id"]]["check_ms"] = check_ms
+    elif flowbook_cells:
+        # FlowBook only - use code_duration_ms as the "baseline" for comparison
+        for c in flowbook_cells:
+            execute_ms = c.get("execute_duration_ms", c.get("cell_runtime_ms", 0))
+            state_ms = c.get("state_duration_ms", 0)
+            check_ms = c.get("check_duration_ms", 0)
+            code_ms = c.get("code_duration_ms")
+            if code_ms is None:
+                code_ms = max(execute_ms - state_ms - check_ms, 0)
+            cell_data_map[c["cell_id"]] = {
+                "baseline_ms": code_ms,  # Use code time as "baseline" when no baseline kernel
+                "execute_ms": execute_ms,
+                "code_ms": code_ms,
+                "state_ms": state_ms,
+                "check_ms": check_ms,
+            }
 
     cell_ids = list(cell_data_map.keys())
     cells = np.arange(1, len(cell_ids) + 1) if cell_ids else np.array([])
@@ -2018,8 +2037,9 @@ def plot_combined_v2(
     # ========== Panel 1: Timing Comparison (top-left) ==========
     ax = axes[0]
     if len(cells) > 0:
-        # Plot baseline line
-        ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label="Baseline")
+        # Plot baseline/code line (baseline if available, otherwise code time)
+        baseline_label = "Baseline" if has_baseline else "Code (no baseline)"
+        ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label=baseline_label)
 
         # FlowBook as stacked area: code (bottom) + state + check + other (top)
         ax.fill_between(cells, 0, code_cumsum / 1000, alpha=0.3, color=colors[1], label="FlowBook Code")
@@ -2029,7 +2049,7 @@ def plot_combined_v2(
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Cumulative Time (seconds)", fontsize=label_size)
-        title = "Timing Comparison"
+        title = "Timing Comparison" if has_baseline else "Timing (FlowBook only)"
         if timing_initial_count < len(cells):
             title += f" (cells 1-{timing_initial_count} + {len(cells) - timing_initial_count} reruns)"
         ax.set_title(title, fontsize=title_size)
@@ -2052,7 +2072,10 @@ def plot_combined_v2(
         total_flowbook_s = total_code_s + total_state_s + total_check_s + total_other_s
         total_baseline_s = baseline_cumsum[-1] / 1000
 
-        textstr = f'Baseline: {total_baseline_s:.2f}s\nFlowBook: {total_flowbook_s:.2f}s'
+        if has_baseline:
+            textstr = f'Baseline: {total_baseline_s:.2f}s\nFlowBook: {total_flowbook_s:.2f}s'
+        else:
+            textstr = f'Code: {total_code_s:.2f}s\nTotal: {total_flowbook_s:.2f}s'
         props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
         ax.text(0.02, 0.70, textstr, transform=ax.transAxes, fontsize=legend_size,
                 verticalalignment='top', horizontalalignment='left', bbox=props)
@@ -2112,9 +2135,16 @@ def plot_combined_v2(
     ax = axes[2]
     if has_memory:
         mem_cells_arr = np.arange(1, len(flowbook_mem_cells) + 1)
-        baseline_footprint = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells])
+        # Handle case when baseline memory is not available
+        if has_baseline_memory and len(baseline_mem_cells) == len(flowbook_mem_cells):
+            baseline_footprint = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells])
+            baseline_gpu = np.array([c.get("gpu_mem_samples", 0) for c in baseline_mem_cells])
+        else:
+            # No baseline - use base_namespace_mb from FlowBook as the "baseline"
+            # This is the size of user_ns without checkpoint data
+            baseline_footprint = np.array([c.get("base_namespace_mb", c.get("current_footprint_mb", 0)) for c in flowbook_mem_cells])
+            baseline_gpu = np.zeros(len(flowbook_mem_cells))
         flowbook_footprint = np.array([c.get("current_footprint_mb", 0) for c in flowbook_mem_cells])
-        baseline_gpu = np.array([c.get("gpu_mem_samples", 0) for c in baseline_mem_cells])
 
         has_overhead_breakdown = any(c.get("overhead_breakdown") for c in flowbook_mem_cells)
 
@@ -2140,7 +2170,8 @@ def plot_combined_v2(
             has_gpu = any(g > 0 for g in baseline_gpu)
 
             # Layer 1: Baseline CPU memory (bottom - gray)
-            ax.fill_between(mem_cells_arr, 0, baseline_footprint, alpha=0.3, color='gray', label='Baseline CPU')
+            base_label = 'Baseline CPU' if has_baseline_memory else 'User Namespace'
+            ax.fill_between(mem_cells_arr, 0, baseline_footprint, alpha=0.3, color='gray', label=base_label)
             cumulative_mem = baseline_footprint.copy()
 
             # Layer 2: GPU memory (if present)
@@ -2180,7 +2211,8 @@ def plot_combined_v2(
                             fontsize=legend_size, va='bottom', ha='left', color=colors[1])
         else:
             has_gpu = any(g > 0 for g in baseline_gpu)
-            ax.fill_between(mem_cells_arr, 0, baseline_footprint, alpha=0.3, color=colors[0], label='Baseline CPU')
+            base_label = 'Baseline CPU' if has_baseline_memory else 'User Namespace'
+            ax.fill_between(mem_cells_arr, 0, baseline_footprint, alpha=0.3, color=colors[0], label=base_label)
             cumulative_mem = baseline_footprint.copy()
 
             if has_gpu:
@@ -2205,7 +2237,8 @@ def plot_combined_v2(
                             xytext=(5, 5), textcoords='offset points',
                             fontsize=legend_size, va='bottom', ha='left', color=colors[1])
 
-        ax.set_title('Memory Overhead', fontsize=title_size)
+        title = 'Memory Overhead' if has_baseline_memory else 'Memory (FlowBook only)'
+        ax.set_title(title, fontsize=title_size)
         ax.set_xlabel('Cell Number', fontsize=label_size)
         ax.set_ylabel('Memory (MB)', fontsize=label_size)
 
@@ -2231,11 +2264,15 @@ def plot_combined_v2(
 
         # Get baseline memory for reference
         baseline_footprint_var = np.zeros(len(var_cells))
-        if has_memory and len(baseline_mem_cells) >= len(var_cells):
+        if has_baseline_memory and len(baseline_mem_cells) >= len(var_cells):
             baseline_footprint_var = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells[:len(var_cells)]])
+        elif has_memory and len(flowbook_mem_cells) >= len(var_cells):
+            # No baseline - use base_namespace_mb from FlowBook
+            baseline_footprint_var = np.array([c.get("base_namespace_mb", c.get("current_footprint_mb", 0)) for c in flowbook_mem_cells[:len(var_cells)]])
 
         # Draw baseline memory first (bottom layer)
-        ax.fill_between(var_cells, 0, baseline_footprint_var, alpha=0.3, color=colors[0], label='Baseline Memory')
+        base_label = 'Baseline Memory' if has_baseline_memory else 'User Namespace'
+        ax.fill_between(var_cells, 0, baseline_footprint_var, alpha=0.3, color=colors[0], label=base_label)
 
         # Stack checkpoint variables on top of baseline
         stacked = [np.array(var_data["by_var"][v]) / mb for v in var_data["vars_ordered"]]
