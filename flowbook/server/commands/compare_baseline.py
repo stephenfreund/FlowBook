@@ -1960,6 +1960,11 @@ class CompareBaselineCommand(NotebookCommand):
         last_flowbook_state = 0.0
         last_flowbook_check = 0.0
 
+        # Track staleness data across trials for consistency checking
+        first_staleness_data: Optional[Dict[str, Any]] = None
+        last_staleness_data: Optional[Dict[str, Any]] = None
+        staleness_mismatch_warned = False
+
         with self.timing_context() as get_elapsed:
             if run_baseline:
                 log(f"Starting 4-phase baseline vs FlowBook comparison...")
@@ -2193,6 +2198,24 @@ class CompareBaselineCommand(NotebookCommand):
                                     if rtype != "never_executed":  # Don't count never_executed
                                         reason_counts[rtype] = reason_counts.get(rtype, 0) + 1
 
+                    # Store staleness data for cross-trial comparison
+                    current_staleness = {
+                        "clean_count": clean_count,
+                        "stale_count": stale_count,
+                        "reason_counts": dict(reason_counts),
+                    }
+
+                    # Check consistency across trials
+                    if first_staleness_data is None:
+                        first_staleness_data = current_staleness
+                    elif not staleness_mismatch_warned and current_staleness != first_staleness_data:
+                        staleness_mismatch_warned = True
+                        log("WARNING: Staleness results differ from first trial!")
+                        log(f"  First trial: clean={first_staleness_data['clean_count']}, stale={first_staleness_data['stale_count']}, reasons={first_staleness_data['reason_counts']}")
+                        log(f"  This trial:  clean={clean_count}, stale={stale_count}, reasons={dict(reason_counts)}")
+
+                    last_staleness_data = current_staleness
+
                     log("CHECKING RESULTS:")
                     log(f"  Clean cells:          {clean_count}")
                     log(f"  Stale cells:          {stale_count}")
@@ -2210,9 +2233,22 @@ class CompareBaselineCommand(NotebookCommand):
                 log("=" * 60)
                 log(f"COMPLETED {num_trials} TRIALS")
                 log("=" * 60)
+                log("")
+                log("Output files:")
                 for path in all_json_paths:
                     log(f"  {path}")
                 log("")
+
+                # Show staleness summary in multi-trial output
+                if last_staleness_data:
+                    log("CHECKING RESULTS (consistent across trials):" if not staleness_mismatch_warned else "CHECKING RESULTS (WARNING: varied across trials):")
+                    log(f"  Clean cells:          {last_staleness_data['clean_count']}")
+                    log(f"  Stale cells:          {last_staleness_data['stale_count']}")
+                    if last_staleness_data['reason_counts']:
+                        log("  Staleness reasons:")
+                        for rtype, count in sorted(last_staleness_data['reason_counts'].items()):
+                            log(f"    {rtype}: {count}")
+                    log("")
 
             total_time = get_elapsed()
 
