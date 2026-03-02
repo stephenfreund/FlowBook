@@ -32,7 +32,7 @@ class TestReproducibilityEnforcerGetStaleCells:
         result = helper.execute_cell("a", {"x": 1, "y": 2}, {"x": 100, "y": 2}, writes={"x"})
 
         assert "b" in result.stale_cells
-        # B is stale (INPUT_CHANGED), c and d are stale (NEVER_EXECUTED)
+        # B is stale (FORWARD_STALE), c and d are stale (NEVER_EXECUTED)
         stale = helper.sdc.get_stale_cells()
         assert "b" in stale
         assert "c" in stale  # Never executed
@@ -75,7 +75,7 @@ class TestReproducibilityEnforcerReset:
         helper.execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
         helper.execute_cell("a", {"x": 1, "y": 2}, {"x": 100, "y": 2}, writes={"x"})
 
-        # B is stale (INPUT_CHANGED), c and d are stale (NEVER_EXECUTED)
+        # B is stale (FORWARD_STALE), c and d are stale (NEVER_EXECUTED)
         stale = helper.sdc.get_stale_cells()
         assert "b" in stale
         assert "c" in stale  # Never executed
@@ -114,7 +114,7 @@ class TestReproducibilityEnforcerComputeAllStaleCells:
         assert "c" in stale_before  # Never executed
         assert "d" in stale_before  # Never executed
 
-        # Recompute should find b stale again (INPUT_CHANGED from x)
+        # Recompute should find b stale again (FORWARD_STALE from x)
         result = helper.sdc.compute_all_stale_cells(current)
         assert "b" in result  # b is stale because x changed
         # c and d are also stale (NEVER_EXECUTED)

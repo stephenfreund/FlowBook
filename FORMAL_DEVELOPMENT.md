@@ -348,32 +348,48 @@ This section maps formal concepts across three representations:
 
 ### 7.2 Validity Predicates
 
+Validity predicates are implemented inline within `check()`, following the [Inst-Run] structure:
+
 | main.tex | FORMAL_DEVELOPMENT.md | Code |
 |----------|----------------------|------|
-| NoReadAndWrite(R, W, i) | §3.2 | `_no_read_and_write()` in `kernel/reproducibility_enforcer.py` |
-| WriteBeforeRead(R, W, i) | §3.2 | `_write_before_read()` in `kernel/reproducibility_enforcer.py` |
-| NoReadBeforeWrite(R, W, i) | §3.2 | `_no_read_before_write()` in `kernel/reproducibility_enforcer.py` |
-| NoWriteAfterRead(R, W, i) | §3.2 | `_no_write_after_read()` in `kernel/reproducibility_enforcer.py` |
+| NoReadAndWrite(R, W, i) | §3.2 | Implicit in `TrackingData.reads_before_writes` (excludes written-after locations) |
+| WriteBeforeRead(R, W, i) | §3.2 | Not strictly enforced (would reject reading undefined variables) |
+| NoReadBeforeWrite(R, W, i) | §3.2 | `_check_forward_contamination()` in `check()` |
+| NoWriteAfterRead(R, W, i) | §3.2 | `_check_backward_mutation_new()` in `check()` |
 
 ### 7.3 Staleness Predicates
 
 | main.tex | FORMAL_DEVELOPMENT.md | Code |
 |----------|----------------------|------|
-| ForwardStale(R, W, i, j) | §3.3 | `_forward_stale()` in `kernel/reproducibility_enforcer.py` |
-| BackwardStale(W, W', i, j) | §3.3 | `_backward_stale()` in `kernel/reproducibility_enforcer.py` |
-| ReadsResidualWrite(R, w, j) | §3.3 | `_reads_residual_write()` in `kernel/reproducibility_enforcer.py` |
-| LastWriter(W, i, y) | §1.4.2 | `NotebookState.last_writer_for()` in `kernel/notebook_state.py` |
-| Overwritten(W, i) | §1.4.1 | `_overwritten()` in `kernel/reproducibility_enforcer.py` |
+| ForwardStale(R, W, i, j) | §3.3 | `_compute_forward_staleness()` in `check()` |
+| BackwardStale(W, W', i, j) | §3.3 | Computed via `NotebookState.last_writer` in `check()` |
+| ReadsResidualWrite(R, w, j) | §3.3 | `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
+| LastWriter(W, i, y) | §1.4.2 | `NotebookState.last_writer[loc]` in `kernel/notebook_state.py` |
+| Overwritten(W, i) | §1.4.1 | Computed on-demand in staleness checks |
 
 ### 7.4 Transition Rules
+
+The `check()` method implements [Inst-Run] exactly, with formal citations in comments:
 
 | main.tex | FORMAL_DEVELOPMENT.md | Code |
 |----------|----------------------|------|
 | Inst-Edit | §3.4 [Inst-Edit] | `mark_cell_edited()` in `kernel/reproducibility_enforcer.py` |
-| Inst-Run | §3.4 [Inst-Run] | `check()` in `kernel/reproducibility_enforcer.py` |
+| Inst-Run | §3.4 [Inst-Run] | `check()` in `kernel/reproducibility_enforcer.py` (lines ~938-1183) |
 | Inst-Insert | §3.5 [Inst-Insert] | `set_cell_order()` detecting new cells |
 | Inst-Delete | §3.5 [Inst-Delete] | `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
 | Inst-Move-Down/Up | §3.5 [Inst-Move-*] | `_handle_moves()` in `kernel/reproducibility_enforcer.py` |
+
+**[Inst-Run] Implementation Structure:**
+
+| Formal Line | Code Location |
+|-------------|---------------|
+| `R' = R[i := r]` | STEP 3: `record_execution()` call |
+| `W' = W[i := w]` | STEP 3: `record_execution()` call |
+| NoReadBeforeWrite check | STEP 2: `_check_forward_contamination()` |
+| NoWriteAfterRead check | STEP 2: `_check_backward_mutation_new()` |
+| `T'ᵢ = CLEAN` | STEP 4: `set_clean(cell_id)` |
+| ForwardStale loop | STEP 5: `_compute_forward_staleness()` |
+| BackwardStale loop | STEP 5: LastWriter tracking via `NotebookState.last_writer` |
 
 ### 7.5 Invariant and Checks
 
@@ -381,8 +397,8 @@ This section maps formal concepts across three representations:
 |----------|----------------------|------|
 | Well-formed invariant | §4 Invariant 4.1 | Enforced by staleness tracking + validity checks |
 | Preservation lemma | §6 Lemma 6.1 | Verified by `check()` return values |
-| ForwardStale propagation | §3.4 T'ⱼ cases | `_update_staleness_incremental()` |
-| BackwardStale check | §3.4 T'ⱼ cases | `_check_backward_mutation()` |
+| ForwardStale propagation | §3.4 T'ⱼ cases | `_compute_forward_staleness()` in `check()` |
+| BackwardStale check | §3.4 T'ⱼ cases | `_check_backward_mutation_new()` in `check()` |
 
 ### 7.6 Frontend Communication
 
@@ -399,18 +415,32 @@ This section maps formal concepts across three representations:
 
 The implementation extends the core formalism with:
 
-### 8.1 Column-Level Tracking
+### 8.1 Location Types (Loc)
 
-Locations include column-level granularity for DataFrames:
+Locations are represented as typed tuples for fine-grained conflict detection:
 ```
-ℓ ∈ Loc ::= Var(x) | Col(df, c)
+ℓ ∈ Loc ::= Var(x) | Col(df, c) | File(path) | Structural(df, attr)
 ```
 
-This allows `df['price']` changes to not conflict with cells reading only `df['quantity']`.
+**Code:** `Loc` dataclass in `kernel/models.py` with constructors:
+- `Loc.var(name)` — variable location
+- `Loc.column(var, column)` — column location
+- `Loc.file(path)` — file location
+- `Loc.structural(var, attr)` — structural attribute location
+
+### 8.2 Column-Level Tracking
+
+Column-level locations allow `df['price']` changes to not conflict with cells reading only `df['quantity']`.
 
 **Code:** `TrackingData.column_reads`, `column_writes` in `kernel_support/models.py`
 
-### 8.2 File I/O Tracking
+Loc-based predicates in `kernel/models.py`:
+- `check_loc_conflicts(W_i, R_before_i, mode)` — implements NoWriteAfterRead with column-level precision
+- `diff_to_write_locs(diff, tracking)` — converts diff result to LocSet
+- `tracking_to_read_locs(tracking)` — converts TrackingData to LocSet
+- `get_loc_variables(locs)` — extracts variable names from LocSet
+
+### 8.3 File I/O Tracking
 
 File reads/writes are tracked as locations:
 ```
@@ -419,7 +449,7 @@ File reads/writes are tracked as locations:
 
 **Code:** `TrackingData.file_reads_before_writes`, `file_writes`
 
-### 8.3 Structural Attributes
+### 8.4 Structural Attributes
 
 DataFrame structural attributes (shape, columns, dtypes) can be tracked:
 ```
@@ -428,7 +458,7 @@ DataFrame structural attributes (shape, columns, dtypes) can be tracked:
 
 **Code:** `structural_reads` in `TrackingData`, `StructuralMode` in `kernel/conflict_rules.py`
 
-### 8.4 Staleness Reasons
+### 8.5 Staleness Reasons
 
 The implementation tracks *why* a cell is stale for UI display:
 ```

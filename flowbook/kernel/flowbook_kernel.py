@@ -362,7 +362,7 @@ import os
 import re
 import time
 import traceback
-from typing import Optional, Tuple
+from typing import Optional, Set, Tuple
 
 from IPython.core.magic import Magics, line_magic, magics_class
 from ipykernel.kernelapp import IPKernelApp
@@ -1107,6 +1107,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 # instead of creating a post-checkpoint. This eliminates ~50% of
                 # checkpoint overhead by avoiding the second deep copy.
                 if tracking and self._cell_id:
+                    # Capture stale cells before check to compute newly stale
+                    stale_before = set(self._enforcer.get_stale_cells())
                     with timer(key="kernel:check") as check_timer:
                         sdc_result = self._enforcer.check(
                             cell_id=self._cell_id,
@@ -1117,77 +1119,30 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         )
 
                     # Handle violations (backward mutation and/or forward dependency)
+                    # NEW SEMANTICS: Never reject, only mark cells stale
+                    # Violations are informational only - cell is marked STALE but execution continues
                     has_backward = sdc_result and sdc_result.violation
                     has_forward = sdc_result and sdc_result.forward_violation
 
-                    # [EXEC-REJECT] Backward conflict → rollback (Def 1.8.2)
+                    # Log violations as warnings (informational, not blocking)
                     if has_backward:
-                        if self._continue_after_violation:
-                            # Warn about backward violation but continue
-                            if sdc_result.violation.truncation_details:
-                                error(
-                                    f"Reproducibility truncation: {sdc_result.violation.message}"
-                                )
-                                self._send_truncation_details(
-                                    sdc_result.violation.truncation_details
-                                )
+                        # Handle truncation issues
+                        if sdc_result.violation.truncation_details:
                             error(
-                                f"Reproducibility violation (continuing): {sdc_result.violation.message}"
+                                f"Reproducibility truncation: {sdc_result.violation.message}"
                             )
-                            self._send_violation_warning(sdc_result.violation)
-                            if has_forward:
-                                error(
-                                    f"Forward dependency (continuing): {sdc_result.forward_violation.message}"
-                                )
-                                self._send_violation_warning(
-                                    sdc_result.forward_violation
-                                )
-                        else:
-                            # Block on backward violation
-                            # Log truncation issues to terminal
-                            if sdc_result.violation.truncation_details:
-                                error(
-                                    f"Reproducibility truncation: {sdc_result.violation.message}"
-                                )
-                                self._send_truncation_details(
-                                    sdc_result.violation.truncation_details
-                                )
-
-                            error(
-                                f"Reproducibility violation: {sdc_result.violation.message}"
+                            self._send_truncation_details(
+                                sdc_result.violation.truncation_details
                             )
+                        # Log the backward mutation (cell is already marked stale by enforcer)
+                        log(f"[Inst-Run] Cell {self._cell_id}: backward mutation detected, marked stale")
 
-                            self._restore_checkpoint(
-                                f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
-                            )
+                    if has_forward:
+                        # Log the forward contamination (cell is already marked stale by enforcer)
+                        log(f"[Inst-Run] Cell {self._cell_id}: forward contamination detected, marked stale")
 
-                            self._send_violation_error(sdc_result.violation)
-
-                            # Also report forward violation if both exist
-                            if has_forward:
-                                self._send_violation_warning(
-                                    sdc_result.forward_violation
-                                )
-
-                            return self._make_error_result(sdc_result.violation)
-
-                    # Forward contamination → block execution (error, not warning)
-                    # User must run upstream cells in document order to fix
-                    if has_forward and not has_backward:
-                        error(
-                            f"Forward dependency (blocked): {sdc_result.forward_violation.message}"
-                        )
-
-                        self._restore_checkpoint(
-                            f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
-                        )
-
-                        self._send_forward_violation_error(sdc_result.forward_violation, sdc_result.writer_violation)
-
-                        return self._make_error_result(sdc_result.forward_violation)
-
-                    # Display results (skip if silent, error, or backward violation with rollback)
-                    skip_display = (has_backward) and not self._continue_after_violation
+                    # Display results (no longer skip on violations since we don't reject)
+                    skip_display = False
                     if (
                         not silent
                         and result.get("status") != "error"
@@ -1201,6 +1156,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             check_duration_ms=check_timer.duration(),
                             tracking=tracking,
                             sdc_result=sdc_result,
+                            stale_before=stale_before,
                         )
 
                 return result
@@ -1410,6 +1366,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         check_duration_ms: float,
         tracking,
         sdc_result,
+        stale_before: Optional[Set[str]] = None,
     ) -> None:
         """Display execution timing and Reproducibility metadata."""
         # Build metadata for display
@@ -1521,15 +1478,20 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 parts.append(f"File Writes: {','.join(file_writes_list)}")
 
         if sdc_result and sdc_result.stale_cells:
-            # Convert cell IDs to @A references for display
-            stale_refs = []
-            for cell_id in sdc_result.stale_cells:
-                try:
-                    idx = self._enforcer.cell_order.index(cell_id)
-                    stale_refs.append(index_to_alpha(idx))
-                except (ValueError, IndexError):
-                    stale_refs.append(cell_id)  # Fallback to ID if not in order
-            parts.append(f"Stale: {','.join(stale_refs)}")
+            # Show only newly stale cells (cells that became stale from this execution)
+            stale_set = set(sdc_result.stale_cells)
+            newly_stale = stale_set - (stale_before or set())
+            if newly_stale:
+                # Convert cell IDs to @A references for display
+                stale_refs = []
+                for cell_id in sdc_result.stale_cells:
+                    if cell_id in newly_stale:
+                        try:
+                            idx = self._enforcer.cell_order.index(cell_id)
+                            stale_refs.append(index_to_alpha(idx))
+                        except (ValueError, IndexError):
+                            stale_refs.append(cell_id)  # Fallback to ID if not in order
+                parts.append(f"Stale: {','.join(stale_refs)}")
 
         icon = "✓" if not (sdc_result and sdc_result.violation) else "✗"
 

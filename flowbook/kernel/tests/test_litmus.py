@@ -43,19 +43,21 @@ class LitmusTestRunner:
     state snapshots for visualization.
     """
 
-    def __init__(self, cell_order: List[str]):
-        """Initialize with a cell order."""
+    def __init__(self, cell_order: List[str], cells: Optional[Dict[str, str]] = None):
+        """Initialize with a cell order and optional initial cell code."""
         self.helper = ReproducibilityTestHelper()
         self.helper.set_cell_order(cell_order)
         self.history: List[StateSnapshot] = []
         self.operations: List[Dict[str, Any]] = []  # Track executed operations
-        self.cell_code: Dict[str, str] = {}  # Track code for each cell
+        self.cell_code: Dict[str, str] = cells.copy() if cells else {}  # Track current code for each cell
+        self.code_history: List[Dict[str, str]] = []  # Track code state after each operation
         self.last_violation: Optional[Dict[str, Any]] = None
         self.last_forward_violation: Optional[Dict[str, Any]] = None
         self.last_newly_stale: List[str] = []
 
         # Capture initial state
         self._capture_snapshot()
+        self.code_history.append(dict(self.cell_code))  # Initial code state
 
     def _capture_snapshot(self) -> StateSnapshot:
         """Capture current state as a snapshot."""
@@ -104,6 +106,7 @@ class LitmusTestRunner:
         # Track the operation for display
         self.operations.append(op)
         self._capture_snapshot()
+        self.code_history.append(dict(self.cell_code))  # Snapshot code state
 
     def _run_cell(self, op: Dict[str, Any]) -> None:
         """Execute a RUN operation."""
@@ -148,6 +151,9 @@ class LitmusTestRunner:
         """Execute an EDIT operation."""
         cell_id = op["cell"]
         self.helper.sdc._notebook_state.handle_edit(cell_id)
+        # Track new code if provided
+        if "new_code" in op:
+            self.cell_code[cell_id] = op["new_code"]
 
     def _delete_cell(self, op: Dict[str, Any]) -> None:
         """Execute a DELETE operation."""
@@ -333,17 +339,6 @@ class LitmusTestRunner:
         lines.append("=" * 79)
         lines.append("")
 
-        # Show cell code if available
-        if self.cell_code:
-            lines.append("Code:")
-            for cell_id in sorted(self.cell_code.keys()):
-                code = self.cell_code[cell_id]
-                # Truncate long code
-                if len(code) > 40:
-                    code = code[:37] + "..."
-                lines.append(f"  {cell_id}: {code}")
-            lines.append("")
-
         # Get all cells across all snapshots
         all_cells = set()
         for snap in self.history:
@@ -364,7 +359,7 @@ class LitmusTestRunner:
             # Collect data per snapshot
             cell_data = []  # List of dicts per snapshot
 
-            for snap in self.history:
+            for snap_idx, snap in enumerate(self.history):
                 if cell_id not in snap.cell_order:
                     cell_data.append({"deleted": True})
                     continue
@@ -377,10 +372,16 @@ class LitmusTestRunner:
                 r_str = "{" + ",".join(sorted(r)) + "}" if r else "∅"
                 w_str = "{" + ",".join(sorted(w)) + "}" if w else "∅"
 
+                # Get code for this cell at this snapshot
+                code = self.code_history[snap_idx].get(cell_id, "") if snap_idx < len(self.code_history) else ""
+
                 # Format reasons - one per line
                 reason_strs = []
+                has_never_executed = False
                 for reason in reasons:
                     rtype = reason.get("type", "?")
+                    if rtype == "never_executed":
+                        has_never_executed = True
                     loc = reason.get("loc", "")
                     cid = reason.get("cell_id", "")
                     if loc and cid:
@@ -390,62 +391,88 @@ class LitmusTestRunner:
                     else:
                         reason_strs.append(rtype)
 
+                # Cell is "executed" if it's clean or has non-empty reads/writes
+                executed = (status == "clean") or bool(r) or bool(w)
+
                 cell_data.append({
                     "deleted": False,
                     "reads": f"R:{r_str}",
                     "writes": f"W:{w_str}",
                     "status": status.upper(),
                     "reasons": reason_strs,
+                    "code": code,
+                    "executed": executed,
                 })
 
             # Determine max reasons across all snapshots for this cell
             max_reasons = max((len(d.get("reasons", [])) for d in cell_data), default=0)
 
-            # Print R line
-            row = cell_id.ljust(6)
-            for d in cell_data:
-                if d.get("deleted"):
-                    row += "(deleted)".center(col_width)
-                else:
-                    row += d["reads"][:col_width - 1].center(col_width)
-            lines.append(row)
+            # Check if any snapshot has code for this cell
+            has_code = any(d.get("code") for d in cell_data if not d.get("deleted"))
 
-            # Print W line
-            row = "".ljust(6)
-            for d in cell_data:
-                if d.get("deleted"):
-                    row += "".center(col_width)
-                else:
-                    row += d["writes"][:col_width - 1].center(col_width)
-            lines.append(row)
-
-            # Print status only if cell is CLEAN (stale is implied by reasons)
-            row = "".ljust(6)
-            has_status = False
-            for d in cell_data:
-                if d.get("deleted"):
-                    row += "".center(col_width)
-                elif d["status"] == "CLEAN":
-                    row += "CLEAN".center(col_width)
-                    has_status = True
-                else:
-                    row += "".center(col_width)  # Stale implied by reasons
-            if has_status or max_reasons == 0:
-                # Show status line if any cell is clean, or if no reasons anywhere
-                row = "".ljust(6)
+            # Print code line if this cell has any code
+            if has_code:
+                row = cell_id.ljust(6)
                 for d in cell_data:
                     if d.get("deleted"):
-                        row += "".center(col_width)
+                        row += "(deleted)".center(col_width)
                     else:
-                        # Show CLEAN or STALE only when no reasons
-                        if not d["reasons"]:
-                            row += d["status"].center(col_width)
+                        code = d.get("code", "")
+                        if code:
+                            # Truncate long code
+                            if len(code) > col_width - 2:
+                                code = code[:col_width - 5] + "..."
+                            row += code.center(col_width)
                         else:
                             row += "".center(col_width)
                 lines.append(row)
 
-            # Print each reason on its own line
-            for reason_idx in range(max_reasons):
+            # Print R line (only show if cell has been executed in at least one snapshot)
+            has_executed = any(d.get("executed") for d in cell_data if not d.get("deleted"))
+            if has_executed:
+                row = ("" if has_code else cell_id).ljust(6)
+                for d in cell_data:
+                    if d.get("deleted"):
+                        row += "(deleted)".center(col_width) if not has_code else "".center(col_width)
+                    elif d.get("executed"):
+                        row += d["reads"][:col_width - 1].center(col_width)
+                    else:
+                        row += "".center(col_width)
+                lines.append(row)
+
+                # Print W line
+                row = "".ljust(6)
+                for d in cell_data:
+                    if d.get("deleted"):
+                        row += "".center(col_width)
+                    elif d.get("executed"):
+                        row += d["writes"][:col_width - 1].center(col_width)
+                    else:
+                        row += "".center(col_width)
+                lines.append(row)
+            elif not has_code:
+                # If no code and no execution, still need to print cell_id
+                row = cell_id.ljust(6)
+                for _ in cell_data:
+                    row += "".center(col_width)
+                lines.append(row)
+
+            # Print status/first reason line
+            # CLEAN cells show "CLEAN", STALE cells show first reason on same line
+            row = "".ljust(6)
+            for d in cell_data:
+                if d.get("deleted"):
+                    row += "".center(col_width)
+                elif not d["reasons"]:
+                    # No reasons = CLEAN
+                    row += "CLEAN".center(col_width)
+                else:
+                    # Has reasons = first reason (stale implied)
+                    row += d["reasons"][0][:col_width - 1].center(col_width)
+            lines.append(row)
+
+            # Print remaining reasons (starting from index 1)
+            for reason_idx in range(1, max_reasons):
                 row = "".ljust(6)
                 for d in cell_data:
                     if d.get("deleted"):
@@ -582,11 +609,12 @@ def test_litmus(litmus_test):
     name = litmus_test.get("name", "unnamed")
     description = litmus_test.get("description", "")
     cell_order = litmus_test.get("cell_order", [])
+    cells = litmus_test.get("cells", {})  # Initial cell code definitions
     operations = litmus_test.get("operations", [])
     expect = litmus_test.get("expect", {})
 
     # Create runner
-    runner = LitmusTestRunner(cell_order)
+    runner = LitmusTestRunner(cell_order, cells)
 
     # Execute operations
     for op in operations:
@@ -646,18 +674,23 @@ class TestLitmusHelpers:
         assert "shape" in result.structural_reads.get("df", set())
 
 
-def generate_all_outputs(output_dir: Optional[Path] = None) -> None:
+def generate_all_outputs(output_dir: Optional[Path] = None, code_only: bool = True) -> None:
     """
     Generate combined text and LaTeX output files for all litmus tests.
 
     Args:
         output_dir: Directory for output files. Defaults to litmus_output/ next to YAML.
+        code_only: If True, only include tests with code (names ending in '_code').
     """
     if output_dir is None:
         output_dir = LITMUS_YAML_PATH.parent / "litmus_output"
     output_dir.mkdir(exist_ok=True)
 
     tests = load_litmus_tests()
+
+    # Filter to code-based tests if requested
+    if code_only:
+        tests = [t for t in tests if t.get("name", "").endswith("_code")]
 
     # Collect all ASCII and LaTeX outputs
     ascii_parts = []
@@ -667,10 +700,11 @@ def generate_all_outputs(output_dir: Optional[Path] = None) -> None:
         name = test.get("name", "unnamed")
         description = test.get("description", "")
         cell_order = test.get("cell_order", [])
+        cells = test.get("cells", {})  # Initial cell code definitions
         operations = test.get("operations", [])
 
         # Create runner and execute operations
-        runner = LitmusTestRunner(cell_order)
+        runner = LitmusTestRunner(cell_order, cells)
         for op in operations:
             runner.execute_operation(op)
 

@@ -56,16 +56,24 @@ export interface IReproducibilityCellState {
 /**
  * Reason types from the formal model (§1.2).
  * Maps to ReasonType enum in flowbook/kernel/models.py
+ *
+ * Names align with formal predicates from [Inst-Run] specification:
+ * - forward_stale: ForwardStale(R,W,i,j) - cell j>i reads/writes location that i wrote
+ * - backward_stale: BackwardStale(W,W',i,j) - cell j<i was last writer of removed write
+ * - no_read_before_write: ¬NoReadBeforeWrite - reads location written by later cell
+ * - no_write_after_read: ¬NoWriteAfterRead - wrote location read by earlier fresh cell
+ * - reads_residual_write: ReadsResidualWrite - reads from deleted cell's writes
  */
 export type BackendReasonType =
   | 'never_executed' // Cell has never been run
   | 'code_changed' // Cell source code was edited
-  | 'input_changed' // A variable this cell reads was modified by another cell
-  | 'write_conflict' // Another cell wrote to a variable this cell also writes
-  | 'reads_from_later' // Cell reads a value written by a later cell (forward contamination)
-  | 'source_deleted' // The cell that wrote a variable this cell reads was deleted
+  | 'forward_stale' // A variable this cell reads was modified by another cell (was input_changed)
+  | 'backward_stale' // Another cell wrote to a variable this cell also writes (was write_conflict)
+  | 'no_read_before_write' // Cell reads a value written by a later cell (was reads_from_later)
+  | 'reads_residual_write' // The cell that wrote a variable this cell reads was deleted (was source_deleted)
   | 'order_changed' // Cell order changed affecting data flow
-  | 'skipped_upstream'; // Cell reads from wrong writer; re-running won't help, run expected cell first
+  | 'skipped_upstream' // Cell reads from wrong writer; re-running won't help, run expected cell first
+  | 'no_write_after_read'; // Cell wrote to location read by earlier cell (was backward_mutation)
 
 /**
  * Frontend-computed reason types with human-readable formatting.

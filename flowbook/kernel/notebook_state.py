@@ -115,20 +115,20 @@ class NotebookState:
         """Get reasons for all stale cells (for metadata output).
 
         Reasons are sorted by priority so the most specific reason comes first:
-        1. INPUT_CHANGED (tells you which variable changed)
+        1. FORWARD_STALE (tells you which variable changed)
         2. CODE_CHANGED (cell was edited)
-        3. WRITE_CONFLICT, READS_FROM_LATER, SOURCE_DELETED
+        3. BACKWARD_STALE, NO_READ_BEFORE_WRITE, READS_RESIDUAL_WRITE
         4. ORDER_CHANGED (least specific)
         5. NEVER_EXECUTED
         """
         # Priority order: lower = higher priority (shown first)
         priority = {
             ReasonType.SKIPPED_UPSTREAM: 0,  # Most actionable: run the expected cell first
-            ReasonType.INPUT_CHANGED: 1,
+            ReasonType.FORWARD_STALE: 1,
             ReasonType.CODE_CHANGED: 2,
-            ReasonType.WRITE_CONFLICT: 3,
-            ReasonType.READS_FROM_LATER: 4,
-            ReasonType.SOURCE_DELETED: 5,
+            ReasonType.BACKWARD_STALE: 3,
+            ReasonType.NO_READ_BEFORE_WRITE: 4,
+            ReasonType.READS_RESIDUAL_WRITE: 5,
             ReasonType.ORDER_CHANGED: 6,
             ReasonType.NEVER_EXECUTED: 7,
         }
@@ -206,7 +206,7 @@ class NotebookState:
                 writer_pos = self.cell_order.index(writer)
                 if writer_pos > cell_pos:
                     reasons.add(Reason(
-                        ReasonType.READS_FROM_LATER,
+                        ReasonType.NO_READ_BEFORE_WRITE,
                         loc=loc,
                         cell_id=writer
                     ))
@@ -354,16 +354,16 @@ class NotebookState:
             later_reads = self.reads.get(later_cell, set())
             later_writes = self.writes.get(later_cell, set())
 
-            # InputChanged: written ∩ reads
+            # ForwardStale: written ∩ reads
             for loc in written_locs & later_reads:
                 self.add_reason(later_cell, Reason(
-                    ReasonType.INPUT_CHANGED, loc=loc, cell_id=writer_cell
+                    ReasonType.FORWARD_STALE, loc=loc, cell_id=writer_cell
                 ))
 
-            # WriteConflict: written ∩ writes
+            # BackwardStale: written ∩ writes
             for loc in written_locs & later_writes:
                 self.add_reason(later_cell, Reason(
-                    ReasonType.WRITE_CONFLICT, loc=loc, cell_id=writer_cell
+                    ReasonType.BACKWARD_STALE, loc=loc, cell_id=writer_cell
                 ))
 
     def handle_edit(self, cell_id: str) -> None:
@@ -409,7 +409,7 @@ class NotebookState:
             for loc in cell_reads & deleted_writes:
                 # The location was written by deleted_cell, mark reader as orphan
                 self.add_reason(cell_id, Reason(
-                    ReasonType.SOURCE_DELETED, loc=loc
+                    ReasonType.READS_RESIDUAL_WRITE, loc=loc
                 ))
 
         # Remove deleted cell from state

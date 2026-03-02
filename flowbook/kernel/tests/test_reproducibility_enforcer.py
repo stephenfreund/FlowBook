@@ -660,8 +660,15 @@ class TestColumnAwareBackwardMutation:
         assert result_b.violation is None
 
 
-class TestContinueOnViolation:
-    """Tests for continue_on_violation parameter."""
+class TestBackwardMutationStaleness:
+    """Tests for backward mutation behavior (new semantics: never reject, mark stale).
+
+    In the new semantics:
+    - Backward mutations mark the cell as STALE (not CLEAN)
+    - Execution state is ALWAYS updated (no early return)
+    - Staleness is ALWAYS computed for downstream cells
+    - `continue_on_violation` parameter is obsolete (always continues)
+    """
 
     def setup_method(self):
         self.checkpoints = MemoryCheckpoints(
@@ -679,11 +686,11 @@ class TestContinueOnViolation:
         """Return namespace dict for use with check()."""
         return namespace
 
-    def test_violation_without_continue_has_empty_stale(self):
-        """Default behavior: violation returns empty stale_cells."""
+    def test_backward_mutation_marks_cell_stale(self):
+        """When cell B writes to x that cell A reads, B is marked stale."""
         # Cell A reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        ns_a = self._make_namespace( {"x": 1, "y": 2})
+        ns_a = self._make_namespace({"x": 1, "y": 2})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
@@ -693,56 +700,69 @@ class TestContinueOnViolation:
 
         # Cell B modifies x (backward mutation)
         self._save_pre_checkpoint("b", {"x": 1, "y": 2})
-        ns_b = self._make_namespace( {"x": 999, "y": 2})
+        ns_b = self._make_namespace({"x": 999, "y": 2})
         result = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=False,  # default
         )
 
+        # Backward violation info is returned
         assert result.violation is not None
-        assert result.stale_cells == []  # Empty when not continuing
-        assert result.changed_variables == []  # Empty when not continuing
+        assert result.violation.mutating_cell == "b"
+        assert result.violation.affected_cell == "a"
+        # Staleness is ALWAYS computed (new semantics)
+        # changed_variables shows what changed
+        assert "x" in result.changed_variables
+        # Cell b itself should be stale (backward mutation)
+        assert not self.sdc._notebook_state.is_clean("b")
+        # Cell b should have NO_WRITE_AFTER_READ reason
+        reasons = self.sdc._notebook_state.get_reasons("b")
+        assert any(r.type == ReasonType.NO_WRITE_AFTER_READ for r in reasons)
 
-    def test_violation_with_continue_computes_stale(self):
-        """With continue_on_violation=True, staleness is computed even on violation."""
+    def test_backward_mutation_computes_forward_staleness(self):
+        """Backward mutation still triggers ForwardStale for downstream cells."""
         # Cell A reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        ns_a = self._make_namespace( {"x": 1, "y": 2})
+        ns_a = self._make_namespace({"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             namespace=ns_a,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
+            tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        # Cell B modifies x (backward mutation) - but we continue
-        self._save_pre_checkpoint("b", {"x": 1, "y": 2})
-        ns_b = self._make_namespace( {"x": 999, "y": 2})
+        # Cell C reads x (will be affected by B's write)
+        self._save_pre_checkpoint("c", {"x": 1})
+        ns_c = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell B modifies x (backward mutation against A, forward stale for C)
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 999})
         result = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=True,  # Continue despite violation
         )
 
+        # Backward violation is detected
         assert result.violation is not None
-        assert result.violation.mutating_cell == "b"
-        assert result.violation.affected_cell == "a"
-        # A is NOT stale because staleness only propagates forward (to cells below B)
-        # The backward mutation violation is sufficient to indicate the issue
-        assert "a" not in result.stale_cells
-        # changed_variables is still computed
-        assert "x" in result.changed_variables
+        # C is marked stale (ForwardStale)
+        assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
 
-    def test_continue_updates_execution_record(self):
-        """With continue_on_violation=True, the cell's execution record is updated."""
+    def test_backward_mutation_updates_execution_record(self):
+        """Execution record is ALWAYS updated, even with backward mutation."""
         # Cell A reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        ns_a = self._make_namespace( {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
@@ -753,54 +773,30 @@ class TestContinueOnViolation:
         assert self.sdc._notebook_state.has_record("a")
         assert not self.sdc._notebook_state.has_record("b")
 
-        # Cell B modifies x (violation) but we continue
+        # Cell B modifies x (backward mutation)
         self._save_pre_checkpoint("b", {"x": 1})
-        ns_b = self._make_namespace( {"x": 999})
+        ns_b = self._make_namespace({"x": 999})
         result = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=True,
         )
 
         assert result.violation is not None
-        # Record is updated even with violation
+        # Record is ALWAYS created (new semantics)
         assert self.sdc._notebook_state.has_record("b")
         assert self.sdc._notebook_state.get_tracking("b").writes == {"x"}
 
-    def test_continue_false_does_not_update_record(self):
-        """With continue_on_violation=False, no record is created on violation."""
-        # Cell A reads x
-        self._save_pre_checkpoint("a", {"x": 1})
-        ns_a = self._make_namespace( {"x": 1})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads={"x"}, writes=set()),
-        )
+    def test_backward_mutation_chain_staleness(self):
+        """Test staleness propagation with backward mutation in chain.
 
-        # Cell B modifies x (violation) with default behavior
-        self._save_pre_checkpoint("b", {"x": 1})
-        ns_b = self._make_namespace( {"x": 999})
-        result = self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=False,
-        )
-
-        assert result.violation is not None
-        # Record is NOT created
-        assert not self.sdc._notebook_state.has_record("b")
-
-    def test_continue_with_chain_staleness(self):
-        """Test staleness propagation when continuing after violation."""
+        In new semantics, backward mutations mark the mutating cell stale,
+        and ForwardStale still propagates to downstream cells.
+        """
         # Cell A writes x
         self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace( {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
@@ -810,7 +806,7 @@ class TestContinueOnViolation:
 
         # Cell B reads x, writes y
         self._save_pre_checkpoint("b", {"x": 1})
-        ns_b = self._make_namespace( {"x": 1, "y": 2})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
@@ -820,7 +816,7 @@ class TestContinueOnViolation:
 
         # Cell C reads y
         self._save_pre_checkpoint("c", {"x": 1, "y": 2})
-        ns_c = self._make_namespace( {"x": 1, "y": 2, "z": 3})
+        ns_c = self._make_namespace({"x": 1, "y": 2, "z": 3})
         self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
@@ -828,27 +824,27 @@ class TestContinueOnViolation:
             tracking=make_tracking(reads={"y"}, writes={"z"}),
         )
 
-        # Cell D modifies x (violation against A) - but we continue
+        # Cell D modifies x (backward mutation against B who reads x)
         self._save_pre_checkpoint("d", {"x": 1, "y": 2, "z": 3})
-        ns_d = self._make_namespace( {"x": 999, "y": 2, "z": 3})
+        ns_d = self._make_namespace({"x": 999, "y": 2, "z": 3})
         result = self.sdc.check(
             cell_id="d",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
             namespace=ns_d,
             tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=True,
         )
 
+        # Backward violation is detected
         assert result.violation is not None
         # B reads x, so D modifying x is a backward mutation against B
         assert result.violation.affected_cell == "b"
-        # B is NOT stale because staleness only propagates forward (to cells below D)
-        # The backward mutation violation is sufficient to indicate the issue
-        assert "b" not in result.stale_cells
-        # C is NOT stale (reads y, and is above D)
-        assert "c" not in result.stale_cells
-        # A is also above D, so not stale
+        # D itself is stale (new semantics: backward mutation marks the cell stale)
+        assert not self.sdc._notebook_state.is_clean("d")
+        # B, C, A are NOT in result.stale_cells since ForwardStale only affects cells AFTER D
+        # (D is the last cell, so no cells after it)
         assert "a" not in result.stale_cells
+        assert "b" not in result.stale_cells
+        assert "c" not in result.stale_cells
 
 
 class TestTruncationDetection:
@@ -2640,20 +2636,20 @@ class TestStalenessReasons:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # B should be stale with INPUT_CHANGED reason
+        # B should be stale with FORWARD_STALE reason
         assert "b" in result.stale_cells
         assert "b" in result.staleness_reasons
         reasons_for_b = result.staleness_reasons["b"]
-        assert any(r["type"] == "input_changed" for r in reasons_for_b)
+        assert any(r["type"] == "forward_stale" for r in reasons_for_b)
 
-    def test_input_changed_includes_variable_and_cell(self):
-        """INPUT_CHANGED reason includes loc and cell_id."""
+    def test_forward_stale_includes_variable_and_cell(self):
+        """FORWARD_STALE reason includes loc and cell_id."""
         # A writes x
         self._execute_cell("a", {}, {"x": 1}, writes={"x"})
         # B reads x
         self._execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
 
-        # A writes x again → B stale with INPUT_CHANGED(loc=x, cell_id=a)
+        # A writes x again → B stale with FORWARD_STALE(loc=x, cell_id=a)
         self._save_pre_checkpoint("a", {"x": 1})
         result = self.sdc.check(
             cell_id="a",
@@ -2663,10 +2659,10 @@ class TestStalenessReasons:
         )
 
         reasons_for_b = result.staleness_reasons["b"]
-        input_changed = [r for r in reasons_for_b if r["type"] == "input_changed"]
-        assert len(input_changed) >= 1
-        assert input_changed[0]["loc"] == "x"
-        assert input_changed[0]["cell_id"] == "a"
+        forward_stale = [r for r in reasons_for_b if r["type"] == "forward_stale"]
+        assert len(forward_stale) >= 1
+        assert forward_stale[0]["loc"] == "x"
+        assert forward_stale[0]["cell_id"] == "a"
 
     def test_fresh_cell_has_no_reasons(self):
         """A freshly executed cell should have no staleness reasons."""
@@ -2702,7 +2698,7 @@ class TestStalenessReasons:
             tracking=make_tracking(reads=set(), writes={"y"}),
         )
 
-        # C might have multiple INPUT_CHANGED reasons (x from a, y from b)
+        # C might have multiple FORWARD_STALE reasons (x from a, y from b)
         # Check that reasons accumulate
         reasons_for_c = result.staleness_reasons.get("c", [])
         # C was already stale from x changing, so it won't get y reason added
@@ -2762,7 +2758,7 @@ class TestSkippedUpstream:
         - H should have SKIPPED_UPSTREAM (reading from F instead of G)
 
         After running G:
-        - H should have INPUT_CHANGED (not SKIPPED_UPSTREAM)
+        - H should have FORWARD_STALE (not SKIPPED_UPSTREAM)
         - Re-running H would now fix it
         """
         # Initial execution: F→G→H
@@ -2786,18 +2782,18 @@ class TestSkippedUpstream:
         assert skipped_reason.loc == "x"
         assert skipped_reason.expected_cell_id == "g"
 
-        # Now run G - this should change H's reason to INPUT_CHANGED
+        # Now run G - this should change H's reason to FORWARD_STALE
         self._execute_cell("g", {"x": 1, "y": 10}, {"x": 3, "y": 10}, reads={"x"}, writes={"x"})
 
-        # H should now have INPUT_CHANGED, not SKIPPED_UPSTREAM
+        # H should now have FORWARD_STALE, not SKIPPED_UPSTREAM
         reasons_h_after = self.sdc._notebook_state.get_reasons("h")
         reason_types_after = {r.type for r in reasons_h_after}
 
-        assert ReasonType.INPUT_CHANGED in reason_types_after, f"Expected INPUT_CHANGED, got {reason_types_after}"
-        assert ReasonType.SKIPPED_UPSTREAM not in reason_types_after, f"SKIPPED_UPSTREAM should be replaced by INPUT_CHANGED"
+        assert ReasonType.FORWARD_STALE in reason_types_after, f"Expected FORWARD_STALE, got {reason_types_after}"
+        assert ReasonType.SKIPPED_UPSTREAM not in reason_types_after, f"SKIPPED_UPSTREAM should be replaced by FORWARD_STALE"
 
-        # Verify INPUT_CHANGED is from G (not F)
-        input_reason = next(r for r in reasons_h_after if r.type == ReasonType.INPUT_CHANGED)
+        # Verify FORWARD_STALE is from G (not F)
+        input_reason = next(r for r in reasons_h_after if r.type == ReasonType.FORWARD_STALE)
         assert input_reason.loc == "x"
         assert input_reason.cell_id == "g"
         assert input_reason.expected_cell_id is None  # No skipped writer anymore
@@ -2806,7 +2802,7 @@ class TestSkippedUpstream:
         """
         Exact user scenario: F -> G -> H -> F -> G
 
-        After this sequence, H should have INPUT_CHANGED (not SKIPPED_UPSTREAM).
+        After this sequence, H should have FORWARD_STALE (not SKIPPED_UPSTREAM).
         """
         # F -> G -> H (initial)
         self._execute_cell("f", {}, {"x": 1}, writes={"x"})
@@ -2837,9 +2833,9 @@ class TestSkippedUpstream:
         print(f"  H reasons: {reasons_after_g}")
         print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
 
-        # H should now have INPUT_CHANGED, NOT SKIPPED_UPSTREAM
+        # H should now have FORWARD_STALE, NOT SKIPPED_UPSTREAM
         reason_types = {r.type for r in reasons_after_g}
         assert ReasonType.SKIPPED_UPSTREAM not in reason_types, \
             f"SKIPPED_UPSTREAM should be gone after running G, got {reasons_after_g}"
-        assert ReasonType.INPUT_CHANGED in reason_types, \
-            f"Expected INPUT_CHANGED after G, got {reasons_after_g}"
+        assert ReasonType.FORWARD_STALE in reason_types, \
+            f"Expected FORWARD_STALE after G, got {reasons_after_g}"

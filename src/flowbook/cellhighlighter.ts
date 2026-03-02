@@ -450,10 +450,10 @@ export class ReproducibilityCellHighlighter {
         return 'Cell has never been executed';
       case 'code_changed':
         return 'Source code was edited';
-      case 'input_changed':
-        // Normal case: show "x modified by @F"
+      case 'forward_stale':
+        // ForwardStale: show "x modified by @F"
         if (loc && causingRef) {
-          return `\`${loc}\` modified by ${causingRef}`;
+          return `\`${loc}\` was modified by ${causingRef}`;
         }
         return causingRef
           ? `Input modified by ${causingRef}`
@@ -466,22 +466,31 @@ export class ReproducibilityCellHighlighter {
         return expectedRef
           ? `Run ${expectedRef} first`
           : 'Upstream cell was skipped';
-      case 'write_conflict':
+      case 'backward_stale':
         if (loc && causingRef) {
           return `Write conflict on \`${loc}\` with ${causingRef}`;
         }
         return 'Write conflict detected';
-      case 'reads_from_later':
+      case 'no_read_before_write':
+        // NoReadBeforeWrite failed - reads from later cell (forward contamination)
         if (loc && causingRef) {
-          return `Reads \`${loc}\` from later cell ${causingRef}`;
+          return `Reads \`${loc}\` from later cell ${causingRef} (forward contamination)`;
         }
         return 'Reads from a later cell';
-      case 'source_deleted':
+      case 'reads_residual_write':
         return loc
           ? `Source of \`${loc}\` was deleted`
           : 'Source cell was deleted';
       case 'order_changed':
         return 'Cell order changed';
+      case 'no_write_after_read':
+        // NoWriteAfterRead failed - wrote to location read by earlier cell (backward mutation)
+        if (loc && causingRef) {
+          return `Wrote \`${loc}\` read by earlier cell ${causingRef} (backward mutation)`;
+        }
+        return causingRef
+          ? `Wrote to variable read by ${causingRef}`
+          : 'Backward mutation detected';
       default:
         return 'Cell is stale';
     }
@@ -528,6 +537,23 @@ export class ReproducibilityCellHighlighter {
         type: 'unknown',
         message: 'Dependencies changed'
       };
+
+      // Don't display notice for never_executed cells
+      if (reason.type === 'never_executed') {
+        if (hasNotice) {
+          // Remove existing notice
+          const allOutputs: IOutput[] = [];
+          for (let i = 0; i < outputs.length; i++) {
+            const out = outputs.get(i).toJSON() as IOutput;
+            if (!(out as any).metadata?.flowbook_staleness_notice) {
+              allOutputs.push(out);
+            }
+          }
+          outputs.fromJSON(allOutputs);
+        }
+        return;
+      }
+
       const message = this._formatStalenessMessage(reason, cellOrder);
 
       // Escape HTML in the message but preserve backtick-wrapped code
@@ -535,13 +561,17 @@ export class ReproducibilityCellHighlighter {
 
       // Use different label for writer_conflict (potential violation vs stale dependency)
       const isWriterConflict = reason.type === 'writer_conflict';
-      const label = isWriterConflict ? 'Unresolved Violation' : 'Stale';
-      const plainText = `\u26a0\ufe0f ${label}: ${message}`;
+      const label = isWriterConflict ? 'Unresolved Violation' : '';
+      const plainText = label
+        ? `\u26a0\ufe0f ${label}: ${message}`
+        : `\u26a0\ufe0f ${message}`;
 
       const stalenessOutput: IOutput = {
         output_type: 'display_data',
         data: {
-          'text/html': `<div class="flowbook-staleness-notice">\u26a0\ufe0f <b>${label}</b>: ${htmlMessage}</div>`,
+          'text/html': label
+            ? `<div class="flowbook-staleness-notice">\u26a0\ufe0f <b>${label}</b>: ${htmlMessage}</div>`
+            : `<div class="flowbook-staleness-notice">\u26a0\ufe0f ${htmlMessage}</div>`,
           'text/plain': plainText
         },
         metadata: { flowbook_staleness_notice: true }

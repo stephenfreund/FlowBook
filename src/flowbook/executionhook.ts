@@ -608,14 +608,14 @@ export class ReproducibilityExecutionHookManager {
           type: 'source_edited',
           message: 'Source code was edited'
         };
-      case 'input_changed':
-        // Normal case: show "x modified by @F"
+      case 'forward_stale':
+        // ForwardStale: show "x modified by @F"
         if (loc && causingRef) {
           return {
             type: 'variable_modified',
             causing_cell: cellId,
             variables: [loc],
-            message: `\`${loc}\` modified by ${causingRef}`
+            message: `\`${loc}\` was modified by ${causingRef}`
           };
         }
         return {
@@ -642,7 +642,7 @@ export class ReproducibilityExecutionHookManager {
             ? `Run ${expectedRef} first`
             : 'Upstream cell was skipped'
         };
-      case 'write_conflict':
+      case 'backward_stale':
         if (loc && causingRef) {
           return {
             type: 'writer_conflict',
@@ -656,12 +656,13 @@ export class ReproducibilityExecutionHookManager {
           causing_cell: cellId,
           message: 'Write conflict detected'
         };
-      case 'reads_from_later':
+      case 'no_read_before_write':
+        // NoReadBeforeWrite failed - reads from later cell (forward contamination)
         if (loc && causingRef) {
           return {
             type: 'unknown',
             causing_cell: cellId,
-            message: `Reads \`${loc}\` from later cell ${causingRef}`
+            message: `Reads \`${loc}\` from later cell ${causingRef} (forward contamination)`
           };
         }
         return {
@@ -669,7 +670,7 @@ export class ReproducibilityExecutionHookManager {
           causing_cell: cellId,
           message: 'Reads from a later cell'
         };
-      case 'source_deleted':
+      case 'reads_residual_write':
         return {
           type: 'unknown',
           message: loc
@@ -680,6 +681,23 @@ export class ReproducibilityExecutionHookManager {
         return {
           type: 'unknown',
           message: 'Cell order changed'
+        };
+      case 'no_write_after_read':
+        // NoWriteAfterRead failed - wrote to location read by earlier cell (backward mutation)
+        if (loc && causingRef) {
+          return {
+            type: 'variable_modified',
+            causing_cell: cellId,
+            variables: [loc],
+            message: `Wrote \`${loc}\` read by earlier cell ${causingRef} (backward mutation)`
+          };
+        }
+        return {
+          type: 'unknown',
+          causing_cell: cellId,
+          message: causingRef
+            ? `Wrote to variable read by ${causingRef}`
+            : 'Backward mutation detected'
         };
       default:
         return {

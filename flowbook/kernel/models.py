@@ -7,12 +7,13 @@ mapping to the formal specification in main.tex and FORMAL_DEVELOPMENT.md.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, FrozenSet, List, Optional, Set, TYPE_CHECKING, Union
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple, TYPE_CHECKING, Union
 
 from flowbook.kernel_support.models import TrackingData
 
 if TYPE_CHECKING:
     from flowbook.kernel.changes import Change
+    from flowbook.kernel_support.types import MemoryCheckpointDiffResult
 
 
 # =============================================================================
@@ -164,22 +165,254 @@ def get_var_locs(locs: LocSet) -> Set[str]:
     return {loc.name for loc in locs if loc.type == LocType.VAR}
 
 
+def get_loc_variables(locs: LocSet) -> Set[str]:
+    """
+    Extract all variable names from a LocSet (including qualified names).
+
+    For Var(x) → x
+    For Col(df, c) → df
+    For Structural(df, attr) → df
+    For File(path) → path
+    """
+    result: Set[str] = set()
+    for loc in locs:
+        if loc.type == LocType.VAR:
+            result.add(loc.name)
+        elif loc.type in (LocType.COLUMN, LocType.STRUCTURAL):
+            if loc.qualifier:
+                result.add(loc.qualifier)
+        elif loc.type == LocType.FILE:
+            result.add(loc.name)
+    return result
+
+
+# =============================================================================
+# Loc-based Conflict Detection
+# =============================================================================
+# These functions implement the formal predicates from FORMAL_DEVELOPMENT.md
+# using Loc-based read/write sets for column-level granularity.
+# =============================================================================
+
+
+def check_loc_conflicts(
+    W_i: LocSet,
+    R_before_i: LocSet,
+    structural_mode: "StructuralTrackingMode",
+) -> Tuple[LocSet, List[str]]:
+    """
+    Check for conflicts between writes and reads.
+
+    Implements: FORMAL_DEVELOPMENT.md §3.2, line 179
+    NoWriteAfterRead(R, W, i) ≝ Wᵢ ∩ R_{1..i-1} = ∅
+
+    Column-level granularity:
+    - Loc.column("df", "price") conflicts only with Loc.column("df", "price")
+    - Loc.column("df", "price") does NOT conflict with Loc.column("df", "quantity")
+    - Loc.var("x") conflicts with any Loc involving x
+
+    Structural mode handling:
+    - OFF: structural conflicts ignored
+    - WARN: structural conflicts return warnings, not violations
+    - ENFORCE: structural conflicts are violations
+
+    Args:
+        W_i: Write set of cell i (locations that changed)
+        R_before_i: Union of read sets of clean cells before i
+        structural_mode: How to handle structural attribute conflicts
+
+    Returns:
+        Tuple of (violation_locs, warning_messages)
+    """
+    from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
+
+    violations: Set[Loc] = set()
+    warnings: List[str] = []
+
+    for write_loc in W_i:
+        for read_loc in R_before_i:
+            conflict = _locs_conflict(write_loc, read_loc)
+            if conflict:
+                # Check if this is a structural conflict
+                if read_loc.type == LocType.STRUCTURAL:
+                    if structural_mode == StructuralTrackingMode.OFF:
+                        continue  # Ignore
+                    elif structural_mode == StructuralTrackingMode.WARN:
+                        warnings.append(
+                            f"Structural conflict: {write_loc} affects {read_loc}"
+                        )
+                        continue  # Warning, not violation
+                    # ENFORCE: fall through to add as violation
+
+                violations.add(write_loc)
+
+    return frozenset(violations), warnings
+
+
+def _locs_conflict(write_loc: Loc, read_loc: Loc) -> bool:
+    """
+    Check if a write location conflicts with a read location.
+
+    Conflict rules:
+    - VAR vs VAR: same name
+    - VAR vs COLUMN: var name matches column's qualifier (variable)
+    - VAR vs STRUCTURAL: var name matches structural's qualifier
+    - COLUMN vs COLUMN: same qualifier AND same column name
+    - COLUMN vs STRUCTURAL: same qualifier (any structural change for that var)
+    - FILE vs FILE: same path
+    """
+    # Different location types have different conflict semantics
+    if write_loc.type == LocType.VAR:
+        # Variable write conflicts with any read of that variable
+        if read_loc.type == LocType.VAR:
+            return write_loc.name == read_loc.name
+        elif read_loc.type == LocType.COLUMN:
+            return write_loc.name == read_loc.qualifier
+        elif read_loc.type == LocType.STRUCTURAL:
+            return write_loc.name == read_loc.qualifier
+        elif read_loc.type == LocType.FILE:
+            return False
+
+    elif write_loc.type == LocType.COLUMN:
+        # Column write conflicts with same column read OR variable read of that df
+        if read_loc.type == LocType.VAR:
+            return write_loc.qualifier == read_loc.name
+        elif read_loc.type == LocType.COLUMN:
+            return (write_loc.qualifier == read_loc.qualifier and
+                    write_loc.name == read_loc.name)
+        elif read_loc.type == LocType.STRUCTURAL:
+            # Column change may affect structural reads (depends on attribute)
+            # Adding/removing columns affects .columns, .shape, etc.
+            return write_loc.qualifier == read_loc.qualifier
+        elif read_loc.type == LocType.FILE:
+            return False
+
+    elif write_loc.type == LocType.STRUCTURAL:
+        # Structural write (e.g., index change) conflicts with structural reads
+        if read_loc.type == LocType.STRUCTURAL:
+            return (write_loc.qualifier == read_loc.qualifier and
+                    write_loc.name == read_loc.name)
+        elif read_loc.type == LocType.VAR:
+            return write_loc.qualifier == read_loc.name
+        else:
+            return False
+
+    elif write_loc.type == LocType.FILE:
+        # File write conflicts with file read of same path
+        if read_loc.type == LocType.FILE:
+            return write_loc.name == read_loc.name
+        return False
+
+    return False
+
+
+def diff_to_write_locs(
+    diff: "MemoryCheckpointDiffResult",
+    tracking: "TrackingData",
+) -> LocSet:
+    """
+    Convert diff result to LocSet of what actually changed.
+
+    Ref: This bridges the gap between runtime diff detection
+    and the formal Wᵢ set in FORMAL_DEVELOPMENT.md §1.2
+
+    Mapping:
+    - Variable changed → Loc.var(name)
+    - Column changed → Loc.column(var, col)
+    - Rows added/removed → Loc.var(var) (whole variable affected)
+    - Structural change → Loc.structural(var, attr)
+
+    Args:
+        diff: MemoryCheckpointDiffResult from namespace comparison
+        tracking: TrackingData for column write info
+
+    Returns:
+        LocSet of locations that changed
+    """
+    from flowbook.kernel_support.types import CompoundDiff, ValueComparison
+
+    locs: Set[Loc] = set()
+
+    for var_name, diff_node in diff.differences.items():
+        # Check if this is a DataFrame/Series with column-level changes
+        if isinstance(diff_node, CompoundDiff):
+            if diff_node.source_type in ("dataframe", "series"):
+                # Extract column-level changes
+                col_changes = _extract_column_locs_from_diff(var_name, diff_node)
+                if col_changes:
+                    locs.update(col_changes)
+                else:
+                    # Whole variable changed (e.g., rows added/removed)
+                    locs.add(Loc.var(var_name))
+            else:
+                # Other compound type - treat as variable change
+                locs.add(Loc.var(var_name))
+        elif isinstance(diff_node, ValueComparison):
+            # Simple value changed
+            locs.add(Loc.var(var_name))
+        else:
+            # Unknown diff type - treat as variable change
+            locs.add(Loc.var(var_name))
+
+    # Also add column writes from tracking if not covered by diff
+    for var, cols in tracking.column_writes.items():
+        for col in cols:
+            locs.add(Loc.column(var, col))
+
+    return frozenset(locs)
+
+
+def _extract_column_locs_from_diff(var_name: str, diff: "CompoundDiff") -> Set[Loc]:
+    """
+    Extract column-level Loc objects from a DataFrame/Series CompoundDiff.
+
+    Returns set of Loc.column() for modified columns, or empty set if
+    the change is structural (rows added/removed).
+    """
+    import re
+    from flowbook.kernel_support.types import CompoundDiff, ValueComparison
+
+    locs: Set[Loc] = set()
+
+    for key, child in diff.children.items():
+        # Structural changes - return empty (caller will use Loc.var)
+        if key in ("_structural_rows", "_structural_columns", "_structural_index", "_index"):
+            return set()  # Structural change affects whole variable
+
+        # Column key (e.g., "['price']" or '["price"]')
+        match = re.match(r"\[[\'\"](.+)[\'\"]\]", key)
+        if match:
+            col_name = match.group(1)
+            if isinstance(child, (ValueComparison, CompoundDiff)):
+                locs.add(Loc.column(var_name, col_name))
+
+    return locs
+
+
 # =============================================================================
 # Staleness Reason Types
 # =============================================================================
 
 
 class ReasonType(str, Enum):
-    """Why a cell is stale."""
+    """Why a cell is stale.
+
+    Names align with formal predicates from [Inst-Run] specification:
+    - FORWARD_STALE: ForwardStale(R,W,i,j) - cell j>i reads/writes location that i wrote
+    - BACKWARD_STALE: BackwardStale(W,W',i,j) - cell j<i was last writer of removed write
+    - NO_READ_BEFORE_WRITE: ¬NoReadBeforeWrite - reads location written by later cell
+    - NO_WRITE_AFTER_READ: ¬NoWriteAfterRead - wrote location read by earlier fresh cell
+    - READS_RESIDUAL_WRITE: ReadsResidualWrite - reads from deleted cell's writes
+    """
 
     NEVER_EXECUTED = "never_executed"
     CODE_CHANGED = "code_changed"
-    INPUT_CHANGED = "input_changed"
-    WRITE_CONFLICT = "write_conflict"
-    READS_FROM_LATER = "reads_from_later"
-    SOURCE_DELETED = "source_deleted"
+    FORWARD_STALE = "forward_stale"  # was INPUT_CHANGED
+    BACKWARD_STALE = "backward_stale"  # was WRITE_CONFLICT
+    NO_READ_BEFORE_WRITE = "no_read_before_write"  # was READS_FROM_LATER
+    READS_RESIDUAL_WRITE = "reads_residual_write"  # was SOURCE_DELETED
     ORDER_CHANGED = "order_changed"
     SKIPPED_UPSTREAM = "skipped_upstream"  # Cell reads from wrong writer; re-run won't help
+    NO_WRITE_AFTER_READ = "no_write_after_read"  # was BACKWARD_MUTATION - cell wrote to location read by earlier cell
 
 
 @dataclass(frozen=True)
@@ -266,14 +499,14 @@ class CellStatus:
     def add_reason(self, reason: Reason) -> None:
         """Add a reason (converts to Stale if Clean).
 
-        For INPUT_CHANGED and SKIPPED_UPSTREAM reasons with a specific location,
+        For FORWARD_STALE and SKIPPED_UPSTREAM reasons with a specific location,
         replaces any existing reason of either type for the same location
         (they are mutually exclusive - only the most recent matters).
         """
         self.is_clean = False
 
-        # INPUT_CHANGED and SKIPPED_UPSTREAM are mutually exclusive for same location
-        location_based_types = {ReasonType.INPUT_CHANGED, ReasonType.SKIPPED_UPSTREAM}
+        # FORWARD_STALE and SKIPPED_UPSTREAM are mutually exclusive for same location
+        location_based_types = {ReasonType.FORWARD_STALE, ReasonType.SKIPPED_UPSTREAM}
         if reason.type in location_based_types and reason.loc is not None:
             self.reasons = {
                 r for r in self.reasons
