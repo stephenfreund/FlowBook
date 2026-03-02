@@ -1,0 +1,868 @@
+===============================================================================
+Test: run_first_execution_clean_explicit
+First execution records writes and is clean
+===============================================================================
+
+Cell          Initial                  Run a          
+------------------------------------------------------
+a               R:∅                     R:∅           
+                W:∅                    W:{x}          
+                                       CLEAN          
+           never_executed                             
+
+b               R:∅                     R:∅           
+                W:∅                     W:∅           
+           never_executed          never_executed     
+
+c               R:∅                     R:∅           
+                W:∅                     W:∅           
+           never_executed          never_executed     
+
+
+===============================================================================
+Test: run_rerun_unchanged_clean_explicit
+Re-running cell with same output stays clean
+===============================================================================
+
+Cell          Initial                  Run a                   Run a          
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+b               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: run_reads_from_earlier_clean_explicit
+Cell reading from earlier cell is clean
+===============================================================================
+
+Cell          Initial                  Run a                   Run b          
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+b               R:∅                     R:∅                    R:{x}          
+                W:∅                     W:∅                    W:{y}          
+                                                               CLEAN          
+           never_executed          never_executed                             
+
+c               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: run_forward_contamination_explicit
+Cell reading from later cell is marked stale with READS_FROM_LATER
+===============================================================================
+
+Cell          Initial                  Run c                   Run a          
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                    R:{x}          
+                W:∅                     W:∅                    W:{y}          
+           never_executed          never_executed          never_executed     
+                                                       reads_from_later(x<-c) 
+
+b               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+c               R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+
+===============================================================================
+Test: run_backward_mutation_violation_explicit
+Cell writing to earlier cell's reads causes backward violation
+===============================================================================
+
+Cell          Initial                  Run a                   Run b          
+------------------------------------------------------------------------------
+a               R:∅                    R:{x}                   R:{x}          
+                W:∅                    W:{y}                   W:{y}          
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+b               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                    W:{x}          
+           never_executed          never_executed     backward_mutation(x<-a) 
+                                                           never_executed     
+
+c               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: run_upstream_change_input_changed_explicit
+Re-running writer marks downstream readers stale with INPUT_CHANGED
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Run a          
+------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                             
+
+b               R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                               CLEAN                                  
+           never_executed          never_executed                               input_changed(x<-a)   
+
+
+===============================================================================
+Test: run_column_independence_explicit
+Disjoint variable accesses do not cause conflict
+===============================================================================
+
+Cell          Initial                  Run a                   Run b          
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅           
+                W:∅                  W:{total}               W:{total}        
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+b               R:∅                     R:∅                  R:{total}        
+                W:∅                     W:∅                  W:{result}       
+                                                               CLEAN          
+           never_executed          never_executed                             
+
+
+===============================================================================
+Test: run_skipped_upstream_explicit
+Re-running earlier cell skipping intermediate marks reader as SKIPPED_UPSTREAM
+===============================================================================
+
+Cell          Initial                  Run f                   Run g                   Run h                   Run f          
+------------------------------------------------------------------------------------------------------------------------------
+f               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                                                     
+
+g               R:∅                     R:∅                    R:{x}                   R:{x}                   R:{x}          
+                W:∅                     W:∅                    W:{x}                   W:{x}                   W:{x}          
+           never_executed          never_executed          never_executed          never_executed          never_executed     
+                                                       skipped_upstream(x<-g)  skipped_upstream(x<-g)   input_changed(x<-f)   
+
+h               R:∅                     R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                                                       CLEAN                                  
+           never_executed          never_executed          never_executed                              skipped_upstream(x<-f) 
+
+
+===============================================================================
+Test: run_first_execution_clean_code
+First execution records writes and is clean (code-based)
+===============================================================================
+
+Code:
+  a: x = 1
+
+Cell          Initial                  Run a          
+------------------------------------------------------
+a               R:∅                     R:∅           
+                W:∅                    W:{x}          
+                                       CLEAN          
+           never_executed                             
+
+b               R:∅                     R:∅           
+                W:∅                     W:∅           
+           never_executed          never_executed     
+
+c               R:∅                     R:∅           
+                W:∅                     W:∅           
+           never_executed          never_executed     
+
+
+===============================================================================
+Test: run_rerun_unchanged_clean_code
+Re-running cell with same output stays clean (code-based)
+===============================================================================
+
+Code:
+  a: x = 1
+
+Cell          Initial                  Run a                   Run a          
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+b               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: run_reads_from_earlier_clean_code
+Cell reading from earlier cell is clean (code-based)
+===============================================================================
+
+Code:
+  a: x = 1
+  b: y = x + 1
+
+Cell          Initial                  Run a                   Run b          
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+b               R:∅                     R:∅                    R:{x}          
+                W:∅                     W:∅                    W:{y}          
+                                                               CLEAN          
+           never_executed          never_executed                             
+
+c               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: run_forward_contamination_code
+Cell reading from later cell is marked stale with READS_FROM_LATER (code-based)
+===============================================================================
+
+Code:
+  a: y = x * 2
+  c: x = 10
+
+Cell          Initial                  Run c                   Run a          
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                    R:{x}          
+                W:∅                     W:∅                    W:{y}          
+           never_executed          never_executed          never_executed     
+                                                       reads_from_later(x<-c) 
+
+b               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+c               R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+
+===============================================================================
+Test: run_backward_mutation_violation_code
+Cell writing to earlier cell's reads causes backward violation (code-based)
+===============================================================================
+
+Code:
+  a: y = x + 1
+  b: x = 99
+
+Cell          Initial                  Run a                   Run b          
+------------------------------------------------------------------------------
+a               R:∅                    R:{x}                   R:{x}          
+                W:∅                    W:{y}                   W:{y}          
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+b               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                    W:{x}          
+           never_executed          never_executed     backward_mutation(x<-a) 
+                                                           never_executed     
+
+c               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: run_upstream_change_input_changed_code
+Re-running writer marks downstream readers stale with INPUT_CHANGED (code-based)
+===============================================================================
+
+Code:
+  a: x = 100
+  b: y = x + 1
+
+Cell          Initial                  Run a                   Run b                   Run a          
+------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                             
+
+b               R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                               CLEAN                                  
+           never_executed          never_executed                               input_changed(x<-a)   
+
+
+===============================================================================
+Test: run_column_independence_code
+Disjoint variable accesses do not cause conflict (code-based)
+===============================================================================
+
+Code:
+  a: total = 3
+  b: result = total - 2
+
+Cell          Initial                  Run a                   Run b          
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅           
+                W:∅                  W:{total}               W:{total}        
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+b               R:∅                     R:∅                  R:{total}        
+                W:∅                     W:∅                  W:{result}       
+                                                               CLEAN          
+           never_executed          never_executed                             
+
+
+===============================================================================
+Test: run_skipped_upstream_code
+Re-running earlier cell skipping intermediate marks reader as SKIPPED_UPSTREAM (code-based)
+===============================================================================
+
+Code:
+  f: x = 1
+  g: x = x + 1
+  h: y = x * 5
+
+Cell          Initial                  Run f                   Run g                   Run h                   Run f          
+------------------------------------------------------------------------------------------------------------------------------
+f               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                                                     
+
+g               R:∅                     R:∅                    R:{x}                   R:{x}                   R:{x}          
+                W:∅                     W:∅                    W:{x}                   W:{x}                   W:{x}          
+           never_executed          never_executed          never_executed          never_executed          never_executed     
+                                                       skipped_upstream(x<-g)  skipped_upstream(x<-g)   input_changed(x<-f)   
+
+h               R:∅                     R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                                                       CLEAN                                  
+           never_executed          never_executed          never_executed                              skipped_upstream(x<-f) 
+
+
+===============================================================================
+Test: edit_executed_cell_code_changed_explicit
+Editing an executed cell marks it CODE_CHANGED
+===============================================================================
+
+Cell          Initial                  Run a                   Edit a         
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                    W:∅           
+                                       CLEAN                                  
+           never_executed                                   code_changed      
+
+b               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: edit_no_immediate_propagation_explicit
+Editing cell does not immediately mark downstream stale (only on re-run)
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Edit a         
+------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                    W:∅           
+                                       CLEAN                   CLEAN                                  
+           never_executed                                                           code_changed      
+
+b               R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                               CLEAN                   CLEAN          
+           never_executed          never_executed                                                     
+
+
+===============================================================================
+Test: edit_unexecuted_cell_explicit
+Editing an unexecuted cell marks it CODE_CHANGED
+===============================================================================
+
+Cell          Initial                  Edit a         
+------------------------------------------------------
+a               R:∅                     R:∅           
+                W:∅                     W:∅           
+           never_executed           code_changed      
+
+b               R:∅                     R:∅           
+                W:∅                     W:∅           
+           never_executed          never_executed     
+
+
+===============================================================================
+Test: edit_executed_cell_code_changed_code
+Editing an executed cell marks it CODE_CHANGED (code-based)
+===============================================================================
+
+Code:
+  a: x = 1
+
+Cell          Initial                  Run a                   Edit a         
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                    W:∅           
+                                       CLEAN                                  
+           never_executed                                   code_changed      
+
+b               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: edit_no_immediate_propagation_code
+Editing cell does not immediately mark downstream stale (code-based)
+===============================================================================
+
+Code:
+  a: x = 1
+  b: y = x + 1
+
+Cell          Initial                  Run a                   Run b                   Edit a         
+------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                    W:∅           
+                                       CLEAN                   CLEAN                                  
+           never_executed                                                           code_changed      
+
+b               R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                               CLEAN                   CLEAN          
+           never_executed          never_executed                                                     
+
+
+===============================================================================
+Test: edit_unexecuted_cell_code
+Editing an unexecuted cell marks it CODE_CHANGED (code-based)
+===============================================================================
+
+Cell          Initial                  Edit a         
+------------------------------------------------------
+a               R:∅                     R:∅           
+                W:∅                     W:∅           
+           never_executed           code_changed      
+
+b               R:∅                     R:∅           
+                W:∅                     W:∅           
+           never_executed          never_executed     
+
+
+===============================================================================
+Test: delete_cell_with_readers_explicit
+Deleting a cell marks cells that read its writes as SOURCE_DELETED
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Run c                   Del b          
+------------------------------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅                     W:∅           
+                                       CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                                                     
+
+b               R:∅                     R:∅                     R:∅                     R:∅                  (deleted)        
+                W:∅                     W:∅                    W:{x}                   W:{x}                                  
+                                                               CLEAN                   CLEAN                                  
+           never_executed          never_executed                                                                             
+
+c               R:∅                     R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                                                       CLEAN                                  
+           never_executed          never_executed          never_executed                                source_deleted(x)    
+
+
+===============================================================================
+Test: delete_unexecuted_cell_explicit
+Deleting an unexecuted cell doesn't mark anything stale
+===============================================================================
+
+Cell          Initial                  Run a                   Del b          
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+b               R:∅                     R:∅                  (deleted)        
+                W:∅                     W:∅                                   
+           never_executed          never_executed                             
+
+c               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: delete_cell_no_readers_explicit
+Deleting a cell with no downstream readers doesn't mark anything stale
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Del b          
+------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅           
+                                       CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                             
+
+b               R:∅                     R:∅                     R:∅                  (deleted)        
+                W:∅                     W:∅                    W:{x}                                  
+                                                               CLEAN                                  
+           never_executed          never_executed                                                     
+
+c               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: delete_cell_with_readers_code
+Deleting a cell marks cells that read its writes as SOURCE_DELETED (code-based)
+===============================================================================
+
+Code:
+  a: pass
+  b: x = 1
+  c: y = x + 1
+
+Cell          Initial                  Run a                   Run b                   Run c                   Del b          
+------------------------------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅                     W:∅           
+                                       CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                                                     
+
+b               R:∅                     R:∅                     R:∅                     R:∅                  (deleted)        
+                W:∅                     W:∅                    W:{x}                   W:{x}                                  
+                                                               CLEAN                   CLEAN                                  
+           never_executed          never_executed                                                                             
+
+c               R:∅                     R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                                                       CLEAN                                  
+           never_executed          never_executed          never_executed                                source_deleted(x)    
+
+
+===============================================================================
+Test: delete_unexecuted_cell_code
+Deleting an unexecuted cell doesn't mark anything stale (code-based)
+===============================================================================
+
+Code:
+  a: x = 1
+
+Cell          Initial                  Run a                   Del b          
+------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN          
+           never_executed                                                     
+
+b               R:∅                     R:∅                  (deleted)        
+                W:∅                     W:∅                                   
+           never_executed          never_executed                             
+
+c               R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: delete_cell_no_readers_code
+Deleting a cell with no downstream readers doesn't mark anything stale (code-based)
+===============================================================================
+
+Code:
+  a: pass
+  b: x = 1
+
+Cell          Initial                  Run a                   Run b                   Del b          
+------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅           
+                                       CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                             
+
+b               R:∅                     R:∅                     R:∅                  (deleted)        
+                W:∅                     W:∅                    W:{x}                                  
+                                                               CLEAN                                  
+           never_executed          never_executed                                                     
+
+c               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅           
+           never_executed          never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: insert_at_end_explicit
+Inserting a new cell at end marks only it as NEVER_EXECUTED
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Ins c          
+------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                             
+
+b               R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                               CLEAN                   CLEAN          
+           never_executed          never_executed                                                     
+
+c            (deleted)               (deleted)               (deleted)                  R:∅           
+                                                                                        W:∅           
+                                                                                   never_executed     
+
+
+===============================================================================
+Test: insert_in_middle_explicit
+Inserting a new cell in middle doesn't immediately mark others stale
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Ins c          
+------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                             
+
+b               R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                               CLEAN                   CLEAN          
+           never_executed          never_executed                                                     
+
+c            (deleted)               (deleted)               (deleted)                  R:∅           
+                                                                                        W:∅           
+                                                                                   never_executed     
+
+
+===============================================================================
+Test: insert_at_end_code
+Inserting a new cell at end marks only it as NEVER_EXECUTED (code-based)
+===============================================================================
+
+Code:
+  a: x = 1
+  b: y = x + 1
+
+Cell          Initial                  Run a                   Run b                   Ins c          
+------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                             
+
+b               R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                               CLEAN                   CLEAN          
+           never_executed          never_executed                                                     
+
+c            (deleted)               (deleted)               (deleted)                  R:∅           
+                                                                                        W:∅           
+                                                                                   never_executed     
+
+
+===============================================================================
+Test: insert_in_middle_code
+Inserting a new cell in middle doesn't immediately mark others stale (code-based)
+===============================================================================
+
+Code:
+  a: x = 1
+  b: y = x + 1
+
+Cell          Initial                  Run a                   Run b                   Ins c          
+------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                             
+
+b               R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                               CLEAN                   CLEAN          
+           never_executed          never_executed                                                     
+
+c            (deleted)               (deleted)               (deleted)                  R:∅           
+                                                                                        W:∅           
+                                                                                   never_executed     
+
+
+===============================================================================
+Test: move_writer_forward_explicit
+Moving a writer forward past its readers marks readers stale
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Run c                   Run d                    Move          
+------------------------------------------------------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅                     W:∅                     W:∅           
+                                       CLEAN                   CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                                                                             
+
+b               R:∅                     R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                    W:{x}                   W:{x}                   W:{x}                   W:{x}          
+                                                               CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed          never_executed                                                                                                     
+
+c               R:∅                     R:∅                     R:∅                    R:{x}                   R:{x}                   R:{x}          
+                W:∅                     W:∅                     W:∅                    W:{y}                   W:{y}                   W:{y}          
+                                                                                       CLEAN                   CLEAN                                  
+           never_executed          never_executed          never_executed                                                          order_changed      
+
+d               R:∅                     R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅                     W:∅                     W:∅           
+                                                                                                               CLEAN                   CLEAN          
+           never_executed          never_executed          never_executed          never_executed                                                     
+
+
+===============================================================================
+Test: move_reader_backward_explicit
+Moving a reader backward before its writer marks it stale
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Run c                    Move          
+------------------------------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                                                     
+
+b               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅                     W:∅           
+                                                               CLEAN                   CLEAN                   CLEAN          
+           never_executed          never_executed                                                                             
+
+c               R:∅                     R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                                                       CLEAN                                  
+           never_executed          never_executed          never_executed                                  order_changed      
+
+
+===============================================================================
+Test: move_independent_cell_explicit
+Moving a cell with no dependencies has no staleness effect
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Run c                    Move          
+------------------------------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                                                     
+
+b               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                    W:{y}                   W:{y}                   W:{y}          
+                                                               CLEAN                   CLEAN                   CLEAN          
+           never_executed          never_executed                                                                             
+
+c               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                    W:{z}                   W:{z}          
+                                                                                       CLEAN                   CLEAN          
+           never_executed          never_executed          never_executed                                                     
+
+
+===============================================================================
+Test: move_writer_forward_code
+Moving a writer forward past its readers marks readers stale (code-based)
+===============================================================================
+
+Code:
+  a: pass
+  b: x = 1
+  c: y = x + 1
+  d: pass
+
+Cell          Initial                  Run a                   Run b                   Run c                   Run d                    Move          
+------------------------------------------------------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅                     W:∅                     W:∅           
+                                       CLEAN                   CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                                                                             
+
+b               R:∅                     R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                    W:{x}                   W:{x}                   W:{x}                   W:{x}          
+                                                               CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed          never_executed                                                                                                     
+
+c               R:∅                     R:∅                     R:∅                    R:{x}                   R:{x}                   R:{x}          
+                W:∅                     W:∅                     W:∅                    W:{y}                   W:{y}                   W:{y}          
+                                                                                       CLEAN                   CLEAN                                  
+           never_executed          never_executed          never_executed                                                          order_changed      
+
+d               R:∅                     R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅                     W:∅                     W:∅           
+                                                                                                               CLEAN                   CLEAN          
+           never_executed          never_executed          never_executed          never_executed                                                     
+
+
+===============================================================================
+Test: move_reader_backward_code
+Moving a reader backward before its writer marks it stale (code-based)
+===============================================================================
+
+Code:
+  a: x = 1
+  b: pass
+  c: y = x + 1
+
+Cell          Initial                  Run a                   Run b                   Run c                    Move          
+------------------------------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                                                     
+
+b               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                     W:∅                     W:∅           
+                                                               CLEAN                   CLEAN                   CLEAN          
+           never_executed          never_executed                                                                             
+
+c               R:∅                     R:∅                     R:∅                    R:{x}                   R:{x}          
+                W:∅                     W:∅                     W:∅                    W:{y}                   W:{y}          
+                                                                                       CLEAN                                  
+           never_executed          never_executed          never_executed                                  order_changed      
+
+
+===============================================================================
+Test: move_independent_cell_code
+Moving a cell with no dependencies has no staleness effect (code-based)
+===============================================================================
+
+Code:
+  a: x = 1
+  b: y = 2
+  c: z = 3
+
+Cell          Initial                  Run a                   Run b                   Run c                    Move          
+------------------------------------------------------------------------------------------------------------------------------
+a               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                    W:{x}                   W:{x}                   W:{x}                   W:{x}          
+                                       CLEAN                   CLEAN                   CLEAN                   CLEAN          
+           never_executed                                                                                                     
+
+b               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                    W:{y}                   W:{y}                   W:{y}          
+                                                               CLEAN                   CLEAN                   CLEAN          
+           never_executed          never_executed                                                                             
+
+c               R:∅                     R:∅                     R:∅                     R:∅                     R:∅           
+                W:∅                     W:∅                     W:∅                    W:{z}                   W:{z}          
+                                                                                       CLEAN                   CLEAN          
+           never_executed          never_executed          never_executed                                                     

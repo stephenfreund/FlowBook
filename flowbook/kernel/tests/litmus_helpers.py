@@ -109,12 +109,11 @@ def infer_rw(code: str) -> InferredRW:
     visitor = RWVisitor()
     visitor.visit(tree)
 
-    # reads_before_writes = reads that aren't also written (at variable level)
-    # But we need to be careful: if we write to a column of df, we still read df first
-    final_reads = reads - (writes - set(column_writes.keys()))
+    # Don't filter reads - a variable can be both read and written (e.g., x = x + 1)
+    # Both the read (of old value) and write (of new value) matter for reproducibility
 
     return InferredRW(
-        reads=final_reads,
+        reads=reads,
         writes=writes,
         column_reads=column_reads,
         column_writes=column_writes,

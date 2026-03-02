@@ -48,6 +48,8 @@ class LitmusTestRunner:
         self.helper = ReproducibilityTestHelper()
         self.helper.set_cell_order(cell_order)
         self.history: List[StateSnapshot] = []
+        self.operations: List[Dict[str, Any]] = []  # Track executed operations
+        self.cell_code: Dict[str, str] = {}  # Track code for each cell
         self.last_violation: Optional[Dict[str, Any]] = None
         self.last_forward_violation: Optional[Dict[str, Any]] = None
         self.last_newly_stale: List[str] = []
@@ -85,6 +87,9 @@ class LitmusTestRunner:
 
         if op_type == "RUN":
             self._run_cell(op)
+            # Track code if available
+            if "code" in op:
+                self.cell_code[op["cell"]] = op["code"]
         elif op_type == "EDIT":
             self._edit_cell(op)
         elif op_type == "DELETE":
@@ -96,6 +101,8 @@ class LitmusTestRunner:
         else:
             raise ValueError(f"Unknown operation type: {op_type}")
 
+        # Track the operation for display
+        self.operations.append(op)
         self._capture_snapshot()
 
     def _run_cell(self, op: Dict[str, Any]) -> None:
@@ -300,6 +307,21 @@ class LitmusTestRunner:
 
         return failures
 
+    def _format_op_header(self, op: Dict[str, Any]) -> str:
+        """Format an operation as a column header like 'Run a' or 'Edit b'."""
+        op_type = op["type"]
+        if op_type == "RUN":
+            return f"Run {op['cell']}"
+        elif op_type == "EDIT":
+            return f"Edit {op['cell']}"
+        elif op_type == "DELETE":
+            return f"Del {op['cell']}"
+        elif op_type == "INSERT":
+            return f"Ins {op['cell']}"
+        elif op_type == "MOVE":
+            return "Move"
+        return op_type
+
     def render_ascii(self, test_name: str, description: str) -> str:
         """Generate ASCII visualization of state evolution."""
         lines = []
@@ -311,32 +333,40 @@ class LitmusTestRunner:
         lines.append("=" * 79)
         lines.append("")
 
+        # Show cell code if available
+        if self.cell_code:
+            lines.append("Code:")
+            for cell_id in sorted(self.cell_code.keys()):
+                code = self.cell_code[cell_id]
+                # Truncate long code
+                if len(code) > 40:
+                    code = code[:37] + "..."
+                lines.append(f"  {cell_id}: {code}")
+            lines.append("")
+
         # Get all cells across all snapshots
         all_cells = set()
         for snap in self.history:
             all_cells.update(snap.cell_order)
         cell_list = sorted(all_cells)
 
-        # Column headers
-        col_width = 18
+        # Column headers - use operation names instead of "Op 1", "Op 2"
+        col_width = 24
         header = "Cell".ljust(6)
         header += "Initial".center(col_width)
-        for i in range(1, len(self.history)):
-            header += f"Op {i}".center(col_width)
+        for op in self.operations:
+            header += self._format_op_header(op).center(col_width)
         lines.append(header)
         lines.append("-" * len(header))
 
         # Each cell row
         for cell_id in cell_list:
-            # Row for this cell - multiple lines per cell
-            cell_rows = {"reads": [], "writes": [], "status": [], "reasons": []}
+            # Collect data per snapshot
+            cell_data = []  # List of dicts per snapshot
 
             for snap in self.history:
                 if cell_id not in snap.cell_order:
-                    cell_rows["reads"].append("(deleted)")
-                    cell_rows["writes"].append("")
-                    cell_rows["status"].append("")
-                    cell_rows["reasons"].append("")
+                    cell_data.append({"deleted": True})
                     continue
 
                 r = snap.reads.get(cell_id, set())
@@ -347,51 +377,111 @@ class LitmusTestRunner:
                 r_str = "{" + ",".join(sorted(r)) + "}" if r else "∅"
                 w_str = "{" + ",".join(sorted(w)) + "}" if w else "∅"
 
-                cell_rows["reads"].append(f"R:{r_str}"[:col_width - 1])
-                cell_rows["writes"].append(f"W:{w_str}"[:col_width - 1])
-                cell_rows["status"].append(status.upper()[:col_width - 1])
+                # Format reasons - one per line
+                reason_strs = []
+                for reason in reasons:
+                    rtype = reason.get("type", "?")
+                    loc = reason.get("loc", "")
+                    cid = reason.get("cell_id", "")
+                    if loc and cid:
+                        reason_strs.append(f"{rtype}({loc}<-{cid})")
+                    elif loc:
+                        reason_strs.append(f"{rtype}({loc})")
+                    else:
+                        reason_strs.append(rtype)
 
-                if reasons:
-                    reason_strs = []
-                    for reason in reasons:
-                        rtype = reason.get("type", "?").replace("_", "").upper()[:8]
-                        loc = reason.get("loc", "")
-                        cid = reason.get("cell_id", "")
-                        if loc and cid:
-                            reason_strs.append(f"{rtype}({loc}<-{cid})")
-                        elif loc:
-                            reason_strs.append(f"{rtype}({loc})")
-                        else:
-                            reason_strs.append(rtype)
-                    cell_rows["reasons"].append(", ".join(reason_strs)[:col_width - 1])
+                cell_data.append({
+                    "deleted": False,
+                    "reads": f"R:{r_str}",
+                    "writes": f"W:{w_str}",
+                    "status": status.upper(),
+                    "reasons": reason_strs,
+                })
+
+            # Determine max reasons across all snapshots for this cell
+            max_reasons = max((len(d.get("reasons", [])) for d in cell_data), default=0)
+
+            # Print R line
+            row = cell_id.ljust(6)
+            for d in cell_data:
+                if d.get("deleted"):
+                    row += "(deleted)".center(col_width)
                 else:
-                    cell_rows["reasons"].append("")
+                    row += d["reads"][:col_width - 1].center(col_width)
+            lines.append(row)
 
-            # Print cell rows
-            lines.append(cell_id.ljust(6) + "".join(s.center(col_width) for s in cell_rows["reads"]))
-            lines.append("".ljust(6) + "".join(s.center(col_width) for s in cell_rows["writes"]))
-            lines.append("".ljust(6) + "".join(s.center(col_width) for s in cell_rows["status"]))
-            if any(cell_rows["reasons"]):
-                lines.append("".ljust(6) + "".join(s.center(col_width) for s in cell_rows["reasons"]))
+            # Print W line
+            row = "".ljust(6)
+            for d in cell_data:
+                if d.get("deleted"):
+                    row += "".center(col_width)
+                else:
+                    row += d["writes"][:col_width - 1].center(col_width)
+            lines.append(row)
+
+            # Print status only if cell is CLEAN (stale is implied by reasons)
+            row = "".ljust(6)
+            has_status = False
+            for d in cell_data:
+                if d.get("deleted"):
+                    row += "".center(col_width)
+                elif d["status"] == "CLEAN":
+                    row += "CLEAN".center(col_width)
+                    has_status = True
+                else:
+                    row += "".center(col_width)  # Stale implied by reasons
+            if has_status or max_reasons == 0:
+                # Show status line if any cell is clean, or if no reasons anywhere
+                row = "".ljust(6)
+                for d in cell_data:
+                    if d.get("deleted"):
+                        row += "".center(col_width)
+                    else:
+                        # Show CLEAN or STALE only when no reasons
+                        if not d["reasons"]:
+                            row += d["status"].center(col_width)
+                        else:
+                            row += "".center(col_width)
+                lines.append(row)
+
+            # Print each reason on its own line
+            for reason_idx in range(max_reasons):
+                row = "".ljust(6)
+                for d in cell_data:
+                    if d.get("deleted"):
+                        row += "".center(col_width)
+                    elif reason_idx < len(d.get("reasons", [])):
+                        row += d["reasons"][reason_idx][:col_width - 1].center(col_width)
+                    else:
+                        row += "".center(col_width)
+                lines.append(row)
+
             lines.append("")
-
-        # Last writer summary
-        final_lw = self.history[-1].last_writer
-        if final_lw:
-            lw_str = ", ".join(f"{k}→{v}" for k, v in sorted(final_lw.items()))
-            lines.append(f"L (last_writer): {{{lw_str}}}")
-        else:
-            lines.append("L (last_writer): {}")
 
         return "\n".join(lines)
 
     def render_latex(self, test_name: str, description: str) -> str:
-        """Generate LaTeX table for state evolution."""
+        """Generate LaTeX section for state evolution."""
         lines = []
 
         # Escape underscores for LaTeX
         safe_name = test_name.replace("_", r"\_")
         safe_desc = description.replace("_", r"\_")
+
+        # Section header
+        lines.append(f"\\subsection{{{safe_name}}}")
+        lines.append(f"\\textit{{{safe_desc}}}")
+        lines.append("")
+
+        # Show cell code if available
+        if self.cell_code:
+            lines.append(r"\textbf{Code:}")
+            lines.append(r"\begin{itemize}")
+            for cell_id in sorted(self.cell_code.keys()):
+                code = self.cell_code[cell_id].replace("_", r"\_")
+                lines.append(f"  \\item \\texttt{{{cell_id}}}: \\verb|{code}|")
+            lines.append(r"\end{itemize}")
+            lines.append("")
 
         # Get all cells
         all_cells = set()
@@ -402,17 +492,16 @@ class LitmusTestRunner:
         num_cols = len(self.history)
         col_spec = "|c|" + "c|" * num_cols
 
-        lines.append(r"\begin{figure}[h]")
-        lines.append(r"\centering")
-        lines.append(f"\\caption{{{safe_name}: {safe_desc}}}")
+        lines.append(r"\begin{center}")
         lines.append(r"\small")
         lines.append(f"\\begin{{tabular}}{{{col_spec}}}")
         lines.append(r"\hline")
 
-        # Header
+        # Header - use operation names
         headers = [r"\textbf{Cell}", r"\textbf{Initial}"]
-        for i in range(1, len(self.history)):
-            headers.append(f"\\textbf{{Op {i}}}")
+        for op in self.operations:
+            op_name = self._format_op_header(op).replace("_", r"\_")
+            headers.append(f"\\textbf{{{op_name}}}")
         lines.append(" & ".join(headers) + r" \\")
         lines.append(r"\hline")
 
@@ -460,14 +549,9 @@ class LitmusTestRunner:
 
             lines.append(r"\hline")
 
-        # Last writer
-        final_lw = self.history[-1].last_writer
-        lw_str = ", ".join(f"{k} \\mapsto {v}" for k, v in sorted(final_lw.items()))
-        lines.append(f"\\multicolumn{{{num_cols + 1}}}{{|l|}}{{$L = \\{{{lw_str}\\}}$}} \\\\")
-        lines.append(r"\hline")
-
         lines.append(r"\end{tabular}")
-        lines.append(r"\end{figure}")
+        lines.append(r"\end{center}")
+        lines.append("")
 
         return "\n".join(lines)
 
@@ -560,3 +644,82 @@ class TestLitmusHelpers:
         """Test inference of len() as structural read."""
         result = infer_rw("n = len(df)")
         assert "shape" in result.structural_reads.get("df", set())
+
+
+def generate_all_outputs(output_dir: Optional[Path] = None) -> None:
+    """
+    Generate combined text and LaTeX output files for all litmus tests.
+
+    Args:
+        output_dir: Directory for output files. Defaults to litmus_output/ next to YAML.
+    """
+    if output_dir is None:
+        output_dir = LITMUS_YAML_PATH.parent / "litmus_output"
+    output_dir.mkdir(exist_ok=True)
+
+    tests = load_litmus_tests()
+
+    # Collect all ASCII and LaTeX outputs
+    ascii_parts = []
+    latex_parts = []
+
+    for test in tests:
+        name = test.get("name", "unnamed")
+        description = test.get("description", "")
+        cell_order = test.get("cell_order", [])
+        operations = test.get("operations", [])
+
+        # Create runner and execute operations
+        runner = LitmusTestRunner(cell_order)
+        for op in operations:
+            runner.execute_operation(op)
+
+        # Generate outputs
+        ascii_parts.append(runner.render_ascii(name, description))
+        latex_parts.append(runner.render_latex(name, description))
+
+    # Write combined text file
+    text_file = output_dir / "litmus_tests.txt"
+    with open(text_file, "w") as f:
+        f.write("\n\n".join(ascii_parts))
+    print(f"Written: {text_file}")
+
+    # Write combined LaTeX file
+    latex_file = output_dir / "litmus_tests.tex"
+    with open(latex_file, "w") as f:
+        # LaTeX preamble
+        f.write(r"""\documentclass{article}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=1in]{geometry}
+
+\title{FlowBook Litmus Tests}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+This document contains the litmus tests for FlowBook's reproducibility enforcement.
+Each test shows the state evolution through a sequence of notebook operations.
+
+\section{Tests}
+
+""")
+        f.write("\n\n".join(latex_parts))
+        f.write(r"""
+
+\end{document}
+""")
+    print(f"Written: {latex_file}")
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--generate":
+        output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+        generate_all_outputs(output_dir)
+    else:
+        print("Usage: python test_litmus.py --generate [output_dir]")
+        print("  Generates litmus_tests.txt and litmus_tests.tex")
