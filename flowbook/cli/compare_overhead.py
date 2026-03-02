@@ -389,6 +389,10 @@ class FileStats:
     per_cell_checkpoint_overhead_ms: List[float] = field(default_factory=list)
     per_cell_total_overhead_ms: List[float] = field(default_factory=list)
     per_cell_memory_overhead_mb: List[float] = field(default_factory=list)
+    # Checking results (staleness summary)
+    checking_clean_cells: int = 0
+    checking_stale_cells: int = 0
+    checking_reason_counts: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -448,6 +452,10 @@ class AggregateStats:
     # Raw per-cell data for histograms
     all_total_overhead_per_cell: List[float] = field(default_factory=list)
     all_memory_overhead_per_cell: List[float] = field(default_factory=list)
+    # Aggregate checking results (staleness summary across all files)
+    total_checking_clean_cells: int = 0
+    total_checking_stale_cells: int = 0
+    total_checking_reason_counts: Dict[str, int] = field(default_factory=dict)
 
 
 def load_comparison_json(file_path: str) -> Dict[str, Any]:
@@ -507,6 +515,12 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     state_overhead = flowbook_totals.get("state_duration_ms", 0.0)
     check_overhead = flowbook_totals.get("check_duration_ms", 0.0)
     flowbook_total = flowbook_runtime
+
+    # Extract checking summary (staleness data)
+    checking_summary = flowbook_totals.get("checking_summary", {})
+    checking_clean_cells = checking_summary.get("clean_cells", 0)
+    checking_stale_cells = checking_summary.get("stale_cells", 0)
+    checking_reason_counts = checking_summary.get("reason_counts", {})
 
     if baseline_runtime > 0:
         slowdown = flowbook_total / baseline_runtime
@@ -689,6 +703,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         per_cell_checkpoint_overhead_ms=per_cell_checkpoint_overhead_ms,
         per_cell_total_overhead_ms=per_cell_total_overhead_ms,
         per_cell_memory_overhead_mb=per_cell_memory_overhead_mb,
+        checking_clean_cells=checking_clean_cells,
+        checking_stale_cells=checking_stale_cells,
+        checking_reason_counts=checking_reason_counts,
     )
 
 
@@ -731,6 +748,14 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
     checkpoint_arr = np.array(all_checkpoint_overhead) if all_checkpoint_overhead else np.array([0.0])
     total_arr = np.array(all_total_overhead) if all_total_overhead else np.array([0.0])
     memory_arr = np.array(all_memory_overhead) if all_memory_overhead else np.array([0.0])
+
+    # Aggregate checking results (staleness summary)
+    total_clean_cells = sum(s.checking_clean_cells for s in stats_list)
+    total_stale_cells = sum(s.checking_stale_cells for s in stats_list)
+    total_reason_counts: Dict[str, int] = {}
+    for s in stats_list:
+        for rtype, count in s.checking_reason_counts.items():
+            total_reason_counts[rtype] = total_reason_counts.get(rtype, 0) + count
 
     return AggregateStats(
         num_files=len(stats_list),
@@ -785,6 +810,10 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
         # Raw per-cell data for histograms
         all_total_overhead_per_cell=list(total_arr),
         all_memory_overhead_per_cell=list(memory_arr),
+        # Aggregate checking results
+        total_checking_clean_cells=total_clean_cells,
+        total_checking_stale_cells=total_stale_cells,
+        total_checking_reason_counts=total_reason_counts,
     )
 
 
@@ -915,6 +944,19 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
         lines.append(f"  Per-Cell Median:    {aggregate.memory_overhead_per_cell_median:.2f}MB")
         lines.append(f"  Per-Cell Max:       {aggregate.memory_overhead_per_cell_max:.2f}MB")
         lines.append(f"  Per-Cell P99:       {aggregate.memory_overhead_per_cell_p99:.2f}MB")
+
+    # Checking results summary (staleness)
+    total_checked = aggregate.total_checking_clean_cells + aggregate.total_checking_stale_cells
+    if total_checked > 0:
+        lines.append("")
+        lines.append("CHECKING RESULTS")
+        lines.append(f"  Clean cells:        {aggregate.total_checking_clean_cells}")
+        lines.append(f"  Stale cells:        {aggregate.total_checking_stale_cells}")
+        if aggregate.total_checking_reason_counts:
+            lines.append("  Staleness reasons:")
+            for rtype, count in sorted(aggregate.total_checking_reason_counts.items()):
+                lines.append(f"    {rtype}: {count}")
+
     lines.append("=" * 110)
 
     return "\n".join(lines)
