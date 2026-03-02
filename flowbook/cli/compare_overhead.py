@@ -181,6 +181,32 @@ def average_trial_data(trial_datas: List[Dict]) -> Dict:
             ]
             phase_data["totals"] = average_dict_values(all_totals)
 
+            # Check staleness consistency across trials (flowbook timing only)
+            if kernel == "flowbook" and phase == "timing":
+                first_checking = all_totals[0].get("checking_summary", {}) if all_totals else {}
+                first_staleness = (
+                    first_checking.get("clean_cells", 0),
+                    first_checking.get("stale_cells", 0),
+                    tuple(sorted(first_checking.get("reason_counts", {}).items()))
+                )
+                for i, totals in enumerate(all_totals[1:], start=2):
+                    checking = totals.get("checking_summary", {})
+                    staleness = (
+                        checking.get("clean_cells", 0),
+                        checking.get("stale_cells", 0),
+                        tuple(sorted(checking.get("reason_counts", {}).items()))
+                    )
+                    if staleness != first_staleness:
+                        notebook_path = result.get("notebook_path", "unknown")
+                        print(f"WARNING: Staleness differs across trials for {notebook_path}:", file=sys.stderr)
+                        print(f"  Trial 1: clean={first_staleness[0]}, stale={first_staleness[1]}, reasons={dict(first_staleness[2])}", file=sys.stderr)
+                        print(f"  Trial {i}: clean={staleness[0]}, stale={staleness[1]}, reasons={dict(staleness[2])}", file=sys.stderr)
+                        break  # Only warn once per notebook
+
+                # Don't average checking_summary - use first trial's values (should be identical)
+                if "checking_summary" in phase_data["totals"]:
+                    phase_data["totals"]["checking_summary"] = first_checking
+
     return result
 
 
@@ -946,6 +972,7 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
         lines.append(f"  Per-Cell P99:       {aggregate.memory_overhead_per_cell_p99:.2f}MB")
 
     # Checking results summary (staleness)
+    # Note: Staleness consistency across trials is checked during averaging in average_trial_data
     total_checked = aggregate.total_checking_clean_cells + aggregate.total_checking_stale_cells
     if total_checked > 0:
         lines.append("")
