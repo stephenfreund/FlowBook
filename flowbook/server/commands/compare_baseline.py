@@ -77,6 +77,16 @@ def generate_comparison_filename(notebook_path: str, num_components: int = 3) ->
 
 
 @dataclass
+class CheckingResult:
+    """Result of reproducibility checking for a cell."""
+    cell_status: str  # "clean" or "stale"
+    reasons: List[Dict[str, Any]] = field(default_factory=list)  # List of reason dicts if stale
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"cell_status": self.cell_status, "reasons": self.reasons}
+
+
+@dataclass
 class TimingCellMetrics:
     """Timing metrics for a single cell execution (Scalene OFF)."""
     cell_id: str
@@ -88,6 +98,7 @@ class TimingCellMetrics:
     status: str
     error: Optional[str] = None
     is_rerun: bool = False
+    checking_result: Optional[CheckingResult] = None  # Reproducibility checking result
 
 
 @dataclass
@@ -481,6 +492,11 @@ def execute_cell_flowbook(
         if violation:
             violation_msg = violation.get("message", "Reproducibility violation")
 
+        # Extract checking result for this cell
+        staleness_reasons = flowbook_metadata.get("staleness_reasons", {})
+        cell_reasons = staleness_reasons.get(cell_id, [])
+        cell_status = "stale" if cell_reasons else "clean"
+
         return {
             # Use kernel-reported timing for accuracy
             "execute_duration_ms": flowbook_metadata.get("execute_duration_ms", elapsed * 1000),
@@ -490,6 +506,10 @@ def execute_cell_flowbook(
             "error": error_msg,
             "violation": violation_msg,
             "stale_cells": flowbook_metadata.get("stale_cells", []),
+            "checking_result": {
+                "cell_status": cell_status,
+                "reasons": cell_reasons,
+            },
         }
     else:
         return {
@@ -500,6 +520,7 @@ def execute_cell_flowbook(
             "error": error_msg or "No flowbook metadata received",
             "violation": None,
             "stale_cells": [],
+            "checking_result": None,
         }
 
 
@@ -1005,7 +1026,8 @@ def run_baseline_timing(
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
                     status="error",
-                    error=timing["error"]
+                    error=timing["error"],
+                    checking_result=None,  # Baseline has no checking
                 ))
             else:
                 runtime_ms = timing["cell_runtime_ms"]
@@ -1019,6 +1041,7 @@ def run_baseline_timing(
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
                     status="ok",
+                    checking_result=None,  # Baseline has no checking
                 ))
                 log(f"  Runtime: {runtime_ms:.1f}ms")
 
@@ -1056,6 +1079,7 @@ def run_baseline_timing(
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
+                            checking_result=None,  # Baseline has no checking
                         ))
                     else:
                         runtime_ms = timing["cell_runtime_ms"]
@@ -1070,6 +1094,7 @@ def run_baseline_timing(
                             check_duration_ms=0.0,
                             status="ok",
                             is_rerun=True,
+                            checking_result=None,  # Baseline has no checking
                         ))
                         log(f"  Rerun Runtime: {runtime_ms:.1f}ms")
 
@@ -1164,7 +1189,8 @@ def run_flowbook_timing(
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
                     status="error",
-                    error=timing["error"]
+                    error=timing["error"],
+                    checking_result=None,
                 ))
             else:
                 if timing.get("violation"):
@@ -1186,6 +1212,15 @@ def run_flowbook_timing(
                 elif timing.get("violation"):
                     status = "violation"
 
+                # Build checking result
+                checking_result_data = timing.get("checking_result")
+                checking_result = None
+                if checking_result_data:
+                    checking_result = CheckingResult(
+                        cell_status=checking_result_data.get("cell_status", "unknown"),
+                        reasons=checking_result_data.get("reasons", []),
+                    )
+
                 results.cells.append(TimingCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
@@ -1195,6 +1230,7 @@ def run_flowbook_timing(
                     check_duration_ms=check_ms,
                     status=status,
                     error=timing.get("violation") or timing.get("error"),
+                    checking_result=checking_result,
                 ))
                 log(f"  Execute: {execute_ms:.1f}ms, Code: {code_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
 
@@ -1237,6 +1273,7 @@ def run_flowbook_timing(
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
+                            checking_result=None,
                         ))
                     else:
                         if timing.get("violation"):
@@ -1258,6 +1295,15 @@ def run_flowbook_timing(
                         elif timing.get("violation"):
                             status = "violation"
 
+                        # Build checking result
+                        checking_result_data = timing.get("checking_result")
+                        checking_result = None
+                        if checking_result_data:
+                            checking_result = CheckingResult(
+                                cell_status=checking_result_data.get("cell_status", "unknown"),
+                                reasons=checking_result_data.get("reasons", []),
+                            )
+
                         results.rerun_cells.append(TimingCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
@@ -1268,8 +1314,23 @@ def run_flowbook_timing(
                             status=status,
                             error=timing.get("violation") or timing.get("error"),
                             is_rerun=True,
+                            checking_result=checking_result,
                         ))
                         log(f"  Rerun Execute: {execute_ms:.1f}ms, Code: {code_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
+
+        # Compute checking summary
+        clean_count = 0
+        stale_count = 0
+        reason_counts: Dict[str, int] = {}
+        for cell in results.cells:
+            if cell.checking_result:
+                if cell.checking_result.cell_status == "clean":
+                    clean_count += 1
+                else:
+                    stale_count += 1
+                    for reason in cell.checking_result.reasons:
+                        rtype = reason.get("type", "unknown")
+                        reason_counts[rtype] = reason_counts.get(rtype, 0) + 1
 
         results.totals = {
             "execute_duration_ms": total_execute_ms,
@@ -1280,6 +1341,11 @@ def run_flowbook_timing(
             "rerun_code_ms": rerun_code_ms,
             "rerun_state_ms": rerun_state_ms,
             "rerun_check_ms": rerun_check_ms,
+            "checking_summary": {
+                "clean_cells": clean_count,
+                "stale_cells": stale_count,
+                "reason_counts": reason_counts,
+            },
         }
 
         log(f"FlowBook Timing: Total execute {total_execute_ms:.1f}ms, code {total_code_ms:.1f}ms, state {total_state_ms:.1f}ms, check {total_check_ms:.1f}ms")
@@ -2099,6 +2165,31 @@ class CompareBaselineCommand(NotebookCommand):
                     log(f"  FlowBook code:        {rerun_flowbook_code:,.1f}ms")
                     log(f"  FlowBook state time:  {rerun_state:,.1f}ms")
                     log(f"  FlowBook check time:  {rerun_check:,.1f}ms")
+                    log("")
+
+                # Checking results summary
+                if flowbook_timing and flowbook_timing.cells:
+                    clean_count = 0
+                    stale_count = 0
+                    reason_counts: Dict[str, int] = {}
+
+                    for cell in flowbook_timing.cells:
+                        if cell.checking_result:
+                            if cell.checking_result.cell_status == "clean":
+                                clean_count += 1
+                            else:
+                                stale_count += 1
+                                for reason in cell.checking_result.reasons:
+                                    rtype = reason.get("type", "unknown")
+                                    reason_counts[rtype] = reason_counts.get(rtype, 0) + 1
+
+                    log("CHECKING RESULTS:")
+                    log(f"  Clean cells:          {clean_count}")
+                    log(f"  Stale cells:          {stale_count}")
+                    if reason_counts:
+                        log("  Staleness reasons:")
+                        for rtype, count in sorted(reason_counts.items()):
+                            log(f"    {rtype}: {count}")
                     log("")
 
                 log(f"Results saved to: {json_output_path}")
