@@ -64,8 +64,8 @@ Cell          Initial                  Run c                   Run a
 a            y = x * 2               y = x * 2               y = x * 2        
                                                                R:{x}          
                                                                W:{y}          
-           never_executed          never_executed     no_read_before_write(x< 
-                                                           never_executed     
+           never_executed          never_executed          never_executed     
+                                                      no_read_before_write(x< 
 
 b              z = y                   z = y                   z = y          
            never_executed          never_executed          never_executed     
@@ -149,8 +149,8 @@ f              x = 1                   x = 1                   x = 1            
 g            x = x + 1               x = x + 1               x = x + 1               x = x + 1               x = x + 1        
                                                                R:{x}                   R:{x}                   R:{x}          
                                                                W:{x}                   W:{x}                   W:{x}          
-           never_executed          never_executed      skipped_upstream(x<-g)  skipped_upstream(x<-g)      never_executed     
-                                                           never_executed          never_executed       forward_stale(x<-f)   
+           never_executed          never_executed          never_executed          never_executed          never_executed     
+                                                       skipped_upstream(x<-g)  skipped_upstream(x<-g)   forward_stale(x<-f)   
 
 h            y = x * 5               y = x * 5               y = x * 5               y = x * 5               y = x * 5        
                                                                                        R:{x}                   R:{x}          
@@ -204,6 +204,97 @@ a                                      x = 1
 
 b              y = x                   y = x          
            never_executed          never_executed     
+
+
+===============================================================================
+Test: edit_then_run_becomes_clean_code
+Editing then running a cell makes it clean (code-based)
+===============================================================================
+
+Cell          Initial                  Run a                   Edit a                  Run a          
+------------------------------------------------------------------------------------------------------
+a              x = 1                   x = 1                   x = 2                   x = 2          
+                                        R:∅                                             R:∅           
+                                       W:{x}                                           W:{x}          
+           never_executed              CLEAN                code_changed               CLEAN          
+
+b              y = x                   y = x                   y = x                   y = x          
+           never_executed          never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: edit_upstream_run_marks_downstream_stale_code
+Edit upstream, run it, downstream reader becomes stale (code-based)
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Edit a                  Run a          
+------------------------------------------------------------------------------------------------------------------------------
+a              x = 1                   x = 1                   x = 1                  x = 100                 x = 100         
+                                        R:∅                     R:∅                                             R:∅           
+                                       W:{x}                   W:{x}                                           W:{x}          
+           never_executed              CLEAN                   CLEAN                code_changed               CLEAN          
+
+b              y = x                   y = x                   y = x                   y = x                   y = x          
+                                                               R:{x}                   R:{x}                   R:{x}          
+                                                               W:{y}                   W:{y}                   W:{y}          
+           never_executed          never_executed              CLEAN                   CLEAN            forward_stale(x<-a)   
+
+
+===============================================================================
+Test: edit_multiple_times_then_run_code
+Multiple edits then run results in clean cell (code-based)
+===============================================================================
+
+Cell          Initial                  Run a                   Edit a                  Edit a                  Edit a                  Run a          
+------------------------------------------------------------------------------------------------------------------------------------------------------
+a              x = 1                   x = 1                   x = 2                   x = 3                   x = 4                   x = 4          
+                                        R:∅                                                                                             R:∅           
+                                       W:{x}                                                                                           W:{x}          
+           never_executed              CLEAN                code_changed            code_changed            code_changed               CLEAN          
+
+b              y = x                   y = x                   y = x                   y = x                   y = x                   y = x          
+           never_executed          never_executed          never_executed          never_executed          never_executed          never_executed     
+
+
+===============================================================================
+Test: run_edit_run_with_reader_code
+Run chain, edit upstream, run upstream - direct reader becomes stale (code-based)
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Run c                   Edit a                  Run a          
+------------------------------------------------------------------------------------------------------------------------------------------------------
+a              x = 1                   x = 1                   x = 1                   x = 1                   x = 10                  x = 10         
+                                        R:∅                     R:∅                     R:∅                                             R:∅           
+                                       W:{x}                   W:{x}                   W:{x}                                           W:{x}          
+           never_executed              CLEAN                   CLEAN                   CLEAN                code_changed               CLEAN          
+
+b            y = x + 1               y = x + 1               y = x + 1               y = x + 1               y = x + 1               y = x + 1        
+                                                               R:{x}                   R:{x}                   R:{x}                   R:{x}          
+                                                               W:{y}                   W:{y}                   W:{y}                   W:{y}          
+           never_executed          never_executed              CLEAN                   CLEAN                   CLEAN            forward_stale(x<-a)   
+
+c              z = y                   z = y                   z = y                   z = y                   z = y                   z = y          
+                                                                                       R:{y}                   R:{y}                   R:{y}          
+                                                                                       W:{z}                   W:{z}                   W:{z}          
+           never_executed          never_executed          never_executed              CLEAN                   CLEAN                   CLEAN          
+
+
+===============================================================================
+Test: edit_reader_then_run_code
+Edit a reader cell then run it - becomes clean with new code (code-based)
+===============================================================================
+
+Cell          Initial                  Run a                   Run b                   Edit b                  Run b          
+------------------------------------------------------------------------------------------------------------------------------
+a              x = 1                   x = 1                   x = 1                   x = 1                   x = 1          
+                                        R:∅                     R:∅                     R:∅                     R:∅           
+                                       W:{x}                   W:{x}                   W:{x}                   W:{x}          
+           never_executed              CLEAN                   CLEAN                   CLEAN                   CLEAN          
+
+b              y = x                   y = x                   y = x                 y = x * 2               y = x * 2        
+                                                               R:{x}                                           R:{x}          
+                                                               W:{y}                                           W:{y}          
+           never_executed          never_executed              CLEAN                code_changed               CLEAN          
 
 
 ===============================================================================

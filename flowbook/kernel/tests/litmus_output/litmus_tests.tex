@@ -143,7 +143,7 @@ Each test shows the state evolution through a sequence of notebook operations.
   & $R: \emptyset$ & $R: \emptyset$ & $R: \{x\}$ \\
   & $W: \emptyset$ & $W: \emptyset$ & $W: \{y\}$ \\
   & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} \\
-  & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{no\_read\_before\_write} \\
+  & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} \\
 \hline
 \multirow{4}{*}{$b$}
   & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ \\
@@ -287,7 +287,7 @@ Each test shows the state evolution through a sequence of notebook operations.
   & $R: \emptyset$ & $R: \emptyset$ & $R: \{x\}$ & $R: \{x\}$ & $R: \{x\}$ \\
   & $W: \emptyset$ & $W: \emptyset$ & $W: \{x\}$ & $W: \{x\}$ & $W: \{x\}$ \\
   & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} \\
-  & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{skipped\_upstream} & \footnotesize\texttt{skipped\_upstream} & \footnotesize\texttt{never\_executed} \\
+  & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} \\
 \hline
 \multirow{4}{*}{$h$}
   & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \{x\}$ & $R: \{x\}$ \\
@@ -387,6 +387,168 @@ Each test shows the state evolution through a sequence of notebook operations.
   & $W: \emptyset$ & $W: \emptyset$ \\
   & \textsc{Stale} & \textsc{Stale} \\
   & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} \\
+\hline
+\end{tabular}
+\end{center}
+
+
+\subsection{edit\_then\_run\_becomes\_clean\_code}
+\textit{Editing then running a cell makes it clean (code-based)}
+
+\textbf{Code:}
+\begin{itemize}
+  \item \texttt{a}: \verb|x = 2|
+  \item \texttt{b}: \verb|y = x|
+\end{itemize}
+
+\begin{center}
+\small
+\begin{tabular}{|c|c|c|c|c|}
+\hline
+\textbf{Cell} & \textbf{Initial} & \textbf{Run a} & \textbf{Edit a} & \textbf{Run a} \\
+\hline
+\multirow{4}{*}{$a$}
+  & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ \\
+  & $W: \emptyset$ & $W: \{x\}$ & $W: \emptyset$ & $W: \{x\}$ \\
+  & \textsc{Stale} & \textsc{Clean} & \textsc{Stale} & \textsc{Clean} \\
+  & \footnotesize\texttt{never\_executed} &  & \footnotesize\texttt{code\_changed} &  \\
+\hline
+\multirow{4}{*}{$b$}
+  & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ \\
+  & $W: \emptyset$ & $W: \emptyset$ & $W: \emptyset$ & $W: \emptyset$ \\
+  & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} \\
+  & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} \\
+\hline
+\end{tabular}
+\end{center}
+
+
+\subsection{edit\_upstream\_run\_marks\_downstream\_stale\_code}
+\textit{Edit upstream, run it, downstream reader becomes stale (code-based)}
+
+\textbf{Code:}
+\begin{itemize}
+  \item \texttt{a}: \verb|x = 100|
+  \item \texttt{b}: \verb|y = x|
+\end{itemize}
+
+\begin{center}
+\small
+\begin{tabular}{|c|c|c|c|c|c|}
+\hline
+\textbf{Cell} & \textbf{Initial} & \textbf{Run a} & \textbf{Run b} & \textbf{Edit a} & \textbf{Run a} \\
+\hline
+\multirow{4}{*}{$a$}
+  & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ \\
+  & $W: \emptyset$ & $W: \{x\}$ & $W: \{x\}$ & $W: \emptyset$ & $W: \{x\}$ \\
+  & \textsc{Stale} & \textsc{Clean} & \textsc{Clean} & \textsc{Stale} & \textsc{Clean} \\
+  & \footnotesize\texttt{never\_executed} &  &  & \footnotesize\texttt{code\_changed} &  \\
+\hline
+\multirow{4}{*}{$b$}
+  & $R: \emptyset$ & $R: \emptyset$ & $R: \{x\}$ & $R: \{x\}$ & $R: \{x\}$ \\
+  & $W: \emptyset$ & $W: \emptyset$ & $W: \{y\}$ & $W: \{y\}$ & $W: \{y\}$ \\
+  & \textsc{Stale} & \textsc{Stale} & \textsc{Clean} & \textsc{Clean} & \textsc{Stale} \\
+  & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} &  &  & \footnotesize\texttt{forward\_stale} \\
+\hline
+\end{tabular}
+\end{center}
+
+
+\subsection{edit\_multiple\_times\_then\_run\_code}
+\textit{Multiple edits then run results in clean cell (code-based)}
+
+\textbf{Code:}
+\begin{itemize}
+  \item \texttt{a}: \verb|x = 4|
+  \item \texttt{b}: \verb|y = x|
+\end{itemize}
+
+\begin{center}
+\small
+\begin{tabular}{|c|c|c|c|c|c|c|}
+\hline
+\textbf{Cell} & \textbf{Initial} & \textbf{Run a} & \textbf{Edit a} & \textbf{Edit a} & \textbf{Edit a} & \textbf{Run a} \\
+\hline
+\multirow{4}{*}{$a$}
+  & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ \\
+  & $W: \emptyset$ & $W: \{x\}$ & $W: \emptyset$ & $W: \emptyset$ & $W: \emptyset$ & $W: \{x\}$ \\
+  & \textsc{Stale} & \textsc{Clean} & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} & \textsc{Clean} \\
+  & \footnotesize\texttt{never\_executed} &  & \footnotesize\texttt{code\_changed} & \footnotesize\texttt{code\_changed} & \footnotesize\texttt{code\_changed} &  \\
+\hline
+\multirow{4}{*}{$b$}
+  & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ \\
+  & $W: \emptyset$ & $W: \emptyset$ & $W: \emptyset$ & $W: \emptyset$ & $W: \emptyset$ & $W: \emptyset$ \\
+  & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} \\
+  & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} \\
+\hline
+\end{tabular}
+\end{center}
+
+
+\subsection{run\_edit\_run\_with\_reader\_code}
+\textit{Run chain, edit upstream, run upstream - direct reader becomes stale (code-based)}
+
+\textbf{Code:}
+\begin{itemize}
+  \item \texttt{a}: \verb|x = 10|
+  \item \texttt{b}: \verb|y = x + 1|
+  \item \texttt{c}: \verb|z = y|
+\end{itemize}
+
+\begin{center}
+\small
+\begin{tabular}{|c|c|c|c|c|c|c|}
+\hline
+\textbf{Cell} & \textbf{Initial} & \textbf{Run a} & \textbf{Run b} & \textbf{Run c} & \textbf{Edit a} & \textbf{Run a} \\
+\hline
+\multirow{4}{*}{$a$}
+  & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ \\
+  & $W: \emptyset$ & $W: \{x\}$ & $W: \{x\}$ & $W: \{x\}$ & $W: \emptyset$ & $W: \{x\}$ \\
+  & \textsc{Stale} & \textsc{Clean} & \textsc{Clean} & \textsc{Clean} & \textsc{Stale} & \textsc{Clean} \\
+  & \footnotesize\texttt{never\_executed} &  &  &  & \footnotesize\texttt{code\_changed} &  \\
+\hline
+\multirow{4}{*}{$b$}
+  & $R: \emptyset$ & $R: \emptyset$ & $R: \{x\}$ & $R: \{x\}$ & $R: \{x\}$ & $R: \{x\}$ \\
+  & $W: \emptyset$ & $W: \emptyset$ & $W: \{y\}$ & $W: \{y\}$ & $W: \{y\}$ & $W: \{y\}$ \\
+  & \textsc{Stale} & \textsc{Stale} & \textsc{Clean} & \textsc{Clean} & \textsc{Clean} & \textsc{Stale} \\
+  & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} &  &  &  & \footnotesize\texttt{forward\_stale} \\
+\hline
+\multirow{4}{*}{$c$}
+  & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \{y\}$ & $R: \{y\}$ & $R: \{y\}$ \\
+  & $W: \emptyset$ & $W: \emptyset$ & $W: \emptyset$ & $W: \{z\}$ & $W: \{z\}$ & $W: \{z\}$ \\
+  & \textsc{Stale} & \textsc{Stale} & \textsc{Stale} & \textsc{Clean} & \textsc{Clean} & \textsc{Clean} \\
+  & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} &  &  &  \\
+\hline
+\end{tabular}
+\end{center}
+
+
+\subsection{edit\_reader\_then\_run\_code}
+\textit{Edit a reader cell then run it - becomes clean with new code (code-based)}
+
+\textbf{Code:}
+\begin{itemize}
+  \item \texttt{a}: \verb|x = 1|
+  \item \texttt{b}: \verb|y = x * 2|
+\end{itemize}
+
+\begin{center}
+\small
+\begin{tabular}{|c|c|c|c|c|c|}
+\hline
+\textbf{Cell} & \textbf{Initial} & \textbf{Run a} & \textbf{Run b} & \textbf{Edit b} & \textbf{Run b} \\
+\hline
+\multirow{4}{*}{$a$}
+  & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ & $R: \emptyset$ \\
+  & $W: \emptyset$ & $W: \{x\}$ & $W: \{x\}$ & $W: \{x\}$ & $W: \{x\}$ \\
+  & \textsc{Stale} & \textsc{Clean} & \textsc{Clean} & \textsc{Clean} & \textsc{Clean} \\
+  & \footnotesize\texttt{never\_executed} &  &  &  &  \\
+\hline
+\multirow{4}{*}{$b$}
+  & $R: \emptyset$ & $R: \emptyset$ & $R: \{x\}$ & $R: \emptyset$ & $R: \{x\}$ \\
+  & $W: \emptyset$ & $W: \emptyset$ & $W: \{y\}$ & $W: \emptyset$ & $W: \{y\}$ \\
+  & \textsc{Stale} & \textsc{Stale} & \textsc{Clean} & \textsc{Stale} & \textsc{Clean} \\
+  & \footnotesize\texttt{never\_executed} & \footnotesize\texttt{never\_executed} &  & \footnotesize\texttt{code\_changed} &  \\
 \hline
 \end{tabular}
 \end{center}

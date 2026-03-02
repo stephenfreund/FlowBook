@@ -760,6 +760,192 @@ tests:
         b:
           - type: never_executed
 
+  # -------------------------------------------------------------------------
+  # EDIT: Edit then run - becomes clean (CODE)
+  # -------------------------------------------------------------------------
+  - name: "edit_then_run_becomes_clean_code"
+    description: "Editing then running a cell makes it clean (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 2"
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 2}
+        code: "x = 2"
+    expect:
+      status:
+        a: clean
+        b: stale
+      reasons:
+        b:
+          - type: never_executed
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit upstream then run - downstream becomes stale (CODE)
+  # -------------------------------------------------------------------------
+  - name: "edit_upstream_run_marks_downstream_stale_code"
+    description: "Edit upstream, run it, downstream reader becomes stale (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 1}
+        code: "y = x"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 100"
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 100}
+        code: "x = 100"
+    expect:
+      status:
+        a: clean
+        b: stale
+      reasons:
+        b:
+          - type: forward_stale
+            loc: "x"
+            cell_id: "a"
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit multiple times then run (CODE)
+  # -------------------------------------------------------------------------
+  - name: "edit_multiple_times_then_run_code"
+    description: "Multiple edits then run results in clean cell (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 2"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 3"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 4"
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 4}
+        code: "x = 4"
+    expect:
+      status:
+        a: clean
+        b: stale
+      reasons:
+        b:
+          - type: never_executed
+
+  # -------------------------------------------------------------------------
+  # EDIT: Run-edit-run cycle with chain (CODE)
+  # -------------------------------------------------------------------------
+  - name: "run_edit_run_with_reader_code"
+    description: "Run chain, edit upstream, run upstream - direct reader becomes stale (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "x = 1"
+      b: "y = x + 1"
+      c: "z = y"
+    operations:
+      # Initial execution
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x + 1"
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 1, "y": 2}
+        post_namespace: {"x": 1, "y": 2, "z": 2}
+        code: "z = y"
+      # Edit and re-run a
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 10"
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 10}
+        code: "x = 10"
+    expect:
+      status:
+        a: clean
+        b: stale  # b reads x which was written by a
+        c: clean  # c reads y which hasn't changed (b not re-run yet)
+      reasons:
+        b:
+          - type: forward_stale
+            loc: "x"
+            cell_id: "a"
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit reader cell then run (CODE)
+  # -------------------------------------------------------------------------
+  - name: "edit_reader_then_run_code"
+    description: "Edit a reader cell then run it - becomes clean with new code (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 1}
+        code: "y = x"
+      - type: EDIT
+        cell: "b"
+        new_code: "y = x * 2"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x * 2"
+    expect:
+      status:
+        a: clean
+        b: clean
+
 # =============================================================================
 # DELETE OPERATIONS - EXPLICIT FORM
 # =============================================================================
