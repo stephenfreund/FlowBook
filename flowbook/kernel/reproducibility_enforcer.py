@@ -191,6 +191,95 @@ Optimization Flags
 Controlled via environment variables:
 - FLOWBOOK_OPT_CONFLICT_LOOP_SKIP: Skip O(n) loop when no overlap (default: on)
 - FLOWBOOK_OPT_ACCESSED_VARS_ONLY: Only diff accessed vars + aliases (default: on)
+
+================================================================================
+STALENESS COMPUTATION MODES
+================================================================================
+
+The enforcer supports two staleness computation modes, controlled via
+%staleness_mode magic command:
+
+SYNTACTIC MODE
+--------------
+Use checkpoint once to compute accurate R and W, then discard it.
+
+On cell i execution:
+    1. Capture pre_checkpoint
+    2. Execute cell, get tracking (reads_before_writes, writes)
+    3. Compute W_i = { v : pre_checkpoint[v] ≠ namespace[v] }  # actual changes
+    4. R_i = tracking.reads_before_writes
+    5. Discard pre_checkpoint
+
+Stored state per cell:
+    - R[i]: Set[str] — variables read before write
+    - W[i]: Set[str] — variables that actually changed
+
+Predicates (pure set operations):
+    - NoReadAndWrite:    R_i ∩ W_i = ∅
+    - WriteBeforeRead:   R_i ⊆ W_{1..i-1}
+    - NoReadBeforeWrite: R_i ∩ W_{i+1..n} = ∅
+    - NoWriteAfterRead:  W_i ∩ R_j = ∅ for all clean j < i
+
+Forward Staleness (cells after i):
+    for j > i where j was executed:
+        if W_i ∩ R_j ≠ ∅:
+            mark j stale
+
+Properties:
+    - Monotonic: Once stale, stays stale until re-executed
+    - Conservative: Over-approximates staleness
+    - Memory: O(cells × |variables|) — just string sets
+
+SEMANTIC MODE (default)
+-----------------------
+Use checkpoint to compute R and W, store pre-checkpoints for semantic comparison.
+
+On cell i execution:
+    1. Capture pre_checkpoint
+    2. Execute cell, get tracking
+    3. Compute W_i via diff
+    4. R_i = tracking.reads_before_writes
+    5. Store pre_checkpoint[i] permanently
+
+Stored state per cell:
+    - R[i], W[i]: Set[str] — for quick filtering
+    - pre_checkpoint[i]: Checkpoint — actual values cell saw
+
+Predicates (syntactic filter + semantic check):
+    - NoWriteAfterRead: W_i ∩ R_j ≠ ∅ AND diff(pre_checkpoint[j], namespace, R_j) ≠ ∅
+
+Forward Staleness (cells after i, semantic):
+    for j > i where j was executed:
+        if W_i ∩ R_j = ∅:
+            continue  # Quick filter
+        diff_result = diff(pre_checkpoint[j], namespace, keys=R_j)
+        if diff_result.differences:
+            mark j stale
+        else:
+            mark j clean  # Converged!
+
+Convergence detection:
+    After any cell execution, check all stale cells:
+        if diff(pre_checkpoint[j], namespace, R_j) is empty:
+            mark j clean  # Inputs match what j originally saw
+
+Properties:
+    - Non-monotonic: Staleness can be cleared when values converge
+    - Precise: Only marks stale when values actually differ
+    - Memory: O(cells × values) — stores checkpoint values
+
+COMPARISON
+----------
+| Aspect              | Syntactic           | Semantic              |
+|---------------------|---------------------|-----------------------|
+| Checkpoint storage  | Discard after W     | Keep permanently      |
+| Staleness check     | W_i ∩ R_j ≠ ∅       | diff(pre_ckpt, ns)    |
+| NoWriteAfterRead    | Set intersection    | + convergence check   |
+| Un-staleness        | Never (monotonic)   | When values converge  |
+| Memory cost         | Low (sets only)     | High (values)         |
+| False positives     | More (conservative) | Fewer (precise)       |
+
+See FORMAL_DEVELOPMENT.md §10 for the full formal specification.
 """
 
 import os
@@ -202,7 +291,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from flowbook.kernel_support.checkpoint import Checkpoint, CheckpointDiffResult
 from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint, MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
-from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
+from flowbook.kernel_support.structural_tracking import StructuralTrackingMode, StalenessMode
 from flowbook.kernel_support.types import MemoryCheckpointDiffResult, DiffNode, ValueComparison, CompoundDiff
 from flowbook.util.cell_index import index_to_alpha
 
@@ -576,11 +665,13 @@ class ReproducibilityEnforcer:
         self,
         checkpoints: MemoryCheckpoints,
         structural_mode: StructuralTrackingMode = StructuralTrackingMode.ENFORCE,
+        staleness_mode: StalenessMode = StalenessMode.SEMANTIC,
     ):
         self.checkpoints = checkpoints
         self.seq_counter: int = 0
         self._cell_order: List[str] = []
         self._structural_mode = structural_mode
+        self._staleness_mode = staleness_mode
         # NotebookState is the single source of truth for formal model state:
         # T (status), R (reads), W (writes), L (last_writer), and per-cell TrackingData
         self._notebook_state = NotebookState()
@@ -601,6 +692,34 @@ class ReproducibilityEnforcer:
         self._conflict_resolver = ConflictResolver(
             structural_mode=_tracking_mode_to_structural_mode(mode)
         )
+
+    @property
+    def staleness_mode(self) -> StalenessMode:
+        """Get the current staleness computation mode."""
+        return self._staleness_mode
+
+    def set_staleness_mode(self, mode: StalenessMode) -> None:
+        """Set the staleness computation mode.
+
+        When switching from SEMANTIC to SYNTACTIC, clears all stored
+        pre-checkpoints since syntactic mode doesn't need them.
+        """
+        old_mode = self._staleness_mode
+        self._staleness_mode = mode
+
+        # Clear checkpoints when switching from semantic to syntactic
+        # (syntactic mode doesn't need stored checkpoints)
+        if old_mode == StalenessMode.SEMANTIC and mode == StalenessMode.SYNTACTIC:
+            self._clear_all_pre_checkpoints()
+
+    def _clear_all_pre_checkpoints(self) -> None:
+        """Clear all stored pre-checkpoints (called when switching to syntactic mode)."""
+        keys_to_delete = [
+            key for key in self.checkpoints.list()
+            if key.startswith(PRE_CHECKPOINT_PREFIX)
+        ]
+        for key in keys_to_delete:
+            self.checkpoints.delete(key)
 
     @property
     def cell_order(self) -> List[str]:
@@ -1246,37 +1365,61 @@ class ReproducibilityEnforcer:
         # ForwardStale(R', W', i, j) ≝ j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
         # Ref: FORMAL_DEVELOPMENT.md §3.3, line 187
         #
-        # Compute ForwardStale when:
-        # - No errors, OR
-        # - Errors exist but continue_on_violation=True (errors are accepted)
-        # Skip ForwardStale only when errors will cause rollback
+        # Staleness is ALWAYS computed, even when there are errors:
+        # - Staleness tracking is orthogonal to error handling
+        # - The execution record (R, W sets) is always updated
+        # - Downstream cells need to know about changes
+        # - If rollback happens, it's at the kernel level, not here
         stale: List[str] = []
         staleness_warnings: List[str] = []
 
-        errors_will_rollback = has_any_errors and not continue_on_violation
-        if not errors_will_rollback:
-            _changed_file_paths = tracking.file_writes if tracking.file_writes else None
+        _changed_file_paths = tracking.file_writes if tracking.file_writes else None
 
-            with timer(key="check:ForwardStale", message=f"[Inst-Run] ForwardStale computation for {cell_id}"):
-                stale, staleness_warnings = self._compute_forward_staleness(
-                    namespace, W_i_vars, column_changed, cell_id, my_position,
-                    changed_file_paths=_changed_file_paths,
-                )
-            log(f"[Inst-Run] {cell_id}: ForwardStale marked {len(stale)} cells")
-            structural_warnings.extend(staleness_warnings)
+        with timer(key="check:ForwardStale", message=f"[Inst-Run] ForwardStale computation for {cell_id}"):
+            stale, staleness_warnings = self._compute_forward_staleness(
+                namespace, W_i_vars, column_changed, cell_id, my_position,
+                changed_file_paths=_changed_file_paths,
+            )
+        log(f"[Inst-Run] {cell_id}: ForwardStale marked {len(stale)} cells")
+        structural_warnings.extend(staleness_warnings)
 
-            # Update last_writer (L) for changed variables
-            if changed_vars:
-                for loc in changed_vars:
-                    self._notebook_state.last_writer[loc] = cell_id
-            if column_changed:
-                for var, cols in column_changed.items():
-                    if var not in self._notebook_state.column_last_writer:
-                        self._notebook_state.column_last_writer[var] = {}
-                    for col in cols:
-                        self._notebook_state.column_last_writer[var][col] = cell_id
-        else:
-            log(f"[Inst-Run] {cell_id}: Skipping ForwardStale (errors will cause rollback)")
+        # BackwardStale: mark cells j < i as stale if W_i ∩ R_j ≠ ∅
+        # This handles the case where a later cell writes to a variable
+        # that an earlier (clean) cell had read.
+        with timer(key="check:BackwardStale", message=f"[Inst-Run] BackwardStale computation for {cell_id}"):
+            backward_stale = self._compute_backward_staleness(
+                namespace, W_i_vars, column_changed, cell_id, my_position
+            )
+        if backward_stale:
+            log(f"[Inst-Run] {cell_id}: BackwardStale marked {len(backward_stale)} cells")
+            stale.extend(backward_stale)
+
+        # Update last_writer (L) for changed variables
+        if changed_vars:
+            for loc in changed_vars:
+                self._notebook_state.last_writer[loc] = cell_id
+        if column_changed:
+            for var, cols in column_changed.items():
+                if var not in self._notebook_state.column_last_writer:
+                    self._notebook_state.column_last_writer[var] = {}
+                for col in cols:
+                    self._notebook_state.column_last_writer[var][col] = cell_id
+
+        # In syntactic mode, clear the pre-checkpoint to save memory
+        # (we've already computed W_i from the diff, so checkpoint is no longer needed)
+        if self._staleness_mode == StalenessMode.SYNTACTIC:
+            self.checkpoints.delete(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
+            # Clear deepcopy caches since we're not reusing checkpoints
+            from flowbook.kernel_support.deepcopy import clear_container_cache
+            clear_container_cache()
+
+        # In semantic mode, check for convergence (stale cells that have converged)
+        if self._staleness_mode == StalenessMode.SEMANTIC:
+            cleared = self._check_convergence(namespace)
+            if cleared:
+                log(f"[Inst-Run] {cell_id}: Convergence cleared staleness for {cleared}")
+                # Update stale list after convergence
+                stale = self._notebook_state.get_stale_cells()
 
         # ================================================================
         # Return result
@@ -1699,8 +1842,37 @@ class ReproducibilityEnforcer:
         """
         Compute ForwardStale for all cells j > i.
 
+        Dispatches to syntactic or semantic implementation based on staleness_mode.
+
         Formal ref: ForwardStale(R, W, i, j) ≝ j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
         FORMAL_DEVELOPMENT.md §3.3, line 187
+        FORMAL_DEVELOPMENT.md §10 (Staleness Computation Modes)
+        """
+        if self._staleness_mode == StalenessMode.SYNTACTIC:
+            return self._compute_forward_staleness_syntactic(
+                changed_vars, column_changed, just_executed, my_position, changed_file_paths
+            )
+        else:
+            return self._compute_forward_staleness_semantic(
+                current_namespace, changed_vars, column_changed, just_executed, my_position, changed_file_paths
+            )
+
+    def _compute_forward_staleness_syntactic(
+        self,
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+        just_executed: str,
+        my_position: int,
+        changed_file_paths: Optional[Set[str]] = None,
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Syntactic ForwardStale: W_i ∩ R_j ≠ ∅ for j > i.
+
+        Uses pure set intersection on R/W sets. Does not use checkpoints for
+        staleness comparison. Staleness is monotonic (once stale, stays stale
+        until re-executed).
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.1
         """
         all_warnings: List[str] = []
 
@@ -1732,11 +1904,78 @@ class ReproducibilityEnforcer:
                         )
                     continue
 
-            # Skip if no variable-level overlap
+            # Syntactic check: pure set intersection W_i ∩ R_j
+            cell_reads = cell_tracking.reads_before_writes or set()
+            overlap = changed_vars & cell_reads
+
+            if overlap:
+                for var in overlap:
+                    expected_writer = self._notebook_state.last_writer_for(var, cell_id)
+                    if expected_writer != just_executed and expected_writer is not None:
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.SKIPPED_UPSTREAM, loc=var, cell_id=just_executed, expected_cell_id=expected_writer)
+                        )
+                    else:
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
+                        )
+
+        return self._notebook_state.get_stale_cells(), all_warnings
+
+    def _compute_forward_staleness_semantic(
+        self,
+        current_namespace: dict,
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+        just_executed: str,
+        my_position: int,
+        changed_file_paths: Optional[Set[str]] = None,
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Semantic ForwardStale: diff(pre_checkpoint[j], namespace, R_j) ≠ ∅ for j > i.
+
+        Uses checkpoint diff comparison for precise staleness detection.
+        Staleness is non-monotonic (can be cleared when values converge).
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.2
+        """
+        all_warnings: List[str] = []
+
+        cells_below = self._cell_order[my_position + 1:]
+        for cell_id in cells_below:
+            cell_tracking = self._notebook_state.get_tracking(cell_id)
+            if cell_tracking is None:
+                continue
+
+            if not self._notebook_state.is_clean(cell_id):
+                # Update SKIPPED_UPSTREAM → FORWARD_STALE if expected cell just ran
+                reasons = self._notebook_state.get_reasons(cell_id)
+                for reason in list(reasons):
+                    if (reason.type == ReasonType.SKIPPED_UPSTREAM and
+                            reason.expected_cell_id == just_executed):
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.FORWARD_STALE, loc=reason.loc, cell_id=just_executed)
+                        )
+                continue
+
+            # File staleness check
+            if changed_file_paths and cell_tracking.file_reads_before_writes:
+                overlap_files = changed_file_paths & cell_tracking.file_reads_before_writes
+                if overlap_files:
+                    for fpath in overlap_files:
+                        self._notebook_state.add_reason(
+                            cell_id, Reason(ReasonType.FORWARD_STALE, loc=fpath, cell_id=just_executed)
+                        )
+                    continue
+
+            # Skip if no variable-level overlap (quick filter)
             if not self._has_relevant_overlap_by_id(cell_id, changed_vars, column_changed):
                 continue
 
-            # Do expensive diff check
+            # Semantic check: expensive diff comparison
             pre_checkpoint = self.checkpoints.get(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
             if pre_checkpoint is None:
                 continue
@@ -1802,6 +2041,189 @@ class ReproducibilityEnforcer:
                         all_warnings.append(f"Cell {affected_alpha}: {warning}")
 
         return self._notebook_state.get_stale_cells(), all_warnings
+
+    def _check_convergence(self, current_namespace: dict) -> List[str]:
+        """Check all stale cells for convergence and clear staleness if inputs match.
+
+        Only called in SEMANTIC mode. A stale cell j converges when:
+            1. diff(pre_checkpoint[j], namespace, R_j) = ∅
+            2. The cell's only staleness reasons are FORWARD_STALE
+
+        Cells with other staleness reasons (like SKIPPED_UPSTREAM, CODE_CHANGED)
+        should NOT be cleared by convergence - those reasons indicate structural
+        issues beyond just value changes.
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.2 Convergence rule
+
+        Returns:
+            List of cell IDs that were cleared (no longer stale)
+        """
+        if self._staleness_mode != StalenessMode.SEMANTIC:
+            return []
+
+        cleared: List[str] = []
+        for cell_id in self._notebook_state.get_stale_cells():
+            # Only consider cells whose only reasons are FORWARD_STALE
+            # (convergence doesn't fix SKIPPED_UPSTREAM, CODE_CHANGED, etc.)
+            reasons = self._notebook_state.get_reasons(cell_id)
+            if not reasons:
+                continue
+            if not all(r.type == ReasonType.FORWARD_STALE for r in reasons):
+                continue
+
+            cell_tracking = self._notebook_state.get_tracking(cell_id)
+            if cell_tracking is None:
+                continue
+
+            pre_checkpoint = self.checkpoints.get(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
+            if pre_checkpoint is None:
+                continue
+
+            diff_result = MemoryCheckpoint.diff(
+                pre_checkpoint,
+                current_namespace,
+                keys_to_include=cell_tracking.reads_before_writes,
+                use_leq=True,
+                column_rbw=cell_tracking.column_reads_before_writes,
+                structural_reads=cell_tracking.structural_reads,
+                structural_mode=self._structural_mode,
+            )
+
+            if not diff_result.differences:
+                # Converged! Clear staleness
+                self._notebook_state.set_clean(cell_id)
+                cleared.append(cell_id)
+
+        return cleared
+
+    def _compute_backward_staleness(
+        self,
+        current_namespace: dict,
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+        just_executed: str,
+        my_position: int,
+    ) -> List[str]:
+        """
+        Compute BackwardStale for all cells j < i.
+
+        When cell i writes to a variable that earlier cell j read, j becomes stale.
+        Dispatches to syntactic or semantic implementation based on staleness_mode.
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.1, §10.2
+
+        Returns:
+            List of cell IDs that were marked stale
+        """
+        if self._staleness_mode == StalenessMode.SYNTACTIC:
+            return self._compute_backward_staleness_syntactic(
+                changed_vars, column_changed, just_executed, my_position
+            )
+        else:
+            return self._compute_backward_staleness_semantic(
+                current_namespace, changed_vars, column_changed, just_executed, my_position
+            )
+
+    def _compute_backward_staleness_syntactic(
+        self,
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+        just_executed: str,
+        my_position: int,
+    ) -> List[str]:
+        """
+        Syntactic BackwardStale: W_i ∩ R_j ≠ ∅ for j < i.
+
+        Uses pure set intersection on R/W sets. Marks cells before i as stale
+        if they read variables that i wrote to.
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.1
+        """
+        newly_stale: List[str] = []
+
+        for prior_cell_id in self._cell_order[:my_position]:
+            if not self._notebook_state.is_clean(prior_cell_id):
+                continue  # Already stale
+
+            if not self._notebook_state.has_record(prior_cell_id):
+                continue  # Never executed
+
+            prior_reads = self._notebook_state.reads.get(prior_cell_id, set())
+            overlap = changed_vars & prior_reads
+
+            if overlap:
+                for var in overlap:
+                    self._notebook_state.add_reason(
+                        prior_cell_id,
+                        Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
+                    )
+                newly_stale.append(prior_cell_id)
+
+        return newly_stale
+
+    def _compute_backward_staleness_semantic(
+        self,
+        current_namespace: dict,
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+        just_executed: str,
+        my_position: int,
+    ) -> List[str]:
+        """
+        Semantic BackwardStale: W_i ∩ R_j ≠ ∅ AND diff(pre_checkpoint[j], namespace, R_j) ≠ ∅.
+
+        Uses checkpoint diff comparison for precise staleness detection.
+        Only marks cells stale if their input values actually changed.
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.2
+        """
+        newly_stale: List[str] = []
+
+        for prior_cell_id in self._cell_order[:my_position]:
+            if not self._notebook_state.is_clean(prior_cell_id):
+                continue  # Already stale
+
+            if not self._notebook_state.has_record(prior_cell_id):
+                continue  # Never executed
+
+            prior_reads = self._notebook_state.reads.get(prior_cell_id, set())
+
+            # Quick filter: check variable-level overlap
+            if not (changed_vars & prior_reads):
+                continue
+
+            # Also check column-level overlap for precision
+            if not self._has_relevant_overlap_by_id(prior_cell_id, changed_vars, column_changed):
+                continue
+
+            # Semantic check: did prior cell's inputs actually change?
+            pre_checkpoint = self.checkpoints.get(f"{PRE_CHECKPOINT_PREFIX}{prior_cell_id}")
+            if pre_checkpoint is None:
+                continue
+
+            prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
+            if prior_tracking is None:
+                continue
+
+            diff_result = MemoryCheckpoint.diff(
+                pre_checkpoint,
+                current_namespace,
+                keys_to_include=prior_tracking.reads_before_writes,
+                use_leq=True,
+                column_rbw=prior_tracking.column_reads_before_writes,
+                structural_reads=prior_tracking.structural_reads,
+                structural_mode=self._structural_mode,
+            )
+
+            if diff_result.differences:
+                for var in diff_result.differences.keys():
+                    self._notebook_state.add_reason(
+                        prior_cell_id,
+                        Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
+                    )
+                newly_stale.append(prior_cell_id)
+
+        return newly_stale
 
     def _has_relevant_overlap_by_id(
         self,

@@ -13,9 +13,10 @@ Memory measurement uses HeapSizer for accurate heap traversal with proper handli
 - Object deduplication across shared references
 
 Usage via CLI:
-    flowbook compare-baseline notebook.ipynb                    # FlowBook only (default)
-    flowbook compare-baseline notebook.ipynb --run-baseline     # Include baseline comparison
-    flowbook compare-baseline notebook.ipynb --timeout 14400    # optional timeout (default: 4 hours)
+    flowbook compare-baseline notebook.ipynb                              # FlowBook only (default)
+    flowbook compare-baseline notebook.ipynb --run-baseline               # Include baseline comparison
+    flowbook compare-baseline notebook.ipynb --staleness-mode syntactic   # Use syntactic mode
+    flowbook compare-baseline notebook.ipynb --timeout 14400              # optional timeout (default: 4 hours)
 """
 
 import argparse
@@ -1157,6 +1158,7 @@ def run_flowbook_timing(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
     rerun_k: int = 0,
+    staleness_mode: str = "semantic",
 ) -> TimingResults:
     """
     Run notebook on FlowBook kernel and collect TIMING metrics only (Scalene OFF).
@@ -1187,6 +1189,11 @@ def run_flowbook_timing(
         kernel_client.execute("%continue_after_violation on", silent=True)
         _wait_for_idle(kernel_client)
         log("FlowBook Timing: continue_after_violation enabled")
+
+        # Set staleness computation mode
+        kernel_client.execute(f"%staleness_mode {staleness_mode}", silent=True)
+        _wait_for_idle(kernel_client)
+        log(f"FlowBook Timing: staleness_mode set to {staleness_mode}")
 
         # Run a warm-up cell to trigger lazy initialization (cudf import, tracking patches, etc.)
         # This ensures the overhead doesn't appear in the first real cell
@@ -1583,6 +1590,7 @@ def run_flowbook_memory(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
     rerun_k: int = 0,
+    staleness_mode: str = "semantic",
 ) -> MemoryResults:
     """
     Run notebook on FlowBook kernel and collect MEMORY metrics using HeapSizer.
@@ -1612,6 +1620,11 @@ def run_flowbook_memory(
         # Enable continue_after_violation
         kernel_client.execute("%continue_after_violation on", silent=True)
         _wait_for_idle(kernel_client)
+
+        # Set staleness computation mode
+        kernel_client.execute(f"%staleness_mode {staleness_mode}", silent=True)
+        _wait_for_idle(kernel_client)
+        log(f"FlowBook Memory: staleness_mode set to {staleness_mode}")
 
         # Run a warm-up cell to trigger lazy initialization (cudf import, tracking patches, etc.)
         log("FlowBook Memory: Running warm-up cell...")
@@ -1958,6 +1971,13 @@ class CompareBaselineCommand(NotebookCommand):
             default=1,
             help="Starting trial number (default: 1). Use negative numbers for counting down (e.g., --trials 3 --start -4 produces -4, -3, -2)",
         )
+        subparser.add_argument(
+            "--staleness-mode",
+            type=str,
+            choices=["syntactic", "semantic"],
+            default="semantic",
+            help="Staleness computation mode: 'syntactic' (set intersection, lower memory) or 'semantic' (checkpoint diff, precise). Default: semantic",
+        )
         return subparser
 
     async def process(
@@ -1992,6 +2012,7 @@ class CompareBaselineCommand(NotebookCommand):
         rerun_k = kwargs.get("rerun_k", 0)
         num_trials = kwargs.get("trials", 1)
         start_trial = kwargs.get("start", 1)
+        staleness_mode = kwargs.get("staleness_mode", "semantic")
         notebook_path = kwargs.get("notebook_path", "unknown.ipynb")
 
         cells = notebook_content.get("cells", [])
@@ -2049,7 +2070,7 @@ class CompareBaselineCommand(NotebookCommand):
                 log("=" * 60)
                 log("PHASE 1: FLOWBOOK TIMING (Scalene OFF)")
                 log("=" * 60)
-                flowbook_timing = run_flowbook_timing(notebook_content, cell_timeout, rerun_k)
+                flowbook_timing = run_flowbook_timing(notebook_content, cell_timeout, rerun_k, staleness_mode)
                 log("")
 
                 # ============================================================
@@ -2092,13 +2113,14 @@ class CompareBaselineCommand(NotebookCommand):
                     log("=" * 60)
                     log("PHASE 4: FLOWBOOK MEMORY (HeapSizer)")
                     log("=" * 60)
-                    flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout, rerun_k)
+                    flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout, rerun_k, staleness_mode)
                     log("")
 
                 # Build comparison result with new structure
                 metadata_dict: Dict[str, Any] = {
                     "num_cells": len(code_cells),
                     "timeout_seconds": cell_timeout,
+                    "staleness_mode": staleness_mode,
                 }
                 if rerun_k > 0:
                     metadata_dict["rerun_k"] = rerun_k
