@@ -15,7 +15,7 @@ Memory measurement uses HeapSizer for accurate heap traversal with proper handli
 Usage via CLI:
     flowbook compare-baseline notebook.ipynb                    # FlowBook only (default)
     flowbook compare-baseline notebook.ipynb --run-baseline     # Include baseline comparison
-    flowbook compare-baseline notebook.ipynb --timeout 3600     # optional timeout
+    flowbook compare-baseline notebook.ipynb --timeout 14400    # optional timeout (default: 4 hours)
 """
 
 import argparse
@@ -434,7 +434,9 @@ def execute_cell_flowbook(
     # Measure wall-clock time from client side (same as baseline)
     start = time.perf_counter()
 
-    msg_id = kernel_client.execute(source, cell_id=cell_id)
+    # Pass timeout to kernel via cell_metadata so kernel respects it
+    cell_meta = {"timeout": timeout} if timeout else None
+    msg_id = kernel_client.execute(source, cell_id=cell_id, cell_metadata=cell_meta)
 
     flowbook_metadata = None
     predicate_violations = []  # Collect all predicate violations (even when continue_after_violation=True)
@@ -1984,7 +1986,7 @@ class CompareBaselineCommand(NotebookCommand):
         Returns:
             ProcessingResult with comparison metadata
         """
-        cell_timeout = kwargs.get("timeout", 3600.0)
+        cell_timeout = kwargs.get("timeout", 14400.0)  # 4 hours default
         skip_memory = kwargs.get("skip_memory", False)
         run_baseline = kwargs.get("run_baseline", False)
         rerun_k = kwargs.get("rerun_k", 0)
