@@ -418,7 +418,9 @@ class FileStats:
     # Checking results (staleness summary)
     checking_clean_cells: int = 0
     checking_stale_cells: int = 0
+    checking_error_cells: int = 0
     checking_reason_counts: Dict[str, int] = field(default_factory=dict)
+    checking_error_counts: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -481,7 +483,9 @@ class AggregateStats:
     # Aggregate checking results (staleness summary across all files)
     total_checking_clean_cells: int = 0
     total_checking_stale_cells: int = 0
+    total_checking_error_cells: int = 0
     total_checking_reason_counts: Dict[str, int] = field(default_factory=dict)
+    total_checking_error_counts: Dict[str, int] = field(default_factory=dict)
 
 
 def load_comparison_json(file_path: str) -> Dict[str, Any]:
@@ -546,7 +550,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     checking_summary = flowbook_totals.get("checking_summary", {})
     checking_clean_cells = checking_summary.get("clean_cells", 0)
     checking_stale_cells = checking_summary.get("stale_cells", 0)
+    checking_error_cells = checking_summary.get("error_cells", 0)
     checking_reason_counts = checking_summary.get("reason_counts", {})
+    checking_error_counts = checking_summary.get("error_counts", {})
 
     if baseline_runtime > 0:
         slowdown = flowbook_total / baseline_runtime
@@ -731,7 +737,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         per_cell_memory_overhead_mb=per_cell_memory_overhead_mb,
         checking_clean_cells=checking_clean_cells,
         checking_stale_cells=checking_stale_cells,
+        checking_error_cells=checking_error_cells,
         checking_reason_counts=checking_reason_counts,
+        checking_error_counts=checking_error_counts,
     )
 
 
@@ -778,10 +786,14 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
     # Aggregate checking results (staleness summary)
     total_clean_cells = sum(s.checking_clean_cells for s in stats_list)
     total_stale_cells = sum(s.checking_stale_cells for s in stats_list)
+    total_error_cells = sum(s.checking_error_cells for s in stats_list)
     total_reason_counts: Dict[str, int] = {}
+    total_error_counts: Dict[str, int] = {}
     for s in stats_list:
         for rtype, count in s.checking_reason_counts.items():
             total_reason_counts[rtype] = total_reason_counts.get(rtype, 0) + count
+        for etype, count in s.checking_error_counts.items():
+            total_error_counts[etype] = total_error_counts.get(etype, 0) + count
 
     return AggregateStats(
         num_files=len(stats_list),
@@ -839,7 +851,9 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
         # Aggregate checking results
         total_checking_clean_cells=total_clean_cells,
         total_checking_stale_cells=total_stale_cells,
+        total_checking_error_cells=total_error_cells,
         total_checking_reason_counts=total_reason_counts,
+        total_checking_error_counts=total_error_counts,
     )
 
 
@@ -973,16 +987,57 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
 
     # Checking results summary (staleness)
     # Note: Staleness consistency across trials is checked during averaging in average_trial_data
-    total_checked = aggregate.total_checking_clean_cells + aggregate.total_checking_stale_cells
+    total_checked = (aggregate.total_checking_clean_cells +
+                     aggregate.total_checking_stale_cells +
+                     aggregate.total_checking_error_cells)
     if total_checked > 0:
         lines.append("")
         lines.append("CHECKING RESULTS")
         lines.append(f"  Clean cells:        {aggregate.total_checking_clean_cells}")
         lines.append(f"  Stale cells:        {aggregate.total_checking_stale_cells}")
+        lines.append(f"  Error cells:        {aggregate.total_checking_error_cells}")
         if aggregate.total_checking_reason_counts:
             lines.append("  Staleness reasons:")
             for rtype, count in sorted(aggregate.total_checking_reason_counts.items()):
                 lines.append(f"    {rtype}: {count}")
+        if aggregate.total_checking_error_counts:
+            lines.append("  Error types:")
+            for etype, count in sorted(aggregate.total_checking_error_counts.items()):
+                lines.append(f"    {etype}: {count}")
+
+    # Per-notebook error table (if any notebook has errors)
+    any_errors = any(s.checking_error_cells > 0 for s in stats_list)
+    if any_errors:
+        # Collect all error types across all notebooks
+        all_error_types = set()
+        for s in stats_list:
+            all_error_types.update(s.checking_error_counts.keys())
+        error_types = sorted(all_error_types)
+
+        lines.append("")
+        lines.append("PER-NOTEBOOK ERROR SUMMARY")
+        lines.append("-" * 110)
+
+        # Build header with dynamic error type columns
+        header = f"{'Notebook':<30} {'Cells':>5} {'Errors':>6}"
+        for etype in error_types:
+            # Shorten error type names for column headers
+            short_name = etype.replace("no_", "").replace("_", " ")[:12]
+            header += f" {short_name:>12}"
+        lines.append(header)
+        lines.append("-" * 110)
+
+        # Per-file rows (only files with errors)
+        for s in stats_list:
+            if s.checking_error_cells > 0:
+                name = s.notebook_name[:28] if len(s.notebook_name) > 28 else s.notebook_name
+                row = f"{name:<30} {s.num_cells:>5} {s.checking_error_cells:>6}"
+                for etype in error_types:
+                    count = s.checking_error_counts.get(etype, 0)
+                    row += f" {count:>12}"
+                lines.append(row)
+
+        lines.append("-" * 110)
 
     lines.append("=" * 110)
 
