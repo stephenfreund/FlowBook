@@ -415,6 +415,87 @@ class ReasonType(str, Enum):
     NO_WRITE_AFTER_READ = "no_write_after_read"  # was BACKWARD_MUTATION - cell wrote to location read by earlier cell
 
 
+# =============================================================================
+# Error Types (Formal Predicate Violations)
+# =============================================================================
+# These error types represent violations of the four formal validity predicates
+# from FORMAL_DEVELOPMENT.md §3.2. When these predicates fail, execution is
+# rejected with rollback (unless continue_after_violation is enabled).
+# =============================================================================
+
+
+class ErrorType(str, Enum):
+    """
+    Type of reproducibility error (formal predicate violation).
+
+    Formal ref: main.tex §3.2, FORMAL_DEVELOPMENT.md §3.2 (lines 176-179)
+
+    These correspond to the four validity predicates from [Inst-Run]:
+    - NO_READ_AND_WRITE: Rᵢ ∩ Wᵢ = ∅ (cell reads and writes same location)
+    - WRITE_BEFORE_READ: Rᵢ ⊆ W_{1..i-1} (reads user var not written by earlier cell)
+    - NO_READ_BEFORE_WRITE: Rᵢ ∩ W_{i+1..n} = ∅ (forward contamination)
+    - NO_WRITE_AFTER_READ: Wᵢ ∩ R_{1..i-1} = ∅ (backward mutation)
+    """
+
+    NO_READ_AND_WRITE = "no_read_and_write"
+    WRITE_BEFORE_READ = "write_before_read"
+    NO_READ_BEFORE_WRITE = "no_read_before_write"  # forward contamination
+    NO_WRITE_AFTER_READ = "no_write_after_read"    # backward mutation
+
+
+@dataclass
+class ReproducibilityError:
+    """
+    A reproducibility error (formal predicate violation).
+
+    Formal ref: FORMAL_DEVELOPMENT.md §3.2
+
+    Errors cause execution rejection with rollback (unless continue_after_violation
+    is enabled). This is distinct from staleness reasons which are informational.
+
+    Attributes:
+        error_type: The violated formal predicate
+        cell_id: ID of the cell that caused the error
+        locations: Variables/columns involved in the violation
+        message: Human-readable error message
+        causer_cell: For backward/forward violations, the conflicting cell ID
+        detail: Additional diagnostic information
+    """
+
+    error_type: ErrorType
+    cell_id: str
+    locations: List[str]
+    message: str
+    causer_cell: Optional[str] = None
+    detail: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dict for JSON serialization."""
+        result = {
+            "error_type": self.error_type.value,
+            "cell_id": self.cell_id,
+            "locations": self.locations,
+            "message": self.message,
+        }
+        if self.causer_cell is not None:
+            result["causer_cell"] = self.causer_cell
+        if self.detail is not None:
+            result["detail"] = self.detail
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ReproducibilityError":
+        """Create from dict (for deserialization)."""
+        return cls(
+            error_type=ErrorType(data["error_type"]),
+            cell_id=data["cell_id"],
+            locations=data["locations"],
+            message=data["message"],
+            causer_cell=data.get("causer_cell"),
+            detail=data.get("detail"),
+        )
+
+
 @dataclass(frozen=True)
 class Reason:
     """
@@ -592,6 +673,12 @@ class ReproducibilityResult:
     writer_violation: Optional[ReproducibilityViolation] = None
     # Staleness reasons per cell: { cell_id: [reason_dict, ...] }
     staleness_reasons: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    # Reproducibility errors (formal predicate violations that cause rejection)
+    errors: List["ReproducibilityError"] = field(default_factory=list)
+
+    def has_errors(self) -> bool:
+        """Return True if any formal predicate violations were detected."""
+        return len(self.errors) > 0
 
 
 @dataclass
@@ -625,6 +712,8 @@ class ReproducibilityMetadata:
     writer_violation: Optional[Dict[str, Any]] = None
     # Staleness reasons per cell: { cell_id: [reason_dict, ...] }
     staleness_reasons: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    # Reproducibility errors (formal predicate violations)
+    errors: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_display_metadata(self) -> dict:
         """Format for display in output metadata."""
@@ -651,6 +740,7 @@ class ReproducibilityMetadata:
                 "check_duration_ms": self.check_duration_ms,
                 "writer_violation": self.writer_violation,
                 "staleness_reasons": self.staleness_reasons,
+                "errors": self.errors,
             }
         }
 
