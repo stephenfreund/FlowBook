@@ -79,11 +79,12 @@ def generate_comparison_filename(notebook_path: str, num_components: int = 3) ->
 @dataclass
 class CheckingResult:
     """Result of reproducibility checking for a cell."""
-    cell_status: str  # "clean" or "stale"
+    cell_status: str  # "clean", "stale", or "error"
     reasons: List[Dict[str, Any]] = field(default_factory=list)  # List of reason dicts if stale
+    errors: List[Dict[str, Any]] = field(default_factory=list)  # List of error dicts if error
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"cell_status": self.cell_status, "reasons": self.reasons}
+        return {"cell_status": self.cell_status, "reasons": self.reasons, "errors": self.errors}
 
 
 @dataclass
@@ -436,6 +437,7 @@ def execute_cell_flowbook(
     msg_id = kernel_client.execute(source, cell_id=cell_id)
 
     flowbook_metadata = None
+    predicate_violations = []  # Collect all predicate violations (even when continue_after_violation=True)
     error_msg = None
     start_time = time.time()
 
@@ -459,11 +461,14 @@ def execute_cell_flowbook(
 
         msg_type = msg["header"]["msg_type"]
 
-        # Look for display_data with flowbook metadata
+        # Look for display_data with flowbook metadata or predicate violations
         if msg_type == "display_data":
             output_meta = msg.get("content", {}).get("metadata", {})
             if "flowbook" in output_meta:
                 flowbook_metadata = output_meta["flowbook"]
+            # Capture predicate violations (sent even when continue_after_violation=True)
+            if "predicate_violation" in output_meta:
+                predicate_violations.append(output_meta["predicate_violation"])
 
         if msg_type == "error":
             content = msg["content"]
@@ -485,17 +490,48 @@ def execute_cell_flowbook(
     # Calculate client-side elapsed time (same methodology as baseline)
     elapsed = time.perf_counter() - start
 
+    # Build violation message from predicate_violations or legacy violation field
+    violation_msg = None
+    if predicate_violations:
+        # Format predicate violations as messages
+        msgs = []
+        for pv in predicate_violations:
+            predicate = pv.get("predicate", "unknown")
+            locations = pv.get("locations", [])
+            accepted = pv.get("accepted", False)
+            status = "accepted" if accepted else "rejected"
+            locs_str = ", ".join(locations) if locations else "unknown"
+            msgs.append(f"{predicate}: {locs_str} ({status})")
+        violation_msg = "; ".join(msgs)
+
     if flowbook_metadata:
-        # Check for violations in metadata
-        violation = flowbook_metadata.get("violation")
-        violation_msg = None
-        if violation:
-            violation_msg = violation.get("message", "Reproducibility violation")
+        # Also check for legacy violations in flowbook metadata
+        if not violation_msg:
+            violation = flowbook_metadata.get("violation")
+            if violation:
+                violation_msg = violation.get("message", "Reproducibility violation")
 
         # Extract checking result for this cell
         staleness_reasons = flowbook_metadata.get("staleness_reasons", {})
         cell_reasons = staleness_reasons.get(cell_id, [])
-        cell_status = "stale" if cell_reasons else "clean"
+
+        # Convert predicate_violations to error dicts for checking_result
+        cell_errors = []
+        for pv in predicate_violations:
+            cell_errors.append({
+                "error_type": pv.get("predicate", "unknown"),
+                "locations": pv.get("locations", []),
+                "causer_cell": pv.get("causer_cell"),
+                "accepted": pv.get("accepted", False),
+            })
+
+        # Determine cell status: error > stale > clean
+        if cell_errors:
+            cell_status = "error"
+        elif cell_reasons:
+            cell_status = "stale"
+        else:
+            cell_status = "clean"
 
         return {
             # Use kernel-reported timing for accuracy
@@ -505,10 +541,12 @@ def execute_cell_flowbook(
             "check_duration_ms": flowbook_metadata.get("check_duration_ms", 0.0),
             "error": error_msg,
             "violation": violation_msg,
+            "predicate_violations": predicate_violations,  # Include full violation details
             "stale_cells": flowbook_metadata.get("stale_cells", []),
             "checking_result": {
                 "cell_status": cell_status,
                 "reasons": cell_reasons,
+                "errors": cell_errors,
             },
         }
     else:
@@ -518,7 +556,8 @@ def execute_cell_flowbook(
             "state_duration_ms": None,
             "check_duration_ms": None,
             "error": error_msg or "No flowbook metadata received",
-            "violation": None,
+            "violation": violation_msg,  # May have predicate violations even without flowbook metadata
+            "predicate_violations": predicate_violations,
             "stale_cells": [],
             "checking_result": None,
         }
@@ -1219,6 +1258,7 @@ def run_flowbook_timing(
                     checking_result = CheckingResult(
                         cell_status=checking_result_data.get("cell_status", "unknown"),
                         reasons=checking_result_data.get("reasons", []),
+                        errors=checking_result_data.get("errors", []),
                     )
 
                 results.cells.append(TimingCellMetrics(
@@ -1302,6 +1342,7 @@ def run_flowbook_timing(
                             checking_result = CheckingResult(
                                 cell_status=checking_result_data.get("cell_status", "unknown"),
                                 reasons=checking_result_data.get("reasons", []),
+                                errors=checking_result_data.get("errors", []),
                             )
 
                         results.rerun_cells.append(TimingCellMetrics(
@@ -1321,15 +1362,23 @@ def run_flowbook_timing(
         # Compute checking summary (exclude never_executed cells - they are empty code cells)
         clean_count = 0
         stale_count = 0
+        error_count = 0
         reason_counts: Dict[str, int] = {}
+        error_counts: Dict[str, int] = {}
         for cell in results.cells:
             if cell.checking_result:
                 # Skip cells that only have never_executed reason (empty code cells)
                 reasons = cell.checking_result.reasons
-                if reasons and all(r.get("type") == "never_executed" for r in reasons):
+                errors = cell.checking_result.errors
+                if reasons and all(r.get("type") == "never_executed" for r in reasons) and not errors:
                     continue
                 if cell.checking_result.cell_status == "clean":
                     clean_count += 1
+                elif cell.checking_result.cell_status == "error":
+                    error_count += 1
+                    for error in errors:
+                        etype = error.get("error_type", "unknown")
+                        error_counts[etype] = error_counts.get(etype, 0) + 1
                 else:
                     stale_count += 1
                     for reason in reasons:
@@ -1349,7 +1398,9 @@ def run_flowbook_timing(
             "checking_summary": {
                 "clean_cells": clean_count,
                 "stale_cells": stale_count,
+                "error_cells": error_count,
                 "reason_counts": reason_counts,
+                "error_counts": error_counts,
             },
         }
 
@@ -2181,16 +2232,24 @@ class CompareBaselineCommand(NotebookCommand):
                 if flowbook_timing and flowbook_timing.cells:
                     clean_count = 0
                     stale_count = 0
+                    error_count = 0
                     reason_counts: Dict[str, int] = {}
+                    error_counts: Dict[str, int] = {}
 
                     for cell in flowbook_timing.cells:
                         if cell.checking_result:
                             # Skip cells that only have never_executed reason (empty code cells)
                             reasons = cell.checking_result.reasons
-                            if reasons and all(r.get("type") == "never_executed" for r in reasons):
+                            errors = cell.checking_result.errors
+                            if reasons and all(r.get("type") == "never_executed" for r in reasons) and not errors:
                                 continue
                             if cell.checking_result.cell_status == "clean":
                                 clean_count += 1
+                            elif cell.checking_result.cell_status == "error":
+                                error_count += 1
+                                for error in errors:
+                                    etype = error.get("error_type", "unknown")
+                                    error_counts[etype] = error_counts.get(etype, 0) + 1
                             else:
                                 stale_count += 1
                                 for reason in reasons:
@@ -2202,7 +2261,9 @@ class CompareBaselineCommand(NotebookCommand):
                     current_staleness = {
                         "clean_count": clean_count,
                         "stale_count": stale_count,
+                        "error_count": error_count,
                         "reason_counts": dict(reason_counts),
+                        "error_counts": dict(error_counts),
                     }
 
                     # Check consistency across trials
@@ -2211,18 +2272,23 @@ class CompareBaselineCommand(NotebookCommand):
                     elif not staleness_mismatch_warned and current_staleness != first_staleness_data:
                         staleness_mismatch_warned = True
                         log("WARNING: Staleness results differ from first trial!")
-                        log(f"  First trial: clean={first_staleness_data['clean_count']}, stale={first_staleness_data['stale_count']}, reasons={first_staleness_data['reason_counts']}")
-                        log(f"  This trial:  clean={clean_count}, stale={stale_count}, reasons={dict(reason_counts)}")
+                        log(f"  First trial: clean={first_staleness_data['clean_count']}, stale={first_staleness_data['stale_count']}, errors={first_staleness_data.get('error_count', 0)}, reasons={first_staleness_data['reason_counts']}")
+                        log(f"  This trial:  clean={clean_count}, stale={stale_count}, errors={error_count}, reasons={dict(reason_counts)}")
 
                     last_staleness_data = current_staleness
 
                     log("CHECKING RESULTS:")
                     log(f"  Clean cells:          {clean_count}")
                     log(f"  Stale cells:          {stale_count}")
+                    log(f"  Error cells:          {error_count}")
                     if reason_counts:
                         log("  Staleness reasons:")
                         for rtype, count in sorted(reason_counts.items()):
                             log(f"    {rtype}: {count}")
+                    if error_counts:
+                        log("  Error types:")
+                        for etype, count in sorted(error_counts.items()):
+                            log(f"    {etype}: {count}")
                     log("")
 
                 log(f"Results saved to: {json_output_path}")
@@ -2244,10 +2310,15 @@ class CompareBaselineCommand(NotebookCommand):
                     log("CHECKING RESULTS (consistent across trials):" if not staleness_mismatch_warned else "CHECKING RESULTS (WARNING: varied across trials):")
                     log(f"  Clean cells:          {last_staleness_data['clean_count']}")
                     log(f"  Stale cells:          {last_staleness_data['stale_count']}")
+                    log(f"  Error cells:          {last_staleness_data.get('error_count', 0)}")
                     if last_staleness_data['reason_counts']:
                         log("  Staleness reasons:")
                         for rtype, count in sorted(last_staleness_data['reason_counts'].items()):
                             log(f"    {rtype}: {count}")
+                    if last_staleness_data.get('error_counts'):
+                        log("  Error types:")
+                        for etype, count in sorted(last_staleness_data['error_counts'].items()):
+                            log(f"    {etype}: {count}")
                     log("")
 
             total_time = get_elapsed()
