@@ -2512,7 +2512,7 @@ def plot_overhead_histograms(
             data_plot = total_overhead_filtered
             xlabel = "Total Overhead per Cell (ms)"
 
-        ax.hist(data_plot, bins=30, alpha=0.7, color='steelblue', edgecolor='black')
+        ax.hist(data_plot, bins=30, alpha=0.3, color='steelblue', edgecolor='black')
         ax.axvline(np.median(data_plot), color='red', linestyle='--', linewidth=2, label=f'Median: {np.median(data_plot):.2f}')
         ax.axvline(np.mean(data_plot), color='orange', linestyle='-', linewidth=2, label=f'Mean: {np.mean(data_plot):.2f}')
         ax.set_xlabel(xlabel, fontsize=label_size)
@@ -2536,7 +2536,7 @@ def plot_overhead_histograms(
     # Histogram 2: Memory Overhead per Cell
     ax = axes[1]
     if len(memory_overhead_filtered) > 0:
-        ax.hist(memory_overhead_filtered, bins=30, alpha=0.7, color='seagreen', edgecolor='black')
+        ax.hist(memory_overhead_filtered, bins=30, alpha=0.3, color='seagreen', edgecolor='black')
         ax.axvline(np.median(memory_overhead_filtered), color='red', linestyle='--', linewidth=2,
                    label=f'Median: {np.median(memory_overhead_filtered):.2f}MB')
         ax.axvline(np.mean(memory_overhead_filtered), color='orange', linestyle='-', linewidth=2,
@@ -2569,6 +2569,262 @@ def plot_overhead_histograms(
         return None
     else:
         return fig
+
+
+def plot_overhead_cdfs(
+    aggregate: "AggregateStats",
+    output_path: Optional[str] = None,
+    large_fonts: bool = True
+) -> Optional[List[Any]]:
+    """
+    Create CDF plots for per-cell overhead distributions.
+
+    Creates two pages:
+    1. Log scale CDFs showing full distribution with percentile markers
+    2. Linear scale CDFs zoomed to P99
+
+    Args:
+        aggregate: AggregateStats with per-cell data
+        output_path: If provided, saves to file; otherwise returns list of figures
+        large_fonts: Use larger fonts for paper-ready plots
+
+    Returns:
+        List of figures if output_path is None, else None
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    sns.set_theme(style="whitegrid")
+
+    # Font sizes
+    label_size = 18 if large_fonts else 12
+    title_size = 20 if large_fonts else 14
+    tick_size = 14 if large_fonts else 10
+    annotation_size = 12 if large_fonts else 9
+
+    total_overhead = np.array(aggregate.all_total_overhead_per_cell)
+    memory_overhead = np.array(aggregate.all_memory_overhead_per_cell)
+
+    # Prepare data - keep in ms, convert memory from MB to bytes for log scale
+    if len(total_overhead) > 0:
+        total_data = np.sort(total_overhead)  # Keep in ms
+        total_xlabel = "Total Overhead per Cell (ms)"
+        total_cdf = np.arange(1, len(total_data) + 1) / len(total_data)
+        total_stats = {
+            'P50': np.percentile(total_data, 50),
+            'P90': np.percentile(total_data, 90),
+            'P95': np.percentile(total_data, 95),
+            'P99': np.percentile(total_data, 99),
+        }
+    else:
+        total_data = None
+
+    if len(memory_overhead) > 0:
+        # Convert MB to bytes for log scale (avoids negatives)
+        memory_data_bytes = np.sort(memory_overhead * 1024 * 1024)  # MB to bytes
+        memory_data_mb = np.sort(memory_overhead)  # Keep MB for linear plot
+        memory_cdf = np.arange(1, len(memory_data_bytes) + 1) / len(memory_data_bytes)
+        memory_stats_bytes = {
+            'P50': np.percentile(memory_data_bytes, 50),
+            'P90': np.percentile(memory_data_bytes, 90),
+            'P95': np.percentile(memory_data_bytes, 95),
+            'P99': np.percentile(memory_data_bytes, 99),
+        }
+        memory_stats_mb = {
+            'P50': np.percentile(memory_data_mb, 50),
+            'P90': np.percentile(memory_data_mb, 90),
+            'P95': np.percentile(memory_data_mb, 95),
+            'P99': np.percentile(memory_data_mb, 99),
+        }
+    else:
+        memory_data_bytes = None
+        memory_data_mb = None
+
+    def format_bytes(b):
+        """Format bytes to human readable."""
+        if b >= 1024 * 1024 * 1024:
+            return f'{b / (1024**3):.1f}GB'
+        elif b >= 1024 * 1024:
+            return f'{b / (1024**2):.1f}MB'
+        elif b >= 1024:
+            return f'{b / 1024:.1f}KB'
+        else:
+            return f'{b:.0f}B'
+
+    def add_percentile_markers(ax, data, cdf, stats, unit_fmt, color, legend_fontsize):
+        """Add percentile markers with vertical lines and labels, plus legend."""
+        percentiles = ['P50', 'P90', 'P95', 'P99']
+        y_positions = [0.5, 0.9, 0.95, 0.99]
+        # Stagger labels: alternate above/below to avoid crowding
+        label_offsets = [(5, 5), (5, -15), (5, 5), (5, -15)]  # (x, y) offsets
+        label_vas = ['bottom', 'top', 'bottom', 'top']  # vertical alignments
+
+        for pname, y_val, offset, va in zip(percentiles, y_positions, label_offsets, label_vas):
+            if pname not in stats:
+                continue
+            x_val = stats[pname]
+            # Vertical line from x-axis to the point (lighter)
+            ax.vlines(x_val, 0, y_val, color=color, linestyle='--', linewidth=1, alpha=0.4)
+            # Small point on the curve
+            ax.scatter([x_val], [y_val], color=color, s=30, marker='o', zorder=5, edgecolors='black', linewidths=0.5)
+            # Staggered label by the dot
+            ax.annotate(pname, (x_val, y_val), textcoords='offset points',
+                       xytext=offset, fontsize=annotation_size, ha='left', va=va, fontweight='bold')
+
+        # Add legend box with values in lower right (right-aligned values)
+        # Find max value length for alignment
+        formatted_values = {pname: unit_fmt(stats[pname]) for pname in percentiles if pname in stats}
+        max_val_len = max(len(v) for v in formatted_values.values()) if formatted_values else 0
+        legend_lines = [f'{pname}: {formatted_values[pname]:>{max_val_len}}' for pname in percentiles if pname in formatted_values]
+        legend_text = '\n'.join(legend_lines)
+        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
+        ax.text(0.98, 0.02, legend_text, transform=ax.transAxes, fontsize=legend_fontsize,
+                verticalalignment='bottom', horizontalalignment='right', bbox=props, family='monospace')
+
+    def add_percentile_gridlines(ax):
+        """Add horizontal gridlines at percentile levels."""
+        for y in [0.5, 0.9, 0.95, 0.99]:
+            ax.axhline(y, color='gray', linestyle=':', linewidth=0.8, alpha=0.5)
+
+    figures = []
+
+    # --- Figure 1: Log scale with full distribution ---
+    fig1, axes1 = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Total overhead - log scale
+    ax = axes1[0]
+    if total_data is not None:
+        pos_mask = total_data > 0
+        if np.any(pos_mask):
+            ax.fill_between(total_data[pos_mask], 0, total_cdf[pos_mask], alpha=0.3, color='steelblue', edgecolor='none')
+            ax.plot(total_data[pos_mask], total_cdf[pos_mask], color='steelblue', linewidth=2)
+
+            add_percentile_markers(ax, total_data[pos_mask], total_cdf[pos_mask],
+                                  total_stats, lambda x: f'{x:.1f}ms', 'black', tick_size)
+            add_percentile_gridlines(ax)
+
+            ax.set_xscale('log')
+            ax.set_xlabel(total_xlabel, fontsize=label_size)
+            ax.set_ylabel("Cumulative Probability", fontsize=label_size)
+            ax.set_title("Total Overhead (Log Scale)", fontsize=title_size)
+            ax.set_ylim(0, 1.05)
+
+            textstr = f'N={len(total_data)}'
+            props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
+            ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
+                    verticalalignment='top', horizontalalignment='left', bbox=props)
+    else:
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Total Overhead (Log Scale)", fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
+
+    # Memory overhead - log scale (in bytes)
+    ax = axes1[1]
+    if memory_data_bytes is not None:
+        pos_mask = memory_data_bytes > 0
+        if np.any(pos_mask):
+            ax.fill_between(memory_data_bytes[pos_mask], 0, memory_cdf[pos_mask], alpha=0.3, color='seagreen', edgecolor='none')
+            ax.plot(memory_data_bytes[pos_mask], memory_cdf[pos_mask], color='seagreen', linewidth=2)
+
+            add_percentile_markers(ax, memory_data_bytes[pos_mask], memory_cdf[pos_mask],
+                                  memory_stats_bytes, format_bytes, 'black', tick_size)
+            add_percentile_gridlines(ax)
+
+            ax.set_xscale('log')
+            ax.set_xlabel("Memory Overhead per Cell (bytes)", fontsize=label_size)
+            ax.set_ylabel("Cumulative Probability", fontsize=label_size)
+            ax.set_title("Memory Overhead (Log Scale)", fontsize=title_size)
+            ax.set_ylim(0, 1.05)
+
+            textstr = f'N={len(memory_data_bytes)}'
+            props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
+            ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
+                    verticalalignment='top', horizontalalignment='left', bbox=props)
+    else:
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Memory Overhead (Log Scale)", fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
+
+    fig1.suptitle("Per-Cell Overhead CDFs (Full Distribution)", fontsize=title_size + 2, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    figures.append(fig1)
+
+    # --- Figure 2: Linear scale zoomed to P99 ---
+    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Total overhead - linear, zoomed to P99
+    ax = axes2[0]
+    if total_data is not None:
+        p99_val = total_stats['P99']
+        mask = total_data <= p99_val * 1.05
+        ax.fill_between(total_data[mask], 0, total_cdf[mask], alpha=0.3, color='steelblue', edgecolor='none')
+        ax.plot(total_data[mask], total_cdf[mask], color='steelblue', linewidth=2)
+
+        # Filter stats to those within range
+        stats_in_range = {k: v for k, v in total_stats.items() if v <= p99_val * 1.05}
+        add_percentile_markers(ax, total_data[mask], total_cdf[mask],
+                              stats_in_range, lambda x: f'{x:.1f}ms', 'black', tick_size)
+        add_percentile_gridlines(ax)
+
+        ax.set_xlabel(total_xlabel, fontsize=label_size)
+        ax.set_ylabel("Cumulative Probability", fontsize=label_size)
+        ax.set_title("Total Overhead (Zoomed to P99)", fontsize=title_size)
+        ax.set_ylim(0, 1.05)
+        ax.set_xlim(left=0)
+
+        n_excluded = np.sum(~mask)
+        textstr = f'N={np.sum(mask)} (excluded {n_excluded} > P99)'
+        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
+        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
+                verticalalignment='top', horizontalalignment='left', bbox=props)
+    else:
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Total Overhead (Zoomed to P99)", fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
+
+    # Memory overhead - linear, zoomed to P99 (in MB for readability)
+    ax = axes2[1]
+    if memory_data_mb is not None:
+        p99_val = memory_stats_mb['P99']
+        mask = memory_data_mb <= p99_val * 1.05
+        ax.fill_between(memory_data_mb[mask], 0, memory_cdf[mask], alpha=0.3, color='seagreen', edgecolor='none')
+        ax.plot(memory_data_mb[mask], memory_cdf[mask], color='seagreen', linewidth=2)
+
+        stats_in_range = {k: v for k, v in memory_stats_mb.items() if v <= p99_val * 1.05}
+        add_percentile_markers(ax, memory_data_mb[mask], memory_cdf[mask],
+                              stats_in_range, lambda x: f'{x:.1f}MB', 'black', tick_size)
+        add_percentile_gridlines(ax)
+
+        ax.set_xlabel("Memory Overhead per Cell (MB)", fontsize=label_size)
+        ax.set_ylabel("Cumulative Probability", fontsize=label_size)
+        ax.set_title("Memory Overhead (Zoomed to P99)", fontsize=title_size)
+        ax.set_ylim(0, 1.05)
+        ax.set_xlim(left=0)
+
+        n_excluded = np.sum(~mask)
+        textstr = f'N={np.sum(mask)} (excluded {n_excluded} > P99)'
+        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
+        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
+                verticalalignment='top', horizontalalignment='left', bbox=props)
+    else:
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title("Memory Overhead (Zoomed to P99)", fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
+
+    fig2.suptitle("Per-Cell Overhead CDFs (Zoomed to P99)", fontsize=title_size + 2, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    figures.append(fig2)
+
+    if output_path is not None:
+        # Save first figure only (for standalone file output)
+        plt.figure(fig1.number)
+        plt.savefig(output_path, dpi=150)
+        for f in figures:
+            plt.close(f)
+        print(f"CDF plot saved to: {output_path}")
+        return None
+    else:
+        return figures
 
 
 def main():
@@ -2747,6 +3003,13 @@ def main():
                     if hist_fig is not None:
                         pdf.savefig(hist_fig, dpi=150)
                         plt.close(hist_fig)
+
+                    # Add CDF plots (returns list of figures)
+                    cdf_figs = plot_overhead_cdfs(aggregate, output_path=None, large_fonts=args.large_fonts)
+                    if cdf_figs is not None:
+                        for cdf_fig in cdf_figs:
+                            pdf.savefig(cdf_fig, dpi=150)
+                            plt.close(cdf_fig)
 
             print(f"Combined overhead plots saved to: {combined_path}")
 
