@@ -207,11 +207,13 @@ from flowbook.kernel_support.types import MemoryCheckpointDiffResult, DiffNode, 
 from flowbook.util.cell_index import index_to_alpha
 
 from flowbook.kernel.models import (
+    ErrorType,
     MovedCell,
     OrderChangeResult,
     OrderDelta,
     Reason,
     ReasonType,
+    ReproducibilityError,
     ReproducibilityResult,
     ReproducibilityViolation,
 )
@@ -226,6 +228,7 @@ from flowbook.util.output import output, timer
 
 # Checkpoint naming constants
 PRE_CHECKPOINT_PREFIX = "_pre_"
+POST_CHECKPOINT_PREFIX = "_post_"
 
 # ============================================================================
 # OPTIMIZATION FLAGS (controlled via environment variables)
@@ -366,7 +369,7 @@ def _backward_stale(
     j: int,
 ) -> bool:
     """
-    BackwardStale(W, W', i, j) ≝ j < i ∧ j = LastWriter(W, i, y) for some y ∈ Wᵢ \ W'ᵢ
+    BackwardStale(W, W', i, j) ≝ j < i ∧ j = LastWriter(W, i, y) for some y ∈ Wᵢ \\ W'ᵢ
 
     Cell j (before i) becomes stale if it was the last writer of a location
     that cell i no longer writes (i.e., i's write set shrank).
@@ -1075,17 +1078,49 @@ class ReproducibilityEnforcer:
         violation = None
         forward_violation = None
         writer_violation = None
+        errors: List[ReproducibilityError] = []
+
+        # NoReadAndWrite(R', W', i) ≝ Rᵢ ∩ Wᵢ = ∅
+        # Ref: FORMAL_DEVELOPMENT.md §3.2, line 176
+        # (Cell reads and writes same location - potential issue for reproducibility)
+        no_read_and_write_error = self._check_no_read_and_write(cell_id, tracking)
+        if no_read_and_write_error:
+            errors.append(no_read_and_write_error)
+            log(f"[Inst-Run] {cell_id}: NoReadAndWrite=fail")
+        else:
+            log(f"[Inst-Run] {cell_id}: NoReadAndWrite=pass")
+
+        # WriteBeforeRead(R', W', i) ≝ Rᵢ ⊆ W_{1..i-1}
+        # Ref: FORMAL_DEVELOPMENT.md §3.2, line 177
+        # (Reads user variable not written by earlier cell)
+        write_before_read_error = self._check_write_before_read(cell_id, my_position, tracking, namespace)
+        if write_before_read_error:
+            errors.append(write_before_read_error)
+            log(f"[Inst-Run] {cell_id}: WriteBeforeRead=fail")
+        else:
+            log(f"[Inst-Run] {cell_id}: WriteBeforeRead=pass")
 
         # NoWriteAfterRead(R', W', i) ≝ Wᵢ ∩ R_{1..i-1} = ∅
         # Ref: FORMAL_DEVELOPMENT.md §3.2, line 179
         # (Backward mutation check - only against CLEAN cells)
-        # NEW SEMANTICS: Never reject, only mark cell stale when predicate fails
         backward_violation = None
         if typed_changes:
             with timer(key="check:NoWriteAfterRead", message=f"[Inst-Run] NoWriteAfterRead check for {cell_id}"):
                 backward_violation = self._check_backward_mutation_new(
                     cell_id, my_position, typed_changes, current_diff, column_changed
                 )
+        if backward_violation:
+            errors.append(ReproducibilityError(
+                error_type=ErrorType.NO_WRITE_AFTER_READ,
+                cell_id=cell_id,
+                locations=backward_violation.variables,
+                message=backward_violation.message,
+                causer_cell=backward_violation.affected_cell,
+                detail={
+                    "structural_reads_detail": backward_violation.structural_reads_detail,
+                    "changes_detail": backward_violation.changes_detail,
+                } if backward_violation.structural_reads_detail or backward_violation.changes_detail else None,
+            ))
         log(f"[Inst-Run] {cell_id}: NoWriteAfterRead={'fail' if backward_violation else 'pass'}")
 
         # NoReadBeforeWrite(R', W', i) ≝ Rᵢ ∩ W_{i+1..n} = ∅
@@ -1093,6 +1128,14 @@ class ReproducibilityEnforcer:
         # (Forward contamination check)
         with timer(key="check:NoReadBeforeWrite", message=f"[Inst-Run] NoReadBeforeWrite check for {cell_id}"):
             forward_violation = self._check_forward_contamination(cell_id, my_position, tracking)
+        if forward_violation:
+            errors.append(ReproducibilityError(
+                error_type=ErrorType.NO_READ_BEFORE_WRITE,
+                cell_id=cell_id,
+                locations=forward_violation.variables,
+                message=forward_violation.message,
+                causer_cell=forward_violation.mutating_cell,
+            ))
         log(f"[Inst-Run] {cell_id}: NoReadBeforeWrite={'fail' if forward_violation else 'pass'}")
 
         # ================================================================
@@ -1119,28 +1162,37 @@ class ReproducibilityEnforcer:
         # T'ᵢ = CLEAN only if ALL validity predicates pass
         # Otherwise T'ᵢ = STALE with appropriate reasons
         # Ref: FORMAL_DEVELOPMENT.md §3.4, line 214
+        #
+        # IMPORTANT: When continue_on_violation=True, predicate violations
+        # are ACCEPTED and the cell stays CLEAN. The only exception is
+        # skipped_writers which always causes staleness.
         # ================================================================
         # Check for skipped writers (provenance mismatch)
         skipped_writers = self._check_skipped_writers(cell_id)
 
         # Collect staleness reasons for this cell
-        if backward_violation is not None:
-            # NoWriteAfterRead failed - cell reads values it then modifies, breaking reproducibility
-            for var in backward_violation.variables:
-                self._notebook_state.add_reason(
-                    cell_id, Reason(ReasonType.NO_WRITE_AFTER_READ, loc=var, cell_id=backward_violation.affected_cell)
-                )
+        # Only add predicate violation reasons if NOT continuing (i.e., they will be rejected)
+        if not continue_on_violation:
+            if backward_violation is not None:
+                # NoWriteAfterRead failed - cell reads values it then modifies, breaking reproducibility
+                for var in backward_violation.variables:
+                    self._notebook_state.add_reason(
+                        cell_id, Reason(ReasonType.NO_WRITE_AFTER_READ, loc=var, cell_id=backward_violation.affected_cell)
+                    )
 
         # Build writer_violation for UI purposes if forward contamination detected
         writer_violation = None
         if forward_violation is not None:
-            # NoReadBeforeWrite failed - cell reads from later cells
+            # Forward contamination ALWAYS marks cell stale (even when continue_on_violation=True)
+            # because re-running top-to-bottom would produce different results.
+            # This is different from backward_violation which only affects other cells.
             writer = forward_violation.mutating_cell
             for var in forward_violation.variables:
                 self._notebook_state.add_reason(
                     cell_id, Reason(ReasonType.NO_READ_BEFORE_WRITE, loc=var, cell_id=writer if writer != "<later>" else None)
                 )
             # Build writer_violation for UI (shows backward_mutation-style message on writer cell)
+            writer = forward_violation.mutating_cell
             if writer and writer != "<later>":
                 writer_alpha = self._cell_id_to_alpha(writer)
                 reader_alpha = self._cell_id_to_alpha(cell_id)
@@ -1152,6 +1204,7 @@ class ReproducibilityEnforcer:
                     violation_type="backward_mutation",
                 )
 
+        # Skipped writers always cause staleness (regardless of continue_on_violation)
         if skipped_writers:
             for loc, actual_writer, expected_writer in skipped_writers:
                 self._notebook_state.add_reason(
@@ -1160,15 +1213,28 @@ class ReproducibilityEnforcer:
                 )
 
         # Set cell status
-        if backward_violation is None and forward_violation is None and not skipped_writers:
+        # When continue_on_violation=True, only NoWriteAfterRead (backward_violation) can be accepted.
+        # Other errors (forward contamination, read-and-write, undefined vars) always cause staleness
+        # because they affect THIS cell's reproducibility.
+        has_any_errors = len(errors) > 0
+
+        # Separate errors into backward-only (can be accepted) and forward/other (always stale)
+        backward_only_errors = [e for e in errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ]
+        other_errors = [e for e in errors if e.error_type != ErrorType.NO_WRITE_AFTER_READ]
+
+        # Backward-only errors can be accepted; other errors always cause staleness
+        has_staleness_causing_errors = len(other_errors) > 0 or (len(backward_only_errors) > 0 and not continue_on_violation)
+
+        if not has_staleness_causing_errors and not skipped_writers:
             self._notebook_state.set_clean(cell_id)
-            log(f"[Inst-Run] {cell_id}: T'=CLEAN")
+            if len(backward_only_errors) > 0:
+                log(f"[Inst-Run] {cell_id}: T'=CLEAN (backward errors accepted via continue_on_violation)")
+            else:
+                log(f"[Inst-Run] {cell_id}: T'=CLEAN")
         else:
             reasons = []
-            if backward_violation:
-                reasons.append("backward_mutation")
-            if forward_violation:
-                reasons.append("forward_contamination")
+            for err in errors:
+                reasons.append(err.error_type.value)
             if skipped_writers:
                 reasons.append("skipped_writers")
             log(f"[Inst-Run] {cell_id}: T'=STALE ({', '.join(reasons)})")
@@ -1179,26 +1245,38 @@ class ReproducibilityEnforcer:
         # ================================================================
         # ForwardStale(R', W', i, j) ≝ j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
         # Ref: FORMAL_DEVELOPMENT.md §3.3, line 187
-        _changed_file_paths = tracking.file_writes if tracking.file_writes else None
+        #
+        # Compute ForwardStale when:
+        # - No errors, OR
+        # - Errors exist but continue_on_violation=True (errors are accepted)
+        # Skip ForwardStale only when errors will cause rollback
+        stale: List[str] = []
+        staleness_warnings: List[str] = []
 
-        with timer(key="check:ForwardStale", message=f"[Inst-Run] ForwardStale computation for {cell_id}"):
-            stale, staleness_warnings = self._compute_forward_staleness(
-                namespace, W_i_vars, column_changed, cell_id, my_position,
-                changed_file_paths=_changed_file_paths,
-            )
-        log(f"[Inst-Run] {cell_id}: ForwardStale marked {len(stale)} cells")
-        structural_warnings.extend(staleness_warnings)
+        errors_will_rollback = has_any_errors and not continue_on_violation
+        if not errors_will_rollback:
+            _changed_file_paths = tracking.file_writes if tracking.file_writes else None
 
-        # Update last_writer (L) for changed variables
-        if changed_vars:
-            for loc in changed_vars:
-                self._notebook_state.last_writer[loc] = cell_id
-        if column_changed:
-            for var, cols in column_changed.items():
-                if var not in self._notebook_state.column_last_writer:
-                    self._notebook_state.column_last_writer[var] = {}
-                for col in cols:
-                    self._notebook_state.column_last_writer[var][col] = cell_id
+            with timer(key="check:ForwardStale", message=f"[Inst-Run] ForwardStale computation for {cell_id}"):
+                stale, staleness_warnings = self._compute_forward_staleness(
+                    namespace, W_i_vars, column_changed, cell_id, my_position,
+                    changed_file_paths=_changed_file_paths,
+                )
+            log(f"[Inst-Run] {cell_id}: ForwardStale marked {len(stale)} cells")
+            structural_warnings.extend(staleness_warnings)
+
+            # Update last_writer (L) for changed variables
+            if changed_vars:
+                for loc in changed_vars:
+                    self._notebook_state.last_writer[loc] = cell_id
+            if column_changed:
+                for var, cols in column_changed.items():
+                    if var not in self._notebook_state.column_last_writer:
+                        self._notebook_state.column_last_writer[var] = {}
+                    for col in cols:
+                        self._notebook_state.column_last_writer[var][col] = cell_id
+        else:
+            log(f"[Inst-Run] {cell_id}: Skipping ForwardStale (errors will cause rollback)")
 
         # ================================================================
         # Return result
@@ -1214,6 +1292,7 @@ class ReproducibilityEnforcer:
             forward_violation=forward_violation,
             writer_violation=writer_violation,  # For UI: shows backward_mutation-style info on writer cell
             staleness_reasons=staleness_reasons,
+            errors=errors,  # All formal predicate violations
         )
 
     # =========================================================================
@@ -1486,6 +1565,111 @@ class ReproducibilityEnforcer:
                     changes_detail=changes,
                 )
 
+        return None
+
+    def _check_write_before_read(
+        self,
+        cell_id: str,
+        cell_position: int,
+        tracking: TrackingData,
+        user_ns,
+    ) -> Optional[ReproducibilityError]:
+        """
+        Check WriteBeforeRead predicate: Rᵢ ⊆ W_{1..i-1}
+
+        All reads should come from writes by earlier cells.
+        Excludes:
+        - Builtins (print, len, range, etc.)
+        - Imported modules and functions
+        - "Ambient" variables (exist in namespace but not written by any cell)
+
+        The "ambient" exclusion handles practical cases where notebooks start
+        with pre-existing data (loaded datasets, injected variables, etc.)
+        that wasn't written by earlier cells. The formal model assumes an
+        empty starting namespace, but real notebooks often have initial state.
+
+        Formal ref: main.tex §3.2, FORMAL_DEVELOPMENT.md §3.2, line 177
+        """
+        import builtins
+        import types
+
+        R_i = tracking.reads_before_writes or set()
+        if not R_i:
+            return None
+
+        # Handle case where user_ns is a checkpoint (in tests)
+        if hasattr(user_ns, 'namespace'):
+            ns_dict = user_ns.namespace
+        elif isinstance(user_ns, dict):
+            ns_dict = user_ns
+        else:
+            # Can't check WriteBeforeRead without a proper namespace
+            return None
+
+        # Compute W_{1..i-1} (what earlier cells wrote)
+        all_writes_before = _writes_in_range(
+            self._notebook_state, self._cell_order, 0, cell_position - 1
+        )
+
+        # Find reads not covered by earlier writes
+        missing = R_i - all_writes_before
+
+        # Flag variables that are NOT in the namespace (would cause NameError)
+        # This is the WriteBeforeRead violation: reading something that doesn't exist
+        user_missing: Set[str] = set()
+        for var in missing:
+            # Skip builtins (print, len, range, etc.)
+            if hasattr(builtins, var):
+                continue
+            # Flag if variable is NOT in namespace - this is an undefined read
+            if var not in ns_dict:
+                user_missing.add(var)
+
+        if user_missing:
+            cell_alpha = self._cell_id_to_alpha(cell_id)
+            vars_str = format_variable_list(sorted(user_missing))
+            message = f"Cell {cell_alpha} reads {vars_str} not written by earlier cells"
+            return ReproducibilityError(
+                error_type=ErrorType.WRITE_BEFORE_READ,
+                cell_id=cell_id,
+                locations=sorted(user_missing),
+                message=message,
+            )
+        return None
+
+    def _check_no_read_and_write(
+        self,
+        cell_id: str,
+        tracking: TrackingData,
+    ) -> Optional[ReproducibilityError]:
+        """
+        Check NoReadAndWrite predicate: Rᵢ ∩ Wᵢ = ∅
+
+        Cell should not both read and write the same location.
+
+        Formal ref: main.tex §3.2, FORMAL_DEVELOPMENT.md §3.2, line 176
+
+        Note: The implementation uses reads_before_writes which already
+        excludes locations that are written before being read. So this
+        check catches variables that are first read, then written - patterns
+        like `x = x + 1` or `df['col'] = df['col'] * 2`.
+
+        This predicate ensures cells have clear input/output boundaries.
+        """
+        R_i = tracking.reads_before_writes or set()
+        W_i = tracking.writes or set()
+
+        overlap = R_i & W_i
+        if overlap:
+            cell_alpha = self._cell_id_to_alpha(cell_id)
+            vars_str = format_variable_list(sorted(overlap))
+            message = f"Cell {cell_alpha} reads and writes the same locations: {vars_str}"
+            return ReproducibilityError(
+                error_type=ErrorType.NO_READ_AND_WRITE,
+                cell_id=cell_id,
+                locations=sorted(overlap),
+                message=message,
+            )
         return None
 
     def _check_skipped_writers(self, cell_id: str) -> List[Tuple[str, Optional[str], str]]:

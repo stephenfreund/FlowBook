@@ -1118,9 +1118,35 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             continue_on_violation=self._continue_after_violation,
                         )
 
+                    # Handle formal predicate violations
+                    # When continue_after_violation=False: rollback and return error (rejected)
+                    # When continue_after_violation=True: continue, cell stays CLEAN (accepted)
+                    if sdc_result and sdc_result.has_errors():
+                        if not self._continue_after_violation:
+                            # ROLLBACK: Restore pre-execution state
+                            self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
+
+                            # Send violation to frontend (rejected)
+                            first_error = sdc_result.errors[0]
+                            self._send_predicate_violation(first_error, accepted=False)
+
+                            # Return error status
+                            return {
+                                "status": "error",
+                                "ename": "ReproducibilityError",
+                                "evalue": first_error.message,
+                                "traceback": [
+                                    f"Predicate {first_error.error_type.value} violated: {first_error.message}"
+                                ],
+                            }
+                        else:
+                            # Send violations to frontend (accepted - cell stays CLEAN)
+                            for err in sdc_result.errors:
+                                self._send_predicate_violation(err, accepted=True)
+                            log(f"[Inst-Run] Cell {self._cell_id}: {len(sdc_result.errors)} violations accepted, cell stays CLEAN")
+
                     # Handle violations (backward mutation and/or forward dependency)
-                    # NEW SEMANTICS: Never reject, only mark cells stale
-                    # Violations are informational only - cell is marked STALE but execution continues
+                    # Violations are informational - cell is marked STALE but execution continues
                     has_backward = sdc_result and sdc_result.violation
                     has_forward = sdc_result and sdc_result.forward_violation
 
@@ -1501,88 +1527,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             metadata=metadata.to_display_metadata(),
         )
 
-    def _send_violation_error(self, violation) -> None:
-        """Send Reproducibility violation as error via iopub.
-
-        Emits structured flowbook metadata before the error so the frontend
-        can store and update violation info (e.g., when cells are reordered).
-        """
-        # Emit structured metadata for the frontend
-        metadata = ReproducibilityMetadata(
-            cell_id=self._cell_id or "",
-            execution_seq=self._enforcer.seq_counter,
-            reads=[],
-            writes=[],
-            changed_variables=[],
-            stale_cells=self._enforcer.get_stale_cells(),
-            violation=violation.to_dict(),
-            cell_order=self._enforcer.cell_order,
-            staleness_reasons=self._enforcer._notebook_state.get_all_reasons(),
-        )
-        self._display.display_icon_and_text(
-            "❌",
-            "Backward violation",
-            metadata=metadata.to_display_metadata(),
-        )
-
-        # Then send the error
-        self.send_response(
-            self.iopub_socket,
-            "error",
-            {
-                "ename": "ReproducibilityViolation",
-                "evalue": violation.message,
-                "traceback": [violation.message],
-            },
-        )
-
-    def _send_forward_violation_error(self, violation, writer_violation) -> None:
-        """Send forward contamination violation as error via iopub.
-
-        Emits structured flowbook metadata including writer_violation so the
-        frontend can store the backward_mutation violation on the writer cell.
-        """
-        # Emit structured metadata for the frontend
-        metadata = ReproducibilityMetadata(
-            cell_id=self._cell_id or "",
-            execution_seq=self._enforcer.seq_counter,
-            reads=[],
-            writes=[],
-            changed_variables=[],
-            stale_cells=self._enforcer.get_stale_cells(),
-            violation=violation.to_dict(),
-            cell_order=self._enforcer.cell_order,
-            writer_violation=writer_violation.to_dict() if writer_violation else None,
-            staleness_reasons=self._enforcer._notebook_state.get_all_reasons(),
-        )
-        self._display.display_icon_and_text(
-            "❌",
-            "Forward contamination",
-            metadata=metadata.to_display_metadata(),
-        )
-
-        # Then send the error
-        self.send_response(
-            self.iopub_socket,
-            "error",
-            {
-                "ename": "ReproducibilityViolation",
-                "evalue": violation.message,
-                "traceback": [violation.message],
-            },
-        )
-
-    def _send_violation_warning(self, violation) -> None:
-        """Send Reproducibility violation as warning via iopub (when continue_after_violation is enabled).
-
-        Uses the violation.message from the enforcer verbatim.
-        """
-        self.send_response(
-            self.iopub_socket,
-            "stream",
-            {"name": "stderr", "text": violation.message + "\n"},
-        )
-
     def _send_truncation_details(self, truncation_details: str) -> None:
         """Send truncation details to stderr for user visibility."""
         self.send_response(
@@ -1605,15 +1549,56 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             {"name": "stderr", "text": warning_text},
         )
 
-    def _make_error_result(self, violation) -> dict:
-        """Create error result dict for Reproducibility violation."""
-        return {
-            "status": "error",
-            "execution_count": self.execution_count,
-            "ename": "ReproducibilityViolation",
-            "evalue": violation.message,
-            "traceback": [violation.message],
+    def _send_predicate_violation(
+        self,
+        error,
+        accepted: bool = False,
+    ) -> None:
+        """
+        Send a predicate violation to the frontend.
+
+        This is the unified method for all four formal predicate violations:
+        - NO_READ_AND_WRITE: Cell reads and writes same location
+        - WRITE_BEFORE_READ: Reads undefined variable
+        - NO_READ_BEFORE_WRITE: Forward contamination
+        - NO_WRITE_AFTER_READ: Backward mutation
+
+        Args:
+            error: ReproducibilityError instance
+            accepted: If True, violation was accepted (continue_after_violation=True)
+                     Cell stays CLEAN and notice is informational (yellow).
+                     If False, violation causes rejection (rollback) and
+                     notice is an error (red).
+        """
+        # Build the unified predicate_violation structure
+        violation_dict = {
+            "predicate": error.error_type.value,
+            "cell_id": error.cell_id,
+            "locations": error.locations,
+            "message": error.message,
+            "accepted": accepted,
         }
+
+        # Add causer cell if available
+        if error.causer_cell:
+            violation_dict["causer_cell"] = error.causer_cell
+
+        # Add detail info if available
+        if error.detail:
+            violation_dict["detail"] = error.detail
+
+        # Send via display_data with structured metadata
+        # The frontend will render this appropriately based on 'accepted'
+        self.send_response(
+            self.iopub_socket,
+            "display_data",
+            {
+                "data": {"text/plain": ""},  # Empty - frontend renders from metadata
+                "metadata": {
+                    "predicate_violation": violation_dict,
+                },
+            },
+        )
 
     # =========================================================================
     # Lifecycle

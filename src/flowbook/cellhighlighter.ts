@@ -15,7 +15,8 @@ import {
   IReproducibilityMetadata,
   IStalenessReason,
   IFrontendStalenessReason,
-  IViolationInfo
+  IViolationInfo,
+  IPredicateViolation
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
@@ -26,6 +27,15 @@ function isFrontendReason(
   reason: IStalenessReason
 ): reason is IFrontendStalenessReason {
   return 'message' in reason;
+}
+
+/**
+ * Type guard to check if a violation is the new predicate violation format.
+ */
+function isPredicateViolation(
+  violation: IViolationInfo | IPredicateViolation | undefined
+): violation is IPredicateViolation {
+  return violation !== undefined && 'predicate' in violation && 'accepted' in violation;
 }
 
 export class ReproducibilityCellHighlighter {
@@ -153,7 +163,7 @@ export class ReproducibilityCellHighlighter {
 
         const stalenessManager = this.getStalenessManager(notebook);
         const cellOrder = this._getCurrentCellOrder(notebook);
-        this._updateCell(args.cell, stalenessManager, cellOrder, path);
+        this.updateCell(args.cell, stalenessManager, cellOrder, path);
       }
     });
 
@@ -218,7 +228,7 @@ export class ReproducibilityCellHighlighter {
 
     cells.forEach(cell => {
       if (cell.model.type === 'code') {
-        this._updateCell(cell, stalenessManager, cellOrder, path);
+        this.updateCell(cell, stalenessManager, cellOrder, path);
       }
     });
   }
@@ -249,10 +259,11 @@ export class ReproducibilityCellHighlighter {
       for (let i = 0; i < outputs.length; i++) {
         const out = outputs.get(i).toJSON() as IOutput;
         const meta = (out as any).metadata || {};
-        // Keep outputs that are NOT flowbook notices
+        // Keep outputs that are NOT flowbook notices (including legacy flowbook_error_notice)
         if (
           !meta.flowbook_staleness_notice &&
-          !meta.flowbook_violation_notice
+          !meta.flowbook_violation_notice &&
+          !meta.flowbook_error_notice
         ) {
           cleanOutputs.push(out);
         }
@@ -262,15 +273,21 @@ export class ReproducibilityCellHighlighter {
         outputs.fromJSON(cleanOutputs);
       }
 
-      // Remove staleness CSS classes
+      // Remove staleness and error CSS classes
       cell.node.classList.remove('flowbook-stale-cell');
       cell.node.classList.remove('flowbook-unexecuted-cell');
       cell.node.classList.remove('flowbook-cell-stale');
       cell.node.classList.remove('flowbook-cell-unexecuted');
+      cell.node.classList.remove('flowbook-cell-error');
     });
   }
 
-  private _updateCell(
+  /**
+   * Update cell highlighting and notices.
+   * This is the single entry point for all cell rendering updates.
+   * Can be called externally after storing metadata on the cell.
+   */
+  updateCell(
     cell: Cell,
     stalenessManager: StalenessManager,
     cellOrder: string[],
@@ -300,6 +317,7 @@ export class ReproducibilityCellHighlighter {
     // Remove existing highlight classes
     cell.node.classList.remove('flowbook-cell-stale');
     cell.node.classList.remove('flowbook-cell-unexecuted');
+    cell.node.classList.remove('flowbook-cell-error');
 
     // Skip highlighting and notices for empty cells - they are always clean
     if (isEmpty) {
@@ -331,7 +349,7 @@ export class ReproducibilityCellHighlighter {
       this._updateCellOutput(cell, false, stalenessManager, cellOrder);
     }
 
-    // Add/remove violation notice output (styled version of kernel's error)
+    // Add/remove violation notice output (unified predicate violations)
     this._updateViolationOutput(cell, cellOrder);
 
     // Recompute metadata messages with current @A references
@@ -385,8 +403,9 @@ export class ReproducibilityCellHighlighter {
     }
 
     const causingIdx = cellOrder.indexOf(reason.causing_cell);
+    // Note: indexToAlpha already returns with @ prefix
     const causingRef =
-      causingIdx >= 0 ? indexToAlpha(causingIdx) : reason.causing_cell;
+      causingIdx >= 0 ? indexToAlpha(causingIdx) : 'a deleted cell';
 
     // Build variable parts
     const parts: string[] = [];
@@ -433,16 +452,23 @@ export class ReproducibilityCellHighlighter {
     const expectedCellId = 'expected_cell_id' in reason ? reason.expected_cell_id : undefined;
     const loc = 'loc' in reason ? reason.loc : undefined;
 
+    // Note: indexToAlpha already returns with @ prefix
     let causingRef = '';
     if (cellId) {
       const causingIdx = cellOrder.indexOf(cellId);
-      causingRef = causingIdx >= 0 ? indexToAlpha(causingIdx) : cellId;
+      causingRef = causingIdx >= 0 ? indexToAlpha(causingIdx) : 'a deleted cell';
     }
 
     let expectedRef = '';
+    let expectedCellDeleted = false;
     if (expectedCellId) {
       const expectedIdx = cellOrder.indexOf(expectedCellId);
-      expectedRef = expectedIdx >= 0 ? indexToAlpha(expectedIdx) : expectedCellId;
+      if (expectedIdx >= 0) {
+        expectedRef = indexToAlpha(expectedIdx);
+      } else {
+        expectedCellDeleted = true;
+        expectedRef = 'a deleted cell';
+      }
     }
 
     switch (reason.type) {
@@ -460,6 +486,12 @@ export class ReproducibilityCellHighlighter {
           : 'Input was modified';
       case 'skipped_upstream':
         // Re-running won't help - need to run the expected cell first
+        // If expected cell was deleted, say so clearly
+        if (expectedCellDeleted) {
+          return loc
+            ? `\`${loc}\` is from a deleted cell`
+            : 'Source cell was deleted';
+        }
         if (loc && expectedRef) {
           return `Run ${expectedRef} first (\`${loc}\` is from wrong source)`;
         }
@@ -511,7 +543,9 @@ export class ReproducibilityCellHighlighter {
     const codeModel = cell.model as ICodeCellModel;
     const outputs = codeModel.outputs;
 
-    // Check if there's a violation notice (violation implies specific issue, so skip staleness notice)
+    // Check if there's a violation (either in metadata or existing notice)
+    // Violation implies specific issue, so skip staleness notice
+    const hasViolationMetadata = cell.model.getMetadata('flowbook_violation') !== undefined;
     let hasViolationNotice = false;
     for (let i = 0; i < outputs.length; i++) {
       const out = outputs.get(i).toJSON() as any;
@@ -521,8 +555,8 @@ export class ReproducibilityCellHighlighter {
       }
     }
 
-    // Skip staleness notice if violation notice is present (it's more specific)
-    if (hasViolationNotice) {
+    // Skip staleness notice if violation is present (it's more specific)
+    if (hasViolationMetadata || hasViolationNotice) {
       return;
     }
 
@@ -611,7 +645,11 @@ export class ReproducibilityCellHighlighter {
 
   /**
    * Add or remove the violation notice display_data output.
-   * This replaces the kernel's raw error output with a styled notice.
+   * Handles both legacy IViolationInfo and new IPredicateViolation formats.
+   *
+   * For IPredicateViolation:
+   * - accepted=true: yellow info box (violation accepted, cell stays CLEAN)
+   * - accepted=false: red error box (violation rejected, execution rolled back)
    */
   private _updateViolationOutput(cell: Cell, cellOrder: string[]): void {
     if (cell.model.type !== 'code') {
@@ -620,9 +658,10 @@ export class ReproducibilityCellHighlighter {
     const codeModel = cell.model as ICodeCellModel;
     const outputs = codeModel.outputs;
 
-    // Get violation metadata from cell
+    // Get violation metadata from cell (can be IViolationInfo or IPredicateViolation)
     const violation = cell.model.getMetadata('flowbook_violation') as
       | IViolationInfo
+      | IPredicateViolation
       | undefined;
 
     // Check if we already have a violation notice
@@ -637,14 +676,114 @@ export class ReproducibilityCellHighlighter {
       }
     }
 
-    if (violation && violation.mutating_cell) {
+    // Handle new predicate violation format
+    if (isPredicateViolation(violation)) {
+      const locs = violation.locations.map(l => '`' + l + '`').join(', ');
+      const htmlLocs = locs.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+      // Get causer cell reference (strip any existing @ prefix)
+      // If cell was deleted, show "a deleted cell" instead of raw ID
+      let causerRef: string | null = null;
+      if (violation.causer_cell && typeof violation.causer_cell === 'string') {
+        const rawCauser = violation.causer_cell.startsWith('@')
+          ? violation.causer_cell.slice(1)
+          : violation.causer_cell;
+        const causerIdx = cellOrder.indexOf(rawCauser);
+        causerRef = causerIdx >= 0 ? indexToAlpha(causerIdx) : 'a deleted cell';
+      }
+
+      // Build message based on predicate type
+      // Note: indexToAlpha already returns with @ prefix, causerRef is either "@A" or "a deleted cell"
+      let message: string;
+      switch (violation.predicate) {
+        case 'no_write_after_read':
+          message = causerRef
+            ? `Wrote ${htmlLocs} read by ${causerRef}`
+            : `Wrote ${htmlLocs} read by earlier cell`;
+          break;
+        case 'no_read_before_write':
+          message = causerRef
+            ? `Read ${htmlLocs} from ${causerRef}`
+            : `Read ${htmlLocs} from later cell`;
+          break;
+        case 'no_read_and_write':
+          message = `Read and wrote ${htmlLocs} in same cell`;
+          break;
+        case 'write_before_read':
+          message = `${htmlLocs} not defined by earlier cells`;
+          break;
+        default:
+          message = violation.message;
+      }
+
+      const plainMessage = message.replace(/<code>([^<]+)<\/code>/g, '`$1`');
+
+      // Style based on whether violation was accepted
+      const isAccepted = violation.accepted;
+      const icon = isAccepted ? '\u26a0\ufe0f' : '\u274c';
+      const cssClass = isAccepted ? 'flowbook-staleness-notice' : 'flowbook-error-notice';
+
+      const plainText = `${icon} ${plainMessage}`;
+      const noticeOutput: IOutput = {
+        output_type: 'display_data',
+        data: {
+          'text/html': `<div class="${cssClass}">${icon} ${message}</div>`,
+          'text/plain': plainText
+        },
+        metadata: {
+          flowbook_violation_notice: true,
+          flowbook_predicate_accepted: isAccepted
+        }
+      };
+
+      // Check if message matches current notice
+      if (hasViolationNotice && existingPlainText === plainText) {
+        return; // Already up to date
+      }
+
+      // Add error class to cell if violation was rejected
+      if (!isAccepted) {
+        cell.node.classList.add('flowbook-cell-error');
+      } else {
+        cell.node.classList.remove('flowbook-cell-error');
+      }
+
+      // Build new output array
+      const allOutputs: IOutput[] = [noticeOutput];
+      for (let i = 0; i < outputs.length; i++) {
+        const out = outputs.get(i).toJSON() as IOutput;
+        const isViolationNotice =
+          (out as any).metadata?.flowbook_violation_notice === true;
+        const isErrorNotice =
+          (out as any).metadata?.flowbook_error_notice === true;
+        const isKernelError =
+          out.output_type === 'error' &&
+          ((out as any).ename === 'ReproducibilityError' ||
+            (out as any).ename === 'ReproducibilityViolation');
+        // Filter kernel's predicate violation display_data (empty text/plain)
+        const isKernelPredicateViolation =
+          out.output_type === 'display_data' &&
+          (out as any).metadata?.predicate_violation;
+
+        if (!isViolationNotice && !isErrorNotice && !isKernelError && !isKernelPredicateViolation) {
+          allOutputs.push(out);
+        }
+      }
+      outputs.fromJSON(allOutputs);
+      return;
+    }
+
+    // Handle legacy IViolationInfo format
+    if (violation && 'mutating_cell' in violation && violation.mutating_cell) {
       // Compute message with current @A references
+      // Note: indexToAlpha already returns with @ prefix
+      // Use "a deleted cell" for cells that no longer exist
       const mutIdx = cellOrder.indexOf(violation.mutating_cell);
       const affIdx = cellOrder.indexOf(violation.affected_cell);
       const mutRef =
-        mutIdx >= 0 ? indexToAlpha(mutIdx) : violation.mutating_cell;
+        mutIdx >= 0 ? indexToAlpha(mutIdx) : 'a deleted cell';
       const affRef =
-        affIdx >= 0 ? indexToAlpha(affIdx) : violation.affected_cell;
+        affIdx >= 0 ? indexToAlpha(affIdx) : 'a deleted cell';
       const vars = violation.variables.map(v => '`' + v + '`').join(', ');
 
       // Different message format based on violation type
@@ -821,16 +960,37 @@ export class ReproducibilityCellHighlighter {
       }
 
       outputs.fromJSON(allOutputs);
-    } else if (hasViolationNotice) {
-      // Remove violation notice (violation was cleared)
-      const allOutputs: IOutput[] = [];
+    } else {
+      // No violation metadata - only clear notices that WE created (not kernel's predicate_violation)
+      // The kernel's predicate_violation output should remain until we process it
+      let hasOurNotices = false;
       for (let i = 0; i < outputs.length; i++) {
-        const out = outputs.get(i).toJSON() as IOutput;
-        if (!(out as any).metadata?.flowbook_violation_notice) {
-          allOutputs.push(out);
+        const out = outputs.get(i).toJSON() as any;
+        if (
+          out.metadata?.flowbook_violation_notice ||
+          out.metadata?.flowbook_error_notice
+        ) {
+          hasOurNotices = true;
+          break;
         }
       }
-      outputs.fromJSON(allOutputs);
+
+      if (hasOurNotices) {
+        // Remove only our notices (not kernel's predicate_violation or errors)
+        cell.node.classList.remove('flowbook-cell-error');
+        const allOutputs: IOutput[] = [];
+        for (let i = 0; i < outputs.length; i++) {
+          const out = outputs.get(i).toJSON() as IOutput;
+          const meta = (out as any).metadata || {};
+          const isOurNotice =
+            meta.flowbook_violation_notice ||
+            meta.flowbook_error_notice;
+          if (!isOurNotice) {
+            allOutputs.push(out);
+          }
+        }
+        outputs.fromJSON(allOutputs);
+      }
     }
   }
 
@@ -884,8 +1044,10 @@ export class ReproducibilityCellHighlighter {
 
     const mutIdx = cellOrder.indexOf(violation.mutating_cell);
     const affIdx = cellOrder.indexOf(violation.affected_cell);
-    const mutRef = mutIdx >= 0 ? indexToAlpha(mutIdx) : violation.mutating_cell;
-    const affRef = affIdx >= 0 ? indexToAlpha(affIdx) : violation.affected_cell;
+    // Note: indexToAlpha already returns with @ prefix
+    // Use "a deleted cell" for cells that no longer exist
+    const mutRef = mutIdx >= 0 ? indexToAlpha(mutIdx) : 'a deleted cell';
+    const affRef = affIdx >= 0 ? indexToAlpha(affIdx) : 'a deleted cell';
     const vars = violation.variables.map(v => '`' + v + '`').join(', ');
     const newMessage = `Cell ${mutRef} modified ${vars} read by ${affRef}`;
 

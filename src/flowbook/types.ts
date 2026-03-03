@@ -43,6 +43,10 @@ export interface IReproducibilityMetadata {
   cell_is_contaminated?: boolean;
   // Proposed fix for violations
   proposed_fix?: IProposedFix;
+  // Unified predicate violation (new format)
+  predicate_violation?: IPredicateViolation;
+  // Legacy: Reproducibility errors (kept for backward compatibility)
+  errors?: IReproducibilityError[];
 }
 
 export interface IReproducibilityCellState {
@@ -147,4 +151,59 @@ export interface IProposedFix {
   strategy: string; // "alpha_rename" | "copy_value" | "merge_cells" | "reorder"
   fix_entries: IProposedFixEntry[];
   explanation: string;
+}
+
+/**
+ * Predicate types for formal predicate violations.
+ * These match ErrorType enum in flowbook/kernel/models.py
+ */
+export type PredicateType =
+  | 'no_read_and_write' // Cell reads and writes same location
+  | 'write_before_read' // Reads user var not written by earlier cell
+  | 'no_read_before_write' // Forward contamination
+  | 'no_write_after_read'; // Backward mutation
+
+/**
+ * Unified predicate violation sent by kernel.
+ *
+ * All four formal predicates produce the same structure:
+ * - NO_READ_AND_WRITE: Cell reads and writes same location
+ * - WRITE_BEFORE_READ: Reads undefined variable
+ * - NO_READ_BEFORE_WRITE: Forward contamination
+ * - NO_WRITE_AFTER_READ: Backward mutation
+ *
+ * The `accepted` field indicates how the violation was handled:
+ * - accepted=false: Rejected - execution rolled back, shown as error (red)
+ * - accepted=true: Accepted (continue_after_violation) - cell stays CLEAN, shown as info (yellow)
+ */
+export interface IPredicateViolation {
+  predicate: PredicateType;
+  cell_id: string;
+  locations: string[];
+  message: string;
+  accepted: boolean;
+  causer_cell?: string;
+  detail?: {
+    structural_reads_detail?: { [key: string]: { [key: string]: string } };
+    changes_detail?: string[];
+  };
+}
+
+// Legacy type alias for backward compatibility
+export type ReproducibilityErrorType = PredicateType;
+
+/**
+ * Legacy interface for backward compatibility.
+ * @deprecated Use IPredicateViolation instead
+ */
+export interface IReproducibilityError {
+  error_type: ReproducibilityErrorType;
+  cell_id: string;
+  locations: string[];
+  message: string;
+  causer_cell?: string;
+  detail?: {
+    structural_reads_detail?: { [key: string]: { [key: string]: string } };
+    changes_detail?: string[];
+  };
 }

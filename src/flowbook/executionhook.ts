@@ -17,7 +17,8 @@ import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import {
   IReproducibilityMetadata,
   IFrontendStalenessReason,
-  IViolationInfo
+  IViolationInfo,
+  IPredicateViolation
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
@@ -376,10 +377,35 @@ export class ReproducibilityExecutionHookManager {
       outputs.push(codeModel.outputs.get(i).toJSON() as IOutput);
     }
 
+    // Check for predicate violation from kernel (new unified format)
+    const predicateViolation = this._extractPredicateViolation(outputs);
+    if (predicateViolation) {
+      // Store predicate violation in cell metadata
+      cell.model.setMetadata('flowbook_violation', predicateViolation);
+
+      // Let cellhighlighter handle the rendering
+      const cellOrder = this._getCurrentCellOrder(panel);
+      const stalenessManager = this._highlighter.getStalenessManager(panel);
+      this._highlighter.updateCell(cell, stalenessManager, cellOrder, panel.context.path);
+
+      console.log(
+        `ReproducibilityExecutionHook: Handled predicate violation for cell ${cell.model.id}, accepted=${predicateViolation.accepted}`
+      );
+
+      // If rejected (not accepted), no further processing needed
+      if (!predicateViolation.accepted) {
+        return;
+      }
+    }
+
     // Extract reproducibility metadata
     const reproducibilityMetadata =
       this._extractReproducibilityMetadata(outputs);
     if (!reproducibilityMetadata) {
+      // If we had a predicate violation but no metadata, we're done
+      if (predicateViolation) {
+        return;
+      }
       return;
     }
 
@@ -389,9 +415,9 @@ export class ReproducibilityExecutionHookManager {
     // Process staleness reasons and update manager
     this._processMetadataUpdate(panel, reproducibilityMetadata);
 
-    // Store or clear violation metadata on the executing cell
+    // Store or clear violation metadata on the executing cell (legacy format)
     const cellOrder = this._getCurrentCellOrder(panel);
-    if (reproducibilityMetadata.violation) {
+    if (reproducibilityMetadata.violation && !predicateViolation) {
       const v = reproducibilityMetadata.violation;
       const mutIdx = cellOrder.indexOf(v.mutating_cell);
       const affIdx = cellOrder.indexOf(v.affected_cell);
@@ -407,18 +433,11 @@ export class ReproducibilityExecutionHookManager {
         changes_detail: (v as any).changes_detail
       };
       cell.model.setMetadata('flowbook_violation', violationInfo);
-
-      // Immediately update violation output (don't wait for staleness signal)
-      this._updateViolationOutput(cell, violationInfo, cellOrder);
-    } else {
+    } else if (!predicateViolation) {
       cell.model.deleteMetadata('flowbook_violation');
-      // Clear any existing violation notice
-      this._clearViolationOutput(cell);
     }
 
-    // If there's a writer_violation, store it on the writer cell
-    // This makes the writer cell's metadata identical to what it would be
-    // if the writer had executed after the reader (backward mutation case)
+    // If there's a writer_violation, store it on the writer cell (legacy format)
     if (reproducibilityMetadata.writer_violation) {
       const wv = reproducibilityMetadata.writer_violation;
       const writerCell = this._findCell(panel, wv.mutating_cell);
@@ -439,11 +458,12 @@ export class ReproducibilityExecutionHookManager {
           changes_detail: (wv as any).changes_detail
         };
 
-        // Store in metadata - SAME as if this cell had executed and caused the error
+        // Store in metadata
         writerCell.model.setMetadata('flowbook_violation', writerViolationInfo);
 
-        // Add violation notice to outputs - SAME display as normal backward violation
-        this._updateViolationOutput(writerCell, writerViolationInfo, cellOrder);
+        // Let cellhighlighter handle the rendering
+        const stalenessManager = this._highlighter.getStalenessManager(panel);
+        this._highlighter.updateCell(writerCell, stalenessManager, cellOrder, panel.context.path);
 
         console.log(
           `ReproducibilityExecutionHook: Stored writer_violation on cell ${wv.mutating_cell}`
@@ -451,10 +471,40 @@ export class ReproducibilityExecutionHookManager {
       }
     }
 
+    // Let cellhighlighter handle all cell rendering
+    const stalenessManager = this._highlighter.getStalenessManager(panel);
+    this._highlighter.updateCell(cell, stalenessManager, cellOrder, panel.context.path);
+
     console.log(
       `ReproducibilityExecutionHook: Extracted metadata for cell ${cell.model.id}:`,
       reproducibilityMetadata
     );
+  }
+
+  /**
+   * Extract predicate violation from kernel outputs (new unified format).
+   * Returns the violation if found, null otherwise.
+   */
+  private _extractPredicateViolation(outputs: IOutput[]): IPredicateViolation | null {
+    for (const output of outputs) {
+      if (output.output_type !== 'display_data') {
+        continue;
+      }
+      const metadata = (output as any).metadata;
+      if (metadata?.predicate_violation) {
+        const pv = metadata.predicate_violation;
+        return {
+          predicate: pv.predicate,
+          cell_id: pv.cell_id,
+          locations: pv.locations || [],
+          message: pv.message,
+          accepted: pv.accepted,
+          causer_cell: pv.causer_cell,
+          detail: pv.detail
+        };
+      }
+    }
+    return null;
   }
 
   /**
@@ -592,9 +642,14 @@ export class ReproducibilityExecutionHookManager {
     }
 
     let expectedRef = '';
+    let expectedCellDeleted = false;
     if (expectedCellId) {
       const expectedIdx = cellOrder.indexOf(expectedCellId);
-      expectedRef = expectedIdx >= 0 ? indexToAlpha(expectedIdx) : expectedCellId;
+      if (expectedIdx >= 0) {
+        expectedRef = indexToAlpha(expectedIdx);
+      } else {
+        expectedCellDeleted = true;
+      }
     }
 
     switch (backendReason.type) {
@@ -627,6 +682,17 @@ export class ReproducibilityExecutionHookManager {
         };
       case 'skipped_upstream':
         // Re-running won't help - need to run the expected cell first
+        // If expected cell was deleted, say so clearly
+        if (expectedCellDeleted) {
+          return {
+            type: 'variable_modified',
+            causing_cell: cellId,
+            variables: loc ? [loc] : undefined,
+            message: loc
+              ? `\`${loc}\` is from a deleted cell`
+              : 'Source cell was deleted'
+          };
+        }
         if (loc && expectedRef) {
           return {
             type: 'variable_modified',
@@ -824,245 +890,4 @@ export class ReproducibilityExecutionHookManager {
     return null;
   }
 
-  /**
-   * Update cell outputs to show styled violation notice.
-   * Replaces kernel's raw error output with a styled display_data.
-   */
-  private _updateViolationOutput(
-    cell: Cell,
-    violation: IViolationInfo,
-    cellOrder: string[]
-  ): void {
-    if (cell.model.type !== 'code') {
-      return;
-    }
-    const codeModel = cell.model as ICodeCellModel;
-    const outputs = codeModel.outputs;
-
-    // Compute message with current @A references
-    const mutIdx = cellOrder.indexOf(violation.mutating_cell);
-    const affIdx = cellOrder.indexOf(violation.affected_cell);
-    const mutRef = mutIdx >= 0 ? indexToAlpha(mutIdx) : violation.mutating_cell;
-    const affRef = affIdx >= 0 ? indexToAlpha(affIdx) : violation.affected_cell;
-    const vars = violation.variables.map(v => '`' + v + '`').join(', ');
-
-    // Different message format based on violation type
-    // If mutating cell is no longer in notebook, treat as deleted cell dependency
-    const mutatingCellDeleted =
-      mutIdx < 0 && violation.mutating_cell !== '<deleted>';
-    const isForwardContamination =
-      violation.type === 'forward_dependency' && !mutatingCellDeleted;
-    const isDeletedCellDependency =
-      violation.type === 'deleted_cell_dependency' || mutatingCellDeleted;
-    let message: string;
-    let noticeOutput: IOutput;
-
-    if (isDeletedCellDependency) {
-      // Deleted cell dependency: reading a variable written by a cell that was deleted
-      const htmlVars = vars.replace(/`([^`]+)`/g, '<code>$1</code>');
-      message = `${vars} written by a deleted cell. Re-run an upstream cell that defines these variables.`;
-      noticeOutput = {
-        output_type: 'display_data',
-        data: {
-          'text/html': `<div class="flowbook-violation-notice"><b>\u274c Deleted Cell Dependency: ${htmlVars} written by a deleted cell. Re-run an upstream cell that defines these variables.</b></div>`,
-          'text/plain': `\u274c Deleted Cell Dependency: ${message}`
-        },
-        metadata: {
-          flowbook_violation_notice: true,
-          flowbook_is_contamination: true
-        }
-      };
-    } else if (isForwardContamination) {
-      // Forward contamination: reading cell read from later writing cell
-      const htmlVars = vars.replace(/`([^`]+)`/g, '<code>$1</code>');
-      message = `${vars} written by downstream cell ${mutRef}. Re-run upstream cells to restore reproducible values.`;
-      noticeOutput = {
-        output_type: 'display_data',
-        data: {
-          'text/html': `<div class="flowbook-violation-notice"><b>\u274c Forward Contamination: ${htmlVars} written by downstream cell ${mutRef}. Re-run upstream cells to restore reproducible values.</b></div>`,
-          'text/plain': `\u274c Forward Contamination: ${message}`
-        },
-        metadata: {
-          flowbook_violation_notice: true,
-          flowbook_is_contamination: true
-        }
-      };
-    } else {
-      // Backward violation: build detailed message
-      const htmlParts: string[] = [];
-      const plainParts: string[] = [];
-
-      // Header line
-      const headerMsg = `Cell ${mutRef} modified ${vars} which Cell ${affRef} (earlier) reads.`;
-      const headerHtml = headerMsg.replace(/`([^`]+)`/g, '<code>$1</code>');
-      htmlParts.push(
-        `<div class="flowbook-violation-header">\u274c <b>Not Reproducible</b>: ${headerHtml}</div>`
-      );
-      plainParts.push(`\u274c Not Reproducible: ${headerMsg}`);
-
-      // What the earlier cell reads (structural_reads_detail)
-      if (violation.structural_reads_detail) {
-        const readsHtml: string[] = [];
-        const readsPlain: string[] = [];
-        for (const [varName, attrs] of Object.entries(
-          violation.structural_reads_detail
-        )) {
-          for (const [attr, value] of Object.entries(attrs)) {
-            readsHtml.push(
-              `<li><code>${varName}.${attr}</code> \u2192 ${this._escapeHtml(String(value))}</li>`
-            );
-            readsPlain.push(`  \u2022 ${varName}.${attr} \u2192 ${value}`);
-          }
-        }
-        if (readsHtml.length > 0) {
-          htmlParts.push(
-            `<div class="flowbook-violation-section"><b>What Cell ${affRef} read:</b><ul>${readsHtml.join('')}</ul></div>`
-          );
-          plainParts.push(`What Cell ${affRef} read:`);
-          plainParts.push(...readsPlain);
-        }
-      }
-
-      // What this cell changed (changes_detail)
-      if (violation.changes_detail && violation.changes_detail.length > 0) {
-        const changesHtml = violation.changes_detail
-          .map(c => `<li>${this._escapeHtml(c)}</li>`)
-          .join('');
-        const changesPlain = violation.changes_detail.map(c => `  \u2022 ${c}`);
-        htmlParts.push(
-          `<div class="flowbook-violation-section"><b>What Cell ${mutRef} changed:</b><ul>${changesHtml}</ul></div>`
-        );
-        plainParts.push(`What Cell ${mutRef} changed:`);
-        plainParts.push(...changesPlain);
-      }
-
-      noticeOutput = {
-        output_type: 'display_data',
-        data: {
-          'text/html': `<div class="flowbook-violation-notice">${htmlParts.join('')}</div>`,
-          'text/plain': plainParts.join('\n')
-        },
-        metadata: { flowbook_violation_notice: true }
-      };
-    }
-
-    // Build new output array:
-    // 1. Staleness notice (if exists AND not showing contamination - contamination implies stale)
-    // 2. Violation/Contamination notice
-    // 3. Other outputs (excluding old notices and kernel outputs)
-    const allOutputs: IOutput[] = [];
-
-    // First, add staleness notice if present (but skip if contamination - it already implies stale)
-    const isContaminationLike =
-      isForwardContamination || isDeletedCellDependency;
-    if (!isContaminationLike) {
-      for (let i = 0; i < outputs.length; i++) {
-        const out = outputs.get(i).toJSON() as IOutput;
-        if ((out as any).metadata?.flowbook_staleness_notice === true) {
-          allOutputs.push(out);
-          break;
-        }
-      }
-    }
-
-    // Add the new notice
-    allOutputs.push(noticeOutput);
-
-    // Add remaining outputs, filtering out:
-    // - Old violation/contamination notice
-    // - Staleness notice (already added, or skip if contamination)
-    // - Kernel's ReproducibilityViolation error
-    // - Kernel's brief "Backward violation" display_data
-    // - Kernel's "Forward Contamination" stderr stream
-    for (let i = 0; i < outputs.length; i++) {
-      const out = outputs.get(i).toJSON() as IOutput;
-      const isViolationNotice =
-        (out as any).metadata?.flowbook_violation_notice === true;
-      const isStalenessNotice =
-        (out as any).metadata?.flowbook_staleness_notice === true;
-      const isKernelError =
-        out.output_type === 'error' &&
-        ((out as any).ename === 'ReproducibilityViolation' ||
-          (out as any).ename === 'ForwardContamination');
-      const plainText = (out as any).data?.['text/plain'] || '';
-      const isKernelBriefViolation =
-        out.output_type === 'display_data' &&
-        (plainText.includes('Backward violation') ||
-          plainText.includes('Forward contamination') ||
-          plainText.includes('Forward Contamination') ||
-          plainText.includes('Deleted cell conflict'));
-      // Stream text can be string or string[] - normalize to string
-      const streamText = Array.isArray((out as any).text)
-        ? (out as any).text.join('')
-        : (out as any).text || '';
-      const isKernelContaminationStderr =
-        out.output_type === 'stream' &&
-        (out as any).name === 'stderr' &&
-        (streamText.includes('Forward Contamination') ||
-          streamText.includes('Deleted cell'));
-      // Also filter staleness notice if showing contamination (contamination implies stale)
-      const skipStalenessForContamination =
-        isStalenessNotice && isContaminationLike;
-
-      if (
-        !isViolationNotice &&
-        !isStalenessNotice &&
-        !isKernelError &&
-        !isKernelBriefViolation &&
-        !isKernelContaminationStderr &&
-        !skipStalenessForContamination
-      ) {
-        allOutputs.push(out);
-      }
-    }
-
-    outputs.fromJSON(allOutputs);
-  }
-
-  /**
-   * Clear any violation notice from cell outputs.
-   */
-  private _clearViolationOutput(cell: Cell): void {
-    if (cell.model.type !== 'code') {
-      return;
-    }
-    const codeModel = cell.model as ICodeCellModel;
-    const outputs = codeModel.outputs;
-
-    // Check if there's a violation notice to remove
-    let hasViolationNotice = false;
-    for (let i = 0; i < outputs.length; i++) {
-      const out = outputs.get(i).toJSON() as any;
-      if (out.metadata?.flowbook_violation_notice === true) {
-        hasViolationNotice = true;
-        break;
-      }
-    }
-
-    if (!hasViolationNotice) {
-      return;
-    }
-
-    // Remove violation notice
-    const allOutputs: IOutput[] = [];
-    for (let i = 0; i < outputs.length; i++) {
-      const out = outputs.get(i).toJSON() as IOutput;
-      if (!(out as any).metadata?.flowbook_violation_notice) {
-        allOutputs.push(out);
-      }
-    }
-    outputs.fromJSON(allOutputs);
-  }
-
-  /**
-   * Escape HTML special characters in a string.
-   */
-  private _escapeHtml(text: string): string {
-    return text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
-  }
 }
