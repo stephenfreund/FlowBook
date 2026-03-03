@@ -722,7 +722,13 @@ class TestBackwardMutationStaleness:
         assert any(r.type == ReasonType.NO_WRITE_AFTER_READ for r in reasons)
 
     def test_backward_mutation_computes_forward_staleness(self):
-        """Backward mutation still triggers ForwardStale for downstream cells."""
+        """Backward mutation still triggers ForwardStale for downstream cells.
+
+        Staleness is always computed, even when there are errors. This is because:
+        - Staleness tracking is orthogonal to error handling
+        - The execution record (R, W sets) is always updated
+        - Downstream cells need to know about changes
+        """
         # Cell A reads x
         self._save_pre_checkpoint("a", {"x": 1})
         ns_a = self._make_namespace({"x": 1})
@@ -744,6 +750,7 @@ class TestBackwardMutationStaleness:
         )
 
         # Cell B modifies x (backward mutation against A, forward stale for C)
+        # ForwardStale is computed even with backward mutation error
         self._save_pre_checkpoint("b", {"x": 1})
         ns_b = self._make_namespace({"x": 999})
         result = self.sdc.check(
@@ -791,8 +798,10 @@ class TestBackwardMutationStaleness:
     def test_backward_mutation_chain_staleness(self):
         """Test staleness propagation with backward mutation in chain.
 
-        In new semantics, backward mutations mark the mutating cell stale,
-        and ForwardStale still propagates to downstream cells.
+        In new semantics:
+        - Backward mutations mark the mutating cell stale
+        - ForwardStale propagates to cells AFTER the executing cell
+        - BackwardStale propagates to cells BEFORE that read the written variable
         """
         # Cell A writes x
         self._save_pre_checkpoint("a", {})
@@ -840,10 +849,11 @@ class TestBackwardMutationStaleness:
         assert result.violation.affected_cell == "b"
         # D itself is stale (new semantics: backward mutation marks the cell stale)
         assert not self.sdc._notebook_state.is_clean("d")
-        # B, C, A are NOT in result.stale_cells since ForwardStale only affects cells AFTER D
-        # (D is the last cell, so no cells after it)
+        # A wrote x but didn't read it, so A is not affected by BackwardStale
         assert "a" not in result.stale_cells
-        assert "b" not in result.stale_cells
+        # B read x, so B IS marked stale via BackwardStale (D wrote x that B read)
+        assert "b" in result.stale_cells
+        # C read y (not x), so C is not affected by D's write to x
         assert "c" not in result.stale_cells
 
 
@@ -2516,7 +2526,8 @@ class TestEditTriggeredStaleness:
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
     def _execute_cell(self, cell_id: str, pre_ns: dict, post_ns: dict,
-                      reads: set = None, writes: set = None):
+                      reads: set = None, writes: set = None,
+                      continue_on_violation: bool = False):
         """Helper to execute a cell with given pre/post namespaces."""
         reads = reads or set()
         writes = writes or set()
@@ -2526,6 +2537,7 @@ class TestEditTriggeredStaleness:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"],
             namespace=post_ns,
             tracking=make_tracking(reads=reads, writes=writes),
+            continue_on_violation=continue_on_violation,
         )
 
     def test_edit_marks_cell_stale(self):
@@ -2598,7 +2610,8 @@ class TestStalenessReasons:
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
     def _execute_cell(self, cell_id: str, pre_ns: dict, post_ns: dict,
-                      reads: set = None, writes: set = None):
+                      reads: set = None, writes: set = None,
+                      continue_on_violation: bool = False):
         """Helper to execute a cell with given pre/post namespaces."""
         reads = reads or set()
         writes = writes or set()
@@ -2608,6 +2621,7 @@ class TestStalenessReasons:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"],
             namespace=post_ns,
             tracking=make_tracking(reads=reads, writes=writes),
+            continue_on_violation=continue_on_violation,
         )
 
     def test_edit_adds_code_changed_reason(self):
@@ -2738,7 +2752,8 @@ class TestSkippedUpstream:
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
     def _execute_cell(self, cell_id: str, pre_ns: dict, post_ns: dict,
-                      reads: set = None, writes: set = None):
+                      reads: set = None, writes: set = None,
+                      continue_on_violation: bool = False):
         """Helper to execute a cell with given pre/post namespaces."""
         reads = reads or set()
         writes = writes or set()
@@ -2748,6 +2763,7 @@ class TestSkippedUpstream:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"],
             namespace=post_ns,
             tracking=make_tracking(reads=reads, writes=writes),
+            continue_on_violation=continue_on_violation,
         )
 
     def test_skipped_upstream_then_run_expected_cell(self):
@@ -2760,6 +2776,9 @@ class TestSkippedUpstream:
         After running G:
         - H should have FORWARD_STALE (not SKIPPED_UPSTREAM)
         - Re-running H would now fix it
+
+        Note: Staleness is always computed, even when G triggers NoReadAndWrite
+        error (because G reads and writes x).
         """
         # Initial execution: F→G→H
         self._execute_cell("f", {}, {"x": 1}, writes={"x"})
@@ -2783,6 +2802,7 @@ class TestSkippedUpstream:
         assert skipped_reason.expected_cell_id == "g"
 
         # Now run G - this should change H's reason to FORWARD_STALE
+        # (Staleness computed even though G has NoReadAndWrite error)
         self._execute_cell("g", {"x": 1, "y": 10}, {"x": 3, "y": 10}, reads={"x"}, writes={"x"})
 
         # H should now have FORWARD_STALE, not SKIPPED_UPSTREAM
@@ -2803,6 +2823,9 @@ class TestSkippedUpstream:
         Exact user scenario: F -> G -> H -> F -> G
 
         After this sequence, H should have FORWARD_STALE (not SKIPPED_UPSTREAM).
+
+        Note: Staleness is always computed, even when G triggers NoReadAndWrite
+        error (because G reads and writes x).
         """
         # F -> G -> H (initial)
         self._execute_cell("f", {}, {"x": 1}, writes={"x"})
@@ -2825,7 +2848,7 @@ class TestSkippedUpstream:
         assert any(r.type == ReasonType.SKIPPED_UPSTREAM for r in reasons_after_f), \
             f"Expected SKIPPED_UPSTREAM after F, got {reasons_after_f}"
 
-        # G (re-run)
+        # G (re-run) - staleness computed even though G has NoReadAndWrite error
         self._execute_cell("g", {"x": 1, "y": 10}, {"x": 3, "y": 10}, reads={"x"}, writes={"x"})
 
         print(f"\nAfter F->G->H->F->G:")
@@ -2839,3 +2862,716 @@ class TestSkippedUpstream:
             f"SKIPPED_UPSTREAM should be gone after running G, got {reasons_after_g}"
         assert ReasonType.FORWARD_STALE in reason_types, \
             f"Expected FORWARD_STALE after G, got {reasons_after_g}"
+
+
+class TestStalenessMode:
+    """Tests for syntactic vs semantic staleness computation modes."""
+
+    def setup_method(self):
+        from flowbook.kernel_support.structural_tracking import StalenessMode
+        self.StalenessMode = StalenessMode
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        """Save a pre-checkpoint for a cell."""
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
+
+    def test_default_mode_is_semantic(self):
+        """Default staleness mode should be SEMANTIC."""
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+    def test_set_staleness_mode_syntactic(self):
+        """Can switch to syntactic mode."""
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        assert self.sdc.staleness_mode == self.StalenessMode.SYNTACTIC
+
+    def test_set_staleness_mode_semantic(self):
+        """Can switch to semantic mode."""
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+    def test_syntactic_mode_clears_checkpoints_on_switch(self):
+        """Switching from semantic to syntactic should clear pre-checkpoints."""
+        # Execute a cell in semantic mode
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Verify pre-checkpoint exists
+        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
+
+        # Switch to syntactic mode
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # Pre-checkpoint should be cleared
+        assert f"{PRE_CHECKPOINT_PREFIX}a" not in self.checkpoints.saved
+
+    def test_syntactic_mode_marks_stale_on_set_intersection(self):
+        """Syntactic mode marks cells stale based on set intersection."""
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Re-run A with different value (W_A ∩ R_B = {x} ≠ ∅)
+        self._save_pre_checkpoint("a", {"x": 1, "y": 2})
+        ns_a2 = self._make_namespace({"x": 100, "y": 2})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should be stale (syntactic: W_A ∩ R_B ≠ ∅)
+        assert "b" in result.stale_cells
+
+    def test_syntactic_mode_no_convergence(self):
+        """Syntactic mode doesn't detect convergence - staleness is monotonic.
+
+        Scenario: A writes x, B reads x, then A re-writes x with different
+        value (B stale), then A re-writes x back to original (B still stale
+        in syntactic mode because no convergence detection).
+        """
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # A writes x=1
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Re-run A with different value x=2 (makes B stale via ForwardStale)
+        self._save_pre_checkpoint("a", {"x": 1, "y": 2})
+        ns_a2 = self._make_namespace({"x": 2, "y": 2})
+        result_a2 = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert "b" in result_a2.stale_cells
+
+        # Re-run A with original value x=1 (back to original)
+        self._save_pre_checkpoint("a", {"x": 2, "y": 2})
+        ns_a3 = self._make_namespace({"x": 1, "y": 2})
+        result_a3 = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a3,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # In syntactic mode, B should STILL be stale (no convergence detection)
+        # because syntactic mode is monotonic
+        assert "b" in result_a3.stale_cells
+
+    def test_semantic_mode_detects_convergence(self):
+        """Semantic mode detects convergence and clears staleness.
+
+        Scenario: A writes x, B reads x, then A re-writes x with different
+        value (B stale), then A re-writes x back to original (B becomes clean
+        in semantic mode due to convergence detection).
+        """
+        # Default is semantic mode
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+        # A writes x=1
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x (captures pre-checkpoint with x=1)
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Re-run A with different value x=2 (makes B stale via ForwardStale)
+        self._save_pre_checkpoint("a", {"x": 1, "y": 2})
+        ns_a2 = self._make_namespace({"x": 2, "y": 2})
+        result_a2 = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert "b" in result_a2.stale_cells
+
+        # Re-run A with original value x=1 (back to original - convergence!)
+        self._save_pre_checkpoint("a", {"x": 2, "y": 2})
+        ns_a3 = self._make_namespace({"x": 1, "y": 2})
+        result_a3 = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a3,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # In semantic mode, B should NOT be stale anymore (converged)
+        assert "b" not in result_a3.stale_cells
+
+    def test_syntactic_mode_discards_checkpoint_after_execution(self):
+        """Syntactic mode discards pre-checkpoint after computing W_i."""
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # Execute cell A
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # In syntactic mode, pre-checkpoint should be discarded
+        assert f"{PRE_CHECKPOINT_PREFIX}a" not in self.checkpoints.saved
+
+    def test_semantic_mode_keeps_checkpoint(self):
+        """Semantic mode keeps pre-checkpoint for convergence detection."""
+        # Default is semantic mode
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+        # Execute cell A
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # In semantic mode, pre-checkpoint should be kept
+        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
+
+    # =======================================================================
+    # Backward Staleness Tests
+    # =======================================================================
+
+    def test_backward_staleness_syntactic_marks_earlier_cell_stale(self):
+        """BackwardStale: when later cell writes to var read by earlier clean cell.
+
+        Scenario: A reads x, B is clean, then C writes x.
+        After C runs, A should be marked stale (W_C ∩ R_A = {x} ≠ ∅).
+
+        Note: Staleness is always computed, even when C triggers NoWriteAfterRead
+        error (because C writes to x that A read).
+        """
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # A reads x (clean cell that read x)
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        # A should be clean
+        assert self.sdc._notebook_state.is_clean("a")
+
+        # B does something unrelated
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 1, "y": 10, "z": 20})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"z"}),
+        )
+
+        # C writes x (should make A stale via BackwardStale)
+        # Staleness is computed even with NoWriteAfterRead error
+        self._save_pre_checkpoint("c", {"x": 1, "y": 10, "z": 20})
+        ns_c = self._make_namespace({"x": 999, "y": 10, "z": 20})
+        result = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # A should be stale (backward staleness: W_C ∩ R_A ≠ ∅)
+        assert "a" in result.stale_cells
+
+    def test_backward_staleness_semantic_checks_diff(self):
+        """Semantic BackwardStale uses diff comparison for precision.
+
+        If cell C writes x but the value converges to what A originally saw,
+        A should NOT be marked stale in semantic mode.
+        """
+        # Default is semantic mode
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+        # A reads x=1
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("a")
+
+        # B does something unrelated
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 1, "y": 10, "z": 20})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"z"}),
+        )
+
+        # C writes x to SAME value as A saw (x=1 -> x=1, no actual change)
+        # In semantic mode, A should NOT be stale because diff is empty
+        self._save_pre_checkpoint("c", {"x": 1, "y": 10, "z": 20})
+        ns_c = self._make_namespace({"x": 1, "y": 10, "z": 20})
+        result = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # A should NOT be stale - no actual change to x
+        assert "a" not in result.stale_cells
+
+    def test_backward_staleness_semantic_marks_stale_on_real_change(self):
+        """Semantic BackwardStale marks stale when values actually differ.
+
+        Note: Staleness is always computed, even when C triggers NoWriteAfterRead
+        error (because C writes to x that A read).
+        """
+        # Default is semantic mode
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+        # A reads x=1
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("a")
+
+        # C writes x to DIFFERENT value
+        # Staleness is computed even with NoWriteAfterRead error
+        self._save_pre_checkpoint("c", {"x": 1, "y": 10})
+        ns_c = self._make_namespace({"x": 999, "y": 10})
+        result = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # A should be stale - x actually changed from what A saw
+        assert "a" in result.stale_cells
+
+    def test_backward_staleness_only_affects_clean_cells(self):
+        """BackwardStale should only mark clean cells as stale, not already-stale cells.
+
+        Note: Staleness is always computed, even when C triggers NoWriteAfterRead
+        error (because C writes to x that A and B read).
+        """
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 1, "y": 10, "z": 20})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"z"}),
+        )
+
+        # Manually mark A as stale (simulating earlier staleness)
+        from flowbook.kernel.models import Reason, ReasonType
+        self.sdc._notebook_state.add_reason("a", Reason(ReasonType.FORWARD_STALE, loc="dummy", cell_id="dummy"))
+        assert not self.sdc._notebook_state.is_clean("a")
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # C writes x - should only affect B (which is clean), not A (already stale)
+        # Staleness is computed even with NoWriteAfterRead error
+        self._save_pre_checkpoint("c", {"x": 1, "y": 10, "z": 20})
+        ns_c = self._make_namespace({"x": 999, "y": 10, "z": 20})
+        result = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should now be stale
+        assert "b" in result.stale_cells
+
+
+class TestStalenessAlwaysComputed:
+    """Tests verifying that staleness is always computed, regardless of errors.
+
+    The key invariant: Staleness tracking is orthogonal to error handling.
+    Even when a cell has predicate violations (NoReadAndWrite, NoWriteAfterRead, etc.),
+    staleness should still be computed because:
+    1. The execution record (R, W sets) is always updated
+    2. Downstream cells need to know about changes
+    3. Rollback (if any) happens at the kernel level, not in check()
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        return namespace
+
+    def test_forward_stale_computed_with_no_read_and_write_error(self):
+        """ForwardStale is computed even when cell has NoReadAndWrite error.
+
+        Scenario: B reads and writes x (NoReadAndWrite violation).
+        C should still be marked stale because B changed x that C reads.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # C reads x
+        self._save_pre_checkpoint("c", {"x": 1})
+        ns_c = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("c")
+
+        # B reads and writes x (triggers NoReadAndWrite)
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 999, "y": 10})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"x"}),
+        )
+
+        # B should have NoReadAndWrite error
+        assert result.has_errors()
+        assert any(e.error_type.value == "no_read_and_write" for e in result.errors)
+
+        # C should still be marked stale (ForwardStale was computed)
+        assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
+
+    def test_forward_stale_computed_with_no_write_after_read_error(self):
+        """ForwardStale is computed even when cell has NoWriteAfterRead error.
+
+        Scenario: A reads x, then B writes x (NoWriteAfterRead violation).
+        C should still be marked stale because B changed x that C reads.
+        """
+        # A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # C reads x
+        self._save_pre_checkpoint("c", {"x": 1})
+        ns_c = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("c")
+
+        # B writes x (triggers NoWriteAfterRead against A)
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 999, "y": 10})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should have NoWriteAfterRead error
+        assert result.has_errors()
+        assert any(e.error_type.value == "no_write_after_read" for e in result.errors)
+
+        # C should still be marked stale (ForwardStale was computed)
+        assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
+
+    def test_backward_stale_computed_with_error(self):
+        """BackwardStale is computed even when cell has errors.
+
+        Scenario: A reads x, then C writes x.
+        A should be marked stale (BackwardStale) even though C has NoWriteAfterRead error.
+        """
+        # A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("a")
+
+        # C writes x (triggers NoWriteAfterRead against A)
+        self._save_pre_checkpoint("c", {"x": 1, "y": 10})
+        ns_c = self._make_namespace({"x": 999, "y": 10})
+        result = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # C should have NoWriteAfterRead error
+        assert result.has_errors()
+
+        # A should be marked stale (BackwardStale was computed)
+        assert "a" in result.stale_cells or not self.sdc._notebook_state.is_clean("a")
+
+    def test_last_writer_updated_with_error(self):
+        """last_writer is updated even when cell has errors.
+
+        This ensures that downstream staleness tracking works correctly.
+        """
+        # A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # B writes x (triggers NoWriteAfterRead against A)
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 999})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B has error
+        assert result.has_errors()
+
+        # last_writer should still be updated
+        assert self.sdc._notebook_state.last_writer.get("x") == "b"
+
+    def test_multiple_errors_still_compute_staleness(self):
+        """Staleness is computed even when cell has multiple errors.
+
+        Scenario: B reads and writes x, which triggers:
+        - NoReadAndWrite (reads and writes same variable)
+        - NoWriteAfterRead (if A read x first)
+
+        Downstream cell C should still be marked stale.
+        """
+        # A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # C reads x
+        self._save_pre_checkpoint("c", {"x": 1})
+        ns_c = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # B reads and writes x (triggers both NoReadAndWrite and NoWriteAfterRead)
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 999, "y": 10})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"x"}),
+        )
+
+        # B should have errors
+        assert result.has_errors()
+        assert len(result.errors) >= 1
+
+        # C should still be marked stale
+        assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
+
+    def test_skipped_upstream_converted_with_error(self):
+        """SKIPPED_UPSTREAM → FORWARD_STALE conversion works even with errors.
+
+        Scenario: F→G→H, then F (skipping G), then G.
+        When G runs (even with NoReadAndWrite error), H's SKIPPED_UPSTREAM
+        should be converted to FORWARD_STALE.
+        """
+        self.sdc.set_cell_order(["f", "g", "h"])
+
+        # F writes x
+        self._save_pre_checkpoint("f", {})
+        ns_f = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="f",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}f"],
+            namespace=ns_f,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # G reads and writes x
+        self._save_pre_checkpoint("g", {"x": 1})
+        ns_g = self._make_namespace({"x": 2})
+        self.sdc.check(
+            cell_id="g",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}g"],
+            namespace=ns_g,
+            tracking=make_tracking(reads={"x"}, writes={"x"}),
+        )
+
+        # H reads x
+        self._save_pre_checkpoint("h", {"x": 2})
+        ns_h = self._make_namespace({"x": 2, "y": 10})
+        self.sdc.check(
+            cell_id="h",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}h"],
+            namespace=ns_h,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("h")
+
+        # Re-run F (skipping G)
+        self._save_pre_checkpoint("f", {"x": 2, "y": 10})
+        ns_f2 = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="f",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}f"],
+            namespace=ns_f2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # H should have SKIPPED_UPSTREAM
+        reasons_h = self.sdc._notebook_state.get_reasons("h")
+        assert any(r.type == ReasonType.SKIPPED_UPSTREAM for r in reasons_h)
+
+        # Re-run G (triggers NoReadAndWrite error)
+        self._save_pre_checkpoint("g", {"x": 1, "y": 10})
+        ns_g2 = self._make_namespace({"x": 3, "y": 10})
+        result = self.sdc.check(
+            cell_id="g",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}g"],
+            namespace=ns_g2,
+            tracking=make_tracking(reads={"x"}, writes={"x"}),
+        )
+
+        # G should have NoReadAndWrite error
+        assert result.has_errors()
+        assert any(e.error_type.value == "no_read_and_write" for e in result.errors)
+
+        # H should now have FORWARD_STALE (converted from SKIPPED_UPSTREAM)
+        reasons_h_after = self.sdc._notebook_state.get_reasons("h")
+        reason_types = {r.type for r in reasons_h_after}
+        assert ReasonType.FORWARD_STALE in reason_types
+        assert ReasonType.SKIPPED_UPSTREAM not in reason_types

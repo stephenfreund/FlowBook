@@ -492,3 +492,104 @@ memory checkpoints that snapshot variable states.
 The implementation uses a rule-based conflict resolver for column-level precision:
 
 **Code:** `CONFLICT_RULES` in `kernel/conflict_rules.py`, `ConflictResolver` in `kernel/conflict_resolver.py`
+
+---
+
+## 10. Staleness Computation Modes
+
+The implementation supports two staleness computation modes that differ in
+precision and memory usage.
+
+### 10.1 Syntactic Mode
+
+Uses checkpoint once to compute accurate W_i (what actually changed),
+then evaluates all predicates using pure set operations on R and W.
+
+**Checkpoint usage**: Compute diff, then discard.
+
+**Stored state**:
+```
+R[i] : Set[Loc]    — variables read before write
+W[i] : Set[Loc]    — variables that actually changed
+```
+
+**Predicates**:
+```
+NoReadAndWrite(R, W, i)    ≝  Rᵢ ∩ Wᵢ = ∅
+WriteBeforeRead(R, W, i)   ≝  Rᵢ ⊆ W_{1..i-1}
+NoReadBeforeWrite(R, W, i) ≝  Rᵢ ∩ W_{i+1..n} = ∅
+NoWriteAfterRead(R, W, i)  ≝  Wᵢ ∩ R_{1..i-1} = ∅  (clean cells only)
+
+ForwardStale(R, W, i, j)   ≝  j > i ∧ Wᵢ ∩ Rⱼ ≠ ∅
+```
+
+**Properties**:
+- Staleness is monotonic (once stale, always stale until re-executed)
+- Sound but conservative (may over-approximate staleness)
+- Memory: O(cells × |variable names|)
+
+### 10.2 Semantic Mode
+
+Uses checkpoint to compute R and W, then stores pre-checkpoints
+for semantic value comparison.
+
+**Checkpoint usage**: Store permanently for each executed cell.
+
+**Stored state**:
+```
+R[i], W[i] : Set[Loc]           — for quick filtering
+pre_checkpoint[i] : Σ → Value   — namespace state when cell i executed
+```
+
+**Predicates** (with semantic override):
+```
+ForwardStale_semantic(i, j) ≝
+    j > i ∧ Wᵢ ∩ Rⱼ ≠ ∅ ∧ diff(pre_checkpoint[j], Σ, Rⱼ) ≠ ∅
+```
+
+**Convergence rule**:
+```
+Converged(j) ≝ diff(pre_checkpoint[j], Σ, Rⱼ) = ∅
+```
+If `Converged(j)` and cell j was stale, mark j clean.
+
+**Properties**:
+- Staleness is non-monotonic (can be cleared when values converge)
+- Precise (only marks stale when values actually differ)
+- Memory: O(cells × |variable values|)
+
+### 10.3 Comparison
+
+| Property | Syntactic | Semantic |
+|----------|-----------|----------|
+| Checkpoint retention | Discard after computing W | Keep permanently |
+| Staleness check | W_i ∩ R_j ≠ ∅ | diff(pre_checkpoint[j], Σ, R_j) ≠ ∅ |
+| Un-staleness | Never | When diff becomes empty |
+| Memory | O(cells × names) | O(cells × values) |
+| Precision | Conservative | Exact |
+
+### 10.4 Example: Diverge-Then-Converge
+
+```
+Cell A: reads x (pre_checkpoint_A[x] = 1)
+Cell B: writes x = 2
+Cell C: writes x = 1
+```
+
+| After | Syntactic | Semantic |
+|-------|-----------|----------|
+| B runs | A stale (W_B ∩ R_A = {x}) | A stale (Σ[x]=2 ≠ pre_A[x]=1) |
+| C runs | A still stale | A clean (Σ[x]=1 = pre_A[x]=1) |
+
+### 10.5 Implementation Map
+
+| Concept | Code Location |
+|---------|---------------|
+| StalenessMode enum | `flowbook/kernel_support/structural_tracking.py` |
+| Mode property | `ReproducibilityEnforcer.staleness_mode` |
+| Mode setter | `ReproducibilityEnforcer.set_staleness_mode()` |
+| Syntactic forward stale | `_compute_forward_staleness_syntactic()` |
+| Semantic forward stale | `_compute_forward_staleness_semantic()` |
+| Convergence detection | `_check_convergence()` |
+| Pre-checkpoint cleanup | `_clear_all_pre_checkpoints()` |
+| Magic command | `%staleness_mode` in `flowbook_kernel.py`
