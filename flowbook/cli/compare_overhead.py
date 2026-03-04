@@ -709,11 +709,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             prev_cumulative = cumulative_ckpt
 
     # Then compute ratio: checkpoint_size / user_ns_size
+    # Use base_namespace_mb as user_ns (see NOTE in Panel 6 and TODO in compare_baseline.py)
     for i, fc in enumerate(flowbook_mem_cells):
-        overhead = fc.get("overhead_breakdown") or {}
-        total_overhead_mb = sum(overhead.values()) if overhead else 0
-        current_mb = fc.get("current_footprint_mb", 0)
-        user_ns_mb = max(0, current_mb - total_overhead_mb)
+        user_ns_mb = fc.get("base_namespace_mb", fc.get("current_footprint_mb", 0))
         user_ns_bytes = user_ns_mb * mb
 
         if user_ns_bytes > 0:
@@ -2433,14 +2431,13 @@ def plot_combined_v2(
                 checkpoint_bytes.append(delta)
                 prev_cumulative = cumulative_ckpt
 
-        # Compute user_ns size per cell: current_footprint - total_overhead
-        # This gives the user namespace size without FlowBook overhead
+        # Compute ratio: checkpoint_bytes / user_ns_bytes
+        # Use base_namespace_mb as user_ns (currently equals current_footprint_mb)
+        # NOTE: base_namespace_mb should ideally be footprint minus overhead,
+        # but currently includes checkpoint memory. See TODO in compare_baseline.py.
         ratios = []
         for i, c in enumerate(flowbook_mem_cells):
-            overhead = c.get("overhead_breakdown") or {}
-            total_overhead_mb = sum(overhead.values()) if overhead else 0
-            current_mb = c.get("current_footprint_mb", 0)
-            user_ns_mb = max(0, current_mb - total_overhead_mb)
+            user_ns_mb = c.get("base_namespace_mb", c.get("current_footprint_mb", 0))
             user_ns_bytes = user_ns_mb * mb
 
             if user_ns_bytes > 0:
