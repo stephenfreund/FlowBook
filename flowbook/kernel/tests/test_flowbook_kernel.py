@@ -10,8 +10,13 @@ class TestReproducibilityEnforcerGetStaleCells:
     """Tests for get_stale_cells method."""
 
     def test_get_stale_cells_empty(self, sdc_helper_with_order):
-        """No stale cells when nothing has been executed."""
-        assert sdc_helper_with_order.sdc.get_stale_cells() == []
+        """Unexecuted cells are stale with NEVER_EXECUTED reason.
+
+        With reason tracking, cells in cell_order start as NeverExecuted.
+        """
+        # All 4 cells (a, b, c, d) are stale because they haven't executed
+        stale = sdc_helper_with_order.sdc.get_stale_cells()
+        assert set(stale) == {"a", "b", "c", "d"}
 
     def test_get_stale_cells_after_staleness(self, sdc_helper_with_order):
         """get_stale_cells returns cached staleness."""
@@ -27,7 +32,12 @@ class TestReproducibilityEnforcerGetStaleCells:
         result = helper.execute_cell("a", {"x": 1, "y": 2}, {"x": 100, "y": 2}, writes={"x"})
 
         assert "b" in result.stale_cells
-        assert helper.sdc.get_stale_cells() == ["b"]
+        # B is stale (FORWARD_STALE), c and d are stale (NEVER_EXECUTED)
+        stale = helper.sdc.get_stale_cells()
+        assert "b" in stale
+        assert "c" in stale  # Never executed
+        assert "d" in stale  # Never executed
+        assert "a" not in stale  # Just executed, so fresh
 
     def test_get_stale_cells_in_document_order(self, sdc_helper_with_order):
         """Stale cells are returned in document order."""
@@ -65,13 +75,19 @@ class TestReproducibilityEnforcerReset:
         helper.execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
         helper.execute_cell("a", {"x": 1, "y": 2}, {"x": 100, "y": 2}, writes={"x"})
 
-        assert helper.sdc.get_stale_cells() == ["b"]
+        # B is stale (FORWARD_STALE), c and d are stale (NEVER_EXECUTED)
+        stale = helper.sdc.get_stale_cells()
+        assert "b" in stale
+        assert "c" in stale  # Never executed
+        assert "d" in stale  # Never executed
+        assert "a" not in stale  # Just executed, so fresh
 
         # Reset
         helper.sdc.reset()
 
+        # After reset, cell_order is cleared so no cells are stale
         assert helper.sdc.get_stale_cells() == []
-        assert helper.sdc.records == {}
+        assert helper.sdc._notebook_state.tracking_data == {}
         assert helper.sdc.seq_counter == 0
 
 
@@ -86,18 +102,26 @@ class TestReproducibilityEnforcerComputeAllStaleCells:
         helper.execute_cell("a", {}, {"x": 1}, writes={"x"})
         helper.execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
 
-        # Get current namespace checkpoint
+        # Get current namespace checkpoint with modified x
         helper.checkpoints.save("current", {"x": 100, "y": 2}, max_size_mb=None)
         current = helper.checkpoints.saved["current"]
 
-        # Manually clear stale cache to simulate external modification
-        helper.sdc._stale_cells.clear()
-        assert helper.sdc.get_stale_cells() == []
+        # Manually mark b as clean to simulate external modification
+        helper.sdc._notebook_state.set_clean("b")
+        # Verify b is now clean but c, d are still NEVER_EXECUTED
+        stale_before = helper.sdc.get_stale_cells()
+        assert "b" not in stale_before
+        assert "c" in stale_before  # Never executed
+        assert "d" in stale_before  # Never executed
 
-        # Recompute should find b stale
+        # Recompute should find b stale again (FORWARD_STALE from x)
         result = helper.sdc.compute_all_stale_cells(current)
-        assert result == ["b"]
-        assert helper.sdc.get_stale_cells() == ["b"]
+        assert "b" in result  # b is stale because x changed
+        # c and d are also stale (NEVER_EXECUTED)
+        stale_after = helper.sdc.get_stale_cells()
+        assert "b" in stale_after
+        assert "c" in stale_after
+        assert "d" in stale_after
 
 
 class TestHelperFunctions:
@@ -109,7 +133,9 @@ class TestHelperFunctions:
             "a", {}, {"x": 1}, writes={"x"}
         )
         assert result.violation is None
-        assert result.stale_cells == []
+        # b, c, d are stale (NEVER_EXECUTED), a is clean (just executed)
+        assert "a" not in result.stale_cells
+        assert set(result.stale_cells) == {"b", "c", "d"}
 
     def test_execute_cell_with_column_tracking(self, sdc_helper_with_order):
         """execute_cell supports column tracking."""

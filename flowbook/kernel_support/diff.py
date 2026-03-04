@@ -381,6 +381,160 @@ def _register_pytorch_dispatch_if_needed():
         pass
 
 
+# LightGBM models - add to dispatch table if available
+# We register lazily to avoid import-time side effects
+_lightgbm_dispatch_registered = False
+
+
+def _is_lightgbm_model(x) -> bool:
+    """Check if x is a LightGBM model without importing lightgbm.
+
+    Uses module name checking to avoid the lightgbm import (~1s).
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    # Check for lightgbm module
+    if not module.startswith('lightgbm'):
+        return False
+    # Check for sklearn estimator classes
+    return cls.__name__ in ('LGBMRegressor', 'LGBMClassifier', 'LGBMRanker', 'LGBMModel')
+
+
+def _register_lightgbm_dispatch_if_needed():
+    """Register LightGBM model types in dispatch table lazily."""
+    global _lightgbm_dispatch_registered
+    if _lightgbm_dispatch_registered:
+        return
+    _lightgbm_dispatch_registered = True
+
+    try:
+        import lightgbm as lgb
+        _COMPARE_DISPATCH[lgb.LGBMRegressor] = "_compare_lightgbm_model"
+        _COMPARE_DISPATCH[lgb.LGBMClassifier] = "_compare_lightgbm_model"
+        _COMPARE_DISPATCH[lgb.LGBMRanker] = "_compare_lightgbm_model"
+    except ImportError:
+        pass
+
+
+# SHAP objects - add to dispatch table if available
+# We register lazily to avoid import-time side effects
+_shap_dispatch_registered = False
+
+
+def _is_shap_explanation(x) -> bool:
+    """Check if x is a SHAP Explanation without importing shap.
+
+    Uses module name checking to avoid the shap import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    # Check for shap module and Explanation class
+    return 'shap' in module and cls.__name__ == 'Explanation'
+
+
+def _is_shap_tree_explainer(x) -> bool:
+    """Check if x is a SHAP TreeExplainer without importing shap.
+
+    Uses module name checking to avoid the shap import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    # Check for shap explainers module and TreeExplainer class
+    return 'shap' in module and cls.__name__ == 'TreeExplainer'
+
+
+def _register_shap_dispatch_if_needed():
+    """Register SHAP types in dispatch table lazily."""
+    global _shap_dispatch_registered
+    if _shap_dispatch_registered:
+        return
+    _shap_dispatch_registered = True
+
+    try:
+        from shap import Explanation
+        from shap.explainers import Tree as TreeExplainer
+        _COMPARE_DISPATCH[Explanation] = "_compare_shap_explanation"
+        _COMPARE_DISPATCH[TreeExplainer] = "_compare_shap_tree_explainer"
+    except ImportError:
+        pass
+
+
+# sklearn TargetEncoder - add to dispatch table if available
+# We register lazily to avoid import-time side effects
+_target_encoder_dispatch_registered = False
+
+
+def _is_sklearn_target_encoder(x) -> bool:
+    """Check if x is a sklearn TargetEncoder without importing sklearn.
+
+    Uses module name checking to avoid the sklearn import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    # Check for sklearn preprocessing module and TargetEncoder class
+    return 'sklearn' in module and cls.__name__ == 'TargetEncoder'
+
+
+def _register_target_encoder_dispatch_if_needed():
+    """Register TargetEncoder types in dispatch table lazily."""
+    global _target_encoder_dispatch_registered
+    if _target_encoder_dispatch_registered:
+        return
+    _target_encoder_dispatch_registered = True
+
+    try:
+        from sklearn.preprocessing import TargetEncoder
+        _COMPARE_DISPATCH[TargetEncoder] = "_compare_target_encoder"
+    except ImportError:
+        pass
+
+
+# sklearn StackingRegressor/Classifier - add to dispatch table if available
+# We register lazily to avoid import-time side effects
+_stacking_dispatch_registered = False
+
+
+def _is_sklearn_stacking_estimator(x) -> bool:
+    """Check if x is a sklearn StackingRegressor or StackingClassifier.
+
+    Uses module name checking to avoid the sklearn import.
+    """
+    cls = type(x)
+    module = getattr(cls, '__module__', '') or ''
+    # Ensure module is a string
+    if not isinstance(module, str):
+        return False
+    # Check for sklearn ensemble module and Stacking classes
+    return 'sklearn' in module and cls.__name__ in ('StackingRegressor', 'StackingClassifier')
+
+
+def _register_stacking_dispatch_if_needed():
+    """Register Stacking estimator types in dispatch table lazily."""
+    global _stacking_dispatch_registered
+    if _stacking_dispatch_registered:
+        return
+    _stacking_dispatch_registered = True
+
+    try:
+        from sklearn.ensemble import StackingRegressor, StackingClassifier
+        _COMPARE_DISPATCH[StackingRegressor] = "_compare_stacking_estimator"
+        _COMPARE_DISPATCH[StackingClassifier] = "_compare_stacking_estimator"
+    except ImportError:
+        pass
+
+
 # Cache for subclass dispatch lookups
 _DISPATCH_CACHE: Dict[type, Optional[str]] = {}
 
@@ -529,6 +683,49 @@ def _is_integer_dtype(dtype) -> bool:
             return np.issubdtype(dtype, np.integer)
         except (TypeError, AttributeError):
             return False
+
+
+# Chunk size for byte-level array comparison (1 MB)
+_BYTE_EQUAL_CHUNK_SIZE = 1 << 20
+
+
+def _fast_numeric_equal(a: np.ndarray, b: np.ndarray) -> bool:
+    """
+    Fast byte-level comparison for numeric arrays.
+
+    Uses IEEE 754 representation for comparison, which means NaN == NaN
+    (same bit pattern). This is ~3x faster than per-column np.array_equal
+    for large arrays.
+
+    Args:
+        a: First numpy array (must be C-contiguous)
+        b: Second numpy array (must be C-contiguous)
+
+    Returns:
+        True if arrays have identical byte representation.
+
+    Raises:
+        ValueError: If arrays are not C-contiguous.
+    """
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    if a.size == 0:
+        return True
+    if not (a.flags.c_contiguous and b.flags.c_contiguous):
+        raise ValueError("Arrays must be C-contiguous")
+
+    a_bytes = a.view(np.uint8)
+    b_bytes = b.view(np.uint8)
+    n = a_bytes.size
+    chunk = _BYTE_EQUAL_CHUNK_SIZE
+
+    if n <= chunk:
+        return bool(np.all(a_bytes == b_bytes))
+
+    for i in range(0, n, chunk):
+        if not np.all(a_bytes[i:i + chunk] == b_bytes[i:i + chunk]):
+            return False
+    return True
 
 
 def _all_elements_are_floats(arr) -> bool:
@@ -980,6 +1177,10 @@ class Diff:
         Compare two values, dispatching to type-specific methods.
         Returns None if equal, otherwise returns DiffNode with differences.
         """
+        # Fast path: same object means definitely equal (identity short-circuit)
+        # This eliminates O(n) comparison for reused objects in incremental checkpoints
+        if val_a is val_b:
+            return None
 
         ta = type(val_a)
         tb = type(val_b)
@@ -1210,6 +1411,31 @@ class Diff:
                     _register_pytorch_dispatch_if_needed()
                     _DISPATCH_CACHE[t] = "_compare_pytorch_model"
                     result = self._compare_pytorch_model(val_a, val_b, path)
+                elif _is_lightgbm_model(val_a):
+                    # LightGBM model - call comparison directly
+                    _register_lightgbm_dispatch_if_needed()
+                    _DISPATCH_CACHE[t] = "_compare_lightgbm_model"
+                    result = self._compare_lightgbm_model(val_a, val_b, path)
+                elif _is_shap_explanation(val_a):
+                    # SHAP Explanation - call comparison directly
+                    _register_shap_dispatch_if_needed()
+                    _DISPATCH_CACHE[t] = "_compare_shap_explanation"
+                    result = self._compare_shap_explanation(val_a, val_b, path)
+                elif _is_shap_tree_explainer(val_a):
+                    # SHAP TreeExplainer - call comparison directly
+                    _register_shap_dispatch_if_needed()
+                    _DISPATCH_CACHE[t] = "_compare_shap_tree_explainer"
+                    result = self._compare_shap_tree_explainer(val_a, val_b, path)
+                elif _is_sklearn_target_encoder(val_a):
+                    # sklearn TargetEncoder - call comparison directly
+                    _register_target_encoder_dispatch_if_needed()
+                    _DISPATCH_CACHE[t] = "_compare_target_encoder"
+                    result = self._compare_target_encoder(val_a, val_b, path)
+                elif _is_sklearn_stacking_estimator(val_a):
+                    # sklearn StackingRegressor/Classifier - call comparison directly
+                    _register_stacking_dispatch_if_needed()
+                    _DISPATCH_CACHE[t] = "_compare_stacking_estimator"
+                    result = self._compare_stacking_estimator(val_a, val_b, path)
                 elif isinstance(val_a, dict):
                     # Handle dict subclasses (OrderedDict, Counter, defaultdict, etc.)
                     _DISPATCH_CACHE[t] = "_compare_dict"
@@ -1978,12 +2204,30 @@ class Diff:
         except (TypeError, ValueError):
             pass  # Some array types don't support shares_memory
 
-        # For float types, use numpy's array_equal with NaN handling
-        # This is ~3x faster than mask+allclose for float columns
-        if pd.api.types.is_float_dtype(s_a.dtype):
-            return np.array_equal(s_a.to_numpy(), s_b.to_numpy(), equal_nan=True)
+        dtype = s_a.dtype
 
-        # For all other types (int, string, object, etc.), pandas equals is faster
+        # Fast byte-level comparison for numeric types (float, int, complex)
+        # This is ~3x faster than per-element comparison for large arrays
+        is_numeric = (
+            pd.api.types.is_float_dtype(dtype) or
+            pd.api.types.is_integer_dtype(dtype) or
+            np.issubdtype(dtype, np.complexfloating)
+        )
+
+        if is_numeric:
+            arr_a = s_a.to_numpy()
+            arr_b = s_b.to_numpy()
+            if arr_a.flags.c_contiguous and arr_b.flags.c_contiguous:
+                try:
+                    return _fast_numeric_equal(arr_a, arr_b)
+                except ValueError:
+                    pass  # Fall through to standard comparison
+            # Fallback for non-contiguous arrays
+            if pd.api.types.is_float_dtype(dtype):
+                return np.array_equal(arr_a, arr_b, equal_nan=True)
+            return np.array_equal(arr_a, arr_b)
+
+        # For all other types (string, object, etc.), pandas equals is faster
         # because it avoids the to_numpy() conversion overhead
         return s_a.equals(s_b)
 
@@ -2007,6 +2251,36 @@ class Diff:
         Raises:
             Exception if comparison fails (caller should catch and fall back).
         """
+        # ======================================================================
+        # WHOLE-ARRAY FAST PATH: For homogeneous numeric DataFrames, compare
+        # the entire underlying array at once using byte-level comparison.
+        # This is ~3x faster than per-column comparison for large DataFrames.
+        # ======================================================================
+        dtypes = df_a.dtypes.unique()
+        if len(dtypes) == 1:
+            dtype = dtypes[0]
+            is_numeric = (
+                pd.api.types.is_float_dtype(dtype) or
+                pd.api.types.is_integer_dtype(dtype) or
+                np.issubdtype(dtype, np.complexfloating)
+            )
+            if is_numeric:
+                try:
+                    arr_a = df_a.values
+                    arr_b = df_b.values
+                    # Verify dtype wasn't coerced (e.g., to object)
+                    if arr_a.dtype == dtype and arr_b.dtype == dtype:
+                        if arr_a.flags.c_contiguous and arr_b.flags.c_contiguous:
+                            if _PROFILE_DIFF:
+                                log(f"[diff profile] {path}: Using whole-array byte comparison")
+                            return _fast_numeric_equal(arr_a, arr_b)
+                except (ValueError, TypeError):
+                    pass  # Fall through to per-column comparison
+
+        # ======================================================================
+        # PER-COLUMN FALLBACK: For mixed-dtype or non-contiguous DataFrames
+        # ======================================================================
+
         # Collect column timings if profiling is enabled
         column_timings: List[Tuple[float, str, str]] = []
 
@@ -2392,6 +2666,11 @@ class Diff:
 
         Returns None if pools are equal, CompoundDiff with differences otherwise.
         """
+        # POINTER COMPARISON first (O(1))
+        # If same object, trivially equal - no need for expensive content comparison
+        if val_a is val_b:
+            return None
+
         children: Dict[str, DiffNode] = {}
 
         # Fast path: shape check first (cheapest)
@@ -2736,6 +3015,385 @@ class Diff:
 
         if children:
             return CompoundDiff(source_type="pytorch_model", children=children, truncated=False)
+        return None
+
+    def _compare_lightgbm_model(
+        self, val_a, val_b, path: str
+    ) -> Optional[DiffNode]:
+        """
+        Compare LightGBM model objects using their model string representation.
+
+        For fitted models, the booster's model_to_string() provides a complete
+        representation of the tree ensemble. Comparing these strings is much
+        faster than traversing the Python object graph.
+
+        Models are compared by:
+        - Fitted status (both must be fitted or both unfitted)
+        - Model string (for fitted models)
+        - Parameters (for unfitted models)
+
+        Returns None if models are equal, CompoundDiff with differences otherwise.
+        """
+        children: Dict[str, DiffNode] = {}
+
+        # Check type match
+        if type(val_a) != type(val_b):
+            return ValueComparison(
+                status="different",
+                value1=type(val_a).__name__,
+                value2=type(val_b).__name__,
+                message=f"LightGBM model type mismatch at {path}: {type(val_a).__name__} vs {type(val_b).__name__}",
+            )
+
+        # Check fitted status
+        a_fitted = hasattr(val_a, 'booster_') and val_a.booster_ is not None
+        b_fitted = hasattr(val_b, 'booster_') and val_b.booster_ is not None
+
+        if a_fitted != b_fitted:
+            return ValueComparison(
+                status="different",
+                value1="fitted" if a_fitted else "unfitted",
+                value2="fitted" if b_fitted else "unfitted",
+                message=f"LightGBM fitted status mismatch at {path}: {'fitted' if a_fitted else 'unfitted'} vs {'fitted' if b_fitted else 'unfitted'}",
+            )
+
+        if not a_fitted:
+            # Both unfitted - compare parameters only
+            params_a = val_a.get_params()
+            params_b = val_b.get_params()
+            if params_a != params_b:
+                children["_params"] = ValueComparison(
+                    status="different",
+                    value1=str(params_a),
+                    value2=str(params_b),
+                    message=f"LightGBM parameters mismatch at {path}",
+                )
+        else:
+            # Both fitted - use POINTER COMPARISON first (O(1))
+            # Since our deepcopy shares the immutable _Booster, same pointer = same model
+            if val_a._Booster is val_b._Booster:
+                # Same booster reference - trivially equal, no comparison needed
+                pass
+            else:
+                # Different booster objects - need string comparison
+                # (happens when comparing models from different training runs)
+                str_a = val_a.booster_.model_to_string()
+                str_b = val_b.booster_.model_to_string()
+
+                if str_a != str_b:
+                    # Models are different - don't include full strings in diff
+                    # (they can be very large)
+                    children["_booster"] = ValueComparison(
+                        status="different",
+                        value1=f"<LightGBM model with {val_a.booster_.num_trees()} trees>",
+                        value2=f"<LightGBM model with {val_b.booster_.num_trees()} trees>",
+                        message=f"LightGBM model trees differ at {path}",
+                    )
+
+        if children:
+            return CompoundDiff(source_type="lightgbm_model", children=children, truncated=False)
+        return None
+
+    def _compare_shap_explanation(
+        self, val_a, val_b, path: str
+    ) -> Optional[DiffNode]:
+        """
+        Compare SHAP Explanation objects using pointer comparison for arrays.
+
+        SHAP Explanation objects contain large numpy arrays (values, base_values,
+        data) that are immutable after creation. Our deepcopy shares these arrays,
+        so we can use O(1) pointer comparison first.
+
+        Returns None if explanations are equal, CompoundDiff with differences otherwise.
+        """
+        children: Dict[str, DiffNode] = {}
+
+        # Check type match
+        if type(val_a) != type(val_b):
+            return ValueComparison(
+                status="different",
+                value1=type(val_a).__name__,
+                value2=type(val_b).__name__,
+                message=f"SHAP Explanation type mismatch at {path}",
+            )
+
+        # POINTER COMPARISON for immutable arrays (O(1))
+        # Since our deepcopy shares the immutable arrays, same pointer = same values
+        values_a = getattr(val_a, 'values', None)
+        values_b = getattr(val_b, 'values', None)
+
+        if values_a is values_b:
+            # Same values array - check other key arrays for safety
+            base_a = getattr(val_a, 'base_values', None)
+            base_b = getattr(val_b, 'base_values', None)
+            data_a = getattr(val_a, 'data', None)
+            data_b = getattr(val_b, 'data', None)
+
+            if base_a is base_b and data_a is data_b:
+                # All key arrays are identical pointers - equal
+                return None
+
+        # FALLBACK: Compare array contents if pointers differ
+        # This handles cases where explanations were created separately
+
+        # Compare values array (the SHAP values)
+        if values_a is not None or values_b is not None:
+            if values_a is None:
+                children["values"] = ValueComparison(
+                    status="different",
+                    value1=None,
+                    value2="<array>",
+                    message=f"SHAP values mismatch at {path}: first has no values",
+                )
+            elif values_b is None:
+                children["values"] = ValueComparison(
+                    status="different",
+                    value1="<array>",
+                    value2=None,
+                    message=f"SHAP values mismatch at {path}: second has no values",
+                )
+            elif values_a is not values_b:
+                # Different pointers - compare contents
+                if isinstance(values_a, np.ndarray) and isinstance(values_b, np.ndarray):
+                    if values_a.shape != values_b.shape:
+                        children["values"] = ValueComparison(
+                            status="different",
+                            value1=f"shape {values_a.shape}",
+                            value2=f"shape {values_b.shape}",
+                            message=f"SHAP values shape mismatch at {path}",
+                        )
+                    elif not np.allclose(values_a, values_b, equal_nan=True):
+                        children["values"] = ValueComparison(
+                            status="different",
+                            value1=f"<array {values_a.shape}>",
+                            value2=f"<array {values_b.shape}>",
+                            message=f"SHAP values differ at {path}",
+                        )
+
+        # Compare base_values
+        base_a = getattr(val_a, 'base_values', None)
+        base_b = getattr(val_b, 'base_values', None)
+        if base_a is not None and base_b is not None and base_a is not base_b:
+            if isinstance(base_a, np.ndarray) and isinstance(base_b, np.ndarray):
+                if not np.allclose(base_a, base_b, equal_nan=True):
+                    children["base_values"] = ValueComparison(
+                        status="different",
+                        value1=f"<array>",
+                        value2=f"<array>",
+                        message=f"SHAP base_values differ at {path}",
+                    )
+            elif base_a != base_b:
+                children["base_values"] = ValueComparison(
+                    status="different",
+                    value1=base_a,
+                    value2=base_b,
+                    message=f"SHAP base_values differ at {path}",
+                )
+
+        if children:
+            return CompoundDiff(source_type="shap_explanation", children=children, truncated=False)
+        return None
+
+    def _compare_shap_tree_explainer(
+        self, val_a, val_b, path: str
+    ) -> Optional[DiffNode]:
+        """
+        Compare SHAP TreeExplainer objects using identity comparison.
+
+        TreeExplainer is immutable after initialization, and our deepcopy
+        shares the entire object. So we use O(1) pointer comparison.
+
+        Returns None if explainers are equal, CompoundDiff with differences otherwise.
+        """
+        # POINTER COMPARISON (O(1))
+        # Since our deepcopy shares the entire explainer, same pointer = equal
+        if val_a is val_b:
+            return None
+
+        # Different explainers - they're considered different
+        # (We don't try to deep compare explainer internals as that's expensive
+        # and not meaningful - if they're different objects, they're different)
+        return ValueComparison(
+            status="different",
+            value1=f"<TreeExplainer id={id(val_a)}>",
+            value2=f"<TreeExplainer id={id(val_b)}>",
+            message=f"SHAP TreeExplainer objects differ at {path}",
+        )
+
+    def _compare_target_encoder(
+        self, val_a, val_b, path: str
+    ) -> Optional[DiffNode]:
+        """
+        Compare sklearn TargetEncoder objects using pointer comparison for fitted arrays.
+
+        TargetEncoder stores fitted state in numpy arrays that are immutable after fit().
+        Our deepcopy shares these arrays, so we can use O(1) pointer comparison first.
+
+        Returns None if encoders are equal, CompoundDiff with differences otherwise.
+        """
+        children: Dict[str, DiffNode] = {}
+
+        # Check type match
+        if type(val_a) != type(val_b):
+            return ValueComparison(
+                status="different",
+                value1=type(val_a).__name__,
+                value2=type(val_b).__name__,
+                message=f"TargetEncoder type mismatch at {path}",
+            )
+
+        # Check fitted status
+        a_fitted = hasattr(val_a, 'encodings_')
+        b_fitted = hasattr(val_b, 'encodings_')
+
+        if a_fitted != b_fitted:
+            return ValueComparison(
+                status="different",
+                value1="fitted" if a_fitted else "unfitted",
+                value2="fitted" if b_fitted else "unfitted",
+                message=f"TargetEncoder fitted status mismatch at {path}",
+            )
+
+        if not a_fitted:
+            # Both unfitted - compare parameters only
+            params_a = val_a.get_params()
+            params_b = val_b.get_params()
+            if params_a != params_b:
+                children["_params"] = ValueComparison(
+                    status="different",
+                    value1=str(params_a),
+                    value2=str(params_b),
+                    message=f"TargetEncoder parameters mismatch at {path}",
+                )
+        else:
+            # Both fitted - use POINTER COMPARISON first (O(1))
+            # Since our deepcopy shares the immutable encodings_, same pointer = equal
+            if val_a.encodings_ is val_b.encodings_:
+                # Same encodings reference - trivially equal
+                pass
+            else:
+                # Different encodings objects - compare values
+                enc_a = val_a.encodings_
+                enc_b = val_b.encodings_
+
+                # encodings_ is a list of arrays (one per feature)
+                if len(enc_a) != len(enc_b):
+                    children["encodings_"] = ValueComparison(
+                        status="different",
+                        value1=f"<{len(enc_a)} features>",
+                        value2=f"<{len(enc_b)} features>",
+                        message=f"TargetEncoder feature count mismatch at {path}",
+                    )
+                else:
+                    # Compare each feature's encodings
+                    for i, (arr_a, arr_b) in enumerate(zip(enc_a, enc_b)):
+                        if arr_a is arr_b:
+                            continue  # Same pointer
+                        if isinstance(arr_a, np.ndarray) and isinstance(arr_b, np.ndarray):
+                            if not np.allclose(arr_a, arr_b, equal_nan=True):
+                                children[f"encodings_[{i}]"] = ValueComparison(
+                                    status="different",
+                                    value1=f"<array>",
+                                    value2=f"<array>",
+                                    message=f"TargetEncoder encodings differ at {path}[{i}]",
+                                )
+                        elif arr_a != arr_b:
+                            children[f"encodings_[{i}]"] = ValueComparison(
+                                status="different",
+                                value1=arr_a,
+                                value2=arr_b,
+                                message=f"TargetEncoder encodings differ at {path}[{i}]",
+                            )
+
+        if children:
+            return CompoundDiff(source_type="target_encoder", children=children, truncated=False)
+        return None
+
+    def _compare_stacking_estimator(
+        self, val_a, val_b, path: str
+    ) -> Optional[DiffNode]:
+        """
+        Compare sklearn StackingRegressor/Classifier using pointer comparison.
+
+        Stacking estimators contain fitted base estimators that are immutable
+        after fit(). Our deepcopy shares these estimators, so we can use O(1)
+        pointer comparison first.
+
+        Returns None if estimators are equal, CompoundDiff with differences otherwise.
+        """
+        children: Dict[str, DiffNode] = {}
+
+        # Check type match
+        if type(val_a) != type(val_b):
+            return ValueComparison(
+                status="different",
+                value1=type(val_a).__name__,
+                value2=type(val_b).__name__,
+                message=f"Stacking estimator type mismatch at {path}",
+            )
+
+        # Check fitted status
+        a_fitted = hasattr(val_a, 'estimators_')
+        b_fitted = hasattr(val_b, 'estimators_')
+
+        if a_fitted != b_fitted:
+            return ValueComparison(
+                status="different",
+                value1="fitted" if a_fitted else "unfitted",
+                value2="fitted" if b_fitted else "unfitted",
+                message=f"Stacking estimator fitted status mismatch at {path}",
+            )
+
+        if not a_fitted:
+            # Both unfitted - compare parameters only
+            params_a = val_a.get_params(deep=False)
+            params_b = val_b.get_params(deep=False)
+            if params_a != params_b:
+                children["_params"] = ValueComparison(
+                    status="different",
+                    value1=str(params_a),
+                    value2=str(params_b),
+                    message=f"Stacking estimator parameters mismatch at {path}",
+                )
+        else:
+            # Both fitted - use POINTER COMPARISON first (O(1))
+            # Since our deepcopy shares the immutable fitted estimators, same pointer = equal
+
+            # Check estimators_ (list of fitted base estimators)
+            if val_a.estimators_ is val_b.estimators_:
+                # Same estimators reference - trivially equal for this key attribute
+                pass
+            else:
+                # Different estimators list - check each estimator by identity
+                if len(val_a.estimators_) != len(val_b.estimators_):
+                    children["estimators_"] = ValueComparison(
+                        status="different",
+                        value1=f"<{len(val_a.estimators_)} estimators>",
+                        value2=f"<{len(val_b.estimators_)} estimators>",
+                        message=f"Stacking estimator count mismatch at {path}",
+                    )
+                else:
+                    # Compare each estimator by identity (O(1) per estimator)
+                    for i, (est_a, est_b) in enumerate(zip(val_a.estimators_, val_b.estimators_)):
+                        if est_a is not est_b:
+                            children[f"estimators_[{i}]"] = ValueComparison(
+                                status="different",
+                                value1=f"<{type(est_a).__name__} id={id(est_a)}>",
+                                value2=f"<{type(est_b).__name__} id={id(est_b)}>",
+                                message=f"Base estimator differs at {path}[{i}]",
+                            )
+
+            # Check final_estimator_
+            if val_a.final_estimator_ is not val_b.final_estimator_:
+                children["final_estimator_"] = ValueComparison(
+                    status="different",
+                    value1=f"<{type(val_a.final_estimator_).__name__}>",
+                    value2=f"<{type(val_b.final_estimator_).__name__}>",
+                    message=f"Final estimator differs at {path}",
+                )
+
+        if children:
+            return CompoundDiff(source_type="stacking_estimator", children=children, truncated=False)
         return None
 
     def _compare_groupby(self, val_a, val_b, path: str) -> Optional[ValueComparison]:

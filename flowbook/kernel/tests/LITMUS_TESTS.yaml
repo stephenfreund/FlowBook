@@ -1,0 +1,1585 @@
+# LITMUS_TESTS.yaml
+# Litmus tests for FlowBook reproducibility enforcement.
+# Each test defines a sequence of operations and expected outcomes.
+#
+# Tests are provided in two forms:
+# 1. EXPLICIT: Using explicit reads/writes fields
+# 2. CODE: Using code field for AST-based inference
+
+spec:
+  version: "1.0"
+  description: |
+    Litmus tests for FlowBook reproducibility enforcement.
+    Each test defines a sequence of operations and expected outcomes.
+
+  operations:
+    RUN:
+      description: "Execute a cell"
+      fields:
+        cell: "Cell ID to execute (required)"
+        pre_namespace: "Variables before execution (dict)"
+        post_namespace: "Variables after execution (dict)"
+        # Option 1: Explicit R/W
+        reads: "Variables read before written (list)"
+        writes: "Variables written (list)"
+        column_reads: "Column-level reads {var: [cols]} (optional)"
+        column_writes: "Column-level writes {var: [cols]} (optional)"
+        structural_reads: "Structural reads {var: [attrs]} (optional)"
+        # Option 2: Infer from code
+        code: "Python code - infers reads/writes/columns/structural (alternative)"
+    EDIT:
+      description: "Mark cell as edited by user"
+      fields:
+        cell: "Cell ID edited (required)"
+    DELETE:
+      description: "Remove cell from notebook"
+      fields:
+        cell: "Cell ID to delete (required)"
+    INSERT:
+      description: "Insert new cell"
+      fields:
+        cell: "New cell ID (required)"
+        position: "Index to insert at (required)"
+    MOVE:
+      description: "Reorder cells"
+      fields:
+        new_order: "Complete new cell order (required)"
+
+  expectations:
+    status: "Map of cell_id -> 'clean' | 'stale'"
+    reasons: |
+      Map of cell_id -> list of reason objects:
+        - type: never_executed | code_changed | forward_stale |
+                write_conflict | no_read_before_write | reads_residual_write |
+                order_changed | skipped_upstream
+        - loc: variable/location involved (optional)
+        - cell_id: cell that caused staleness (optional)
+        - expected_cell_id: for skipped_upstream (optional)
+    stale_cells: "List of stale cell IDs in document order"
+    newly_stale: "Cells marked stale by last structural operation"
+    last_writer: "Map of location -> writer cell_id"
+    cell_order: "Expected cell order after operations"
+    violation: "Backward mutation {mutating_cell, affected_cell, variables, type}"
+    forward_violation: "Forward dependency violation (same structure)"
+
+# =============================================================================
+# RUN OPERATIONS - EXPLICIT FORM
+# =============================================================================
+
+tests:
+  # -------------------------------------------------------------------------
+  # RUN: First execution - clean, records writes (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "run_first_execution_clean_explicit"
+    description: "First execution records writes and is clean"
+    cell_order: ["a", "b", "c"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+    expect:
+      status:
+        a: clean
+        b: stale
+        c: stale
+      reasons:
+        b:
+          - type: never_executed
+        c:
+          - type: never_executed
+      last_writer:
+        x: "a"
+
+  # -------------------------------------------------------------------------
+  # RUN: Re-run unchanged cell - clean (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "run_rerun_unchanged_clean_explicit"
+    description: "Re-running cell with same output stays clean"
+    cell_order: ["a", "b"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+    expect:
+      status:
+        a: clean
+        b: stale
+      reasons:
+        b:
+          - type: never_executed
+
+  # -------------------------------------------------------------------------
+  # RUN: Cell reads from earlier cell - clean (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "run_reads_from_earlier_clean_explicit"
+    description: "Cell reading from earlier cell is clean"
+    cell_order: ["a", "b", "c"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        reads: ["x"]
+        writes: ["y"]
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: stale
+      reasons:
+        c:
+          - type: never_executed
+      last_writer:
+        x: "a"
+        y: "b"
+
+  # -------------------------------------------------------------------------
+  # RUN: Forward contamination (reads from later) - NO_READ_BEFORE_WRITE (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "run_forward_contamination_explicit"
+    description: "Cell reading from later cell is marked stale with NO_READ_BEFORE_WRITE"
+    cell_order: ["a", "b", "c"]
+    operations:
+      # Execute c first (writes x)
+      - type: RUN
+        cell: "c"
+        pre_namespace: {}
+        post_namespace: {"x": 10}
+        reads: []
+        writes: ["x"]
+      # Execute a (reads x from c which is after a in document order)
+      - type: RUN
+        cell: "a"
+        pre_namespace: {"x": 10}
+        post_namespace: {"x": 10, "y": 20}
+        reads: ["x"]
+        writes: ["y"]
+    expect:
+      status:
+        a: stale
+        b: stale
+        c: clean
+      reasons:
+        a:
+          - type: no_read_before_write
+            loc: "x"
+            cell_id: "c"
+        b:
+          - type: never_executed
+
+  # -------------------------------------------------------------------------
+  # RUN: Backward mutation (writes to earlier's reads) - violation (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "run_backward_mutation_violation_explicit"
+    description: "Cell writing to earlier cell's reads causes backward violation"
+    cell_order: ["a", "b", "c"]
+    operations:
+      # Execute a (reads x)
+      - type: RUN
+        cell: "a"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        reads: ["x"]
+        writes: ["y"]
+      # Execute b (writes x - backward mutation!)
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1, "y": 2}
+        post_namespace: {"x": 99, "y": 2}
+        reads: []
+        writes: ["x"]
+    expect:
+      violation:
+        mutating_cell: "b"
+        affected_cell: "a"
+        variables: ["x"]
+        type: "backward_mutation"
+
+  # -------------------------------------------------------------------------
+  # RUN: Run after upstream change - FORWARD_STALE (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "run_upstream_change_forward_stale_explicit"
+    description: "Re-running writer marks downstream readers stale with FORWARD_STALE"
+    cell_order: ["a", "b"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        reads: ["x"]
+        writes: ["y"]
+      # Re-run a with different output
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 100}
+        reads: []
+        writes: ["x"]
+    expect:
+      status:
+        a: clean
+        b: stale
+      reasons:
+        b:
+          - type: forward_stale
+            loc: "x"
+            cell_id: "a"
+      last_writer:
+        x: "a"
+
+  # -------------------------------------------------------------------------
+  # RUN: Column-level independence (different columns) - no conflict (EXPLICIT)
+  # -------------------------------------------------------------------------
+  # NOTE: Column independence relies on column-level tracking. For tests without
+  # actual DataFrames, we test the simpler case of disjoint variable accesses.
+  # Real column independence is tested in test_reproducibility_structural.py.
+  - name: "run_column_independence_explicit"
+    description: "Disjoint variable accesses do not cause conflict"
+    cell_order: ["a", "b"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {"df": {"price": [1, 2]}}
+        post_namespace: {"df": {"price": [1, 2]}, "total": 3}
+        reads: []
+        writes: ["total"]
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"df": {"price": [1, 2]}, "total": 3}
+        post_namespace: {"df": {"price": [1, 2], "tax": [0.1, 0.2]}, "total": 3, "result": 1}
+        reads: ["total"]
+        writes: ["result"]
+    expect:
+      status:
+        a: clean
+        b: clean
+      # No violation because disjoint variables
+
+  # -------------------------------------------------------------------------
+  # RUN: Skipped upstream writer - SKIPPED_UPSTREAM (EXPLICIT)
+  # -------------------------------------------------------------------------
+  # The SKIPPED_UPSTREAM pattern: F→G→H in order, then re-run F (skipping G)
+  # H was reading from G, but now x comes from F. H gets SKIPPED_UPSTREAM.
+  - name: "run_skipped_upstream_explicit"
+    description: "Re-running earlier cell skipping intermediate marks reader as SKIPPED_UPSTREAM"
+    cell_order: ["f", "g", "h"]
+    operations:
+      # Initial execution in order: F→G→H
+      - type: RUN
+        cell: "f"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: RUN
+        cell: "g"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 2}
+        reads: ["x"]
+        writes: ["x"]
+      - type: RUN
+        cell: "h"
+        pre_namespace: {"x": 2}
+        post_namespace: {"x": 2, "y": 10}
+        reads: ["x"]
+        writes: ["y"]
+      # Re-run F (skipping G) - x goes from 2 back to 1
+      - type: RUN
+        cell: "f"
+        pre_namespace: {"x": 2, "y": 10}
+        post_namespace: {"x": 1, "y": 10}
+        reads: []
+        writes: ["x"]
+    expect:
+      status:
+        f: clean
+        h: stale
+      reasons:
+        h:
+          - type: skipped_upstream
+            loc: "x"
+            cell_id: "f"
+            expected_cell_id: "g"
+
+# =============================================================================
+# RUN OPERATIONS - CODE FORM
+# =============================================================================
+
+  # -------------------------------------------------------------------------
+  # RUN: First execution - clean, records writes (CODE)
+  # -------------------------------------------------------------------------
+  - name: "run_first_execution_clean_code"
+    description: "First execution records writes and is clean (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+      c: "z = y"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+    expect:
+      status:
+        a: clean
+        b: stale
+        c: stale
+      reasons:
+        b:
+          - type: never_executed
+        c:
+          - type: never_executed
+      last_writer:
+        x: "a"
+
+  # -------------------------------------------------------------------------
+  # RUN: Re-run unchanged cell - clean (CODE)
+  # -------------------------------------------------------------------------
+  - name: "run_rerun_unchanged_clean_code"
+    description: "Re-running cell with same output stays clean (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+    expect:
+      status:
+        a: clean
+        b: stale
+      reasons:
+        b:
+          - type: never_executed
+
+  # -------------------------------------------------------------------------
+  # RUN: Cell reads from earlier cell - clean (CODE)
+  # -------------------------------------------------------------------------
+  - name: "run_reads_from_earlier_clean_code"
+    description: "Cell reading from earlier cell is clean (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "x = 1"
+      b: "y = x + 1"
+      c: "z = y"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x + 1"
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: stale
+      reasons:
+        c:
+          - type: never_executed
+      last_writer:
+        x: "a"
+        y: "b"
+
+  # -------------------------------------------------------------------------
+  # RUN: Forward contamination (reads from later) - NO_READ_BEFORE_WRITE (CODE)
+  # -------------------------------------------------------------------------
+  - name: "run_forward_contamination_code"
+    description: "Cell reading from later cell is marked stale with NO_READ_BEFORE_WRITE (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "y = x * 2"
+      b: "z = y"
+      c: "x = 10"
+    operations:
+      # Execute c first (writes x)
+      - type: RUN
+        cell: "c"
+        pre_namespace: {}
+        post_namespace: {"x": 10}
+        code: "x = 10"
+      # Execute a (reads x from c which is after a in document order)
+      - type: RUN
+        cell: "a"
+        pre_namespace: {"x": 10}
+        post_namespace: {"x": 10, "y": 20}
+        code: "y = x * 2"
+    expect:
+      status:
+        a: stale
+        b: stale
+        c: clean
+      reasons:
+        a:
+          - type: no_read_before_write
+            loc: "x"
+            cell_id: "c"
+        b:
+          - type: never_executed
+
+  # -------------------------------------------------------------------------
+  # RUN: Backward mutation (writes to earlier's reads) - violation (CODE)
+  # -------------------------------------------------------------------------
+  - name: "run_backward_mutation_violation_code"
+    description: "Cell writing to earlier cell's reads causes backward violation (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "y = x + 1"
+      b: "x = 99"
+      c: "z = y"
+    operations:
+      # Execute a (reads x)
+      - type: RUN
+        cell: "a"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x + 1"
+      # Execute b (writes x - backward mutation!)
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1, "y": 2}
+        post_namespace: {"x": 99, "y": 2}
+        code: "x = 99"
+    expect:
+      violation:
+        mutating_cell: "b"
+        affected_cell: "a"
+        variables: ["x"]
+        type: "backward_mutation"
+
+  # -------------------------------------------------------------------------
+  # RUN: Run after upstream change - FORWARD_STALE (CODE)
+  # -------------------------------------------------------------------------
+  - name: "run_upstream_change_forward_stale_code"
+    description: "Re-running writer marks downstream readers stale with FORWARD_STALE (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x + 1"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x + 1"
+      # Re-run a with different output
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 100}
+        code: "x = 100"
+    expect:
+      status:
+        a: clean
+        b: stale
+      reasons:
+        b:
+          - type: forward_stale
+            loc: "x"
+            cell_id: "a"
+      last_writer:
+        x: "a"
+
+  # -------------------------------------------------------------------------
+  # RUN: Column-level independence (different columns) - no conflict (CODE)
+  # -------------------------------------------------------------------------
+  # NOTE: Column independence relies on column-level tracking. For tests without
+  # actual DataFrames, we test the simpler case of disjoint variable accesses.
+  # Real column independence is tested in test_reproducibility_structural.py.
+  - name: "run_column_independence_code"
+    description: "Disjoint variable accesses do not cause conflict (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "total = 3"
+      b: "result = total - 2"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"total": 3}
+        code: "total = 3"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"total": 3}
+        post_namespace: {"total": 3, "result": 1}
+        code: "result = total - 2"
+    expect:
+      status:
+        a: clean
+        b: clean
+      # No violation because disjoint variables
+
+  # -------------------------------------------------------------------------
+  # RUN: Skipped upstream writer - SKIPPED_UPSTREAM (CODE)
+  # -------------------------------------------------------------------------
+  # The SKIPPED_UPSTREAM pattern: F→G→H in order, then re-run F (skipping G)
+  - name: "run_skipped_upstream_code"
+    description: "Re-running earlier cell skipping intermediate marks reader as SKIPPED_UPSTREAM (code-based)"
+    cell_order: ["f", "g", "h"]
+    cells:
+      f: "x = 1"
+      g: "x = x + 1"
+      h: "y = x * 5"
+    operations:
+      # Initial execution in order: F→G→H
+      - type: RUN
+        cell: "f"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "g"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 2}
+        code: "x = x + 1"
+      - type: RUN
+        cell: "h"
+        pre_namespace: {"x": 2}
+        post_namespace: {"x": 2, "y": 10}
+        code: "y = x * 5"
+      # Re-run F (skipping G) - x goes from 2 back to 1
+      - type: RUN
+        cell: "f"
+        pre_namespace: {"x": 2, "y": 10}
+        post_namespace: {"x": 1, "y": 10}
+        code: "x = 1"
+    expect:
+      status:
+        f: clean
+        h: stale
+      reasons:
+        h:
+          - type: skipped_upstream
+            loc: "x"
+            cell_id: "f"
+            expected_cell_id: "g"
+
+# =============================================================================
+# EDIT OPERATIONS - EXPLICIT FORM
+# =============================================================================
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit executed cell - CODE_CHANGED (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "edit_executed_cell_code_changed_explicit"
+    description: "Editing an executed cell marks it CODE_CHANGED"
+    cell_order: ["a", "b"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: EDIT
+        cell: "a"
+    expect:
+      status:
+        a: stale
+        b: stale
+      reasons:
+        a:
+          - type: code_changed
+        b:
+          - type: never_executed
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit does NOT immediately propagate downstream (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "edit_no_immediate_propagation_explicit"
+    description: "Editing cell does not immediately mark downstream stale (only on re-run)"
+    cell_order: ["a", "b"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        reads: ["x"]
+        writes: ["y"]
+      - type: EDIT
+        cell: "a"
+    expect:
+      status:
+        a: stale
+        b: clean  # Still clean until a is re-run
+      reasons:
+        a:
+          - type: code_changed
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit unexecuted cell - remains NEVER_EXECUTED (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "edit_unexecuted_cell_explicit"
+    description: "Editing an unexecuted cell marks it CODE_CHANGED"
+    cell_order: ["a", "b"]
+    operations:
+      - type: EDIT
+        cell: "a"
+    expect:
+      status:
+        a: stale
+        b: stale
+      reasons:
+        a:
+          - type: code_changed
+        b:
+          - type: never_executed
+
+# =============================================================================
+# EDIT OPERATIONS - CODE FORM
+# =============================================================================
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit executed cell - CODE_CHANGED (CODE)
+  # -------------------------------------------------------------------------
+  - name: "edit_executed_cell_code_changed_code"
+    description: "Editing an executed cell marks it CODE_CHANGED (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 2"
+    expect:
+      status:
+        a: stale
+        b: stale
+      reasons:
+        a:
+          - type: code_changed
+        b:
+          - type: never_executed
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit does NOT immediately propagate downstream (CODE)
+  # -------------------------------------------------------------------------
+  - name: "edit_no_immediate_propagation_code"
+    description: "Editing cell does not immediately mark downstream stale (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x + 1"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x + 1"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 100"
+    expect:
+      status:
+        a: stale
+        b: clean  # Still clean until a is re-run
+      reasons:
+        a:
+          - type: code_changed
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit unexecuted cell (CODE)
+  # -------------------------------------------------------------------------
+  - name: "edit_unexecuted_cell_code"
+    description: "Editing an unexecuted cell marks it CODE_CHANGED (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: ""
+      b: "y = x"
+    operations:
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 1"
+    expect:
+      status:
+        a: stale
+        b: stale
+      reasons:
+        a:
+          - type: code_changed
+        b:
+          - type: never_executed
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit then run - becomes clean (CODE)
+  # -------------------------------------------------------------------------
+  - name: "edit_then_run_becomes_clean_code"
+    description: "Editing then running a cell makes it clean (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 2"
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 2}
+        code: "x = 2"
+    expect:
+      status:
+        a: clean
+        b: stale
+      reasons:
+        b:
+          - type: never_executed
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit upstream then run - downstream becomes stale (CODE)
+  # -------------------------------------------------------------------------
+  - name: "edit_upstream_run_marks_downstream_stale_code"
+    description: "Edit upstream, run it, downstream reader becomes stale (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 1}
+        code: "y = x"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 100"
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 100}
+        code: "x = 100"
+    expect:
+      status:
+        a: clean
+        b: stale
+      reasons:
+        b:
+          - type: forward_stale
+            loc: "x"
+            cell_id: "a"
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit multiple times then run (CODE)
+  # -------------------------------------------------------------------------
+  - name: "edit_multiple_times_then_run_code"
+    description: "Multiple edits then run results in clean cell (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 2"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 3"
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 4"
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 4}
+        code: "x = 4"
+    expect:
+      status:
+        a: clean
+        b: stale
+      reasons:
+        b:
+          - type: never_executed
+
+  # -------------------------------------------------------------------------
+  # EDIT: Run-edit-run cycle with chain (CODE)
+  # -------------------------------------------------------------------------
+  - name: "run_edit_run_with_reader_code"
+    description: "Run chain, edit upstream, run upstream - direct reader becomes stale (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "x = 1"
+      b: "y = x + 1"
+      c: "z = y"
+    operations:
+      # Initial execution
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x + 1"
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 1, "y": 2}
+        post_namespace: {"x": 1, "y": 2, "z": 2}
+        code: "z = y"
+      # Edit and re-run a
+      - type: EDIT
+        cell: "a"
+        new_code: "x = 10"
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 10}
+        code: "x = 10"
+    expect:
+      status:
+        a: clean
+        b: stale  # b reads x which was written by a
+        c: clean  # c reads y which hasn't changed (b not re-run yet)
+      reasons:
+        b:
+          - type: forward_stale
+            loc: "x"
+            cell_id: "a"
+
+  # -------------------------------------------------------------------------
+  # EDIT: Edit reader cell then run (CODE)
+  # -------------------------------------------------------------------------
+  - name: "edit_reader_then_run_code"
+    description: "Edit a reader cell then run it - becomes clean with new code (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 1}
+        code: "y = x"
+      - type: EDIT
+        cell: "b"
+        new_code: "y = x * 2"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x * 2"
+    expect:
+      status:
+        a: clean
+        b: clean
+
+# =============================================================================
+# DELETE OPERATIONS - EXPLICIT FORM
+# =============================================================================
+
+  # -------------------------------------------------------------------------
+  # DELETE: Delete cell with readers - READS_RESIDUAL_WRITE (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "delete_cell_with_readers_explicit"
+    description: "Deleting a cell marks cells that read its writes as READS_RESIDUAL_WRITE"
+    cell_order: ["a", "b", "c"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {}
+        reads: []
+        writes: []
+      - type: RUN
+        cell: "b"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        reads: ["x"]
+        writes: ["y"]
+      - type: DELETE
+        cell: "b"
+    expect:
+      status:
+        a: clean
+        c: stale
+      reasons:
+        c:
+          - type: reads_residual_write
+            loc: "x"
+      cell_order: ["a", "c"]
+
+  # -------------------------------------------------------------------------
+  # DELETE: Delete unexecuted cell - no staleness effect (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "delete_unexecuted_cell_explicit"
+    description: "Deleting an unexecuted cell doesn't mark anything stale"
+    cell_order: ["a", "b", "c"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: DELETE
+        cell: "b"
+    expect:
+      status:
+        a: clean
+        c: stale
+      reasons:
+        c:
+          - type: never_executed
+      cell_order: ["a", "c"]
+      newly_stale: []
+
+  # -------------------------------------------------------------------------
+  # DELETE: Delete cell with no readers - no staleness effect (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "delete_cell_no_readers_explicit"
+    description: "Deleting a cell with no downstream readers doesn't mark anything stale"
+    cell_order: ["a", "b", "c"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {}
+        reads: []
+        writes: []
+      - type: RUN
+        cell: "b"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: DELETE
+        cell: "b"
+    expect:
+      status:
+        a: clean
+        c: stale
+      reasons:
+        c:
+          - type: never_executed
+      cell_order: ["a", "c"]
+      newly_stale: []
+
+# =============================================================================
+# DELETE OPERATIONS - CODE FORM
+# =============================================================================
+
+  # -------------------------------------------------------------------------
+  # DELETE: Delete cell with readers - READS_RESIDUAL_WRITE (CODE)
+  # -------------------------------------------------------------------------
+  - name: "delete_cell_with_readers_code"
+    description: "Deleting a cell marks cells that read its writes as READS_RESIDUAL_WRITE (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "pass"
+      b: "x = 1"
+      c: "y = x + 1"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {}
+        code: "pass"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x + 1"
+      - type: DELETE
+        cell: "b"
+    expect:
+      status:
+        a: clean
+        c: stale
+      reasons:
+        c:
+          - type: reads_residual_write
+            loc: "x"
+      cell_order: ["a", "c"]
+
+  # -------------------------------------------------------------------------
+  # DELETE: Delete unexecuted cell - no staleness effect (CODE)
+  # -------------------------------------------------------------------------
+  - name: "delete_unexecuted_cell_code"
+    description: "Deleting an unexecuted cell doesn't mark anything stale (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "x = 1"
+      b: "y = x"
+      c: "z = y"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: DELETE
+        cell: "b"
+    expect:
+      status:
+        a: clean
+        c: stale
+      reasons:
+        c:
+          - type: never_executed
+      cell_order: ["a", "c"]
+      newly_stale: []
+
+  # -------------------------------------------------------------------------
+  # DELETE: Delete cell with no readers - no staleness effect (CODE)
+  # -------------------------------------------------------------------------
+  - name: "delete_cell_no_readers_code"
+    description: "Deleting a cell with no downstream readers doesn't mark anything stale (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "pass"
+      b: "x = 1"
+      c: "z = 3"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {}
+        code: "pass"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: DELETE
+        cell: "b"
+    expect:
+      status:
+        a: clean
+        c: stale
+      reasons:
+        c:
+          - type: never_executed
+      cell_order: ["a", "c"]
+      newly_stale: []
+
+# =============================================================================
+# INSERT OPERATIONS - EXPLICIT FORM
+# =============================================================================
+
+  # -------------------------------------------------------------------------
+  # INSERT: Insert at end - NEVER_EXECUTED only (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "insert_at_end_explicit"
+    description: "Inserting a new cell at end marks only it as NEVER_EXECUTED"
+    cell_order: ["a", "b"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        reads: ["x"]
+        writes: ["y"]
+      - type: INSERT
+        cell: "c"
+        position: 2
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: stale
+      reasons:
+        c:
+          - type: never_executed
+      cell_order: ["a", "b", "c"]
+
+  # -------------------------------------------------------------------------
+  # INSERT: Insert in middle - no immediate staleness (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "insert_in_middle_explicit"
+    description: "Inserting a new cell in middle doesn't immediately mark others stale"
+    cell_order: ["a", "b"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        reads: ["x"]
+        writes: ["y"]
+      - type: INSERT
+        cell: "c"
+        position: 1
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: stale
+      reasons:
+        c:
+          - type: never_executed
+      cell_order: ["a", "c", "b"]
+
+# =============================================================================
+# INSERT OPERATIONS - CODE FORM
+# =============================================================================
+
+  # -------------------------------------------------------------------------
+  # INSERT: Insert at end - NEVER_EXECUTED only (CODE)
+  # -------------------------------------------------------------------------
+  - name: "insert_at_end_code"
+    description: "Inserting a new cell at end marks only it as NEVER_EXECUTED (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x + 1"
+      c: "z = y"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x + 1"
+      - type: INSERT
+        cell: "c"
+        position: 2
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: stale
+      reasons:
+        c:
+          - type: never_executed
+      cell_order: ["a", "b", "c"]
+
+  # -------------------------------------------------------------------------
+  # INSERT: Insert in middle - no immediate staleness (CODE)
+  # -------------------------------------------------------------------------
+  - name: "insert_in_middle_code"
+    description: "Inserting a new cell in middle doesn't immediately mark others stale (code-based)"
+    cell_order: ["a", "b"]
+    cells:
+      a: "x = 1"
+      b: "y = x + 1"
+      c: "z = x"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x + 1"
+      - type: INSERT
+        cell: "c"
+        position: 1
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: stale
+      reasons:
+        c:
+          - type: never_executed
+      cell_order: ["a", "c", "b"]
+
+# =============================================================================
+# MOVE OPERATIONS - EXPLICIT FORM
+# =============================================================================
+
+  # -------------------------------------------------------------------------
+  # MOVE: Move writer forward past readers - marks readers stale (EXPLICIT)
+  # -------------------------------------------------------------------------
+  # NOTE: When a writer moves forward past its readers, the readers are
+  # marked stale (reason depends on which staleness path triggers first).
+  - name: "move_writer_forward_explicit"
+    description: "Moving a writer forward past its readers marks readers stale"
+    cell_order: ["a", "b", "c", "d"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {}
+        reads: []
+        writes: []
+      - type: RUN
+        cell: "b"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        reads: ["x"]
+        writes: ["y"]
+      - type: RUN
+        cell: "d"
+        pre_namespace: {"x": 1, "y": 2}
+        post_namespace: {"x": 1, "y": 2}
+        reads: []
+        writes: []
+      # Move B from pos 1 to pos 3 (after D)
+      - type: MOVE
+        new_order: ["a", "c", "d", "b"]
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: stale
+        d: clean
+      newly_stale: ["c"]
+
+  # -------------------------------------------------------------------------
+  # MOVE: Move reader backward before writer - marks reader stale (EXPLICIT)
+  # -------------------------------------------------------------------------
+  # NOTE: When a reader moves backward before its writer, the reader is
+  # marked stale (reason depends on which staleness path triggers first).
+  - name: "move_reader_backward_explicit"
+    description: "Moving a reader backward before its writer marks it stale"
+    cell_order: ["a", "b", "c"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: []
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        reads: ["x"]
+        writes: ["y"]
+      # Move C backward before A
+      - type: MOVE
+        new_order: ["c", "a", "b"]
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: stale
+
+  # -------------------------------------------------------------------------
+  # MOVE: Move independent cell - no effect (EXPLICIT)
+  # -------------------------------------------------------------------------
+  - name: "move_independent_cell_explicit"
+    description: "Moving a cell with no dependencies has no staleness effect"
+    cell_order: ["a", "b", "c"]
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        reads: []
+        writes: ["x"]
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        reads: []
+        writes: ["y"]
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 1, "y": 2}
+        post_namespace: {"x": 1, "y": 2, "z": 3}
+        reads: []
+        writes: ["z"]
+      # Move B to end (B has no dependencies with A or C)
+      - type: MOVE
+        new_order: ["a", "c", "b"]
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: clean
+      cell_order: ["a", "c", "b"]
+      newly_stale: []
+
+# =============================================================================
+# MOVE OPERATIONS - CODE FORM
+# =============================================================================
+
+  # -------------------------------------------------------------------------
+  # MOVE: Move writer forward past readers - marks readers stale (CODE)
+  # -------------------------------------------------------------------------
+  # NOTE: When a writer moves forward past its readers, the readers are
+  # marked stale (reason depends on which staleness path triggers first).
+  - name: "move_writer_forward_code"
+    description: "Moving a writer forward past its readers marks readers stale (code-based)"
+    cell_order: ["a", "b", "c", "d"]
+    cells:
+      a: "pass"
+      b: "x = 1"
+      c: "y = x + 1"
+      d: "pass"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {}
+        code: "pass"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x + 1"
+      - type: RUN
+        cell: "d"
+        pre_namespace: {"x": 1, "y": 2}
+        post_namespace: {"x": 1, "y": 2}
+        code: "pass"
+      # Move B from pos 1 to pos 3 (after D)
+      - type: MOVE
+        new_order: ["a", "c", "d", "b"]
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: stale
+        d: clean
+      newly_stale: ["c"]
+
+  # -------------------------------------------------------------------------
+  # MOVE: Move reader backward before writer - marks reader stale (CODE)
+  # -------------------------------------------------------------------------
+  # NOTE: When a reader moves backward before its writer, the reader is
+  # marked stale (reason depends on which staleness path triggers first).
+  - name: "move_reader_backward_code"
+    description: "Moving a reader backward before its writer marks it stale (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "x = 1"
+      b: "pass"
+      c: "y = x + 1"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1}
+        code: "pass"
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = x + 1"
+      # Move C backward before A
+      - type: MOVE
+        new_order: ["c", "a", "b"]
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: stale
+
+  # -------------------------------------------------------------------------
+  # MOVE: Move independent cell - no effect (CODE)
+  # -------------------------------------------------------------------------
+  - name: "move_independent_cell_code"
+    description: "Moving a cell with no dependencies has no staleness effect (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "x = 1"
+      b: "y = 2"
+      c: "z = 3"
+    operations:
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 2}
+        code: "y = 2"
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 1, "y": 2}
+        post_namespace: {"x": 1, "y": 2, "z": 3}
+        code: "z = 3"
+      # Move B to end (B has no dependencies with A or C)
+      - type: MOVE
+        new_order: ["a", "c", "b"]
+    expect:
+      status:
+        a: clean
+        b: clean
+        c: clean
+      cell_order: ["a", "c", "b"]
+      newly_stale: []
+
+  # -------------------------------------------------------------------------
+  # RUN: Multiple writers and reader - complex execution order (CODE)
+  # -------------------------------------------------------------------------
+  # Test case: a and b both write x, c reads x
+  # Run order: a->c->b->c->a
+  - name: "run_multi_writer_reader_code"
+    description: "Multiple writers with reader shows forward_stale and skipped_upstream (code-based)"
+    cell_order: ["a", "b", "c"]
+    cells:
+      a: "x = 1"
+      b: "x = 2"
+      c: "y = x"
+    operations:
+      # Run a: writes x=1
+      - type: RUN
+        cell: "a"
+        pre_namespace: {}
+        post_namespace: {"x": 1}
+        code: "x = 1"
+      # Run c: reads x from a (skipping b)
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 1}
+        post_namespace: {"x": 1, "y": 1}
+        code: "y = x"
+      # Run b: writes x=2, marks c stale (forward_stale)
+      - type: RUN
+        cell: "b"
+        pre_namespace: {"x": 1, "y": 1}
+        post_namespace: {"x": 2, "y": 1}
+        code: "x = 2"
+      # Run c again: reads x from b
+      - type: RUN
+        cell: "c"
+        pre_namespace: {"x": 2}
+        post_namespace: {"x": 2, "y": 2}
+        code: "y = x"
+      # Run a: writes x=1, c reads from b but now x comes from a (skipped_upstream)
+      - type: RUN
+        cell: "a"
+        pre_namespace: {"x": 2, "y": 2}
+        post_namespace: {"x": 1, "y": 2}
+        code: "x = 1"
+    expect:
+      status:
+        a: clean
+        b: clean  # b doesn't read x, so not affected by forward_stale
+        c: stale
+      reasons:
+        c:
+          - type: skipped_upstream
+            loc: "x"
+            cell_id: "a"
+            expected_cell_id: "b"

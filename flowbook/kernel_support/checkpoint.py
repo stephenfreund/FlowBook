@@ -85,25 +85,48 @@ class Checkpoint:
     @staticmethod
     def diff(
         a: "Checkpoint",
-        b: "Checkpoint",
+        b: "Checkpoint | MemoryCheckpoint | dict",
         keys_to_include=None,
         use_leq: bool = False,
         column_rbw=None,
         structural_reads=None,
         structural_mode=None,
     ) -> CheckpointDiffResult:
-        """Diff both memory and files in one call."""
+        """Diff both memory and files in one call.
+
+        Args:
+            a: First checkpoint to compare (pre-execution state)
+            b: Second checkpoint, MemoryCheckpoint, or raw namespace dict.
+               Accepts raw dict to support diffing against live namespace without
+               creating a post-checkpoint.
+
+        Returns:
+            CheckpointDiffResult with memory diff and optional file diff.
+            File diff is only computed when both a and b are full Checkpoints
+            with file checkpoints.
+        """
+        # Extract memory component from b (supports Checkpoint, MemoryCheckpoint, or raw dict)
+        if isinstance(b, Checkpoint):
+            b_mem = b.memory
+        elif isinstance(b, MemoryCheckpoint):
+            b_mem = b
+        else:
+            # b is a raw dict (live namespace)
+            b_mem = b
+
         mem_diff = MemoryCheckpoint.diff(
             a.memory,
-            b.memory,
+            b_mem,
             keys_to_include=keys_to_include,
             use_leq=use_leq,
             column_rbw=column_rbw,
             structural_reads=structural_reads,
             structural_mode=structural_mode,
         )
+
+        # File diff only available when both are full Checkpoints
         file_diff = None
-        if a.file is not None and b.file is not None:
+        if isinstance(b, Checkpoint) and a.file is not None and b.file is not None:
             file_diff = FileCheckpoints.diff(a.file, b.file)
         return CheckpointDiffResult(memory=mem_diff, file=file_diff)
 
@@ -130,6 +153,50 @@ class Checkpoints:
             Tuple of (Checkpoint, removed_vars dict)
         """
         saved, removed = self.memory.save(name, user_ns, max_size_mb=max_size_mb)
+
+        file_cp = None
+        if self.file._enabled and write_paths is not None:
+            from flowbook.util.output import timer
+            n_files = len(write_paths) if write_paths else 0
+            with timer(key="checkpoint:file_save", message=f"File checkpoint ({n_files} files)"):
+                file_cp = self.file.save(name, write_paths, vfs=vfs)
+
+        total = Checkpoint(
+            memory=self.memory.saved[name],
+            file=file_cp,
+        )
+        return total, removed
+
+    def save_incremental(
+        self,
+        name: str,
+        user_ns: dict,
+        accessed_vars: Set[str],
+        prior_checkpoint_name: str,
+        write_paths: Optional[Set[str]] = None,
+        vfs=None,
+        max_size_mb=None,
+    ) -> Tuple[Checkpoint, dict]:
+        """
+        Save memory + file checkpoint with incremental optimization.
+
+        Reuses deep copies from prior checkpoint for untouched leaf objects.
+
+        Args:
+            name: Checkpoint name
+            user_ns: User namespace dict
+            accessed_vars: Variables accessed during cell execution
+            prior_checkpoint_name: Name of prior checkpoint for reuse
+            write_paths: Paths of files written
+            vfs: Virtual file system
+            max_size_mb: Size warning threshold
+
+        Returns:
+            Tuple of (Checkpoint, removed_vars dict)
+        """
+        saved, removed = self.memory.save_incremental(
+            name, user_ns, accessed_vars, prior_checkpoint_name, max_size_mb=max_size_mb
+        )
 
         file_cp = None
         if self.file._enabled and write_paths is not None:

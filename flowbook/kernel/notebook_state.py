@@ -1,0 +1,567 @@
+"""
+Notebook state for reproducibility tracking.
+
+This module implements the core state model for tracking notebook reproducibility:
+    S = ⟨C, O, Σ, T, R, W, L⟩
+
+Where:
+    C, O, Σ: Managed elsewhere (notebook content, outputs, kernel namespace)
+    T: Cell → Status (managed here)
+    R: Cell → P(Loc) - reads per cell (managed here)
+    W: Cell → P(Loc) - writes per cell (managed here)
+    L: Loc → Cell - last writer map (managed here)
+
+This module also stores per-cell TrackingData for:
+    - Column-level reads/writes for DataFrames
+    - Structural attribute reads (df.columns, df.shape, etc.)
+    - File I/O tracking
+
+And additional per-cell metadata:
+    - execution_seq: Monotonic execution counter
+    - structural_reads_values: Captured values for error messages
+    - typed_changes: Cached Change objects for fast forward dependency checks
+"""
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
+
+from flowbook.kernel.models import CellStatus, Reason, ReasonType
+from flowbook.kernel_support.models import TrackingData
+
+if TYPE_CHECKING:
+    from flowbook.kernel.changes import Change
+
+
+@dataclass
+class NotebookState:
+    """
+    Instrumentation state for reproducibility tracking.
+
+    This class maintains the state needed to track cell staleness and detect
+    reproducibility issues. It implements the formal model transitions:
+    - EDIT: Mark cell stale with CodeChanged reason
+    - EXEC: Record reads/writes, update last_writer, propagate staleness
+    - INSERT/DELETE/MOVE: Handle structural changes
+
+    Attributes:
+        # Formal model state (T, R, W, L)
+        status: Map from cell ID to CellStatus (T in formal model)
+        reads: Map from cell ID to set of locations read (R in formal model)
+        writes: Map from cell ID to set of locations written (W in formal model)
+        last_writer: Map from location to cell that last wrote it (L in formal model)
+        column_last_writer: Map from (var, col) to cell that last wrote it
+        cell_order: List of cell IDs in document order
+
+        # Per-cell tracking data
+        tracking_data: TrackingData per cell (Pydantic model for frontend communication)
+        execution_seq: Execution sequence number per cell
+        structural_reads_values: Captured structural values for error messages
+        typed_changes: Cached typed Change objects for fast forward dependency checks
+    """
+
+    # Formal model state (T, R, W, L)
+    status: Dict[str, CellStatus] = field(default_factory=dict)
+    reads: Dict[str, Set[str]] = field(default_factory=dict)
+    writes: Dict[str, Set[str]] = field(default_factory=dict)
+    last_writer: Dict[str, str] = field(default_factory=dict)
+    column_last_writer: Dict[str, Dict[str, str]] = field(default_factory=dict)  # var -> col -> cell_id
+    cell_order: List[str] = field(default_factory=list)
+
+    # Per-cell tracking data
+    tracking_data: Dict[str, TrackingData] = field(default_factory=dict)  # cell_id -> TrackingData
+    execution_seq: Dict[str, int] = field(default_factory=dict)  # cell_id -> seq number
+    structural_reads_values: Dict[str, Dict[str, Dict[str, str]]] = field(default_factory=dict)  # cell_id -> var -> attr -> value
+    typed_changes: Dict[str, List["Change"]] = field(default_factory=dict)  # cell_id -> changes
+
+    # =========================================================================
+    # Status Access
+    # =========================================================================
+
+    def get_status(self, cell_id: str) -> CellStatus:
+        """Get cell status, defaulting to Stale(NeverExecuted)."""
+        if cell_id not in self.status:
+            self.status[cell_id] = CellStatus.never_executed()
+        return self.status[cell_id]
+
+    def is_clean(self, cell_id: str) -> bool:
+        """Check if cell is Clean."""
+        return self.get_status(cell_id).is_clean
+
+    def set_clean(self, cell_id: str) -> None:
+        """Mark cell as Clean (clears all reasons)."""
+        self.status[cell_id] = CellStatus.clean()
+
+    def set_stale(self, cell_id: str, reasons: Set[Reason]) -> None:
+        """Mark cell as Stale with given reasons (replaces existing)."""
+        self.status[cell_id] = CellStatus.stale(reasons)
+
+    def add_reason(self, cell_id: str, reason: Reason) -> None:
+        """Add a reason to a cell (accumulates with existing reasons)."""
+        self.get_status(cell_id).add_reason(reason)
+
+    def get_reasons(self, cell_id: str) -> Set[Reason]:
+        """Get all reasons for a cell's staleness."""
+        return self.get_status(cell_id).reasons
+
+    # =========================================================================
+    # Stale Cell Queries
+    # =========================================================================
+
+    def get_stale_cells(self) -> List[str]:
+        """Return list of stale cell IDs in document order."""
+        return [c for c in self.cell_order if not self.is_clean(c)]
+
+    def get_all_reasons(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Get reasons for all stale cells (for metadata output).
+
+        Reasons are sorted by priority so the most specific reason comes first:
+        1. FORWARD_STALE (tells you which variable changed)
+        2. CODE_CHANGED (cell was edited)
+        3. BACKWARD_STALE, NO_READ_BEFORE_WRITE, READS_RESIDUAL_WRITE
+        4. ORDER_CHANGED (least specific)
+        5. NEVER_EXECUTED
+        """
+        # Priority order: lower = higher priority (shown first)
+        priority = {
+            ReasonType.SKIPPED_UPSTREAM: 0,  # Most actionable: run the expected cell first
+            ReasonType.FORWARD_STALE: 1,
+            ReasonType.CODE_CHANGED: 2,
+            ReasonType.BACKWARD_STALE: 3,
+            ReasonType.NO_READ_BEFORE_WRITE: 4,
+            ReasonType.READS_RESIDUAL_WRITE: 5,
+            ReasonType.ORDER_CHANGED: 6,
+            ReasonType.NEVER_EXECUTED: 7,
+        }
+
+        result: Dict[str, List[Dict[str, Any]]] = {}
+        for cell_id in self.cell_order:
+            status = self.get_status(cell_id)
+            if not status.is_clean:
+                # Sort reasons by priority
+                sorted_reasons = sorted(
+                    status.reasons,
+                    key=lambda r: (priority.get(r.type, 99), r.loc or "", r.cell_id or "")
+                )
+                result[cell_id] = [r.to_dict() for r in sorted_reasons]
+        return result
+
+    # =========================================================================
+    # Derived Functions (from formal model)
+    # =========================================================================
+
+    def last_writer_for(self, loc: str, before_cell: str) -> Optional[str]:
+        """
+        LastWriter(W, i, x) = max { j < i | x ∈ W_j }, or None
+
+        Find which cell before `before_cell` should have written `loc`
+        based on document order and recorded writes.
+        """
+        if before_cell not in self.cell_order:
+            return None
+
+        before_pos = self.cell_order.index(before_cell)
+        result: Optional[str] = None
+        result_pos = -1
+
+        for cell_id, cell_writes in self.writes.items():
+            if loc in cell_writes and cell_id in self.cell_order:
+                pos = self.cell_order.index(cell_id)
+                if pos < before_pos and pos > result_pos:
+                    result = cell_id
+                    result_pos = pos
+
+        return result
+
+    def is_runnable(self, cell_id: str) -> bool:
+        """
+        Runnable(L, W, R, i) ≡ ∀x ∈ Rᵢ. L(x) = lastWriter(W, i, x)
+
+        A cell is runnable iff every location it reads has the expected provenance:
+        the actual last writer equals the expected last writer based on document order.
+        """
+        cell_reads = self.reads.get(cell_id, set())
+        for loc in cell_reads:
+            actual = self.last_writer.get(loc)
+            expected = self.last_writer_for(loc, cell_id)
+            if actual != expected:
+                return False
+        return True
+
+    def get_contamination_reasons(self, cell_id: str, new_reads: Set[str]) -> Set[Reason]:
+        """
+        Check if cell reads from later cells (contamination).
+
+        Returns set of ReadsFromLater reasons for each location where
+        the actual writer is positioned after this cell in document order.
+        """
+        if cell_id not in self.cell_order:
+            return set()
+
+        cell_pos = self.cell_order.index(cell_id)
+        reasons: Set[Reason] = set()
+
+        for loc in new_reads:
+            writer = self.last_writer.get(loc)
+            if writer and writer in self.cell_order:
+                writer_pos = self.cell_order.index(writer)
+                if writer_pos > cell_pos:
+                    reasons.add(Reason(
+                        ReasonType.NO_READ_BEFORE_WRITE,
+                        loc=loc,
+                        cell_id=writer
+                    ))
+
+        return reasons
+
+    # =========================================================================
+    # Transitions
+    # =========================================================================
+
+    def record_execution(
+        self,
+        cell_id: str,
+        tracking: TrackingData,
+        changed_vars: Optional[Set[str]] = None,
+        column_changed: Optional[Dict[str, Set[str]]] = None,
+        execution_seq: Optional[int] = None,
+        structural_reads_values: Optional[Dict[str, Dict[str, str]]] = None,
+        typed_changes: Optional[List["Change"]] = None,
+    ) -> None:
+        """
+        Record cell execution: update R, W, L, column_last_writer, and tracking data.
+
+        Called after successful execution (not on rollback).
+        This corresponds to the "commit" phase of EXEC.
+
+        Args:
+            cell_id: The cell that executed
+            tracking: TrackingData from cell execution (contains reads, writes, columns, etc.)
+            changed_vars: Variables that actually CHANGED (from diff, for L tracking)
+            column_changed: Columns that changed {var: {col1, col2, ...}}
+            execution_seq: Execution sequence number
+            structural_reads_values: Captured structural values for error messages
+            typed_changes: Cached typed changes for fast forward dependency checks
+        """
+        # Store the TrackingData object directly
+        self.tracking_data[cell_id] = tracking
+
+        # Core R, W tracking (derived from TrackingData)
+        self.reads[cell_id] = tracking.get_rbw_vars()
+        self.writes[cell_id] = tracking.get_written_variables()
+
+        # Update L: only for variables that CHANGED (diff-based, not all writes)
+        # This prevents false forward contamination when a cell writes but doesn't change
+        if changed_vars:
+            for loc in changed_vars:
+                self.last_writer[loc] = cell_id
+
+        # Update column-level provenance (only for changed columns)
+        if column_changed:
+            for var, cols in column_changed.items():
+                if var not in self.column_last_writer:
+                    self.column_last_writer[var] = {}
+                for col in cols:
+                    self.column_last_writer[var][col] = cell_id
+
+        # Additional per-cell metadata (not in TrackingData)
+        if execution_seq is not None:
+            self.execution_seq[cell_id] = execution_seq
+        if structural_reads_values is not None:
+            self.structural_reads_values[cell_id] = structural_reads_values
+        if typed_changes is not None:
+            self.typed_changes[cell_id] = typed_changes
+
+    def get_column_writer(self, var: str, col: str) -> Optional[str]:
+        """Get the cell_id that last wrote column col of var, or None."""
+        return self.column_last_writer.get(var, {}).get(col)
+
+    # =========================================================================
+    # Per-Cell Tracking Data Access
+    # =========================================================================
+
+    def get_tracking(self, cell_id: str) -> Optional[TrackingData]:
+        """Get TrackingData for a cell, or None if not executed."""
+        return self.tracking_data.get(cell_id)
+
+    def get_column_reads(self, cell_id: str) -> Dict[str, Set[str]]:
+        """Get column-level reads for a cell {var: {cols}}."""
+        tracking = self.tracking_data.get(cell_id)
+        if tracking is None:
+            return {}
+        return tracking.get_column_rbw_sets()
+
+    def get_column_writes(self, cell_id: str) -> Dict[str, Set[str]]:
+        """Get column-level writes for a cell {var: {cols}}."""
+        tracking = self.tracking_data.get(cell_id)
+        if tracking is None:
+            return {}
+        return {k: set(v) for k, v in tracking.column_writes.items()}
+
+    def get_structural_reads(self, cell_id: str) -> Dict[str, Set[str]]:
+        """Get structural attribute reads for a cell {var: {attrs}}."""
+        tracking = self.tracking_data.get(cell_id)
+        if tracking is None:
+            return {}
+        return {k: set(v) for k, v in tracking.structural_reads.items()}
+
+    def get_file_reads(self, cell_id: str) -> Set[str]:
+        """Get file paths read by a cell."""
+        tracking = self.tracking_data.get(cell_id)
+        if tracking is None:
+            return set()
+        return set(tracking.file_reads_before_writes)
+
+    def get_file_writes(self, cell_id: str) -> Set[str]:
+        """Get file paths written by a cell."""
+        tracking = self.tracking_data.get(cell_id)
+        if tracking is None:
+            return set()
+        return set(tracking.file_writes)
+
+    def get_execution_seq(self, cell_id: str) -> Optional[int]:
+        """Get execution sequence number for a cell."""
+        return self.execution_seq.get(cell_id)
+
+    def get_structural_reads_values(self, cell_id: str) -> Dict[str, Dict[str, str]]:
+        """Get captured structural values for a cell {var: {attr: value}}."""
+        return self.structural_reads_values.get(cell_id, {})
+
+    def get_typed_changes(self, cell_id: str) -> List["Change"]:
+        """Get cached typed changes for a cell."""
+        return self.typed_changes.get(cell_id, [])
+
+    def has_record(self, cell_id: str) -> bool:
+        """Check if a cell has been executed (has tracking data)."""
+        return cell_id in self.tracking_data
+
+    def propagate_staleness(self, writer_cell: str, written_locs: Set[str]) -> None:
+        """
+        Propagate staleness to later cells.
+
+        For j in {i+1, ..., n}:
+            for x ∈ W' ∩ R_j: AddReason(j, InputChanged(x, i))
+            for x ∈ W' ∩ W_j: AddReason(j, WriteConflict(x, i))
+        """
+        if writer_cell not in self.cell_order:
+            return
+
+        writer_pos = self.cell_order.index(writer_cell)
+
+        for later_cell in self.cell_order[writer_pos + 1:]:
+            if not self.is_clean(later_cell):
+                continue  # Already stale, skip
+
+            later_reads = self.reads.get(later_cell, set())
+            later_writes = self.writes.get(later_cell, set())
+
+            # ForwardStale: written ∩ reads
+            for loc in written_locs & later_reads:
+                self.add_reason(later_cell, Reason(
+                    ReasonType.FORWARD_STALE, loc=loc, cell_id=writer_cell
+                ))
+
+            # BackwardStale: written ∩ writes
+            for loc in written_locs & later_writes:
+                self.add_reason(later_cell, Reason(
+                    ReasonType.BACKWARD_STALE, loc=loc, cell_id=writer_cell
+                ))
+
+    def handle_edit(self, cell_id: str) -> None:
+        """
+        EDIT transition: T_i := Stale({CodeChanged})
+
+        Editing replaces any prior reasons with just CodeChanged.
+        Also clears R/W sets and tracking data since the cell's behavior may change.
+        """
+        self.set_stale(cell_id, {Reason(ReasonType.CODE_CHANGED)})
+        # Clear per-cell state since the code has changed
+        self.reads.pop(cell_id, None)
+        self.writes.pop(cell_id, None)
+        self.tracking_data.pop(cell_id, None)
+        self.typed_changes.pop(cell_id, None)
+        self.structural_reads_values.pop(cell_id, None)
+        self.execution_seq.pop(cell_id, None)
+
+    def handle_delete(self, deleted_cell: str) -> None:
+        """
+        DELETE transition:
+        1. Keep L(x) pointing to deleted cell (for orphan detection)
+        2. Mark cells that read orphaned locations as Stale(SourceDeleted)
+        3. Remove deleted cell from status/reads/writes/cell_order
+
+        Note: We intentionally keep last_writer pointing to the deleted cell
+        so that forward dependency checks can detect "orphaned values" -
+        values that came from a cell that no longer exists.
+        """
+        deleted_writes = self.writes.get(deleted_cell, set())
+
+        # Note: Do NOT clear last_writer - keep it for orphan detection
+        # The forward dependency check detects deleted cells by checking
+        # if the writer is still in cell_order.
+
+        # Mark orphan readers (cells that read what the deleted cell wrote)
+        # Since we keep last_writer pointing to deleted cell, check directly
+        for cell_id in self.cell_order:
+            if cell_id == deleted_cell:
+                continue
+
+            cell_reads = self.reads.get(cell_id, set())
+            for loc in cell_reads & deleted_writes:
+                # The location was written by deleted_cell, mark reader as orphan
+                self.add_reason(cell_id, Reason(
+                    ReasonType.READS_RESIDUAL_WRITE, loc=loc
+                ))
+
+        # Remove deleted cell from state
+        self.status.pop(deleted_cell, None)
+        self.reads.pop(deleted_cell, None)
+        self.writes.pop(deleted_cell, None)
+        # Also remove per-cell tracking data
+        self.tracking_data.pop(deleted_cell, None)
+        self.execution_seq.pop(deleted_cell, None)
+        self.structural_reads_values.pop(deleted_cell, None)
+        self.typed_changes.pop(deleted_cell, None)
+        if deleted_cell in self.cell_order:
+            self.cell_order.remove(deleted_cell)
+
+    def handle_insert(self, cell_id: str, position: int) -> None:
+        """
+        INSERT transition: new cell at position with Stale({NeverExecuted})
+
+        Also checks if insertion affects Runnable for later cells.
+        """
+        # Insert into cell_order at position
+        if position < 0:
+            position = 0
+        if position > len(self.cell_order):
+            position = len(self.cell_order)
+
+        self.cell_order.insert(position, cell_id)
+        self.status[cell_id] = CellStatus.never_executed()
+        self.reads[cell_id] = set()
+        self.writes[cell_id] = set()
+
+        # Check Runnable for cells after insertion point
+        for later_cell in self.cell_order[position + 1:]:
+            if self.is_clean(later_cell) and not self.is_runnable(later_cell):
+                self.add_reason(later_cell, Reason(ReasonType.ORDER_CHANGED))
+
+    def handle_move(self, cell_id: str, new_position: int) -> None:
+        """
+        MOVE transition: reposition cell and check affected cells.
+        """
+        if cell_id not in self.cell_order:
+            return
+
+        old_position = self.cell_order.index(cell_id)
+        if old_position == new_position:
+            return
+
+        # Remove from old position
+        self.cell_order.remove(cell_id)
+
+        # new_position is the target index in the final list (no adjustment needed)
+
+        # Clamp to valid range
+        if new_position < 0:
+            new_position = 0
+        if new_position > len(self.cell_order):
+            new_position = len(self.cell_order)
+
+        # Insert at new position
+        self.cell_order.insert(new_position, cell_id)
+
+        # Check Runnable for affected range
+        lo = min(old_position, new_position)
+        hi = max(old_position, new_position) + 1
+
+        for affected_cell in self.cell_order[lo:hi]:
+            if self.is_clean(affected_cell) and not self.is_runnable(affected_cell):
+                self.add_reason(affected_cell, Reason(ReasonType.ORDER_CHANGED))
+
+    def set_cell_order(self, new_order: List[str]) -> List[str]:
+        """
+        Update cell order and handle structural changes.
+
+        Detects deletions, insertions, and reorderings.
+        Returns list of cells that became newly stale.
+
+        Args:
+            new_order: New list of cell IDs in document order
+
+        Returns:
+            List of cell IDs that became stale due to this change
+        """
+        old_set = set(self.cell_order)
+        new_set = set(new_order)
+        previously_stale = set(self.get_stale_cells())
+
+        # Handle deletions
+        for deleted in old_set - new_set:
+            self.handle_delete(deleted)
+
+        # Handle insertions (new cells not in old order)
+        for inserted in new_set - old_set:
+            pos = new_order.index(inserted)
+            # Don't use handle_insert as it modifies cell_order
+            # Just initialize the new cell's state
+            self.status[inserted] = CellStatus.never_executed()
+            self.reads[inserted] = set()
+            self.writes[inserted] = set()
+
+        # Check if order actually changed (not just same cells in same positions)
+        old_order = self.cell_order
+        order_changed = old_order != list(new_order)
+
+        # Update order
+        self.cell_order = list(new_order)
+
+        # Check Runnable for all cells - but only add ORDER_CHANGED if order actually changed
+        # This prevents spurious ORDER_CHANGED when cells are just stale due to value changes
+        if order_changed:
+            for cell_id in self.cell_order:
+                if self.is_clean(cell_id) and not self.is_runnable(cell_id):
+                    self.add_reason(cell_id, Reason(ReasonType.ORDER_CHANGED))
+
+        # Return newly stale cells
+        currently_stale = set(self.get_stale_cells())
+        return list(currently_stale - previously_stale)
+
+    def clear(self) -> None:
+        """Reset all state (e.g., on kernel restart)."""
+        # Formal model state
+        self.status.clear()
+        self.reads.clear()
+        self.writes.clear()
+        self.last_writer.clear()
+        self.column_last_writer.clear()
+        self.cell_order.clear()
+        # Per-cell tracking data
+        self.tracking_data.clear()
+        self.execution_seq.clear()
+        self.structural_reads_values.clear()
+        self.typed_changes.clear()
+
+    # =========================================================================
+    # Debug/Inspection
+    # =========================================================================
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert entire state to dict for debugging."""
+        return {
+            "cell_order": self.cell_order,
+            "status": {k: v.to_dict() for k, v in self.status.items()},
+            "reads": {k: sorted(v) for k, v in self.reads.items()},
+            "writes": {k: sorted(v) for k, v in self.writes.items()},
+            "last_writer": dict(self.last_writer),
+        }
+
+    def __str__(self) -> str:
+        lines = ["NotebookState:"]
+        lines.append(f"  cell_order: {self.cell_order}")
+        lines.append("  status:")
+        for cell_id in self.cell_order:
+            status = self.get_status(cell_id)
+            lines.append(f"    {cell_id}: {status}")
+        lines.append(f"  last_writer: {self.last_writer}")
+        return "\n".join(lines)

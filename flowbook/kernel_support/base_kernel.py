@@ -220,6 +220,54 @@ class BaseFlowbookKernel(IPythonKernel):
 
         return total
 
+    def _take_checkpoint_incremental(
+        self,
+        checkpoint_name: str,
+        accessed_vars: set,
+        prior_checkpoint_name: str,
+    ) -> Checkpoint:
+        """
+        Take an incremental snapshot optimized for untouched variables.
+
+        Reuses deep copies from prior_checkpoint for variables that were not
+        accessed during cell execution AND are known leaf objects.
+
+        Args:
+            checkpoint_name: Name for the new checkpoint
+            accessed_vars: Set of variable names accessed during cell execution
+            prior_checkpoint_name: Name of checkpoint to potentially reuse from
+
+        Returns:
+            The Checkpoint object
+        """
+        from flowbook.util.output import timer
+
+        with timer(key="checkpoint:get_write_paths", message="Get VFS write paths"):
+            write_paths = self._vfs.get_write_paths() if (self._vfs.enabled or self._vfs.tracking_only) else None
+
+        with timer(key="checkpoint:dict_ns", message="Convert namespace to dict"):
+            ns_dict = dict(self.shell.user_ns)
+
+        total, removed = self._checkpoints.save_incremental(
+            checkpoint_name,
+            ns_dict,
+            accessed_vars,
+            prior_checkpoint_name,
+            write_paths=write_paths,
+            vfs=self._vfs if self._vfs.enabled else None,
+            max_size_mb=None,
+        )
+
+        for k, v in removed.items():
+            from flowbook.util.output import log
+            message = f"The object {k} (type {v}) cannot be checkpointed"
+            log(message)
+            self._display.display_icon_and_text("\u26a0\ufe0f", message)
+            if k in self.shell.user_ns:
+                del self.shell.user_ns[k]
+
+        return total
+
     def _restore_checkpoint(self, checkpoint_name: str) -> None:
         """Restore memory + file checkpoint."""
         self._checkpoints.restore(

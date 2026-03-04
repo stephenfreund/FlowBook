@@ -38,11 +38,6 @@ class TestReproducibilityEnforcerBaseline:
         """Save a pre-checkpoint for a cell."""
         checkpoints.save(f"_pre_{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, checkpoints, name, namespace):
-        """Create and return a post-checkpoint."""
-        checkpoints.save(name, namespace, max_size_mb=None)
-        return checkpoints.saved[name]
-
     def test_no_backward_mutation_without_structural(self):
         """No backward mutation when earlier cell doesn't read what we modify."""
         checkpoints = MemoryCheckpoints()
@@ -52,28 +47,26 @@ class TestReproducibilityEnforcerBaseline:
         # Cell A reads 'x', writes nothing
         ns_a = {'x': 10, 'y': 20}
         self._save_pre_checkpoint(checkpoints, 'cell_a', ns_a)
-        post_a = self._make_post_checkpoint(checkpoints, 'post_a', ns_a)
 
         tracking_a = TrackingData(
             reads_before_writes={'x'},
             writes=set(),
         )
 
-        result_a = enforcer.check('cell_a', checkpoints.saved['_pre_cell_a'], post_a, tracking_a)
+        result_a = enforcer.check('cell_a', checkpoints.saved['_pre_cell_a'], ns_a, tracking_a)
         assert result_a.violation is None
 
         # Cell B modifies 'y' (not read by cell A)
         ns_b_pre = {'x': 10, 'y': 20}
         ns_b_post = {'x': 10, 'y': 999}
         self._save_pre_checkpoint(checkpoints, 'cell_b', ns_b_pre)
-        post_b = self._make_post_checkpoint(checkpoints, 'post_b', ns_b_post)
 
         tracking_b = TrackingData(
             reads_before_writes={'y'},
             writes={'y'},
         )
 
-        result_b = enforcer.check('cell_b', checkpoints.saved['_pre_cell_b'], post_b, tracking_b)
+        result_b = enforcer.check('cell_b', checkpoints.saved['_pre_cell_b'], ns_b_post, tracking_b)
         assert result_b.violation is None
 
     def test_backward_mutation_detected(self):
@@ -85,28 +78,26 @@ class TestReproducibilityEnforcerBaseline:
         # Cell A reads 'x'
         ns_a = {'x': 10}
         self._save_pre_checkpoint(checkpoints, 'cell_a', ns_a)
-        post_a = self._make_post_checkpoint(checkpoints, 'post_a', ns_a)
 
         tracking_a = TrackingData(
             reads_before_writes={'x'},
             writes=set(),
         )
 
-        result_a = enforcer.check('cell_a', checkpoints.saved['_pre_cell_a'], post_a, tracking_a)
+        result_a = enforcer.check('cell_a', checkpoints.saved['_pre_cell_a'], ns_a, tracking_a)
         assert result_a.violation is None
 
         # Cell B modifies 'x' (read by cell A)
         ns_b_pre = {'x': 10}
         ns_b_post = {'x': 999}
         self._save_pre_checkpoint(checkpoints, 'cell_b', ns_b_pre)
-        post_b = self._make_post_checkpoint(checkpoints, 'post_b', ns_b_post)
 
         tracking_b = TrackingData(
             reads_before_writes={'x'},
             writes={'x'},
         )
 
-        result_b = enforcer.check('cell_b', checkpoints.saved['_pre_cell_b'], post_b, tracking_b)
+        result_b = enforcer.check('cell_b', checkpoints.saved['_pre_cell_b'], ns_b_post, tracking_b)
         assert result_b.violation is not None
         assert 'x' in result_b.violation.variables
 
@@ -126,7 +117,6 @@ class TestSDCStructuralReadsModeOff:
         df = pd.DataFrame({'a': [1], 'b': [2]})
         ns_a = {'df': df}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -136,7 +126,7 @@ class TestSDCStructuralReadsModeOff:
         )
 
         result_a = enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+            'cell_a', pre_a, ns_a, tracking_a,
         )
         assert result_a.violation is None
 
@@ -144,7 +134,6 @@ class TestSDCStructuralReadsModeOff:
         df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
         ns_b_post = {'df': df_b}
         pre_b = MemoryCheckpoint('pre_b', ns_a, {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
 
         tracking_b = TrackingData(
             reads_before_writes={'df'},
@@ -153,7 +142,7 @@ class TestSDCStructuralReadsModeOff:
         )
 
         result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+            'cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         # OFF mode: no violation for structural changes
@@ -175,7 +164,6 @@ class TestSDCStructuralReadsModeWarn:
         df = pd.DataFrame({'a': [1], 'b': [2]})
         ns_a = {'df': df}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -184,8 +172,7 @@ class TestSDCStructuralReadsModeWarn:
             structural_reads={'df': {'columns'}},
         )
 
-        result_a = enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
         assert result_a.violation is None
 
@@ -193,16 +180,13 @@ class TestSDCStructuralReadsModeWarn:
         df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
         ns_b_post = {'df': df_b}
         pre_b = MemoryCheckpoint('pre_b', ns_a, {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
-
         tracking_b = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
             column_writes={'df': {'c'}},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         # WARN mode: no violation but should have warnings
@@ -225,7 +209,6 @@ class TestSDCStructuralReadsModeEnforce:
         df = pd.DataFrame({'a': [1], 'b': [2]})
         ns_a = {'df': df.copy()}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -234,8 +217,7 @@ class TestSDCStructuralReadsModeEnforce:
             structural_reads={'df': {'columns'}},
         )
 
-        result_a = enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
         assert result_a.violation is None
 
@@ -243,16 +225,13 @@ class TestSDCStructuralReadsModeEnforce:
         df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
         ns_b_post = {'df': df_b}
         pre_b = MemoryCheckpoint('pre_b', {'df': df.copy()}, {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
-
         tracking_b = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
             column_writes={'df': {'c'}},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         # ENFORCE mode: should be violation
@@ -270,7 +249,6 @@ class TestSDCStructuralReadsModeEnforce:
         df = pd.DataFrame({'a': [1, 2]})
         ns_a = {'df': df.copy()}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -279,8 +257,7 @@ class TestSDCStructuralReadsModeEnforce:
             structural_reads={'df': {'shape'}},
         )
 
-        result_a = enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
         assert result_a.violation is None
 
@@ -288,15 +265,12 @@ class TestSDCStructuralReadsModeEnforce:
         df_b = pd.DataFrame({'a': [1, 2, 3]})
         ns_b_post = {'df': df_b}
         pre_b = MemoryCheckpoint('pre_b', {'df': df.copy()}, {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
-
         tracking_b = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         # ENFORCE mode: should be violation
@@ -313,7 +287,6 @@ class TestSDCStructuralReadsModeEnforce:
         df = pd.DataFrame({'a': [1, 2]})
         ns_a = {'df': df.copy()}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -322,8 +295,7 @@ class TestSDCStructuralReadsModeEnforce:
             structural_reads={'df': {'len'}},
         )
 
-        result_a = enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
         assert result_a.violation is None
 
@@ -331,15 +303,12 @@ class TestSDCStructuralReadsModeEnforce:
         df_b = pd.DataFrame({'a': [1, 2, 3]})
         ns_b_post = {'df': df_b}
         pre_b = MemoryCheckpoint('pre_b', {'df': df.copy()}, {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
-
         tracking_b = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         assert result_b.violation is not None
@@ -355,7 +324,6 @@ class TestSDCStructuralReadsModeEnforce:
         df = pd.DataFrame({'a': [1], 'b': [2]})
         ns_a = {'df': df.copy()}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -364,8 +332,7 @@ class TestSDCStructuralReadsModeEnforce:
             structural_reads={'df': {'iter'}},
         )
 
-        result_a = enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
         assert result_a.violation is None
 
@@ -373,16 +340,13 @@ class TestSDCStructuralReadsModeEnforce:
         df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
         ns_b_post = {'df': df_b}
         pre_b = MemoryCheckpoint('pre_b', {'df': df.copy()}, {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
-
         tracking_b = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
             column_writes={'df': {'c'}},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         assert result_b.violation is not None
@@ -398,7 +362,6 @@ class TestSDCStructuralReadsModeEnforce:
         df = pd.DataFrame({'a': [1, 2], 'b': [3, 4]})
         ns_a = {'df': df.copy()}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -407,8 +370,7 @@ class TestSDCStructuralReadsModeEnforce:
             structural_reads={'df': {'describe'}},
         )
 
-        result_a = enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
         assert result_a.violation is None
 
@@ -416,16 +378,13 @@ class TestSDCStructuralReadsModeEnforce:
         df_b = pd.DataFrame({'a': [1, 2], 'b': [3, 4], 'c': [5, 6]})
         ns_b_post = {'df': df_b}
         pre_b = MemoryCheckpoint('pre_b', {'df': df.copy()}, {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
-
         tracking_b = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
             column_writes={'df': {'c'}},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         assert result_b.violation is not None
@@ -446,7 +405,6 @@ class TestSDCStructuralStaleness:
         df = pd.DataFrame({'a': [1], 'b': [2]})
         ns_a = {'df': df.copy()}
         pre_a = MemoryCheckpoint('pre_a', {}, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -454,15 +412,13 @@ class TestSDCStructuralStaleness:
             writes={'df'},
         )
 
-        result_a = enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
         assert result_a.violation is None
 
         # Cell B: reads df.columns
         ns_b = ns_a.copy()
         pre_b = MemoryCheckpoint('pre_b', ns_b, {})
-        post_b = MemoryCheckpoint('post_b', ns_b, {})
         checkpoints.save('_pre_cell_b', ns_b)
 
         tracking_b = TrackingData(
@@ -471,8 +427,7 @@ class TestSDCStructuralStaleness:
             structural_reads={'df': {'columns'}},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
             continue_on_violation=True,
         )
         assert result_b.violation is None
@@ -481,16 +436,13 @@ class TestSDCStructuralStaleness:
         df_c = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
         ns_c_post = {'df': df_c}
         pre_c = MemoryCheckpoint('pre_c', ns_a.copy(), {})
-        post_c = MemoryCheckpoint('post_c', ns_c_post, {})
-
         tracking_c = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
             column_writes={'df': {'c'}},
         )
 
-        result_c = enforcer.check(
-            'cell_c', pre_c, post_c, tracking_c,
+        result_c = enforcer.check('cell_c', pre_c, ns_c_post, tracking_c,
         )
 
         # Cell B should be stale (it read df.columns, columns changed)
@@ -508,7 +460,6 @@ class TestSDCStructuralStaleness:
         df = pd.DataFrame({'a': [1, 2]})
         ns_a = {'df': df.copy()}
         pre_a = MemoryCheckpoint('pre_a', {}, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -516,14 +467,12 @@ class TestSDCStructuralStaleness:
             writes={'df'},
         )
 
-        result_a = enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
 
         # Cell B: reads len(df)
         ns_b = ns_a.copy()
         pre_b = MemoryCheckpoint('pre_b', ns_b, {})
-        post_b = MemoryCheckpoint('post_b', ns_b, {})
         checkpoints.save('_pre_cell_b', ns_b)
 
         tracking_b = TrackingData(
@@ -532,23 +481,19 @@ class TestSDCStructuralStaleness:
             structural_reads={'df': {'len'}},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         # Cell C: adds row
         df_c = pd.DataFrame({'a': [1, 2, 3]})
         ns_c_post = {'df': df_c}
         pre_c = MemoryCheckpoint('pre_c', ns_a.copy(), {})
-        post_c = MemoryCheckpoint('post_c', ns_c_post, {})
-
         tracking_c = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
         )
 
-        result_c = enforcer.check(
-            'cell_c', pre_c, post_c, tracking_c,
+        result_c = enforcer.check('cell_c', pre_c, ns_c_post, tracking_c,
         )
 
         # Cell B should be stale (it read len(df), row count changed)
@@ -569,7 +514,6 @@ class TestSDCStructuralNoFalsePositives:
         df = pd.DataFrame({'a': [1], 'b': [2]})
         ns_a = {'df': df.copy()}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -578,8 +522,7 @@ class TestSDCStructuralNoFalsePositives:
             structural_reads={'df': {'columns', 'shape'}},
         )
 
-        result_a = enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
         assert result_a.violation is None
 
@@ -587,16 +530,13 @@ class TestSDCStructuralNoFalsePositives:
         df_b = pd.DataFrame({'a': [999], 'b': [888]})
         ns_b_post = {'df': df_b}
         pre_b = MemoryCheckpoint('pre_b', {'df': df.copy()}, {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
-
         tracking_b = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
             column_writes={'df': {'a', 'b'}},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         # No structural change, so no violation from structural reads
@@ -614,19 +554,16 @@ class TestSDCStructuralNoFalsePositives:
         df = pd.DataFrame({'a': [1], 'b': [2]})
         ns_a = {'df': df.copy()}
         pre_a = MemoryCheckpoint('pre_a', {}, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(writes={'df'})
 
-        enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
 
         # Cell B: reads df.columns
         ns_b = ns_a.copy()
         pre_b = MemoryCheckpoint('pre_b', ns_b, {})
-        post_b = MemoryCheckpoint('post_b', ns_b, {})
         checkpoints.save('_pre_cell_b', ns_b)
 
         tracking_b = TrackingData(
@@ -634,24 +571,20 @@ class TestSDCStructuralNoFalsePositives:
             structural_reads={'df': {'columns'}},
         )
 
-        enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        enforcer.check('cell_b', pre_b, ns_b, tracking_b,
         )
 
         # Cell C: modifies values but not structure
         df_c = pd.DataFrame({'a': [999], 'b': [888]})
         ns_c_post = {'df': df_c}
         pre_c = MemoryCheckpoint('pre_c', ns_a.copy(), {})
-        post_c = MemoryCheckpoint('post_c', ns_c_post, {})
-
         tracking_c = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
             column_writes={'df': {'a', 'b'}},
         )
 
-        result_c = enforcer.check(
-            'cell_c', pre_c, post_c, tracking_c,
+        result_c = enforcer.check('cell_c', pre_c, ns_c_post, tracking_c,
         )
 
         # Cell B should NOT be stale (structure unchanged, only values changed)
@@ -675,7 +608,6 @@ class TestSDCStructuralMultipleVariables:
         df2 = pd.DataFrame({'x': [1]})
         ns_a = {'df1': df1.copy(), 'df2': df2.copy()}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -683,24 +615,20 @@ class TestSDCStructuralMultipleVariables:
             structural_reads={'df1': {'columns'}},  # Only df1
         )
 
-        enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
 
         # Cell B adds column to df2 (not tracked structurally)
         df2_b = pd.DataFrame({'x': [1], 'y': [2]})
         ns_b_post = {'df1': df1.copy(), 'df2': df2_b}
         pre_b = MemoryCheckpoint('pre_b', ns_a.copy(), {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
-
         tracking_b = TrackingData(
             reads_before_writes={'df2'},
             writes={'df2'},
             column_writes={'df2': {'y'}},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         # Should NOT be violation (df1.columns was read, but df2 was modified)
@@ -721,7 +649,6 @@ class TestSDCStructuralSeriesTracking:
         s = pd.Series([1, 2, 3])
         ns_a = {'s': s.copy()}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -729,23 +656,19 @@ class TestSDCStructuralSeriesTracking:
             structural_reads={'s': {'index'}},
         )
 
-        enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
 
         # Cell B adds element
         s_b = pd.Series([1, 2, 3, 4])
         ns_b_post = {'s': s_b}
         pre_b = MemoryCheckpoint('pre_b', {'s': s.copy()}, {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
-
         tracking_b = TrackingData(
             reads_before_writes={'s'},
             writes={'s'},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         assert result_b.violation is not None
@@ -761,7 +684,6 @@ class TestSDCStructuralSeriesTracking:
         s = pd.Series([1, 2, 3])
         ns_a = {'s': s.copy()}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -769,23 +691,19 @@ class TestSDCStructuralSeriesTracking:
             structural_reads={'s': {'dtype'}},
         )
 
-        enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
 
         # Cell B changes dtype
         s_b = pd.Series([1.0, 2.0, 3.0])  # Now float
         ns_b_post = {'s': s_b}
         pre_b = MemoryCheckpoint('pre_b', {'s': s.copy()}, {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
-
         tracking_b = TrackingData(
             reads_before_writes={'s'},
             writes={'s'},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         assert result_b.violation is not None
@@ -829,7 +747,6 @@ class TestSDCStructuralNestedPaths:
         df = pd.DataFrame({'a': [1]})
         ns_a = {'data': {'train': df.copy()}}
         pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        post_a = MemoryCheckpoint('post_a', ns_a, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -837,24 +754,20 @@ class TestSDCStructuralNestedPaths:
             structural_reads={"data['train']": {'columns'}},
         )
 
-        enforcer.check(
-            'cell_a', pre_a, post_a, tracking_a,
+        enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
 
         # Cell B adds column to data['train']
         df_b = pd.DataFrame({'a': [1], 'b': [2]})
         ns_b_post = {'data': {'train': df_b}}
         pre_b = MemoryCheckpoint('pre_b', {'data': {'train': df.copy()}}, {})
-        post_b = MemoryCheckpoint('post_b', ns_b_post, {})
-
         tracking_b = TrackingData(
             reads_before_writes={'data'},
             writes={'data'},
             column_writes={"data['train']": {'b'}},
         )
 
-        result_b = enforcer.check(
-            'cell_b', pre_b, post_b, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
         assert result_b.violation is not None

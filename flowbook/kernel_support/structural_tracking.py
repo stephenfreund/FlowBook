@@ -96,6 +96,21 @@ class StructuralTrackingMode(str, Enum):
     ENFORCE = "enforce"
 
 
+class StalenessMode(str, Enum):
+    """Mode for staleness computation.
+
+    SYNTACTIC: Use set intersection on R/W sets. Monotonic staleness.
+               Lower memory (no checkpoint storage after initial diff).
+               More conservative (over-approximates staleness).
+
+    SEMANTIC:  Use checkpoint diff comparison. Non-monotonic staleness.
+               Higher memory (stores pre-checkpoints per cell).
+               Precise (detects convergence, can clear staleness).
+    """
+    SYNTACTIC = "syntactic"
+    SEMANTIC = "semantic"
+
+
 # =============================================================================
 # Structural attributes/methods to track
 # =============================================================================

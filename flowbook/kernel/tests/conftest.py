@@ -62,11 +62,6 @@ class ReproducibilityTestHelper:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
-        """Create and return a post-checkpoint."""
-        self.checkpoints.save(name, namespace, max_size_mb=None)
-        return self.checkpoints.saved[name]
-
     def get_pre_checkpoint(self, cell_id: str) -> MemoryCheckpoint:
         """Get the pre-checkpoint for a cell."""
         return self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"]
@@ -88,13 +83,13 @@ class ReproducibilityTestHelper:
 
         This is a convenience method that:
         1. Saves a pre-checkpoint
-        2. Creates a post-checkpoint
+        2. Passes the post_namespace directly to check()
         3. Runs the SDC check
 
         Args:
             cell_id: ID of the cell being executed
             pre_namespace: Namespace state before execution
-            post_namespace: Namespace state after execution
+            post_namespace: Namespace state after execution (live namespace)
             reads: Variables read by the cell
             writes: Variables written by the cell
             column_reads: Dict of var -> set of read columns
@@ -106,7 +101,6 @@ class ReproducibilityTestHelper:
             ReproducibilityResult from the check
         """
         self.save_pre_checkpoint(cell_id, pre_namespace)
-        post_checkpoint = self.make_post_checkpoint(f"post_{cell_id}", post_namespace)
 
         tracking = make_tracking(
             reads=reads,
@@ -119,7 +113,7 @@ class ReproducibilityTestHelper:
         return self.sdc.check(
             cell_id=cell_id,
             pre_checkpoint=self.get_pre_checkpoint(cell_id),
-            post_checkpoint=post_checkpoint,
+            namespace=post_namespace,
             tracking=tracking,
             continue_on_violation=continue_on_violation,
         )

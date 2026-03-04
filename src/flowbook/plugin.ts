@@ -6,7 +6,8 @@ import {
   JupyterFrontEnd,
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
-import { INotebookTracker } from '@jupyterlab/notebook';
+import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
+import { Cell } from '@jupyterlab/cells';
 
 import { KernelDetector } from '../shared/kerneldetection';
 import { ReproducibilityMetadataPanel } from './metadatapanel';
@@ -223,10 +224,52 @@ class FlowbookActivationManager {
     if (widget) {
       this._activeNotebookPath = widget.context.path;
       this._cellIndexManager.startMonitoring(this._activeNotebookPath, widget);
+
+      // Sync initial staleness state from kernel
+      this._syncInitialState(widget);
     }
 
     this._isActive = true;
     console.log('FlowBook Plugin: Activated');
+  }
+
+  /**
+   * Sync initial staleness state from kernel on notebook load.
+   * Sends cell order and requests current state.
+   */
+  private _syncInitialState(panel: NotebookPanel): void {
+    const session = panel.sessionContext.session;
+    if (!session?.kernel) {
+      console.log('FlowBook Plugin: No kernel available for sync');
+      return;
+    }
+
+    // Get cell order
+    const cells = panel.content.widgets;
+    const cellOrder = cells
+      .filter((cell: Cell) => cell.model.type === 'code')
+      .map((cell: Cell) => cell.model.id);
+
+    if (cellOrder.length === 0) {
+      return;
+    }
+
+    // Send cell order first, then request sync
+    const structureCmd = `%notebook_structure ${cellOrder.join(' ')}`;
+    session.kernel.requestExecute({
+      code: structureCmd,
+      silent: true,
+      store_history: false
+    });
+
+    // Request staleness sync (output will be processed by execution hook)
+    session.kernel.requestExecute({
+      code: '%flowbook_sync',
+      silent: true,
+      store_history: false
+    });
+
+    console.log('FlowBook Plugin: Sent initial sync request');
   }
 
   private _deactivate(): void {

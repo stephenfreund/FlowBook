@@ -212,11 +212,15 @@ Boolean toggle commands (no arg = enable, ? = show status):
 %continue_after_violation off        - Stop on violation (default behavior)
 %continue_after_violation ?          - Show current setting
 
-Mode selection command:
+Mode selection commands:
 %structural_tracking [off|warn|enforce] - Set structural tracking mode
     off     - Don't track structural attributes
     warn    - Track and warn, but don't block (default)
     enforce - Track and block violations
+
+%staleness_mode [syntactic|semantic] - Set staleness computation mode
+    syntactic - Use set intersection (monotonic, lower memory)
+    semantic  - Use checkpoint diff (precise, detects convergence, default)
 
 ================================================================================
 ASSUMPTIONS AND LIMITATIONS
@@ -298,7 +302,7 @@ DESIGN IMPROVEMENTS:
 3. STRUCTURAL ATTRIBUTE VALUES
    Currently: Capture values at read time for better error messages
    Improvement: Show before/after values in all violation messages
-   Status: Partially implemented (structural_reads_values in ReproducibilityExecutionRecord)
+   Status: Partially implemented (structural_reads_values in NotebookState)
 
 4. ASYNC EXECUTION SUPPORT
    Currently: Assumes synchronous execution
@@ -362,7 +366,7 @@ import os
 import re
 import time
 import traceback
-from typing import Optional, Tuple
+from typing import Optional, Set, Tuple
 
 from IPython.core.magic import Magics, line_magic, magics_class
 from ipykernel.kernelapp import IPKernelApp
@@ -380,7 +384,6 @@ from flowbook.kernel.models import ReproducibilityMetadata
 from flowbook.kernel.reproducibility_enforcer import (
     ReproducibilityEnforcer,
     PRE_CHECKPOINT_PREFIX,
-    POST_CHECKPOINT_PREFIX,
 )
 
 
@@ -430,9 +433,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         # Continue after violation flag (default: stop on violation)
         self._continue_after_violation: bool = False
 
-        # Pending EXEC-RESTORE flag: set by %exec_restore, consumed by _do_execute_impl
-        self._pending_exec_restore: Optional[str] = None
-
         # Ensure filesystem magics are registered
         self._ensure_fs_magics()
 
@@ -463,21 +463,63 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         self._enforcer.set_cell_order(cell_order)
 
     @line_magic
+    def flowbook_sync(self, line: str) -> None:
+        """
+        Sync current staleness state to frontend.
+
+        Sends reproducibility metadata for all cells, including never_executed cells.
+        Called by frontend on notebook load to initialize staleness display.
+
+        Usage:
+            %flowbook_sync
+        """
+        state = self._enforcer._notebook_state
+
+        # Build metadata with current staleness state
+        metadata = ReproducibilityMetadata(
+            cell_id="",  # No specific cell
+            execution_seq=self._enforcer.seq_counter,
+            reads=[],
+            writes=[],
+            changed_variables=[],
+            stale_cells=state.get_stale_cells(),
+            violation=None,
+            cell_order=self._enforcer.cell_order,
+            staleness_reasons=state.get_all_reasons(),
+        )
+
+        # Send to frontend via display_data (same format as execution metadata)
+        self._display.display_icon_and_text(
+            "🔄",
+            "Synced",
+            metadata=metadata.to_display_metadata(),
+        )
+
+    @line_magic
     def flowbook_status(self, line: str) -> None:
         """Display current Reproducibility state."""
+        state = self._enforcer._notebook_state
         order = self._enforcer.cell_order
-        records = self._enforcer.records
+
+        # Get executed cells (those with tracking data)
+        executed_cells = list(state.tracking_data.keys())
 
         status_lines = [
             f"Cell order: {order}",
-            f"Executed cells: {list(records.keys())}",
+            f"Executed cells: {executed_cells}",
             f"Execution counter: {self._enforcer.seq_counter}",
+            f"Stale cells: {state.get_stale_cells()}",
         ]
 
-        for cell_id, record in records.items():
+        for cell_id in executed_cells:
+            reads = state.reads.get(cell_id, set())
+            writes = state.writes.get(cell_id, set())
+            seq = state.execution_seq.get(cell_id, 0)
+            reasons = state.get_reasons(cell_id)
+            status = "clean" if state.is_clean(cell_id) else f"stale({[r.type.value for r in reasons]})"
             status_lines.append(
-                f"  {cell_id}: reads={sorted(record.reads)}, "
-                f"writes={sorted(record.writes)}, seq={record.execution_seq}"
+                f"  {cell_id}: reads={sorted(reads)}, writes={sorted(writes)}, "
+                f"seq={seq}, status={status}"
             )
 
         self._display.display_icon_and_text(
@@ -559,6 +601,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         stale_cells = self._enforcer.mark_cell_edited(cell_id)
         if cell_id in [c for c in stale_cells]:
             # Send updated staleness info to frontend
+            staleness_reasons = self._enforcer._notebook_state.get_all_reasons()
             metadata = ReproducibilityMetadata(
                 cell_id=cell_id,
                 execution_seq=self._enforcer.seq_counter,
@@ -568,6 +611,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 stale_cells=stale_cells,
                 violation=None,
                 cell_order=self._enforcer.cell_order,
+                staleness_reasons=staleness_reasons,
             )
             self._display.display_icon_and_text(
                 "✏️",
@@ -577,42 +621,16 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
     @line_magic
     def exec_restore(self, line: str) -> None:
-        """[EXEC-RESTORE] Request execution from prefix checkpoint (§1.8).
+        """Deprecated: EXEC-RESTORE has been removed.
 
-        Sets a pending flag that is consumed by the next _do_execute_impl() call.
-        The frontend sends this magic silently before triggering cell execution,
-        so the ZMQ queue ordering is: %exec_restore → %notebook_structure → cell code.
-
-        Usage:
-            %exec_restore <cell_id>
+        Forward contamination now blocks execution. To fix:
+        1. Run the upstream cells in document order
+        2. Then run this cell
         """
-        cell_id = line.strip()
-        log(f"[exec_restore magic] Received for cell_id={cell_id!r}")
-        if not cell_id:
-            self._display.display_icon_and_text("❌", "Usage: %exec_restore <cell_id>")
-            return
-
-        can_restore = self._enforcer.can_exec_restore(cell_id)
-        if not can_restore:
-            # Identify the immediate predecessor for a helpful error message
-            try:
-                pos = self._enforcer.cell_order.index(cell_id)
-                cell_alpha = index_to_alpha(pos)
-                if pos > 0:
-                    prev_alpha = index_to_alpha(pos - 1)
-                    msg = (
-                        f"Cannot restore {cell_alpha}: predecessor {prev_alpha} "
-                        f"has not been executed or is stale. Run {prev_alpha} first."
-                    )
-                else:
-                    msg = f"Cannot restore {cell_alpha}: cell not in notebook order."
-            except (ValueError, IndexError):
-                msg = "Cannot restore: cell not in notebook order."
-            self._display.display_icon_and_text("❌", msg)
-            return
-
-        self._pending_exec_restore = cell_id
-        log(f"[exec_restore magic] Pending flag set for {cell_id}")
+        self._display.display_icon_and_text(
+            "❌",
+            "EXEC-RESTORE is deprecated. Run upstream cells in document order to fix forward contamination."
+        )
 
     @line_magic
     def structural_tracking(self, line: str) -> None:
@@ -671,6 +689,75 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             self._display.display_icon_and_text(
                 "✅", f"Structural tracking mode set to: {mode.value}"
             )
+
+    @line_magic
+    def staleness_mode(self, line: str) -> None:
+        """
+        Set staleness computation mode.
+
+        Staleness computation can use two different approaches:
+
+        SYNTACTIC mode:
+        - Uses checkpoint once to compute W_i (what actually changed)
+        - All staleness checks use pure set intersection: W_i ∩ R_j ≠ ∅
+        - Staleness is monotonic (once stale, stays stale until re-executed)
+        - Lower memory (discards pre-checkpoints after computing W_i)
+        - More conservative (may over-approximate staleness)
+
+        SEMANTIC mode (default):
+        - Uses checkpoint diff comparison for staleness detection
+        - Staleness is non-monotonic (can be cleared when values converge)
+        - Higher memory (stores pre-checkpoints per cell)
+        - Precise (detects convergence when values return to original)
+
+        Usage:
+            %staleness_mode              - Show current mode
+            %staleness_mode syntactic    - Use set intersection (monotonic, lower memory)
+            %staleness_mode semantic     - Use checkpoint diff (precise, detects convergence)
+
+        Note: Switching from semantic to syntactic clears all stored pre-checkpoints.
+        """
+        from flowbook.kernel_support.structural_tracking import StalenessMode
+
+        # Suspend tracking during magic execution to avoid recording infrastructure reads
+        tracking = self._tracking
+        if tracking is not None and hasattr(tracking, "suspended"):
+            ctx = tracking.suspended()
+        else:
+            from contextlib import nullcontext
+            ctx = nullcontext()
+
+        with ctx:
+            mode_str = line.strip().lower()
+
+            if not mode_str:
+                # Show current mode
+                current_mode = self._enforcer.staleness_mode.value
+                self._display.display_icon_and_text(
+                    "🔍", f"Staleness mode: {current_mode}"
+                )
+                return
+
+            try:
+                mode = StalenessMode(mode_str)
+            except ValueError:
+                self._display.display_icon_and_text(
+                    "❌", f"Invalid mode: {mode_str}. Use 'syntactic' or 'semantic'"
+                )
+                return
+
+            old_mode = self._enforcer.staleness_mode
+            self._enforcer.set_staleness_mode(mode)
+
+            # Notify user if checkpoints were cleared
+            if old_mode == StalenessMode.SEMANTIC and mode == StalenessMode.SYNTACTIC:
+                self._display.display_icon_and_text(
+                    "✅", f"Staleness mode set to: {mode.value} (pre-checkpoints cleared)"
+                )
+            else:
+                self._display.display_icon_and_text(
+                    "✅", f"Staleness mode set to: {mode.value}"
+                )
 
     # =========================================================================
     # Memory introspection magic (using HeapSizer)
@@ -1000,103 +1087,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         cell_meta,
                     )
 
-                # [EXEC-RESTORE] Check and consume pending flag set by %exec_restore magic.
-                _is_exec_restore = False
-                _old_live_checkpoint = None
-
-                if self._pending_exec_restore is not None:
-                    if self._pending_exec_restore == self._cell_id:
-                        # Re-validate precondition (predecessors may have become stale
-                        # between the magic and execution)
-                        if self._enforcer.can_exec_restore(self._cell_id):
-                            prefix_name = self._enforcer.get_prefix_checkpoint_name(
-                                self._cell_id
-                            )
-
-                            if prefix_name is None:
-                                # First cell — restore to initial state (σ_0)
-                                if "_initial_state" in self._checkpoints.memory.saved:
-                                    _old_live_checkpoint = self._take_checkpoint(
-                                        f"_old_live_{self._cell_id}"
-                                    )
-                                    self._restore_checkpoint("_initial_state")
-                                    _is_exec_restore = True
-                                    log(
-                                        f"[exec_restore] Restored initial state for first cell {self._cell_id}"
-                                    )
-                                else:
-                                    log(
-                                        f"[exec_restore] No initial state checkpoint, executing normally"
-                                    )
-
-                            elif prefix_name in self._checkpoints.memory.saved:
-                                # Non-first cell, predecessor has been run — normal restore
-                                _old_live_checkpoint = self._take_checkpoint(
-                                    f"_old_live_{self._cell_id}"
-                                )
-                                self._restore_checkpoint(prefix_name)
-                                _is_exec_restore = True
-                                log(
-                                    f"[exec_restore] Restored prefix checkpoint {prefix_name} for cell {self._cell_id}"
-                                )
-
-                            else:
-                                # Non-first cell, predecessor NOT run — refuse
-                                try:
-                                    cell_idx = self._enforcer.cell_order.index(
-                                        self._cell_id
-                                    )
-                                    prev_idx = cell_idx - 1
-                                    prev_alpha = index_to_alpha(prev_idx)
-                                    cell_alpha = index_to_alpha(cell_idx)
-                                except (ValueError, IndexError):
-                                    prev_alpha = "?"
-                                    cell_alpha = self._cell_id
-                                error_msg = (
-                                    f"Cannot restore {cell_alpha}: predecessor {prev_alpha} "
-                                    f"has not been executed. Run {prev_alpha} first."
-                                )
-                                log(f"[exec_restore] {error_msg}")
-                                self._display.display_icon_and_text("❌", error_msg)
-                                self._pending_exec_restore = None
-                                return {
-                                    "status": "error",
-                                    "execution_count": self.execution_count,
-                                    "ename": "ExecRestoreError",
-                                    "evalue": error_msg,
-                                    "traceback": [error_msg],
-                                }
-
-                            # Emit visible notification on successful restore
-                            if _is_exec_restore:
-                                try:
-                                    cell_idx = self._enforcer.cell_order.index(
-                                        self._cell_id
-                                    )
-                                    cell_alpha = index_to_alpha(cell_idx)
-                                    if cell_idx > 0:
-                                        prev_alpha = index_to_alpha(cell_idx - 1)
-                                        self._display.display_icon_and_text(
-                                            "↩",
-                                            f"Restored from {prev_alpha} checkpoint — re-executing {cell_alpha} from prefix state",
-                                        )
-                                    else:
-                                        self._display.display_icon_and_text(
-                                            "↩",
-                                            f"Restored to initial state — re-executing {cell_alpha}",
-                                        )
-                                except (ValueError, IndexError):
-                                    self._display.display_icon_and_text(
-                                        "↩",
-                                        "Restored from prefix checkpoint — re-executing",
-                                    )
-                        else:
-                            log(
-                                f"[exec_restore] Precondition no longer valid for cell {self._cell_id}, executing normally"
-                            )
-                    # Clear flag regardless (user may have executed a different cell)
-                    self._pending_exec_restore = None
-
                 # Take pre-execution snapshot
                 user_ns = self.shell.user_ns
                 with timer(
@@ -1185,104 +1175,79 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                     self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
                     return result
 
-                # Warn about non-deepcopyable objects after successful execution
-                # with timer(key="warn_non_deepcopyable", message="Warn non-deepcopyable"):
-                #     self._warn_non_deepcopyable_objects()
-
-                # Take post-execution snapshot
-                with timer(
-                    key="kernel:checkpoint", message="Post-execution checkpoint"
-                ) as post_timer:
-                    post_checkpoint = self._take_checkpoint(
-                        f"{POST_CHECKPOINT_PREFIX}{self._cell_id}"
-                    )
-
                 # Run Reproducibility check if we have tracking data and cell_id
+                # NOTE: We diff pre_checkpoint against the live namespace (user_ns)
+                # instead of creating a post-checkpoint. This eliminates ~50% of
+                # checkpoint overhead by avoiding the second deep copy.
                 if tracking and self._cell_id:
+                    # Capture stale cells before check to compute newly stale
+                    stale_before = set(self._enforcer.get_stale_cells())
                     with timer(key="kernel:check") as check_timer:
                         sdc_result = self._enforcer.check(
                             cell_id=self._cell_id,
                             pre_checkpoint=pre_checkpoint,
-                            post_checkpoint=post_checkpoint,
+                            namespace=self.shell.user_ns,
                             tracking=tracking,
                             continue_on_violation=self._continue_after_violation,
-                            namespace=self.shell.user_ns,  # For capturing structural read values
-                            is_exec_restore=_is_exec_restore,
-                            old_live_checkpoint=_old_live_checkpoint,
                         )
 
+                    # Handle formal predicate violations
+                    # When continue_after_violation=False: rollback and return error (rejected)
+                    # When continue_after_violation=True: continue, cell stays CLEAN (accepted)
+                    if sdc_result and sdc_result.has_errors():
+                        if not self._continue_after_violation:
+                            # ROLLBACK: Restore pre-execution state
+                            self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
+
+                            # Send violation to frontend (rejected)
+                            first_error = sdc_result.errors[0]
+                            self._send_predicate_violation(first_error, accepted=False)
+
+                            # Return error status
+                            return {
+                                "status": "error",
+                                "ename": "ReproducibilityError",
+                                "evalue": first_error.message,
+                                "traceback": [
+                                    f"Predicate {first_error.error_type.value} violated: {first_error.message}"
+                                ],
+                            }
+                        else:
+                            # Send violations to frontend (accepted - cell stays CLEAN)
+                            for err in sdc_result.errors:
+                                self._send_predicate_violation(err, accepted=True)
+                            log(f"[Inst-Run] Cell {self._cell_id}: {len(sdc_result.errors)} violations accepted, cell stays CLEAN")
+
                     # Handle violations (backward mutation and/or forward dependency)
+                    # Violations are informational - cell is marked STALE but execution continues
                     has_backward = sdc_result and sdc_result.violation
                     has_forward = sdc_result and sdc_result.forward_violation
 
-                    # [EXEC-REJECT] Backward conflict → rollback (Def 1.8.2)
+                    # Log violations as warnings (informational, not blocking)
                     if has_backward:
-                        if self._continue_after_violation:
-                            # Warn about backward violation but continue
-                            if sdc_result.violation.truncation_details:
-                                error(
-                                    f"Reproducibility truncation: {sdc_result.violation.message}"
-                                )
-                                self._send_truncation_details(
-                                    sdc_result.violation.truncation_details
-                                )
+                        # Handle truncation issues
+                        if sdc_result.violation.truncation_details:
                             error(
-                                f"Reproducibility violation (continuing): {sdc_result.violation.message}"
+                                f"Reproducibility truncation: {sdc_result.violation.message}"
                             )
-                            self._send_violation_warning(sdc_result.violation)
-                            if has_forward:
-                                error(
-                                    f"Forward dependency (continuing): {sdc_result.forward_violation.message}"
-                                )
-                                self._send_violation_warning(
-                                    sdc_result.forward_violation
-                                )
-                        else:
-                            # Block on backward violation
-                            # Log truncation issues to terminal
-                            if sdc_result.violation.truncation_details:
-                                error(
-                                    f"Reproducibility truncation: {sdc_result.violation.message}"
-                                )
-                                self._send_truncation_details(
-                                    sdc_result.violation.truncation_details
-                                )
-
-                            error(
-                                f"Reproducibility violation: {sdc_result.violation.message}"
+                            self._send_truncation_details(
+                                sdc_result.violation.truncation_details
                             )
+                        # Log the backward mutation (cell is already marked stale by enforcer)
+                        log(f"[Inst-Run] Cell {self._cell_id}: backward mutation detected, marked stale")
 
-                            self._restore_checkpoint(
-                                f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
-                            )
+                    if has_forward:
+                        # Log the forward contamination (cell is already marked stale by enforcer)
+                        log(f"[Inst-Run] Cell {self._cell_id}: forward contamination detected, marked stale")
 
-                            self._send_violation_error(sdc_result.violation)
-
-                            # Also report forward violation if both exist
-                            if has_forward:
-                                self._send_violation_warning(
-                                    sdc_result.forward_violation
-                                )
-
-                            return self._make_error_result(sdc_result.violation)
-
-                    # [EXEC-CONTAMINATED] Forward contamination → warn, don't reject (§1.8)
-                    if has_forward and not has_backward:
-                        error(
-                            f"Forward dependency (contaminated): {sdc_result.forward_violation.message}"
-                        )
-                        self._send_violation_warning(sdc_result.forward_violation)
-
-                    # Display results (skip if silent, error, or backward violation with rollback)
-                    skip_display = (has_backward) and not self._continue_after_violation
+                    # Display results (no longer skip on violations since we don't reject)
+                    skip_display = False
                     if (
                         not silent
                         and result.get("status") != "error"
                         and not skip_display
                     ):
-                        pre_ms = pre_timer.duration()
-                        post_ms = post_timer.duration()
-                        state_ms = pre_ms + post_ms
+                        state_ms = pre_timer.duration()
                         self._display_execution_result(
                             execute_duration_ms=time.perf_counter() * 1000 - start_time,
                             code_duration_ms=execution_time or 0.0,
@@ -1290,13 +1255,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             check_duration_ms=check_timer.duration(),
                             tracking=tracking,
                             sdc_result=sdc_result,
-                            pre_state_ms=pre_ms,
-                            post_state_ms=post_ms,
+                            stale_before=stale_before,
                         )
-
-                # Clean up temporary old live checkpoint used for EXEC-RESTORE
-                if _old_live_checkpoint is not None:
-                    self._checkpoints.delete(f"_old_live_{self._cell_id}")
 
                 return result
             except Exception as e:
@@ -1456,6 +1416,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 stale_cells=self._enforcer.get_stale_cells(),
                 violation=None,
                 cell_order=self._enforcer.cell_order,
+                staleness_reasons=self._enforcer._notebook_state.get_all_reasons(),
             )
             # Use display_icon_and_text with metadata to send to frontend
             self._display.display_icon_and_text(
@@ -1504,8 +1465,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         check_duration_ms: float,
         tracking,
         sdc_result,
-        pre_state_ms: float = 0.0,
-        post_state_ms: float = 0.0,
+        stale_before: Optional[Set[str]] = None,
     ) -> None:
         """Display execution timing and Reproducibility metadata."""
         # Build metadata for display
@@ -1563,10 +1523,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             code_duration_ms=code_duration_ms,
             state_duration_ms=state_duration_ms,
             check_duration_ms=check_duration_ms,
-            cell_is_contaminated=(
-                sdc_result.cell_is_contaminated if sdc_result else False
+            writer_violation=(
+                sdc_result.writer_violation.to_dict()
+                if (sdc_result and sdc_result.writer_violation)
+                else None
             ),
-            exec_mode=sdc_result.exec_mode if sdc_result else "live",
+            staleness_reasons=sdc_result.staleness_reasons if sdc_result else {},
         )
 
         # Log and display structural warnings
@@ -1576,7 +1538,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             self._send_structural_warnings(structural_warnings)
 
         # Build display text
-        state_detail = f"State: {state_duration_ms:.0f} ms (pre={pre_state_ms:.0f}, post={post_state_ms:.0f})"
+        state_detail = f"State: {state_duration_ms:.0f} ms"
         parts = [
             f"Execute: {execute_duration_ms:.0f} ms",
             f"Code: {code_duration_ms:.0f} ms",
@@ -1615,15 +1577,20 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 parts.append(f"File Writes: {','.join(file_writes_list)}")
 
         if sdc_result and sdc_result.stale_cells:
-            # Convert cell IDs to @A references for display
-            stale_refs = []
-            for cell_id in sdc_result.stale_cells:
-                try:
-                    idx = self._enforcer.cell_order.index(cell_id)
-                    stale_refs.append(index_to_alpha(idx))
-                except (ValueError, IndexError):
-                    stale_refs.append(cell_id)  # Fallback to ID if not in order
-            parts.append(f"Stale: {','.join(stale_refs)}")
+            # Show only newly stale cells (cells that became stale from this execution)
+            stale_set = set(sdc_result.stale_cells)
+            newly_stale = stale_set - (stale_before or set())
+            if newly_stale:
+                # Convert cell IDs to @A references for display
+                stale_refs = []
+                for cell_id in sdc_result.stale_cells:
+                    if cell_id in newly_stale:
+                        try:
+                            idx = self._enforcer.cell_order.index(cell_id)
+                            stale_refs.append(index_to_alpha(idx))
+                        except (ValueError, IndexError):
+                            stale_refs.append(cell_id)  # Fallback to ID if not in order
+                parts.append(f"Stale: {','.join(stale_refs)}")
 
         icon = "✓" if not (sdc_result and sdc_result.violation) else "✗"
 
@@ -1631,51 +1598,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             icon,
             " | ".join(parts),
             metadata=metadata.to_display_metadata(),
-        )
-
-    def _send_violation_error(self, violation) -> None:
-        """Send Reproducibility violation as error via iopub.
-
-        Emits structured flowbook metadata before the error so the frontend
-        can store and update violation info (e.g., when cells are reordered).
-        """
-        # Emit structured metadata for the frontend
-        metadata = ReproducibilityMetadata(
-            cell_id=self._cell_id or "",
-            execution_seq=self._enforcer.seq_counter,
-            reads=[],
-            writes=[],
-            changed_variables=[],
-            stale_cells=self._enforcer.get_stale_cells(),
-            violation=violation.to_dict(),
-            cell_order=self._enforcer.cell_order,
-        )
-        self._display.display_icon_and_text(
-            "❌",
-            "Backward violation",
-            metadata=metadata.to_display_metadata(),
-        )
-
-        # Then send the error
-        self.send_response(
-            self.iopub_socket,
-            "error",
-            {
-                "ename": "ReproducibilityViolation",
-                "evalue": violation.message,
-                "traceback": [violation.message],
-            },
-        )
-
-    def _send_violation_warning(self, violation) -> None:
-        """Send Reproducibility violation as warning via iopub (when continue_after_violation is enabled).
-
-        Uses the violation.message from the enforcer verbatim.
-        """
-        self.send_response(
-            self.iopub_socket,
-            "stream",
-            {"name": "stderr", "text": violation.message + "\n"},
         )
 
     def _send_truncation_details(self, truncation_details: str) -> None:
@@ -1700,15 +1622,56 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             {"name": "stderr", "text": warning_text},
         )
 
-    def _make_error_result(self, violation) -> dict:
-        """Create error result dict for Reproducibility violation."""
-        return {
-            "status": "error",
-            "execution_count": self.execution_count,
-            "ename": "ReproducibilityViolation",
-            "evalue": violation.message,
-            "traceback": [violation.message],
+    def _send_predicate_violation(
+        self,
+        error,
+        accepted: bool = False,
+    ) -> None:
+        """
+        Send a predicate violation to the frontend.
+
+        This is the unified method for all four formal predicate violations:
+        - NO_READ_AND_WRITE: Cell reads and writes same location
+        - WRITE_BEFORE_READ: Reads undefined variable
+        - NO_READ_BEFORE_WRITE: Forward contamination
+        - NO_WRITE_AFTER_READ: Backward mutation
+
+        Args:
+            error: ReproducibilityError instance
+            accepted: If True, violation was accepted (continue_after_violation=True)
+                     Cell stays CLEAN and notice is informational (yellow).
+                     If False, violation causes rejection (rollback) and
+                     notice is an error (red).
+        """
+        # Build the unified predicate_violation structure
+        violation_dict = {
+            "predicate": error.error_type.value,
+            "cell_id": error.cell_id,
+            "locations": error.locations,
+            "message": error.message,
+            "accepted": accepted,
         }
+
+        # Add causer cell if available
+        if error.causer_cell:
+            violation_dict["causer_cell"] = error.causer_cell
+
+        # Add detail info if available
+        if error.detail:
+            violation_dict["detail"] = error.detail
+
+        # Send via display_data with structured metadata
+        # The frontend will render this appropriately based on 'accepted'
+        self.send_response(
+            self.iopub_socket,
+            "display_data",
+            {
+                "data": {"text/plain": ""},  # Empty - frontend renders from metadata
+                "metadata": {
+                    "predicate_violation": violation_dict,
+                },
+            },
+        )
 
     # =========================================================================
     # Lifecycle

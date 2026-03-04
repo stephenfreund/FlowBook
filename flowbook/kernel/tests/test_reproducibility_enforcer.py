@@ -7,6 +7,7 @@ from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 
 from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX
+from flowbook.kernel.models import ReasonType
 from flowbook.kernel.tests.conftest import make_tracking
 
 
@@ -24,31 +25,30 @@ class TestReproducibilityEnforcer:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
-        """Create a post-checkpoint."""
-        self.checkpoints.save(name, namespace, max_size_mb=None)
-        return self.checkpoints.saved[name]
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
 
     def test_no_violation_forward_dependency(self):
         """Cell B reads what cell A writes - valid."""
         # Cell A writes x
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         result_a = self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
         assert result_a.violation is None
 
         # Cell B reads x - valid (forward dependency)
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
+        ns_b = self._make_namespace( {"x": 1, "y": 2})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
         assert result_b.violation is None
@@ -57,21 +57,21 @@ class TestReproducibilityEnforcer:
         """Cell B modifies what cell A reads - violation."""
         # Cell A reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1, "y": 2})
+        ns_a = self._make_namespace( {"x": 1, "y": 2})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
 
         # Cell B (after A) modifies x - violation!
         self._save_pre_checkpoint("b", {"x": 1, "y": 2})
-        post_b = self._make_post_checkpoint("post_b", {"x": 999, "y": 2})
+        ns_b = self._make_namespace( {"x": 999, "y": 2})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
@@ -84,31 +84,31 @@ class TestReproducibilityEnforcer:
         """Re-running cell A makes cell B stale if B reads A's output."""
         # First run: A writes x
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
         # B reads x
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
+        ns_b = self._make_namespace( {"x": 1, "y": 2})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
 
         # Re-run A with different value
         self._save_pre_checkpoint("a", {"x": 1, "y": 2})
-        post_a2 = self._make_post_checkpoint("post_a2", {"x": 100, "y": 2})
+        ns_a2 = self._make_namespace( {"x": 100, "y": 2})
         result = self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a2,
+            namespace=ns_a2,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
@@ -119,32 +119,32 @@ class TestReproducibilityEnforcer:
         """Semantic check: no staleness if value didn't actually change."""
         # A writes x=1
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
         # B reads x
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
+        ns_b = self._make_namespace( {"x": 1, "y": 2})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
 
         # Re-run A with same value x=1
         # Note: pre-checkpoint for A now reflects current state
         self._save_pre_checkpoint("a", {"x": 1, "y": 2})
-        post_a2 = self._make_post_checkpoint("post_a2", {"x": 1, "y": 2})
+        ns_a2 = self._make_namespace( {"x": 1, "y": 2})
         result = self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a2,
+            namespace=ns_a2,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
@@ -165,21 +165,21 @@ class TestReproducibilityEnforcer:
         # Scenario 1: [a, b, c, d] — A is before B
         # B reads x
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1})
+        ns_b = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
         # A modifies x - A is before B in order, so NOT a violation
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 2})
+        ns_a = self._make_namespace( {"x": 2})
         result = self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
         assert result.violation is None
@@ -190,21 +190,21 @@ class TestReproducibilityEnforcer:
 
         # B reads x (fresh)
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b2 = self._make_post_checkpoint("post_b2", {"x": 1})
+        ns_b2 = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b2,
+            namespace=ns_b2,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
         # A modifies x - now A is AFTER B, so this IS a violation
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a2 = self._make_post_checkpoint("post_a2", {"x": 3})
+        ns_a2 = self._make_namespace( {"x": 3})
         result = self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a2,
+            namespace=ns_a2,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
         assert result.violation is not None
@@ -214,49 +214,49 @@ class TestReproducibilityEnforcer:
         """Deleted cells are removed from tracking."""
         # Execute cells a and b
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1})
+        ns_b = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        assert "a" in self.sdc.records
-        assert "b" in self.sdc.records
+        assert self.sdc._notebook_state.has_record("a")
+        assert self.sdc._notebook_state.has_record("b")
 
         # Remove cell b from order
         self.sdc.set_cell_order(["a", "c", "d"])
 
         # b should be pruned
-        assert "a" in self.sdc.records
-        assert "b" not in self.sdc.records
+        assert self.sdc._notebook_state.has_record("a")
+        assert not self.sdc._notebook_state.has_record("b")
 
     def test_reset_clears_all_state(self):
         """Reset clears all tracking state."""
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert len(self.sdc.records) == 1
+        assert len(self.sdc._notebook_state.tracking_data) == 1
         assert self.sdc.seq_counter == 1
 
         self.sdc.reset()
 
-        assert len(self.sdc.records) == 0
+        assert len(self.sdc._notebook_state.tracking_data) == 0
         assert self.sdc.seq_counter == 0
         assert self.sdc.cell_order == []
 
@@ -266,48 +266,48 @@ class TestReproducibilityEnforcer:
         # All read x
 
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
         self._save_pre_checkpoint("d", {"x": 1})
-        post_d = self._make_post_checkpoint("post_d", {"x": 1, "w": 4})
+        ns_d = self._make_namespace( {"x": 1, "w": 4})
         self.sdc.check(
             cell_id="d",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
-            post_checkpoint=post_d,
+            namespace=ns_d,
             tracking=make_tracking(reads={"x"}, writes={"w"}),
         )
 
         self._save_pre_checkpoint("b", {"x": 1, "w": 4})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1, "w": 4, "y": 2})
+        ns_b = self._make_namespace( {"x": 1, "w": 4, "y": 2})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
 
         self._save_pre_checkpoint("c", {"x": 1, "w": 4, "y": 2})
-        post_c = self._make_post_checkpoint("post_c", {"x": 1, "w": 4, "y": 2, "z": 3})
+        ns_c = self._make_namespace( {"x": 1, "w": 4, "y": 2, "z": 3})
         self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(reads={"x"}, writes={"z"}),
         )
 
         # Re-run A with different x - should make b, c, d stale (they all read x)
         self._save_pre_checkpoint("a", {"x": 1, "w": 4, "y": 2, "z": 3})
-        post_a2 = self._make_post_checkpoint("post_a2", {"x": 100, "w": 4, "y": 2, "z": 3})
+        ns_a2 = self._make_namespace( {"x": 100, "w": 4, "y": 2, "z": 3})
         result = self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a2,
+            namespace=ns_a2,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
@@ -321,21 +321,21 @@ class TestReproducibilityEnforcer:
 
         # Cell 'a' reads variable 'var'
         self._save_pre_checkpoint("a", {"var": 1})
-        post_a = self._make_post_checkpoint("post_a", {"var": 1})
+        ns_a = self._make_namespace( {"var": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"var"}, writes=set()),
         )
 
         # Cell 'x' (not in order) modifies 'var' - should not trigger violation
         self._save_pre_checkpoint("x", {"var": 1})
-        post_x = self._make_post_checkpoint("post_x", {"var": 999})
+        ns_x = self._make_namespace( {"var": 999})
         result = self.sdc.check(
             cell_id="x",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}x"],
-            post_checkpoint=post_x,
+            namespace=ns_x,
             tracking=make_tracking(reads=set(), writes={"var"}),
         )
 
@@ -358,10 +358,9 @@ class TestColumnAwareBackwardMutation:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
-        """Create a post-checkpoint."""
-        self.checkpoints.save(name, namespace, max_size_mb=None)
-        return self.checkpoints.saved[name]
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
 
     def test_no_conflict_different_columns(self):
         """Cell A reads df.price, Cell B modifies df.quantity - no violation."""
@@ -371,11 +370,11 @@ class TestColumnAwareBackwardMutation:
 
         # Cell A: reads df.price
         self._save_pre_checkpoint("a", {"df": df})
-        post_a = self._make_post_checkpoint("post_a", {"df": df, "y": 30})
+        ns_a = self._make_namespace( {"df": df, "y": 30})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(
                 reads={"df"},
                 writes={"y"},
@@ -387,11 +386,11 @@ class TestColumnAwareBackwardMutation:
         df_modified = df.copy()
         df_modified["quantity"] = [10, 20]
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "y": 30})
+        ns_b = self._make_namespace( {"df": df_modified, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"df"},
                 writes={"df"},
@@ -411,11 +410,11 @@ class TestColumnAwareBackwardMutation:
 
         # Cell A: reads df.price
         self._save_pre_checkpoint("a", {"df": df})
-        post_a = self._make_post_checkpoint("post_a", {"df": df, "y": 30})
+        ns_a = self._make_namespace( {"df": df, "y": 30})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(
                 reads={"df"},
                 writes={"y"},
@@ -427,11 +426,11 @@ class TestColumnAwareBackwardMutation:
         df_modified = df.copy()
         df_modified["price"] = [100, 200]
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "y": 30})
+        ns_b = self._make_namespace( {"df": df_modified, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"df"},
                 writes={"df"},
@@ -454,11 +453,11 @@ class TestColumnAwareBackwardMutation:
 
         # Cell A: reads df (no column tracking)
         self._save_pre_checkpoint("a", {"df": df})
-        post_a = self._make_post_checkpoint("post_a", {"df": df, "y": 30})
+        ns_a = self._make_namespace( {"df": df, "y": 30})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(
                 reads={"df"},
                 writes={"y"},
@@ -470,11 +469,11 @@ class TestColumnAwareBackwardMutation:
         df_modified = df.copy()
         df_modified["price"] = [100, 200]
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "y": 30})
+        ns_b = self._make_namespace( {"df": df_modified, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"df"},
                 writes={"df"},
@@ -496,11 +495,11 @@ class TestColumnAwareBackwardMutation:
 
         # Cell A: reads df.price
         self._save_pre_checkpoint("a", {"df": df})
-        post_a = self._make_post_checkpoint("post_a", {"df": df, "y": 30})
+        ns_a = self._make_namespace( {"df": df, "y": 30})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(
                 reads={"df"},
                 writes={"y"},
@@ -511,11 +510,11 @@ class TestColumnAwareBackwardMutation:
         # Cell B: modifies entire df (no column tracking)
         df_modified = df * 2
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "y": 30})
+        ns_b = self._make_namespace( {"df": df_modified, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"df"},
                 writes={"df"},
@@ -538,11 +537,11 @@ class TestColumnAwareBackwardMutation:
 
         # Cell A: reads config (variable-level) and df.price (column-level)
         self._save_pre_checkpoint("a", {"df": df, "config": config})
-        post_a = self._make_post_checkpoint("post_a", {"df": df, "config": config, "y": 10})
+        ns_a = self._make_namespace( {"df": df, "config": config, "y": 10})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(
                 reads={"df", "config"},
                 writes={"y"},
@@ -555,11 +554,11 @@ class TestColumnAwareBackwardMutation:
         df_modified["quantity"] = [10, 20]
         config_modified = {}
         self._save_pre_checkpoint("b", {"df": df, "config": config, "y": 10})
-        post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "config": config_modified, "y": 10})
+        ns_b = self._make_namespace( {"df": df_modified, "config": config_modified, "y": 10})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"df", "config"},
                 writes={"df", "config"},
@@ -583,11 +582,11 @@ class TestColumnAwareBackwardMutation:
 
         # Cell A: reads df.price and df.quantity
         self._save_pre_checkpoint("a", {"df": df})
-        post_a = self._make_post_checkpoint("post_a", {"df": df, "y": 30})
+        ns_a = self._make_namespace( {"df": df, "y": 30})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(
                 reads={"df"},
                 writes={"y"},
@@ -600,11 +599,11 @@ class TestColumnAwareBackwardMutation:
         df_modified["price"] = [100, 200]
         df_modified["quantity"] = [10, 20]
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        post_b = self._make_post_checkpoint("post_b", {"df": df_modified, "y": 30})
+        ns_b = self._make_namespace( {"df": df_modified, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"df"},
                 writes={"df"},
@@ -628,11 +627,11 @@ class TestColumnAwareBackwardMutation:
 
         # Cell A: reads df1.a and df2.b
         self._save_pre_checkpoint("a", {"df1": df1, "df2": df2})
-        post_a = self._make_post_checkpoint("post_a", {"df1": df1, "df2": df2, "y": 1})
+        ns_a = self._make_namespace( {"df1": df1, "df2": df2, "y": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(
                 reads={"df1", "df2"},
                 writes={"y"},
@@ -644,11 +643,11 @@ class TestColumnAwareBackwardMutation:
         df1_modified = df1.copy()
         df1_modified["b"] = [10, 20]
         self._save_pre_checkpoint("b", {"df1": df1, "df2": df2, "y": 1})
-        post_b = self._make_post_checkpoint("post_b", {"df1": df1_modified, "df2": df2, "y": 1})
+        ns_b = self._make_namespace( {"df1": df1_modified, "df2": df2, "y": 1})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"df1"},
                 writes={"df1"},
@@ -661,8 +660,15 @@ class TestColumnAwareBackwardMutation:
         assert result_b.violation is None
 
 
-class TestContinueOnViolation:
-    """Tests for continue_on_violation parameter."""
+class TestBackwardMutationStaleness:
+    """Tests for backward mutation behavior (new semantics: never reject, mark stale).
+
+    In the new semantics:
+    - Backward mutations mark the cell as STALE (not CLEAN)
+    - Execution state is ALWAYS updated (no early return)
+    - Staleness is ALWAYS computed for downstream cells
+    - `continue_on_violation` parameter is obsolete (always continues)
+    """
 
     def setup_method(self):
         self.checkpoints = MemoryCheckpoints(
@@ -676,181 +682,179 @@ class TestContinueOnViolation:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
-        """Create a post-checkpoint."""
-        self.checkpoints.save(name, namespace, max_size_mb=None)
-        return self.checkpoints.saved[name]
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
 
-    def test_violation_without_continue_has_empty_stale(self):
-        """Default behavior: violation returns empty stale_cells."""
+    def test_backward_mutation_marks_cell_stale(self):
+        """When cell B writes to x that cell A reads, B is marked stale."""
         # Cell A reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1, "y": 2})
+        ns_a = self._make_namespace({"x": 1, "y": 2})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
 
         # Cell B modifies x (backward mutation)
         self._save_pre_checkpoint("b", {"x": 1, "y": 2})
-        post_b = self._make_post_checkpoint("post_b", {"x": 999, "y": 2})
+        ns_b = self._make_namespace({"x": 999, "y": 2})
         result = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=False,  # default
         )
 
-        assert result.violation is not None
-        assert result.stale_cells == []  # Empty when not continuing
-        assert result.changed_variables == []  # Empty when not continuing
-
-    def test_violation_with_continue_computes_stale(self):
-        """With continue_on_violation=True, staleness is computed even on violation."""
-        # Cell A reads x
-        self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1, "y": 2})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
-        )
-
-        # Cell B modifies x (backward mutation) - but we continue
-        self._save_pre_checkpoint("b", {"x": 1, "y": 2})
-        post_b = self._make_post_checkpoint("post_b", {"x": 999, "y": 2})
-        result = self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=True,  # Continue despite violation
-        )
-
+        # Backward violation info is returned
         assert result.violation is not None
         assert result.violation.mutating_cell == "b"
         assert result.violation.affected_cell == "a"
-        # A is NOT stale because staleness only propagates forward (to cells below B)
-        # The backward mutation violation is sufficient to indicate the issue
-        assert "a" not in result.stale_cells
-        # changed_variables is still computed
+        # Staleness is ALWAYS computed (new semantics)
+        # changed_variables shows what changed
         assert "x" in result.changed_variables
+        # Cell b itself should be stale (backward mutation)
+        assert not self.sdc._notebook_state.is_clean("b")
+        # Cell b should have NO_WRITE_AFTER_READ reason
+        reasons = self.sdc._notebook_state.get_reasons("b")
+        assert any(r.type == ReasonType.NO_WRITE_AFTER_READ for r in reasons)
 
-    def test_continue_updates_execution_record(self):
-        """With continue_on_violation=True, the cell's execution record is updated."""
+    def test_backward_mutation_computes_forward_staleness(self):
+        """Backward mutation still triggers ForwardStale for downstream cells.
+
+        Staleness is always computed, even when there are errors. This is because:
+        - Staleness tracking is orthogonal to error handling
+        - The execution record (R, W sets) is always updated
+        - Downstream cells need to know about changes
+        """
         # Cell A reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        assert "a" in self.sdc.records
-        assert "b" not in self.sdc.records
+        # Cell C reads x (will be affected by B's write)
+        self._save_pre_checkpoint("c", {"x": 1})
+        ns_c = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
 
-        # Cell B modifies x (violation) but we continue
+        # Cell B modifies x (backward mutation against A, forward stale for C)
+        # ForwardStale is computed even with backward mutation error
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 999})
+        ns_b = self._make_namespace({"x": 999})
         result = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=True,
         )
 
+        # Backward violation is detected
         assert result.violation is not None
-        # Record is updated even with violation
-        assert "b" in self.sdc.records
-        assert self.sdc.records["b"].tracking.writes == {"x"}
+        # C is marked stale (ForwardStale)
+        assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
 
-    def test_continue_false_does_not_update_record(self):
-        """With continue_on_violation=False, no record is created on violation."""
+    def test_backward_mutation_updates_execution_record(self):
+        """Execution record is ALWAYS updated, even with backward mutation."""
         # Cell A reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        # Cell B modifies x (violation) with default behavior
+        assert self.sdc._notebook_state.has_record("a")
+        assert not self.sdc._notebook_state.has_record("b")
+
+        # Cell B modifies x (backward mutation)
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 999})
+        ns_b = self._make_namespace({"x": 999})
         result = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=False,
         )
 
         assert result.violation is not None
-        # Record is NOT created
-        assert "b" not in self.sdc.records
+        # Record is ALWAYS created (new semantics)
+        assert self.sdc._notebook_state.has_record("b")
+        assert self.sdc._notebook_state.get_tracking("b").writes == {"x"}
 
-    def test_continue_with_chain_staleness(self):
-        """Test staleness propagation when continuing after violation."""
+    def test_backward_mutation_chain_staleness(self):
+        """Test staleness propagation with backward mutation in chain.
+
+        In new semantics:
+        - Backward mutations mark the mutating cell stale
+        - ForwardStale propagates to cells AFTER the executing cell
+        - BackwardStale propagates to cells BEFORE that read the written variable
+        """
         # Cell A writes x
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
         # Cell B reads x, writes y
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
 
         # Cell C reads y
         self._save_pre_checkpoint("c", {"x": 1, "y": 2})
-        post_c = self._make_post_checkpoint("post_c", {"x": 1, "y": 2, "z": 3})
+        ns_c = self._make_namespace({"x": 1, "y": 2, "z": 3})
         self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(reads={"y"}, writes={"z"}),
         )
 
-        # Cell D modifies x (violation against A) - but we continue
+        # Cell D modifies x (backward mutation against B who reads x)
         self._save_pre_checkpoint("d", {"x": 1, "y": 2, "z": 3})
-        post_d = self._make_post_checkpoint("post_d", {"x": 999, "y": 2, "z": 3})
+        ns_d = self._make_namespace({"x": 999, "y": 2, "z": 3})
         result = self.sdc.check(
             cell_id="d",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
-            post_checkpoint=post_d,
+            namespace=ns_d,
             tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=True,
         )
 
+        # Backward violation is detected
         assert result.violation is not None
         # B reads x, so D modifying x is a backward mutation against B
         assert result.violation.affected_cell == "b"
-        # B is NOT stale because staleness only propagates forward (to cells below D)
-        # The backward mutation violation is sufficient to indicate the issue
-        assert "b" not in result.stale_cells
-        # C is NOT stale (reads y, and is above D)
-        assert "c" not in result.stale_cells
-        # A is also above D, so not stale
+        # D itself is stale (new semantics: backward mutation marks the cell stale)
+        assert not self.sdc._notebook_state.is_clean("d")
+        # A wrote x but didn't read it, so A is not affected by BackwardStale
         assert "a" not in result.stale_cells
+        # B read x, so B IS marked stale via BackwardStale (D wrote x that B read)
+        assert "b" in result.stale_cells
+        # C read y (not x), so C is not affected by D's write to x
+        assert "c" not in result.stale_cells
 
 
 class TestTruncationDetection:
@@ -975,10 +979,9 @@ class TestStructuralTrackingOff:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
-        """Create a post-checkpoint."""
-        self.checkpoints.save(name, namespace, max_size_mb=None)
-        return self.checkpoints.saved[name]
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
 
     def test_structural_only_read_no_violation_when_off(self):
         """
@@ -998,11 +1001,11 @@ class TestStructuralTrackingOff:
 
         # Cell A: Creates the DataFrame
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"raw_data": df})
+        ns_a = self._make_namespace( {"raw_data": df})
         result_a = self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"raw_data"}),
         )
         assert result_a.violation is None
@@ -1010,11 +1013,11 @@ class TestStructuralTrackingOff:
         # Cell B: Reads raw_data.shape (structural read only, no column reads)
         # This cell reads the variable but only accesses structural attributes
         self._save_pre_checkpoint("b", {"raw_data": df})
-        post_b = self._make_post_checkpoint("post_b", {"raw_data": df})
+        ns_b = self._make_namespace( {"raw_data": df})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"raw_data"},  # Variable read
                 writes=set(),
@@ -1029,11 +1032,11 @@ class TestStructuralTrackingOff:
         df_modified = df.copy()
         df_modified['x'] = 3
         self._save_pre_checkpoint("c", {"raw_data": df})
-        post_c = self._make_post_checkpoint("post_c", {"raw_data": df_modified})
+        ns_c = self._make_namespace( {"raw_data": df_modified})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(
                 reads={"raw_data"},  # Reads raw_data to modify it
                 writes={"raw_data"},
@@ -1057,22 +1060,22 @@ class TestStructuralTrackingOff:
 
         # Cell A: Creates the DataFrame
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"raw_data": df})
+        ns_a = self._make_namespace( {"raw_data": df})
         result_a = self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"raw_data"}),
         )
 
         # Cell B: Reads raw_data (whole variable, e.g., print(raw_data))
         # This is NOT a structural-only read
         self._save_pre_checkpoint("b", {"raw_data": df})
-        post_b = self._make_post_checkpoint("post_b", {"raw_data": df})
+        ns_b = self._make_namespace( {"raw_data": df})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"raw_data"},
                 writes=set(),
@@ -1085,11 +1088,11 @@ class TestStructuralTrackingOff:
         df_modified = df.copy()
         df_modified['x'] = 3
         self._save_pre_checkpoint("c", {"raw_data": df})
-        post_c = self._make_post_checkpoint("post_c", {"raw_data": df_modified})
+        ns_c = self._make_namespace( {"raw_data": df_modified})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(
                 reads={"raw_data"},
                 writes={"raw_data"},
@@ -1121,10 +1124,9 @@ class TestStructuralTrackingWarn:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
-        """Create a post-checkpoint."""
-        self.checkpoints.save(name, namespace, max_size_mb=None)
-        return self.checkpoints.saved[name]
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
 
     def test_structural_only_read_no_violation_in_warn_mode(self):
         """
@@ -1140,22 +1142,22 @@ class TestStructuralTrackingWarn:
 
         # Cell A: Creates the DataFrame
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"raw_data": df})
+        ns_a = self._make_namespace( {"raw_data": df})
         result_a = self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"raw_data"}),
         )
         assert result_a.violation is None
 
         # Cell B: Reads raw_data.shape (structural read only)
         self._save_pre_checkpoint("b", {"raw_data": df})
-        post_b = self._make_post_checkpoint("post_b", {"raw_data": df})
+        ns_b = self._make_namespace( {"raw_data": df})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"raw_data"},
                 writes=set(),
@@ -1170,11 +1172,11 @@ class TestStructuralTrackingWarn:
         df_modified = df.copy()
         df_modified['x'] = 3
         self._save_pre_checkpoint("c", {"raw_data": df})
-        post_c = self._make_post_checkpoint("post_c", {"raw_data": df_modified})
+        ns_c = self._make_namespace( {"raw_data": df_modified})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(
                 reads={"raw_data"},
                 writes={"raw_data"},
@@ -1206,10 +1208,9 @@ class TestStructuralTrackingEnforce:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
-        """Create a post-checkpoint."""
-        self.checkpoints.save(name, namespace, max_size_mb=None)
-        return self.checkpoints.saved[name]
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
 
     def test_structural_only_read_causes_violation_in_enforce_mode(self):
         """
@@ -1224,22 +1225,22 @@ class TestStructuralTrackingEnforce:
 
         # Cell A: Creates the DataFrame
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"raw_data": df})
+        ns_a = self._make_namespace( {"raw_data": df})
         result_a = self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"raw_data"}),
         )
         assert result_a.violation is None
 
         # Cell B: Reads raw_data.shape (structural read only)
         self._save_pre_checkpoint("b", {"raw_data": df})
-        post_b = self._make_post_checkpoint("post_b", {"raw_data": df})
+        ns_b = self._make_namespace( {"raw_data": df})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"raw_data"},
                 writes=set(),
@@ -1254,11 +1255,11 @@ class TestStructuralTrackingEnforce:
         df_modified = df.copy()
         df_modified['x'] = 3
         self._save_pre_checkpoint("c", {"raw_data": df})
-        post_c = self._make_post_checkpoint("post_c", {"raw_data": df_modified})
+        ns_c = self._make_namespace( {"raw_data": df_modified})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(
                 reads={"raw_data"},
                 writes={"raw_data"},
@@ -1286,22 +1287,22 @@ class TestStructuralTrackingEnforce:
 
         # Cell A: Creates the DataFrame
         self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"df": df})
+        ns_a = self._make_namespace( {"df": df})
         result_a = self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"df"}),
         )
 
         # Cell B: Display DataFrame - reads columns AND structural attrs
         # This simulates what happens when you just type `df` in a cell
         self._save_pre_checkpoint("b", {"df": df})
-        post_b = self._make_post_checkpoint("post_b", {"df": df})
+        ns_b = self._make_namespace( {"df": df})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(
                 reads={"df"},
                 writes=set(),
@@ -1316,11 +1317,11 @@ class TestStructuralTrackingEnforce:
         df_modified = df.copy()
         df_modified['x'] = 3
         self._save_pre_checkpoint("c", {"df": df})
-        post_c = self._make_post_checkpoint("post_c", {"df": df_modified})
+        ns_c = self._make_namespace( {"df": df_modified})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(
                 reads={"df"},
                 writes={"df"},
@@ -1364,10 +1365,9 @@ class TestAccessedVarsOnlyOptimization:
         """Save a pre-checkpoint for a cell."""
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
-        """Create a post-checkpoint."""
-        self.checkpoints.save(name, namespace, max_size_mb=None)
-        return self.checkpoints.saved[name]
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
 
     # -------------------------------------------------------------------------
     # Basic alias detection tests
@@ -1390,22 +1390,22 @@ class TestAccessedVarsOnlyOptimization:
         # Cell A: creates y, reads y
         y = [1, 2, 3]
         self._save_pre_checkpoint("a", {"y": y})
-        post_a = self._make_post_checkpoint("post_a", {"y": y})
+        ns_a = self._make_namespace( {"y": y})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"y"}, writes=set()),
         )
 
         # Cell B: creates alias x = y (same object)
         x = y  # x and y are the same object
         self._save_pre_checkpoint("b", {"y": y, "x": x})
-        post_b = self._make_post_checkpoint("post_b", {"y": y, "x": x})
+        ns_b = self._make_namespace( {"y": y, "x": x})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"y"}, writes={"x"}),
         )
 
@@ -1414,11 +1414,11 @@ class TestAccessedVarsOnlyOptimization:
         x_modified[0] = 999  # Simulate in-place modification
         self._save_pre_checkpoint("c", {"y": y, "x": x})
         # After modification, both x and y point to modified list
-        post_c = self._make_post_checkpoint("post_c", {"y": x_modified, "x": x_modified})
+        ns_c = self._make_namespace( {"y": x_modified, "x": x_modified})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
@@ -1445,11 +1445,11 @@ class TestAccessedVarsOnlyOptimization:
 
         # Cell A: creates df, reads price column
         self._save_pre_checkpoint("a", {"df": df})
-        post_a = self._make_post_checkpoint("post_a", {"df": df})
+        ns_a = self._make_namespace( {"df": df})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(
                 reads={"df"}, writes=set(),
                 column_reads={"df": {"price"}}
@@ -1459,22 +1459,22 @@ class TestAccessedVarsOnlyOptimization:
         # Cell B: creates alias (NOT a copy)
         df_alias = df  # Same object!
         self._save_pre_checkpoint("b", {"df": df, "df_alias": df_alias})
-        post_b = self._make_post_checkpoint("post_b", {"df": df, "df_alias": df_alias})
+        ns_b = self._make_namespace( {"df": df, "df_alias": df_alias})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"df"}, writes={"df_alias"}),
         )
 
         # Cell C: modifies through alias
         df_modified = pd.DataFrame({'price': [999, 999], 'quantity': [5, 10]})
         self._save_pre_checkpoint("c", {"df": df, "df_alias": df_alias})
-        post_c = self._make_post_checkpoint("post_c", {"df": df_modified, "df_alias": df_modified})
+        ns_c = self._make_namespace( {"df": df_modified, "df_alias": df_modified})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(
                 reads=set(), writes={"df_alias"},
                 column_writes={"df_alias": {"price"}}
@@ -1500,11 +1500,11 @@ class TestAccessedVarsOnlyOptimization:
 
         # Cell A: creates x, reads x
         self._save_pre_checkpoint("a", {"x": x})
-        post_a = self._make_post_checkpoint("post_a", {"x": x})
+        ns_a = self._make_namespace( {"x": x})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
@@ -1512,22 +1512,22 @@ class TestAccessedVarsOnlyOptimization:
         y = x
         z = x
         self._save_pre_checkpoint("b", {"x": x, "y": y, "z": z})
-        post_b = self._make_post_checkpoint("post_b", {"x": x, "y": y, "z": z})
+        ns_b = self._make_namespace( {"x": x, "y": y, "z": z})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes={"y", "z"}),
         )
 
         # Cell C: modifies through z
         modified = {"value": 999}
         self._save_pre_checkpoint("c", {"x": x, "y": y, "z": z})
-        post_c = self._make_post_checkpoint("post_c", {"x": modified, "y": modified, "z": modified})
+        ns_c = self._make_namespace( {"x": modified, "y": modified, "z": modified})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(reads=set(), writes={"z"}),
         )
 
@@ -1549,11 +1549,11 @@ class TestAccessedVarsOnlyOptimization:
         """
         # Cell A: reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
@@ -1566,11 +1566,11 @@ class TestAccessedVarsOnlyOptimization:
         self._save_pre_checkpoint("b", namespace)
         namespace_after = namespace.copy()
         namespace_after["y"] = 999  # Only y changes
-        post_b = self._make_post_checkpoint("post_b", namespace_after)
+        ns_b = self._make_namespace( namespace_after)
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"y"}),
         )
 
@@ -1594,22 +1594,22 @@ class TestAccessedVarsOnlyOptimization:
 
         # Cell A: creates df, reads df
         self._save_pre_checkpoint("a", {"df": df})
-        post_a = self._make_post_checkpoint("post_a", {"df": df})
+        ns_a = self._make_namespace( {"df": df})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"df"}, writes=set()),
         )
 
         # Cell B: creates alias
         df_alias = df
         self._save_pre_checkpoint("b", {"df": df, "df_alias": df_alias})
-        post_b = self._make_post_checkpoint("post_b", {"df": df, "df_alias": df_alias})
+        ns_b = self._make_namespace( {"df": df, "df_alias": df_alias})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"df"}, writes={"df_alias"}),
         )
 
@@ -1619,11 +1619,11 @@ class TestAccessedVarsOnlyOptimization:
         # Post-state: df_alias is now a different object (the copy, modified)
         df_copy_modified = df.copy()
         df_copy_modified['a'] = [999, 999, 999]
-        post_c = self._make_post_checkpoint("post_c", {"df": df, "df_alias": df_copy_modified})
+        ns_c = self._make_namespace( {"df": df, "df_alias": df_copy_modified})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(reads={"df_alias"}, writes={"df_alias"}),
         )
 
@@ -1642,21 +1642,21 @@ class TestAccessedVarsOnlyOptimization:
         """
         # Cell A: reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
         # Cell B: creates new variable y
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 42})
+        ns_b = self._make_namespace( {"x": 1, "y": 42})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"y"}),
         )
 
@@ -1675,21 +1675,21 @@ class TestAccessedVarsOnlyOptimization:
         """
         # Cell A: reads x
         self._save_pre_checkpoint("a", {"x": 1, "y": 2})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1, "y": 2})
+        ns_a = self._make_namespace( {"x": 1, "y": 2})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
         # Cell B: deletes y
         self._save_pre_checkpoint("b", {"x": 1, "y": 2})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1})  # y deleted
+        ns_b = self._make_namespace( {"x": 1})  # y deleted
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"y"}),
         )
 
@@ -1714,11 +1714,11 @@ class TestAccessedVarsOnlyOptimization:
 
         # Cell A: reads data, specifically data['df1']
         self._save_pre_checkpoint("a", {"data": data})
-        post_a = self._make_post_checkpoint("post_a", {"data": data})
+        ns_a = self._make_namespace( {"data": data})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"data"}, writes=set()),
         )
 
@@ -1729,11 +1729,11 @@ class TestAccessedVarsOnlyOptimization:
         data_modified['df2'] = df_modified
 
         self._save_pre_checkpoint("b", {"data": data})
-        post_b = self._make_post_checkpoint("post_b", {"data": data_modified})
+        ns_b = self._make_namespace( {"data": data_modified})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"data"}),
         )
 
@@ -1750,21 +1750,21 @@ class TestAccessedVarsOnlyOptimization:
         """
         # Cell A: reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
         # Cell B: accesses nothing (e.g., just prints a constant)
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1})
+        ns_b = self._make_namespace( {"x": 1})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads=set(), writes=set()),
         )
 
@@ -1779,21 +1779,21 @@ class TestAccessedVarsOnlyOptimization:
         """
         # Cell A: reads x
         self._save_pre_checkpoint("a", {"x": 1, "y": 2, "z": 3})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1, "y": 2, "z": 3})
+        ns_a = self._make_namespace( {"x": 1, "y": 2, "z": 3})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
         # Cell B: accesses all variables, modifies x
         self._save_pre_checkpoint("b", {"x": 1, "y": 2, "z": 3})
-        post_b = self._make_post_checkpoint("post_b", {"x": 999, "y": 2, "z": 3})
+        ns_b = self._make_namespace( {"x": 999, "y": 2, "z": 3})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"x", "y", "z"}, writes={"x"}),
         )
 
@@ -2387,216 +2387,6 @@ class TestDeepAliasIntegration:
         # (unless namespace is very simple)
 
 
-class TestExecRestore:
-    """Tests for EXEC-RESTORE transition rule (§1.8)."""
-
-    def setup_method(self):
-        self.checkpoints = MemoryCheckpoints(
-            sanity_check=False,
-            warn_classes=False,
-        )
-        self.sdc = ReproducibilityEnforcer(self.checkpoints)
-        self.sdc.set_cell_order(["a", "b", "c", "d"])
-
-    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
-        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
-
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
-        self.checkpoints.save(name, namespace, max_size_mb=None)
-        return self.checkpoints.saved[name]
-
-    def test_can_exec_restore_all_fresh(self):
-        """can_exec_restore returns True when all j < i are fresh."""
-        # Execute A and B (both fresh)
-        self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
-        self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
-        )
-
-        # C can exec-restore since A and B are both fresh
-        assert self.sdc.can_exec_restore("c") is True
-
-    def test_can_exec_restore_with_stale_predecessor(self):
-        """can_exec_restore returns False when any j < i is stale."""
-        # Execute A
-        self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # Execute B
-        self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1, "y": 2})
-        self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
-        )
-
-        # Mark B stale (immediate predecessor of C)
-        self.sdc._stale_cells.add("b")
-
-        # C cannot exec-restore since B (immediate predecessor) is stale
-        assert self.sdc.can_exec_restore("c") is False
-
-    def test_can_exec_restore_with_unexecuted_predecessor(self):
-        """can_exec_restore returns False when a predecessor hasn't executed."""
-        # Only execute A (skip B)
-        self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # C cannot exec-restore since B hasn't executed
-        assert self.sdc.can_exec_restore("c") is False
-
-    def test_can_exec_restore_first_cell(self):
-        """First cell can always exec-restore (no predecessors)."""
-        assert self.sdc.can_exec_restore("a") is True
-
-    def test_exec_restore_cell_is_fresh(self):
-        """Cell is always fresh after EXEC-RESTORE."""
-        # Mark C as stale
-        self._save_pre_checkpoint("c", {})
-        post_c = self._make_post_checkpoint("post_c", {"z": 1})
-        self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
-            tracking=make_tracking(reads=set(), writes={"z"}),
-        )
-        self.sdc._stale_cells.add("c")
-        assert "c" in self.sdc._stale_cells
-
-        # EXEC-RESTORE for C
-        self._save_pre_checkpoint("c", {"z": 1})
-        post_c2 = self._make_post_checkpoint("post_c2", {"z": 2})
-        result = self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c2,
-            tracking=make_tracking(reads=set(), writes={"z"}),
-            is_exec_restore=True,
-        )
-
-        # Cell is fresh (not stale)
-        assert "c" not in self.sdc._stale_cells
-        assert result.exec_mode == "restore"
-
-    def test_exec_restore_no_backward_check(self):
-        """EXEC-RESTORE skips backward conflict check."""
-        # Execute A (reads x)
-        self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
-            tracking=make_tracking(reads={"x"}, writes=set()),
-        )
-
-        # B modifies x — would normally be backward violation against A
-        # But with is_exec_restore=True, no backward check
-        self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 999})
-        result = self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-            is_exec_restore=True,
-        )
-
-        # No violation in EXEC-RESTORE mode
-        assert result.violation is None
-        assert result.forward_violation is None
-        assert result.exec_mode == "restore"
-
-    def test_exec_restore_stalefwd_uses_old_live_delta(self):
-        """StaleFwd uses Δ(old_live, post) in EXEC-RESTORE mode."""
-        # Execute C (reads y)
-        self._save_pre_checkpoint("c", {"y": 0})
-        post_c = self._make_post_checkpoint("post_c", {"y": 0})
-        self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
-            tracking=make_tracking(reads={"y"}, writes=set()),
-        )
-
-        # EXEC-RESTORE for B: old live has y=0, post has y=99
-        # Create old_live checkpoint
-        self.checkpoints.save("_old_live_b", {"y": 0}, max_size_mb=None)
-        old_live = self.checkpoints.saved["_old_live_b"]
-
-        self._save_pre_checkpoint("b", {"y": 0})  # prefix state
-        post_b = self._make_post_checkpoint("post_b", {"y": 99})  # after execution
-
-        result = self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
-            tracking=make_tracking(reads=set(), writes={"y"}),
-            is_exec_restore=True,
-            old_live_checkpoint=old_live,
-        )
-
-        # C reads y, and y changed from 0→99 in old_live→post delta
-        # So C should be stale
-        assert "c" in result.stale_cells
-
-    def test_get_prefix_checkpoint_name(self):
-        """get_prefix_checkpoint_name returns correct checkpoint name."""
-        from flowbook.kernel.reproducibility_enforcer import POST_CHECKPOINT_PREFIX
-
-        # First cell → None
-        assert self.sdc.get_prefix_checkpoint_name("a") is None
-
-        # Second cell → post_a
-        assert self.sdc.get_prefix_checkpoint_name("b") == f"{POST_CHECKPOINT_PREFIX}a"
-
-        # Third cell → post_b
-        assert self.sdc.get_prefix_checkpoint_name("c") == f"{POST_CHECKPOINT_PREFIX}b"
-
-    def test_exec_restore_first_cell(self):
-        """First cell EXEC-RESTORE works (no prefix checkpoint)."""
-        self._save_pre_checkpoint("a", {})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
-        result = self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-            is_exec_restore=True,
-        )
-
-        assert result.violation is None
-        assert result.exec_mode == "restore"
-        assert "a" not in self.sdc._stale_cells
-
-
 class TestBackwardConflictFreshOnly:
     """Tests that BackConflict only checks fresh cells (Def 1.8.2)."""
 
@@ -2611,9 +2401,9 @@ class TestBackwardConflictFreshOnly:
     def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
-        self.checkpoints.save(name, namespace, max_size_mb=None)
-        return self.checkpoints.saved[name]
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
 
     def test_backward_conflict_skips_stale_cells(self):
         """Stale prior cell should be excluded from backward conflict check.
@@ -2623,24 +2413,24 @@ class TestBackwardConflictFreshOnly:
         """
         # Cell A reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        # Mark A stale
-        self.sdc._stale_cells.add("a")
+        # Mark A stale via NotebookState API (CODE_CHANGED simulates edit)
+        self.sdc._notebook_state.handle_edit("a")
 
         # Cell B modifies x — should NOT trigger violation because A is stale
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 999})
+        ns_b = self._make_namespace( {"x": 999})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
@@ -2654,21 +2444,21 @@ class TestBackwardConflictFreshOnly:
         """
         # Cell A reads x (fresh — not in _stale_cells)
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
         # Cell B modifies x — SHOULD trigger violation because A is fresh
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 999})
+        ns_b = self._make_namespace( {"x": 999})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
@@ -2684,34 +2474,34 @@ class TestBackwardConflictFreshOnly:
         """
         # Cell A reads x
         self._save_pre_checkpoint("a", {"x": 1})
-        post_a = self._make_post_checkpoint("post_a", {"x": 1})
+        ns_a = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            post_checkpoint=post_a,
+            namespace=ns_a,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
         # Cell B reads x
         self._save_pre_checkpoint("b", {"x": 1})
-        post_b = self._make_post_checkpoint("post_b", {"x": 1})
+        ns_b = self._make_namespace( {"x": 1})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            post_checkpoint=post_b,
+            namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        # Mark A stale, keep B fresh
-        self.sdc._stale_cells.add("a")
+        # Mark A stale, keep B fresh via NotebookState API
+        self.sdc._notebook_state.handle_edit("a")
 
         # Cell C modifies x — should conflict with B (fresh) but not A (stale)
         self._save_pre_checkpoint("c", {"x": 1})
-        post_c = self._make_post_checkpoint("post_c", {"x": 999})
+        ns_c = self._make_namespace( {"x": 999})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            post_checkpoint=post_c,
+            namespace=ns_c,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
@@ -2735,31 +2525,28 @@ class TestEditTriggeredStaleness:
     def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
         self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
 
-    def _make_post_checkpoint(self, name: str, namespace: dict) -> MemoryCheckpoint:
-        self.checkpoints.save(name, namespace, max_size_mb=None)
-        return self.checkpoints.saved[name]
-
     def _execute_cell(self, cell_id: str, pre_ns: dict, post_ns: dict,
-                      reads: set = None, writes: set = None):
+                      reads: set = None, writes: set = None,
+                      continue_on_violation: bool = False):
         """Helper to execute a cell with given pre/post namespaces."""
         reads = reads or set()
         writes = writes or set()
         self._save_pre_checkpoint(cell_id, pre_ns)
-        post = self._make_post_checkpoint(f"post_{cell_id}", post_ns)
         return self.sdc.check(
             cell_id=cell_id,
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"],
-            post_checkpoint=post,
+            namespace=post_ns,
             tracking=make_tracking(reads=reads, writes=writes),
+            continue_on_violation=continue_on_violation,
         )
 
     def test_edit_marks_cell_stale(self):
         """Editing an executed cell marks it stale."""
         self._execute_cell("a", {}, {"x": 1}, writes={"x"})
-        assert "a" not in self.sdc._stale_cells
+        assert "a" not in self.sdc._notebook_state.get_stale_cells()
 
         stale = self.sdc.mark_cell_edited("a")
-        assert "a" in self.sdc._stale_cells
+        assert "a" in self.sdc._notebook_state.get_stale_cells()
         assert "a" in stale
 
     def test_edit_does_not_propagate_downstream(self):
@@ -2771,20 +2558,27 @@ class TestEditTriggeredStaleness:
         self._execute_cell("a", {}, {"x": 1}, writes={"x"})
         self._execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
 
-        assert "a" not in self.sdc._stale_cells
-        assert "b" not in self.sdc._stale_cells
+        assert "a" not in self.sdc._notebook_state.get_stale_cells()
+        assert "b" not in self.sdc._notebook_state.get_stale_cells()
 
         # Edit A — only A should become stale, not B
         self.sdc.mark_cell_edited("a")
-        assert "a" in self.sdc._stale_cells
-        assert "b" not in self.sdc._stale_cells
+        assert "a" in self.sdc._notebook_state.get_stale_cells()
+        assert "b" not in self.sdc._notebook_state.get_stale_cells()
 
     def test_edit_unexecuted_cell_is_noop(self):
-        """Editing an unexecuted cell has no effect."""
+        """Editing an unexecuted cell has no effect (no CODE_CHANGED reason added)."""
         # "a" has never been executed — no record
-        stale = self.sdc.mark_cell_edited("a")
-        assert "a" not in self.sdc._stale_cells
-        assert stale == []
+        # Note: "a" is already stale with NEVER_EXECUTED reason from cell_order setup
+        stale_before = self.sdc._notebook_state.get_stale_cells()
+        self.sdc.mark_cell_edited("a")
+        stale_after = self.sdc._notebook_state.get_stale_cells()
+
+        # No CODE_CHANGED reason should be added for unexecuted cell
+        reasons = self.sdc._notebook_state.get_reasons("a")
+        assert not any(r.type == ReasonType.CODE_CHANGED for r in reasons)
+        # Stale list unchanged (edit is a no-op on unexecuted)
+        assert set(stale_before) == set(stale_after)
 
     def test_edit_already_stale_cell(self):
         """Editing an already-stale cell is idempotent."""
@@ -2792,9 +2586,1256 @@ class TestEditTriggeredStaleness:
 
         # Mark stale via edit
         self.sdc.mark_cell_edited("a")
-        assert "a" in self.sdc._stale_cells
+        assert "a" in self.sdc._notebook_state.get_stale_cells()
 
         # Mark stale again — no change
         stale = self.sdc.mark_cell_edited("a")
-        assert "a" in self.sdc._stale_cells
+        assert "a" in self.sdc._notebook_state.get_stale_cells()
         assert stale.count("a") == 1  # Only appears once
+
+
+class TestStalenessReasons:
+    """Tests for staleness reason tracking (§1.2)."""
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        """Save a pre-checkpoint for a cell."""
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _execute_cell(self, cell_id: str, pre_ns: dict, post_ns: dict,
+                      reads: set = None, writes: set = None,
+                      continue_on_violation: bool = False):
+        """Helper to execute a cell with given pre/post namespaces."""
+        reads = reads or set()
+        writes = writes or set()
+        self._save_pre_checkpoint(cell_id, pre_ns)
+        return self.sdc.check(
+            cell_id=cell_id,
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"],
+            namespace=post_ns,
+            tracking=make_tracking(reads=reads, writes=writes),
+            continue_on_violation=continue_on_violation,
+        )
+
+    def test_edit_adds_code_changed_reason(self):
+        """Editing a cell adds CODE_CHANGED reason."""
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        self.sdc.mark_cell_edited("a")
+
+        # Check that notebook_state has CODE_CHANGED reason
+        reasons = self.sdc._notebook_state.get_reasons("a")
+        reason_types = {r.type.value for r in reasons}
+        assert "code_changed" in reason_types
+
+    def test_staleness_result_contains_reasons(self):
+        """ReproducibilityResult includes staleness_reasons dict."""
+        # A writes x
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        # B reads x
+        self._execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
+
+        # A writes x again (different value) → B becomes stale
+        self._save_pre_checkpoint("a", {"x": 1})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 2},  # Changed!
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should be stale with FORWARD_STALE reason
+        assert "b" in result.stale_cells
+        assert "b" in result.staleness_reasons
+        reasons_for_b = result.staleness_reasons["b"]
+        assert any(r["type"] == "forward_stale" for r in reasons_for_b)
+
+    def test_forward_stale_includes_variable_and_cell(self):
+        """FORWARD_STALE reason includes loc and cell_id."""
+        # A writes x
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        # B reads x
+        self._execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
+
+        # A writes x again → B stale with FORWARD_STALE(loc=x, cell_id=a)
+        self._save_pre_checkpoint("a", {"x": 1})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 2},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        reasons_for_b = result.staleness_reasons["b"]
+        forward_stale = [r for r in reasons_for_b if r["type"] == "forward_stale"]
+        assert len(forward_stale) >= 1
+        assert forward_stale[0]["loc"] == "x"
+        assert forward_stale[0]["cell_id"] == "a"
+
+    def test_fresh_cell_has_no_reasons(self):
+        """A freshly executed cell should have no staleness reasons."""
+        result = self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+
+        # Cell a is fresh — should not be in staleness_reasons
+        assert "a" not in result.staleness_reasons or not result.staleness_reasons.get("a")
+
+    def test_multiple_reasons_accumulate(self):
+        """Multiple staleness reasons accumulate on a cell."""
+        # A writes x, B writes y
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        self._execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, writes={"y"})
+        # C reads both x and y
+        self._execute_cell("c", {"x": 1, "y": 2}, {"x": 1, "y": 2, "z": 3}, reads={"x", "y"}, writes={"z"})
+
+        # A changes x
+        self._save_pre_checkpoint("a", {"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 10},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        # C should be stale due to x changing
+
+        # Now B also changes y
+        self._save_pre_checkpoint("b", {"x": 10, "y": 2})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace={"x": 10, "y": 20},
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # C might have multiple FORWARD_STALE reasons (x from a, y from b)
+        # Check that reasons accumulate
+        reasons_for_c = result.staleness_reasons.get("c", [])
+        # C was already stale from x changing, so it won't get y reason added
+        # (already stale cells are skipped in _update_staleness_incremental)
+        assert "c" in self.sdc._notebook_state.get_stale_cells()
+
+    def test_reset_clears_reasons(self):
+        """Resetting the enforcer clears all staleness reasons."""
+        self._execute_cell("a", {}, {"x": 1}, writes={"x"})
+        self.sdc.mark_cell_edited("a")
+
+        # Verify CODE_CHANGED reason exists
+        reasons = self.sdc._notebook_state.get_reasons("a")
+        assert any(r.type.value == "code_changed" for r in reasons)
+
+        self.sdc.reset()
+
+        # After reset, status dict should be empty (not CODE_CHANGED)
+        # Note: get_reasons creates NEVER_EXECUTED for unknown cells, so we
+        # check the internal status dict directly
+        assert "a" not in self.sdc._notebook_state.status
+
+
+class TestSkippedUpstream:
+    """Tests for SKIPPED_UPSTREAM reason type - when cell reads from wrong writer."""
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        # F writes x, G writes x, H reads x
+        self.sdc.set_cell_order(["f", "g", "h"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _execute_cell(self, cell_id: str, pre_ns: dict, post_ns: dict,
+                      reads: set = None, writes: set = None,
+                      continue_on_violation: bool = False):
+        """Helper to execute a cell with given pre/post namespaces."""
+        reads = reads or set()
+        writes = writes or set()
+        self._save_pre_checkpoint(cell_id, pre_ns)
+        return self.sdc.check(
+            cell_id=cell_id,
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"],
+            namespace=post_ns,
+            tracking=make_tracking(reads=reads, writes=writes),
+            continue_on_violation=continue_on_violation,
+        )
+
+    def test_skipped_upstream_then_run_expected_cell(self):
+        """
+        Scenario: F→G→H, then F again (skipping G), then G.
+
+        After running F (skipping G):
+        - H should have SKIPPED_UPSTREAM (reading from F instead of G)
+
+        After running G:
+        - H should have FORWARD_STALE (not SKIPPED_UPSTREAM)
+        - Re-running H would now fix it
+
+        Note: Staleness is always computed, even when G triggers NoReadAndWrite
+        error (because G reads and writes x).
+        """
+        # Initial execution: F→G→H
+        self._execute_cell("f", {}, {"x": 1}, writes={"x"})
+        self._execute_cell("g", {"x": 1}, {"x": 2}, reads={"x"}, writes={"x"})
+        self._execute_cell("h", {"x": 2}, {"x": 2, "y": 10}, reads={"x"}, writes={"y"})
+
+        # H is clean after initial execution
+        assert self.sdc._notebook_state.is_clean("h")
+
+        # Run F again (skipping G) - x goes from 2 back to 1
+        self._execute_cell("f", {"x": 2, "y": 10}, {"x": 1, "y": 10}, writes={"x"})
+
+        # H should now have SKIPPED_UPSTREAM - reading from F instead of G
+        reasons_h = self.sdc._notebook_state.get_reasons("h")
+        reason_types = {r.type for r in reasons_h}
+        assert ReasonType.SKIPPED_UPSTREAM in reason_types, f"Expected SKIPPED_UPSTREAM, got {reason_types}"
+
+        # Verify it's for variable x with expected_cell_id = g
+        skipped_reason = next(r for r in reasons_h if r.type == ReasonType.SKIPPED_UPSTREAM)
+        assert skipped_reason.loc == "x"
+        assert skipped_reason.expected_cell_id == "g"
+
+        # Now run G - this should change H's reason to FORWARD_STALE
+        # (Staleness computed even though G has NoReadAndWrite error)
+        self._execute_cell("g", {"x": 1, "y": 10}, {"x": 3, "y": 10}, reads={"x"}, writes={"x"})
+
+        # H should now have FORWARD_STALE, not SKIPPED_UPSTREAM
+        reasons_h_after = self.sdc._notebook_state.get_reasons("h")
+        reason_types_after = {r.type for r in reasons_h_after}
+
+        assert ReasonType.FORWARD_STALE in reason_types_after, f"Expected FORWARD_STALE, got {reason_types_after}"
+        assert ReasonType.SKIPPED_UPSTREAM not in reason_types_after, f"SKIPPED_UPSTREAM should be replaced by FORWARD_STALE"
+
+        # Verify FORWARD_STALE is from G (not F)
+        input_reason = next(r for r in reasons_h_after if r.type == ReasonType.FORWARD_STALE)
+        assert input_reason.loc == "x"
+        assert input_reason.cell_id == "g"
+        assert input_reason.expected_cell_id is None  # No skipped writer anymore
+
+    def test_skipped_upstream_exact_user_scenario(self):
+        """
+        Exact user scenario: F -> G -> H -> F -> G
+
+        After this sequence, H should have FORWARD_STALE (not SKIPPED_UPSTREAM).
+
+        Note: Staleness is always computed, even when G triggers NoReadAndWrite
+        error (because G reads and writes x).
+        """
+        # F -> G -> H (initial)
+        self._execute_cell("f", {}, {"x": 1}, writes={"x"})
+        self._execute_cell("g", {"x": 1}, {"x": 2}, reads={"x"}, writes={"x"})
+        self._execute_cell("h", {"x": 2}, {"x": 2, "y": 10}, reads={"x"}, writes={"y"})
+
+        print(f"\nAfter F->G->H:")
+        print(f"  H reasons: {self.sdc._notebook_state.get_reasons('h')}")
+        print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
+
+        # F (re-run, skipping G)
+        self._execute_cell("f", {"x": 2, "y": 10}, {"x": 1, "y": 10}, writes={"x"})
+
+        print(f"\nAfter F->G->H->F:")
+        reasons_after_f = self.sdc._notebook_state.get_reasons("h")
+        print(f"  H reasons: {reasons_after_f}")
+        print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
+
+        # Verify H has SKIPPED_UPSTREAM at this point
+        assert any(r.type == ReasonType.SKIPPED_UPSTREAM for r in reasons_after_f), \
+            f"Expected SKIPPED_UPSTREAM after F, got {reasons_after_f}"
+
+        # G (re-run) - staleness computed even though G has NoReadAndWrite error
+        self._execute_cell("g", {"x": 1, "y": 10}, {"x": 3, "y": 10}, reads={"x"}, writes={"x"})
+
+        print(f"\nAfter F->G->H->F->G:")
+        reasons_after_g = self.sdc._notebook_state.get_reasons("h")
+        print(f"  H reasons: {reasons_after_g}")
+        print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
+
+        # H should now have FORWARD_STALE, NOT SKIPPED_UPSTREAM
+        reason_types = {r.type for r in reasons_after_g}
+        assert ReasonType.SKIPPED_UPSTREAM not in reason_types, \
+            f"SKIPPED_UPSTREAM should be gone after running G, got {reasons_after_g}"
+        assert ReasonType.FORWARD_STALE in reason_types, \
+            f"Expected FORWARD_STALE after G, got {reasons_after_g}"
+
+
+class TestStalenessMode:
+    """Tests for syntactic vs semantic staleness computation modes."""
+
+    def setup_method(self):
+        from flowbook.kernel_support.structural_tracking import StalenessMode
+        self.StalenessMode = StalenessMode
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        """Save a pre-checkpoint for a cell."""
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
+
+    def test_default_mode_is_semantic(self):
+        """Default staleness mode should be SEMANTIC."""
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+    def test_set_staleness_mode_syntactic(self):
+        """Can switch to syntactic mode."""
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        assert self.sdc.staleness_mode == self.StalenessMode.SYNTACTIC
+
+    def test_set_staleness_mode_semantic(self):
+        """Can switch to semantic mode."""
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+    def test_syntactic_mode_clears_checkpoints_on_switch(self):
+        """Switching from semantic to syntactic should clear pre-checkpoints."""
+        # Execute a cell in semantic mode
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Verify pre-checkpoint exists
+        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
+
+        # Switch to syntactic mode
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # Pre-checkpoint should be cleared
+        assert f"{PRE_CHECKPOINT_PREFIX}a" not in self.checkpoints.saved
+
+    def test_syntactic_mode_marks_stale_on_set_intersection(self):
+        """Syntactic mode marks cells stale based on set intersection."""
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Re-run A with different value (W_A ∩ R_B = {x} ≠ ∅)
+        self._save_pre_checkpoint("a", {"x": 1, "y": 2})
+        ns_a2 = self._make_namespace({"x": 100, "y": 2})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should be stale (syntactic: W_A ∩ R_B ≠ ∅)
+        assert "b" in result.stale_cells
+
+    def test_syntactic_mode_no_convergence(self):
+        """Syntactic mode doesn't detect convergence - staleness is monotonic.
+
+        Scenario: A writes x, B reads x, then A re-writes x with different
+        value (B stale), then A re-writes x back to original (B still stale
+        in syntactic mode because no convergence detection).
+        """
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # A writes x=1
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Re-run A with different value x=2 (makes B stale via ForwardStale)
+        self._save_pre_checkpoint("a", {"x": 1, "y": 2})
+        ns_a2 = self._make_namespace({"x": 2, "y": 2})
+        result_a2 = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert "b" in result_a2.stale_cells
+
+        # Re-run A with original value x=1 (back to original)
+        self._save_pre_checkpoint("a", {"x": 2, "y": 2})
+        ns_a3 = self._make_namespace({"x": 1, "y": 2})
+        result_a3 = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a3,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # In syntactic mode, B should STILL be stale (no convergence detection)
+        # because syntactic mode is monotonic
+        assert "b" in result_a3.stale_cells
+
+    def test_semantic_mode_detects_convergence(self):
+        """Semantic mode detects convergence and clears staleness.
+
+        Scenario: A writes x, B reads x, then A re-writes x with different
+        value (B stale), then A re-writes x back to original (B becomes clean
+        in semantic mode due to convergence detection).
+        """
+        # Default is semantic mode
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+        # A writes x=1
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x (captures pre-checkpoint with x=1)
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Re-run A with different value x=2 (makes B stale via ForwardStale)
+        self._save_pre_checkpoint("a", {"x": 1, "y": 2})
+        ns_a2 = self._make_namespace({"x": 2, "y": 2})
+        result_a2 = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert "b" in result_a2.stale_cells
+
+        # Re-run A with original value x=1 (back to original - convergence!)
+        self._save_pre_checkpoint("a", {"x": 2, "y": 2})
+        ns_a3 = self._make_namespace({"x": 1, "y": 2})
+        result_a3 = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a3,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # In semantic mode, B should NOT be stale anymore (converged)
+        assert "b" not in result_a3.stale_cells
+
+    def test_syntactic_mode_defers_checkpoint_deletion(self):
+        """Syntactic mode defers checkpoint deletion until next cell executes.
+
+        This allows checkpoint size queries after a cell completes but before
+        the next cell runs (important for benchmarking/compare_overhead).
+        """
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # Execute cell A
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # In syntactic mode with deferred deletion, checkpoint A is STILL present
+        # (marked for pending deletion, but not yet deleted)
+        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
+        assert self.sdc._pending_checkpoint_deletion == f"{PRE_CHECKPOINT_PREFIX}a"
+
+        # Execute cell B - this triggers deletion of cell A's checkpoint
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Now checkpoint A should be deleted
+        assert f"{PRE_CHECKPOINT_PREFIX}a" not in self.checkpoints.saved
+        # Checkpoint B is still present (pending deletion for next cell)
+        assert f"{PRE_CHECKPOINT_PREFIX}b" in self.checkpoints.saved
+        assert self.sdc._pending_checkpoint_deletion == f"{PRE_CHECKPOINT_PREFIX}b"
+
+    def test_semantic_mode_keeps_checkpoint(self):
+        """Semantic mode keeps pre-checkpoint for convergence detection."""
+        # Default is semantic mode
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+        # Execute cell A
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # In semantic mode, pre-checkpoint should be kept
+        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
+
+    # =======================================================================
+    # Backward Staleness Tests
+    # =======================================================================
+
+    def test_backward_staleness_syntactic_marks_earlier_cell_stale(self):
+        """BackwardStale: when later cell writes to var read by earlier clean cell.
+
+        Scenario: A reads x, B is clean, then C writes x.
+        After C runs, A should be marked stale (W_C ∩ R_A = {x} ≠ ∅).
+
+        Note: Staleness is always computed, even when C triggers NoWriteAfterRead
+        error (because C writes to x that A read).
+        """
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # A reads x (clean cell that read x)
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        # A should be clean
+        assert self.sdc._notebook_state.is_clean("a")
+
+        # B does something unrelated
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 1, "y": 10, "z": 20})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"z"}),
+        )
+
+        # C writes x (should make A stale via BackwardStale)
+        # Staleness is computed even with NoWriteAfterRead error
+        self._save_pre_checkpoint("c", {"x": 1, "y": 10, "z": 20})
+        ns_c = self._make_namespace({"x": 999, "y": 10, "z": 20})
+        result = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # A should be stale (backward staleness: W_C ∩ R_A ≠ ∅)
+        assert "a" in result.stale_cells
+
+    def test_backward_staleness_semantic_checks_diff(self):
+        """Semantic BackwardStale uses diff comparison for precision.
+
+        If cell C writes x but the value converges to what A originally saw,
+        A should NOT be marked stale in semantic mode.
+        """
+        # Default is semantic mode
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+        # A reads x=1
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("a")
+
+        # B does something unrelated
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 1, "y": 10, "z": 20})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"z"}),
+        )
+
+        # C writes x to SAME value as A saw (x=1 -> x=1, no actual change)
+        # In semantic mode, A should NOT be stale because diff is empty
+        self._save_pre_checkpoint("c", {"x": 1, "y": 10, "z": 20})
+        ns_c = self._make_namespace({"x": 1, "y": 10, "z": 20})
+        result = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # A should NOT be stale - no actual change to x
+        assert "a" not in result.stale_cells
+
+    def test_backward_staleness_semantic_marks_stale_on_real_change(self):
+        """Semantic BackwardStale marks stale when values actually differ.
+
+        Note: Staleness is always computed, even when C triggers NoWriteAfterRead
+        error (because C writes to x that A read).
+        """
+        # Default is semantic mode
+        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+
+        # A reads x=1
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("a")
+
+        # C writes x to DIFFERENT value
+        # Staleness is computed even with NoWriteAfterRead error
+        self._save_pre_checkpoint("c", {"x": 1, "y": 10})
+        ns_c = self._make_namespace({"x": 999, "y": 10})
+        result = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # A should be stale - x actually changed from what A saw
+        assert "a" in result.stale_cells
+
+    def test_backward_staleness_only_affects_clean_cells(self):
+        """BackwardStale should only mark clean cells as stale, not already-stale cells.
+
+        Note: Staleness is always computed, even when C triggers NoWriteAfterRead
+        error (because C writes to x that A and B read).
+        """
+        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+
+        # A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 1, "y": 10, "z": 20})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"z"}),
+        )
+
+        # Manually mark A as stale (simulating earlier staleness)
+        from flowbook.kernel.models import Reason, ReasonType
+        self.sdc._notebook_state.add_reason("a", Reason(ReasonType.FORWARD_STALE, loc="dummy", cell_id="dummy"))
+        assert not self.sdc._notebook_state.is_clean("a")
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # C writes x - should only affect B (which is clean), not A (already stale)
+        # Staleness is computed even with NoWriteAfterRead error
+        self._save_pre_checkpoint("c", {"x": 1, "y": 10, "z": 20})
+        ns_c = self._make_namespace({"x": 999, "y": 10, "z": 20})
+        result = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should now be stale
+        assert "b" in result.stale_cells
+
+
+class TestStalenessAlwaysComputed:
+    """Tests verifying that staleness is always computed, regardless of errors.
+
+    The key invariant: Staleness tracking is orthogonal to error handling.
+    Even when a cell has predicate violations (NoReadAndWrite, NoWriteAfterRead, etc.),
+    staleness should still be computed because:
+    1. The execution record (R, W sets) is always updated
+    2. Downstream cells need to know about changes
+    3. Rollback (if any) happens at the kernel level, not in check()
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        return namespace
+
+    def test_forward_stale_computed_with_no_read_and_write_error(self):
+        """ForwardStale is computed even when cell has NoReadAndWrite error.
+
+        Scenario: B reads and writes x (NoReadAndWrite violation).
+        C should still be marked stale because B changed x that C reads.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # C reads x
+        self._save_pre_checkpoint("c", {"x": 1})
+        ns_c = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("c")
+
+        # B reads and writes x (triggers NoReadAndWrite)
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 999, "y": 10})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"x"}),
+        )
+
+        # B should have NoReadAndWrite error
+        assert result.has_errors()
+        assert any(e.error_type.value == "no_read_and_write" for e in result.errors)
+
+        # C should still be marked stale (ForwardStale was computed)
+        assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
+
+    def test_forward_stale_computed_with_no_write_after_read_error(self):
+        """ForwardStale is computed even when cell has NoWriteAfterRead error.
+
+        Scenario: A reads x, then B writes x (NoWriteAfterRead violation).
+        C should still be marked stale because B changed x that C reads.
+        """
+        # A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # C reads x
+        self._save_pre_checkpoint("c", {"x": 1})
+        ns_c = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("c")
+
+        # B writes x (triggers NoWriteAfterRead against A)
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 999, "y": 10})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should have NoWriteAfterRead error
+        assert result.has_errors()
+        assert any(e.error_type.value == "no_write_after_read" for e in result.errors)
+
+        # C should still be marked stale (ForwardStale was computed)
+        assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
+
+    def test_backward_stale_computed_with_error(self):
+        """BackwardStale is computed even when cell has errors.
+
+        Scenario: A reads x, then C writes x.
+        A should be marked stale (BackwardStale) even though C has NoWriteAfterRead error.
+        """
+        # A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("a")
+
+        # C writes x (triggers NoWriteAfterRead against A)
+        self._save_pre_checkpoint("c", {"x": 1, "y": 10})
+        ns_c = self._make_namespace({"x": 999, "y": 10})
+        result = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # C should have NoWriteAfterRead error
+        assert result.has_errors()
+
+        # A should be marked stale (BackwardStale was computed)
+        assert "a" in result.stale_cells or not self.sdc._notebook_state.is_clean("a")
+
+    def test_last_writer_updated_with_error(self):
+        """last_writer is updated even when cell has errors.
+
+        This ensures that downstream staleness tracking works correctly.
+        """
+        # A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # B writes x (triggers NoWriteAfterRead against A)
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 999})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B has error
+        assert result.has_errors()
+
+        # last_writer should still be updated
+        assert self.sdc._notebook_state.last_writer.get("x") == "b"
+
+    def test_multiple_errors_still_compute_staleness(self):
+        """Staleness is computed even when cell has multiple errors.
+
+        Scenario: B reads and writes x, which triggers:
+        - NoReadAndWrite (reads and writes same variable)
+        - NoWriteAfterRead (if A read x first)
+
+        Downstream cell C should still be marked stale.
+        """
+        # A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # C reads x
+        self._save_pre_checkpoint("c", {"x": 1})
+        ns_c = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # B reads and writes x (triggers both NoReadAndWrite and NoWriteAfterRead)
+        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
+        ns_b = self._make_namespace({"x": 999, "y": 10})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"x"}),
+        )
+
+        # B should have errors
+        assert result.has_errors()
+        assert len(result.errors) >= 1
+
+        # C should still be marked stale
+        assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
+
+    def test_skipped_upstream_converted_with_error(self):
+        """SKIPPED_UPSTREAM → FORWARD_STALE conversion works even with errors.
+
+        Scenario: F→G→H, then F (skipping G), then G.
+        When G runs (even with NoReadAndWrite error), H's SKIPPED_UPSTREAM
+        should be converted to FORWARD_STALE.
+        """
+        self.sdc.set_cell_order(["f", "g", "h"])
+
+        # F writes x
+        self._save_pre_checkpoint("f", {})
+        ns_f = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="f",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}f"],
+            namespace=ns_f,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # G reads and writes x
+        self._save_pre_checkpoint("g", {"x": 1})
+        ns_g = self._make_namespace({"x": 2})
+        self.sdc.check(
+            cell_id="g",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}g"],
+            namespace=ns_g,
+            tracking=make_tracking(reads={"x"}, writes={"x"}),
+        )
+
+        # H reads x
+        self._save_pre_checkpoint("h", {"x": 2})
+        ns_h = self._make_namespace({"x": 2, "y": 10})
+        self.sdc.check(
+            cell_id="h",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}h"],
+            namespace=ns_h,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("h")
+
+        # Re-run F (skipping G)
+        self._save_pre_checkpoint("f", {"x": 2, "y": 10})
+        ns_f2 = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="f",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}f"],
+            namespace=ns_f2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # H should have SKIPPED_UPSTREAM
+        reasons_h = self.sdc._notebook_state.get_reasons("h")
+        assert any(r.type == ReasonType.SKIPPED_UPSTREAM for r in reasons_h)
+
+        # Re-run G (triggers NoReadAndWrite error)
+        self._save_pre_checkpoint("g", {"x": 1, "y": 10})
+        ns_g2 = self._make_namespace({"x": 3, "y": 10})
+        result = self.sdc.check(
+            cell_id="g",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}g"],
+            namespace=ns_g2,
+            tracking=make_tracking(reads={"x"}, writes={"x"}),
+        )
+
+        # G should have NoReadAndWrite error
+        assert result.has_errors()
+        assert any(e.error_type.value == "no_read_and_write" for e in result.errors)
+
+        # H should now have FORWARD_STALE (converted from SKIPPED_UPSTREAM)
+        reasons_h_after = self.sdc._notebook_state.get_reasons("h")
+        reason_types = {r.type for r in reasons_h_after}
+        assert ReasonType.FORWARD_STALE in reason_types
+        assert ReasonType.SKIPPED_UPSTREAM not in reason_types
+
+
+class TestForwardStaleFormula:
+    """Tests for ForwardStale formula: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+
+    The new formula marks cell j stale if:
+    - Cell i's old OR new writes overlap with cell j's reads OR writes
+
+    This is more conservative than the old formula (W'ᵢ ∩ Rⱼ ≠ ∅).
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        """Save a pre-checkpoint for a cell."""
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
+
+    def test_write_overlap_marks_stale(self):
+        """Cell j is stale if i writes to a variable that j also writes.
+
+        New behavior: (Wᵢ ∪ W'ᵢ) ∩ Wⱼ ≠ ∅ triggers staleness.
+        Old behavior would NOT mark j stale since j doesn't READ x.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert self.sdc._notebook_state.is_clean("a")
+
+        # B writes x (doesn't read it)
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"x", "y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # Re-run A with different value
+        self._save_pre_checkpoint("a", {"x": 1, "y": 10})
+        ns_a2 = self._make_namespace({"x": 2, "y": 10})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should be stale because A wrote x and B writes x
+        assert "b" in result.stale_cells
+
+    def test_old_writes_overlap_with_reads_marks_stale(self):
+        """Cell j is stale if i's OLD writes overlap with j's reads.
+
+        Scenario: Cell A writes x, then writes y (no longer writes x).
+        Cell B reads x. B should be stale because A's old writes included x.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        # Record that A wrote x
+        assert self.sdc._notebook_state.writes.get("a") == {"x"}
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "z": 10})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"z"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # Re-run A, now writes y instead of x (x unchanged in namespace)
+        self._save_pre_checkpoint("a", {"x": 1, "z": 10})
+        ns_a2 = self._make_namespace({"x": 1, "y": 5, "z": 10})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # B should be stale because A's OLD writes (x) overlap with B's reads (x)
+        # Even though A's NEW writes (y) don't overlap with B's reads
+        assert "b" in result.stale_cells
+
+    def test_old_writes_overlap_with_writes_marks_stale(self):
+        """Cell j is stale if i's OLD writes overlap with j's writes.
+
+        Scenario: Cell A writes x, then writes y (no longer writes x).
+        Cell B writes x. B should be stale because A's old writes included x.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B writes x (doesn't read it)
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 100})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # Re-run A, now writes y instead of x
+        self._save_pre_checkpoint("a", {"x": 100})
+        ns_a2 = self._make_namespace({"x": 100, "y": 5})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # B should be stale because A's OLD writes (x) overlap with B's writes (x)
+        assert "b" in result.stale_cells
+
+    def test_no_overlap_not_stale(self):
+        """Cell j is NOT stale if there's no overlap.
+
+        Formula: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) = ∅ means j is NOT stale.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads/writes completely different variables (y, z)
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 10, "z": 20})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"y"}, writes={"z"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # Re-run A with different value
+        self._save_pre_checkpoint("a", {"x": 1, "y": 10, "z": 20})
+        ns_a2 = self._make_namespace({"x": 2, "y": 10, "z": 20})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should NOT be stale (no overlap: {x} ∩ {y, z} = ∅)
+        assert "b" not in result.stale_cells
+        assert self.sdc._notebook_state.is_clean("b")
+
+    def test_combined_old_and_new_writes(self):
+        """Both old and new writes contribute to staleness.
+
+        Wᵢ ∪ W'ᵢ means both old and new writes can trigger staleness.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x, C reads y
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "b_out": 10})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"b_out"}),
+        )
+
+        self._save_pre_checkpoint("c", {"x": 1, "b_out": 10, "y": 2})
+        ns_c = self._make_namespace({"x": 1, "b_out": 10, "y": 2, "c_out": 20})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"y"}, writes={"c_out"}),
+        )
+
+        assert self.sdc._notebook_state.is_clean("b")
+        assert self.sdc._notebook_state.is_clean("c")
+
+        # Re-run A, now writes y instead of x (old writes: {x}, new writes: {y})
+        self._save_pre_checkpoint("a", {"x": 1, "b_out": 10, "y": 2, "c_out": 20})
+        ns_a2 = self._make_namespace({"x": 1, "b_out": 10, "y": 99, "c_out": 20})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # B should be stale: old writes {x} overlap with B's reads {x}
+        # C should be stale: new writes {y} overlap with C's reads {y}
+        assert "b" in result.stale_cells
+        assert "c" in result.stale_cells

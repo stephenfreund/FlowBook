@@ -54,14 +54,15 @@ KEY COMPONENTS
 ================================================================================
 
 ReproducibilityEnforcer: Main enforcement class
-    - records: Dict[cell_id, ReproducibilityExecutionRecord] - execution history
+    - _notebook_state: NotebookState - single source of truth for formal model
     - checkpoints: Checkpoints - pre/post state snapshots
     - cell_order: List[cell_id] - document order from notebook
 
-ReproducibilityExecutionRecord: Per-cell execution data
-    - tracking: TrackingData - reads/writes at variable, column, structural levels
-    - pre_checkpoint_name: Reference to pre-execution state
-    - structural_reads_values: Captured values for error messages
+NotebookState: Single source of truth for formal model S = ⟨C, O, Σ, T, R, W, L⟩
+    - status: T (Cell → CellStatus) - clean/stale per cell
+    - reads/writes: R, W (Cell → P(Loc)) - per-cell reads and writes
+    - last_writer: L (Loc → Cell) - provenance tracking
+    - tracking_data: Per-cell TrackingData for conflict detection
 
 ConflictResolver: Declarative conflict rule evaluation
     - Evaluates access events against change events
@@ -190,6 +191,95 @@ Optimization Flags
 Controlled via environment variables:
 - FLOWBOOK_OPT_CONFLICT_LOOP_SKIP: Skip O(n) loop when no overlap (default: on)
 - FLOWBOOK_OPT_ACCESSED_VARS_ONLY: Only diff accessed vars + aliases (default: on)
+
+================================================================================
+STALENESS COMPUTATION MODES
+================================================================================
+
+The enforcer supports two staleness computation modes, controlled via
+%staleness_mode magic command:
+
+SYNTACTIC MODE
+--------------
+Use checkpoint once to compute accurate R and W, then discard it.
+
+On cell i execution:
+    1. Capture pre_checkpoint
+    2. Execute cell, get tracking (reads_before_writes, writes)
+    3. Compute W_i = { v : pre_checkpoint[v] ≠ namespace[v] }  # actual changes
+    4. R_i = tracking.reads_before_writes
+    5. Discard pre_checkpoint
+
+Stored state per cell:
+    - R[i]: Set[str] — variables read before write
+    - W[i]: Set[str] — variables that actually changed
+
+Predicates (pure set operations):
+    - NoReadAndWrite:    R_i ∩ W_i = ∅
+    - WriteBeforeRead:   R_i ⊆ W_{1..i-1}
+    - NoReadBeforeWrite: R_i ∩ W_{i+1..n} = ∅
+    - NoWriteAfterRead:  W_i ∩ R_j = ∅ for all clean j < i
+
+Forward Staleness (cells after i):
+    for j > i where j was executed:
+        if W_i ∩ R_j ≠ ∅:
+            mark j stale
+
+Properties:
+    - Monotonic: Once stale, stays stale until re-executed
+    - Conservative: Over-approximates staleness
+    - Memory: O(cells × |variables|) — just string sets
+
+SEMANTIC MODE (default)
+-----------------------
+Use checkpoint to compute R and W, store pre-checkpoints for semantic comparison.
+
+On cell i execution:
+    1. Capture pre_checkpoint
+    2. Execute cell, get tracking
+    3. Compute W_i via diff
+    4. R_i = tracking.reads_before_writes
+    5. Store pre_checkpoint[i] permanently
+
+Stored state per cell:
+    - R[i], W[i]: Set[str] — for quick filtering
+    - pre_checkpoint[i]: Checkpoint — actual values cell saw
+
+Predicates (syntactic filter + semantic check):
+    - NoWriteAfterRead: W_i ∩ R_j ≠ ∅ AND diff(pre_checkpoint[j], namespace, R_j) ≠ ∅
+
+Forward Staleness (cells after i, semantic):
+    for j > i where j was executed:
+        if W_i ∩ R_j = ∅:
+            continue  # Quick filter
+        diff_result = diff(pre_checkpoint[j], namespace, keys=R_j)
+        if diff_result.differences:
+            mark j stale
+        else:
+            mark j clean  # Converged!
+
+Convergence detection:
+    After any cell execution, check all stale cells:
+        if diff(pre_checkpoint[j], namespace, R_j) is empty:
+            mark j clean  # Inputs match what j originally saw
+
+Properties:
+    - Non-monotonic: Staleness can be cleared when values converge
+    - Precise: Only marks stale when values actually differ
+    - Memory: O(cells × values) — stores checkpoint values
+
+COMPARISON
+----------
+| Aspect              | Syntactic           | Semantic              |
+|---------------------|---------------------|-----------------------|
+| Checkpoint storage  | Discard after W     | Keep permanently      |
+| Staleness check     | W_i ∩ R_j ≠ ∅       | diff(pre_ckpt, ns)    |
+| NoWriteAfterRead    | Set intersection    | + convergence check   |
+| Un-staleness        | Never (monotonic)   | When values converge  |
+| Memory cost         | Low (sets only)     | High (values)         |
+| False positives     | More (conservative) | Fewer (precise)       |
+
+See FORMAL_DEVELOPMENT.md §10 for the full formal specification.
 """
 
 import os
@@ -201,11 +291,22 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from flowbook.kernel_support.checkpoint import Checkpoint, CheckpointDiffResult
 from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint, MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
-from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
+from flowbook.kernel_support.structural_tracking import StructuralTrackingMode, StalenessMode
 from flowbook.kernel_support.types import MemoryCheckpointDiffResult, DiffNode, ValueComparison, CompoundDiff
 from flowbook.util.cell_index import index_to_alpha
 
-from flowbook.kernel.models import ReproducibilityExecutionRecord, ReproducibilityResult, ReproducibilityViolation
+from flowbook.kernel.models import (
+    ErrorType,
+    MovedCell,
+    OrderChangeResult,
+    OrderDelta,
+    Reason,
+    ReasonType,
+    ReproducibilityError,
+    ReproducibilityResult,
+    ReproducibilityViolation,
+)
+from flowbook.kernel.notebook_state import NotebookState
 
 # Conflict resolution imports
 from flowbook.kernel.access_events import StructuralRead, VariableRead
@@ -238,6 +339,269 @@ OPT_CONFLICT_LOOP_SKIP = _env_flag("FLOWBOOK_OPT_CONFLICT_LOOP_SKIP", default=Tr
 # (reads + writes) plus their aliases, instead of diffing the entire namespace.
 # This can provide 5-10x speedup when cells access few variables.
 OPT_ACCESSED_VARS_ONLY = _env_flag("FLOWBOOK_OPT_ACCESSED_VARS_ONLY", default=True)
+
+
+# ============================================================================
+# FORMAL PREDICATE HELPERS
+# ============================================================================
+# These functions implement the formal predicates from main.tex and
+# FORMAL_DEVELOPMENT.md §3.2-3.3. They provide a direct mapping between
+# the formal specification and the implementation.
+#
+# Notation:
+#   R, W = read/write sets indexed by cell position
+#   i, j = cell positions in document order
+#   n = total number of cells
+#
+# Location types (Loc):
+#   Var(x)           - Variable
+#   Col(df, c)       - DataFrame column
+#   File(path)       - File path
+#   Structural(df, a) - Structural attribute
+#
+# The predicates below work with Set[str] for backward compatibility.
+# For full Loc-based predicates, see flowbook.kernel.models:
+#   tracking_to_read_locs(), tracking_to_write_locs(), locs_intersect()
+# ============================================================================
+
+
+def _writes_in_range(
+    notebook_state: "NotebookState",
+    cell_order: List[str],
+    start: int,
+    end: int,
+) -> Set[str]:
+    """
+    Compute W_{start..end} = ⋃_{k ∈ [start..end]} Wₖ
+
+    Formal ref: FORMAL_DEVELOPMENT.md §1.3
+    """
+    result: Set[str] = set()
+    for k in range(start, min(end + 1, len(cell_order))):
+        cell_id = cell_order[k]
+        tracking = notebook_state.get_tracking(cell_id)
+        if tracking is not None:
+            result.update(tracking.writes)
+    return result
+
+
+def _reads_in_range(
+    notebook_state: "NotebookState",
+    cell_order: List[str],
+    start: int,
+    end: int,
+) -> Set[str]:
+    """
+    Compute R_{start..end} = ⋃_{k ∈ [start..end]} Rₖ
+
+    Formal ref: FORMAL_DEVELOPMENT.md §1.3
+    """
+    result: Set[str] = set()
+    for k in range(start, min(end + 1, len(cell_order))):
+        cell_id = cell_order[k]
+        tracking = notebook_state.get_tracking(cell_id)
+        if tracking is not None:
+            result.update(tracking.reads_before_writes)
+    return result
+
+
+def _overwritten(
+    notebook_state: "NotebookState",
+    cell_order: List[str],
+    i: int,
+) -> Set[str]:
+    """
+    Overwritten(W, i) ≝ W_{i+1..n}
+
+    The set of locations written by cells after position i.
+
+    Formal ref: main.tex Definition (Overwritten), FORMAL_DEVELOPMENT.md §1.4.1
+    """
+    return _writes_in_range(notebook_state, cell_order, i + 1, len(cell_order) - 1)
+
+
+def _forward_stale(
+    R_j: Set[str],
+    W_j: Set[str],
+    W_i: Set[str],
+    i: int,
+    j: int,
+) -> bool:
+    """
+    ForwardStale(R, W, i, j) ≝ j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+
+    Cell j (after i) becomes stale if i wrote to a location that j reads or writes.
+
+    Formal ref: main.tex §Staleness predicates, FORMAL_DEVELOPMENT.md §3.3
+
+    Args:
+        R_j: Read set of cell j
+        W_j: Write set of cell j
+        W_i: Write set of cell i (the executing cell)
+        i: Position of executing cell
+        j: Position of cell to check
+
+    Returns:
+        True if cell j should become stale due to cell i's execution
+    """
+    if j <= i:
+        return False
+    return bool(W_i & (R_j | W_j))
+
+
+def _backward_stale(
+    W_old: Dict[str, Set[str]],
+    W_new_i: Set[str],
+    W_old_i: Set[str],
+    last_writer_func,
+    i: int,
+    j: int,
+) -> bool:
+    """
+    BackwardStale(W, W', i, j) ≝ j < i ∧ j = LastWriter(W, i, y) for some y ∈ Wᵢ \\ W'ᵢ
+
+    Cell j (before i) becomes stale if it was the last writer of a location
+    that cell i no longer writes (i.e., i's write set shrank).
+
+    Formal ref: main.tex §Staleness predicates, FORMAL_DEVELOPMENT.md §3.3
+
+    Args:
+        W_old: Old write sets by cell_id
+        W_new_i: New write set of cell i
+        W_old_i: Old write set of cell i
+        last_writer_func: Function(var, cell_id) -> last writer cell_id
+        i: Position of executing cell
+        j: Position of cell to check
+
+    Returns:
+        True if cell j should become stale due to cell i's changed writes
+    """
+    if j >= i:
+        return False
+    # Find locations that i used to write but no longer writes
+    removed_writes = W_old_i - W_new_i
+    for y in removed_writes:
+        # Check if j was the last writer of y before cell i
+        writer = last_writer_func(y, i)
+        if writer is not None and writer == j:
+            return True
+    return False
+
+
+def _reads_residual_write(
+    R_j: Set[str],
+    w: Set[str],
+) -> bool:
+    """
+    ReadsResidualWrite(R', w, j) ≝ R'ⱼ ∩ w ≠ ∅
+
+    Cell j becomes stale if it reads from deleted cell's writes.
+
+    Formal ref: main.tex §Staleness predicates, FORMAL_DEVELOPMENT.md §3.3
+
+    Args:
+        R_j: Read set of cell j (in the shifted state after deletion)
+        w: Write set of the deleted cell (captured before deletion)
+
+    Returns:
+        True if cell j reads any location written by the deleted cell
+    """
+    return bool(R_j & w)
+
+
+def _write_before_read(
+    R_i: Set[str],
+    W_before_i: Set[str],
+) -> bool:
+    """
+    WriteBeforeRead(R, W, i) ≝ Rᵢ ⊆ W_{1..i-1}
+
+    All reads come from writes by earlier cells.
+
+    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
+
+    Args:
+        R_i: Read set of cell i
+        W_before_i: Union of write sets of cells 1..i-1
+
+    Returns:
+        True if the validity predicate holds
+    """
+    return R_i <= W_before_i
+
+
+def _no_read_before_write(
+    R_i: Set[str],
+    W_after_i: Set[str],
+) -> bool:
+    """
+    NoReadBeforeWrite(R, W, i) ≝ Rᵢ ∩ W_{i+1..n} = ∅
+
+    Cell i does not read locations that will be written by later cells.
+    (This detects forward contamination at the variable level.)
+
+    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
+
+    Args:
+        R_i: Read set of cell i
+        W_after_i: Union of write sets of cells i+1..n
+
+    Returns:
+        True if the validity predicate holds
+    """
+    return not bool(R_i & W_after_i)
+
+
+def _no_write_after_read(
+    W_i: Set[str],
+    R_before_i: Set[str],
+) -> bool:
+    """
+    NoWriteAfterRead(R, W, i) ≝ Wᵢ ∩ R_{1..i-1} = ∅
+
+    Cell i does not write locations that earlier cells read.
+    (This is the backward mutation check at the variable level.)
+
+    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
+
+    Args:
+        W_i: Write set of cell i
+        R_before_i: Union of read sets of cells 1..i-1
+
+    Returns:
+        True if the validity predicate holds (no backward mutation)
+    """
+    return not bool(W_i & R_before_i)
+
+
+def _no_read_and_write(
+    R_i: Set[str],
+    W_i: Set[str],
+) -> bool:
+    """
+    NoReadAndWrite(R, W, i) ≝ Rᵢ ∩ Wᵢ = ∅
+
+    Cell i does not both read and write the same location.
+    (This simplifies reasoning; actual impl allows read-then-write.)
+
+    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
+
+    Note: The implementation uses reads_before_writes which already
+    excludes locations that are written before being read.
+
+    Args:
+        R_i: Read set of cell i
+        W_i: Write set of cell i
+
+    Returns:
+        True if the validity predicate holds
+    """
+    return not bool(R_i & W_i)
+
+
+# ============================================================================
+# ALIAS EXPANSION
+# ============================================================================
 
 
 def _expand_with_deep_aliases(
@@ -301,17 +665,23 @@ class ReproducibilityEnforcer:
         self,
         checkpoints: MemoryCheckpoints,
         structural_mode: StructuralTrackingMode = StructuralTrackingMode.ENFORCE,
+        staleness_mode: StalenessMode = StalenessMode.SEMANTIC,
     ):
         self.checkpoints = checkpoints
-        self.records: Dict[str, ReproducibilityExecutionRecord] = {}
         self.seq_counter: int = 0
         self._cell_order: List[str] = []
-        self._stale_cells: Set[str] = set()  # Cache for absolute staleness state
         self._structural_mode = structural_mode
-        # New declarative conflict resolver
+        self._staleness_mode = staleness_mode
+        # NotebookState is the single source of truth for formal model state:
+        # T (status), R (reads), W (writes), L (last_writer), and per-cell TrackingData
+        self._notebook_state = NotebookState()
+        # Declarative conflict resolver
         self._conflict_resolver = ConflictResolver(
             structural_mode=_tracking_mode_to_structural_mode(structural_mode)
         )
+        # Deferred checkpoint deletion for syntactic mode - keeps last checkpoint
+        # until next cell executes, allowing size queries between executions
+        self._pending_checkpoint_deletion: Optional[str] = None
 
     @property
     def structural_mode(self) -> StructuralTrackingMode:
@@ -327,13 +697,381 @@ class ReproducibilityEnforcer:
         )
 
     @property
+    def staleness_mode(self) -> StalenessMode:
+        """Get the current staleness computation mode."""
+        return self._staleness_mode
+
+    def set_staleness_mode(self, mode: StalenessMode) -> None:
+        """Set the staleness computation mode.
+
+        When switching from SEMANTIC to SYNTACTIC, clears all stored
+        pre-checkpoints since syntactic mode doesn't need them.
+        """
+        old_mode = self._staleness_mode
+        self._staleness_mode = mode
+
+        # Clear checkpoints when switching from semantic to syntactic
+        # (syntactic mode doesn't need stored checkpoints)
+        if old_mode == StalenessMode.SEMANTIC and mode == StalenessMode.SYNTACTIC:
+            self._clear_all_pre_checkpoints()
+
+    def _clear_all_pre_checkpoints(self) -> None:
+        """Clear all stored pre-checkpoints (called when switching to syntactic mode)."""
+        keys_to_delete = [
+            key for key in self.checkpoints.list()
+            if key.startswith(PRE_CHECKPOINT_PREFIX)
+        ]
+        for key in keys_to_delete:
+            self.checkpoints.delete(key)
+        # Also clear any pending deletion
+        self._pending_checkpoint_deletion = None
+
+    @property
     def cell_order(self) -> List[str]:
         return self._cell_order
 
-    def set_cell_order(self, order: List[str]) -> None:
-        """Update notebook structure. Called via magic or metadata."""
-        self._cell_order = order
-        self._prune_deleted_cells()
+    def set_cell_order(self, order: List[str]) -> OrderChangeResult:
+        """Update notebook structure. Called via magic or metadata.
+
+        Implements DELETE, INSERT, and MOVE transitions (§2.4-§2.6).
+
+        Args:
+            order: New cell order (list of cell IDs)
+
+        Returns:
+            OrderChangeResult with newly_stale cells, warnings, and delta
+        """
+        from flowbook.util.output import log, timer
+
+        with timer(key="order:set_cell_order", message="[Order] Processing order change"):
+            old_order = self._cell_order
+            delta = self._compute_order_delta(old_order, order)
+
+            # Update order first (needed for position lookups in handlers)
+            self._cell_order = order
+
+            all_newly_stale: List[str] = []
+            all_warnings: List[str] = []
+
+            # Handle deletions (§2.4)
+            if delta.deleted:
+                newly_stale, warnings = self._handle_deletions(delta.deleted, old_order)
+                all_newly_stale.extend(newly_stale)
+                all_warnings.extend(warnings)
+                # Note: NotebookState cleanup (tracking_data, etc.) happens in set_cell_order below
+
+            # Handle moves (§2.6)
+            if delta.moved:
+                newly_stale, warnings = self._handle_moves(delta.moved, old_order)
+                all_newly_stale.extend(newly_stale)
+                all_warnings.extend(warnings)
+
+            # INSERT (§2.5): no action needed (new cells have no records)
+
+            # Sync NotebookState with new order (handles its own insert/delete/reorder tracking)
+            self._notebook_state.set_cell_order(order)
+
+            if all_newly_stale:
+                log(f"[ORDER] Cells marked stale: {all_newly_stale}")
+
+            return OrderChangeResult(
+                newly_stale=all_newly_stale,
+                warnings=all_warnings,
+                delta=delta,
+            )
+
+    def _compute_order_delta(
+        self, old_order: List[str], new_order: List[str]
+    ) -> OrderDelta:
+        """Compute delta between old and new cell order.
+
+        Args:
+            old_order: Previous cell order
+            new_order: New cell order
+
+        Returns:
+            OrderDelta with deleted, inserted, and moved cells
+        """
+        old_set = set(old_order)
+        new_set = set(new_order)
+
+        deleted = [c for c in old_order if c not in new_set]
+        inserted = [c for c in new_order if c not in old_set]
+
+        # Build position maps for cells that exist in both orders
+        old_positions = {c: i for i, c in enumerate(old_order)}
+        new_positions = {c: i for i, c in enumerate(new_order)}
+
+        # Find moved cells: cells in both orders whose relative position changed
+        # We use a stable algorithm: for each cell, check if its position changed
+        # relative to cells that were adjacent to it
+        moved: List[MovedCell] = []
+        common_cells = old_set & new_set
+
+        for cell_id in common_cells:
+            old_pos = old_positions[cell_id]
+            new_pos = new_positions[cell_id]
+            if old_pos != new_pos:
+                moved.append(MovedCell(cell_id=cell_id, old_position=old_pos, new_position=new_pos))
+
+        return OrderDelta(deleted=deleted, inserted=inserted, moved=moved)
+
+    def _handle_deletions(
+        self, deleted_cells: List[str], old_order: List[str]
+    ) -> tuple:
+        """Handle DELETE transitions — Inst-Delete rule.
+
+        Formal ref: ReadsResidualWrite(R', w, j) in main.tex §Staleness predicates,
+                    FORMAL_DEVELOPMENT.md §3.3, §3.5 [Inst-Delete]
+
+        The formal predicate is: R'ⱼ ∩ w ≠ ∅
+        Where w = Wᵢ (the deleted cell's writes) captured before deletion.
+
+        For each deleted cell i with an execution record:
+        - Capture w = Wᵢ (the deleted cell's writes)
+        - For each remaining cell j: if ReadsResidualWrite(R', w, j), mark j stale
+
+        Args:
+            deleted_cells: List of deleted cell IDs (cell i being deleted)
+            old_order: Cell order before deletion
+
+        Returns:
+            Tuple of (newly_stale cell IDs, warnings)
+        """
+        from flowbook.util.output import log, timer
+
+        with timer(key="order:Inst-Delete", message=f"[Inst-Delete] Handling {len(deleted_cells)} deletions"):
+            newly_stale: List[str] = []
+            warnings: List[str] = []
+
+            for deleted_id in deleted_cells:
+                deleted_tracking = self._notebook_state.get_tracking(deleted_id)
+                if deleted_tracking is None:
+                    continue  # No execution record, nothing to propagate
+
+                deleted_writes = deleted_tracking.writes
+
+                if not deleted_writes:
+                    continue  # Deleted cell didn't write anything
+
+                # Track cells marked stale by this deletion for logging
+                cells_marked = 0
+
+                # Find cells that read what the deleted cell wrote
+                for cell_id in self._cell_order:
+                    if cell_id == deleted_id:
+                        continue
+                    if not self._notebook_state.is_clean(cell_id):
+                        continue  # Already stale
+
+                    other_tracking = self._notebook_state.get_tracking(cell_id)
+                    if other_tracking is None:
+                        continue
+                    other_reads = other_tracking.reads_before_writes
+                    overlap = deleted_writes & other_reads
+
+                    if overlap:
+                        newly_stale.append(cell_id)
+                        cells_marked += 1
+                        # Track reason: READS_RESIDUAL_WRITE for each orphaned variable
+                        for var in overlap:
+                            self._notebook_state.add_reason(
+                                cell_id,
+                                Reason(ReasonType.READS_RESIDUAL_WRITE, loc=var)
+                            )
+                        alpha_deleted = self._cell_id_to_alpha(deleted_id)
+                        alpha_other = self._cell_id_to_alpha(cell_id)
+                        warning = (
+                            f"Cell @{alpha_other} marked stale: "
+                            f"deleted cell @{alpha_deleted} wrote {sorted(overlap)}"
+                        )
+                        warnings.append(warning)
+                        log(f"[DELETE] {warning}")
+
+                log(f"[Inst-Delete] Cell {deleted_id}: ReadsResidualWrite marked {cells_marked} cells stale")
+
+            return (newly_stale, warnings)
+
+    def _handle_moves(
+        self, moved_cells: List[MovedCell], old_order: List[str]
+    ) -> tuple:
+        """Handle MOVE transitions — Inst-Move-Down/Up rules.
+
+        Formal ref: main.tex §3.5 [Inst-Move-Down], [Inst-Move-Up],
+                    FORMAL_DEVELOPMENT.md §3.5
+
+        Move is the composition of Inst-Delete followed by Inst-Insert.
+
+        Move forward (p < q):
+            - Crossed cells that read moved cell's writes → stale (lost dependency)
+            - Moved cell that reads from crossed cells' writes → stale (gains input)
+
+        Move backward (q < p):
+            - Moved cell that reads from crossed cells' writes → stale (forward contamination)
+            - Crossed cells that read moved cell's writes → stale (gains input)
+
+        IMPORTANT: "Crossed" means cells whose relative order to the moved cell
+        actually changed. If all cells shift together (e.g., due to insertion),
+        they don't cross each other.
+
+        Args:
+            moved_cells: List of MovedCell records
+            old_order: Cell order before moves
+
+        Returns:
+            Tuple of (newly_stale cell IDs, warnings)
+        """
+        from flowbook.util.output import log, timer
+
+        with timer(key="order:Inst-Move", message=f"[Inst-Move] Handling {len(moved_cells)} moves"):
+            newly_stale: List[str] = []
+            warnings: List[str] = []
+            new_order = self._cell_order
+
+            # Build position maps
+            old_positions = {c: i for i, c in enumerate(old_order)}
+            new_positions = {c: i for i, c in enumerate(new_order)}
+
+            for move in moved_cells:
+                cell_id = move.cell_id
+
+                cell_tracking = self._notebook_state.get_tracking(cell_id)
+                if cell_tracking is None:
+                    continue  # No execution record, nothing to check
+
+                cell_reads = cell_tracking.reads_before_writes
+                cell_writes = cell_tracking.writes
+
+                old_pos = move.old_position
+                new_pos = move.new_position
+                is_forward = new_pos > old_pos
+
+                # Determine truly crossed cells: cells whose relative order to cell_id changed
+                # A cell is "crossed" if:
+                #   - It was AFTER cell_id in old order but is now BEFORE in new order, OR
+                #   - It was BEFORE cell_id in old order but is now AFTER in new order
+                crossed_ids = []
+                for other_id in self._cell_order:
+                    if other_id == cell_id:
+                        continue
+                    if other_id not in old_positions or other_id not in new_positions:
+                        continue  # Cell was deleted or inserted, not moved
+
+                    other_old_pos = old_positions[other_id]
+                    other_new_pos = new_positions[other_id]
+
+                    # Check if relative order flipped
+                    was_after = other_old_pos > old_pos
+                    is_after = other_new_pos > new_pos
+
+                    if was_after != is_after:
+                        crossed_ids.append(other_id)
+
+                # Count cells marked stale for this move
+                cells_marked = 0
+
+                for other_id in crossed_ids:
+                    other_tracking = self._notebook_state.get_tracking(other_id)
+                    if other_tracking is None:
+                        continue
+
+                    other_reads = other_tracking.reads_before_writes
+                    other_writes = other_tracking.writes
+
+                    # Determine direction of crossing for this specific pair
+                    other_old_pos = old_positions[other_id]
+                    other_new_pos = new_positions[other_id]
+                    was_after = other_old_pos > old_pos
+                    # is_after = other_new_pos > new_pos  # Must be opposite of was_after
+
+                    if was_after:
+                        # other_id was after cell_id, now before: cell_id moved forward past other_id
+                        # (Ex1) Crossed cells that read moved cell's writes → stale
+                        overlap1 = other_reads & cell_writes
+                        if overlap1 and self._notebook_state.is_clean(other_id):
+                            newly_stale.append(other_id)
+                            cells_marked += 1
+                            # Track reason: ORDER_CHANGED
+                            self._notebook_state.add_reason(
+                                other_id, Reason(ReasonType.ORDER_CHANGED)
+                            )
+                            alpha_moved = self._cell_id_to_alpha(cell_id)
+                            alpha_other = self._cell_id_to_alpha(other_id)
+                            warning = (
+                                f"Cell @{alpha_other} marked stale: "
+                                f"cell @{alpha_moved} moved forward past it, "
+                                f"lost dependency on {sorted(overlap1)}"
+                            )
+                            warnings.append(warning)
+                            log(f"[MOVE] {warning}")
+
+                        # (Ex2) Moved cell reads from crossed cells' writes → stale
+                        overlap2 = cell_reads & other_writes
+                        if overlap2 and self._notebook_state.is_clean(cell_id):
+                            newly_stale.append(cell_id)
+                            cells_marked += 1
+                            # Track reason: ORDER_CHANGED
+                            self._notebook_state.add_reason(
+                                cell_id, Reason(ReasonType.ORDER_CHANGED)
+                            )
+                            alpha_moved = self._cell_id_to_alpha(cell_id)
+                            alpha_other = self._cell_id_to_alpha(other_id)
+                            warning = (
+                                f"Cell @{alpha_moved} marked stale: "
+                                f"moved forward past @{alpha_other}, "
+                                f"now reads {sorted(overlap2)} from it"
+                            )
+                            warnings.append(warning)
+                            log(f"[MOVE] {warning}")
+
+                    else:
+                        # other_id was before cell_id, now after: cell_id moved backward past other_id
+                        # (Ex3) Moved cell reads from crossed cells' writes → stale
+                        overlap3 = cell_reads & other_writes
+                        if overlap3 and self._notebook_state.is_clean(cell_id):
+                            newly_stale.append(cell_id)
+                            cells_marked += 1
+                            # Track reason: NO_READ_BEFORE_WRITE (forward contamination)
+                            for var in overlap3:
+                                self._notebook_state.add_reason(
+                                    cell_id,
+                                    Reason(ReasonType.NO_READ_BEFORE_WRITE, loc=var, cell_id=other_id)
+                                )
+                            alpha_moved = self._cell_id_to_alpha(cell_id)
+                            alpha_other = self._cell_id_to_alpha(other_id)
+                            warning = (
+                                f"Cell @{alpha_moved} marked stale: "
+                                f"moved backward before @{alpha_other}, "
+                                f"forward contamination on {sorted(overlap3)}"
+                            )
+                            warnings.append(warning)
+                            log(f"[MOVE] {warning}")
+
+                        # (Ex4) Crossed cells that read moved cell's writes → stale
+                        overlap4 = other_reads & cell_writes
+                        if overlap4 and self._notebook_state.is_clean(other_id):
+                            newly_stale.append(other_id)
+                            cells_marked += 1
+                            # Track reason: FORWARD_STALE (gains input from moved cell)
+                            for var in overlap4:
+                                self._notebook_state.add_reason(
+                                    other_id,
+                                    Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=cell_id)
+                                )
+                            alpha_moved = self._cell_id_to_alpha(cell_id)
+                            alpha_other = self._cell_id_to_alpha(other_id)
+                            warning = (
+                                f"Cell @{alpha_other} marked stale: "
+                                f"cell @{alpha_moved} moved backward before it, "
+                                f"gains input from {sorted(overlap4)}"
+                            )
+                            warnings.append(warning)
+                            log(f"[MOVE] {warning}")
+
+                direction = "Down" if is_forward else "Up"
+                log(f"[Inst-Move-{direction}] Cell {cell_id}: crossed {len(crossed_ids)} cells, {cells_marked} marked stale")
+
+            return (newly_stale, warnings)
 
     def _cell_id_to_alpha(self, cell_id: str) -> str:
         """Convert cell ID to @A notation using cell_order position."""
@@ -344,537 +1082,487 @@ class ReproducibilityEnforcer:
             # Cell not in order, just return the ID
             return cell_id
 
-    def _prune_deleted_cells(self) -> None:
-        """Remove records for cells no longer in notebook."""
-        current = set(self._cell_order)
-        deleted = [c for c in self.records if c not in current]
-        for c in deleted:
-            del self.records[c]
-            self._stale_cells.discard(c)  # Also remove from stale cache
-
     def check(
         self,
         cell_id: str,
         pre_checkpoint,
-        post_checkpoint,
+        namespace: dict,
         tracking: TrackingData,
         continue_on_violation: bool = False,
-        namespace: Optional[dict] = None,
-        is_exec_restore: bool = False,
-        old_live_checkpoint=None,
     ) -> ReproducibilityResult:
         """
-        Main entry point. Call after cell execution.
+        Main entry point. Implements [Inst-Run] from FORMAL_DEVELOPMENT.md §3.4.
 
-        Implements EXEC-ACCEPT, EXEC-CONTAMINATED, EXEC-REJECT, and EXEC-RESTORE
-        transition rules from the formalism (§1.8).
+        Formal ref: FORMAL_DEVELOPMENT.md §3.4, lines 205-219
+
+        [Inst-Run] Transition Rule:
+        1. Cᵢ; Σ ⇓ o · Σ' · r · w  (cell execution produces r, w)
+        2. R' = R[i := r], W' = W[i := w]  (update state)
+        3. Check validity predicates (§3.2, lines 176-179):
+           - NoReadAndWrite(R', W', i)    ≝ Rᵢ ∩ Wᵢ = ∅
+           - WriteBeforeRead(R', W', i)   ≝ Rᵢ ⊆ W_{1..i-1}
+           - NoReadBeforeWrite(R', W', i) ≝ Rᵢ ∩ W_{i+1..n} = ∅
+           - NoWriteAfterRead(R', W', i)  ≝ Wᵢ ∩ R_{1..i-1} = ∅
+        4. If all pass: T'ᵢ = CLEAN; else T'ᵢ = STALE with problem list
+        5. For j ≠ i, compute staleness (§3.3, lines 187-188):
+           - ForwardStale(R', W', i, j)   ≝ j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+           - BackwardStale(W, W', i, j)   ≝ j < i ∧ j = LastWriter(W,i,y) for y ∈ Wᵢ\\W'ᵢ
 
         Args:
             cell_id: ID of the cell that just executed
-            pre_checkpoint: Snapshot before execution (Checkpoint or Checkpoint)
-            post_checkpoint: Snapshot after execution (Checkpoint or Checkpoint)
+            pre_checkpoint: Snapshot before execution (Checkpoint)
+            namespace: Live user namespace dict (post-execution state)
             tracking: TrackingData with reads/writes
             continue_on_violation: If True, compute staleness even when violation detected
-            namespace: Optional user namespace for capturing structural read values
-            is_exec_restore: [EXEC-RESTORE] If True, skip backward/forward checks,
-                always mark fresh, compute StaleFwd using old_live_checkpoint
-            old_live_checkpoint: [EXEC-RESTORE] Checkpoint of old live store for
-                computing StaleFwd delta as diff(old_live, post)
 
         Returns:
-            ReproducibilityResult with violation info, absolute set of stale cells, and changed variables
+            ReproducibilityResult with violation info, stale cells, and changed variables
         """
+        from flowbook.kernel.models import (
+            tracking_to_read_locs, diff_to_write_locs, check_loc_conflicts,
+            get_var_locs, get_loc_variables,
+        )
+        from flowbook.util.output import log
+
+        # Process deferred checkpoint deletion from previous cell (syntactic mode)
+        # This allows checkpoint size queries after a cell completes but before the next runs
+        if self._pending_checkpoint_deletion is not None:
+            self.checkpoints.delete(self._pending_checkpoint_deletion)
+            from flowbook.kernel_support.deepcopy import clear_container_cache
+            clear_container_cache()
+            self._pending_checkpoint_deletion = None
+
         self.seq_counter += 1
+        my_position = self._get_position(cell_id)
+        problems: List[Reason] = []
 
-        # Get position in document order
-        try:
-            my_position = self._cell_order.index(cell_id)
-        except ValueError:
-            # Cell not in order list - can't enforce reproducibility
-            my_position = -1
+        # ================================================================
+        # STEP 1: Compute r (reads) and w (writes) from tracking
+        # Ref: FORMAL_DEVELOPMENT.md §3.1, line 169
+        # ================================================================
+        R_i_locs = tracking_to_read_locs(tracking)  # r as LocSet
+        W_i_old = self._notebook_state.writes.get(cell_id, set())  # Old W_i (strings)
 
-        # [EXEC-RESTORE] Skip backward/forward checks, always mark fresh (§1.8)
-        if is_exec_restore and my_position >= 0:
-            return self._check_exec_restore(
-                cell_id, my_position, pre_checkpoint, post_checkpoint,
-                tracking, namespace, old_live_checkpoint,
+        # Compute diff to get actual changes
+        with timer(key="check:compute_diff", message=f"[Inst-Run] Computing diff for {cell_id}"):
+            current_diff, typed_changes = self._compute_diff_and_changes(
+                pre_checkpoint, namespace, tracking
             )
 
-        # Rule 3: Check backward mutation (also returns diff and typed_changes for reuse)
-        violation = None
-        current_diff = None
-        typed_changes = []
-        if my_position >= 0:
-            with timer(key="sdc:backward_mutation", message=f"[sdc] Backward mutation check for {cell_id}") as t:
-                violation, current_diff, typed_changes = self._check_backward_mutation(
-                    cell_id, my_position, pre_checkpoint, post_checkpoint, tracking
-                )
+        # Check for truncation first
+        truncated_vars = _check_for_truncation(current_diff)
+        if truncated_vars:
+            formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
+            mutating_alpha = self._cell_id_to_alpha(cell_id)
+            return ReproducibilityResult(
+                violation=ReproducibilityViolation(
+                    mutating_cell=cell_id,
+                    affected_cell=cell_id,
+                    variables=truncated_vars,
+                    message=format_truncation_error(mutating_alpha, truncated_vars),
+                    truncation_details=formatted_diff,
+                ),
+                stale_cells=[],
+                changed_variables=[],
+                column_changed={},
+                structural_warnings=list(current_diff.warnings) if current_diff.warnings else [],
+            )
 
-            if violation is not None:
-                output.add_timing("sdc:backward_mutation_violation", t.duration())
-            else:
-                output.add_timing("sdc:backward_mutation_no_violation", t.duration())
+        # W_i from diff (what actually changed)
+        W_i_locs = diff_to_write_locs(current_diff, tracking)  # w as LocSet
+        changed_vars = list(current_diff.differences.keys()) if current_diff.differences else []
+        column_changed = _extract_column_changes(current_diff, tracking)
 
+        # Convert LocSet to Set[str] for backward compatibility with NotebookState
+        R_i_vars = tracking.reads_before_writes  # Use tracking directly
+        W_i_vars = set(changed_vars)  # Variables that changed
 
-        # Check forward dependency (reading from later cells that already executed)
-        forward_violation = None
-        if my_position >= 0:
-            with timer(key="sdc:forward_dependency", message=f"[sdc] Forward dependency check for {cell_id}") as t:
-                forward_violation = self._check_forward_dependency(
-                    cell_id, my_position, tracking
-                )
+        # Extract structural warnings from diff
+        structural_warnings = list(current_diff.warnings) if current_diff.warnings else []
 
-            if forward_violation is not None:
-                output.add_timing("sdc:forward_dependency_violation", t.duration())
-            else:
-                output.add_timing("sdc:forward_dependency_no_violation", t.duration())
-
-        stale = []
-        changed_vars = []
-        column_changed = {}
-        structural_warnings = []
-
-        # Extract structural warnings from diff (always, even with violations)
-        # This ensures users see warnings about structural changes regardless of
-        # whether there's also a violation
-        if current_diff is not None and current_diff.warnings:
-            structural_warnings = list(current_diff.warnings)
-
-        if not violation or continue_on_violation:
-            # Capture structural read values for better error messages later
+        if my_position < 0:
+            # Cell not in order - store state and return early
             structural_read_values = {}
             if namespace is not None and tracking.structural_reads:
-                structural_read_values = capture_structural_read_values(
-                    namespace, tracking.structural_reads
-                )
-
-            # Update our record for this cell BEFORE computing staleness
-            # (so this cell is considered "fresh" in the computation)
-            # typed_changes is cached for fast forward dependency checks
-            self.records[cell_id] = ReproducibilityExecutionRecord(
-                cell_id=cell_id,
+                structural_read_values = capture_structural_read_values(namespace, tracking.structural_reads)
+            self._notebook_state.record_execution(
+                cell_id,
                 tracking=tracking,
+                changed_vars=W_i_vars if W_i_vars else None,
+                column_changed={k: set(v) for k, v in column_changed.items()} if column_changed else None,
                 execution_seq=self.seq_counter,
                 structural_reads_values=structural_read_values,
                 typed_changes=typed_changes,
             )
+            return ReproducibilityResult(
+                violation=None,
+                stale_cells=self._notebook_state.get_stale_cells(),
+                changed_variables=changed_vars,
+                column_changed=column_changed,
+                structural_warnings=structural_warnings,
+                staleness_reasons=self._notebook_state.get_all_reasons(),
+            )
 
-            # [EXEC-CONTAMINATED / EXEC-ACCEPT] (Formal rules §1.8)
-            if forward_violation is not None:
-                self._stale_cells.add(cell_id)    # EXEC-CONTAMINATED: cell recorded stale
+        # ================================================================
+        # STEP 2: Check validity predicates BEFORE updating state
+        # Ref: FORMAL_DEVELOPMENT.md §3.2, lines 176-179
+        # ================================================================
+        violation = None
+        forward_violation = None
+        writer_violation = None
+        errors: List[ReproducibilityError] = []
+
+        # NoReadAndWrite(R', W', i) ≝ Rᵢ ∩ Wᵢ = ∅
+        # Ref: FORMAL_DEVELOPMENT.md §3.2, line 176
+        # (Cell reads and writes same location - potential issue for reproducibility)
+        no_read_and_write_error = self._check_no_read_and_write(cell_id, tracking)
+        if no_read_and_write_error:
+            errors.append(no_read_and_write_error)
+            log(f"[Inst-Run] {cell_id}: NoReadAndWrite=fail")
+        else:
+            log(f"[Inst-Run] {cell_id}: NoReadAndWrite=pass")
+
+        # WriteBeforeRead(R', W', i) ≝ Rᵢ ⊆ W_{1..i-1}
+        # Ref: FORMAL_DEVELOPMENT.md §3.2, line 177
+        # (Reads user variable not written by earlier cell)
+        write_before_read_error = self._check_write_before_read(cell_id, my_position, tracking, namespace)
+        if write_before_read_error:
+            errors.append(write_before_read_error)
+            log(f"[Inst-Run] {cell_id}: WriteBeforeRead=fail")
+        else:
+            log(f"[Inst-Run] {cell_id}: WriteBeforeRead=pass")
+
+        # NoWriteAfterRead(R', W', i) ≝ Wᵢ ∩ R_{1..i-1} = ∅
+        # Ref: FORMAL_DEVELOPMENT.md §3.2, line 179
+        # (Backward mutation check - only against CLEAN cells)
+        backward_violation = None
+        if typed_changes:
+            with timer(key="check:NoWriteAfterRead", message=f"[Inst-Run] NoWriteAfterRead check for {cell_id}"):
+                backward_violation = self._check_backward_mutation_new(
+                    cell_id, my_position, typed_changes, current_diff, column_changed
+                )
+        if backward_violation:
+            errors.append(ReproducibilityError(
+                error_type=ErrorType.NO_WRITE_AFTER_READ,
+                cell_id=cell_id,
+                locations=backward_violation.variables,
+                message=backward_violation.message,
+                causer_cell=backward_violation.affected_cell,
+                detail={
+                    "structural_reads_detail": backward_violation.structural_reads_detail,
+                    "changes_detail": backward_violation.changes_detail,
+                } if backward_violation.structural_reads_detail or backward_violation.changes_detail else None,
+            ))
+        log(f"[Inst-Run] {cell_id}: NoWriteAfterRead={'fail' if backward_violation else 'pass'}")
+
+        # NoReadBeforeWrite(R', W', i) ≝ Rᵢ ∩ W_{i+1..n} = ∅
+        # Ref: FORMAL_DEVELOPMENT.md §3.2, line 178
+        # (Forward contamination check)
+        with timer(key="check:NoReadBeforeWrite", message=f"[Inst-Run] NoReadBeforeWrite check for {cell_id}"):
+            forward_violation = self._check_forward_contamination(cell_id, my_position, tracking)
+        if forward_violation:
+            errors.append(ReproducibilityError(
+                error_type=ErrorType.NO_READ_BEFORE_WRITE,
+                cell_id=cell_id,
+                locations=forward_violation.variables,
+                message=forward_violation.message,
+                causer_cell=forward_violation.mutating_cell,
+            ))
+        log(f"[Inst-Run] {cell_id}: NoReadBeforeWrite={'fail' if forward_violation else 'pass'}")
+
+        # ================================================================
+        # STEP 3: Update state R' = R[i := r], W' = W[i := w]
+        # Ref: FORMAL_DEVELOPMENT.md §3.4, lines 208-209
+        # ALWAYS update state (new semantics: no rejection)
+        # ================================================================
+        structural_read_values = {}
+        if namespace is not None and tracking.structural_reads:
+            structural_read_values = capture_structural_read_values(namespace, tracking.structural_reads)
+
+        self._notebook_state.record_execution(
+            cell_id,
+            tracking=tracking,
+            changed_vars=W_i_vars if W_i_vars else None,
+            column_changed={k: set(v) for k, v in column_changed.items()} if column_changed else None,
+            execution_seq=self.seq_counter,
+            structural_reads_values=structural_read_values,
+            typed_changes=typed_changes,
+        )
+
+        # ================================================================
+        # STEP 4: Determine cell status T'ᵢ
+        # T'ᵢ = CLEAN only if ALL validity predicates pass
+        # Otherwise T'ᵢ = STALE with appropriate reasons
+        # Ref: FORMAL_DEVELOPMENT.md §3.4, line 214
+        #
+        # IMPORTANT: When continue_on_violation=True, predicate violations
+        # are ACCEPTED and the cell stays CLEAN. The only exception is
+        # skipped_writers which always causes staleness.
+        # ================================================================
+        # Check for skipped writers (provenance mismatch)
+        skipped_writers = self._check_skipped_writers(cell_id)
+
+        # Collect staleness reasons for this cell
+        # Only add predicate violation reasons if NOT continuing (i.e., they will be rejected)
+        if not continue_on_violation:
+            if backward_violation is not None:
+                # NoWriteAfterRead failed - cell reads values it then modifies, breaking reproducibility
+                for var in backward_violation.variables:
+                    self._notebook_state.add_reason(
+                        cell_id, Reason(ReasonType.NO_WRITE_AFTER_READ, loc=var, cell_id=backward_violation.affected_cell)
+                    )
+
+        # Build writer_violation for UI purposes if forward contamination detected
+        writer_violation = None
+        if forward_violation is not None:
+            # Forward contamination ALWAYS marks cell stale (even when continue_on_violation=True)
+            # because re-running top-to-bottom would produce different results.
+            # This is different from backward_violation which only affects other cells.
+            writer = forward_violation.mutating_cell
+            for var in forward_violation.variables:
+                self._notebook_state.add_reason(
+                    cell_id, Reason(ReasonType.NO_READ_BEFORE_WRITE, loc=var, cell_id=writer if writer != "<later>" else None)
+                )
+            # Build writer_violation for UI (shows backward_mutation-style message on writer cell)
+            writer = forward_violation.mutating_cell
+            if writer and writer != "<later>":
+                writer_alpha = self._cell_id_to_alpha(writer)
+                reader_alpha = self._cell_id_to_alpha(cell_id)
+                writer_violation = ReproducibilityViolation(
+                    mutating_cell=writer,
+                    affected_cell=cell_id,
+                    variables=forward_violation.variables,
+                    message=format_backward_mutation_message(writer_alpha, reader_alpha, forward_violation.variables),
+                    violation_type="backward_mutation",
+                )
+
+        # Skipped writers always cause staleness (regardless of continue_on_violation)
+        if skipped_writers:
+            for loc, actual_writer, expected_writer in skipped_writers:
+                self._notebook_state.add_reason(
+                    cell_id,
+                    Reason(ReasonType.SKIPPED_UPSTREAM, loc=loc, cell_id=actual_writer, expected_cell_id=expected_writer)
+                )
+
+        # Set cell status
+        # When continue_on_violation=True, only NoWriteAfterRead (backward_violation) can be accepted.
+        # Other errors (forward contamination, read-and-write, undefined vars) always cause staleness
+        # because they affect THIS cell's reproducibility.
+        has_any_errors = len(errors) > 0
+
+        # Separate errors into backward-only (can be accepted) and forward/other (always stale)
+        backward_only_errors = [e for e in errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ]
+        other_errors = [e for e in errors if e.error_type != ErrorType.NO_WRITE_AFTER_READ]
+
+        # Backward-only errors can be accepted; other errors always cause staleness
+        has_staleness_causing_errors = len(other_errors) > 0 or (len(backward_only_errors) > 0 and not continue_on_violation)
+
+        if not has_staleness_causing_errors and not skipped_writers:
+            self._notebook_state.set_clean(cell_id)
+            if len(backward_only_errors) > 0:
+                log(f"[Inst-Run] {cell_id}: T'=CLEAN (backward errors accepted via continue_on_violation)")
             else:
-                self._stale_cells.discard(cell_id) # EXEC-ACCEPT: cell recorded fresh
+                log(f"[Inst-Run] {cell_id}: T'=CLEAN")
+        else:
+            reasons = []
+            for err in errors:
+                reasons.append(err.error_type.value)
+            if skipped_writers:
+                reasons.append("skipped_writers")
+            log(f"[Inst-Run] {cell_id}: T'=STALE ({', '.join(reasons)})")
 
-            # Reuse diff from backward mutation check, or compute if not available
-            if current_diff is None:
-                # Note: Don't pass current cell's structural_reads - intra-cell
-                # structural reads are not backward mutations. Structural warnings
-                # for prior cells are handled in staleness computation.
-                # Extract memory checkpoints if we have Checkpoints
-                _pre_mem = pre_checkpoint.memory if isinstance(pre_checkpoint, Checkpoint) else pre_checkpoint
-                _post_mem = post_checkpoint.memory if isinstance(post_checkpoint, Checkpoint) else post_checkpoint
-                current_diff = MemoryCheckpoint.diff(
-                    _pre_mem,
-                    _post_mem,
-                    use_leq=True,
-                    column_rbw=tracking.column_reads_before_writes,
-                    structural_reads={},  # Empty - no intra-cell structural warnings
-                    structural_mode=self._structural_mode,
-                )
+        # ================================================================
+        # STEP 5: Compute staleness for all j ≠ i
+        # Ref: FORMAL_DEVELOPMENT.md §3.4, lines 215-217
+        # ================================================================
+        # ForwardStale(R', W', i, j) ≝ j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+        # Ref: FORMAL_DEVELOPMENT.md §3.3, line 187
+        #
+        # Staleness is ALWAYS computed, even when there are errors:
+        # - Staleness tracking is orthogonal to error handling
+        # - The execution record (R, W sets) is always updated
+        # - Downstream cells need to know about changes
+        # - If rollback happens, it's at the kernel level, not here
+        stale: List[str] = []
+        staleness_warnings: List[str] = []
 
-            # Check if diff was truncated - if so, return violation
-            truncated_vars = _check_for_truncation(current_diff)
-            if truncated_vars:
-                with timer(key="violation:truncation_check", message=f"[violation] Building truncation violation (check)"):
-                    formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
-                    mutating_alpha = self._cell_id_to_alpha(cell_id)
-                    return ReproducibilityResult(
-                        violation=ReproducibilityViolation(
-                            mutating_cell=cell_id,
-                            affected_cell=cell_id,
-                            variables=truncated_vars,
-                            message=format_truncation_error(mutating_alpha, truncated_vars),
-                            truncation_details=formatted_diff,
-                        ),
-                        stale_cells=[],
-                        changed_variables=[],
-                        column_changed={},
-                        structural_warnings=structural_warnings,
-                    )
+        _changed_file_paths = tracking.file_writes if tracking.file_writes else None
 
-            if current_diff.differences:
-                changed_vars = list(current_diff.differences.keys())
+        # W_i_current = current tracking.writes (what cell claims to write now)
+        W_i_current = tracking.writes or set()
 
-            # Extract column-level changes from diff result
-            column_changed = _extract_column_changes(current_diff, tracking)
+        with timer(key="check:ForwardStale", message=f"[Inst-Run] ForwardStale computation for {cell_id}"):
+            stale, staleness_warnings = self._compute_forward_staleness(
+                namespace, W_i_old, W_i_current, W_i_vars, column_changed, cell_id, my_position,
+                changed_file_paths=_changed_file_paths,
+            )
+        log(f"[Inst-Run] {cell_id}: ForwardStale marked {len(stale)} cells")
+        structural_warnings.extend(staleness_warnings)
 
-            # Update staleness INCREMENTALLY (only check cells below that might have become stale)
-            # Extract changed file paths from the diff (if available)
-            _changed_file_paths = None
-            if current_diff is not None:
-                # Check if we have a total_diff from backward mutation check
-                # If pre_checkpoint is Checkpoint, we computed total_diff there
-                _is_total_cp = isinstance(pre_checkpoint, Checkpoint)
-                if _is_total_cp and hasattr(pre_checkpoint, 'file') and pre_checkpoint.file is not None:
-                    # Re-diff files for staleness (or reuse from backward mutation)
-                    total_diff_for_staleness = Checkpoint.diff(
-                        pre_checkpoint, post_checkpoint,
-                        use_leq=True,
-                        column_rbw=tracking.column_reads_before_writes,
-                        structural_reads={},
-                        structural_mode=self._structural_mode,
-                    )
-                    if total_diff_for_staleness.has_file_changes:
-                        _changed_file_paths = total_diff_for_staleness.changed_file_paths
+        # BackwardStale: mark cells j < i as stale if W_i ∩ R_j ≠ ∅
+        # This handles the case where a later cell writes to a variable
+        # that an earlier (clean) cell had read.
+        with timer(key="check:BackwardStale", message=f"[Inst-Run] BackwardStale computation for {cell_id}"):
+            backward_stale = self._compute_backward_staleness(
+                namespace, W_i_vars, column_changed, cell_id, my_position
+            )
+        if backward_stale:
+            log(f"[Inst-Run] {cell_id}: BackwardStale marked {len(backward_stale)} cells")
+            stale.extend(backward_stale)
 
-            # Use memory checkpoint for staleness diff
-            _staleness_cp = post_checkpoint.memory if isinstance(post_checkpoint, Checkpoint) else post_checkpoint
+        # Update last_writer (L) for changed variables
+        if changed_vars:
+            for loc in changed_vars:
+                self._notebook_state.last_writer[loc] = cell_id
+        if column_changed:
+            for var, cols in column_changed.items():
+                if var not in self._notebook_state.column_last_writer:
+                    self._notebook_state.column_last_writer[var] = {}
+                for col in cols:
+                    self._notebook_state.column_last_writer[var][col] = cell_id
 
-            # Also captures structural warnings from affected cells
-            with timer(key="sdc:staleness", message=f"[sdc] Staleness update for {cell_id}"):
-                stale, staleness_warnings = self._update_staleness_incremental(
-                    _staleness_cp, set(changed_vars), column_changed, cell_id, my_position,
-                    changed_file_paths=_changed_file_paths,
-                )
-            # Merge warnings from staleness checks
-            structural_warnings.extend(staleness_warnings)
+        # In syntactic mode, defer checkpoint deletion until next cell executes.
+        # This allows checkpoint size queries after cell execution completes.
+        # (we've already computed W_i from the diff, so checkpoint is no longer needed
+        # for reproducibility checks, but we keep it for metrics collection)
+        if self._staleness_mode == StalenessMode.SYNTACTIC:
+            self._pending_checkpoint_deletion = f"{PRE_CHECKPOINT_PREFIX}{cell_id}"
+
+        # In semantic mode, check for convergence (stale cells that have converged)
+        if self._staleness_mode == StalenessMode.SEMANTIC:
+            cleared = self._check_convergence(namespace)
+            if cleared:
+                log(f"[Inst-Run] {cell_id}: Convergence cleared staleness for {cleared}")
+                # Update stale list after convergence
+                stale = self._notebook_state.get_stale_cells()
+
+        # ================================================================
+        # Return result
+        # ================================================================
+        staleness_reasons = self._notebook_state.get_all_reasons()
 
         return ReproducibilityResult(
-            violation=violation,
+            violation=backward_violation,  # Return backward mutation info (for UI, not for rejection)
             stale_cells=stale,
             changed_variables=changed_vars,
             column_changed=column_changed,
             structural_warnings=structural_warnings,
             forward_violation=forward_violation,
-            cell_is_contaminated=(forward_violation is not None),
+            writer_violation=writer_violation,  # For UI: shows backward_mutation-style info on writer cell
+            staleness_reasons=staleness_reasons,
+            errors=errors,  # All formal predicate violations
         )
 
-    def _check_backward_mutation(
+    # =========================================================================
+    # Helper methods for check() - implementing formal predicates
+    # =========================================================================
+
+    def _get_position(self, cell_id: str) -> int:
+        """Get cell position in document order."""
+        try:
+            return self._cell_order.index(cell_id)
+        except ValueError:
+            return -1
+
+    def _compute_diff_and_changes(
         self,
-        cell_id: str,
-        my_position: int,
         pre_checkpoint,
-        post_checkpoint,
+        namespace: dict,
         tracking: TrackingData,
-    ) -> Tuple[Optional[ReproducibilityViolation], MemoryCheckpointDiffResult, List]:
+    ) -> Tuple[MemoryCheckpointDiffResult, List]:
         """
-        Check if current cell causes a backward mutation — BackConflict (Def 1.8.2).
+        Compute diff and typed changes for a cell execution.
 
-        A backward mutation occurs when a cell modifies a variable that an
-        earlier FRESH cell (in notebook order) reads. Stale cells are excluded
-        from the check per the formal definition. This prevents hidden dependencies
-        where earlier cells depend on later cells having run first.
-
-        Includes column-aware conflict detection for DataFrames: modifying
-        df['price'] doesn't conflict with a cell that only reads df['quantity'].
-
-        Returns:
-            Tuple of (violation, diff_result, typed_changes):
-            - diff_result is returned for reuse by caller
-            - typed_changes is cached in the record for fast forward dependency checks
+        Returns: (diff_result, typed_changes)
         """
-        # Compute what THIS cell actually modified
-        # For diff detection, check all accessed columns (read OR written)
-        with timer(key="bwm:prepare_columns", message=f"[bwm] Prepare accessed columns"):
-            all_accessed_columns = {}
-            for var, cols in tracking.column_reads_before_writes.items():
+        # Prepare accessed columns for diff
+        all_accessed_columns = {}
+        for var, cols in tracking.column_reads_before_writes.items():
+            all_accessed_columns[var] = set(cols)
+        for var, cols in tracking.column_writes.items():
+            if var in all_accessed_columns:
+                all_accessed_columns[var].update(cols)
+            else:
                 all_accessed_columns[var] = set(cols)
-            for var, cols in tracking.column_writes.items():
-                if var in all_accessed_columns:
-                    all_accessed_columns[var].update(cols)
-                else:
-                    all_accessed_columns[var] = set(cols)
 
-        # Compute diff without structural_reads - intra-cell structural reads
-        # are not backward mutations. Structural conflict detection is handled
-        # by the ConflictResolver which uses prior cells' structural reads.
-        # Note: use_leq=False to detect created variables too - these are cached
-        # for forward dependency checks. Created variables won't cause false
-        # positive backward mutations (earlier cells couldn't have read them).
-
-        # ======================================================================
-        # OPTIMIZATION: OPT_ACCESSED_VARS_ONLY
-        # Only diff variables that the cell accessed (reads + writes) plus their
-        # aliases, instead of diffing the entire namespace. This can provide
-        # 5-10x speedup when cells access few variables out of many.
-        # ======================================================================
+        # Optimization: only diff accessed variables + deep aliases
         keys_to_include: Optional[Set[str]] = None
         if OPT_ACCESSED_VARS_ONLY:
-            with timer(key="bwm:expand_aliases", message=f"[bwm] OPT expand accessed vars with DEEP aliases"):
-                # Get variables this cell accessed (reads + writes)
-                # Note: reads_before_writes is a Set[str], writes is also Set[str]
-                accessed_vars = set(tracking.reads_before_writes) | set(tracking.writes)
+            accessed_vars = set(tracking.reads_before_writes) | set(tracking.writes)
+            keys_to_include = _expand_with_deep_aliases(accessed_vars, pre_checkpoint)
 
-                # Expand to include DEEP aliases (vars sharing ANY internal reference)
-                # Uses precomputed index from checkpoint (O(accessed + aliases))
-                keys_to_include = _expand_with_deep_aliases(accessed_vars, pre_checkpoint)
-
-                # Log the optimization impact with variable names
-                total_vars = len(pre_checkpoint.user_ns)
-                all_vars_sorted = sorted(pre_checkpoint.user_ns.keys())
-                from flowbook.util.output import log
-                accessed_sorted = sorted(accessed_vars)
-                expanded_sorted = sorted(keys_to_include)
-                log(f"[bwm] OPT_ACCESSED_VARS_ONLY: diffing {len(keys_to_include)} of {total_vars} vars")
-                log(f"[bwm]   all_vars={all_vars_sorted}")
-                log(f"[bwm]   accessed={accessed_sorted}")
-                log(f"[bwm]   deep_aliases_added={sorted(set(expanded_sorted) - set(accessed_sorted))}")
-        # ======================================================================
-
-        # Use Checkpoint.diff if pre_checkpoint is combined Checkpoint (produces CheckpointDiffResult with file diff)
-        # Otherwise fall back to MemoryCheckpoint.diff (for plain MemoryCheckpoint objects)
+        # Compute diff
         _is_combined = isinstance(pre_checkpoint, Checkpoint)
+        if _is_combined:
+            total_diff = Checkpoint.diff(
+                pre_checkpoint,
+                namespace,
+                keys_to_include=keys_to_include,
+                use_leq=False,
+                column_rbw=all_accessed_columns,
+                structural_reads={},
+                structural_mode=self._structural_mode,
+            )
+            current_diff = total_diff.memory
+        else:
+            current_diff = MemoryCheckpoint.diff(
+                pre_checkpoint,
+                namespace,
+                keys_to_include=keys_to_include,
+                use_leq=False,
+                column_rbw=all_accessed_columns,
+                structural_reads={},
+                structural_mode=self._structural_mode,
+            )
 
-        with timer(key="bwm:checkpoint_diff", message=f"[bwm] Checkpoint.diff (pre vs post)"):
-            if _is_combined:
-                total_diff = Checkpoint.diff(
-                    pre_checkpoint,
-                    post_checkpoint,
-                    keys_to_include=keys_to_include,
-                    use_leq=False,
-                    column_rbw=all_accessed_columns,
-                    structural_reads={},
-                    structural_mode=self._structural_mode,
-                )
-                current_diff = total_diff.memory
-            else:
-                total_diff = None
-                current_diff = MemoryCheckpoint.diff(
-                    pre_checkpoint,
-                    post_checkpoint,
-                    keys_to_include=keys_to_include,
-                    use_leq=False,  # Detect creations for forward dependency caching
-                    column_rbw=all_accessed_columns,
-                    structural_reads={},  # Empty - ConflictResolver handles this
-                    structural_mode=self._structural_mode,
-                )
+        # Convert to typed changes
+        typed_changes = detect_changes(current_diff) if current_diff.differences else []
 
-        # Check if diff was truncated - if so, return violation
-        with timer(key="bwm:check_truncation", message=f"[bwm] Check truncation"):
-            truncated_vars = _check_for_truncation(current_diff)
-        if truncated_vars:
-            with timer(key="violation:truncation", message=f"[violation] Building truncation violation"):
-                formatted_diff = _format_diff_for_display(current_diff, truncated_vars)
-                mutating_alpha = self._cell_id_to_alpha(cell_id)
-                return (
-                    ReproducibilityViolation(
-                        mutating_cell=cell_id,
-                        affected_cell=cell_id,
-                        variables=truncated_vars,
-                        message=format_truncation_error(mutating_alpha, truncated_vars),
-                        truncation_details=formatted_diff,
-                    ),
-                    current_diff,
-                    [],  # No typed_changes on truncation
-                )
+        return current_diff, typed_changes
 
-        if not current_diff.differences:
-            # This cell didn't modify anything, no backward mutation possible
-            return (None, current_diff, [])
-
-        # Column-level modifications (for DataFrames)
-        with timer(key="bwm:extract_columns", message=f"[bwm] Extract column changes"):
-            modified_columns = _extract_column_changes(current_diff, tracking)
-
-        # Convert diff to typed Changes for conflict detection
-        # These are also cached in the record for forward dependency checks
-        with timer(key="bwm:detect_changes", message=f"[bwm] detect_changes (diff -> typed)"):
-            typed_changes = detect_changes(current_diff)
-        if not typed_changes:
-            return (None, current_diff, [])
-
-        # ======================================================================
-        # OPTIMIZATION: OPT_CONFLICT_LOOP_SKIP
-        # Skip the O(n) conflict detection loop when there's no variable-level
-        # overlap between changed variables and prior cell reads.
-        # ======================================================================
-        if OPT_CONFLICT_LOOP_SKIP:
-            with timer(key="bwm:opt_skip_check", message=f"[bwm] OPT skip check ({my_position} prior cells)"):
-                changed_var_names = {c.variable for c in typed_changes}
-                all_prior_var_reads: Set[str] = set()
-                for prior_cell_id_check in self._cell_order[:my_position]:
-                    prior_record_check = self.records.get(prior_cell_id_check)
-                    # [BackConflict] Only accumulate reads from fresh cells (Def 1.8.2)
-                    if prior_record_check and prior_cell_id_check not in self._stale_cells:
-                        all_prior_var_reads.update(prior_record_check.tracking.reads_before_writes)
-
-                # If no overlap at variable level, no conflict is possible
-                has_overlap = bool(changed_var_names & all_prior_var_reads)
-
-            if not has_overlap:
-                return (None, current_diff, typed_changes)
-        # ======================================================================
-
-        # [BackConflict (Def 1.8.2)] Check if any earlier FRESH cell reads something we modified
-        with timer(key="bwm:conflict_loop", message=f"[bwm] Conflict detection loop ({my_position} prior cells)"):
-            conflict_checks = 0
-            for prior_cell_id in self._cell_order[:my_position]:
-                prior_record = self.records.get(prior_cell_id)
-                if prior_record is None:
-                    continue
-
-                # [BackConflict] Only check fresh cells (Def 1.8.2)
-                if prior_cell_id in self._stale_cells:
-                    continue
-
-                # Convert prior cell's tracking to typed AccessEvents
-                prior_reads = prior_record.tracking.to_read_events()
-                if not prior_reads:
-                    continue
-
-                conflict_checks += 1
-
-                # Use declarative ConflictResolver to detect conflicts
-                violations = self._conflict_resolver.get_violations(typed_changes, prior_reads)
-                if not violations:
-                    continue
-
-                # Extract conflict names in the format expected by messages
-                # When the read is a VariableRead or StructuralRead, report just
-                # the variable name (for backward compatibility with old behavior)
-                conflicts = []
-                for v in violations:
-                    var = v.change.variable
-                    # Check if the read was a VariableRead or StructuralRead
-                    if isinstance(v.read, (VariableRead, StructuralRead)):
-                        # Report just the variable name for variable/structural reads
-                        conflicts.append(var)
-                    elif hasattr(v.change, 'column'):
-                        conflicts.append(f"{var}.{v.change.column}")
-                    else:
-                        conflicts.append(var)
-                conflicts = sorted(set(conflicts))
-
-                if conflicts:
-                    with timer(key="violation:backward_mutation", message=f"[violation] Building backward mutation violation"):
-                        mutating_alpha = self._cell_id_to_alpha(cell_id)
-                        affected_alpha = self._cell_id_to_alpha(prior_cell_id)
-
-                        # Get structural reads values from the prior record
-                        prior_structural_values = prior_record.structural_reads_values
-
-                        # Extract change descriptions from diff
-                        changes = _extract_change_descriptions(current_diff, modified_columns)
-
-                        # Build the detailed message
-                        message = format_structural_violation(
-                            mutating_alpha,
-                            affected_alpha,
-                            conflicts,
-                            prior_structural_values,
-                            changes,
-                        )
-
-                        return (
-                            ReproducibilityViolation(
-                                mutating_cell=cell_id,
-                                affected_cell=prior_cell_id,
-                                variables=conflicts,
-                                message=message,
-                                structural_reads_detail=prior_structural_values,
-                                changes_detail=changes,
-                            ),
-                            current_diff,
-                            typed_changes,
-                        )
-
-        # [BackConflict] File backward mutation check — fresh cells only (Def 1.8.2)
-        if total_diff is not None and total_diff.has_file_changes:
-            for prior_cell_id in self._cell_order[:my_position]:
-                prior_record = self.records.get(prior_cell_id)
-                if prior_record is None:
-                    continue
-                # [BackConflict] Only check fresh cells (Def 1.8.2)
-                if prior_cell_id in self._stale_cells:
-                    continue
-                file_conflicts = total_diff.changed_file_paths & prior_record.tracking.file_reads_before_writes
-                if file_conflicts:
-                    mutating_alpha = self._cell_id_to_alpha(cell_id)
-                    affected_alpha = self._cell_id_to_alpha(prior_cell_id)
-                    conflict_names = sorted(os.path.basename(p) for p in file_conflicts)
-                    message = (
-                        f"Cell {mutating_alpha} modified file(s) {conflict_names} "
-                        f"which Cell {affected_alpha} (earlier) reads."
-                    )
-                    return (
-                        ReproducibilityViolation(
-                            mutating_cell=cell_id,
-                            affected_cell=prior_cell_id,
-                            variables=conflict_names,
-                            message=message,
-                        ),
-                        current_diff,
-                        typed_changes,
-                    )
-
-        return (None, current_diff, typed_changes)
-
-    def _check_forward_dependency(
+    def _check_forward_contamination(
         self,
         cell_id: str,
         my_position: int,
         tracking: TrackingData,
     ) -> Optional[ReproducibilityViolation]:
         """
-        Check if current cell reads from a later cell — FwdContaminated (Def 1.8.3).
+        Check NoReadBeforeWrite predicate.
 
-        A forward dependency occurs when a cell reads a variable that a later
-        cell (in document order) has already written. This means the reading
-        cell is seeing "future" state that wouldn't exist in top-to-bottom order.
-
-        Uses cached typed_changes from each cell's execution record, avoiding
-        expensive checkpoint diffs. The typed_changes are computed once during
-        backward mutation check and cached for reuse here.
-
-        Args:
-            cell_id: ID of the cell that just executed (the reading cell)
-            my_position: Position in document order
-            tracking: TrackingData with reads for this cell
-
-        Returns:
-            ReproducibilityViolation with violation_type="forward_dependency" if detected, None otherwise
+        Formal ref: NoReadBeforeWrite(R, W, i) ≝ Rᵢ ∩ W_{i+1..n} = ∅
+        FORMAL_DEVELOPMENT.md §3.2, line 178
         """
-        # Convert current cell's reads to typed AccessEvents
+        # Use existing implementation (consolidated from _check_forward_dependency)
         my_read_events = tracking.to_read_events()
-        if not my_read_events:
-            return None
+        vars_covered_by_typed_changes: Set[str] = set()
 
-        # Check later cells (in document order) that already executed
+        # Check later cells that already executed
         for later_cell_id in self._cell_order[my_position + 1:]:
-            later_record = self.records.get(later_cell_id)
-            if later_record is None:
-                continue  # Later cell hasn't executed yet - OK
-
-            # Use cached typed_changes from the later cell's execution
-            # These were computed during backward mutation check and include
-            # both modifications and creations (use_leq=False)
-            later_changes = later_record.typed_changes
-            if not later_changes:
-                continue  # Later cell didn't actually change anything
-
-            # Check if later cell's changes conflict with current cell's reads
-            violations = self._conflict_resolver.get_violations(later_changes, my_read_events)
-            if not violations:
+            if not self._notebook_state.has_record(later_cell_id):
                 continue
 
-            # Extract conflict names from violations
-            conflicts = []
-            for v in violations:
-                var = v.change.variable
-                if hasattr(v.change, 'column') and v.change.column:
-                    conflicts.append(f"{var}['{v.change.column}']")
-                else:
-                    conflicts.append(var)
-            conflicts = sorted(set(conflicts))
+            later_changes = self._notebook_state.get_typed_changes(later_cell_id)
+            if not later_changes:
+                continue
 
-            if conflicts:
-                with timer(key="violation:forward_dependency", message=f"[violation] Building forward dependency violation"):
+            for change in later_changes:
+                vars_covered_by_typed_changes.add(change.variable)
+
+            if my_read_events:
+                violations = self._conflict_resolver.get_violations(later_changes, my_read_events)
+                if violations:
+                    conflicts = []
+                    for v in violations:
+                        var = v.change.variable
+                        if hasattr(v.change, 'column') and v.change.column:
+                            conflicts.append(f"{var}['{v.change.column}']")
+                        else:
+                            conflicts.append(var)
+                    conflicts = sorted(set(conflicts))
+
                     reading_alpha = self._cell_id_to_alpha(cell_id)
                     writing_alpha = self._cell_id_to_alpha(later_cell_id)
-
-                    message = format_forward_dependency_message(
-                        reading_alpha, writing_alpha, conflicts
-                    )
+                    message = format_forward_dependency_message(reading_alpha, writing_alpha, conflicts)
 
                     return ReproducibilityViolation(
                         mutating_cell=later_cell_id,
@@ -884,20 +1572,71 @@ class ReproducibilityEnforcer:
                         violation_type="forward_dependency",
                     )
 
-        # File forward dependency: current cell reads files that a later cell wrote
+        # Provenance check for uncovered variables
+        provenance_conflicts: List[str] = []
+        deleted_cell_conflicts: List[str] = []
+        writer_cell_for_message: Optional[str] = None
+        deleted_writer_cell: Optional[str] = None
+
+        for read_var in (tracking.reads_before_writes or set()):
+            if read_var in vars_covered_by_typed_changes:
+                continue
+
+            writer_cell = self._notebook_state.last_writer.get(read_var)
+            if writer_cell and writer_cell != cell_id:
+                try:
+                    writer_pos = self._cell_order.index(writer_cell)
+                    if writer_pos > my_position:
+                        provenance_conflicts.append(read_var)
+                        if writer_cell_for_message is None:
+                            writer_cell_for_message = writer_cell
+                except ValueError:
+                    deleted_cell_conflicts.append(read_var)
+                    if deleted_writer_cell is None:
+                        deleted_writer_cell = writer_cell
+
+        if deleted_cell_conflicts:
+            reading_alpha = self._cell_id_to_alpha(cell_id)
+            conflict_names = sorted(set(deleted_cell_conflicts))
+            vars_str = format_variable_list(conflict_names)
+            message = (
+                f"⚠️ Deleted cell conflict: Cell {reading_alpha} reads {vars_str} "
+                f"written by cell {deleted_writer_cell} which is no longer in the notebook."
+            )
+            return ReproducibilityViolation(
+                mutating_cell=deleted_writer_cell or "<deleted>",
+                affected_cell=cell_id,
+                variables=conflict_names,
+                message=message,
+                violation_type="deleted_cell_dependency",
+            )
+
+        if provenance_conflicts:
+            reading_alpha = self._cell_id_to_alpha(cell_id)
+            conflict_names = sorted(set(provenance_conflicts))
+            writing_alpha = self._cell_id_to_alpha(writer_cell_for_message)
+            message = format_forward_dependency_message(reading_alpha, writing_alpha, conflict_names)
+
+            return ReproducibilityViolation(
+                mutating_cell=writer_cell_for_message,
+                affected_cell=cell_id,
+                variables=conflict_names,
+                message=message,
+                violation_type="forward_dependency",
+            )
+
+        # File forward dependency check
         if tracking.file_reads_before_writes:
             for later_cell_id in self._cell_order[my_position + 1:]:
-                later_record = self.records.get(later_cell_id)
-                if later_record is None:
+                later_tracking = self._notebook_state.get_tracking(later_cell_id)
+                if later_tracking is None:
                     continue
-                file_overlap = tracking.file_reads_before_writes & later_record.tracking.file_writes
+                file_overlap = tracking.file_reads_before_writes & later_tracking.file_writes
                 if file_overlap:
                     reading_alpha = self._cell_id_to_alpha(cell_id)
                     writing_alpha = self._cell_id_to_alpha(later_cell_id)
                     conflict_names = sorted(os.path.basename(p) for p in file_overlap)
-                    message = format_forward_dependency_message(
-                        reading_alpha, writing_alpha, conflict_names
-                    )
+                    message = format_forward_dependency_message(reading_alpha, writing_alpha, conflict_names)
                     return ReproducibilityViolation(
                         mutating_cell=later_cell_id,
                         affected_cell=cell_id,
@@ -908,9 +1647,209 @@ class ReproducibilityEnforcer:
 
         return None
 
-    def _update_staleness_incremental(
+    def _check_backward_mutation_new(
         self,
-        current_checkpoint: Checkpoint,
+        cell_id: str,
+        my_position: int,
+        typed_changes: List,
+        current_diff: MemoryCheckpointDiffResult,
+        modified_columns: Dict[str, List[str]],
+    ) -> Optional[ReproducibilityViolation]:
+        """
+        Check NoWriteAfterRead predicate.
+
+        Formal ref: NoWriteAfterRead(R, W, i) ≝ Wᵢ ∩ R_{1..i-1} = ∅
+        FORMAL_DEVELOPMENT.md §3.2, line 179
+
+        Only checks against CLEAN cells per [Inst-Run] semantics.
+        """
+        if not typed_changes:
+            return None
+
+        # Optimization: skip if no variable-level overlap
+        if OPT_CONFLICT_LOOP_SKIP:
+            changed_var_names = {c.variable for c in typed_changes}
+            all_prior_var_reads: Set[str] = set()
+            for prior_cell_id in self._cell_order[:my_position]:
+                prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
+                if prior_tracking and self._notebook_state.is_clean(prior_cell_id):
+                    all_prior_var_reads.update(prior_tracking.reads_before_writes)
+            if not (changed_var_names & all_prior_var_reads):
+                return None
+
+        # Check each prior CLEAN cell
+        for prior_cell_id in self._cell_order[:my_position]:
+            prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
+            if prior_tracking is None:
+                continue
+            if not self._notebook_state.is_clean(prior_cell_id):
+                continue
+
+            prior_reads = prior_tracking.to_read_events()
+            if not prior_reads:
+                continue
+
+            violations = self._conflict_resolver.get_violations(typed_changes, prior_reads)
+            if not violations:
+                continue
+
+            # Build conflict list
+            conflicts = []
+            for v in violations:
+                var = v.change.variable
+                if isinstance(v.read, (VariableRead, StructuralRead)):
+                    conflicts.append(var)
+                elif hasattr(v.change, 'column'):
+                    conflicts.append(f"{var}.{v.change.column}")
+                else:
+                    conflicts.append(var)
+            conflicts = sorted(set(conflicts))
+
+            if conflicts:
+                mutating_alpha = self._cell_id_to_alpha(cell_id)
+                affected_alpha = self._cell_id_to_alpha(prior_cell_id)
+                prior_structural_values = self._notebook_state.get_structural_reads_values(prior_cell_id)
+                changes = _extract_change_descriptions(current_diff, modified_columns)
+                message = format_structural_violation(
+                    mutating_alpha, affected_alpha, conflicts, prior_structural_values, changes
+                )
+
+                return ReproducibilityViolation(
+                    mutating_cell=cell_id,
+                    affected_cell=prior_cell_id,
+                    variables=conflicts,
+                    message=message,
+                    structural_reads_detail=prior_structural_values,
+                    changes_detail=changes,
+                )
+
+        return None
+
+    def _check_write_before_read(
+        self,
+        cell_id: str,
+        cell_position: int,
+        tracking: TrackingData,
+        user_ns,
+    ) -> Optional[ReproducibilityError]:
+        """
+        Check WriteBeforeRead predicate: Rᵢ ⊆ W_{1..i-1}
+
+        All reads should come from writes by earlier cells.
+        Excludes:
+        - Builtins (print, len, range, etc.)
+        - Imported modules and functions
+        - "Ambient" variables (exist in namespace but not written by any cell)
+
+        The "ambient" exclusion handles practical cases where notebooks start
+        with pre-existing data (loaded datasets, injected variables, etc.)
+        that wasn't written by earlier cells. The formal model assumes an
+        empty starting namespace, but real notebooks often have initial state.
+
+        Formal ref: main.tex §3.2, FORMAL_DEVELOPMENT.md §3.2, line 177
+        """
+        import builtins
+        import types
+
+        R_i = tracking.reads_before_writes or set()
+        if not R_i:
+            return None
+
+        # Handle case where user_ns is a checkpoint (in tests)
+        if hasattr(user_ns, 'namespace'):
+            ns_dict = user_ns.namespace
+        elif isinstance(user_ns, dict):
+            ns_dict = user_ns
+        else:
+            # Can't check WriteBeforeRead without a proper namespace
+            return None
+
+        # Compute W_{1..i-1} (what earlier cells wrote)
+        all_writes_before = _writes_in_range(
+            self._notebook_state, self._cell_order, 0, cell_position - 1
+        )
+
+        # Find reads not covered by earlier writes
+        missing = R_i - all_writes_before
+
+        # Flag variables that are NOT in the namespace (would cause NameError)
+        # This is the WriteBeforeRead violation: reading something that doesn't exist
+        user_missing: Set[str] = set()
+        for var in missing:
+            # Skip builtins (print, len, range, etc.)
+            if hasattr(builtins, var):
+                continue
+            # Flag if variable is NOT in namespace - this is an undefined read
+            if var not in ns_dict:
+                user_missing.add(var)
+
+        if user_missing:
+            cell_alpha = self._cell_id_to_alpha(cell_id)
+            vars_str = format_variable_list(sorted(user_missing))
+            message = f"Cell {cell_alpha} reads {vars_str} not written by earlier cells"
+            return ReproducibilityError(
+                error_type=ErrorType.WRITE_BEFORE_READ,
+                cell_id=cell_id,
+                locations=sorted(user_missing),
+                message=message,
+            )
+        return None
+
+    def _check_no_read_and_write(
+        self,
+        cell_id: str,
+        tracking: TrackingData,
+    ) -> Optional[ReproducibilityError]:
+        """
+        Check NoReadAndWrite predicate: Rᵢ ∩ Wᵢ = ∅
+
+        Cell should not both read and write the same location.
+
+        Formal ref: main.tex §3.2, FORMAL_DEVELOPMENT.md §3.2, line 176
+
+        Note: The implementation uses reads_before_writes which already
+        excludes locations that are written before being read. So this
+        check catches variables that are first read, then written - patterns
+        like `x = x + 1` or `df['col'] = df['col'] * 2`.
+
+        This predicate ensures cells have clear input/output boundaries.
+        """
+        R_i = tracking.reads_before_writes or set()
+        W_i = tracking.writes or set()
+
+        overlap = R_i & W_i
+        if overlap:
+            cell_alpha = self._cell_id_to_alpha(cell_id)
+            vars_str = format_variable_list(sorted(overlap))
+            message = f"Cell {cell_alpha} reads and writes the same locations: {vars_str}"
+            return ReproducibilityError(
+                error_type=ErrorType.NO_READ_AND_WRITE,
+                cell_id=cell_id,
+                locations=sorted(overlap),
+                message=message,
+            )
+        return None
+
+    def _check_skipped_writers(self, cell_id: str) -> List[Tuple[str, Optional[str], str]]:
+        """
+        Check for skipped intermediate writers.
+
+        Returns list of (loc, actual_writer, expected_writer) tuples.
+        """
+        skipped_writers: List[Tuple[str, Optional[str], str]] = []
+        cell_reads = self._notebook_state.reads.get(cell_id, set())
+        for loc in cell_reads:
+            actual_writer = self._notebook_state.last_writer.get(loc)
+            expected_writer = self._notebook_state.last_writer_for(loc, cell_id)
+            if expected_writer is not None and actual_writer != expected_writer:
+                skipped_writers.append((loc, actual_writer, expected_writer))
+        return skipped_writers
+
+    def _compute_forward_staleness(
+        self,
+        current_namespace: dict,
+        old_writes: Set[str],
+        current_writes: Set[str],
         changed_vars: Set[str],
         column_changed: Dict[str, List[str]],
         just_executed: str,
@@ -918,92 +1857,251 @@ class ReproducibilityEnforcer:
         changed_file_paths: Optional[Set[str]] = None,
     ) -> Tuple[List[str], List[str]]:
         """
-        Incrementally update staleness — StaleFwd (Def 1.8.1).
+        Compute ForwardStale for all cells j > i.
 
-        Only checks cells BELOW the executed cell in document order (forward propagation).
-        Cells above are not checked - backward dependencies are handled by violation detection.
+        Dispatches to syntactic or semantic implementation based on staleness_mode.
 
-        Skips cells that don't need checking:
-        - Cells already marked stale
-        - Cells whose reads don't overlap with changed variables/columns
+        Formal ref: ForwardStale(R, W, W', i, j) ≝ j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+        FORMAL_DEVELOPMENT.md §3.3, line 187
+        FORMAL_DEVELOPMENT.md §10 (Staleness Computation Modes)
+        """
+        if self._staleness_mode == StalenessMode.SYNTACTIC:
+            return self._compute_forward_staleness_syntactic(
+                old_writes, changed_vars, column_changed, just_executed, my_position, changed_file_paths
+            )
+        else:
+            return self._compute_forward_staleness_semantic(
+                current_namespace, old_writes, current_writes, changed_vars, column_changed, just_executed, my_position, changed_file_paths
+            )
 
-        Args:
-            current_checkpoint: The current state of the namespace
-            changed_vars: Set of variable names that changed in this execution
-            column_changed: Dict mapping var names to lists of changed column names
-            just_executed: The cell_id that just executed (already marked fresh)
-            my_position: Position of the executed cell in document order
-            changed_file_paths: Optional set of file paths that changed
+    def _compute_forward_staleness_syntactic(
+        self,
+        old_writes: Set[str],
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+        just_executed: str,
+        my_position: int,
+        changed_file_paths: Optional[Set[str]] = None,
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Syntactic ForwardStale: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅ for j > i.
 
-        Returns:
-            Tuple of:
-            - List of all currently stale cell IDs (in document order)
-            - List of structural warnings from affected cells
+        Cell j becomes stale if cell i's old OR new writes overlap with
+        what cell j reads or writes.
+
+        Uses pure set intersection on R/W sets. Does not use checkpoints for
+        staleness comparison. Staleness is monotonic (once stale, stays stale
+        until re-executed).
+
+        Formal ref: FORMAL_DEVELOPMENT.md §3.3, §10.1
         """
         all_warnings: List[str] = []
-        cells_checked = 0
-        cells_skipped_stale = 0
-        cells_skipped_no_overlap = 0
-        diffs_performed = 0
 
-        # Only check cells BELOW the executed cell (forward staleness only)
+        # Wᵢ ∪ W'ᵢ: all locations cell i has written (old or new)
+        W_i_union = old_writes | changed_vars
+
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:
-            record = self.records.get(cell_id)
-            if record is None:
-                continue  # Cell below hasn't executed yet
-
-            if cell_id in self._stale_cells:
-                cells_skipped_stale += 1
-                continue  # Already stale, no need to re-check
-
-            # Check file staleness (cheap — set intersection, no diff needed)
-            if changed_file_paths and record.tracking.file_reads_before_writes:
-                if changed_file_paths & record.tracking.file_reads_before_writes:
-                    self._stale_cells.add(cell_id)
-                    continue  # Already stale, no need for expensive variable diff
-
-            # Skip cells whose reads don't overlap with changed vars
-            if not self._has_relevant_overlap(record, changed_vars, column_changed):
-                cells_skipped_no_overlap += 1
+            cell_tracking = self._notebook_state.get_tracking(cell_id)
+            if cell_tracking is None:
                 continue
 
-            cells_checked += 1
+            if not self._notebook_state.is_clean(cell_id):
+                # Update SKIPPED_UPSTREAM → FORWARD_STALE if expected cell just ran
+                reasons = self._notebook_state.get_reasons(cell_id)
+                for reason in list(reasons):
+                    if (reason.type == ReasonType.SKIPPED_UPSTREAM and
+                            reason.expected_cell_id == just_executed):
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.FORWARD_STALE, loc=reason.loc, cell_id=just_executed)
+                        )
+                continue
 
-            # Cell MIGHT be stale - do the expensive diff check
+            # File staleness check
+            if changed_file_paths and cell_tracking.file_reads_before_writes:
+                overlap_files = changed_file_paths & cell_tracking.file_reads_before_writes
+                if overlap_files:
+                    for fpath in overlap_files:
+                        self._notebook_state.add_reason(
+                            cell_id, Reason(ReasonType.FORWARD_STALE, loc=fpath, cell_id=just_executed)
+                        )
+                    continue
+
+            # Syntactic check: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+            cell_reads = cell_tracking.reads_before_writes or set()
+            cell_writes = cell_tracking.writes or set()
+            read_overlap = W_i_union & cell_reads   # Overlap with reads
+            write_overlap = W_i_union & cell_writes  # Overlap with writes
+
+            if read_overlap or write_overlap:
+                # First handle read overlaps (FORWARD_STALE or SKIPPED_UPSTREAM)
+                for var in read_overlap:
+                    expected_writer = self._notebook_state.last_writer_for(var, cell_id)
+                    if expected_writer != just_executed and expected_writer is not None:
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.SKIPPED_UPSTREAM, loc=var, cell_id=just_executed, expected_cell_id=expected_writer)
+                        )
+                    else:
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
+                        )
+                # Then handle write-only overlaps (WRITE_OVERLAP - no convergence)
+                for var in write_overlap - read_overlap:
+                    self._notebook_state.add_reason(
+                        cell_id,
+                        Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
+                    )
+
+        return self._notebook_state.get_stale_cells(), all_warnings
+
+    def _compute_forward_staleness_semantic(
+        self,
+        current_namespace: dict,
+        old_writes: Set[str],
+        current_writes: Set[str],
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+        just_executed: str,
+        my_position: int,
+        changed_file_paths: Optional[Set[str]] = None,
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Semantic ForwardStale: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅ with semantic diff for reads.
+
+        For read overlaps: uses checkpoint diff comparison for precise staleness detection.
+        For write-only overlaps: marks stale immediately (no convergence for writes).
+        For removed writes (W'_i - W_i): marks stale immediately (dependency removed).
+        Staleness is non-monotonic for reads (can be cleared when values converge).
+
+        Formal ref: FORMAL_DEVELOPMENT.md §3.3, §10.2
+        """
+        all_warnings: List[str] = []
+
+        # Wᵢ ∪ W'ᵢ: all locations cell i has written (old or new)
+        W_i_union = old_writes | changed_vars
+
+        cells_below = self._cell_order[my_position + 1:]
+        for cell_id in cells_below:
+            cell_tracking = self._notebook_state.get_tracking(cell_id)
+            if cell_tracking is None:
+                continue
+
+            if not self._notebook_state.is_clean(cell_id):
+                # Update SKIPPED_UPSTREAM → FORWARD_STALE if expected cell just ran
+                reasons = self._notebook_state.get_reasons(cell_id)
+                for reason in list(reasons):
+                    if (reason.type == ReasonType.SKIPPED_UPSTREAM and
+                            reason.expected_cell_id == just_executed):
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.FORWARD_STALE, loc=reason.loc, cell_id=just_executed)
+                        )
+                continue
+
+            # File staleness check
+            if changed_file_paths and cell_tracking.file_reads_before_writes:
+                overlap_files = changed_file_paths & cell_tracking.file_reads_before_writes
+                if overlap_files:
+                    for fpath in overlap_files:
+                        self._notebook_state.add_reason(
+                            cell_id, Reason(ReasonType.FORWARD_STALE, loc=fpath, cell_id=just_executed)
+                        )
+                    continue
+
+            # Compute syntactic overlap: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ)
+            cell_reads = cell_tracking.reads_before_writes or set()
+            cell_writes = cell_tracking.writes or set()
+            read_overlap = W_i_union & cell_reads
+            write_overlap = W_i_union & cell_writes
+
+            # Skip if no overlap at all
+            if not read_overlap and not write_overlap:
+                continue
+
+            # Write-only overlap: mark stale immediately (no convergence for writes)
+            # Use WRITE_OVERLAP reason type so convergence won't clear this staleness
+            if write_overlap and not read_overlap:
+                for var in write_overlap:
+                    self._notebook_state.add_reason(
+                        cell_id,
+                        Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
+                    )
+                continue
+
+            # Check for removed-writes overlap with reads: (W'_i - W_i) ∩ R_j
+            # If cell reads a variable that executing cell USED TO write but no longer
+            # writes, the dependency relationship has changed. Mark stale with WRITE_OVERLAP
+            # since this can't converge (the source of the variable has changed).
+            removed_writes = old_writes - current_writes
+            old_writes_read_overlap = removed_writes & cell_reads
+            if old_writes_read_overlap:
+                for var in old_writes_read_overlap:
+                    self._notebook_state.add_reason(
+                        cell_id,
+                        Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
+                    )
+                # Also handle any write_overlap
+                for var in write_overlap:
+                    self._notebook_state.add_reason(
+                        cell_id,
+                        Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
+                    )
+                continue
+
+            # Read overlap: use semantic diff check (skip if no relevant column overlap)
+            if not self._has_relevant_overlap_by_id(cell_id, changed_vars, column_changed):
+                # No column-level overlap for reads, but mark stale for write overlap
+                if write_overlap:
+                    for var in write_overlap:
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
+                        )
+                continue
+
+            # Semantic check: expensive diff comparison
             pre_checkpoint = self.checkpoints.get(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
             if pre_checkpoint is None:
                 continue
 
-            diffs_performed += 1
-            with timer(key="sdc:staleness_diff", message=f"[staleness] Diff for cell {cell_id}"):
-                diff_result = MemoryCheckpoint.diff(
-                    pre_checkpoint,
-                    current_checkpoint,
-                    keys_to_include=record.tracking.reads_before_writes,
-                    use_leq=True,
-                    column_rbw=record.tracking.column_reads_before_writes,
-                    structural_reads=record.tracking.structural_reads,
-                    structural_mode=self._structural_mode,
-                )
+            diff_result = MemoryCheckpoint.diff(
+                pre_checkpoint,
+                current_namespace,
+                keys_to_include=cell_tracking.reads_before_writes,
+                use_leq=True,
+                column_rbw=cell_tracking.column_reads_before_writes,
+                structural_reads=cell_tracking.structural_reads,
+                structural_mode=self._structural_mode,
+            )
 
             if diff_result.differences:
-                self._stale_cells.add(cell_id)
+                for var in diff_result.differences.keys():
+                    expected_writer = self._notebook_state.last_writer_for(var, cell_id)
+                    if expected_writer != just_executed and expected_writer is not None:
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.SKIPPED_UPSTREAM, loc=var, cell_id=just_executed, expected_cell_id=expected_writer)
+                        )
+                    else:
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
+                        )
 
-            # Capture warnings (these come from WARN mode structural tracking)
+            # Capture warnings
             if diff_result.warnings:
                 affected_alpha = self._cell_id_to_alpha(cell_id)
                 mutating_alpha = self._cell_id_to_alpha(just_executed)
 
                 for warning in diff_result.warnings:
-                    # Parse the warning to extract variable name and changes
-                    # Format: "Structural change at var_name: details (read: attrs)"
                     var_match = re.match(r"Structural change at (\w+):", warning)
                     if var_match:
                         var_name = var_match.group(1)
-                        # Get saved structural values from the affected cell's record
-                        read_values = record.structural_reads_values.get(var_name, {})
-                        # Extract change descriptions
+                        cell_structural_values = self._notebook_state.get_structural_reads_values(cell_id)
+                        read_values = cell_structural_values.get(var_name, {})
                         changes = []
                         if "Columns added:" in warning:
                             match = re.search(r"Columns added: \[([^\]]+)\]", warning)
@@ -1018,38 +2116,205 @@ class ReproducibilityEnforcer:
                             if match:
                                 changes.append(f"Shape: {match.group(1)} → {match.group(2)}")
                         if not changes:
-                            # Fallback: use the raw warning detail
                             detail_match = re.search(r"Structural change at \w+: (.+)$", warning)
                             if detail_match:
                                 changes.append(detail_match.group(1))
 
-                        # Format the detailed warning
                         formatted = format_structural_warning(
-                            mutating_alpha,
-                            affected_alpha,
-                            var_name,
-                            read_values,
-                            changes,
+                            mutating_alpha, affected_alpha, var_name, read_values, changes
                         )
                         all_warnings.append(formatted)
                     else:
-                        # Fallback for unrecognized warning format
                         all_warnings.append(f"Cell {affected_alpha}: {warning}")
 
-        # Return in document order
-        stale_cells = [cid for cid in self._cell_order if cid in self._stale_cells]
+        return self._notebook_state.get_stale_cells(), all_warnings
 
-        # Log summary
-        from flowbook.util.output import log
-        log(f"[staleness] Summary: checked={cells_checked}, skipped_stale={cells_skipped_stale}, "
-            f"skipped_no_overlap={cells_skipped_no_overlap}, diffs={diffs_performed}, "
-            f"newly_stale={len(stale_cells) - cells_skipped_stale}")
+    def _check_convergence(self, current_namespace: dict) -> List[str]:
+        """Check all stale cells for convergence and clear staleness if inputs match.
 
-        return stale_cells, all_warnings
+        Only called in SEMANTIC mode. A stale cell j converges when:
+            1. diff(pre_checkpoint[j], namespace, R_j) = ∅
+            2. The cell's only staleness reasons are FORWARD_STALE
 
-    def _has_relevant_overlap(
+        Cells with other staleness reasons (like SKIPPED_UPSTREAM, CODE_CHANGED)
+        should NOT be cleared by convergence - those reasons indicate structural
+        issues beyond just value changes.
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.2 Convergence rule
+
+        Returns:
+            List of cell IDs that were cleared (no longer stale)
+        """
+        if self._staleness_mode != StalenessMode.SEMANTIC:
+            return []
+
+        cleared: List[str] = []
+        for cell_id in self._notebook_state.get_stale_cells():
+            # Only consider cells whose only reasons are FORWARD_STALE
+            # (convergence doesn't fix SKIPPED_UPSTREAM, CODE_CHANGED, etc.)
+            reasons = self._notebook_state.get_reasons(cell_id)
+            if not reasons:
+                continue
+            if not all(r.type == ReasonType.FORWARD_STALE for r in reasons):
+                continue
+
+            cell_tracking = self._notebook_state.get_tracking(cell_id)
+            if cell_tracking is None:
+                continue
+
+            pre_checkpoint = self.checkpoints.get(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
+            if pre_checkpoint is None:
+                continue
+
+            diff_result = MemoryCheckpoint.diff(
+                pre_checkpoint,
+                current_namespace,
+                keys_to_include=cell_tracking.reads_before_writes,
+                use_leq=True,
+                column_rbw=cell_tracking.column_reads_before_writes,
+                structural_reads=cell_tracking.structural_reads,
+                structural_mode=self._structural_mode,
+            )
+
+            if not diff_result.differences:
+                # Converged! Clear staleness
+                self._notebook_state.set_clean(cell_id)
+                cleared.append(cell_id)
+
+        return cleared
+
+    def _compute_backward_staleness(
         self,
-        record: ReproducibilityExecutionRecord,
+        current_namespace: dict,
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+        just_executed: str,
+        my_position: int,
+    ) -> List[str]:
+        """
+        Compute BackwardStale for all cells j < i.
+
+        When cell i writes to a variable that earlier cell j read, j becomes stale.
+        Dispatches to syntactic or semantic implementation based on staleness_mode.
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.1, §10.2
+
+        Returns:
+            List of cell IDs that were marked stale
+        """
+        if self._staleness_mode == StalenessMode.SYNTACTIC:
+            return self._compute_backward_staleness_syntactic(
+                changed_vars, column_changed, just_executed, my_position
+            )
+        else:
+            return self._compute_backward_staleness_semantic(
+                current_namespace, changed_vars, column_changed, just_executed, my_position
+            )
+
+    def _compute_backward_staleness_syntactic(
+        self,
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+        just_executed: str,
+        my_position: int,
+    ) -> List[str]:
+        """
+        Syntactic BackwardStale: W_i ∩ R_j ≠ ∅ for j < i.
+
+        Uses pure set intersection on R/W sets. Marks cells before i as stale
+        if they read variables that i wrote to.
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.1
+        """
+        newly_stale: List[str] = []
+
+        for prior_cell_id in self._cell_order[:my_position]:
+            if not self._notebook_state.is_clean(prior_cell_id):
+                continue  # Already stale
+
+            if not self._notebook_state.has_record(prior_cell_id):
+                continue  # Never executed
+
+            prior_reads = self._notebook_state.reads.get(prior_cell_id, set())
+            overlap = changed_vars & prior_reads
+
+            if overlap:
+                for var in overlap:
+                    self._notebook_state.add_reason(
+                        prior_cell_id,
+                        Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
+                    )
+                newly_stale.append(prior_cell_id)
+
+        return newly_stale
+
+    def _compute_backward_staleness_semantic(
+        self,
+        current_namespace: dict,
+        changed_vars: Set[str],
+        column_changed: Dict[str, List[str]],
+        just_executed: str,
+        my_position: int,
+    ) -> List[str]:
+        """
+        Semantic BackwardStale: W_i ∩ R_j ≠ ∅ AND diff(pre_checkpoint[j], namespace, R_j) ≠ ∅.
+
+        Uses checkpoint diff comparison for precise staleness detection.
+        Only marks cells stale if their input values actually changed.
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.2
+        """
+        newly_stale: List[str] = []
+
+        for prior_cell_id in self._cell_order[:my_position]:
+            if not self._notebook_state.is_clean(prior_cell_id):
+                continue  # Already stale
+
+            if not self._notebook_state.has_record(prior_cell_id):
+                continue  # Never executed
+
+            prior_reads = self._notebook_state.reads.get(prior_cell_id, set())
+
+            # Quick filter: check variable-level overlap
+            if not (changed_vars & prior_reads):
+                continue
+
+            # Also check column-level overlap for precision
+            if not self._has_relevant_overlap_by_id(prior_cell_id, changed_vars, column_changed):
+                continue
+
+            # Semantic check: did prior cell's inputs actually change?
+            pre_checkpoint = self.checkpoints.get(f"{PRE_CHECKPOINT_PREFIX}{prior_cell_id}")
+            if pre_checkpoint is None:
+                continue
+
+            prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
+            if prior_tracking is None:
+                continue
+
+            diff_result = MemoryCheckpoint.diff(
+                pre_checkpoint,
+                current_namespace,
+                keys_to_include=prior_tracking.reads_before_writes,
+                use_leq=True,
+                column_rbw=prior_tracking.column_reads_before_writes,
+                structural_reads=prior_tracking.structural_reads,
+                structural_mode=self._structural_mode,
+            )
+
+            if diff_result.differences:
+                for var in diff_result.differences.keys():
+                    self._notebook_state.add_reason(
+                        prior_cell_id,
+                        Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
+                    )
+                newly_stale.append(prior_cell_id)
+
+        return newly_stale
+
+    def _has_relevant_overlap_by_id(
+        self,
+        cell_id: str,
         changed_vars: Set[str],
         column_changed: Dict[str, List[str]],
     ) -> bool:
@@ -1063,23 +2328,26 @@ class ReproducibilityEnforcer:
           - Cell has structural reads for this variable (structural changes possible)
 
         Args:
-            record: The cell's execution record with tracking info
+            cell_id: The cell to check
             changed_vars: Variables that changed in current execution
             column_changed: Dict mapping var names to changed column names
 
         Returns:
             True if the cell might be affected by the changes
         """
-        reads = record.tracking.reads_before_writes
+        reads = self._notebook_state.reads.get(cell_id, set())
         var_overlap = reads & changed_vars
 
         if not var_overlap:
             return False  # No variable-level overlap at all
 
+        cell_column_reads = self._notebook_state.get_column_reads(cell_id)
+        cell_structural_reads = self._notebook_state.get_structural_reads(cell_id)
+
         # Check column-level overlap for each overlapping variable
         for var in var_overlap:
             changed_cols = set(column_changed.get(var, []))
-            read_cols = record.tracking.column_reads_before_writes.get(var, None)
+            read_cols = cell_column_reads.get(var, None)
 
             if not changed_cols or read_cols is None:
                 # No column info on one or both sides - conservative: assume overlap
@@ -1091,139 +2359,11 @@ class ReproducibilityEnforcer:
 
             # Check if cell has structural reads for this variable
             # If columns were added/changed and cell read structure, it might be affected
-            if var in record.tracking.structural_reads and changed_cols:
+            if var in cell_structural_reads and changed_cols:
                 return True
 
         # All overlapping vars have column info and no column overlap
         return False
-
-    def _check_exec_restore(
-        self,
-        cell_id: str,
-        my_position: int,
-        pre_checkpoint,
-        post_checkpoint,
-        tracking: TrackingData,
-        namespace: Optional[dict],
-        old_live_checkpoint,
-    ) -> ReproducibilityResult:
-        """[EXEC-RESTORE] Execute from prefix checkpoint (§1.8).
-
-        Cell is always fresh. No backward/forward checks. StaleFwd delta
-        is computed against the old live store (before restore).
-        """
-        # Capture structural read values
-        structural_read_values = {}
-        if namespace is not None and tracking.structural_reads:
-            structural_read_values = capture_structural_read_values(
-                namespace, tracking.structural_reads
-            )
-
-        # Compute diff for change detection (needed for staleness propagation)
-        _pre_mem = pre_checkpoint.memory if isinstance(pre_checkpoint, Checkpoint) else pre_checkpoint
-        _post_mem = post_checkpoint.memory if isinstance(post_checkpoint, Checkpoint) else post_checkpoint
-        current_diff = MemoryCheckpoint.diff(
-            _pre_mem, _post_mem, use_leq=True,
-            column_rbw=tracking.column_reads_before_writes,
-            structural_reads={},
-            structural_mode=self._structural_mode,
-        )
-
-        typed_changes = []
-        changed_vars = []
-        column_changed = {}
-
-        if current_diff.differences:
-            changed_vars = list(current_diff.differences.keys())
-            column_changed = _extract_column_changes(current_diff, tracking)
-            from flowbook.kernel.change_detector import detect_changes
-            typed_changes = detect_changes(current_diff)
-
-        # Update record
-        self.records[cell_id] = ReproducibilityExecutionRecord(
-            cell_id=cell_id,
-            tracking=tracking,
-            execution_seq=self.seq_counter,
-            structural_reads_values=structural_read_values,
-            typed_changes=typed_changes,
-        )
-
-        # [EXEC-RESTORE] Cell is always fresh
-        self._stale_cells.discard(cell_id)
-
-        # Compute StaleFwd using delta against old live store
-        stale = []
-        structural_warnings = []
-        delta_changed_vars = set()
-        if old_live_checkpoint is not None:
-            # Delta = diff(old_live, post) — what changed from the user's perspective
-            _old_live_mem = old_live_checkpoint.memory if isinstance(old_live_checkpoint, Checkpoint) else old_live_checkpoint
-            restore_diff = MemoryCheckpoint.diff(
-                _old_live_mem, _post_mem, use_leq=True,
-                column_rbw=tracking.column_reads_before_writes,
-                structural_reads={},
-                structural_mode=self._structural_mode,
-            )
-            if restore_diff.differences:
-                restore_changed_vars = set(restore_diff.differences.keys())
-                delta_changed_vars = restore_changed_vars
-                restore_column_changed = _extract_column_changes(restore_diff, tracking)
-                stale, structural_warnings = self._update_staleness_incremental(
-                    _post_mem, restore_changed_vars, restore_column_changed,
-                    cell_id, my_position,
-                )
-        else:
-            # No old live checkpoint — use standard diff for staleness
-            if changed_vars:
-                delta_changed_vars = set(changed_vars)
-                _staleness_cp = post_checkpoint.memory if isinstance(post_checkpoint, Checkpoint) else post_checkpoint
-                stale, structural_warnings = self._update_staleness_incremental(
-                    _staleness_cp, delta_changed_vars, column_changed,
-                    cell_id, my_position,
-                )
-
-        # [EXEC-RESTORE §1.8] StaleBack: mark earlier fresh cells stale
-        # if their reads overlap with Δ(Σ, Σ').
-        #
-        # In EXEC-ACCEPT/CONTAMINATED, BackConflict rejects cell i if it
-        # modifies locations read by fresh cells k < i. EXEC-RESTORE has
-        # no BackConflict (cell i runs from the prefix checkpoint, not Σ),
-        # so we mark k stale instead.
-        if delta_changed_vars:
-            for earlier_cell_id in self._cell_order[:my_position]:
-                if earlier_cell_id in self.records and earlier_cell_id not in self._stale_cells:
-                    earlier_reads = self.records[earlier_cell_id].tracking.reads_before_writes
-                    if earlier_reads & delta_changed_vars:
-                        self._stale_cells.add(earlier_cell_id)
-
-        # [EXEC-RESTORE §1.8] Mark later cells that would cause BackConflict.
-        #
-        # StaleFwd (above) marks later cells that READ changed variables.
-        # But it misses later cells that WRITE to variables this cell reads:
-        # re-running such a cell would trigger BackConflict (it mutates a
-        # location that a fresh earlier cell depends on).  Mark those stale
-        # so the user sees them highlighted and knows they need attention.
-        cell_reads = tracking.reads_before_writes
-        if cell_reads:
-            for later_cell_id in self._cell_order[my_position + 1:]:
-                if later_cell_id in self.records and later_cell_id not in self._stale_cells:
-                    later_writes = self.records[later_cell_id].tracking.writes
-                    if later_writes & cell_reads:
-                        self._stale_cells.add(later_cell_id)
-
-        # Re-sort stale list by document order
-        stale = [cid for cid in self._cell_order if cid in self._stale_cells]
-
-        return ReproducibilityResult(
-            violation=None,
-            stale_cells=stale,
-            changed_variables=changed_vars,
-            column_changed=column_changed,
-            structural_warnings=structural_warnings,
-            forward_violation=None,
-            cell_is_contaminated=False,
-            exec_mode="restore",
-        )
 
     def get_stale_cells(self) -> List[str]:
         """
@@ -1235,9 +2375,9 @@ class ReproducibilityEnforcer:
         Returns:
             List of cell IDs that are currently stale (in document order)
         """
-        return [cid for cid in self._cell_order if cid in self._stale_cells]
+        return self._notebook_state.get_stale_cells()
 
-    def compute_all_stale_cells(self, current_checkpoint: Checkpoint) -> List[str]:
+    def compute_all_stale_cells(self, current_namespace: dict) -> List[str]:
         """
         Recompute staleness for ALL cells from scratch.
 
@@ -1246,91 +2386,60 @@ class ReproducibilityEnforcer:
         accuracy (e.g., after external namespace modifications).
 
         Args:
-            current_checkpoint: The current state of the namespace
+            current_namespace: The current live user namespace dict
 
         Returns:
             List of cell IDs that are currently stale (in document order)
         """
-        self._stale_cells.clear()
-
-        for cell_id, record in self.records.items():
+        
+        for cell_id in self._cell_order:
+            cell_tracking = self._notebook_state.get_tracking(cell_id)
+            if cell_tracking is None:
+                continue
             pre_checkpoint = self.checkpoints.get(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
             if pre_checkpoint is None:
                 continue
 
             diff_result = MemoryCheckpoint.diff(
                 pre_checkpoint,
-                current_checkpoint,
-                keys_to_include=record.tracking.reads_before_writes,
+                current_namespace,
+                keys_to_include=cell_tracking.reads_before_writes,
                 use_leq=True,
-                column_rbw=record.tracking.column_reads_before_writes,
-                structural_reads=record.tracking.structural_reads,
+                column_rbw=cell_tracking.column_reads_before_writes,
+                structural_reads=cell_tracking.structural_reads,
                 structural_mode=self._structural_mode,
             )
 
             if diff_result.differences:
-                self._stale_cells.add(cell_id)
+                # Track reasons: FORWARD_STALE for each changed variable
+                for var in diff_result.differences.keys():
+                    self._notebook_state.add_reason(
+                        cell_id, Reason(ReasonType.FORWARD_STALE, loc=var)
+                    )
 
-        return [cid for cid in self._cell_order if cid in self._stale_cells]
-
-    def can_exec_restore(self, cell_id: str) -> bool:
-        """[EXEC-RESTORE precondition] (§1.8)
-
-        True iff the immediate predecessor (cell i-1) has a fresh record,
-        which guarantees its post-checkpoint (the prefix store) is valid.
-        For the first cell in document order, always returns True (restore
-        to initial state).
-
-        Cells earlier than the immediate predecessor may be unexecuted
-        (e.g. executed with cell_id=None) — this is acceptable because the
-        prefix store depends only on σ^post_{i-1}.
-        """
-        try:
-            my_position = self._cell_order.index(cell_id)
-        except ValueError:
-            return False
-
-        if my_position == 0:
-            return True  # First cell — restore to initial state
-
-        prev_cell_id = self._cell_order[my_position - 1]
-        # Immediate predecessor must have been executed
-        if prev_cell_id not in self.records:
-            return False
-        # Immediate predecessor must be fresh (not stale)
-        if prev_cell_id in self._stale_cells:
-            return False
-
-        return True
-
-    def get_prefix_checkpoint_name(self, cell_id: str) -> Optional[str]:
-        """[PrefixStore] (Def 1.8.4)
-
-        Returns the post-checkpoint name of the cell immediately before cell_id
-        in document order (σ^post_{i-1}), or None if cell_id is the first cell.
-        """
-        try:
-            my_position = self._cell_order.index(cell_id)
-        except ValueError:
-            return None
-
-        if my_position == 0:
-            return None  # First cell — restore to empty/initial state
-
-        prev_cell_id = self._cell_order[my_position - 1]
-        return f"{POST_CHECKPOINT_PREFIX}{prev_cell_id}"
+        return self._notebook_state.get_stale_cells()
 
     def mark_cell_edited(self, cell_id: str) -> List[str]:
         """[EDIT] Mark edited cell stale (§2.3).
 
-        Only marks the edited cell itself stale.
-        Downstream propagation deferred to execution time (StaleFwd).
+        With provenance tracking (§1.8.5), no special handling is needed on edit.
+        Provenance persists until another cell writes to those locations, so
+        forward contamination is automatically detected when earlier cells read
+        values whose provenance points to later cells.
+
         Returns current stale cells list.
         """
-        if cell_id not in self.records:
-            return self.get_stale_cells()  # Unexecuted cell — no-op
-        self._stale_cells.add(cell_id)
-        return self.get_stale_cells()
+        from flowbook.util.output import log, timer
+
+        with timer(key="order:Inst-Edit", message=f"[Inst-Edit] Cell {cell_id}"):
+            if not self._notebook_state.has_record(cell_id):
+                return self.get_stale_cells()  # Unexecuted cell — no-op
+
+            # Track reason: CODE_CHANGED via NotebookState
+            self._notebook_state.handle_edit(cell_id)
+            log(f"[Inst-Edit] Cell {cell_id} marked stale (CODE_CHANGED)")
+
+            return self.get_stale_cells()
 
     def get_execution_records_size(self) -> int:
         """
@@ -1344,62 +2453,58 @@ class ReproducibilityEnforcer:
         """
         import sys
 
-        total = sys.getsizeof(self.records)
+        total = sys.getsizeof(self._notebook_state.tracking_data)
 
-        for cell_id, record in self.records.items():
+        for cell_id, td in self._notebook_state.tracking_data.items():
             total += sys.getsizeof(cell_id)
-            total += sys.getsizeof(record)
+            total += sys.getsizeof(td)
 
-            # TrackingData contents
-            if hasattr(record, 'tracking') and record.tracking:
-                td = record.tracking
-                total += sys.getsizeof(td)
+            # Sets for reads/writes
+            if td.reads_before_writes:
+                total += sys.getsizeof(td.reads_before_writes)
+                for r in td.reads_before_writes:
+                    total += sys.getsizeof(r)
+            if td.writes:
+                total += sys.getsizeof(td.writes)
+                for w in td.writes:
+                    total += sys.getsizeof(w)
 
-                # Sets for reads/writes
-                if hasattr(td, 'reads'):
-                    total += sys.getsizeof(td.reads)
-                    for r in td.reads:
-                        total += sys.getsizeof(r)
-                if hasattr(td, 'writes'):
-                    total += sys.getsizeof(td.writes)
-                    for w in td.writes:
-                        total += sys.getsizeof(w)
-
-                # Column tracking dicts
-                for attr in ['column_reads', 'column_writes', 'column_reads_before_writes']:
-                    if hasattr(td, attr):
-                        d = getattr(td, attr)
-                        if d:
-                            total += sys.getsizeof(d)
-                            for k, v in d.items():
-                                total += sys.getsizeof(k) + sys.getsizeof(v)
-
-                # Structural tracking
-                if hasattr(td, 'structural_reads') and td.structural_reads:
-                    total += sys.getsizeof(td.structural_reads)
-                    for k, v in td.structural_reads.items():
+            # Column tracking dicts
+            for attr in ['column_writes', 'column_reads_before_writes']:
+                d = getattr(td, attr, None)
+                if d:
+                    total += sys.getsizeof(d)
+                    for k, v in d.items():
                         total += sys.getsizeof(k) + sys.getsizeof(v)
 
-            # structural_reads_values dict
-            if hasattr(record, 'structural_reads_values') and record.structural_reads_values:
-                total += sys.getsizeof(record.structural_reads_values)
-                for k, v in record.structural_reads_values.items():
+            # Structural tracking
+            if td.structural_reads:
+                total += sys.getsizeof(td.structural_reads)
+                for k, v in td.structural_reads.items():
                     total += sys.getsizeof(k) + sys.getsizeof(v)
 
-            # typed_changes list
-            if hasattr(record, 'typed_changes') and record.typed_changes:
-                total += sys.getsizeof(record.typed_changes)
-                for change in record.typed_changes:
+            # structural_reads_values dict (stored separately in NotebookState)
+            structural_vals = self._notebook_state.get_structural_reads_values(cell_id)
+            if structural_vals:
+                total += sys.getsizeof(structural_vals)
+                for k, v in structural_vals.items():
+                    total += sys.getsizeof(k) + sys.getsizeof(v)
+
+            # typed_changes list (stored separately in NotebookState)
+            typed_changes = self._notebook_state.get_typed_changes(cell_id)
+            if typed_changes:
+                total += sys.getsizeof(typed_changes)
+                for change in typed_changes:
                     total += sys.getsizeof(change)
 
         return total
 
     def reset(self) -> None:
         """Clear all state. Called on kernel restart."""
-        self.records.clear()
         self.seq_counter = 0
         self._cell_order = []
-        self._stale_cells.clear()
+        self._notebook_state.clear()  # Clear status, R, W, last_writer, tracking_data
+        self._pending_checkpoint_deletion = None
 
 
 def _extract_column_changes(
@@ -1428,6 +2533,16 @@ def _extract_column_changes(
             continue
 
         diff_node = diff_result.differences[var_name]
+
+        # For newly created variables ("Variable was added"), all written columns
+        # are considered "changed" since they didn't exist before
+        if isinstance(diff_node, ValueComparison):
+            if diff_node.message and "was added" in diff_node.message:
+                # Variable is new - all tracked column_writes are "changed"
+                if var_name in tracking.column_writes:
+                    column_changed[var_name] = sorted(tracking.column_writes[var_name])
+                continue
+
         changed_cols = _get_changed_columns_from_diff_node(diff_node)
 
         if changed_cols:
@@ -1836,14 +2951,16 @@ def format_forward_dependency_message(
     variables: List[str],
 ) -> str:
     """
-    Format a forward dependency violation message.
+    Format a forward dependency (contamination) error message.
 
     A forward dependency occurs when a cell reads a variable that a later cell
-    (in document order) has already written. This means the reading cell is
-    seeing "future" state that wouldn't exist in top-to-bottom order.
+    (in document order) has already written. This means the reading cell would
+    see "future" state that wouldn't exist in top-to-bottom order.
+
+    Forward contamination now blocks execution with an error.
 
     Args:
-        reading_cell_alpha: Cell that read the variable (@A notation)
+        reading_cell_alpha: Cell that attempted to read the variable (@A notation)
         writing_cell_alpha: Later cell that wrote the variable (@A notation)
         variables: List of affected variable names
 
@@ -1853,20 +2970,50 @@ def format_forward_dependency_message(
     vars_str = format_variable_list(variables)
 
     lines = [
-        "⚠️ Forward Contamination",
+        "❌ Forward Contamination",
         "",
         f"Cell {reading_cell_alpha} reads {vars_str} which was written by "
         f"downstream cell {writing_cell_alpha}.",
         "",
-        f"Cell {reading_cell_alpha} executed successfully but is marked stale "
-        "because it read out-of-order state that would not exist in a "
-        "top-to-bottom run.",
+        "Execution blocked because this cell would read out-of-order state "
+        "that would not exist in a top-to-bottom run.",
         "",
-        'Fix: Right-click the cell and select "Run with upstream state", '
-        "or re-run cells in notebook order.",
+        "Fix: Re-run upstream cells to restore reproducible values for these variables.",
     ]
 
     return "\n".join(lines)
+
+
+def format_backward_mutation_message(
+    mutating_cell_alpha: str,
+    affected_cell_alpha: str,
+    variables: List[str],
+) -> str:
+    """
+    Format a backward mutation error message.
+
+    A backward mutation occurs when a cell modifies a variable that an
+    earlier cell (in document order) reads. This creates a hidden dependency
+    where the earlier cell depends on the later cell having run first.
+
+    This format is used both for:
+    1. Direct backward mutation (writer runs after reader)
+    2. Writer violation on forward contamination (writer ran before reader)
+
+    Args:
+        mutating_cell_alpha: Cell that modified the variable (@A notation)
+        affected_cell_alpha: Earlier cell that reads the variable (@A notation)
+        variables: List of affected variable names
+
+    Returns:
+        Formatted message string
+    """
+    vars_str = format_variable_list(variables)
+
+    return (
+        f"Cell {mutating_cell_alpha} modified {vars_str} which Cell {affected_cell_alpha} "
+        f"(earlier) reads."
+    )
 
 
 def format_truncation_error(

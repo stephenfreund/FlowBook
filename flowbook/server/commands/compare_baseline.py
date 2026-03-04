@@ -3,8 +3,8 @@ Compare baseline (python3) vs FlowBook kernel execution with timing and memory m
 
 4-Phase Execution:
   Phase 1: FlowBook timing - collect cell_runtime_ms, state_duration_ms, check_duration_ms
-  Phase 2: Baseline timing - collect cell_runtime_ms
-  Phase 3: Baseline memory (HeapSizer) - collect namespace_size_mb
+  Phase 2: Baseline timing - collect cell_runtime_ms (skipped by default, use --run-baseline)
+  Phase 3: Baseline memory (HeapSizer) - collect namespace_size_mb (skipped by default)
   Phase 4: FlowBook memory (HeapSizer) - collect namespace_size_mb, checkpoint overhead
 
 Memory measurement uses HeapSizer for accurate heap traversal with proper handling of:
@@ -13,8 +13,10 @@ Memory measurement uses HeapSizer for accurate heap traversal with proper handli
 - Object deduplication across shared references
 
 Usage via CLI:
-    flowbook compare-baseline notebook.ipynb
-    flowbook compare-baseline notebook.ipynb --timeout 3600  # optional timeout
+    flowbook compare-baseline notebook.ipynb                              # FlowBook only (default)
+    flowbook compare-baseline notebook.ipynb --run-baseline               # Include baseline comparison
+    flowbook compare-baseline notebook.ipynb --staleness-mode syntactic   # Use syntactic mode
+    flowbook compare-baseline notebook.ipynb --timeout 14400              # optional timeout (default: 4 hours)
 """
 
 import argparse
@@ -76,6 +78,17 @@ def generate_comparison_filename(notebook_path: str, num_components: int = 3) ->
 
 
 @dataclass
+class CheckingResult:
+    """Result of reproducibility checking for a cell."""
+    cell_status: str  # "clean", "stale", or "error"
+    reasons: List[Dict[str, Any]] = field(default_factory=list)  # List of reason dicts if stale
+    errors: List[Dict[str, Any]] = field(default_factory=list)  # List of error dicts if error
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"cell_status": self.cell_status, "reasons": self.reasons, "errors": self.errors}
+
+
+@dataclass
 class TimingCellMetrics:
     """Timing metrics for a single cell execution (Scalene OFF)."""
     cell_id: str
@@ -87,6 +100,7 @@ class TimingCellMetrics:
     status: str
     error: Optional[str] = None
     is_rerun: bool = False
+    checking_result: Optional[CheckingResult] = None  # Reproducibility checking result
 
 
 @dataclass
@@ -105,6 +119,9 @@ class MemoryCellMetrics:
     # Pre/post checkpoint breakdown for NO_POST analysis (accounts for sharing)
     pre_only_bytes: int = 0  # Bytes if only pre checkpoints existed (with sharing)
     post_savings_bytes: int = 0  # Memory saved by removing post checkpoints
+    # New fields for memory overhead ratio calculation
+    base_namespace_mb: float = 0.0  # User namespace only (without checkpoint overhead)
+    total_overhead_mb: float = 0.0  # Sum of all FlowBook overhead (checkpoints, tracking, etc.)
     status: str = "ok"
     error: Optional[str] = None
     is_rerun: bool = False
@@ -418,9 +435,12 @@ def execute_cell_flowbook(
     # Measure wall-clock time from client side (same as baseline)
     start = time.perf_counter()
 
-    msg_id = kernel_client.execute(source, cell_id=cell_id)
+    # Pass timeout to kernel via cell_metadata so kernel respects it
+    cell_meta = {"timeout": timeout} if timeout else None
+    msg_id = kernel_client.execute(source, cell_id=cell_id, cell_metadata=cell_meta)
 
     flowbook_metadata = None
+    predicate_violations = []  # Collect all predicate violations (even when continue_after_violation=True)
     error_msg = None
     start_time = time.time()
 
@@ -444,11 +464,14 @@ def execute_cell_flowbook(
 
         msg_type = msg["header"]["msg_type"]
 
-        # Look for display_data with flowbook metadata
+        # Look for display_data with flowbook metadata or predicate violations
         if msg_type == "display_data":
             output_meta = msg.get("content", {}).get("metadata", {})
             if "flowbook" in output_meta:
                 flowbook_metadata = output_meta["flowbook"]
+            # Capture predicate violations (sent even when continue_after_violation=True)
+            if "predicate_violation" in output_meta:
+                predicate_violations.append(output_meta["predicate_violation"])
 
         if msg_type == "error":
             content = msg["content"]
@@ -470,12 +493,48 @@ def execute_cell_flowbook(
     # Calculate client-side elapsed time (same methodology as baseline)
     elapsed = time.perf_counter() - start
 
+    # Build violation message from predicate_violations or legacy violation field
+    violation_msg = None
+    if predicate_violations:
+        # Format predicate violations as messages
+        msgs = []
+        for pv in predicate_violations:
+            predicate = pv.get("predicate", "unknown")
+            locations = pv.get("locations", [])
+            accepted = pv.get("accepted", False)
+            status = "accepted" if accepted else "rejected"
+            locs_str = ", ".join(locations) if locations else "unknown"
+            msgs.append(f"{predicate}: {locs_str} ({status})")
+        violation_msg = "; ".join(msgs)
+
     if flowbook_metadata:
-        # Check for violations in metadata
-        violation = flowbook_metadata.get("violation")
-        violation_msg = None
-        if violation:
-            violation_msg = violation.get("message", "Reproducibility violation")
+        # Also check for legacy violations in flowbook metadata
+        if not violation_msg:
+            violation = flowbook_metadata.get("violation")
+            if violation:
+                violation_msg = violation.get("message", "Reproducibility violation")
+
+        # Extract checking result for this cell
+        staleness_reasons = flowbook_metadata.get("staleness_reasons", {})
+        cell_reasons = staleness_reasons.get(cell_id, [])
+
+        # Convert predicate_violations to error dicts for checking_result
+        cell_errors = []
+        for pv in predicate_violations:
+            cell_errors.append({
+                "error_type": pv.get("predicate", "unknown"),
+                "locations": pv.get("locations", []),
+                "causer_cell": pv.get("causer_cell"),
+                "accepted": pv.get("accepted", False),
+            })
+
+        # Determine cell status: error > stale > clean
+        if cell_errors:
+            cell_status = "error"
+        elif cell_reasons:
+            cell_status = "stale"
+        else:
+            cell_status = "clean"
 
         return {
             # Use kernel-reported timing for accuracy
@@ -485,7 +544,13 @@ def execute_cell_flowbook(
             "check_duration_ms": flowbook_metadata.get("check_duration_ms", 0.0),
             "error": error_msg,
             "violation": violation_msg,
+            "predicate_violations": predicate_violations,  # Include full violation details
             "stale_cells": flowbook_metadata.get("stale_cells", []),
+            "checking_result": {
+                "cell_status": cell_status,
+                "reasons": cell_reasons,
+                "errors": cell_errors,
+            },
         }
     else:
         return {
@@ -494,8 +559,10 @@ def execute_cell_flowbook(
             "state_duration_ms": None,
             "check_duration_ms": None,
             "error": error_msg or "No flowbook metadata received",
-            "violation": None,
+            "violation": violation_msg,  # May have predicate violations even without flowbook metadata
+            "predicate_violations": predicate_violations,
             "stale_cells": [],
+            "checking_result": None,
         }
 
 
@@ -872,10 +939,14 @@ _overhead_breakdown = {
 from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 if hasattr(MemoryCheckpoints, '_instance') and MemoryCheckpoints._instance:
     mc = MemoryCheckpoints._instance
-    breakdown = mc.get_overhead_breakdown()
-    _overhead_breakdown['checkpoints_mb'] = breakdown.get('checkpoints_bytes', 0) / (1024 * 1024)
-    _overhead_breakdown['tracking_metadata_mb'] = breakdown.get('tracking_metadata_bytes', 0) / (1024 * 1024)
-    _overhead_breakdown['other_mb'] = breakdown.get('other_bytes', 0) / (1024 * 1024)
+    # Use get_total_checkpoint_size() to measure actual storage via HeapSizer
+    all_sizes = mc.get_total_checkpoint_size()
+    _overhead_breakdown['checkpoints_mb'] = all_sizes.total_bytes / (1024 * 1024)
+    # Estimate tracking metadata: ~200 bytes per variable entry
+    num_vars = sum(len(ckpt.user_ns) for ckpt in mc.saved.values())
+    _overhead_breakdown['tracking_metadata_mb'] = (num_vars * 200) / (1024 * 1024)
+    # Other overhead: ~1KB per checkpoint
+    _overhead_breakdown['other_mb'] = len(mc.saved) * 1024 / (1024 * 1024)
 
 # Get execution records overhead from ReproducibilityEnforcer (if accessible)
 try:
@@ -997,7 +1068,8 @@ def run_baseline_timing(
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
                     status="error",
-                    error=timing["error"]
+                    error=timing["error"],
+                    checking_result=None,  # Baseline has no checking
                 ))
             else:
                 runtime_ms = timing["cell_runtime_ms"]
@@ -1011,6 +1083,7 @@ def run_baseline_timing(
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
                     status="ok",
+                    checking_result=None,  # Baseline has no checking
                 ))
                 log(f"  Runtime: {runtime_ms:.1f}ms")
 
@@ -1048,6 +1121,7 @@ def run_baseline_timing(
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
+                            checking_result=None,  # Baseline has no checking
                         ))
                     else:
                         runtime_ms = timing["cell_runtime_ms"]
@@ -1062,6 +1136,7 @@ def run_baseline_timing(
                             check_duration_ms=0.0,
                             status="ok",
                             is_rerun=True,
+                            checking_result=None,  # Baseline has no checking
                         ))
                         log(f"  Rerun Runtime: {runtime_ms:.1f}ms")
 
@@ -1083,6 +1158,7 @@ def run_flowbook_timing(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
     rerun_k: int = 0,
+    staleness_mode: str = "semantic",
 ) -> TimingResults:
     """
     Run notebook on FlowBook kernel and collect TIMING metrics only (Scalene OFF).
@@ -1113,6 +1189,11 @@ def run_flowbook_timing(
         kernel_client.execute("%continue_after_violation on", silent=True)
         _wait_for_idle(kernel_client)
         log("FlowBook Timing: continue_after_violation enabled")
+
+        # Set staleness computation mode
+        kernel_client.execute(f"%staleness_mode {staleness_mode}", silent=True)
+        _wait_for_idle(kernel_client)
+        log(f"FlowBook Timing: staleness_mode set to {staleness_mode}")
 
         # Run a warm-up cell to trigger lazy initialization (cudf import, tracking patches, etc.)
         # This ensures the overhead doesn't appear in the first real cell
@@ -1156,7 +1237,8 @@ def run_flowbook_timing(
                     state_duration_ms=0.0,
                     check_duration_ms=0.0,
                     status="error",
-                    error=timing["error"]
+                    error=timing["error"],
+                    checking_result=None,
                 ))
             else:
                 if timing.get("violation"):
@@ -1178,6 +1260,16 @@ def run_flowbook_timing(
                 elif timing.get("violation"):
                     status = "violation"
 
+                # Build checking result
+                checking_result_data = timing.get("checking_result")
+                checking_result = None
+                if checking_result_data:
+                    checking_result = CheckingResult(
+                        cell_status=checking_result_data.get("cell_status", "unknown"),
+                        reasons=checking_result_data.get("reasons", []),
+                        errors=checking_result_data.get("errors", []),
+                    )
+
                 results.cells.append(TimingCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
@@ -1187,6 +1279,7 @@ def run_flowbook_timing(
                     check_duration_ms=check_ms,
                     status=status,
                     error=timing.get("violation") or timing.get("error"),
+                    checking_result=checking_result,
                 ))
                 log(f"  Execute: {execute_ms:.1f}ms, Code: {code_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
 
@@ -1229,6 +1322,7 @@ def run_flowbook_timing(
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
+                            checking_result=None,
                         ))
                     else:
                         if timing.get("violation"):
@@ -1250,6 +1344,16 @@ def run_flowbook_timing(
                         elif timing.get("violation"):
                             status = "violation"
 
+                        # Build checking result
+                        checking_result_data = timing.get("checking_result")
+                        checking_result = None
+                        if checking_result_data:
+                            checking_result = CheckingResult(
+                                cell_status=checking_result_data.get("cell_status", "unknown"),
+                                reasons=checking_result_data.get("reasons", []),
+                                errors=checking_result_data.get("errors", []),
+                            )
+
                         results.rerun_cells.append(TimingCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
@@ -1260,8 +1364,36 @@ def run_flowbook_timing(
                             status=status,
                             error=timing.get("violation") or timing.get("error"),
                             is_rerun=True,
+                            checking_result=checking_result,
                         ))
                         log(f"  Rerun Execute: {execute_ms:.1f}ms, Code: {code_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
+
+        # Compute checking summary (exclude never_executed cells - they are empty code cells)
+        clean_count = 0
+        stale_count = 0
+        error_count = 0
+        reason_counts: Dict[str, int] = {}
+        error_counts: Dict[str, int] = {}
+        for cell in results.cells:
+            if cell.checking_result:
+                # Skip cells that only have never_executed reason (empty code cells)
+                reasons = cell.checking_result.reasons
+                errors = cell.checking_result.errors
+                if reasons and all(r.get("type") == "never_executed" for r in reasons) and not errors:
+                    continue
+                if cell.checking_result.cell_status == "clean":
+                    clean_count += 1
+                elif cell.checking_result.cell_status == "error":
+                    error_count += 1
+                    for error in errors:
+                        etype = error.get("error_type", "unknown")
+                        error_counts[etype] = error_counts.get(etype, 0) + 1
+                else:
+                    stale_count += 1
+                    for reason in reasons:
+                        rtype = reason.get("type", "unknown")
+                        if rtype != "never_executed":  # Don't count never_executed
+                            reason_counts[rtype] = reason_counts.get(rtype, 0) + 1
 
         results.totals = {
             "execute_duration_ms": total_execute_ms,
@@ -1272,6 +1404,13 @@ def run_flowbook_timing(
             "rerun_code_ms": rerun_code_ms,
             "rerun_state_ms": rerun_state_ms,
             "rerun_check_ms": rerun_check_ms,
+            "checking_summary": {
+                "clean_cells": clean_count,
+                "stale_cells": stale_count,
+                "error_cells": error_count,
+                "reason_counts": reason_counts,
+                "error_counts": error_counts,
+            },
         }
 
         log(f"FlowBook Timing: Total execute {total_execute_ms:.1f}ms, code {total_code_ms:.1f}ms, state {total_state_ms:.1f}ms, check {total_check_ms:.1f}ms")
@@ -1451,6 +1590,7 @@ def run_flowbook_memory(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
     rerun_k: int = 0,
+    staleness_mode: str = "semantic",
 ) -> MemoryResults:
     """
     Run notebook on FlowBook kernel and collect MEMORY metrics using HeapSizer.
@@ -1480,6 +1620,11 @@ def run_flowbook_memory(
         # Enable continue_after_violation
         kernel_client.execute("%continue_after_violation on", silent=True)
         _wait_for_idle(kernel_client)
+
+        # Set staleness computation mode
+        kernel_client.execute(f"%staleness_mode {staleness_mode}", silent=True)
+        _wait_for_idle(kernel_client)
+        log(f"FlowBook Memory: staleness_mode set to {staleness_mode}")
 
         # Run a warm-up cell to trigger lazy initialization (cudf import, tracking patches, etc.)
         log("FlowBook Memory: Running warm-up cell...")
@@ -1573,6 +1718,7 @@ def run_flowbook_memory(
 
             if timing.get("error") and timing.get("cell_runtime_ms") is None:
                 log(f"  Error:\n{timing['error']}")
+                cell_total_overhead = sum(overhead_breakdown.values()) if overhead_breakdown else 0.0
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
@@ -1586,11 +1732,14 @@ def run_flowbook_memory(
                     cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
                     pre_only_bytes=pre_only_bytes,
                     post_savings_bytes=post_savings_bytes,
+                    base_namespace_mb=0.0,
+                    total_overhead_mb=cell_total_overhead,
                     status="error",
                     error=timing["error"]
                 ))
             else:
                 allocation_delta = current_mb - pre_stats.get("total_mb", 0.0)
+                cell_total_overhead = sum(overhead_breakdown.values()) if overhead_breakdown else 0.0
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
@@ -1604,6 +1753,8 @@ def run_flowbook_memory(
                     cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
                     pre_only_bytes=pre_only_bytes,
                     post_savings_bytes=post_savings_bytes,
+                    base_namespace_mb=current_mb,
+                    total_overhead_mb=cell_total_overhead,
                     status="ok",
                 ))
                 cumulative_ckpt = overhead_breakdown.get('checkpoints_mb', 0) if overhead_breakdown else 0
@@ -1670,6 +1821,7 @@ def run_flowbook_memory(
 
                     gpu_mem = get_gpu_memory_mb()
 
+                    rerun_total_overhead = sum(overhead_breakdown.values()) if overhead_breakdown else 0.0
                     if timing.get("error") and timing.get("cell_runtime_ms") is None:
                         log(f"  Rerun Error:\n{timing['error']}")
                         results.rerun_cells.append(MemoryCellMetrics(
@@ -1685,6 +1837,8 @@ def run_flowbook_memory(
                             cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
                             pre_only_bytes=pre_only_bytes,
                             post_savings_bytes=post_savings_bytes,
+                            base_namespace_mb=0.0,
+                            total_overhead_mb=rerun_total_overhead,
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
@@ -1704,6 +1858,8 @@ def run_flowbook_memory(
                             cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
                             pre_only_bytes=pre_only_bytes,
                             post_savings_bytes=post_savings_bytes,
+                            base_namespace_mb=current_mb,
+                            total_overhead_mb=rerun_total_overhead,
                             status="ok",
                             is_rerun=True,
                         ))
@@ -1715,15 +1871,31 @@ def run_flowbook_memory(
         # Get final stats
         final_stats = get_namespace_size(kernel_client)
         final_gpu_mem = get_gpu_memory_mb()
+
+        # Get final overhead and compute memory overhead ratio
+        final_overhead = get_flowbook_overhead_breakdown(kernel_client)
+        # Sum only the known numeric overhead fields
+        overhead_keys = ['checkpoints_mb', 'execution_records_mb', 'tracking_metadata_mb', 'other_mb']
+        total_overhead_mb = sum(final_overhead.get(k, 0.0) for k in overhead_keys) if final_overhead else 0.0
+        base_namespace_mb = final_stats.get("total_mb", 0.0)
+        if base_namespace_mb > 0:
+            memory_overhead_ratio = (base_namespace_mb + total_overhead_mb) / base_namespace_mb
+        else:
+            memory_overhead_ratio = 1.0
+
         results.totals = {
             "final_footprint_mb": final_stats.get("total_mb", 0.0),
             "max_footprint_mb": max_footprint_mb,
             "total_allocation_mb": final_stats.get("total_mb", 0.0) - before_stats.get("total_mb", 0.0),
             "gpu_mem_samples": final_gpu_mem,
+            "base_namespace_mb": base_namespace_mb,
+            "total_overhead_mb": total_overhead_mb,
+            "memory_overhead_ratio": memory_overhead_ratio,
         }
 
         log(f"FlowBook Memory: Final namespace {final_stats.get('total_mb', 0):.1f}MB, "
-            f"Max {max_footprint_mb:.1f}MB" + (f", GPU {final_gpu_mem:.1f}MB" if final_gpu_mem > 0 else ""))
+            f"Max {max_footprint_mb:.1f}MB, Overhead {total_overhead_mb:.1f}MB (ratio: {memory_overhead_ratio:.3f}x)" +
+            (f", GPU {final_gpu_mem:.1f}MB" if final_gpu_mem > 0 else ""))
 
     finally:
         cleanup_kernel(kernel_manager, kernel_client)
@@ -1777,6 +1949,11 @@ class CompareBaselineCommand(NotebookCommand):
             help="Skip memory measurement phases (timing only)",
         )
         subparser.add_argument(
+            "--run-baseline",
+            action="store_true",
+            help="Run baseline kernel (skipped by default)",
+        )
+        subparser.add_argument(
             "--rerun-k",
             type=int,
             default=0,
@@ -1793,6 +1970,13 @@ class CompareBaselineCommand(NotebookCommand):
             type=int,
             default=1,
             help="Starting trial number (default: 1). Use negative numbers for counting down (e.g., --trials 3 --start -4 produces -4, -3, -2)",
+        )
+        subparser.add_argument(
+            "--staleness-mode",
+            type=str,
+            choices=["syntactic", "semantic"],
+            default="semantic",
+            help="Staleness computation mode: 'syntactic' (set intersection, lower memory) or 'semantic' (checkpoint diff, precise). Default: semantic",
         )
         return subparser
 
@@ -1822,11 +2006,13 @@ class CompareBaselineCommand(NotebookCommand):
         Returns:
             ProcessingResult with comparison metadata
         """
-        cell_timeout = kwargs.get("timeout", 3600.0)
+        cell_timeout = kwargs.get("timeout", 14400.0)  # 4 hours default
         skip_memory = kwargs.get("skip_memory", False)
+        run_baseline = kwargs.get("run_baseline", False)
         rerun_k = kwargs.get("rerun_k", 0)
         num_trials = kwargs.get("trials", 1)
         start_trial = kwargs.get("start", 1)
+        staleness_mode = kwargs.get("staleness_mode", "semantic")
         notebook_path = kwargs.get("notebook_path", "unknown.ipynb")
 
         cells = notebook_content.get("cells", [])
@@ -1848,11 +2034,20 @@ class CompareBaselineCommand(NotebookCommand):
         last_flowbook_state = 0.0
         last_flowbook_check = 0.0
 
+        # Track staleness data across trials for consistency checking
+        first_staleness_data: Optional[Dict[str, Any]] = None
+        last_staleness_data: Optional[Dict[str, Any]] = None
+        staleness_mismatch_warned = False
+
         with self.timing_context() as get_elapsed:
-            log(f"Starting 4-phase baseline vs FlowBook comparison...")
+            if run_baseline:
+                log(f"Starting 4-phase baseline vs FlowBook comparison...")
+            else:
+                log(f"Starting FlowBook-only comparison (use --run-baseline to include baseline)...")
             log(f"Notebook: {notebook_path}")
             log(f"Cell timeout: {cell_timeout}s" if cell_timeout else "Cell timeout: none")
             log(f"HeapSizer available: {heapsizer_available}")
+            log(f"Run baseline: {run_baseline}")
             if rerun_k > 0:
                 log(f"Rerun passes: {rerun_k} (will execute all {len(code_cells)} cells {rerun_k} extra time(s))")
             if num_trials > 1:
@@ -1875,27 +2070,39 @@ class CompareBaselineCommand(NotebookCommand):
                 log("=" * 60)
                 log("PHASE 1: FLOWBOOK TIMING (Scalene OFF)")
                 log("=" * 60)
-                flowbook_timing = run_flowbook_timing(notebook_content, cell_timeout, rerun_k)
+                flowbook_timing = run_flowbook_timing(notebook_content, cell_timeout, rerun_k, staleness_mode)
                 log("")
 
                 # ============================================================
-                # PHASE 2: Baseline Timing (Scalene OFF)
+                # PHASE 2: Baseline Timing (Scalene OFF) - if run_baseline
                 # ============================================================
-                log("=" * 60)
-                log("PHASE 2: BASELINE TIMING (Scalene OFF)")
-                log("=" * 60)
-                baseline_timing = run_baseline_timing(notebook_content, cell_timeout, rerun_k)
-                log("")
+                baseline_timing = None
+                if run_baseline:
+                    log("=" * 60)
+                    log("PHASE 2: BASELINE TIMING (Scalene OFF)")
+                    log("=" * 60)
+                    baseline_timing = run_baseline_timing(notebook_content, cell_timeout, rerun_k)
+                    log("")
+                else:
+                    log("=" * 60)
+                    log("PHASE 2: BASELINE TIMING - SKIPPED (use --run-baseline to enable)")
+                    log("=" * 60)
+                    log("")
 
                 # ============================================================
-                # PHASE 3: Baseline Memory (HeapSizer) - if available
+                # PHASE 3: Baseline Memory (HeapSizer) - if available and run_baseline
                 # ============================================================
                 baseline_memory = None
-                if heapsizer_available:
+                if heapsizer_available and run_baseline:
                     log("=" * 60)
                     log("PHASE 3: BASELINE MEMORY (HeapSizer)")
                     log("=" * 60)
                     baseline_memory = run_baseline_memory(notebook_content, cell_timeout, rerun_k)
+                    log("")
+                elif heapsizer_available:
+                    log("=" * 60)
+                    log("PHASE 3: BASELINE MEMORY - SKIPPED (use --run-baseline to enable)")
+                    log("=" * 60)
                     log("")
 
                 # ============================================================
@@ -1906,13 +2113,14 @@ class CompareBaselineCommand(NotebookCommand):
                     log("=" * 60)
                     log("PHASE 4: FLOWBOOK MEMORY (HeapSizer)")
                     log("=" * 60)
-                    flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout, rerun_k)
+                    flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout, rerun_k, staleness_mode)
                     log("")
 
                 # Build comparison result with new structure
                 metadata_dict: Dict[str, Any] = {
                     "num_cells": len(code_cells),
                     "timeout_seconds": cell_timeout,
+                    "staleness_mode": staleness_mode,
                 }
                 if rerun_k > 0:
                     metadata_dict["rerun_k"] = rerun_k
@@ -1977,7 +2185,7 @@ class CompareBaselineCommand(NotebookCommand):
                     log("SUMMARY")
                 log("=" * 60)
 
-                baseline_total = baseline_timing.totals.get("execute_duration_ms", 0)
+                baseline_total = baseline_timing.totals.get("execute_duration_ms", 0) if baseline_timing else 0
                 flowbook_execute = flowbook_timing.totals.get("execute_duration_ms", 0)
                 flowbook_code = flowbook_timing.totals.get("code_duration_ms", 0)
                 flowbook_state = flowbook_timing.totals.get("state_duration_ms", 0)
@@ -1990,34 +2198,43 @@ class CompareBaselineCommand(NotebookCommand):
                 last_flowbook_state = flowbook_state
                 last_flowbook_check = flowbook_check
 
-                if baseline_total > 0:
-                    state_overhead_pct = (flowbook_state / baseline_total) * 100
-                    check_overhead_pct = (flowbook_check / baseline_total) * 100
-                else:
-                    state_overhead_pct = 0.0
-                    check_overhead_pct = 0.0
-
                 log("TIMING:")
-                log(f"  Baseline code time:   {baseline_total:,.1f}ms")
-                log(f"  FlowBook execute:     {flowbook_execute:,.1f}ms")
-                log(f"  FlowBook code time:   {flowbook_code:,.1f}ms")
-                log(f"  FlowBook state time:  {flowbook_state:,.1f}ms ({state_overhead_pct:.1f}%)")
-                log(f"  FlowBook check time:  {flowbook_check:,.1f}ms ({check_overhead_pct:.1f}%)")
+                if baseline_timing:
+                    if baseline_total > 0:
+                        state_overhead_pct = (flowbook_state / baseline_total) * 100
+                        check_overhead_pct = (flowbook_check / baseline_total) * 100
+                    else:
+                        state_overhead_pct = 0.0
+                        check_overhead_pct = 0.0
+                    log(f"  Baseline code time:   {baseline_total:,.1f}ms")
+                    log(f"  FlowBook execute:     {flowbook_execute:,.1f}ms")
+                    log(f"  FlowBook code time:   {flowbook_code:,.1f}ms")
+                    log(f"  FlowBook state time:  {flowbook_state:,.1f}ms ({state_overhead_pct:.1f}%)")
+                    log(f"  FlowBook check time:  {flowbook_check:,.1f}ms ({check_overhead_pct:.1f}%)")
+                else:
+                    log(f"  Baseline:             SKIPPED")
+                    log(f"  FlowBook execute:     {flowbook_execute:,.1f}ms")
+                    log(f"  FlowBook code time:   {flowbook_code:,.1f}ms")
+                    log(f"  FlowBook state time:  {flowbook_state:,.1f}ms")
+                    log(f"  FlowBook check time:  {flowbook_check:,.1f}ms")
                 log("")
 
-                if heapsizer_available and baseline_memory and flowbook_memory:
-                    baseline_mem = baseline_memory.totals.get("final_footprint_mb", 0)
+                if heapsizer_available and flowbook_memory:
                     flowbook_mem = flowbook_memory.totals.get("final_footprint_mb", 0)
-                    mem_overhead = flowbook_mem - baseline_mem
-
                     log("MEMORY (from HeapSizer):")
-                    log(f"  Baseline namespace:   {baseline_mem:,.1f}MB")
-                    log(f"  FlowBook namespace:   {flowbook_mem:,.1f}MB")
-                    log(f"  Memory overhead:      {mem_overhead:+,.1f}MB")
+                    if baseline_memory:
+                        baseline_mem = baseline_memory.totals.get("final_footprint_mb", 0)
+                        mem_overhead = flowbook_mem - baseline_mem
+                        log(f"  Baseline namespace:   {baseline_mem:,.1f}MB")
+                        log(f"  FlowBook namespace:   {flowbook_mem:,.1f}MB")
+                        log(f"  Memory overhead:      {mem_overhead:+,.1f}MB")
+                    else:
+                        log(f"  Baseline:             SKIPPED")
+                        log(f"  FlowBook namespace:   {flowbook_mem:,.1f}MB")
                     log("")
 
                 if rerun_k > 0:
-                    rerun_baseline = baseline_timing.totals.get("rerun_runtime_ms", 0)
+                    rerun_baseline = baseline_timing.totals.get("rerun_runtime_ms", 0) if baseline_timing else 0
                     rerun_flowbook_execute = flowbook_timing.totals.get("rerun_execute_ms", 0)
                     rerun_flowbook_code = flowbook_timing.totals.get("rerun_code_ms", 0)
                     rerun_state = flowbook_timing.totals.get("rerun_state_ms", 0)
@@ -2025,11 +2242,77 @@ class CompareBaselineCommand(NotebookCommand):
                     total_rerun_cells = rerun_k * len(code_cells)
 
                     log(f"RERUN TIMING ({rerun_k} pass(es) x {len(code_cells)} cells = {total_rerun_cells} executions):")
-                    log(f"  Baseline rerun:       {rerun_baseline:,.1f}ms")
+                    if baseline_timing:
+                        log(f"  Baseline rerun:       {rerun_baseline:,.1f}ms")
+                    else:
+                        log(f"  Baseline rerun:       SKIPPED")
                     log(f"  FlowBook execute:     {rerun_flowbook_execute:,.1f}ms")
                     log(f"  FlowBook code:        {rerun_flowbook_code:,.1f}ms")
                     log(f"  FlowBook state time:  {rerun_state:,.1f}ms")
                     log(f"  FlowBook check time:  {rerun_check:,.1f}ms")
+                    log("")
+
+                # Checking results summary (exclude never_executed - empty code cells)
+                if flowbook_timing and flowbook_timing.cells:
+                    clean_count = 0
+                    stale_count = 0
+                    error_count = 0
+                    reason_counts: Dict[str, int] = {}
+                    error_counts: Dict[str, int] = {}
+
+                    for cell in flowbook_timing.cells:
+                        if cell.checking_result:
+                            # Skip cells that only have never_executed reason (empty code cells)
+                            reasons = cell.checking_result.reasons
+                            errors = cell.checking_result.errors
+                            if reasons and all(r.get("type") == "never_executed" for r in reasons) and not errors:
+                                continue
+                            if cell.checking_result.cell_status == "clean":
+                                clean_count += 1
+                            elif cell.checking_result.cell_status == "error":
+                                error_count += 1
+                                for error in errors:
+                                    etype = error.get("error_type", "unknown")
+                                    error_counts[etype] = error_counts.get(etype, 0) + 1
+                            else:
+                                stale_count += 1
+                                for reason in reasons:
+                                    rtype = reason.get("type", "unknown")
+                                    if rtype != "never_executed":  # Don't count never_executed
+                                        reason_counts[rtype] = reason_counts.get(rtype, 0) + 1
+
+                    # Store staleness data for cross-trial comparison
+                    current_staleness = {
+                        "clean_count": clean_count,
+                        "stale_count": stale_count,
+                        "error_count": error_count,
+                        "reason_counts": dict(reason_counts),
+                        "error_counts": dict(error_counts),
+                    }
+
+                    # Check consistency across trials
+                    if first_staleness_data is None:
+                        first_staleness_data = current_staleness
+                    elif not staleness_mismatch_warned and current_staleness != first_staleness_data:
+                        staleness_mismatch_warned = True
+                        log("WARNING: Staleness results differ from first trial!")
+                        log(f"  First trial: clean={first_staleness_data['clean_count']}, stale={first_staleness_data['stale_count']}, errors={first_staleness_data.get('error_count', 0)}, reasons={first_staleness_data['reason_counts']}")
+                        log(f"  This trial:  clean={clean_count}, stale={stale_count}, errors={error_count}, reasons={dict(reason_counts)}")
+
+                    last_staleness_data = current_staleness
+
+                    log("CHECKING RESULTS:")
+                    log(f"  Clean cells:          {clean_count}")
+                    log(f"  Stale cells:          {stale_count}")
+                    log(f"  Error cells:          {error_count}")
+                    if reason_counts:
+                        log("  Staleness reasons:")
+                        for rtype, count in sorted(reason_counts.items()):
+                            log(f"    {rtype}: {count}")
+                    if error_counts:
+                        log("  Error types:")
+                        for etype, count in sorted(error_counts.items()):
+                            log(f"    {etype}: {count}")
                     log("")
 
                 log(f"Results saved to: {json_output_path}")
@@ -2040,9 +2323,27 @@ class CompareBaselineCommand(NotebookCommand):
                 log("=" * 60)
                 log(f"COMPLETED {num_trials} TRIALS")
                 log("=" * 60)
+                log("")
+                log("Output files:")
                 for path in all_json_paths:
                     log(f"  {path}")
                 log("")
+
+                # Show staleness summary in multi-trial output
+                if last_staleness_data:
+                    log("CHECKING RESULTS (consistent across trials):" if not staleness_mismatch_warned else "CHECKING RESULTS (WARNING: varied across trials):")
+                    log(f"  Clean cells:          {last_staleness_data['clean_count']}")
+                    log(f"  Stale cells:          {last_staleness_data['stale_count']}")
+                    log(f"  Error cells:          {last_staleness_data.get('error_count', 0)}")
+                    if last_staleness_data['reason_counts']:
+                        log("  Staleness reasons:")
+                        for rtype, count in sorted(last_staleness_data['reason_counts'].items()):
+                            log(f"    {rtype}: {count}")
+                    if last_staleness_data.get('error_counts'):
+                        log("  Error types:")
+                        for etype, count in sorted(last_staleness_data['error_counts'].items()):
+                            log(f"    {etype}: {count}")
+                    log("")
 
             total_time = get_elapsed()
 
