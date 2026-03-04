@@ -712,17 +712,19 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     # The checkpoint captures state BEFORE cell N runs, which equals state AFTER cell N-1.
     # So we compare cell N's checkpoint to cell N-1's current_footprint_mb.
     # Cell 0 has no prior state, so ratio = 0.
+    # Skip ratio for tiny namespaces (< 1 MB) - ratio not meaningful for empty kernels.
+    min_meaningful_ns_mb = 1.0
     for i, fc in enumerate(flowbook_mem_cells):
         if i == 0:
             user_ns_before_mb = 0  # No prior namespace for first cell
         else:
             user_ns_before_mb = flowbook_mem_cells[i - 1].get("current_footprint_mb", 0)
-        user_ns_bytes = user_ns_before_mb * mb
 
-        if user_ns_bytes > 0:
+        if user_ns_before_mb >= min_meaningful_ns_mb:
+            user_ns_bytes = user_ns_before_mb * mb
             ratio = checkpoint_bytes_list[i] / user_ns_bytes
         else:
-            ratio = 0.0
+            ratio = 0.0  # Namespace too small for meaningful ratio
         per_cell_memory_overhead_mb.append(ratio)  # Note: field name kept for compatibility
 
     return FileStats(
@@ -2440,18 +2442,20 @@ def plot_combined_v2(
         # The checkpoint captures state BEFORE cell N runs, which equals state AFTER cell N-1.
         # So we compare cell N's checkpoint to cell N-1's current_footprint_mb.
         # Cell 0 has no prior state, so ratio = 0.
+        # Skip ratio for tiny namespaces (< 1 MB) - ratio not meaningful for empty kernels.
+        min_meaningful_ns_mb = 1.0
         ratios = []
         for i, c in enumerate(flowbook_mem_cells):
             if i == 0:
                 user_ns_before_mb = 0  # No prior namespace for first cell
             else:
                 user_ns_before_mb = flowbook_mem_cells[i - 1].get("current_footprint_mb", 0)
-            user_ns_bytes = user_ns_before_mb * mb
 
-            if user_ns_bytes > 0:
+            if user_ns_before_mb >= min_meaningful_ns_mb:
+                user_ns_bytes = user_ns_before_mb * mb
                 ratio = checkpoint_bytes[i] / user_ns_bytes
             else:
-                ratio = 0.0
+                ratio = 0.0  # Namespace too small for meaningful ratio
             ratios.append(ratio)
 
         bar_width = 0.6
