@@ -734,7 +734,9 @@ class ReproducibilityEnforcer:
         Args:
             enabled: Whether to enable measurement (default True)
         """
+        from flowbook.util.output import log
         self._measure_checkpoint_sizes = enabled
+        log(f"[Measurement] Checkpoint measurement {'enabled' if enabled else 'disabled'}")
         if not enabled:
             self._recorded_checkpoint_sizes.clear()
 
@@ -1444,6 +1446,7 @@ class ReproducibilityEnforcer:
                 checkpoint_name = f"{PRE_CHECKPOINT_PREFIX}{cell_id}"
                 size_info = self.checkpoints.get_checkpoint_size(checkpoint_name)
                 self._recorded_checkpoint_sizes[cell_id] = size_info.total_bytes
+                log(f"[Measurement] Recorded pre-checkpoint size for {cell_id}: {size_info.total_bytes} bytes")
             self.checkpoints.delete(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
             # Clear deepcopy caches since we're not reusing checkpoints
             from flowbook.kernel_support.deepcopy import clear_container_cache
