@@ -2931,6 +2931,11 @@ def main():
         default=10,
         help="Number of top types/variables to show individually in plots (default: 10)"
     )
+    parser.add_argument(
+        "--output",
+        default="all_overhead.pdf",
+        help="Output PDF filename for combined plots (default: all_overhead.pdf)"
+    )
 
     args = parser.parse_args()
 
@@ -3042,7 +3047,7 @@ def main():
 
         # Save combined plots to a single PDF
         if combined_figures:
-            combined_path = output_dir / "all_overhead.pdf"
+            combined_path = output_dir / args.output
             with PdfPages(str(combined_path)) as pdf:
                 for fig in combined_figures:
                     pdf.savefig(fig, dpi=150)
