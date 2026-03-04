@@ -208,23 +208,22 @@ class TimingCellMetrics:
 
 @dataclass
 class MemoryCellMetrics:
-    """Memory metrics for a single cell execution (Scalene ON)."""
+    """Memory metrics for a single cell execution.
+
+    Simplified structure with clear semantics:
+    - namespace_mb: Size of user namespace (what the user's code uses)
+    - checkpoint_delta_mb: What THIS cell's checkpoint adds (beyond ns + prior ckpts)
+    - checkpoint_cumulative_mb: Total checkpoint overhead so far
+    - gpu_mb: GPU memory usage
+    - checkpoint_by_var: Per-variable breakdown of checkpoint memory
+    """
     cell_id: str
     cell_index: int
-    current_footprint_mb: float
-    max_footprint_mb: float
-    allocation_delta_mb: float
-    gpu_mem_samples: float
-    checkpoint_var_costs: Optional[Dict[str, Any]] = None  # FlowBook only: per-cell var costs (includes deepcopy_ms)
-    overhead_breakdown: Optional[Dict[str, float]] = None  # FlowBook only: {category: MB}
-    cumulative_by_type: Optional[Dict[str, int]] = None  # FlowBook only: cumulative bytes by type
-    cumulative_by_var: Optional[Dict[str, int]] = None  # FlowBook only: cumulative bytes by variable
-    # Pre/post checkpoint breakdown for NO_POST analysis (accounts for sharing)
-    pre_only_bytes: int = 0  # Bytes if only pre checkpoints existed (with sharing)
-    post_savings_bytes: int = 0  # Memory saved by removing post checkpoints
-    # New fields for memory overhead ratio calculation
-    base_namespace_mb: float = 0.0  # User namespace only (without checkpoint overhead)
-    total_overhead_mb: float = 0.0  # Sum of all FlowBook overhead (checkpoints, tracking, etc.)
+    namespace_mb: float              # User namespace size
+    checkpoint_delta_mb: float       # This cell's checkpoint contribution
+    checkpoint_cumulative_mb: float  # Total checkpoint overhead so far
+    gpu_mb: float                    # GPU memory
+    checkpoint_by_var: Optional[Dict[str, float]] = None  # Per-variable MB
     status: str = "ok"
     error: Optional[str] = None
     is_rerun: bool = False
@@ -995,6 +994,81 @@ def get_flowbook_cumulative_checkpoint_size(
     return {}
 
 
+def get_checkpoint_overhead(
+    kernel_client, cell_id: str, timeout: float = 30.0
+) -> Dict[str, Any]:
+    """Get checkpoint overhead beyond namespace (correctly handles CoW sharing).
+
+    This is the CORRECT way to measure checkpoint memory overhead because it:
+    1. Measures namespace first (marks objects as seen)
+    2. Measures checkpoints cumulatively (only NEW objects counted)
+
+    This properly handles Copy-on-Write sharing between checkpoints and
+    the namespace - shared memory is not double-counted.
+
+    Args:
+        kernel_client: Kernel client to execute code on
+        cell_id: Cell ID to measure up to (inclusive)
+        timeout: Timeout in seconds
+
+    Returns:
+        Dict with:
+        - total_mb: Total checkpoint memory beyond namespace
+        - by_checkpoint: Per-checkpoint delta in MB
+        - by_variable: Per-variable totals in MB
+        - cumulative: Running total at each checkpoint in MB
+    """
+    # Filter namespace same way as sizeof_namespace (exclude private, callable, modules)
+    ns_filter = "{k: v for k, v in globals().items() if not k.startswith('_') and not callable(v) and not isinstance(v, type(__builtins__))}"
+
+    expr = (
+        f"__import__('flowbook.kernel_support.memory_checkpoint', fromlist=['MemoryCheckpoints'])"
+        f".MemoryCheckpoints._instance.get_overhead_beyond_namespace('{cell_id}', {ns_filter})"
+    )
+
+    msg_id = kernel_client.execute('', user_expressions={'_overhead': expr}, silent=True)
+
+    # Wait for idle on iopub
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            return {'total_mb': 0, 'by_checkpoint': {}, 'by_variable': {}, 'cumulative': {}}
+        try:
+            msg = kernel_client.get_iopub_msg(timeout=1.0)
+        except Exception:
+            continue
+        if msg['parent_header'].get('msg_id') != msg_id:
+            continue
+        if msg['header']['msg_type'] == 'status':
+            if msg['content']['execution_state'] == 'idle':
+                break
+
+    # Get the execute_reply
+    try:
+        import ast
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                reply = kernel_client.get_shell_msg(timeout=1.0)
+            except Exception:
+                continue
+            if reply['parent_header'].get('msg_id') != msg_id:
+                continue
+            if reply['header']['msg_type'] != 'execute_reply':
+                continue
+
+            expr_result = reply['content'].get('user_expressions', {}).get('_overhead', {})
+            if expr_result.get('status') == 'ok':
+                text = expr_result['data']['text/plain']
+                return ast.literal_eval(text)
+            break
+    except Exception as e:
+        log(f"Failed to get checkpoint overhead: {e}")
+        log(traceback.format_exc())
+
+    return {'total_mb': 0, 'by_checkpoint': {}, 'by_variable': {}, 'cumulative': {}}
+
+
 def get_flowbook_pre_post_checkpoint_sizes(
     kernel_client, cell_id: str, timeout: float = 30.0
 ) -> Dict[str, Any]:
@@ -1666,26 +1740,25 @@ def run_baseline_memory(
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
-                    current_footprint_mb=0.0,
-                    max_footprint_mb=0.0,
-                    allocation_delta_mb=0.0,
-                    gpu_mem_samples=get_kernel_gpu_memory_mb(kernel_client),
+                    namespace_mb=0.0,
+                    checkpoint_delta_mb=0.0,
+                    checkpoint_cumulative_mb=0.0,
+                    gpu_mb=get_kernel_gpu_memory_mb(kernel_client),
                     status="error",
                     error=timing["error"]
                 ))
             else:
-                allocation_delta = current_mb - pre_stats.get("total_mb", 0.0)
                 gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
-                    current_footprint_mb=current_mb,
-                    max_footprint_mb=max_footprint_mb,
-                    allocation_delta_mb=allocation_delta,
-                    gpu_mem_samples=gpu_mem,
+                    namespace_mb=current_mb,
+                    checkpoint_delta_mb=0.0,  # Baseline has no checkpoints
+                    checkpoint_cumulative_mb=0.0,
+                    gpu_mb=gpu_mem,
                     status="ok",
                 ))
-                log(f"  Namespace: {current_mb:.1f}MB, Delta: {allocation_delta:.1f}MB")
+                log(f"  Namespace: {current_mb:.1f}MB")
 
         # Execute reruns: run all cells k extra times (top-to-bottom)
         if rerun_k > 0:
@@ -1722,24 +1795,23 @@ def run_baseline_memory(
                         results.rerun_cells.append(MemoryCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
-                            current_footprint_mb=0.0,
-                            max_footprint_mb=0.0,
-                            allocation_delta_mb=0.0,
-                            gpu_mem_samples=get_kernel_gpu_memory_mb(kernel_client),
+                            namespace_mb=0.0,
+                            checkpoint_delta_mb=0.0,
+                            checkpoint_cumulative_mb=0.0,
+                            gpu_mb=get_kernel_gpu_memory_mb(kernel_client),
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
                         ))
                     else:
-                        allocation_delta = current_mb - pre_stats.get("total_mb", 0.0)
                         gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
                         results.rerun_cells.append(MemoryCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
-                            current_footprint_mb=current_mb,
-                            max_footprint_mb=max_footprint_mb,
-                            allocation_delta_mb=allocation_delta,
-                            gpu_mem_samples=gpu_mem,
+                            namespace_mb=current_mb,
+                            checkpoint_delta_mb=0.0,
+                            checkpoint_cumulative_mb=0.0,
+                            gpu_mb=gpu_mem,
                             status="ok",
                             is_rerun=True,
                         ))
@@ -1854,104 +1926,58 @@ def run_flowbook_memory(
             # Get namespace size after cell
             post_stats = get_namespace_size(kernel_client)
 
-            # Get checkpoint variable costs (combined pre + post) for per-variable breakdown
-            var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id)
+            # Get namespace size (this is what the user's code uses)
+            namespace_mb = post_stats.get("total_mb", 0.0)
+            max_footprint_mb = max(max_footprint_mb, namespace_mb)
 
-            # Get TRUE cumulative checkpoint size - measures ALL checkpoints together
-            # This accounts for memory sharing between checkpoints (via memo dict)
-            cumulative_size = get_flowbook_cumulative_checkpoint_size(kernel_client, cell_id)
-            cumulative_checkpoint_bytes = cumulative_size.get('total_bytes', 0)
+            # Get checkpoint overhead using the new cumulative measurement approach
+            # This properly handles CoW sharing - measures checkpoints BEYOND namespace
+            overhead = get_checkpoint_overhead(kernel_client, cell_id)
 
-            # Get pre/post checkpoint breakdown for NO_POST analysis
-            pre_post_sizes = get_flowbook_pre_post_checkpoint_sizes(kernel_client, cell_id)
-            pre_only_bytes = pre_post_sizes.get('pre_only_bytes', 0)
-            post_savings_bytes = pre_post_sizes.get('post_savings_bytes', 0)
+            # Extract this cell's checkpoint delta (pre + post checkpoints)
+            pre_name = f"_pre_{cell_id}"
+            post_name = f"_post_{cell_id}"
+            checkpoint_delta_mb = (
+                overhead['by_checkpoint'].get(pre_name, 0.0) +
+                overhead['by_checkpoint'].get(post_name, 0.0)
+            )
+            checkpoint_cumulative_mb = overhead.get('total_mb', 0.0)
+            checkpoint_by_var = overhead.get('by_variable') or None
 
-            current_mb = post_stats.get("total_mb", 0.0)
-            max_footprint_mb = max(max_footprint_mb, current_mb)
+            # Get GPU memory
+            gpu_mb = get_kernel_gpu_memory_mb(kernel_client)
 
-            # Track variable count for metadata overhead estimate
-            if var_costs:
-                cumulative_var_count += len(var_costs)
-
-            # Build CUMULATIVE overhead breakdown
-            # checkpoints_mb is the TRUE cumulative size accounting for sharing
-            overhead_breakdown = {
-                'checkpoints_mb': cumulative_checkpoint_bytes / (1024 * 1024),
-                'execution_records_mb': 0.0,
-                'tracking_metadata_mb': cumulative_var_count * 200 / (1024 * 1024),
-                'other_mb': (idx + 1) * 0.001,  # ~1KB per checkpoint
-            }
-
-            # Debug logging for checkpoint costs
-            cumulative_ckpt_mb = overhead_breakdown['checkpoints_mb']
-            if var_costs:
-                # Per-cell costs (for reference - may overcount due to sharing)
-                cell_checkpoint_bytes = sum(v.get('bytes', 0) for v in var_costs.values())
-                cell_ckpt_mb = cell_checkpoint_bytes / (1024 * 1024)
-                log(f"  This cell's vars: {cell_ckpt_mb:.1f}MB, TRUE Cumulative: {cumulative_ckpt_mb:.1f}MB")
-                log(f"  Variables in this checkpoint ({len(var_costs)}):")
-                for var_name, info in list(var_costs.items())[:3]:
-                    log(f"    {var_name}: {info.get('bytes', 0)/1024/1024:.2f}MB ({info.get('type')})")
-                if len(var_costs) > 3:
-                    log(f"    ... and {len(var_costs) - 3} more")
-            else:
-                log(f"  No checkpoint costs retrieved for cell {cell_id}, Cumulative: {cumulative_ckpt_mb:.1f}MB")
-
-            # Extract cumulative breakdown by type and variable (for Plots 3/4)
-            cumulative_by_type = cumulative_size.get('by_type', {})
-            cumulative_by_var = cumulative_size.get('by_variable', {})
-
-            gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
+            # Debug logging
+            log(f"  Namespace: {namespace_mb:.1f}MB, Checkpoint delta: {checkpoint_delta_mb:.1f}MB, "
+                f"Cumulative: {checkpoint_cumulative_mb:.1f}MB, GPU: {gpu_mb:.1f}MB")
+            if checkpoint_by_var:
+                top_vars = sorted(checkpoint_by_var.items(), key=lambda x: x[1], reverse=True)[:3]
+                log(f"  Top checkpoint vars: {', '.join(f'{k}={v:.2f}MB' for k, v in top_vars)}")
 
             if timing.get("error") and timing.get("cell_runtime_ms") is None:
                 log(f"  Error:\n{timing['error']}")
-                cell_total_overhead = sum(overhead_breakdown.values()) if overhead_breakdown else 0.0
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
-                    current_footprint_mb=0.0,
-                    max_footprint_mb=0.0,
-                    allocation_delta_mb=0.0,
-                    gpu_mem_samples=gpu_mem,
-                    checkpoint_var_costs=None,
-                    overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
-                    cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
-                    cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
-                    pre_only_bytes=pre_only_bytes,
-                    post_savings_bytes=post_savings_bytes,
-                    base_namespace_mb=0.0,
-                    total_overhead_mb=cell_total_overhead,
+                    namespace_mb=0.0,
+                    checkpoint_delta_mb=checkpoint_delta_mb,
+                    checkpoint_cumulative_mb=checkpoint_cumulative_mb,
+                    gpu_mb=gpu_mb,
+                    checkpoint_by_var=checkpoint_by_var,
                     status="error",
                     error=timing["error"]
                 ))
             else:
-                allocation_delta = current_mb - pre_stats.get("total_mb", 0.0)
-                cell_total_overhead = sum(overhead_breakdown.values()) if overhead_breakdown else 0.0
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
-                    current_footprint_mb=current_mb,
-                    max_footprint_mb=max_footprint_mb,
-                    allocation_delta_mb=allocation_delta,
-                    gpu_mem_samples=gpu_mem,
-                    checkpoint_var_costs=var_costs if var_costs else None,
-                    overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
-                    cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
-                    cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
-                    pre_only_bytes=pre_only_bytes,
-                    post_savings_bytes=post_savings_bytes,
-                    # TODO: base_namespace_mb should be current_mb - cell_total_overhead to
-                    # represent user namespace without FlowBook overhead. Currently includes
-                    # checkpoint memory, which makes overhead ratio calculations incorrect.
-                    base_namespace_mb=current_mb,
-                    total_overhead_mb=cell_total_overhead,
+                    namespace_mb=namespace_mb,
+                    checkpoint_delta_mb=checkpoint_delta_mb,
+                    checkpoint_cumulative_mb=checkpoint_cumulative_mb,
+                    gpu_mb=gpu_mb,
+                    checkpoint_by_var=checkpoint_by_var,
                     status="ok",
                 ))
-                cumulative_ckpt = overhead_breakdown.get('checkpoints_mb', 0) if overhead_breakdown else 0
-                pre_only_mb = pre_only_bytes / (1024 * 1024)
-                savings_mb = post_savings_bytes / (1024 * 1024)
-                log(f"  Namespace: {current_mb:.1f}MB, Delta: {allocation_delta:.1f}MB, Checkpoints: {cumulative_ckpt:.1f}MB (pre-only: {pre_only_mb:.1f}MB, post-savings: {savings_mb:.1f}MB)")
 
         # Execute reruns: run all cells k extra times (top-to-bottom)
         if rerun_k > 0:
@@ -1981,113 +2007,81 @@ def run_flowbook_memory(
 
                     # Get namespace size after cell
                     post_stats = get_namespace_size(kernel_client)
+                    namespace_mb = post_stats.get("total_mb", 0.0)
+                    max_footprint_mb = max(max_footprint_mb, namespace_mb)
 
-                    # Get checkpoint variable costs
-                    var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id)
+                    # Get checkpoint overhead using cumulative measurement
+                    overhead = get_checkpoint_overhead(kernel_client, cell_id)
+                    pre_name = f"_pre_{cell_id}"
+                    post_name = f"_post_{cell_id}"
+                    checkpoint_delta_mb = (
+                        overhead['by_checkpoint'].get(pre_name, 0.0) +
+                        overhead['by_checkpoint'].get(post_name, 0.0)
+                    )
+                    checkpoint_cumulative_mb = overhead.get('total_mb', 0.0)
+                    checkpoint_by_var = overhead.get('by_variable') or None
 
-                    # Get cumulative checkpoint size
-                    cumulative_size = get_flowbook_cumulative_checkpoint_size(kernel_client, cell_id)
-                    cumulative_checkpoint_bytes = cumulative_size.get('total_bytes', 0)
+                    gpu_mb = get_kernel_gpu_memory_mb(kernel_client)
 
-                    # Get pre/post checkpoint breakdown
-                    pre_post_sizes = get_flowbook_pre_post_checkpoint_sizes(kernel_client, cell_id)
-                    pre_only_bytes = pre_post_sizes.get('pre_only_bytes', 0)
-                    post_savings_bytes = pre_post_sizes.get('post_savings_bytes', 0)
-
-                    current_mb = post_stats.get("total_mb", 0.0)
-                    max_footprint_mb = max(max_footprint_mb, current_mb)
-
-                    if var_costs:
-                        cumulative_var_count += len(var_costs)
-
-                    overhead_breakdown = {
-                        'checkpoints_mb': cumulative_checkpoint_bytes / (1024 * 1024),
-                        'execution_records_mb': 0.0,
-                        'tracking_metadata_mb': cumulative_var_count * 200 / (1024 * 1024),
-                        'other_mb': (len(code_cells) + rerun_count) * 0.001,
-                    }
-
-                    cumulative_by_type = cumulative_size.get('by_type', {})
-                    cumulative_by_var = cumulative_size.get('by_variable', {})
-
-                    gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
-
-                    rerun_total_overhead = sum(overhead_breakdown.values()) if overhead_breakdown else 0.0
                     if timing.get("error") and timing.get("cell_runtime_ms") is None:
                         log(f"  Rerun Error:\n{timing['error']}")
                         results.rerun_cells.append(MemoryCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
-                            current_footprint_mb=0.0,
-                            max_footprint_mb=0.0,
-                            allocation_delta_mb=0.0,
-                            gpu_mem_samples=gpu_mem,
-                            checkpoint_var_costs=None,
-                            overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
-                            cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
-                            cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
-                            pre_only_bytes=pre_only_bytes,
-                            post_savings_bytes=post_savings_bytes,
-                            base_namespace_mb=0.0,
-                            total_overhead_mb=rerun_total_overhead,
+                            namespace_mb=0.0,
+                            checkpoint_delta_mb=checkpoint_delta_mb,
+                            checkpoint_cumulative_mb=checkpoint_cumulative_mb,
+                            gpu_mb=gpu_mb,
+                            checkpoint_by_var=checkpoint_by_var,
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
                         ))
                     else:
-                        allocation_delta = current_mb - pre_stats.get("total_mb", 0.0)
                         results.rerun_cells.append(MemoryCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
-                            current_footprint_mb=current_mb,
-                            max_footprint_mb=max_footprint_mb,
-                            allocation_delta_mb=allocation_delta,
-                            gpu_mem_samples=gpu_mem,
-                            checkpoint_var_costs=var_costs if var_costs else None,
-                            overhead_breakdown=overhead_breakdown if overhead_breakdown else None,
-                            cumulative_by_type=cumulative_by_type if cumulative_by_type else None,
-                            cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
-                            pre_only_bytes=pre_only_bytes,
-                            post_savings_bytes=post_savings_bytes,
-                            # TODO: See above - base_namespace_mb should exclude overhead
-                            base_namespace_mb=current_mb,
-                            total_overhead_mb=rerun_total_overhead,
+                            namespace_mb=namespace_mb,
+                            checkpoint_delta_mb=checkpoint_delta_mb,
+                            checkpoint_cumulative_mb=checkpoint_cumulative_mb,
+                            gpu_mb=gpu_mb,
+                            checkpoint_by_var=checkpoint_by_var,
                             status="ok",
                             is_rerun=True,
                         ))
-                        cumulative_ckpt = overhead_breakdown.get('checkpoints_mb', 0) if overhead_breakdown else 0
-                        pre_only_mb = pre_only_bytes / (1024 * 1024)
-                        savings_mb = post_savings_bytes / (1024 * 1024)
-                        log(f"  Rerun Namespace: {current_mb:.1f}MB, Delta: {allocation_delta:.1f}MB, Checkpoints: {cumulative_ckpt:.1f}MB (pre-only: {pre_only_mb:.1f}MB, post-savings: {savings_mb:.1f}MB)")
+                        log(f"  Rerun Namespace: {namespace_mb:.1f}MB, Delta: {checkpoint_delta_mb:.1f}MB, "
+                            f"Cumulative: {checkpoint_cumulative_mb:.1f}MB")
 
         # Get final stats
         final_stats = get_namespace_size(kernel_client)
-        final_gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
+        final_gpu_mb = get_kernel_gpu_memory_mb(kernel_client)
 
-        # Get final overhead and compute memory overhead ratio
-        final_overhead = get_flowbook_overhead_breakdown(kernel_client)
-        # Sum only the known numeric overhead fields
-        overhead_keys = ['checkpoints_mb', 'execution_records_mb', 'tracking_metadata_mb', 'other_mb']
-        total_overhead_mb = sum(final_overhead.get(k, 0.0) for k in overhead_keys) if final_overhead else 0.0
-        base_namespace_mb = final_stats.get("total_mb", 0.0)
-        if base_namespace_mb > 0:
-            memory_overhead_ratio = (base_namespace_mb + total_overhead_mb) / base_namespace_mb
+        # Get final checkpoint overhead (for last cell)
+        if code_cells:
+            last_cell_id = code_cells[-1].get("id", f"cell_{len(code_cells)-1}")
+            final_overhead = get_checkpoint_overhead(kernel_client, last_cell_id)
+            total_checkpoint_mb = final_overhead.get('total_mb', 0.0)
+        else:
+            total_checkpoint_mb = 0.0
+
+        namespace_mb = final_stats.get("total_mb", 0.0)
+        if namespace_mb > 0:
+            # Ratio = (namespace + checkpoint_overhead) / namespace
+            memory_overhead_ratio = (namespace_mb + total_checkpoint_mb) / namespace_mb
         else:
             memory_overhead_ratio = 1.0
 
         results.totals = {
-            "final_footprint_mb": final_stats.get("total_mb", 0.0),
-            "max_footprint_mb": max_footprint_mb,
-            "total_allocation_mb": final_stats.get("total_mb", 0.0) - before_stats.get("total_mb", 0.0),
-            "gpu_mem_samples": final_gpu_mem,
-            "base_namespace_mb": base_namespace_mb,
-            "total_overhead_mb": total_overhead_mb,
+            "final_namespace_mb": namespace_mb,
+            "max_namespace_mb": max_footprint_mb,
+            "total_checkpoint_mb": total_checkpoint_mb,
+            "gpu_mb": final_gpu_mb,
             "memory_overhead_ratio": memory_overhead_ratio,
         }
 
-        log(f"FlowBook Memory: Final namespace {final_stats.get('total_mb', 0):.1f}MB, "
-            f"Max {max_footprint_mb:.1f}MB, Overhead {total_overhead_mb:.1f}MB (ratio: {memory_overhead_ratio:.3f}x)" +
-            (f", GPU {final_gpu_mem:.1f}MB" if final_gpu_mem > 0 else ""))
+        log(f"FlowBook Memory: Final namespace {namespace_mb:.1f}MB, "
+            f"Max {max_footprint_mb:.1f}MB, Checkpoints {total_checkpoint_mb:.1f}MB (ratio: {memory_overhead_ratio:.3f}x)" +
+            (f", GPU {final_gpu_mb:.1f}MB" if final_gpu_mb > 0 else ""))
 
     finally:
         cleanup_kernel(kernel_manager, kernel_client)

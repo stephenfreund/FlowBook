@@ -2802,6 +2802,63 @@ class MemoryCheckpoints:
         # objects in the deepcopy cache, since those ARE part of checkpoint storage
         return sizer.sizeof_all_checkpoints(checkpoints_to_include, exclude_cached=False)
 
+    def get_overhead_beyond_namespace(
+        self,
+        cell_id: str,
+        namespace: dict,
+    ) -> dict:
+        """
+        Get checkpoint memory overhead beyond what's in the namespace.
+
+        This correctly handles Copy-on-Write sharing - memory shared between
+        checkpoints and namespace is not double-counted.
+
+        Uses cumulative measurement:
+        1. Measure namespace first (marks objects as seen)
+        2. Measure each checkpoint in order (only NEW objects counted)
+
+        Args:
+            cell_id: Cell ID to measure up to (inclusive)
+            namespace: Current user namespace dict (should be filtered)
+
+        Returns:
+            Dict with:
+            - total_mb: Total checkpoint memory beyond namespace
+            - by_checkpoint: Per-checkpoint delta in MB
+            - by_variable: Per-variable totals in MB (across all checkpoints)
+            - cumulative: Running total at each checkpoint in MB
+        """
+        from flowbook.kernel_support.heap_size import HeapSizer
+
+        pre_name = f"_pre_{cell_id}"
+        post_name = f"_post_{cell_id}"
+
+        # Collect checkpoints in order up to this cell
+        checkpoints = []
+        for name, ckpt in self.saved.items():
+            checkpoints.append((name, ckpt))
+            if name == post_name or name == pre_name:
+                break
+
+        if not checkpoints:
+            return {
+                'total_mb': 0.0,
+                'by_checkpoint': {},
+                'by_variable': {},
+                'cumulative': {},
+            }
+
+        sizer = HeapSizer()
+        result = sizer.sizeof_checkpoints_beyond_namespace(namespace, checkpoints)
+
+        # Convert dataclass to dict for easy serialization
+        return {
+            'total_mb': result.total_mb,
+            'by_checkpoint': dict(result.by_checkpoint),
+            'by_variable': dict(result.by_variable),
+            'cumulative': dict(result.cumulative),
+        }
+
     def get_pre_post_checkpoint_sizes_at_cell(self, cell_id: str) -> dict:
         """
         Get separate sizes for pre and post checkpoints up to and including a cell.

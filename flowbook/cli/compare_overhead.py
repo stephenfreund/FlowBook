@@ -690,39 +690,29 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         per_cell_checkpoint_overhead_ms.append(state_ms)
         per_cell_total_overhead_ms.append(state_ms + check_ms + other_ms)
 
-    # Per-cell memory overhead as ratio of checkpoint/user_ns
-    # This gives a proportion: 0 = no overhead, 1 = checkpoint equals user_ns size
-    staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
-    mb = 1024 * 1024
-
-    # First compute checkpoint bytes per cell
-    if staleness_mode == "syntactic":
-        checkpoint_bytes_list = [fc.get("pre_only_bytes", 0) for fc in flowbook_mem_cells]
-    else:
-        checkpoint_bytes_list = []
-        prev_cumulative = 0
-        for fc in flowbook_mem_cells:
-            overhead = fc.get("overhead_breakdown") or {}
-            cumulative_ckpt = overhead.get("checkpoints_mb", 0) * mb
-            delta = max(0, cumulative_ckpt - prev_cumulative)
-            checkpoint_bytes_list.append(delta)
-            prev_cumulative = cumulative_ckpt
-
-    # Compute ratio: checkpoint_size / user_ns_before_cell
-    # The checkpoint captures state BEFORE cell N runs, which equals state AFTER cell N-1.
-    # So we compare cell N's checkpoint to cell N-1's current_footprint_mb.
-    # Cell 0 has no prior state, so ratio = 0.
-    # Skip ratio for tiny namespaces (< 1 MB) - ratio not meaningful for empty kernels.
-    min_meaningful_ns_mb = 1.0
+    # Per-cell memory overhead as ratio of checkpoint_delta / (prev_namespace + prev_gpu)
+    # This gives a proportion: 0 = no overhead, 1 = checkpoint equals base memory size
+    # Uses the new simplified fields: checkpoint_delta_mb, namespace_mb, gpu_mb
+    min_meaningful_base_mb = 1.0
     for i, fc in enumerate(flowbook_mem_cells):
         if i == 0:
-            user_ns_before_mb = 0  # No prior namespace for first cell
+            base_mb = 0  # No prior namespace for first cell
         else:
-            user_ns_before_mb = flowbook_mem_cells[i - 1].get("current_footprint_mb", 0)
+            prev_cell = flowbook_mem_cells[i - 1]
+            # Support both old and new field names for backward compatibility during transition
+            namespace = prev_cell.get("namespace_mb", prev_cell.get("current_footprint_mb", 0))
+            gpu = prev_cell.get("gpu_mb", prev_cell.get("gpu_mem_samples", 0))
+            base_mb = namespace + gpu
 
-        if user_ns_before_mb >= min_meaningful_ns_mb:
-            user_ns_bytes = user_ns_before_mb * mb
-            ratio = checkpoint_bytes_list[i] / user_ns_bytes
+        # Get checkpoint delta (new field) or compute from old fields
+        delta_mb = fc.get("checkpoint_delta_mb")
+        if delta_mb is None:
+            # Fall back to old field computation
+            overhead = fc.get("overhead_breakdown") or {}
+            delta_mb = overhead.get("checkpoints_mb", 0)
+
+        if base_mb >= min_meaningful_base_mb:
+            ratio = delta_mb / base_mb
         else:
             ratio = 0.0  # Namespace too small for meaningful ratio
         per_cell_memory_overhead_mb.append(ratio)  # Note: field name kept for compatibility
@@ -2209,113 +2199,59 @@ def plot_combined_v2(
     ax.tick_params(axis='both', labelsize=tick_size)
 
     # ========== Panel 3: Memory Overhead (middle-left) ==========
+    # Uses simplified fields: namespace_mb, checkpoint_cumulative_mb, gpu_mb
     ax = axes[2]
     if has_memory:
         mem_cells_arr = np.arange(1, len(flowbook_mem_cells) + 1)
-        # Handle case when baseline memory is not available
-        if has_baseline_memory and len(baseline_mem_cells) == len(flowbook_mem_cells):
-            baseline_footprint = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells])
-            baseline_gpu = np.array([c.get("gpu_mem_samples", 0) for c in baseline_mem_cells])
-        else:
-            # No baseline - use base_namespace_mb from FlowBook as the "baseline"
-            # This is the size of user_ns without checkpoint data
-            baseline_footprint = np.array([c.get("base_namespace_mb", c.get("current_footprint_mb", 0)) for c in flowbook_mem_cells])
-            baseline_gpu = np.array([c.get("gpu_mem_samples", 0) for c in flowbook_mem_cells])
-        flowbook_footprint = np.array([c.get("current_footprint_mb", 0) for c in flowbook_mem_cells])
 
-        has_overhead_breakdown = any(c.get("overhead_breakdown") for c in flowbook_mem_cells)
+        # Extract namespace, checkpoint, and GPU memory using new simplified fields
+        # (with fallback to old field names for backward compatibility)
+        namespace_mb = np.array([
+            c.get("namespace_mb", c.get("current_footprint_mb", c.get("base_namespace_mb", 0)))
+            for c in flowbook_mem_cells
+        ])
+        checkpoint_cumulative_mb = np.array([
+            c.get("checkpoint_cumulative_mb", (c.get("overhead_breakdown") or {}).get("checkpoints_mb", 0))
+            for c in flowbook_mem_cells
+        ])
+        gpu_mb = np.array([
+            c.get("gpu_mb", c.get("gpu_mem_samples", 0))
+            for c in flowbook_mem_cells
+        ])
 
-        if has_overhead_breakdown:
-            checkpoints_mb = np.array([
-                (c.get("overhead_breakdown") or {}).get("checkpoints_mb", 0)
-                for c in flowbook_mem_cells
-            ])
-            execution_records_mb = np.array([
-                (c.get("overhead_breakdown") or {}).get("execution_records_mb", 0)
-                for c in flowbook_mem_cells
-            ])
-            tracking_metadata_mb = np.array([
-                (c.get("overhead_breakdown") or {}).get("tracking_metadata_mb", 0)
-                for c in flowbook_mem_cells
-            ])
-            other_overhead_mb = np.array([
-                (c.get("overhead_breakdown") or {}).get("other_mb", 0)
-                for c in flowbook_mem_cells
-            ])
+        has_gpu = np.any(gpu_mb > 0)
+        stack_colors = sns.color_palette("Set2", 5)
 
-            stack_colors = sns.color_palette("Set2", 5)
-            has_gpu = any(g > 0 for g in baseline_gpu)
+        # Layer 1: User namespace (bottom - gray)
+        ax.fill_between(mem_cells_arr, 0, namespace_mb, alpha=0.4, color='gray', label='User Namespace')
+        cumulative_mem = namespace_mb.copy()
 
-            # Layer 1: Baseline CPU memory (bottom - gray)
-            base_label = 'Baseline CPU' if has_baseline_memory else 'User Namespace'
-            ax.fill_between(mem_cells_arr, 0, baseline_footprint, alpha=0.3, color='gray', label=base_label)
-            cumulative_mem = baseline_footprint.copy()
-
-            # Layer 2: GPU memory (if present)
-            if has_gpu:
-                next_level = cumulative_mem + baseline_gpu
-                ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.4, color='orange', label='GPU Memory')
-                cumulative_mem = next_level
-
-            # Layer 3: FlowBook overhead categories
-            next_level = cumulative_mem + checkpoints_mb
-            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.5, color=stack_colors[0], label='Checkpoints')
+        # Layer 2: GPU memory (if present)
+        if has_gpu:
+            next_level = cumulative_mem + gpu_mb
+            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.4, color='orange', label='GPU Memory')
             cumulative_mem = next_level
 
-            next_level = cumulative_mem + execution_records_mb
-            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.5, color=stack_colors[1], label='Exec Records')
-            cumulative_mem = next_level
+        # Layer 3: Checkpoint overhead
+        next_level = cumulative_mem + checkpoint_cumulative_mb
+        ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.5, color='steelblue', label='Checkpoints')
+        cumulative_mem = next_level
 
-            next_level = cumulative_mem + tracking_metadata_mb
-            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.5, color=stack_colors[2], label='Tracking')
-            cumulative_mem = next_level
+        # Draw namespace line for reference
+        ax.plot(mem_cells_arr, namespace_mb, color='gray', linewidth=2, linestyle='--')
 
-            next_level = cumulative_mem + other_overhead_mb
-            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.5, color=stack_colors[3], label='Other')
-            cumulative_mem = next_level
+        # Calculate and annotate PEAK overhead percentage
+        base_mem = namespace_mb + gpu_mb  # Base = namespace + GPU
+        peak_overhead = np.max(cumulative_mem - base_mem)
+        peak_idx = np.argmax(cumulative_mem - base_mem)
+        if base_mem[peak_idx] > 0:
+            peak_overhead_pct = peak_overhead / base_mem[peak_idx] * 100
+            ax.annotate(f'{peak_overhead_pct:.1f}% peak overhead',
+                        xy=(mem_cells_arr[peak_idx], cumulative_mem[peak_idx]),
+                        xytext=(5, 5), textcoords='offset points',
+                        fontsize=legend_size, va='bottom', ha='left', color=colors[1])
 
-            # Draw baseline line for reference
-            ax.plot(mem_cells_arr, baseline_footprint, color='gray', linewidth=2, linestyle='--')
-
-            # Calculate and annotate PEAK overhead percentage
-            peak_overhead = np.max(cumulative_mem - baseline_footprint)
-            peak_idx = np.argmax(cumulative_mem - baseline_footprint)
-            if baseline_footprint[peak_idx] > 0:
-                peak_overhead_pct = peak_overhead / baseline_footprint[peak_idx] * 100
-                ax.annotate(f'{peak_overhead_pct:.1f}% peak overhead',
-                            xy=(mem_cells_arr[peak_idx], cumulative_mem[peak_idx]),
-                            xytext=(5, 5), textcoords='offset points',
-                            fontsize=legend_size, va='bottom', ha='left', color=colors[1])
-        else:
-            has_gpu = any(g > 0 for g in baseline_gpu)
-            base_label = 'Baseline CPU' if has_baseline_memory else 'User Namespace'
-            ax.fill_between(mem_cells_arr, 0, baseline_footprint, alpha=0.3, color=colors[0], label=base_label)
-            cumulative_mem = baseline_footprint.copy()
-
-            if has_gpu:
-                next_level = cumulative_mem + baseline_gpu
-                ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.4, color='orange', label='GPU Memory')
-                cumulative_mem = next_level
-
-            flowbook_overhead_mem = np.maximum(flowbook_footprint - baseline_footprint, 0)
-            next_level = cumulative_mem + flowbook_overhead_mem
-            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.3, color=colors[1], label='FlowBook Overhead')
-            cumulative_mem = next_level
-
-            ax.plot(mem_cells_arr, baseline_footprint, color=colors[0], linewidth=2, marker='o', markersize=4)
-
-            # Calculate and annotate PEAK overhead percentage
-            peak_overhead = np.max(cumulative_mem - baseline_footprint)
-            peak_idx = np.argmax(cumulative_mem - baseline_footprint)
-            if baseline_footprint[peak_idx] > 0:
-                peak_overhead_pct = peak_overhead / baseline_footprint[peak_idx] * 100
-                ax.annotate(f'{peak_overhead_pct:.1f}% peak overhead',
-                            xy=(mem_cells_arr[peak_idx], cumulative_mem[peak_idx]),
-                            xytext=(5, 5), textcoords='offset points',
-                            fontsize=legend_size, va='bottom', ha='left', color=colors[1])
-
-        title = 'Memory Overhead' if has_baseline_memory else 'Memory (FlowBook only)'
-        ax.set_title(title, fontsize=title_size)
+        ax.set_title('Memory Overhead', fontsize=title_size)
         ax.set_xlabel('Cell Number', fontsize=label_size)
         ax.set_ylabel('Memory (MB)', fontsize=label_size)
 
@@ -2339,25 +2275,27 @@ def plot_combined_v2(
         mb = 1024 * 1024
         mem_var_types = var_data.get("var_types", {})
 
-        # Get baseline memory for reference
-        baseline_footprint_var = np.zeros(len(var_cells))
+        # Get namespace memory for reference (use new simplified fields with fallback)
+        namespace_var = np.zeros(len(var_cells))
         gpu_mem_var = np.zeros(len(var_cells))
         if has_baseline_memory and len(baseline_mem_cells) >= len(var_cells):
-            baseline_footprint_var = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells[:len(var_cells)]])
-            gpu_mem_var = np.array([c.get("gpu_mem_samples", 0) for c in baseline_mem_cells[:len(var_cells)]])
+            namespace_var = np.array([c.get("namespace_mb", c.get("current_footprint_mb", 0)) for c in baseline_mem_cells[:len(var_cells)]])
+            gpu_mem_var = np.array([c.get("gpu_mb", c.get("gpu_mem_samples", 0)) for c in baseline_mem_cells[:len(var_cells)]])
         elif has_memory and len(flowbook_mem_cells) >= len(var_cells):
-            # No baseline - use base_namespace_mb from FlowBook
-            baseline_footprint_var = np.array([c.get("base_namespace_mb", c.get("current_footprint_mb", 0)) for c in flowbook_mem_cells[:len(var_cells)]])
-            gpu_mem_var = np.array([c.get("gpu_mem_samples", 0) for c in flowbook_mem_cells[:len(var_cells)]])
+            # Use FlowBook namespace
+            namespace_var = np.array([
+                c.get("namespace_mb", c.get("current_footprint_mb", c.get("base_namespace_mb", 0)))
+                for c in flowbook_mem_cells[:len(var_cells)]
+            ])
+            gpu_mem_var = np.array([c.get("gpu_mb", c.get("gpu_mem_samples", 0)) for c in flowbook_mem_cells[:len(var_cells)]])
 
         has_gpu_var = any(g > 0 for g in gpu_mem_var)
 
-        # Draw baseline memory first (bottom layer)
-        base_label = 'Baseline Memory' if has_baseline_memory else 'User Namespace'
-        ax.fill_between(var_cells, 0, baseline_footprint_var, alpha=0.3, color='gray', label=base_label)
-        cumulative_var = baseline_footprint_var.copy()
+        # Draw namespace memory first (bottom layer)
+        ax.fill_between(var_cells, 0, namespace_var, alpha=0.3, color='gray', label='User Namespace')
+        cumulative_var = namespace_var.copy()
 
-        # Layer 2: GPU memory (if present) - between baseline and checkpoints
+        # Layer 2: GPU memory (if present) - between namespace and checkpoints
         if has_gpu_var:
             next_level = cumulative_var + gpu_mem_var
             ax.fill_between(var_cells, cumulative_var, next_level, alpha=0.4, color='orange', label='GPU Memory')
@@ -2371,8 +2309,8 @@ def plot_combined_v2(
             ax.fill_between(var_cells, cumulative_var, cumulative_var + data_mb, alpha=0.7, color=var_colors[i], label=label)
             cumulative_var = cumulative_var + data_mb
 
-        # Draw baseline line (CPU only, for reference)
-        ax.plot(var_cells, baseline_footprint_var, color='gray', linewidth=2, linestyle='--')
+        # Draw namespace line (for reference)
+        ax.plot(var_cells, namespace_var, color='gray', linewidth=2, linestyle='--')
 
         # Add separator line for rerun phase
         var_initial_count = var_data.get("initial_count", len(var_cells))
@@ -2426,48 +2364,33 @@ def plot_combined_v2(
     ax.tick_params(axis='both', labelsize=tick_size)
 
     # ========== Panel 6: Checkpoint Memory Overhead Ratio per Cell (bottom-right) ==========
-    # Shows checkpoint size as a proportion of user namespace size (0 = none, 1 = same size)
+    # Shows checkpoint_delta / (prev_namespace + prev_gpu) - the ratio of new checkpoint data to base memory
+    # Uses simplified fields: checkpoint_delta_mb, namespace_mb, gpu_mb
     ax = axes[5]
-    staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
 
     if flowbook_mem_cells:
-        mb = 1024 * 1024
         cell_nums = list(range(1, len(flowbook_mem_cells) + 1))
+        min_meaningful_base_mb = 1.0
 
-        # Compute checkpoint size per cell
-        if staleness_mode == "syntactic":
-            # Syntactic mode: use pre_only_bytes directly (only one checkpoint at a time)
-            checkpoint_bytes = [c.get("pre_only_bytes", 0) for c in flowbook_mem_cells]
-        else:
-            # Semantic mode: compute delta from cumulative checkpoint values
-            checkpoint_bytes = []
-            prev_cumulative = 0
-            for c in flowbook_mem_cells:
-                overhead = c.get("overhead_breakdown") or {}
-                cumulative_ckpt = overhead.get("checkpoints_mb", 0) * mb
-                delta = max(0, cumulative_ckpt - prev_cumulative)
-                checkpoint_bytes.append(delta)
-                prev_cumulative = cumulative_ckpt
-
-        # Compute ratio: checkpoint_bytes / (user_ns_before_cell + gpu_memory)
-        # The checkpoint captures state BEFORE cell N runs, which equals state AFTER cell N-1.
-        # So we compare cell N's checkpoint to cell N-1's total memory (CPU + GPU).
-        # Cell 0 has no prior state, so ratio = 0.
-        # Skip ratio for tiny namespaces (< 1 MB) - ratio not meaningful for empty kernels.
-        min_meaningful_ns_mb = 1.0
         ratios = []
         for i, c in enumerate(flowbook_mem_cells):
+            # Get checkpoint delta (new field) or fall back to old computation
+            delta_mb = c.get("checkpoint_delta_mb")
+            if delta_mb is None:
+                overhead = c.get("overhead_breakdown") or {}
+                delta_mb = overhead.get("checkpoints_mb", 0)
+
             if i == 0:
                 base_mb = 0  # No prior namespace for first cell
             else:
                 prev_cell = flowbook_mem_cells[i - 1]
-                cpu_mb = prev_cell.get("current_footprint_mb", 0)
-                gpu_mb = prev_cell.get("gpu_mem_samples", 0)
-                base_mb = cpu_mb + gpu_mb
+                # Support both old and new field names
+                namespace = prev_cell.get("namespace_mb", prev_cell.get("current_footprint_mb", 0))
+                gpu = prev_cell.get("gpu_mb", prev_cell.get("gpu_mem_samples", 0))
+                base_mb = namespace + gpu
 
-            if base_mb >= min_meaningful_ns_mb:
-                base_bytes = base_mb * mb
-                ratio = checkpoint_bytes[i] / base_bytes
+            if base_mb >= min_meaningful_base_mb:
+                ratio = delta_mb / base_mb
             else:
                 ratio = 0.0  # Namespace too small for meaningful ratio
             ratios.append(ratio)

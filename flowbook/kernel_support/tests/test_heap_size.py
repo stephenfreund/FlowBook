@@ -1159,6 +1159,189 @@ class TestExtensionArrayDeduplication:
         assert size2 == 0, "Same DataFrame should return 0 on second measurement"
 
 
+class TestCheckpointOverheadBeyondNamespace:
+    """Tests for sizeof_checkpoints_beyond_namespace method.
+
+    This method properly measures checkpoint memory BEYOND what's in the namespace,
+    correctly handling Copy-on-Write sharing. It fixes the issue where checkpoint
+    overhead was incorrectly reported as 4x+ the namespace size.
+    """
+
+    def test_basic_checkpoint_overhead(self):
+        """Test basic checkpoint overhead measurement."""
+        from flowbook.kernel_support.heap_size import CheckpointOverhead
+
+        # Create namespace
+        ns = {'arr': np.zeros(10_000)}  # ~80KB
+
+        # Create mock checkpoint with same data
+        class MockCheckpoint:
+            def __init__(self, data):
+                self.user_ns = data
+
+        ckpt = MockCheckpoint({'arr': ns['arr']})  # Same object - CoW sharing
+
+        sizer = HeapSizer()
+        result = sizer.sizeof_checkpoints_beyond_namespace(ns, [('ckpt_0', ckpt)])
+
+        assert isinstance(result, CheckpointOverhead)
+        # Checkpoint should have minimal overhead since it shares the same object
+        assert result.total_mb < 0.01, f"Expected minimal overhead, got {result.total_mb}MB"
+        assert 'ckpt_0' in result.by_checkpoint
+        assert 'ckpt_0' in result.cumulative
+
+    def test_checkpoint_with_new_data(self):
+        """Test checkpoint with data not in namespace."""
+        class MockCheckpoint:
+            def __init__(self, data):
+                self.user_ns = data
+
+        # Namespace has one array
+        ns = {'arr1': np.zeros(10_000)}  # ~80KB
+
+        # Checkpoint has different array
+        ckpt = MockCheckpoint({'arr2': np.zeros(10_000)})  # Different object
+
+        sizer = HeapSizer()
+        result = sizer.sizeof_checkpoints_beyond_namespace(ns, [('ckpt_0', ckpt)])
+
+        # Checkpoint should have ~80KB overhead (new data)
+        assert result.total_mb > 0.07, f"Expected ~80KB overhead, got {result.total_mb}MB"
+        assert result.total_mb < 0.1
+        assert result.by_checkpoint['ckpt_0'] > 0.07
+
+    def test_multiple_checkpoints_cumulative(self):
+        """Test that multiple checkpoints measure cumulatively."""
+        class MockCheckpoint:
+            def __init__(self, data):
+                self.user_ns = data
+
+        # Namespace
+        ns = {'x': 1}
+
+        # Three checkpoints, each with new data
+        arr1 = np.zeros(10_000)  # ~80KB
+        arr2 = np.zeros(10_000)  # ~80KB
+        arr3 = np.zeros(10_000)  # ~80KB
+
+        ckpt1 = MockCheckpoint({'arr1': arr1})
+        ckpt2 = MockCheckpoint({'arr2': arr2})
+        ckpt3 = MockCheckpoint({'arr3': arr3})
+
+        sizer = HeapSizer()
+        result = sizer.sizeof_checkpoints_beyond_namespace(
+            ns, [('ckpt_1', ckpt1), ('ckpt_2', ckpt2), ('ckpt_3', ckpt3)]
+        )
+
+        # Total should be ~240KB (all three arrays)
+        assert result.total_mb > 0.2, f"Expected ~240KB total, got {result.total_mb}MB"
+        assert result.total_mb < 0.3
+
+        # Each checkpoint adds ~80KB
+        assert result.by_checkpoint['ckpt_1'] > 0.07
+        assert result.by_checkpoint['ckpt_2'] > 0.07
+        assert result.by_checkpoint['ckpt_3'] > 0.07
+
+        # Cumulative should grow
+        assert result.cumulative['ckpt_1'] < result.cumulative['ckpt_2']
+        assert result.cumulative['ckpt_2'] < result.cumulative['ckpt_3']
+
+    def test_checkpoint_sharing_between_checkpoints(self):
+        """Test that shared data between checkpoints is deduplicated."""
+        class MockCheckpoint:
+            def __init__(self, data):
+                self.user_ns = data
+
+        ns = {'x': 1}
+
+        # Two checkpoints sharing the same array
+        shared_arr = np.zeros(100_000)  # ~800KB
+        ckpt1 = MockCheckpoint({'arr': shared_arr})
+        ckpt2 = MockCheckpoint({'arr': shared_arr})  # Same object
+
+        sizer = HeapSizer()
+        result = sizer.sizeof_checkpoints_beyond_namespace(
+            ns, [('ckpt_1', ckpt1), ('ckpt_2', ckpt2)]
+        )
+
+        # Total should be ~800KB (not 1.6MB)
+        assert result.total_mb > 0.7, f"Expected ~800KB, got {result.total_mb}MB"
+        assert result.total_mb < 1.0
+
+        # First checkpoint gets credit, second gets 0
+        assert result.by_checkpoint['ckpt_1'] > 0.7
+        assert result.by_checkpoint['ckpt_2'] < 0.01
+
+    def test_cow_sharing_with_dataframe(self):
+        """Test CoW sharing with pandas DataFrames."""
+        from flowbook.kernel_support.deepcopy import deepcopy
+
+        class MockCheckpoint:
+            def __init__(self, data):
+                self.user_ns = data
+
+        # Namespace with DataFrame
+        df = pd.DataFrame({'a': np.zeros(100_000)})  # ~800KB
+        ns = {'df': df}
+
+        # Checkpoint with CoW copy
+        df_copy = deepcopy(df, {})  # Should share underlying data
+        ckpt = MockCheckpoint({'df': df_copy})
+
+        sizer = HeapSizer()
+        result = sizer.sizeof_checkpoints_beyond_namespace(ns, [('ckpt_0', ckpt)])
+
+        # Checkpoint should have minimal overhead (CoW sharing)
+        assert result.total_mb < 0.1, \
+            f"CoW copy should have minimal overhead, got {result.total_mb}MB"
+
+    def test_empty_checkpoint(self):
+        """Test checkpoint without user_ns."""
+        class MockCheckpointNoNs:
+            pass
+
+        ns = {'x': 1}
+        ckpt = MockCheckpointNoNs()
+
+        sizer = HeapSizer()
+        result = sizer.sizeof_checkpoints_beyond_namespace(ns, [('ckpt_0', ckpt)])
+
+        assert result.total_mb == 0
+        assert result.by_checkpoint['ckpt_0'] == 0.0
+
+    def test_no_checkpoints(self):
+        """Test with empty checkpoint list."""
+        ns = {'x': np.zeros(10_000)}
+
+        sizer = HeapSizer()
+        result = sizer.sizeof_checkpoints_beyond_namespace(ns, [])
+
+        assert result.total_mb == 0
+        assert len(result.by_checkpoint) == 0
+        assert len(result.cumulative) == 0
+
+    def test_per_variable_breakdown(self):
+        """Test by_variable breakdown in result."""
+        class MockCheckpoint:
+            def __init__(self, data):
+                self.user_ns = data
+
+        ns = {'x': 1}
+
+        arr1 = np.zeros(50_000)  # ~400KB
+        arr2 = np.zeros(30_000)  # ~240KB
+        ckpt = MockCheckpoint({'var1': arr1, 'var2': arr2})
+
+        sizer = HeapSizer()
+        result = sizer.sizeof_checkpoints_beyond_namespace(ns, [('ckpt_0', ckpt)])
+
+        # Should have breakdown by variable
+        assert 'var1' in result.by_variable
+        assert 'var2' in result.by_variable
+        assert result.by_variable['var1'] > 0.3  # ~400KB
+        assert result.by_variable['var2'] > 0.2  # ~240KB
+
+
 class TestExtensionArrayRegression:
     """Regression tests for the infer_string memory growth bug.
 

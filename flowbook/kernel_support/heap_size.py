@@ -75,6 +75,15 @@ class AllCheckpointsSize:
     by_checkpoint: Dict[str, int]  # Per-checkpoint contribution (after dedup)
 
 
+@dataclass
+class CheckpointOverhead:
+    """Result of measuring checkpoint memory beyond namespace."""
+    total_mb: float  # Total checkpoint memory beyond namespace
+    by_checkpoint: Dict[str, float]  # Delta per checkpoint (in MB)
+    by_variable: Dict[str, float]  # Per-variable totals (in MB)
+    cumulative: Dict[str, float]  # Running total at each checkpoint (in MB)
+
+
 # Types that are atomic (no internal references to measure)
 _ATOMIC_TYPES = (
     type(None),
@@ -324,6 +333,72 @@ class HeapSizer:
             by_variable=by_variable,
             by_type=by_type,
             by_checkpoint=by_checkpoint,
+        )
+
+    def sizeof_checkpoints_beyond_namespace(
+        self,
+        namespace: Dict[str, Any],
+        checkpoints: List[tuple],
+    ) -> CheckpointOverhead:
+        """
+        Measure checkpoint memory BEYOND what's in the namespace.
+
+        Uses cumulative seen_ids to deduplicate:
+        1. Objects in namespace (measured first, marked as seen)
+        2. Objects shared between checkpoints (only counted once)
+
+        This correctly handles Copy-on-Write sharing between checkpoints
+        and the namespace - shared memory is not double-counted.
+
+        Args:
+            namespace: Current user namespace dict (filtered to exclude private/callable)
+            checkpoints: List of (checkpoint_name, MemoryCheckpoint) in execution order
+
+        Returns:
+            CheckpointOverhead with:
+            - total_mb: Total bytes in checkpoints not in namespace
+            - by_checkpoint: Dict of checkpoint_name -> delta MB
+            - by_variable: Dict of var_name -> total MB across all checkpoints
+            - cumulative: Dict of checkpoint_name -> running total MB
+        """
+        self.reset()
+
+        # Step 1: Measure namespace, mark all objects as seen
+        # This populates seen_ids with all namespace object IDs
+        self.sizeof_namespace(namespace)
+
+        # Step 2: Measure each checkpoint cumulatively (don't reset between)
+        # Objects already seen (from namespace or prior checkpoints) return 0
+        by_checkpoint: Dict[str, float] = {}
+        by_variable: Dict[str, float] = {}
+        cumulative: Dict[str, float] = {}
+        running_total_bytes = 0
+
+        for ckpt_name, ckpt in checkpoints:
+            if not hasattr(ckpt, 'user_ns'):
+                by_checkpoint[ckpt_name] = 0.0
+                cumulative[ckpt_name] = running_total_bytes / (1024 * 1024)
+                continue
+
+            ckpt_delta_bytes = 0
+            for var_name, obj in ckpt.user_ns.items():
+                # owned_only=True: don't follow views to base arrays owned elsewhere
+                size = self._sizeof(obj, owned_only=True)
+                ckpt_delta_bytes += size
+                if size > 0:
+                    var_mb = size / (1024 * 1024)
+                    by_variable[var_name] = by_variable.get(var_name, 0.0) + var_mb
+
+            delta_mb = ckpt_delta_bytes / (1024 * 1024)
+            by_checkpoint[ckpt_name] = delta_mb
+            running_total_bytes += ckpt_delta_bytes
+            cumulative[ckpt_name] = running_total_bytes / (1024 * 1024)
+
+        return CheckpointOverhead(
+            total_mb=running_total_bytes / (1024 * 1024),
+            by_checkpoint=by_checkpoint,
+            by_variable=by_variable,
+            cumulative=cumulative,
         )
 
     def _count_refs(self, obj: Any, depth: int = 0) -> None:
