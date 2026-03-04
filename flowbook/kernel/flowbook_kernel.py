@@ -973,6 +973,73 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             "ℹ️", "List checkpoints not supported in Reproducibility kernel"
         )
 
+    @line_magic
+    def df_subset_checkpoints(self, line: str) -> None:
+        """
+        Control DataFrame subset optimization for checkpoints.
+
+        When enabled, the checkpoint system detects DataFrames that are row-subsets
+        of other DataFrames and stores only indices instead of full copies.
+
+        Usage:
+            %df_subset_checkpoints on      - Enable optimization
+            %df_subset_checkpoints off     - Disable optimization
+            %df_subset_checkpoints status  - Show current settings
+
+        Example:
+            df_filtered = df[df['country'] != 'Canada']
+
+            Without optimization: checkpoint stores both df (100 MB) and df_filtered (80 MB)
+            With optimization: checkpoint stores df (100 MB) + indices (~1 MB)
+        """
+        line = line.strip().lower()
+
+        if line == "on":
+            self._checkpoint.set_df_subset_optimization(True)
+            self._display.display_icon_and_text(
+                "✓",
+                "DataFrame subset checkpoint optimization: ENABLED\n"
+                "  - Detects DataFrames that are row-subsets of other DataFrames\n"
+                "  - Stores indices instead of full copies\n"
+                "  - Use '%df_subset_checkpoints status' to see settings",
+            )
+
+        elif line == "off":
+            self._checkpoint.set_df_subset_optimization(False)
+            self._display.display_icon_and_text(
+                "✓", "DataFrame subset checkpoint optimization: DISABLED"
+            )
+
+        elif line == "status":
+            status = self._checkpoint.get_df_subset_optimization_status()
+            status_text = (
+                f"DataFrame Subset Checkpoint Optimization\n"
+                f"{'=' * 45}\n"
+                f"  Enabled:       {status['enabled']}\n"
+                f"  Min rows:      {status['min_rows']}\n"
+                f"  Min savings:   {status['min_savings_bytes'] / 1024:.1f} KB\n"
+                f"  Max DFs:       {status['max_dataframes']}\n"
+                f"  Timeout:       {status['timeout_ms']:.0f} ms"
+            )
+            self._display.display_icon_and_text("ℹ️", status_text)
+
+        elif line == "":
+            # No argument - show help
+            self._display.display_icon_and_text(
+                "ℹ️",
+                "Usage: %df_subset_checkpoints <on|off|status>\n"
+                "  on     - Enable DataFrame subset optimization\n"
+                "  off    - Disable DataFrame subset optimization\n"
+                "  status - Show current settings",
+            )
+
+        else:
+            self._display.display_icon_and_text(
+                "⚠️",
+                f"Unknown option: '{line}'\n"
+                "Usage: %df_subset_checkpoints <on|off|status>",
+            )
+
     # =========================================================================
     # Tracking Initialization
     # =========================================================================

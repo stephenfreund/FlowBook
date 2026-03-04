@@ -909,6 +909,13 @@ from flowbook.kernel_support.opaque import OpaqueRegistry
 from pandas.api.types import infer_dtype
 from flowbook.kernel_support.extended_types import TypeModel, get_type_model
 from flowbook.util.output import log, output, timer
+from flowbook.kernel_support.df_subset_detector import (
+    DataFrameSubsetDetector,
+    SubsetRelation,
+    SubsetDetectionResult,
+    reconstruct_from_subset,
+    topological_sort_relations,
+)
 
 
 # Enable copy-on-write mode for better performance with DataFrame copies
@@ -1565,6 +1572,7 @@ class MemoryCheckpoint:
         user_ns: dict[str, Any],
         cudf_origins: Optional['cudf_compat.CuDFOriginTracker'] = None,
         original_ids: Optional[Dict[str, int]] = None,
+        df_subset_relations: Optional[List['SubsetRelation']] = None,
     ):
         """
         Create a new checkpoint.
@@ -1576,6 +1584,9 @@ class MemoryCheckpoint:
             original_ids: Optional mapping from variable names to original object IDs
                 (before deep copy). Used for incremental checkpointing to detect
                 which objects can be reused without comparison.
+            df_subset_relations: Optional list of DataFrame subset relations for
+                optimized storage. When present, child DataFrames are stored as
+                indices into parent DataFrames rather than full copies.
         """
         self.name = name
         self.user_ns = user_ns
@@ -1588,6 +1599,10 @@ class MemoryCheckpoint:
         # cuDF origin tracking (for restore)
         from flowbook.kernel_support import cudf_compat
         self._cudf_origins = cudf_origins or cudf_compat.CuDFOriginTracker()
+
+        # DataFrame subset relations for optimized storage
+        # See df_subset_detector.py for details
+        self._df_subset_relations: List['SubsetRelation'] = df_subset_relations or []
 
         # Deep alias detection index (built lazily on first query)
         self._reachable_ids: Dict[str, Set[int]] = {}
@@ -1841,6 +1856,11 @@ class MemoryCheckpoints:
         self,
         sanity_check: bool = False,
         warn_classes: bool = True,
+        optimize_df_subsets: bool = False,
+        df_subset_min_rows: int = 100,
+        df_subset_min_savings_bytes: int = 10 * 1024,
+        df_subset_max_dataframes: int = 20,
+        df_subset_timeout_ms: float = 1000,
     ):
         """
         Initialize the checkpoint manager.
@@ -1849,10 +1869,28 @@ class MemoryCheckpoints:
             sanity_check: If True, verify copies match originals after save
             warn_classes: If True, warn when user-defined classes are checkpointed, since
                 class variables won't be properly restored. Default True.
+            optimize_df_subsets: If True, detect DataFrame subset relationships and
+                store indices instead of full copies. Default False.
+            df_subset_min_rows: Minimum rows for a DataFrame to be considered for
+                subset optimization. Default 100.
+            df_subset_min_savings_bytes: Minimum bytes saved to create a subset
+                relation. Default 10 KB.
+            df_subset_max_dataframes: Maximum number of DataFrames to analyze for
+                subset relationships. Default 20.
+            df_subset_timeout_ms: Maximum time in ms for subset detection. Default 1000.
         """
         self.sanity_check = sanity_check
         self.warn_classes = warn_classes
         self.saved: dict[str, MemoryCheckpoint] = {}
+
+        # DataFrame subset optimization settings
+        self.optimize_df_subsets = optimize_df_subsets
+        self._df_subset_detector = DataFrameSubsetDetector(
+            min_rows=df_subset_min_rows,
+            min_savings_bytes=df_subset_min_savings_bytes,
+            max_dataframes=df_subset_max_dataframes,
+            timeout_ms=df_subset_timeout_ms,
+        )
 
         # Register this instance as the singleton
         MemoryCheckpoints._instance = self
@@ -1868,6 +1906,34 @@ class MemoryCheckpoints:
         if hasattr(pd.options.mode, 'copy_on_write') and not pd.options.mode.copy_on_write:
             log("WARNING: pandas copy_on_write was disabled - re-enabling for checkpoint performance")
             pd.options.mode.copy_on_write = True
+
+    def set_df_subset_optimization(self, enabled: bool) -> None:
+        """
+        Enable or disable DataFrame subset optimization.
+
+        When enabled, the checkpoint system detects DataFrames that are row-subsets
+        of other DataFrames and stores only indices instead of full copies.
+
+        Args:
+            enabled: True to enable, False to disable
+        """
+        self.optimize_df_subsets = enabled
+        log(f"DataFrame subset checkpoint optimization: {'enabled' if enabled else 'disabled'}")
+
+    def get_df_subset_optimization_status(self) -> dict:
+        """
+        Get current DataFrame subset optimization settings.
+
+        Returns:
+            Dictionary with current settings including enabled state and thresholds.
+        """
+        return {
+            'enabled': self.optimize_df_subsets,
+            'min_rows': self._df_subset_detector.min_rows,
+            'min_savings_bytes': self._df_subset_detector.min_savings_bytes,
+            'max_dataframes': self._df_subset_detector.max_dataframes,
+            'timeout_ms': self._df_subset_detector.timeout_ms,
+        }
 
     def _estimate_size(self, variables: dict[str, Any]) -> int:
         """
@@ -2138,6 +2204,7 @@ class MemoryCheckpoints:
         with timer(key="checkpoint:deep_copy", message="Deep copying user namespace"):
             saved = {}
             removed = {}
+            df_subset_relations: List[SubsetRelation] = []
 
             for k in checkpointable_vars.keys() - checkpointable_values.keys():
                 removed[k] = get_type_model(user_ns[k])
@@ -2152,9 +2219,25 @@ class MemoryCheckpoints:
             # Track original IDs before deep copy (for incremental checkpointing)
             original_ids = {k: id(v) for k, v in checkpointable_values.items()}
 
-            # Use helper to deep copy all variables
+            # Detect DataFrame subset relationships if enabled
+            child_vars: Set[str] = set()
+            if self.optimize_df_subsets:
+                with timer(key="checkpoint:df_subset_detect", message="Detecting DataFrame subsets"):
+                    subset_result = self._df_subset_detector.detect(checkpointable_values)
+                    child_vars = subset_result.child_vars
+                    df_subset_relations = subset_result.relations
+
+                    if subset_result.total_estimated_savings_bytes > 0:
+                        savings_mb = subset_result.total_estimated_savings_bytes / (1024 * 1024)
+                        log(f"DataFrame subset optimization: {len(df_subset_relations)} relations, "
+                            f"~{savings_mb:.1f} MB savings, {subset_result.detection_time_ms:.1f} ms")
+
+            # Separate variables: copy non-subset vars, store subset vars as relations
+            vars_to_copy = {k: v for k, v in checkpointable_values.items() if k not in child_vars}
+
+            # Use helper to deep copy non-subset variables
             with timer(key="checkpoint:deepcopy", message="Deep copying variables"):
-                cp, memo, failed = self._deep_copy_user_ns(checkpointable_values)
+                cp, memo, failed = self._deep_copy_user_ns(vars_to_copy)
 
             # Remove failed variables from original_ids
             for k in failed:
@@ -2169,11 +2252,15 @@ class MemoryCheckpoints:
                 for k in cp:
                     saved[k] = get_type_model(checkpointable_values[k])
 
+                # Also track child variables (stored as relations, not full copies)
+                for relation in df_subset_relations:
+                    saved[relation.child_var] = get_type_model(checkpointable_values[relation.child_var])
+
                 # Track variables that failed to copy
                 for k in failed:
                     removed[k] = get_type_model(checkpointable_values[k])
 
-            self.saved[name] = MemoryCheckpoint(name, cp, cudf_origins, original_ids)
+            self.saved[name] = MemoryCheckpoint(name, cp, cudf_origins, original_ids, df_subset_relations)
 
         if self.sanity_check:
             with timer(key="checkpoint:sanity_check", message="Running sanity check"):
@@ -2421,7 +2508,8 @@ class MemoryCheckpoints:
         Restore a checkpoint to the namespace.
 
         Clears all checkpointable variables from the namespace and replaces
-        them with deep copies from the checkpoint.
+        them with deep copies from the checkpoint. DataFrame subsets stored
+        as relations are reconstructed from their parent DataFrames.
 
         Args:
             name: Name of checkpoint to restore
@@ -2445,6 +2533,26 @@ class MemoryCheckpoints:
             restored_vars[k] = cp._cudf_origins.restore_value(k, restored_vars[k])
 
         user_ns.update(restored_vars)
+
+        # Reconstruct DataFrame subsets from relations
+        if cp._df_subset_relations:
+            with timer(key="restore:df_subsets", message="Reconstructing DataFrame subsets"):
+                # Sort relations to restore parents before children (handles chains)
+                sorted_relations = topological_sort_relations(cp._df_subset_relations)
+
+                for relation in sorted_relations:
+                    try:
+                        parent_df = user_ns.get(relation.parent_var)
+                        if parent_df is None:
+                            log(f"WARNING: Parent '{relation.parent_var}' not found for "
+                                f"subset '{relation.child_var}'")
+                            continue
+
+                        child_df = reconstruct_from_subset(parent_df, relation)
+                        user_ns[relation.child_var] = child_df
+
+                    except Exception as e:
+                        log(f"WARNING: Failed to reconstruct subset '{relation.child_var}': {e}")
 
     def type_models(self, user_ns: dict[str, Any]) -> dict[str, TypeModel]:
         """
