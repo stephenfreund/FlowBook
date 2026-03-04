@@ -905,70 +905,6 @@ def get_flowbook_pre_post_checkpoint_sizes(
     return {}
 
 
-def get_flowbook_recorded_checkpoint_size(
-    kernel_client, cell_id: str, timeout: float = 30.0
-) -> int:
-    """Get recorded checkpoint size for a cell in syntactic mode.
-
-    In syntactic mode, pre-checkpoints are deleted after computing write sets.
-    When checkpoint measurement is enabled, the size is recorded before deletion.
-
-    Args:
-        kernel_client: Kernel client to execute code on
-        cell_id: Cell ID to get checkpoint size for
-        timeout: Timeout in seconds
-
-    Returns:
-        Size in bytes, or 0 if not recorded
-    """
-    expr = f"get_ipython().kernel._enforcer.get_recorded_checkpoint_size('{cell_id}')"
-
-    msg_id = kernel_client.execute(
-        '',  # Empty code
-        user_expressions={'_recorded_size': expr},
-        silent=True,
-    )
-
-    # Wait for idle on iopub
-    start_time = time.time()
-    while True:
-        if time.time() - start_time > timeout:
-            return 0
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
-            continue
-        if msg['parent_header'].get('msg_id') != msg_id:
-            continue
-        if msg['header']['msg_type'] == 'status':
-            if msg['content']['execution_state'] == 'idle':
-                break
-
-    # Get the execute_reply
-    try:
-        import ast
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            try:
-                reply = kernel_client.get_shell_msg(timeout=1.0)
-            except Exception:
-                continue
-            if reply['parent_header'].get('msg_id') != msg_id:
-                continue
-            if reply['header']['msg_type'] != 'execute_reply':
-                continue
-
-            expr_result = reply['content'].get('user_expressions', {}).get('_recorded_size', {})
-            if expr_result.get('status') == 'ok':
-                text = expr_result['data']['text/plain']
-                return int(ast.literal_eval(text))
-            break
-    except Exception as e:
-        log(f"Failed to get recorded checkpoint size: {e}")
-
-    return 0
-
-
 def get_flowbook_overhead_breakdown(
     kernel_client, timeout: float = 30.0
 ) -> Dict[str, float]:
@@ -1690,13 +1626,6 @@ def run_flowbook_memory(
         _wait_for_idle(kernel_client)
         log(f"FlowBook Memory: staleness_mode set to {staleness_mode}")
 
-        # Enable checkpoint measurement in syntactic mode (pre-checkpoints are deleted,
-        # so we need to measure size before deletion)
-        if staleness_mode == "syntactic":
-            kernel_client.execute("%enable_checkpoint_measurement on", silent=True)
-            _wait_for_idle(kernel_client)
-            log("FlowBook Memory: checkpoint measurement enabled for syntactic mode")
-
         # Run a warm-up cell to trigger lazy initialization (cudf import, tracking patches, etc.)
         log("FlowBook Memory: Running warm-up cell...")
         warmup_result = execute_cell_flowbook(
@@ -1749,13 +1678,6 @@ def run_flowbook_memory(
             pre_post_sizes = get_flowbook_pre_post_checkpoint_sizes(kernel_client, cell_id)
             pre_only_bytes = pre_post_sizes.get('pre_only_bytes', 0)
             post_savings_bytes = pre_post_sizes.get('post_savings_bytes', 0)
-
-            # In syntactic mode, pre-checkpoints are deleted, so use recorded sizes
-            if staleness_mode == "syntactic" and pre_only_bytes == 0:
-                recorded_size = get_flowbook_recorded_checkpoint_size(kernel_client, cell_id)
-                if recorded_size > 0:
-                    pre_only_bytes = recorded_size
-                    log(f"  Using recorded pre-checkpoint size: {recorded_size / (1024*1024):.2f}MB")
 
             current_mb = post_stats.get("total_mb", 0.0)
             max_footprint_mb = max(max_footprint_mb, current_mb)
@@ -1880,12 +1802,6 @@ def run_flowbook_memory(
                     pre_post_sizes = get_flowbook_pre_post_checkpoint_sizes(kernel_client, cell_id)
                     pre_only_bytes = pre_post_sizes.get('pre_only_bytes', 0)
                     post_savings_bytes = pre_post_sizes.get('post_savings_bytes', 0)
-
-                    # In syntactic mode, pre-checkpoints are deleted, so use recorded sizes
-                    if staleness_mode == "syntactic" and pre_only_bytes == 0:
-                        recorded_size = get_flowbook_recorded_checkpoint_size(kernel_client, cell_id)
-                        if recorded_size > 0:
-                            pre_only_bytes = recorded_size
 
                     current_mb = post_stats.get("total_mb", 0.0)
                     max_footprint_mb = max(max_footprint_mb, current_mb)

@@ -679,9 +679,9 @@ class ReproducibilityEnforcer:
         self._conflict_resolver = ConflictResolver(
             structural_mode=_tracking_mode_to_structural_mode(structural_mode)
         )
-        # Checkpoint measurement for benchmarking (disabled by default)
-        self._measure_checkpoint_sizes = False
-        self._recorded_checkpoint_sizes: Dict[str, int] = {}
+        # Deferred checkpoint deletion for syntactic mode - keeps last checkpoint
+        # until next cell executes, allowing size queries between executions
+        self._pending_checkpoint_deletion: Optional[str] = None
 
     @property
     def structural_mode(self) -> StructuralTrackingMode:
@@ -723,36 +723,8 @@ class ReproducibilityEnforcer:
         ]
         for key in keys_to_delete:
             self.checkpoints.delete(key)
-
-    def enable_checkpoint_measurement(self, enabled: bool = True) -> None:
-        """Enable recording checkpoint sizes before deletion (for benchmarking).
-
-        When enabled, checkpoint sizes are measured and stored before being
-        deleted in syntactic mode. This allows compare-baseline to retrieve
-        accurate checkpoint sizes even though checkpoints are deleted.
-
-        Args:
-            enabled: Whether to enable measurement (default True)
-        """
-        from flowbook.util.output import log
-        self._measure_checkpoint_sizes = enabled
-        log(f"[Measurement] Checkpoint measurement {'enabled' if enabled else 'disabled'}")
-        if not enabled:
-            self._recorded_checkpoint_sizes.clear()
-
-    def get_recorded_checkpoint_size(self, cell_id: str) -> int:
-        """Get the recorded size for a deleted checkpoint.
-
-        In syntactic mode, checkpoints are deleted after computing write sets.
-        When measurement is enabled, the size is recorded before deletion.
-
-        Args:
-            cell_id: The cell ID to get checkpoint size for
-
-        Returns:
-            Size in bytes, or 0 if not recorded
-        """
-        return self._recorded_checkpoint_sizes.get(cell_id, 0)
+        # Also clear any pending deletion
+        self._pending_checkpoint_deletion = None
 
     @property
     def cell_order(self) -> List[str]:
@@ -1152,6 +1124,14 @@ class ReproducibilityEnforcer:
         )
         from flowbook.util.output import log
 
+        # Process deferred checkpoint deletion from previous cell (syntactic mode)
+        # This allows checkpoint size queries after a cell completes but before the next runs
+        if self._pending_checkpoint_deletion is not None:
+            self.checkpoints.delete(self._pending_checkpoint_deletion)
+            from flowbook.kernel_support.deepcopy import clear_container_cache
+            clear_container_cache()
+            self._pending_checkpoint_deletion = None
+
         self.seq_counter += 1
         my_position = self._get_position(cell_id)
         problems: List[Reason] = []
@@ -1408,9 +1388,12 @@ class ReproducibilityEnforcer:
 
         _changed_file_paths = tracking.file_writes if tracking.file_writes else None
 
+        # W_i_current = current tracking.writes (what cell claims to write now)
+        W_i_current = tracking.writes or set()
+
         with timer(key="check:ForwardStale", message=f"[Inst-Run] ForwardStale computation for {cell_id}"):
             stale, staleness_warnings = self._compute_forward_staleness(
-                namespace, W_i_vars, column_changed, cell_id, my_position,
+                namespace, W_i_old, W_i_current, W_i_vars, column_changed, cell_id, my_position,
                 changed_file_paths=_changed_file_paths,
             )
         log(f"[Inst-Run] {cell_id}: ForwardStale marked {len(stale)} cells")
@@ -1438,19 +1421,12 @@ class ReproducibilityEnforcer:
                 for col in cols:
                     self._notebook_state.column_last_writer[var][col] = cell_id
 
-        # In syntactic mode, clear the pre-checkpoint to save memory
-        # (we've already computed W_i from the diff, so checkpoint is no longer needed)
+        # In syntactic mode, defer checkpoint deletion until next cell executes.
+        # This allows checkpoint size queries after cell execution completes.
+        # (we've already computed W_i from the diff, so checkpoint is no longer needed
+        # for reproducibility checks, but we keep it for metrics collection)
         if self._staleness_mode == StalenessMode.SYNTACTIC:
-            # If measurement is enabled, record size before deletion (for benchmarking)
-            if self._measure_checkpoint_sizes:
-                checkpoint_name = f"{PRE_CHECKPOINT_PREFIX}{cell_id}"
-                size_info = self.checkpoints.get_checkpoint_size(checkpoint_name)
-                self._recorded_checkpoint_sizes[cell_id] = size_info.total_bytes
-                log(f"[Measurement] Recorded pre-checkpoint size for {cell_id}: {size_info.total_bytes} bytes")
-            self.checkpoints.delete(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
-            # Clear deepcopy caches since we're not reusing checkpoints
-            from flowbook.kernel_support.deepcopy import clear_container_cache
-            clear_container_cache()
+            self._pending_checkpoint_deletion = f"{PRE_CHECKPOINT_PREFIX}{cell_id}"
 
         # In semantic mode, check for convergence (stale cells that have converged)
         if self._staleness_mode == StalenessMode.SEMANTIC:
@@ -1872,6 +1848,8 @@ class ReproducibilityEnforcer:
     def _compute_forward_staleness(
         self,
         current_namespace: dict,
+        old_writes: Set[str],
+        current_writes: Set[str],
         changed_vars: Set[str],
         column_changed: Dict[str, List[str]],
         just_executed: str,
@@ -1883,21 +1861,22 @@ class ReproducibilityEnforcer:
 
         Dispatches to syntactic or semantic implementation based on staleness_mode.
 
-        Formal ref: ForwardStale(R, W, i, j) ≝ j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+        Formal ref: ForwardStale(R, W, W', i, j) ≝ j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
         FORMAL_DEVELOPMENT.md §3.3, line 187
         FORMAL_DEVELOPMENT.md §10 (Staleness Computation Modes)
         """
         if self._staleness_mode == StalenessMode.SYNTACTIC:
             return self._compute_forward_staleness_syntactic(
-                changed_vars, column_changed, just_executed, my_position, changed_file_paths
+                old_writes, changed_vars, column_changed, just_executed, my_position, changed_file_paths
             )
         else:
             return self._compute_forward_staleness_semantic(
-                current_namespace, changed_vars, column_changed, just_executed, my_position, changed_file_paths
+                current_namespace, old_writes, current_writes, changed_vars, column_changed, just_executed, my_position, changed_file_paths
             )
 
     def _compute_forward_staleness_syntactic(
         self,
+        old_writes: Set[str],
         changed_vars: Set[str],
         column_changed: Dict[str, List[str]],
         just_executed: str,
@@ -1905,15 +1884,21 @@ class ReproducibilityEnforcer:
         changed_file_paths: Optional[Set[str]] = None,
     ) -> Tuple[List[str], List[str]]:
         """
-        Syntactic ForwardStale: W_i ∩ R_j ≠ ∅ for j > i.
+        Syntactic ForwardStale: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅ for j > i.
+
+        Cell j becomes stale if cell i's old OR new writes overlap with
+        what cell j reads or writes.
 
         Uses pure set intersection on R/W sets. Does not use checkpoints for
         staleness comparison. Staleness is monotonic (once stale, stays stale
         until re-executed).
 
-        Formal ref: FORMAL_DEVELOPMENT.md §10.1
+        Formal ref: FORMAL_DEVELOPMENT.md §3.3, §10.1
         """
         all_warnings: List[str] = []
+
+        # Wᵢ ∪ W'ᵢ: all locations cell i has written (old or new)
+        W_i_union = old_writes | changed_vars
 
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:
@@ -1943,12 +1928,15 @@ class ReproducibilityEnforcer:
                         )
                     continue
 
-            # Syntactic check: pure set intersection W_i ∩ R_j
+            # Syntactic check: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
             cell_reads = cell_tracking.reads_before_writes or set()
-            overlap = changed_vars & cell_reads
+            cell_writes = cell_tracking.writes or set()
+            read_overlap = W_i_union & cell_reads   # Overlap with reads
+            write_overlap = W_i_union & cell_writes  # Overlap with writes
 
-            if overlap:
-                for var in overlap:
+            if read_overlap or write_overlap:
+                # First handle read overlaps (FORWARD_STALE or SKIPPED_UPSTREAM)
+                for var in read_overlap:
                     expected_writer = self._notebook_state.last_writer_for(var, cell_id)
                     if expected_writer != just_executed and expected_writer is not None:
                         self._notebook_state.add_reason(
@@ -1960,12 +1948,20 @@ class ReproducibilityEnforcer:
                             cell_id,
                             Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
                         )
+                # Then handle write-only overlaps (WRITE_OVERLAP - no convergence)
+                for var in write_overlap - read_overlap:
+                    self._notebook_state.add_reason(
+                        cell_id,
+                        Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
+                    )
 
         return self._notebook_state.get_stale_cells(), all_warnings
 
     def _compute_forward_staleness_semantic(
         self,
         current_namespace: dict,
+        old_writes: Set[str],
+        current_writes: Set[str],
         changed_vars: Set[str],
         column_changed: Dict[str, List[str]],
         just_executed: str,
@@ -1973,14 +1969,19 @@ class ReproducibilityEnforcer:
         changed_file_paths: Optional[Set[str]] = None,
     ) -> Tuple[List[str], List[str]]:
         """
-        Semantic ForwardStale: diff(pre_checkpoint[j], namespace, R_j) ≠ ∅ for j > i.
+        Semantic ForwardStale: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅ with semantic diff for reads.
 
-        Uses checkpoint diff comparison for precise staleness detection.
-        Staleness is non-monotonic (can be cleared when values converge).
+        For read overlaps: uses checkpoint diff comparison for precise staleness detection.
+        For write-only overlaps: marks stale immediately (no convergence for writes).
+        For removed writes (W'_i - W_i): marks stale immediately (dependency removed).
+        Staleness is non-monotonic for reads (can be cleared when values converge).
 
-        Formal ref: FORMAL_DEVELOPMENT.md §10.2
+        Formal ref: FORMAL_DEVELOPMENT.md §3.3, §10.2
         """
         all_warnings: List[str] = []
+
+        # Wᵢ ∪ W'ᵢ: all locations cell i has written (old or new)
+        W_i_union = old_writes | changed_vars
 
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:
@@ -2010,8 +2011,55 @@ class ReproducibilityEnforcer:
                         )
                     continue
 
-            # Skip if no variable-level overlap (quick filter)
+            # Compute syntactic overlap: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ)
+            cell_reads = cell_tracking.reads_before_writes or set()
+            cell_writes = cell_tracking.writes or set()
+            read_overlap = W_i_union & cell_reads
+            write_overlap = W_i_union & cell_writes
+
+            # Skip if no overlap at all
+            if not read_overlap and not write_overlap:
+                continue
+
+            # Write-only overlap: mark stale immediately (no convergence for writes)
+            # Use WRITE_OVERLAP reason type so convergence won't clear this staleness
+            if write_overlap and not read_overlap:
+                for var in write_overlap:
+                    self._notebook_state.add_reason(
+                        cell_id,
+                        Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
+                    )
+                continue
+
+            # Check for removed-writes overlap with reads: (W'_i - W_i) ∩ R_j
+            # If cell reads a variable that executing cell USED TO write but no longer
+            # writes, the dependency relationship has changed. Mark stale with WRITE_OVERLAP
+            # since this can't converge (the source of the variable has changed).
+            removed_writes = old_writes - current_writes
+            old_writes_read_overlap = removed_writes & cell_reads
+            if old_writes_read_overlap:
+                for var in old_writes_read_overlap:
+                    self._notebook_state.add_reason(
+                        cell_id,
+                        Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
+                    )
+                # Also handle any write_overlap
+                for var in write_overlap:
+                    self._notebook_state.add_reason(
+                        cell_id,
+                        Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
+                    )
+                continue
+
+            # Read overlap: use semantic diff check (skip if no relevant column overlap)
             if not self._has_relevant_overlap_by_id(cell_id, changed_vars, column_changed):
+                # No column-level overlap for reads, but mark stale for write overlap
+                if write_overlap:
+                    for var in write_overlap:
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
+                        )
                 continue
 
             # Semantic check: expensive diff comparison
@@ -2456,6 +2504,7 @@ class ReproducibilityEnforcer:
         self.seq_counter = 0
         self._cell_order = []
         self._notebook_state.clear()  # Clear status, R, W, last_writer, tracking_data
+        self._pending_checkpoint_deletion = None
 
 
 def _extract_column_changes(

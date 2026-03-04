@@ -3066,8 +3066,12 @@ class TestStalenessMode:
         # In semantic mode, B should NOT be stale anymore (converged)
         assert "b" not in result_a3.stale_cells
 
-    def test_syntactic_mode_discards_checkpoint_after_execution(self):
-        """Syntactic mode discards pre-checkpoint after computing W_i."""
+    def test_syntactic_mode_defers_checkpoint_deletion(self):
+        """Syntactic mode defers checkpoint deletion until next cell executes.
+
+        This allows checkpoint size queries after a cell completes but before
+        the next cell runs (important for benchmarking/compare_overhead).
+        """
         self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
 
         # Execute cell A
@@ -3080,8 +3084,26 @@ class TestStalenessMode:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # In syntactic mode, pre-checkpoint should be discarded
+        # In syntactic mode with deferred deletion, checkpoint A is STILL present
+        # (marked for pending deletion, but not yet deleted)
+        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
+        assert self.sdc._pending_checkpoint_deletion == f"{PRE_CHECKPOINT_PREFIX}a"
+
+        # Execute cell B - this triggers deletion of cell A's checkpoint
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Now checkpoint A should be deleted
         assert f"{PRE_CHECKPOINT_PREFIX}a" not in self.checkpoints.saved
+        # Checkpoint B is still present (pending deletion for next cell)
+        assert f"{PRE_CHECKPOINT_PREFIX}b" in self.checkpoints.saved
+        assert self.sdc._pending_checkpoint_deletion == f"{PRE_CHECKPOINT_PREFIX}b"
 
     def test_semantic_mode_keeps_checkpoint(self):
         """Semantic mode keeps pre-checkpoint for convergence detection."""
@@ -3575,3 +3597,245 @@ class TestStalenessAlwaysComputed:
         reason_types = {r.type for r in reasons_h_after}
         assert ReasonType.FORWARD_STALE in reason_types
         assert ReasonType.SKIPPED_UPSTREAM not in reason_types
+
+
+class TestForwardStaleFormula:
+    """Tests for ForwardStale formula: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+
+    The new formula marks cell j stale if:
+    - Cell i's old OR new writes overlap with cell j's reads OR writes
+
+    This is more conservative than the old formula (W'ᵢ ∩ Rⱼ ≠ ∅).
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        """Save a pre-checkpoint for a cell."""
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
+
+    def test_write_overlap_marks_stale(self):
+        """Cell j is stale if i writes to a variable that j also writes.
+
+        New behavior: (Wᵢ ∪ W'ᵢ) ∩ Wⱼ ≠ ∅ triggers staleness.
+        Old behavior would NOT mark j stale since j doesn't READ x.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert self.sdc._notebook_state.is_clean("a")
+
+        # B writes x (doesn't read it)
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"x", "y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # Re-run A with different value
+        self._save_pre_checkpoint("a", {"x": 1, "y": 10})
+        ns_a2 = self._make_namespace({"x": 2, "y": 10})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should be stale because A wrote x and B writes x
+        assert "b" in result.stale_cells
+
+    def test_old_writes_overlap_with_reads_marks_stale(self):
+        """Cell j is stale if i's OLD writes overlap with j's reads.
+
+        Scenario: Cell A writes x, then writes y (no longer writes x).
+        Cell B reads x. B should be stale because A's old writes included x.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        # Record that A wrote x
+        assert self.sdc._notebook_state.writes.get("a") == {"x"}
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "z": 10})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"z"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # Re-run A, now writes y instead of x (x unchanged in namespace)
+        self._save_pre_checkpoint("a", {"x": 1, "z": 10})
+        ns_a2 = self._make_namespace({"x": 1, "y": 5, "z": 10})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # B should be stale because A's OLD writes (x) overlap with B's reads (x)
+        # Even though A's NEW writes (y) don't overlap with B's reads
+        assert "b" in result.stale_cells
+
+    def test_old_writes_overlap_with_writes_marks_stale(self):
+        """Cell j is stale if i's OLD writes overlap with j's writes.
+
+        Scenario: Cell A writes x, then writes y (no longer writes x).
+        Cell B writes x. B should be stale because A's old writes included x.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B writes x (doesn't read it)
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 100})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # Re-run A, now writes y instead of x
+        self._save_pre_checkpoint("a", {"x": 100})
+        ns_a2 = self._make_namespace({"x": 100, "y": 5})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # B should be stale because A's OLD writes (x) overlap with B's writes (x)
+        assert "b" in result.stale_cells
+
+    def test_no_overlap_not_stale(self):
+        """Cell j is NOT stale if there's no overlap.
+
+        Formula: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) = ∅ means j is NOT stale.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads/writes completely different variables (y, z)
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 10, "z": 20})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"y"}, writes={"z"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # Re-run A with different value
+        self._save_pre_checkpoint("a", {"x": 1, "y": 10, "z": 20})
+        ns_a2 = self._make_namespace({"x": 2, "y": 10, "z": 20})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B should NOT be stale (no overlap: {x} ∩ {y, z} = ∅)
+        assert "b" not in result.stale_cells
+        assert self.sdc._notebook_state.is_clean("b")
+
+    def test_combined_old_and_new_writes(self):
+        """Both old and new writes contribute to staleness.
+
+        Wᵢ ∪ W'ᵢ means both old and new writes can trigger staleness.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x, C reads y
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "b_out": 10})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"b_out"}),
+        )
+
+        self._save_pre_checkpoint("c", {"x": 1, "b_out": 10, "y": 2})
+        ns_c = self._make_namespace({"x": 1, "b_out": 10, "y": 2, "c_out": 20})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"y"}, writes={"c_out"}),
+        )
+
+        assert self.sdc._notebook_state.is_clean("b")
+        assert self.sdc._notebook_state.is_clean("c")
+
+        # Re-run A, now writes y instead of x (old writes: {x}, new writes: {y})
+        self._save_pre_checkpoint("a", {"x": 1, "b_out": 10, "y": 2, "c_out": 20})
+        ns_a2 = self._make_namespace({"x": 1, "b_out": 10, "y": 99, "c_out": 20})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # B should be stale: old writes {x} overlap with B's reads {x}
+        # C should be stale: new writes {y} overlap with C's reads {y}
+        assert "b" in result.stale_cells
+        assert "c" in result.stale_cells

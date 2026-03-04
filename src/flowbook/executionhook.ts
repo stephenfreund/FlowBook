@@ -680,6 +680,23 @@ export class ReproducibilityExecutionHookManager {
             ? `Input modified by ${causingRef}`
             : 'Input was modified'
         };
+      case 'write_overlap':
+        // Write overlap: cell writes to location that earlier cell also writes
+        if (loc && causingRef) {
+          return {
+            type: 'writer_conflict',
+            causing_cell: cellId,
+            variables: [loc],
+            message: `Write overlap: \`${loc}\` also written by ${causingRef}`
+          };
+        }
+        return {
+          type: 'writer_conflict',
+          causing_cell: cellId,
+          message: causingRef
+            ? `Write overlap with ${causingRef}`
+            : 'Write overlap detected'
+        };
       case 'skipped_upstream':
         // Re-running won't help - need to run the expected cell first
         // If expected cell was deleted, say so clearly

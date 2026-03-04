@@ -397,7 +397,8 @@ class ReasonType(str, Enum):
     """Why a cell is stale.
 
     Names align with formal predicates from [Inst-Run] specification:
-    - FORWARD_STALE: ForwardStale(R,W,i,j) - cell j>i reads/writes location that i wrote
+    - FORWARD_STALE: ForwardStale(R,W,i,j) - cell j>i reads location that i wrote
+    - WRITE_OVERLAP: ForwardStale write part - cell j>i writes to location that i wrote
     - BACKWARD_STALE: BackwardStale(W,W',i,j) - cell j<i was last writer of removed write
     - NO_READ_BEFORE_WRITE: ¬NoReadBeforeWrite - reads location written by later cell
     - NO_WRITE_AFTER_READ: ¬NoWriteAfterRead - wrote location read by earlier fresh cell
@@ -406,7 +407,8 @@ class ReasonType(str, Enum):
 
     NEVER_EXECUTED = "never_executed"
     CODE_CHANGED = "code_changed"
-    FORWARD_STALE = "forward_stale"  # was INPUT_CHANGED
+    FORWARD_STALE = "forward_stale"  # was INPUT_CHANGED - cell reads location that changed
+    WRITE_OVERLAP = "write_overlap"  # cell writes to same location as earlier cell (no convergence)
     BACKWARD_STALE = "backward_stale"  # was WRITE_CONFLICT
     NO_READ_BEFORE_WRITE = "no_read_before_write"  # was READS_FROM_LATER
     READS_RESIDUAL_WRITE = "reads_residual_write"  # was SOURCE_DELETED

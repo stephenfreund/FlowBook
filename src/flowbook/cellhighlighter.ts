@@ -484,6 +484,14 @@ export class ReproducibilityCellHighlighter {
         return causingRef
           ? `Input modified by ${causingRef}`
           : 'Input was modified';
+      case 'write_overlap':
+        // Write overlap: both cells write to same location
+        if (loc && causingRef) {
+          return `Write overlap: \`${loc}\` also written by ${causingRef}`;
+        }
+        return causingRef
+          ? `Write overlap with ${causingRef}`
+          : 'Write overlap detected';
       case 'skipped_upstream':
         // Re-running won't help - need to run the expected cell first
         // If expected cell was deleted, say so clearly

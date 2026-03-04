@@ -691,7 +691,6 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         per_cell_total_overhead_ms.append(state_ms + check_ms + other_ms)
 
     # Per-cell memory overhead (from cumulative_by_var - compute delta between consecutive cells)
-    # Falls back to pre_only_bytes for syntactic mode where checkpoints are deleted
     prev_cumulative = 0
     for fc in flowbook_mem_cells:
         cumulative_by_var = fc.get("cumulative_by_var", {})
@@ -703,12 +702,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             per_cell_memory_overhead_mb.append(per_cell_bytes / (1024 * 1024))
             prev_cumulative = total_cumulative
         else:
-            # Fallback: use pre_only_bytes (already per-cell, not cumulative)
-            pre_only_bytes = fc.get("pre_only_bytes", 0)
-            if pre_only_bytes > 0:
-                per_cell_memory_overhead_mb.append(pre_only_bytes / (1024 * 1024))
-            else:
-                per_cell_memory_overhead_mb.append(0.0)
+            per_cell_memory_overhead_mb.append(0.0)
 
     return FileStats(
         notebook_path=notebook_path,
@@ -1804,53 +1798,34 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
         var_max: Dict[str, int] = {v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names}
     else:
         # Fall back to old method - derives from checkpoint_var_costs (may overcount)
-        # Check if checkpoint_var_costs has any non-zero bytes (not just exists)
-        def has_nonzero_costs(cell):
-            costs = cell.get("checkpoint_var_costs") or {}
-            return any(v.get("bytes", 0) > 0 for v in costs.values() if isinstance(v, dict))
-        has_costs = any(has_nonzero_costs(c) for c in memory_cells)
+        has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
 
-        # Third fallback: use pre_only_bytes (for syntactic mode where checkpoints are deleted)
-        has_pre_only = any(c.get("pre_only_bytes", 0) > 0 for c in memory_cells)
-
-        if not has_costs and not has_pre_only:
+        if not has_costs:
             return None
 
-        if has_costs:
-            # First pass: collect all variable names
-            all_var_names = set()
-            for c in memory_cells:
-                costs = c.get("checkpoint_var_costs") or {}
-                all_var_names.update(costs.keys())
+        # First pass: collect all variable names
+        all_var_names = set()
+        for c in memory_cells:
+            costs = c.get("checkpoint_var_costs") or {}
+            all_var_names.update(costs.keys())
 
-            # Initialize tracking - cumulative totals per variable
-            var_cumulative: Dict[str, int] = {v: 0 for v in all_var_names}
-            var_by_cell = {v: [] for v in all_var_names}
+        # Initialize tracking - cumulative totals per variable
+        var_cumulative: Dict[str, int] = {v: 0 for v in all_var_names}
+        var_by_cell = {v: [] for v in all_var_names}
 
-            # Second pass: collect CUMULATIVE data (OLD method - overcounts sharing)
-            for c in memory_cells:
-                costs = c.get("checkpoint_var_costs") or {}
+        # Second pass: collect CUMULATIVE data (OLD method - overcounts sharing)
+        for c in memory_cells:
+            costs = c.get("checkpoint_var_costs") or {}
 
-                for var_name in all_var_names:
-                    if var_name in costs:
-                        var_bytes = costs[var_name].get("bytes", 0)
-                        var_cumulative[var_name] += var_bytes
-                    # Append current cumulative value for this variable
-                    var_by_cell[var_name].append(var_cumulative[var_name])
+            for var_name in all_var_names:
+                if var_name in costs:
+                    var_bytes = costs[var_name].get("bytes", 0)
+                    var_cumulative[var_name] += var_bytes
+                # Append current cumulative value for this variable
+                var_by_cell[var_name].append(var_cumulative[var_name])
 
-            # Get MAX cumulative for ordering (captures peak contribution)
-            var_max = {v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names}
-        else:
-            # Use pre_only_bytes as single "Total" variable (syntactic mode fallback)
-            # pre_only_bytes is per-cell size, convert to cumulative for consistency
-            all_var_names = {"Total"}
-            cumulative = 0
-            var_by_cell = {"Total": []}
-            for c in memory_cells:
-                pre_bytes = c.get("pre_only_bytes", 0)
-                cumulative += pre_bytes
-                var_by_cell["Total"].append(cumulative)
-            var_max = {"Total": cumulative}
+        # Get MAX cumulative for ordering (captures peak contribution)
+        var_max = {v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names}
 
     # Order variables by MAX cumulative size descending (not final - captures vars that get cleaned up)
     vars_ordered = sorted(var_max.keys(), key=lambda v: var_max[v], reverse=True)

@@ -72,6 +72,7 @@ export type BackendReasonType =
   | 'never_executed' // Cell has never been run
   | 'code_changed' // Cell source code was edited
   | 'forward_stale' // A variable this cell reads was modified by another cell (was input_changed)
+  | 'write_overlap' // Cell writes to same location as earlier cell (no convergence)
   | 'backward_stale' // Another cell wrote to a variable this cell also writes (was write_conflict)
   | 'no_read_before_write' // Cell reads a value written by a later cell (was reads_from_later)
   | 'reads_residual_write' // The cell that wrote a variable this cell reads was deleted (was source_deleted)
