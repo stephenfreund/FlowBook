@@ -2395,9 +2395,33 @@ def plot_combined_v2(
 
     # ========== Panel 6: Checkpoint Memory Overhead per Cell (bottom-right) ==========
     ax = axes[5]
-    if var_data is not None:
-        # Use the same data as Panel 4: sum cumulative values across all variables per cell
-        # Then compute per-cell checkpoint size as delta from previous cell
+    staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
+
+    # In syntactic mode, use pre_only_bytes directly (only one checkpoint at a time)
+    # In semantic mode, compute delta from cumulative values
+    if staleness_mode == "syntactic" and flowbook_mem_cells:
+        mb = 1024 * 1024
+        cell_nums = list(range(1, len(flowbook_mem_cells) + 1))
+        per_cell_mem = [c.get("pre_only_bytes", 0) / mb for c in flowbook_mem_cells]
+
+        bar_width = 0.6
+        ax.bar(cell_nums, per_cell_mem, width=bar_width, alpha=0.7, color='#66c2a5')
+
+        ax.set_xlabel("Cell Number", fontsize=label_size)
+        ax.set_ylabel("Checkpoint Size (MB)", fontsize=label_size)
+
+        title = "Checkpoint Memory per Cell"
+        if memory_initial_count < len(flowbook_mem_cells):
+            title += f" (cells 1-{memory_initial_count} + {len(flowbook_mem_cells) - memory_initial_count} reruns)"
+            ax.axvline(x=memory_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+            ax.legend(loc="upper right", fontsize=legend_size)
+        ax.set_title(title, fontsize=title_size)
+
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax.set_xlim(left=0.5, right=len(cell_nums) + 0.5)
+        ax.set_ylim(bottom=0)
+    elif var_data is not None:
+        # Semantic mode: use cumulative values and compute delta
         mb = 1024 * 1024
         var_cells = np.array(var_data["cells"])
 

@@ -2663,8 +2663,8 @@ class MemoryCheckpoints:
         Get cumulative checkpoint size including all checkpoints up to and including
         the given cell.
 
-        This measures all checkpoints from _pre_* to _post_{cell_id} together,
-        properly accounting for memory sharing between checkpoints.
+        This measures all checkpoints from _pre_* to _post_{cell_id} (or _pre_{cell_id}
+        in syntactic mode) together, properly accounting for memory sharing between checkpoints.
 
         Args:
             cell_id: Cell ID (e.g., "abc1")
@@ -2675,13 +2675,15 @@ class MemoryCheckpoints:
         from flowbook.kernel_support.heap_size import HeapSizer, AllCheckpointsSize
 
         # Get all checkpoint names up to and including this cell
+        pre_name = f"_pre_{cell_id}"
         post_name = f"_post_{cell_id}"
         checkpoints_to_include = {}
 
         # Include all checkpoints up to the target cell
+        # Break on _post_{cell_id} (semantic mode) or _pre_{cell_id} (syntactic mode)
         for name, ckpt in self.saved.items():
             checkpoints_to_include[name] = ckpt
-            if name == post_name:
+            if name == post_name or name == pre_name:
                 break
 
         if not checkpoints_to_include:
@@ -2718,19 +2720,20 @@ class MemoryCheckpoints:
         """
         from flowbook.kernel_support.heap_size import HeapSizer
 
+        pre_name = f"_pre_{cell_id}"
         post_name = f"_post_{cell_id}"
 
         pre_checkpoints = {}
         post_checkpoints = {}
 
         # Collect checkpoints up to and including this cell
+        # Break on _post_{cell_id} (semantic mode) or _pre_{cell_id} (syntactic mode)
         for name, ckpt in self.saved.items():
             if name.startswith("_pre_"):
                 pre_checkpoints[name] = ckpt
             elif name.startswith("_post_"):
                 post_checkpoints[name] = ckpt
-            # Stop after we've included the target cell's post checkpoint
-            if name == post_name:
+            if name == post_name or name == pre_name:
                 break
 
         sizer = HeapSizer()
