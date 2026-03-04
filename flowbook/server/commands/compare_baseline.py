@@ -142,7 +142,6 @@ from flowbook import make_kernels
 from flowbook.kernel.flowbook_client import FlowbookKernelClient
 from flowbook.server.base import NotebookCommand, ProcessingResult
 from flowbook.server.config import FlowbookConfig
-from flowbook.util.gpu_memory import get_gpu_memory_mb
 from flowbook.util.output import log
 
 
@@ -767,6 +766,71 @@ def get_namespace_size(kernel_client, timeout: float = 30.0) -> Dict[str, Any]:
         log(traceback.format_exc())
 
     return {"total_bytes": 0, "total_mb": 0.0, "by_variable": {}, "by_type": {}}
+
+
+def get_kernel_gpu_memory_mb(kernel_client, timeout: float = 10.0) -> float:
+    """Get GPU memory usage from the kernel process.
+
+    GPU memory must be queried from the kernel process because that's where
+    cuDF/RAPIDS allocations happen. The server process won't see kernel GPU usage.
+
+    Args:
+        kernel_client: Kernel client to execute code on
+        timeout: Timeout in seconds
+
+    Returns:
+        GPU memory in MB, or 0.0 if unavailable
+    """
+    # Query GPU memory from kernel process using pynvml
+    expr_code = """(lambda: (
+        __import__('flowbook.util.gpu_memory', fromlist=['get_gpu_memory_mb'])
+        .get_gpu_memory_mb()
+    ))()"""
+
+    msg_id = kernel_client.execute(
+        '',  # Empty code - no side effects
+        user_expressions={'_gpu_mem': expr_code},
+        silent=True,
+    )
+
+    # Wait for idle on iopub channel
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            return 0.0
+        try:
+            msg = kernel_client.get_iopub_msg(timeout=1.0)
+        except Exception:
+            continue
+        if msg['parent_header'].get('msg_id') != msg_id:
+            continue
+        if msg['header']['msg_type'] == 'status':
+            if msg['content']['execution_state'] == 'idle':
+                break
+
+    # Get the execute_reply
+    try:
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                reply = kernel_client.get_shell_msg(timeout=1.0)
+            except Exception:
+                continue
+            if reply['parent_header'].get('msg_id') != msg_id:
+                continue
+            if reply['header']['msg_type'] != 'execute_reply':
+                continue
+
+            user_exprs = reply['content'].get('user_expressions', {})
+            expr = user_exprs.get('_gpu_mem', {})
+            if expr.get('status') == 'ok':
+                text = expr['data']['text/plain']
+                return float(text)
+            break
+    except Exception:
+        pass
+
+    return 0.0
 
 
 def get_flowbook_checkpoint_var_costs(
@@ -1593,13 +1657,13 @@ def run_baseline_memory(
                     current_footprint_mb=0.0,
                     max_footprint_mb=0.0,
                     allocation_delta_mb=0.0,
-                    gpu_mem_samples=get_gpu_memory_mb(),
+                    gpu_mem_samples=get_kernel_gpu_memory_mb(kernel_client),
                     status="error",
                     error=timing["error"]
                 ))
             else:
                 allocation_delta = current_mb - pre_stats.get("total_mb", 0.0)
-                gpu_mem = get_gpu_memory_mb()
+                gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
@@ -1649,14 +1713,14 @@ def run_baseline_memory(
                             current_footprint_mb=0.0,
                             max_footprint_mb=0.0,
                             allocation_delta_mb=0.0,
-                            gpu_mem_samples=get_gpu_memory_mb(),
+                            gpu_mem_samples=get_kernel_gpu_memory_mb(kernel_client),
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
                         ))
                     else:
                         allocation_delta = current_mb - pre_stats.get("total_mb", 0.0)
-                        gpu_mem = get_gpu_memory_mb()
+                        gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
                         results.rerun_cells.append(MemoryCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
@@ -1671,7 +1735,7 @@ def run_baseline_memory(
 
         # Get final stats
         final_stats = get_namespace_size(kernel_client)
-        final_gpu_mem = get_gpu_memory_mb()
+        final_gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
         results.totals = {
             "final_footprint_mb": final_stats.get("total_mb", 0.0),
             "max_footprint_mb": max_footprint_mb,
@@ -1816,7 +1880,7 @@ def run_flowbook_memory(
             cumulative_by_type = cumulative_size.get('by_type', {})
             cumulative_by_var = cumulative_size.get('by_variable', {})
 
-            gpu_mem = get_gpu_memory_mb()
+            gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
 
             if timing.get("error") and timing.get("cell_runtime_ms") is None:
                 log(f"  Error:\n{timing['error']}")
@@ -1924,7 +1988,7 @@ def run_flowbook_memory(
                     cumulative_by_type = cumulative_size.get('by_type', {})
                     cumulative_by_var = cumulative_size.get('by_variable', {})
 
-                    gpu_mem = get_gpu_memory_mb()
+                    gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
 
                     rerun_total_overhead = sum(overhead_breakdown.values()) if overhead_breakdown else 0.0
                     if timing.get("error") and timing.get("cell_runtime_ms") is None:
@@ -1976,7 +2040,7 @@ def run_flowbook_memory(
 
         # Get final stats
         final_stats = get_namespace_size(kernel_client)
-        final_gpu_mem = get_gpu_memory_mb()
+        final_gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
 
         # Get final overhead and compute memory overhead ratio
         final_overhead = get_flowbook_overhead_breakdown(kernel_client)
