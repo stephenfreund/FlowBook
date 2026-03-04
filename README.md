@@ -11,6 +11,8 @@
 
 Once JupyterLab opens, create or open a notebook and select the **FlowBook** kernel from the kernel picker. As you execute cells, FlowBook automatically highlights stale cells that must be run or re-run in yellow. It marks cells whose execution would violate reproducilibity in red. The metadata panel (right sidebar) shows a bunch of analysis state.  When no cells are stale, the notebook's outputs will match a top-to-bottom run in a newly-created kernel.
 
+Start with the `GettingStarted.ipynb` notebook, and them maybe the ones in the `examples` directory.
+
 ## Requirements
 
 - JupyterLab >= 4.0.0
