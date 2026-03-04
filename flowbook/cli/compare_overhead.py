@@ -2764,10 +2764,9 @@ def plot_overhead_cdfs(
                                   memory_stats_ratio, format_ratio, 'black', tick_size)
             add_percentile_gridlines(ax)
 
-            ax.set_xscale('log')
             ax.set_xlabel("Checkpoint / User NS Ratio", fontsize=label_size)
             ax.set_ylabel("Cumulative Probability", fontsize=label_size)
-            ax.set_title("Memory Overhead Ratio (Log Scale)", fontsize=title_size)
+            ax.set_title("Memory Overhead Ratio", fontsize=title_size)
             ax.set_ylim(0, 1.05)
 
             textstr = f'N={len(memory_data_ratio)}'
@@ -2776,7 +2775,7 @@ def plot_overhead_cdfs(
                     verticalalignment='top', horizontalalignment='left', bbox=props)
     else:
         ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-        ax.set_title("Memory Overhead Ratio (Log Scale)", fontsize=title_size)
+        ax.set_title("Memory Overhead Ratio", fontsize=title_size)
     ax.tick_params(axis='both', labelsize=tick_size)
 
     fig1.suptitle("Per-Cell Overhead CDFs (Full Distribution)", fontsize=title_size + 2, fontweight='bold')
