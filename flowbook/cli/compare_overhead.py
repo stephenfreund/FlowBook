@@ -2220,7 +2220,7 @@ def plot_combined_v2(
             # No baseline - use base_namespace_mb from FlowBook as the "baseline"
             # This is the size of user_ns without checkpoint data
             baseline_footprint = np.array([c.get("base_namespace_mb", c.get("current_footprint_mb", 0)) for c in flowbook_mem_cells])
-            baseline_gpu = np.zeros(len(flowbook_mem_cells))
+            baseline_gpu = np.array([c.get("gpu_mem_samples", 0) for c in flowbook_mem_cells])
         flowbook_footprint = np.array([c.get("current_footprint_mb", 0) for c in flowbook_mem_cells])
 
         has_overhead_breakdown = any(c.get("overhead_breakdown") for c in flowbook_mem_cells)
@@ -2341,27 +2341,38 @@ def plot_combined_v2(
 
         # Get baseline memory for reference
         baseline_footprint_var = np.zeros(len(var_cells))
+        gpu_mem_var = np.zeros(len(var_cells))
         if has_baseline_memory and len(baseline_mem_cells) >= len(var_cells):
             baseline_footprint_var = np.array([c.get("current_footprint_mb", 0) for c in baseline_mem_cells[:len(var_cells)]])
+            gpu_mem_var = np.array([c.get("gpu_mem_samples", 0) for c in baseline_mem_cells[:len(var_cells)]])
         elif has_memory and len(flowbook_mem_cells) >= len(var_cells):
             # No baseline - use base_namespace_mb from FlowBook
             baseline_footprint_var = np.array([c.get("base_namespace_mb", c.get("current_footprint_mb", 0)) for c in flowbook_mem_cells[:len(var_cells)]])
+            gpu_mem_var = np.array([c.get("gpu_mem_samples", 0) for c in flowbook_mem_cells[:len(var_cells)]])
+
+        has_gpu_var = any(g > 0 for g in gpu_mem_var)
 
         # Draw baseline memory first (bottom layer)
         base_label = 'Baseline Memory' if has_baseline_memory else 'User Namespace'
-        ax.fill_between(var_cells, 0, baseline_footprint_var, alpha=0.3, color=colors[0], label=base_label)
-
-        # Stack checkpoint variables on top of baseline
-        stacked = [np.array(var_data["by_var"][v]) / mb for v in var_data["vars_ordered"]]
+        ax.fill_between(var_cells, 0, baseline_footprint_var, alpha=0.3, color='gray', label=base_label)
         cumulative_var = baseline_footprint_var.copy()
+
+        # Layer 2: GPU memory (if present) - between baseline and checkpoints
+        if has_gpu_var:
+            next_level = cumulative_var + gpu_mem_var
+            ax.fill_between(var_cells, cumulative_var, next_level, alpha=0.4, color='orange', label='GPU Memory')
+            cumulative_var = next_level
+
+        # Stack checkpoint variables on top
+        stacked = [np.array(var_data["by_var"][v]) / mb for v in var_data["vars_ordered"]]
         for i, (v, data_mb) in enumerate(zip(var_data["vars_ordered"], stacked)):
             var_type = mem_var_types.get(v, "")
             label = f"{v} ({var_type})" if var_type else v
             ax.fill_between(var_cells, cumulative_var, cumulative_var + data_mb, alpha=0.7, color=var_colors[i], label=label)
             cumulative_var = cumulative_var + data_mb
 
-        # Draw baseline line
-        ax.plot(var_cells, baseline_footprint_var, color=colors[0], linewidth=2, marker='o', markersize=4)
+        # Draw baseline line (CPU only, for reference)
+        ax.plot(var_cells, baseline_footprint_var, color='gray', linewidth=2, linestyle='--')
 
         # Add separator line for rerun phase
         var_initial_count = var_data.get("initial_count", len(var_cells))
@@ -2438,22 +2449,25 @@ def plot_combined_v2(
                 checkpoint_bytes.append(delta)
                 prev_cumulative = cumulative_ckpt
 
-        # Compute ratio: checkpoint_bytes / user_ns_before_cell
+        # Compute ratio: checkpoint_bytes / (user_ns_before_cell + gpu_memory)
         # The checkpoint captures state BEFORE cell N runs, which equals state AFTER cell N-1.
-        # So we compare cell N's checkpoint to cell N-1's current_footprint_mb.
+        # So we compare cell N's checkpoint to cell N-1's total memory (CPU + GPU).
         # Cell 0 has no prior state, so ratio = 0.
         # Skip ratio for tiny namespaces (< 1 MB) - ratio not meaningful for empty kernels.
         min_meaningful_ns_mb = 1.0
         ratios = []
         for i, c in enumerate(flowbook_mem_cells):
             if i == 0:
-                user_ns_before_mb = 0  # No prior namespace for first cell
+                base_mb = 0  # No prior namespace for first cell
             else:
-                user_ns_before_mb = flowbook_mem_cells[i - 1].get("current_footprint_mb", 0)
+                prev_cell = flowbook_mem_cells[i - 1]
+                cpu_mb = prev_cell.get("current_footprint_mb", 0)
+                gpu_mb = prev_cell.get("gpu_mem_samples", 0)
+                base_mb = cpu_mb + gpu_mb
 
-            if user_ns_before_mb >= min_meaningful_ns_mb:
-                user_ns_bytes = user_ns_before_mb * mb
-                ratio = checkpoint_bytes[i] / user_ns_bytes
+            if base_mb >= min_meaningful_ns_mb:
+                base_bytes = base_mb * mb
+                ratio = checkpoint_bytes[i] / base_bytes
             else:
                 ratio = 0.0  # Namespace too small for meaningful ratio
             ratios.append(ratio)
@@ -2462,7 +2476,7 @@ def plot_combined_v2(
         ax.bar(cell_nums, ratios, width=bar_width, alpha=0.7, color='#66c2a5')
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
-        ax.set_ylabel("Checkpoint / User NS", fontsize=label_size)
+        ax.set_ylabel("Checkpoint / Base Memory", fontsize=label_size)
 
         title = "Checkpoint Overhead Ratio"
         if memory_initial_count < len(flowbook_mem_cells):
