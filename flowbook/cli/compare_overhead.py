@@ -708,11 +708,16 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             checkpoint_bytes_list.append(delta)
             prev_cumulative = cumulative_ckpt
 
-    # Then compute ratio: checkpoint_size / user_ns_size
-    # Use base_namespace_mb as user_ns (see NOTE in Panel 6 and TODO in compare_baseline.py)
+    # Compute ratio: checkpoint_size / user_ns_before_cell
+    # The checkpoint captures state BEFORE cell N runs, which equals state AFTER cell N-1.
+    # So we compare cell N's checkpoint to cell N-1's current_footprint_mb.
+    # Cell 0 has no prior state, so ratio = 0.
     for i, fc in enumerate(flowbook_mem_cells):
-        user_ns_mb = fc.get("base_namespace_mb", fc.get("current_footprint_mb", 0))
-        user_ns_bytes = user_ns_mb * mb
+        if i == 0:
+            user_ns_before_mb = 0  # No prior namespace for first cell
+        else:
+            user_ns_before_mb = flowbook_mem_cells[i - 1].get("current_footprint_mb", 0)
+        user_ns_bytes = user_ns_before_mb * mb
 
         if user_ns_bytes > 0:
             ratio = checkpoint_bytes_list[i] / user_ns_bytes
@@ -2431,14 +2436,17 @@ def plot_combined_v2(
                 checkpoint_bytes.append(delta)
                 prev_cumulative = cumulative_ckpt
 
-        # Compute ratio: checkpoint_bytes / user_ns_bytes
-        # Use base_namespace_mb as user_ns (currently equals current_footprint_mb)
-        # NOTE: base_namespace_mb should ideally be footprint minus overhead,
-        # but currently includes checkpoint memory. See TODO in compare_baseline.py.
+        # Compute ratio: checkpoint_bytes / user_ns_before_cell
+        # The checkpoint captures state BEFORE cell N runs, which equals state AFTER cell N-1.
+        # So we compare cell N's checkpoint to cell N-1's current_footprint_mb.
+        # Cell 0 has no prior state, so ratio = 0.
         ratios = []
         for i, c in enumerate(flowbook_mem_cells):
-            user_ns_mb = c.get("base_namespace_mb", c.get("current_footprint_mb", 0))
-            user_ns_bytes = user_ns_mb * mb
+            if i == 0:
+                user_ns_before_mb = 0  # No prior namespace for first cell
+            else:
+                user_ns_before_mb = flowbook_mem_cells[i - 1].get("current_footprint_mb", 0)
+            user_ns_bytes = user_ns_before_mb * mb
 
             if user_ns_bytes > 0:
                 ratio = checkpoint_bytes[i] / user_ns_bytes
