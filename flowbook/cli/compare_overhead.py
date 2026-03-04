@@ -691,6 +691,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         per_cell_total_overhead_ms.append(state_ms + check_ms + other_ms)
 
     # Per-cell memory overhead (from cumulative_by_var - compute delta between consecutive cells)
+    # Falls back to pre_only_bytes for syntactic mode where checkpoints are deleted
     prev_cumulative = 0
     for fc in flowbook_mem_cells:
         cumulative_by_var = fc.get("cumulative_by_var", {})
@@ -702,7 +703,12 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             per_cell_memory_overhead_mb.append(per_cell_bytes / (1024 * 1024))
             prev_cumulative = total_cumulative
         else:
-            per_cell_memory_overhead_mb.append(0.0)
+            # Fallback: use pre_only_bytes (already per-cell, not cumulative)
+            pre_only_bytes = fc.get("pre_only_bytes", 0)
+            if pre_only_bytes > 0:
+                per_cell_memory_overhead_mb.append(pre_only_bytes / (1024 * 1024))
+            else:
+                per_cell_memory_overhead_mb.append(0.0)
 
     return FileStats(
         notebook_path=notebook_path,
