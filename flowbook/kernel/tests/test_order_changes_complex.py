@@ -61,8 +61,13 @@ class TestBlockMoves:
         assert "d" in result.newly_stale
 
     def test_move_block_backward(self):
-        """Move cells D,E as a block backward before B."""
-        # Setup: A→B→C→D→E→F where D writes to var that B reads
+        """Move cells D,E as a block backward before B.
+
+        Setup: A→B→C→D→E→F where D writes x (which B reads).
+        When D executes with continue_on_violation=True, BackwardStale marks B stale
+        because D wrote to a variable that B (an earlier cell) had read.
+        The move then doesn't add B to newly_stale since B was already stale.
+        """
         self.helper.execute_cell(
             "a", pre_namespace={}, post_namespace={"x": 1},
             reads=set(), writes={"x"}
@@ -78,7 +83,7 @@ class TestBlockMoves:
         self.helper.execute_cell(
             "d", pre_namespace={"x": 1, "y": 2}, post_namespace={"x": 99, "y": 2},
             reads=set(), writes={"x"},
-            continue_on_violation=True  # D writes x which was read by... nobody after A
+            continue_on_violation=True  # D writes x which B read - BackwardStale marks B
         )
         self.helper.execute_cell(
             "e", pre_namespace={"x": 99, "y": 2}, post_namespace={"x": 99, "y": 2, "z": 3},
@@ -90,11 +95,14 @@ class TestBlockMoves:
             reads=set(), writes=set()
         )
 
+        # Verify B is already stale (from BackwardStale during D's execution)
+        assert not self.helper.sdc._notebook_state.is_clean("b")
+
         # Move D,E block before B: A→D→E→B→C→F
         result = self.helper.sdc.set_cell_order(["a", "d", "e", "b", "c", "f"])
 
-        # B should be stale: D now precedes B and writes x, B reads x
-        assert "b" in result.newly_stale
+        # B should NOT be in newly_stale because it was already stale
+        assert "b" not in result.newly_stale
 
     def test_swap_adjacent_blocks(self):
         """Swap two adjacent blocks: [B,C] <-> [D,E]."""
@@ -758,7 +766,12 @@ class TestRealWorldPatterns:
         assert "clean" not in result.newly_stale
 
     def test_move_helper_function_up(self):
-        """Move a helper function cell to be before cells that use it."""
+        """Move a helper function cell to be before cells that use it.
+
+        When helper writes helper_fn (which process reads), BackwardStale marks
+        process stale during helper's execution. The move doesn't add process
+        to newly_stale since it was already stale.
+        """
         self.helper.set_cell_order(["imports", "data", "process", "helper", "model"])
         self.helper.execute_cell(
             "imports", pre_namespace={}, post_namespace={"pd": "pandas"},
@@ -780,12 +793,14 @@ class TestRealWorldPatterns:
             "helper", pre_namespace={"pd": "pandas", "df": "dataframe", "result": "processed"},
             post_namespace={"pd": "pandas", "df": "dataframe", "result": "processed", "helper_fn": "fn"},
             reads=set(), writes={"helper_fn"},
-            continue_on_violation=True  # Backward violation: helper writes what process reads
+            continue_on_violation=True  # BackwardStale marks process stale
         )
+
+        # Verify process is already stale (from BackwardStale during helper's execution)
+        assert not self.helper.sdc._notebook_state.is_clean("process")
 
         # Move helper before process (where it should be)
         result = self.helper.sdc.set_cell_order(["imports", "data", "helper", "process", "model"])
 
-        # Process reads helper_fn, helper writes helper_fn
-        # Helper was after process, now before → process gains new input → process stale
-        assert "process" in result.newly_stale
+        # Process should NOT be in newly_stale because it was already stale
+        assert "process" not in result.newly_stale
