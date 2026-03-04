@@ -690,19 +690,27 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         per_cell_checkpoint_overhead_ms.append(state_ms)
         per_cell_total_overhead_ms.append(state_ms + check_ms + other_ms)
 
-    # Per-cell memory overhead (from cumulative_by_var - compute delta between consecutive cells)
-    prev_cumulative = 0
-    for fc in flowbook_mem_cells:
-        cumulative_by_var = fc.get("cumulative_by_var", {})
-        if cumulative_by_var:
-            # Sum all variable cumulative values at this cell
-            total_cumulative = sum(cumulative_by_var.values())
-            # Per-cell is the delta from previous cell
-            per_cell_bytes = max(0, total_cumulative - prev_cumulative)
-            per_cell_memory_overhead_mb.append(per_cell_bytes / (1024 * 1024))
-            prev_cumulative = total_cumulative
-        else:
-            per_cell_memory_overhead_mb.append(0.0)
+    # Per-cell memory overhead
+    # In syntactic mode, use pre_only_bytes directly (only one checkpoint at a time)
+    # In semantic mode, compute delta from cumulative values
+    staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
+    if staleness_mode == "syntactic":
+        for fc in flowbook_mem_cells:
+            pre_only_bytes = fc.get("pre_only_bytes", 0)
+            per_cell_memory_overhead_mb.append(pre_only_bytes / (1024 * 1024))
+    else:
+        prev_cumulative = 0
+        for fc in flowbook_mem_cells:
+            cumulative_by_var = fc.get("cumulative_by_var", {})
+            if cumulative_by_var:
+                # Sum all variable cumulative values at this cell
+                total_cumulative = sum(cumulative_by_var.values())
+                # Per-cell is the delta from previous cell
+                per_cell_bytes = max(0, total_cumulative - prev_cumulative)
+                per_cell_memory_overhead_mb.append(per_cell_bytes / (1024 * 1024))
+                prev_cumulative = total_cumulative
+            else:
+                per_cell_memory_overhead_mb.append(0.0)
 
     return FileStats(
         notebook_path=notebook_path,
