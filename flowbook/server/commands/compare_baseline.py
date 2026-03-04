@@ -17,6 +17,108 @@ Usage via CLI:
     flowbook compare-baseline notebook.ipynb --run-baseline               # Include baseline comparison
     flowbook compare-baseline notebook.ipynb --staleness-mode syntactic   # Use syntactic mode
     flowbook compare-baseline notebook.ipynb --timeout 14400              # optional timeout (default: 4 hours)
+
+OUTPUT JSON SCHEMA (version 2.0):
+{
+  "version": "2.0",
+  "notebook_path": str,                    # Path to the notebook file
+  "timestamp": str,                        # ISO format timestamp
+  "scalene_available": bool,               # Whether HeapSizer was available
+  "metadata": {
+    "num_cells": int,                      # Number of code cells
+    "timeout_seconds": float,              # Cell execution timeout
+    "staleness_mode": str,                 # "semantic" or "syntactic"
+    "rerun_k": int,                        # Number of rerun iterations (optional)
+    "trial": int,                          # Trial number (optional, for multi-trial runs)
+    "num_trials": int                      # Total trials (optional)
+  },
+  "kernels": {
+    "baseline": {                          # Only present if --run-baseline
+      "kernel_name": "baseline_kernel",
+      "timing": TimingResults,             # See below
+      "memory": MemoryResults              # See below (optional)
+    },
+    "flowbook": {
+      "kernel_name": "flowbook_kernel",
+      "timing": TimingResults,
+      "memory": MemoryResults              # Only present if HeapSizer available
+    }
+  }
+}
+
+TimingResults:
+{
+  "kernel_name": str,
+  "cells": [TimingCellMetrics, ...],       # Initial execution cells
+  "rerun_cells": [TimingCellMetrics, ...], # Rerun cells (if rerun_k > 0)
+  "totals": {
+    "total_runtime_ms": float,
+    "state_overhead_ms": float,            # FlowBook only
+    "check_overhead_ms": float             # FlowBook only
+  }
+}
+
+TimingCellMetrics:
+{
+  "cell_id": str,
+  "cell_index": int,
+  "execute_duration_ms": float,            # Total execution time
+  "code_duration_ms": float,               # User code time (FlowBook only)
+  "state_duration_ms": float,              # Checkpoint time (FlowBook only)
+  "check_duration_ms": float,              # Reproducibility check time (FlowBook only)
+  "status": str,                           # "ok" or "error"
+  "error": str | null,
+  "is_rerun": bool,
+  "checking_result": {                     # FlowBook only (optional)
+    "cell_status": str,                    # "clean", "stale", or "error"
+    "reasons": [dict, ...],
+    "errors": [dict, ...]
+  }
+}
+
+MemoryResults:
+{
+  "kernel_name": str,
+  "cells": [MemoryCellMetrics, ...],
+  "rerun_cells": [MemoryCellMetrics, ...],
+  "totals": {
+    "final_footprint_mb": float,
+    "max_footprint_mb": float,
+    "total_allocation_mb": float,
+    "gpu_mem_samples": float,
+    "base_namespace_mb": float,            # FlowBook only
+    "total_overhead_mb": float             # FlowBook only
+  }
+}
+
+MemoryCellMetrics:
+{
+  "cell_id": str,
+  "cell_index": int,
+  "current_footprint_mb": float,           # Total memory at end of cell
+  "max_footprint_mb": float,
+  "allocation_delta_mb": float,
+  "gpu_mem_samples": float,
+  "status": str,
+  "error": str | null,
+  "is_rerun": bool,
+  # FlowBook-only fields:
+  "checkpoint_var_costs": {var: {bytes, deepcopy_ms}, ...} | null,
+  "overhead_breakdown": {                  # Memory breakdown by category
+    "checkpoints_mb": float,               # Cumulative checkpoint memory
+    "execution_records_mb": float,
+    "tracking_metadata_mb": float,
+    "other_mb": float
+  } | null,
+  "cumulative_by_type": {type_name: bytes, ...} | null,
+  "cumulative_by_var": {var_name: bytes, ...} | null,
+  "pre_only_bytes": int,                   # Pre-checkpoint size (for syntactic mode)
+  "post_savings_bytes": int,               # Memory saved without post checkpoints
+  "base_namespace_mb": float,              # TODO: Currently set to current_footprint_mb, should be
+                                           #       current_footprint_mb - total_overhead to represent
+                                           #       user namespace without FlowBook overhead
+  "total_overhead_mb": float               # Sum of overhead_breakdown values
+}
 """
 
 import argparse
@@ -1753,6 +1855,9 @@ def run_flowbook_memory(
                     cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
                     pre_only_bytes=pre_only_bytes,
                     post_savings_bytes=post_savings_bytes,
+                    # TODO: base_namespace_mb should be current_mb - cell_total_overhead to
+                    # represent user namespace without FlowBook overhead. Currently includes
+                    # checkpoint memory, which makes overhead ratio calculations incorrect.
                     base_namespace_mb=current_mb,
                     total_overhead_mb=cell_total_overhead,
                     status="ok",
@@ -1858,6 +1963,7 @@ def run_flowbook_memory(
                             cumulative_by_var=cumulative_by_var if cumulative_by_var else None,
                             pre_only_bytes=pre_only_bytes,
                             post_savings_bytes=post_savings_bytes,
+                            # TODO: See above - base_namespace_mb should exclude overhead
                             base_namespace_mb=current_mb,
                             total_overhead_mb=rerun_total_overhead,
                             status="ok",

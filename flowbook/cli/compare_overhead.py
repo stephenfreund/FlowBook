@@ -690,27 +690,37 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         per_cell_checkpoint_overhead_ms.append(state_ms)
         per_cell_total_overhead_ms.append(state_ms + check_ms + other_ms)
 
-    # Per-cell memory overhead
-    # In syntactic mode, use pre_only_bytes directly (only one checkpoint at a time)
-    # In semantic mode, compute delta from cumulative values
+    # Per-cell memory overhead as ratio of checkpoint/user_ns
+    # This gives a proportion: 0 = no overhead, 1 = checkpoint equals user_ns size
     staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
+    mb = 1024 * 1024
+
+    # First compute checkpoint bytes per cell
     if staleness_mode == "syntactic":
-        for fc in flowbook_mem_cells:
-            pre_only_bytes = fc.get("pre_only_bytes", 0)
-            per_cell_memory_overhead_mb.append(pre_only_bytes / (1024 * 1024))
+        checkpoint_bytes_list = [fc.get("pre_only_bytes", 0) for fc in flowbook_mem_cells]
     else:
+        checkpoint_bytes_list = []
         prev_cumulative = 0
         for fc in flowbook_mem_cells:
-            cumulative_by_var = fc.get("cumulative_by_var", {})
-            if cumulative_by_var:
-                # Sum all variable cumulative values at this cell
-                total_cumulative = sum(cumulative_by_var.values())
-                # Per-cell is the delta from previous cell
-                per_cell_bytes = max(0, total_cumulative - prev_cumulative)
-                per_cell_memory_overhead_mb.append(per_cell_bytes / (1024 * 1024))
-                prev_cumulative = total_cumulative
-            else:
-                per_cell_memory_overhead_mb.append(0.0)
+            overhead = fc.get("overhead_breakdown") or {}
+            cumulative_ckpt = overhead.get("checkpoints_mb", 0) * mb
+            delta = max(0, cumulative_ckpt - prev_cumulative)
+            checkpoint_bytes_list.append(delta)
+            prev_cumulative = cumulative_ckpt
+
+    # Then compute ratio: checkpoint_size / user_ns_size
+    for i, fc in enumerate(flowbook_mem_cells):
+        overhead = fc.get("overhead_breakdown") or {}
+        total_overhead_mb = sum(overhead.values()) if overhead else 0
+        current_mb = fc.get("current_footprint_mb", 0)
+        user_ns_mb = max(0, current_mb - total_overhead_mb)
+        user_ns_bytes = user_ns_mb * mb
+
+        if user_ns_bytes > 0:
+            ratio = checkpoint_bytes_list[i] / user_ns_bytes
+        else:
+            ratio = 0.0
+        per_cell_memory_overhead_mb.append(ratio)  # Note: field name kept for compatibility
 
     return FileStats(
         notebook_path=notebook_path,
@@ -960,14 +970,14 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
     lines.append(f"  P95:    {aggregate.total_overhead_per_cell_p95:.2f}ms")
     lines.append(f"  P99:    {aggregate.total_overhead_per_cell_p99:.2f}ms")
     lines.append("")
-    lines.append("PER-CELL MEMORY OVERHEAD (MB)")
-    lines.append(f"  Mean:   {aggregate.memory_overhead_per_cell_mean:.2f}MB")
-    lines.append(f"  Median: {aggregate.memory_overhead_per_cell_median:.2f}MB")
-    lines.append(f"  Min:    {aggregate.memory_overhead_per_cell_min:.2f}MB")
-    lines.append(f"  Max:    {aggregate.memory_overhead_per_cell_max:.2f}MB")
-    lines.append(f"  P90:    {aggregate.memory_overhead_per_cell_p90:.2f}MB")
-    lines.append(f"  P95:    {aggregate.memory_overhead_per_cell_p95:.2f}MB")
-    lines.append(f"  P99:    {aggregate.memory_overhead_per_cell_p99:.2f}MB")
+    lines.append("PER-CELL MEMORY OVERHEAD RATIO (checkpoint / user_ns)")
+    lines.append(f"  Mean:   {aggregate.memory_overhead_per_cell_mean:.2f}")
+    lines.append(f"  Median: {aggregate.memory_overhead_per_cell_median:.2f}")
+    lines.append(f"  Min:    {aggregate.memory_overhead_per_cell_min:.2f}")
+    lines.append(f"  Max:    {aggregate.memory_overhead_per_cell_max:.2f}")
+    lines.append(f"  P90:    {aggregate.memory_overhead_per_cell_p90:.2f}")
+    lines.append(f"  P95:    {aggregate.memory_overhead_per_cell_p95:.2f}")
+    lines.append(f"  P99:    {aggregate.memory_overhead_per_cell_p99:.2f}")
     # Check if we have baseline memory data (ratio > 0 and not ~1.0 from checkpoint fraction)
     has_baseline_memory = any(s.baseline_memory_bytes > 0 for s in stats_list)
     lines.append("")
@@ -983,15 +993,13 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
         lines.append(f"  P95 Overhead:       {aggregate.memory_overhead_p95:.3f}x")
         lines.append(f"  P99 Overhead:       {aggregate.memory_overhead_p99:.3f}x")
     else:
-        # No baseline memory - show checkpoint overhead in MB instead
-        total_checkpoint_mb = sum(s.flowbook_memory_bytes for s in stats_list) / (1024 * 1024)
-        lines.append("CHECKPOINT MEMORY")
+        # No baseline memory - show checkpoint overhead ratio
+        lines.append("CHECKPOINT MEMORY RATIO")
         lines.append(f"AGGREGATE (N={aggregate.num_files})")
-        lines.append(f"  Total:              {total_checkpoint_mb:.2f}MB")
-        lines.append(f"  Per-Cell Mean:      {aggregate.memory_overhead_per_cell_mean:.2f}MB")
-        lines.append(f"  Per-Cell Median:    {aggregate.memory_overhead_per_cell_median:.2f}MB")
-        lines.append(f"  Per-Cell Max:       {aggregate.memory_overhead_per_cell_max:.2f}MB")
-        lines.append(f"  Per-Cell P99:       {aggregate.memory_overhead_per_cell_p99:.2f}MB")
+        lines.append(f"  Per-Cell Mean:      {aggregate.memory_overhead_per_cell_mean:.2f}")
+        lines.append(f"  Per-Cell Median:    {aggregate.memory_overhead_per_cell_median:.2f}")
+        lines.append(f"  Per-Cell Max:       {aggregate.memory_overhead_per_cell_max:.2f}")
+        lines.append(f"  Per-Cell P99:       {aggregate.memory_overhead_per_cell_p99:.2f}")
 
     # Checking results summary (staleness)
     # Note: Staleness consistency across trials is checked during averaging in average_trial_data
@@ -2401,24 +2409,53 @@ def plot_combined_v2(
         ax.set_title("Overhead Time per Cell", fontsize=title_size)
     ax.tick_params(axis='both', labelsize=tick_size)
 
-    # ========== Panel 6: Checkpoint Memory Overhead per Cell (bottom-right) ==========
+    # ========== Panel 6: Checkpoint Memory Overhead Ratio per Cell (bottom-right) ==========
+    # Shows checkpoint size as a proportion of user namespace size (0 = none, 1 = same size)
     ax = axes[5]
     staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
 
-    # In syntactic mode, use pre_only_bytes directly (only one checkpoint at a time)
-    # In semantic mode, compute delta from cumulative values
-    if staleness_mode == "syntactic" and flowbook_mem_cells:
+    if flowbook_mem_cells:
         mb = 1024 * 1024
         cell_nums = list(range(1, len(flowbook_mem_cells) + 1))
-        per_cell_mem = [c.get("pre_only_bytes", 0) / mb for c in flowbook_mem_cells]
+
+        # Compute checkpoint size per cell
+        if staleness_mode == "syntactic":
+            # Syntactic mode: use pre_only_bytes directly (only one checkpoint at a time)
+            checkpoint_bytes = [c.get("pre_only_bytes", 0) for c in flowbook_mem_cells]
+        else:
+            # Semantic mode: compute delta from cumulative checkpoint values
+            checkpoint_bytes = []
+            prev_cumulative = 0
+            for c in flowbook_mem_cells:
+                overhead = c.get("overhead_breakdown") or {}
+                cumulative_ckpt = overhead.get("checkpoints_mb", 0) * mb
+                delta = max(0, cumulative_ckpt - prev_cumulative)
+                checkpoint_bytes.append(delta)
+                prev_cumulative = cumulative_ckpt
+
+        # Compute user_ns size per cell: current_footprint - total_overhead
+        # This gives the user namespace size without FlowBook overhead
+        ratios = []
+        for i, c in enumerate(flowbook_mem_cells):
+            overhead = c.get("overhead_breakdown") or {}
+            total_overhead_mb = sum(overhead.values()) if overhead else 0
+            current_mb = c.get("current_footprint_mb", 0)
+            user_ns_mb = max(0, current_mb - total_overhead_mb)
+            user_ns_bytes = user_ns_mb * mb
+
+            if user_ns_bytes > 0:
+                ratio = checkpoint_bytes[i] / user_ns_bytes
+            else:
+                ratio = 0.0
+            ratios.append(ratio)
 
         bar_width = 0.6
-        ax.bar(cell_nums, per_cell_mem, width=bar_width, alpha=0.7, color='#66c2a5')
+        ax.bar(cell_nums, ratios, width=bar_width, alpha=0.7, color='#66c2a5')
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
-        ax.set_ylabel("Checkpoint Size (MB)", fontsize=label_size)
+        ax.set_ylabel("Checkpoint / User NS", fontsize=label_size)
 
-        title = "Checkpoint Memory per Cell"
+        title = "Checkpoint Overhead Ratio"
         if memory_initial_count < len(flowbook_mem_cells):
             title += f" (cells 1-{memory_initial_count} + {len(flowbook_mem_cells) - memory_initial_count} reruns)"
             ax.axvline(x=memory_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
@@ -2427,41 +2464,6 @@ def plot_combined_v2(
 
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=0.5, right=len(cell_nums) + 0.5)
-        ax.set_ylim(bottom=0)
-    elif var_data is not None:
-        # Semantic mode: use cumulative values and compute delta
-        mb = 1024 * 1024
-        var_cells = np.array(var_data["cells"])
-
-        # Compute total cumulative checkpoint size at each cell
-        total_cumulative = np.zeros(len(var_cells))
-        for v in var_data["vars_ordered"]:
-            total_cumulative += np.array(var_data["by_var"][v]) / mb
-
-        # Compute per-cell checkpoint size (delta from previous)
-        per_cell_mem = np.zeros(len(var_cells))
-        per_cell_mem[0] = total_cumulative[0]  # First cell: all of it
-        for i in range(1, len(var_cells)):
-            per_cell_mem[i] = max(0, total_cumulative[i] - total_cumulative[i-1])
-
-        bar_width = 0.6
-        ax.bar(var_cells, per_cell_mem, width=bar_width, alpha=0.7, color='#66c2a5')
-
-        ax.set_xlabel("Cell Number", fontsize=label_size)
-        ax.set_ylabel("Checkpoint Size (MB)", fontsize=label_size)
-
-        var_initial_count = var_data.get("initial_count", len(var_cells))
-        title = "Checkpoint Memory per Cell"
-        if var_initial_count < len(var_cells):
-            title += f" (cells 1-{var_initial_count} + {len(var_cells) - var_initial_count} reruns)"
-        ax.set_title(title, fontsize=title_size)
-
-        if var_initial_count < len(var_cells):
-            ax.axvline(x=var_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
-            ax.legend(loc="upper right", fontsize=legend_size)
-
-        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
-        ax.set_xlim(left=0.5, right=len(var_cells) + 0.5)
         ax.set_ylim(bottom=0)
     else:
         ax.text(0.5, 0.5, 'No memory data', ha='center', va='center', transform=ax.transAxes)
@@ -2566,17 +2568,17 @@ def plot_overhead_histograms(
         ax.set_title("Total Overhead per Cell Distribution", fontsize=title_size)
     ax.tick_params(axis='both', labelsize=tick_size)
 
-    # Histogram 2: Memory Overhead per Cell
+    # Histogram 2: Memory Overhead Ratio per Cell (checkpoint / user_ns)
     ax = axes[1]
     if len(memory_overhead_filtered) > 0:
         ax.hist(memory_overhead_filtered, bins=30, alpha=0.3, color='seagreen', edgecolor='black')
         ax.axvline(np.median(memory_overhead_filtered), color='red', linestyle='--', linewidth=2,
-                   label=f'Median: {np.median(memory_overhead_filtered):.2f}MB')
+                   label=f'Median: {np.median(memory_overhead_filtered):.2f}')
         ax.axvline(np.mean(memory_overhead_filtered), color='orange', linestyle='-', linewidth=2,
-                   label=f'Mean: {np.mean(memory_overhead_filtered):.2f}MB')
-        ax.set_xlabel("Memory Overhead per Cell (MB)", fontsize=label_size)
+                   label=f'Mean: {np.mean(memory_overhead_filtered):.2f}')
+        ax.set_xlabel("Checkpoint / User NS Ratio", fontsize=label_size)
         ax.set_ylabel("Frequency", fontsize=label_size)
-        ax.set_title("Memory Overhead per Cell Distribution", fontsize=title_size)
+        ax.set_title("Memory Overhead Ratio Distribution", fontsize=title_size)
         ax.legend(fontsize=tick_size)
 
         # Add stats text box
@@ -2653,36 +2655,21 @@ def plot_overhead_cdfs(
         total_data = None
 
     if len(memory_overhead) > 0:
-        # Convert MB to bytes for log scale (avoids negatives)
-        memory_data_bytes = np.sort(memory_overhead * 1024 * 1024)  # MB to bytes
-        memory_data_mb = np.sort(memory_overhead)  # Keep MB for linear plot
-        memory_cdf = np.arange(1, len(memory_data_bytes) + 1) / len(memory_data_bytes)
-        memory_stats_bytes = {
-            'P50': np.percentile(memory_data_bytes, 50),
-            'P90': np.percentile(memory_data_bytes, 90),
-            'P95': np.percentile(memory_data_bytes, 95),
-            'P99': np.percentile(memory_data_bytes, 99),
-        }
-        memory_stats_mb = {
-            'P50': np.percentile(memory_data_mb, 50),
-            'P90': np.percentile(memory_data_mb, 90),
-            'P95': np.percentile(memory_data_mb, 95),
-            'P99': np.percentile(memory_data_mb, 99),
+        # memory_overhead is now a ratio (checkpoint / user_ns), not MB
+        memory_data_ratio = np.sort(memory_overhead)
+        memory_cdf = np.arange(1, len(memory_data_ratio) + 1) / len(memory_data_ratio)
+        memory_stats_ratio = {
+            'P50': np.percentile(memory_data_ratio, 50),
+            'P90': np.percentile(memory_data_ratio, 90),
+            'P95': np.percentile(memory_data_ratio, 95),
+            'P99': np.percentile(memory_data_ratio, 99),
         }
     else:
-        memory_data_bytes = None
-        memory_data_mb = None
+        memory_data_ratio = None
 
-    def format_bytes(b):
-        """Format bytes to human readable."""
-        if b >= 1024 * 1024 * 1024:
-            return f'{b / (1024**3):.1f}GB'
-        elif b >= 1024 * 1024:
-            return f'{b / (1024**2):.1f}MB'
-        elif b >= 1024:
-            return f'{b / 1024:.1f}KB'
-        else:
-            return f'{b:.0f}B'
+    def format_ratio(r):
+        """Format ratio to human readable."""
+        return f'{r:.2f}'
 
     def add_percentile_markers(ax, data, cdf, stats, unit_fmt, color, legend_fontsize):
         """Add percentile markers with vertical lines and labels, plus legend."""
@@ -2760,31 +2747,31 @@ def plot_overhead_cdfs(
         ax.set_title("Total Overhead (Log Scale)", fontsize=title_size)
     ax.tick_params(axis='both', labelsize=tick_size)
 
-    # Memory overhead - log scale (in bytes)
+    # Memory overhead ratio (checkpoint / user_ns)
     ax = axes1[1]
-    if memory_data_bytes is not None:
-        pos_mask = memory_data_bytes > 0
+    if memory_data_ratio is not None:
+        pos_mask = memory_data_ratio > 0
         if np.any(pos_mask):
-            ax.fill_between(memory_data_bytes[pos_mask], 0, memory_cdf[pos_mask], alpha=0.3, color='seagreen', edgecolor='none')
-            ax.plot(memory_data_bytes[pos_mask], memory_cdf[pos_mask], color='seagreen', linewidth=2)
+            ax.fill_between(memory_data_ratio[pos_mask], 0, memory_cdf[pos_mask], alpha=0.3, color='seagreen', edgecolor='none')
+            ax.plot(memory_data_ratio[pos_mask], memory_cdf[pos_mask], color='seagreen', linewidth=2)
 
-            add_percentile_markers(ax, memory_data_bytes[pos_mask], memory_cdf[pos_mask],
-                                  memory_stats_bytes, format_bytes, 'black', tick_size)
+            add_percentile_markers(ax, memory_data_ratio[pos_mask], memory_cdf[pos_mask],
+                                  memory_stats_ratio, format_ratio, 'black', tick_size)
             add_percentile_gridlines(ax)
 
             ax.set_xscale('log')
-            ax.set_xlabel("Memory Overhead per Cell (bytes)", fontsize=label_size)
+            ax.set_xlabel("Checkpoint / User NS Ratio", fontsize=label_size)
             ax.set_ylabel("Cumulative Probability", fontsize=label_size)
-            ax.set_title("Memory Overhead (Log Scale)", fontsize=title_size)
+            ax.set_title("Memory Overhead Ratio (Log Scale)", fontsize=title_size)
             ax.set_ylim(0, 1.05)
 
-            textstr = f'N={len(memory_data_bytes)}'
+            textstr = f'N={len(memory_data_ratio)}'
             props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
             ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
                     verticalalignment='top', horizontalalignment='left', bbox=props)
     else:
         ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-        ax.set_title("Memory Overhead (Log Scale)", fontsize=title_size)
+        ax.set_title("Memory Overhead Ratio (Log Scale)", fontsize=title_size)
     ax.tick_params(axis='both', labelsize=tick_size)
 
     fig1.suptitle("Per-Cell Overhead CDFs (Full Distribution)", fontsize=title_size + 2, fontweight='bold')
@@ -2824,22 +2811,22 @@ def plot_overhead_cdfs(
         ax.set_title("Total Overhead (Zoomed to P99)", fontsize=title_size)
     ax.tick_params(axis='both', labelsize=tick_size)
 
-    # Memory overhead - linear, zoomed to P99 (in MB for readability)
+    # Memory overhead ratio - linear, zoomed to P99
     ax = axes2[1]
-    if memory_data_mb is not None:
-        p99_val = memory_stats_mb['P99']
-        mask = memory_data_mb <= p99_val * 1.05
-        ax.fill_between(memory_data_mb[mask], 0, memory_cdf[mask], alpha=0.3, color='seagreen', edgecolor='none')
-        ax.plot(memory_data_mb[mask], memory_cdf[mask], color='seagreen', linewidth=2)
+    if memory_data_ratio is not None:
+        p99_val = memory_stats_ratio['P99']
+        mask = memory_data_ratio <= p99_val * 1.05
+        ax.fill_between(memory_data_ratio[mask], 0, memory_cdf[mask], alpha=0.3, color='seagreen', edgecolor='none')
+        ax.plot(memory_data_ratio[mask], memory_cdf[mask], color='seagreen', linewidth=2)
 
-        stats_in_range = {k: v for k, v in memory_stats_mb.items() if v <= p99_val * 1.05}
-        add_percentile_markers(ax, memory_data_mb[mask], memory_cdf[mask],
-                              stats_in_range, lambda x: f'{x:.1f}MB', 'black', tick_size)
+        stats_in_range = {k: v for k, v in memory_stats_ratio.items() if v <= p99_val * 1.05}
+        add_percentile_markers(ax, memory_data_ratio[mask], memory_cdf[mask],
+                              stats_in_range, format_ratio, 'black', tick_size)
         add_percentile_gridlines(ax)
 
-        ax.set_xlabel("Memory Overhead per Cell (MB)", fontsize=label_size)
+        ax.set_xlabel("Checkpoint / User NS Ratio", fontsize=label_size)
         ax.set_ylabel("Cumulative Probability", fontsize=label_size)
-        ax.set_title("Memory Overhead (Zoomed to P99)", fontsize=title_size)
+        ax.set_title("Memory Overhead Ratio (Zoomed to P99)", fontsize=title_size)
         ax.set_ylim(0, 1.05)
         ax.set_xlim(left=0)
 
@@ -2850,7 +2837,7 @@ def plot_overhead_cdfs(
                 verticalalignment='top', horizontalalignment='left', bbox=props)
     else:
         ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-        ax.set_title("Memory Overhead (Zoomed to P99)", fontsize=title_size)
+        ax.set_title("Memory Overhead Ratio (Zoomed to P99)", fontsize=title_size)
     ax.tick_params(axis='both', labelsize=tick_size)
 
     fig2.suptitle("Per-Cell Overhead CDFs (Zoomed to P99)", fontsize=title_size + 2, fontweight='bold')
