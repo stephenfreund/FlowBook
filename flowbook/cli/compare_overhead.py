@@ -2671,11 +2671,20 @@ def plot_overhead_cdfs(
             ax.annotate(pname, (x_val, y_val), textcoords='offset points',
                        xytext=offset, fontsize=annotation_size, ha='left', va=va, fontweight='bold')
 
+        # Add max point on the curve (at CDF = 1.0) with label
+        if len(data) > 0:
+            max_val = np.max(data)
+            ax.scatter([max_val], [1.0], color=color, s=30, marker='o', zorder=5, edgecolors='black', linewidths=0.5)
+            ax.annotate('Max', (max_val, 1.0), textcoords='offset points',
+                       xytext=(5, -15), fontsize=annotation_size, ha='left', va='top', fontweight='bold')
+
         # Add legend box with values in lower right (right-aligned values)
-        # Find max value length for alignment
         formatted_values = {pname: unit_fmt(stats[pname]) for pname in percentiles if pname in stats}
+        if len(data) > 0:
+            formatted_values['Max'] = unit_fmt(np.max(data))
         max_val_len = max(len(v) for v in formatted_values.values()) if formatted_values else 0
-        legend_lines = [f'{pname}: {formatted_values[pname]:>{max_val_len}}' for pname in percentiles if pname in formatted_values]
+        legend_keys = [p for p in percentiles if p in formatted_values] + (['Max'] if 'Max' in formatted_values else [])
+        legend_lines = [f'{pname}: {formatted_values[pname]:>{max_val_len}}' for pname in legend_keys]
         legend_text = '\n'.join(legend_lines)
         props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
         ax.text(0.98, 0.02, legend_text, transform=ax.transAxes, fontsize=legend_fontsize,

@@ -679,6 +679,9 @@ class ReproducibilityEnforcer:
         self._conflict_resolver = ConflictResolver(
             structural_mode=_tracking_mode_to_structural_mode(structural_mode)
         )
+        # Checkpoint measurement for benchmarking (disabled by default)
+        self._measure_checkpoint_sizes = False
+        self._recorded_checkpoint_sizes: Dict[str, int] = {}
 
     @property
     def structural_mode(self) -> StructuralTrackingMode:
@@ -720,6 +723,34 @@ class ReproducibilityEnforcer:
         ]
         for key in keys_to_delete:
             self.checkpoints.delete(key)
+
+    def enable_checkpoint_measurement(self, enabled: bool = True) -> None:
+        """Enable recording checkpoint sizes before deletion (for benchmarking).
+
+        When enabled, checkpoint sizes are measured and stored before being
+        deleted in syntactic mode. This allows compare-baseline to retrieve
+        accurate checkpoint sizes even though checkpoints are deleted.
+
+        Args:
+            enabled: Whether to enable measurement (default True)
+        """
+        self._measure_checkpoint_sizes = enabled
+        if not enabled:
+            self._recorded_checkpoint_sizes.clear()
+
+    def get_recorded_checkpoint_size(self, cell_id: str) -> int:
+        """Get the recorded size for a deleted checkpoint.
+
+        In syntactic mode, checkpoints are deleted after computing write sets.
+        When measurement is enabled, the size is recorded before deletion.
+
+        Args:
+            cell_id: The cell ID to get checkpoint size for
+
+        Returns:
+            Size in bytes, or 0 if not recorded
+        """
+        return self._recorded_checkpoint_sizes.get(cell_id, 0)
 
     @property
     def cell_order(self) -> List[str]:
@@ -1408,6 +1439,11 @@ class ReproducibilityEnforcer:
         # In syntactic mode, clear the pre-checkpoint to save memory
         # (we've already computed W_i from the diff, so checkpoint is no longer needed)
         if self._staleness_mode == StalenessMode.SYNTACTIC:
+            # If measurement is enabled, record size before deletion (for benchmarking)
+            if self._measure_checkpoint_sizes:
+                checkpoint_name = f"{PRE_CHECKPOINT_PREFIX}{cell_id}"
+                size_info = self.checkpoints.get_checkpoint_size(checkpoint_name)
+                self._recorded_checkpoint_sizes[cell_id] = size_info.total_bytes
             self.checkpoints.delete(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
             # Clear deepcopy caches since we're not reusing checkpoints
             from flowbook.kernel_support.deepcopy import clear_container_cache

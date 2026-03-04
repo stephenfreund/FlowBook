@@ -759,6 +759,55 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                     "✅", f"Staleness mode set to: {mode.value}"
                 )
 
+    @line_magic
+    def enable_checkpoint_measurement(self, line: str) -> None:
+        """
+        Enable/disable checkpoint size measurement for benchmarking.
+
+        When enabled, checkpoint sizes are measured and stored before being
+        deleted in syntactic mode. This allows compare-baseline to retrieve
+        accurate checkpoint sizes even though checkpoints are deleted.
+
+        Usage:
+            %enable_checkpoint_measurement on   - Enable measurement
+            %enable_checkpoint_measurement off  - Disable measurement
+            %enable_checkpoint_measurement      - Show current state
+        """
+        # Suspend tracking during magic execution
+        tracking = self._tracking
+        if tracking is not None and hasattr(tracking, "suspended"):
+            ctx = tracking.suspended()
+        else:
+            from contextlib import nullcontext
+            ctx = nullcontext()
+
+        with ctx:
+            arg = line.strip().lower()
+
+            if not arg:
+                # Show current state
+                enabled = self._enforcer._measure_checkpoint_sizes
+                state = "enabled" if enabled else "disabled"
+                self._display.display_icon_and_text(
+                    "🔍", f"Checkpoint measurement: {state}"
+                )
+                return
+
+            if arg in ('on', 'true', '1'):
+                self._enforcer.enable_checkpoint_measurement(True)
+                self._display.display_icon_and_text(
+                    "✅", "Checkpoint measurement enabled"
+                )
+            elif arg in ('off', 'false', '0'):
+                self._enforcer.enable_checkpoint_measurement(False)
+                self._display.display_icon_and_text(
+                    "✅", "Checkpoint measurement disabled"
+                )
+            else:
+                self._display.display_icon_and_text(
+                    "❌", f"Invalid argument: {arg}. Use 'on' or 'off'"
+                )
+
     # =========================================================================
     # Memory introspection magic (using HeapSizer)
     # =========================================================================
