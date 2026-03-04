@@ -223,7 +223,8 @@ class MemoryCellMetrics:
     checkpoint_delta_mb: float       # This cell's checkpoint contribution
     checkpoint_cumulative_mb: float  # Total checkpoint overhead so far
     gpu_mb: float                    # GPU memory
-    checkpoint_by_var: Optional[Dict[str, float]] = None  # Per-variable MB
+    checkpoint_by_var: Optional[Dict[str, float]] = None  # Per-variable MB (for memory plots)
+    checkpoint_var_costs: Optional[Dict[str, Any]] = None  # Per-variable timing (for timing plots)
     status: str = "ok"
     error: Optional[str] = None
     is_rerun: bool = False
@@ -1944,6 +1945,9 @@ def run_flowbook_memory(
             checkpoint_cumulative_mb = overhead.get('total_mb', 0.0)
             checkpoint_by_var = overhead.get('by_variable') or None
 
+            # Get per-variable checkpoint costs (includes deepcopy_ms for timing plots)
+            checkpoint_var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id) or None
+
             # Get GPU memory
             gpu_mb = get_kernel_gpu_memory_mb(kernel_client)
 
@@ -1964,6 +1968,7 @@ def run_flowbook_memory(
                     checkpoint_cumulative_mb=checkpoint_cumulative_mb,
                     gpu_mb=gpu_mb,
                     checkpoint_by_var=checkpoint_by_var,
+                    checkpoint_var_costs=checkpoint_var_costs,
                     status="error",
                     error=timing["error"]
                 ))
@@ -1976,6 +1981,7 @@ def run_flowbook_memory(
                     checkpoint_cumulative_mb=checkpoint_cumulative_mb,
                     gpu_mb=gpu_mb,
                     checkpoint_by_var=checkpoint_by_var,
+                    checkpoint_var_costs=checkpoint_var_costs,
                     status="ok",
                 ))
 
@@ -2021,6 +2027,9 @@ def run_flowbook_memory(
                     checkpoint_cumulative_mb = overhead.get('total_mb', 0.0)
                     checkpoint_by_var = overhead.get('by_variable') or None
 
+                    # Get per-variable checkpoint costs (includes deepcopy_ms for timing plots)
+                    checkpoint_var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id) or None
+
                     gpu_mb = get_kernel_gpu_memory_mb(kernel_client)
 
                     if timing.get("error") and timing.get("cell_runtime_ms") is None:
@@ -2033,6 +2042,7 @@ def run_flowbook_memory(
                             checkpoint_cumulative_mb=checkpoint_cumulative_mb,
                             gpu_mb=gpu_mb,
                             checkpoint_by_var=checkpoint_by_var,
+                            checkpoint_var_costs=checkpoint_var_costs,
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
@@ -2046,6 +2056,7 @@ def run_flowbook_memory(
                             checkpoint_cumulative_mb=checkpoint_cumulative_mb,
                             gpu_mb=gpu_mb,
                             checkpoint_by_var=checkpoint_by_var,
+                            checkpoint_var_costs=checkpoint_var_costs,
                             status="ok",
                             is_rerun=True,
                         ))
