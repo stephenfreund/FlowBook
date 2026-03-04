@@ -296,6 +296,7 @@ from flowbook.kernel_support.types import MemoryCheckpointDiffResult, DiffNode, 
 from flowbook.util.cell_index import index_to_alpha
 
 from flowbook.kernel.models import (
+    CellStateSnapshot,
     ErrorType,
     MovedCell,
     OrderChangeResult,
@@ -682,6 +683,8 @@ class ReproducibilityEnforcer:
         # Deferred checkpoint deletion for syntactic mode - keeps last checkpoint
         # until next cell executes, allowing size queries between executions
         self._pending_checkpoint_deletion: Optional[str] = None
+        # Snapshot for rollback if execution is rejected
+        self._pending_snapshot: Optional[CellStateSnapshot] = None
 
     @property
     def structural_mode(self) -> StructuralTrackingMode:
@@ -1278,6 +1281,9 @@ class ReproducibilityEnforcer:
         structural_read_values = {}
         if namespace is not None and tracking.structural_reads:
             structural_read_values = capture_structural_read_values(namespace, tracking.structural_reads)
+
+        # Snapshot state before update (for potential rollback)
+        self._pending_snapshot = self._notebook_state.snapshot_cell_state(cell_id)
 
         self._notebook_state.record_execution(
             cell_id,
@@ -2505,6 +2511,23 @@ class ReproducibilityEnforcer:
         self._cell_order = []
         self._notebook_state.clear()  # Clear status, R, W, last_writer, tracking_data
         self._pending_checkpoint_deletion = None
+        self._pending_snapshot = None
+
+    def rollback_last_check(self) -> None:
+        """
+        Rollback state changes from the most recent check() call.
+
+        Called by kernel when execution is rejected and namespace is rolled back.
+        This ensures the enforcer's analysis state matches the rolled-back namespace.
+
+        The rollback restores:
+        - Per-cell state (reads, writes, status, tracking_data, etc.)
+        - last_writer entries that pointed to the cell
+        - column_last_writer entries that pointed to the cell
+        """
+        if self._pending_snapshot is not None:
+            self._notebook_state.restore_cell_state(self._pending_snapshot)
+            self._pending_snapshot = None
 
 
 def _extract_column_changes(

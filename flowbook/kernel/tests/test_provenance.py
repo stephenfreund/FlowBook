@@ -210,12 +210,13 @@ class TestProvenanceBasic:
         # Now provenance shows C wrote x
         assert driver.provenance.get_variable_writer("x") == "c"
 
-    def test_provenance_persists_after_edit(self):
+    def test_provenance_cleared_when_cell_stops_writing(self):
         """
-        Provenance persists after cell edit.
+        Provenance is cleared when cell stops writing a variable.
 
-        This is the key insight: when C is edited from "x = 1" to "y = 1",
-        Prov["x"] = C still holds (it's not cleared).
+        When C is edited from "x = 1" to "y = 1" and re-runs,
+        Prov["x"] = C is cleared since C no longer writes x.
+        This prevents false "forward contamination" errors.
         """
         driver = NotebookDriver(["a", "b", "c"])
 
@@ -224,17 +225,18 @@ class TestProvenanceBasic:
         driver.run_cell("c")
         assert driver.provenance.get_variable_writer("x") == "c"
 
-        # Edit C to write y instead (x is NOT cleared from provenance)
+        # Edit C to write y instead (x is NOT cleared yet - cell hasn't re-run)
         driver.edit_cell("c", "y = 1", writes={"y"}, effect=lambda s: {**s, "y": 1})
 
-        # Provenance for x still points to C (even though C now writes y)
+        # Provenance for x still points to C (cell hasn't re-run yet)
         assert driver.provenance.get_variable_writer("x") == "c"
 
         # Run C with new code
         driver.run_cell("c")
 
-        # Now C also has provenance for y, but x still points to C
-        assert driver.provenance.get_variable_writer("x") == "c"
+        # Now C has provenance for y, and x provenance is CLEARED
+        # (since C no longer writes x, keeping stale provenance would cause false errors)
+        assert driver.provenance.get_variable_writer("x") is None
         assert driver.provenance.get_variable_writer("y") == "c"
 
 
@@ -293,13 +295,13 @@ class TestBugScenario:
 
     def test_bug_scenario_edit_removes_write(self):
         """
-        The main bug scenario: edit removes a write, but provenance persists.
+        Bug scenario: edit removes a write, provenance is cleared.
 
-        Before the fix (with orphan tracking), step 6 would NOT detect contamination
-        because C's new trace doesn't write x.
+        When C is edited from "x=1" to "y=1" and re-runs, Prov["x"] is cleared
+        since C no longer writes x. This prevents false forward contamination.
 
-        With provenance tracking, x still has Prov["x"] = C, and since C > B in
-        document order, B is correctly marked contaminated.
+        This fixes the user's reported bug: "Read x from @D" errors after
+        editing D to write a different variable.
         """
         driver = NotebookDriver(["a", "b", "c"])
 
@@ -324,12 +326,11 @@ class TestBugScenario:
         # Step 3: Run B
         result_b = driver.run_cell("b")
         assert result_b.forward_violation is not None  # Contaminated by C
-        # cell_is_contaminated removed - forward_violation presence indicates contamination
         assert "b" in driver.stale_cells
 
         # Step 4: Edit C to "y = 1"
         driver.edit_cell("c", "y = 1", writes={"y"}, effect=lambda s: {**s, "y": 1})
-        # Provenance for x STILL points to C (not cleared on edit)
+        # Provenance for x STILL points to C (cell hasn't re-run yet)
         assert driver.provenance.get_variable_writer("x") == "c"
 
         # Step 5: Run C with new code
@@ -337,16 +338,15 @@ class TestBugScenario:
         assert result_c2.violation is None
         assert driver.live_store["x"] == 1  # x STILL 1 from old execution!
         assert driver.live_store["y"] == 1
-        # Provenance for x still points to C
-        assert driver.provenance.get_variable_writer("x") == "c"
+        # Provenance for x is CLEARED (C no longer writes x)
+        assert driver.provenance.get_variable_writer("x") is None
         assert driver.provenance.get_variable_writer("y") == "c"
 
-        # Step 6: Run B - THE FIX
+        # Step 6: Run B - no longer contaminated
         result_b2 = driver.run_cell("b")
-        # B should STILL be contaminated because Prov["x"] = C and C > B
-        assert result_b2.forward_violation is not None
-        # cell_is_contaminated removed - forward_violation presence indicates contamination
-        assert "x" in result_b2.forward_violation.variables
+        # B is NOT contaminated: Prov["x"] is None, so no forward contamination error
+        # (The value x=1 is still stale, but there's no false "Read x from @C" error)
+        assert result_b2.forward_violation is None
 
     def test_bug_scenario_cleared_by_earlier_cell_rerun(self):
         """
@@ -365,21 +365,20 @@ class TestBugScenario:
         driver.edit_cell("c", "y = 1", writes={"y"}, effect=lambda s: {**s, "y": 1})
         driver.run_cell("c")
 
-        # x has provenance pointing to C
-        assert driver.provenance.get_variable_writer("x") == "c"
+        # x provenance is CLEARED (C no longer writes x)
+        assert driver.provenance.get_variable_writer("x") is None
 
         # Re-run A (which writes x)
         result_a2 = driver.run_cell("a")
         assert result_a2.violation is None
 
-        # x now has provenance pointing to A (earlier cell)
+        # x now has provenance pointing to A
         assert driver.provenance.get_variable_writer("x") == "a"
         assert driver.live_store["x"] == 0  # A restored x to 0
 
         # Now B should be clean (Prov["x"] = A, A < B)
         result_b3 = driver.run_cell("b")
         assert result_b3.forward_violation is None
-        # cell_is_contaminated removed - forward_violation absence indicates no contamination
 
 
 class TestProvenanceWithMultipleCells:

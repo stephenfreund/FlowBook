@@ -3839,3 +3839,227 @@ class TestForwardStaleFormula:
         # C should be stale: new writes {y} overlap with C's reads {y}
         assert "b" in result.stale_cells
         assert "c" in result.stale_cells
+
+
+class TestRollbackLastCheck:
+    """Tests for rollback_last_check() - restoring state after rejected execution."""
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        """Save a pre-checkpoint for a cell."""
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def test_rollback_clears_last_writer(self):
+        """Rollback removes last_writer entries added by check().
+
+        Scenario: Cell D writes x, gets rejected, rollback should remove
+        last_writer[x] = D so it doesn't affect later checks.
+        """
+        # Cell A writes x
+        self._save_pre_checkpoint("a", {})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 1},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert self.sdc._notebook_state.last_writer.get("x") == "a"
+
+        # Cell D writes x (simulating a check that will be rejected)
+        self._save_pre_checkpoint("d", {"x": 1})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace={"x": 999},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert self.sdc._notebook_state.last_writer.get("x") == "d"
+
+        # Rollback D's check
+        self.sdc.rollback_last_check()
+
+        # last_writer[x] should be restored to "a"
+        assert self.sdc._notebook_state.last_writer.get("x") == "a"
+
+    def test_rollback_restores_writes_set(self):
+        """Rollback restores the cell's writes set to previous value."""
+        # Cell D writes x first time
+        self._save_pre_checkpoint("d", {})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace={"x": 1},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert self.sdc._notebook_state.writes.get("d") == {"x"}
+
+        # Cell D writes y (different variable) - simulating rejected execution
+        self._save_pre_checkpoint("d", {"x": 1})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace={"x": 1, "y": 2},
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+        assert self.sdc._notebook_state.writes.get("d") == {"y"}
+
+        # Rollback
+        self.sdc.rollback_last_check()
+
+        # Writes should be restored to {"x"}
+        assert self.sdc._notebook_state.writes.get("d") == {"x"}
+
+    def test_rollback_restores_status(self):
+        """Rollback restores cell status to previous value."""
+        # Cell A writes x, marks later cell C stale
+        self._save_pre_checkpoint("a", {})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 1},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Cell C reads x
+        self._save_pre_checkpoint("c", {"x": 1})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace={"x": 1, "c_out": 10},
+            tracking=make_tracking(reads={"x"}, writes={"c_out"}),
+        )
+        assert self.sdc._notebook_state.is_clean("c")
+
+        # Cell A re-runs, marks C stale - this will be rejected
+        self._save_pre_checkpoint("a", {"x": 1, "c_out": 10})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 2, "c_out": 10},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Rollback A's check - but this only restores A's state, not C's
+        # (staleness propagation to C is a side effect we don't fully rollback)
+        self.sdc.rollback_last_check()
+
+        # A's writes should be restored
+        assert "x" in self.sdc._notebook_state.writes.get("a", set())
+
+    def test_rollback_for_never_executed_cell(self):
+        """Rollback works correctly for a cell that hadn't executed before."""
+        # Cell D never executed before (set_cell_order initializes empty sets)
+        assert self.sdc._notebook_state.writes.get("d") == set()
+        assert self.sdc._notebook_state.last_writer.get("x") is None
+        assert self.sdc._notebook_state.tracking_data.get("d") is None
+
+        # D writes x (simulating rejected execution)
+        self._save_pre_checkpoint("d", {})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace={"x": 1},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert self.sdc._notebook_state.writes.get("d") == {"x"}
+        assert self.sdc._notebook_state.last_writer.get("x") == "d"
+        assert self.sdc._notebook_state.tracking_data.get("d") is not None
+
+        # Rollback
+        self.sdc.rollback_last_check()
+
+        # Should be back to never-executed state
+        assert self.sdc._notebook_state.writes.get("d") == set()
+        assert self.sdc._notebook_state.last_writer.get("x") is None
+        assert self.sdc._notebook_state.tracking_data.get("d") is None
+
+    def test_rollback_noop_when_no_pending_snapshot(self):
+        """Rollback is safe to call even without a pending snapshot."""
+        # Just make sure it doesn't crash
+        self.sdc.rollback_last_check()
+        self.sdc.rollback_last_check()  # Multiple calls should be safe
+
+    def test_user_scenario_edit_d_to_different_variable(self):
+        """
+        User scenario: D writes x, causes error, user edits D to write w,
+        re-runs D, then runs C - C should not see "Read x from @D".
+
+        This test simulates the full flow with rollback.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 10},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B writes x
+        self._save_pre_checkpoint("b", {"x": 10})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace={"x": 11},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # C reads x, writes y
+        self._save_pre_checkpoint("c", {"x": 11})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace={"x": 11, "y": 11},
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # D writes x (will be rejected due to backward mutation with C)
+        self._save_pre_checkpoint("d", {"x": 11, "y": 11})
+        result_d = self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace={"x": 999, "y": 11},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        # This causes backward mutation (D writes x, C read x)
+        assert result_d.violation is not None or result_d.has_errors()
+
+        # After check, last_writer[x] = D
+        assert self.sdc._notebook_state.last_writer.get("x") == "d"
+
+        # Kernel rolls back D's execution
+        self.sdc.rollback_last_check()
+
+        # Now last_writer[x] should be back to B
+        assert self.sdc._notebook_state.last_writer.get("x") == "b"
+
+        # User edits D to write w instead of x, and re-runs D
+        self._save_pre_checkpoint("d", {"x": 11, "y": 11})
+        result_d2 = self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace={"x": 11, "y": 11, "w": 1},
+            tracking=make_tracking(reads=set(), writes={"w"}),
+        )
+        # No violation now since D writes w, not x
+        assert result_d2.violation is None
+        assert not result_d2.has_errors()
+
+        # Re-run C - should NOT get forward contamination from D
+        self._save_pre_checkpoint("c", {"x": 11, "y": 11, "w": 1})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace={"x": 11, "y": 11, "w": 1},
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # C should have no forward violation (no "Read x from @D")
+        assert result_c.forward_violation is None

@@ -1575,9 +1575,13 @@ tests:
     expect:
       status:
         a: clean
-        b: clean  # b doesn't read x, so not affected by forward_stale
+        b: stale  # b writes x, so write_overlap when a writes x
         c: stale
       reasons:
+        b:
+          - type: write_overlap
+            loc: "x"
+            cell_id: "a"
         c:
           - type: skipped_upstream
             loc: "x"

@@ -25,7 +25,7 @@ And additional per-cell metadata:
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
-from flowbook.kernel.models import CellStatus, Reason, ReasonType
+from flowbook.kernel.models import CellStateSnapshot, CellStatus, Reason, ReasonType
 from flowbook.kernel_support.models import TrackingData
 
 if TYPE_CHECKING:
@@ -247,7 +247,15 @@ class NotebookState:
 
         # Core R, W tracking (derived from TrackingData)
         self.reads[cell_id] = tracking.get_rbw_vars()
-        self.writes[cell_id] = tracking.get_written_variables()
+        new_writes = tracking.get_written_variables()
+        self.writes[cell_id] = new_writes
+
+        # Clear stale last_writer entries: if this cell was the last writer
+        # for a variable it NO LONGER writes, clear that entry.
+        # This handles the case where a cell is edited to write different variables.
+        for loc in list(self.last_writer.keys()):
+            if self.last_writer[loc] == cell_id and loc not in new_writes:
+                del self.last_writer[loc]
 
         # Update L: only for variables that CHANGED (diff-based, not all writes)
         # This prevents false forward contamination when a cell writes but doesn't change
@@ -270,6 +278,97 @@ class NotebookState:
             self.structural_reads_values[cell_id] = structural_reads_values
         if typed_changes is not None:
             self.typed_changes[cell_id] = typed_changes
+
+    def snapshot_cell_state(self, cell_id: str) -> CellStateSnapshot:
+        """
+        Capture current state for a cell before execution.
+
+        Used to enable rollback if execution is rejected. Returns a
+        CellStateSnapshot that can be passed to restore_cell_state().
+
+        Args:
+            cell_id: The cell about to execute
+
+        Returns:
+            CellStateSnapshot containing all state that will be modified
+        """
+        # Capture full last_writer dict (will be replaced on restore)
+        last_writer_entries = dict(self.last_writer)
+
+        # Capture full column_last_writer dict (deep copy)
+        column_entries: Dict[str, Dict[str, str]] = {}
+        for var, cols in self.column_last_writer.items():
+            column_entries[var] = dict(cols)
+
+        return CellStateSnapshot(
+            cell_id=cell_id,
+            reads=self.reads.get(cell_id),
+            writes=self.writes.get(cell_id),
+            status=self.status.get(cell_id),
+            tracking_data=self.tracking_data.get(cell_id),
+            execution_seq=self.execution_seq.get(cell_id),
+            structural_reads_values=self.structural_reads_values.get(cell_id),
+            typed_changes=self.typed_changes.get(cell_id),
+            last_writer_entries=last_writer_entries,
+            column_last_writer_entries=column_entries,
+        )
+
+    def restore_cell_state(self, snapshot: CellStateSnapshot) -> None:
+        """
+        Restore cell state from a snapshot (undo record_execution).
+
+        Called when kernel rolls back a rejected execution. This restores
+        the enforcer's analysis state to match the rolled-back namespace.
+
+        Args:
+            snapshot: CellStateSnapshot from snapshot_cell_state()
+        """
+        cell_id = snapshot.cell_id
+
+        # Restore or clear per-cell state
+        if snapshot.reads is None:
+            self.reads.pop(cell_id, None)
+        else:
+            self.reads[cell_id] = snapshot.reads
+
+        if snapshot.writes is None:
+            self.writes.pop(cell_id, None)
+        else:
+            self.writes[cell_id] = snapshot.writes
+
+        if snapshot.status is None:
+            self.status.pop(cell_id, None)
+        else:
+            self.status[cell_id] = snapshot.status
+
+        if snapshot.tracking_data is None:
+            self.tracking_data.pop(cell_id, None)
+        else:
+            self.tracking_data[cell_id] = snapshot.tracking_data
+
+        if snapshot.execution_seq is None:
+            self.execution_seq.pop(cell_id, None)
+        else:
+            self.execution_seq[cell_id] = snapshot.execution_seq
+
+        if snapshot.structural_reads_values is None:
+            self.structural_reads_values.pop(cell_id, None)
+        else:
+            self.structural_reads_values[cell_id] = snapshot.structural_reads_values
+
+        if snapshot.typed_changes is None:
+            self.typed_changes.pop(cell_id, None)
+        else:
+            self.typed_changes[cell_id] = snapshot.typed_changes
+
+        # Restore last_writer to pre-execution state
+        self.last_writer.clear()
+        self.last_writer.update(snapshot.last_writer_entries)
+
+        # Restore column_last_writer to pre-execution state
+        self.column_last_writer.clear()
+        for var, cols in snapshot.column_last_writer_entries.items():
+            self.column_last_writer[var] = dict(cols)
 
     def get_column_writer(self, var: str, col: str) -> Optional[str]:
         """Get the cell_id that last wrote column col of var, or None."""

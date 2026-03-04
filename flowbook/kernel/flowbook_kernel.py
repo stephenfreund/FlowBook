@@ -1196,8 +1196,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                     # When continue_after_violation=True: continue, cell stays CLEAN (accepted)
                     if sdc_result and sdc_result.has_errors():
                         if not self._continue_after_violation:
-                            # ROLLBACK: Restore pre-execution state
+                            # ROLLBACK: Restore pre-execution state (namespace)
                             self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
+
+                            # ROLLBACK: Restore enforcer analysis state
+                            self._enforcer.rollback_last_check()
 
                             # Send violation to frontend (rejected)
                             first_error = sdc_result.errors[0]

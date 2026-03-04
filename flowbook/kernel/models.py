@@ -784,3 +784,42 @@ class OrderChangeResult:
     delta: OrderDelta  # The computed delta
 
 
+# =============================================================================
+# Cell State Snapshot (for rollback)
+# =============================================================================
+
+
+@dataclass
+class CellStateSnapshot:
+    """
+    Snapshot of a cell's state before execution, used for rollback.
+
+    When a cell execution is rejected (e.g., due to a reproducibility violation),
+    the kernel rolls back the namespace. This snapshot allows the enforcer to
+    also rollback its analysis state to match.
+
+    Attributes:
+        cell_id: The cell whose state was captured
+        reads: Previous reads set (None if cell hadn't executed)
+        writes: Previous writes set (None if cell hadn't executed)
+        status: Previous CellStatus (None if cell hadn't executed)
+        tracking_data: Previous TrackingData (None if cell hadn't executed)
+        execution_seq: Previous execution sequence number (None if cell hadn't executed)
+        structural_reads_values: Previous structural read values (None if none)
+        typed_changes: Previous typed changes (None if none)
+        last_writer_entries: Entries in last_writer that pointed to this cell
+        column_last_writer_entries: Entries in column_last_writer that pointed to this cell
+    """
+
+    cell_id: str
+    reads: Optional[Set[str]]
+    writes: Optional[Set[str]]
+    status: Optional["CellStatus"]
+    tracking_data: Optional[TrackingData]
+    execution_seq: Optional[int]
+    structural_reads_values: Optional[Dict[str, Dict[str, str]]]
+    typed_changes: Optional[List["Change"]]
+    last_writer_entries: Dict[str, str]  # loc -> cell_id (was this cell)
+    column_last_writer_entries: Dict[str, Dict[str, str]]  # var -> {col -> cell_id}
+
+
