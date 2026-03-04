@@ -16,6 +16,7 @@ Usage via CLI:
     flowbook compare-baseline notebook.ipynb                              # FlowBook only (default)
     flowbook compare-baseline notebook.ipynb --run-baseline               # Include baseline comparison
     flowbook compare-baseline notebook.ipynb --staleness-mode syntactic   # Use syntactic mode
+    flowbook compare-baseline notebook.ipynb --df-subset-optimization     # Enable DF subset optimization
     flowbook compare-baseline notebook.ipynb --timeout 14400              # optional timeout (default: 4 hours)
 
 OUTPUT JSON SCHEMA (version 2.0):
@@ -28,6 +29,7 @@ OUTPUT JSON SCHEMA (version 2.0):
     "num_cells": int,                      # Number of code cells
     "timeout_seconds": float,              # Cell execution timeout
     "staleness_mode": str,                 # "semantic" or "syntactic"
+    "df_subset_optimization": bool,        # Whether DF subset optimization is enabled
     "rerun_k": int,                        # Number of rerun iterations (optional)
     "trial": int,                          # Trial number (optional, for multi-trial runs)
     "num_trials": int                      # Total trials (optional)
@@ -1261,6 +1263,7 @@ def run_flowbook_timing(
     cell_timeout: float,
     rerun_k: int = 0,
     staleness_mode: str = "semantic",
+    df_subset_optimization: bool = False,
 ) -> TimingResults:
     """
     Run notebook on FlowBook kernel and collect TIMING metrics only (Scalene OFF).
@@ -1268,6 +1271,9 @@ def run_flowbook_timing(
     Args:
         notebook_content: Notebook JSON
         cell_timeout: Timeout per cell in seconds
+        rerun_k: Number of rerun iterations
+        staleness_mode: Staleness computation mode ('syntactic' or 'semantic')
+        df_subset_optimization: Enable DataFrame subset optimization for checkpoints
 
     Returns:
         TimingResults with cell timing data including state_duration_ms, check_duration_ms
@@ -1296,6 +1302,12 @@ def run_flowbook_timing(
         kernel_client.execute(f"%staleness_mode {staleness_mode}", silent=True)
         _wait_for_idle(kernel_client)
         log(f"FlowBook Timing: staleness_mode set to {staleness_mode}")
+
+        # Enable DataFrame subset optimization if requested
+        if df_subset_optimization:
+            kernel_client.execute("%df_subset_checkpoints on", silent=True)
+            _wait_for_idle(kernel_client)
+            log("FlowBook Timing: df_subset_checkpoints enabled")
 
         # Run a warm-up cell to trigger lazy initialization (cudf import, tracking patches, etc.)
         # This ensures the overhead doesn't appear in the first real cell
@@ -1693,6 +1705,7 @@ def run_flowbook_memory(
     cell_timeout: float,
     rerun_k: int = 0,
     staleness_mode: str = "semantic",
+    df_subset_optimization: bool = False,
 ) -> MemoryResults:
     """
     Run notebook on FlowBook kernel and collect MEMORY metrics using HeapSizer.
@@ -1700,6 +1713,9 @@ def run_flowbook_memory(
     Args:
         notebook_content: Notebook JSON
         cell_timeout: Timeout per cell in seconds
+        rerun_k: Number of rerun iterations
+        staleness_mode: Staleness computation mode ('syntactic' or 'semantic')
+        df_subset_optimization: Enable DataFrame subset optimization for checkpoints
 
     Returns:
         MemoryResults with cell memory data from HeapSizer + checkpoint var costs
@@ -1727,6 +1743,12 @@ def run_flowbook_memory(
         kernel_client.execute(f"%staleness_mode {staleness_mode}", silent=True)
         _wait_for_idle(kernel_client)
         log(f"FlowBook Memory: staleness_mode set to {staleness_mode}")
+
+        # Enable DataFrame subset optimization if requested
+        if df_subset_optimization:
+            kernel_client.execute("%df_subset_checkpoints on", silent=True)
+            _wait_for_idle(kernel_client)
+            log("FlowBook Memory: df_subset_checkpoints enabled")
 
         # Run a warm-up cell to trigger lazy initialization (cudf import, tracking patches, etc.)
         log("FlowBook Memory: Running warm-up cell...")
@@ -2084,6 +2106,11 @@ class CompareBaselineCommand(NotebookCommand):
             default="semantic",
             help="Staleness computation mode: 'syntactic' (set intersection, lower memory) or 'semantic' (checkpoint diff, precise). Default: semantic",
         )
+        subparser.add_argument(
+            "--df-subset-optimization",
+            action="store_true",
+            help="Enable DataFrame subset optimization for checkpoints. Detects row-subsets and stores indices instead of full copies.",
+        )
         return subparser
 
     async def process(
@@ -2119,6 +2146,7 @@ class CompareBaselineCommand(NotebookCommand):
         num_trials = kwargs.get("trials", 1)
         start_trial = kwargs.get("start", 1)
         staleness_mode = kwargs.get("staleness_mode", "semantic")
+        df_subset_optimization = kwargs.get("df_subset_optimization", False)
         notebook_path = kwargs.get("notebook_path", "unknown.ipynb")
 
         cells = notebook_content.get("cells", [])
@@ -2176,7 +2204,7 @@ class CompareBaselineCommand(NotebookCommand):
                 log("=" * 60)
                 log("PHASE 1: FLOWBOOK TIMING (Scalene OFF)")
                 log("=" * 60)
-                flowbook_timing = run_flowbook_timing(notebook_content, cell_timeout, rerun_k, staleness_mode)
+                flowbook_timing = run_flowbook_timing(notebook_content, cell_timeout, rerun_k, staleness_mode, df_subset_optimization)
                 log("")
 
                 # ============================================================
@@ -2219,7 +2247,7 @@ class CompareBaselineCommand(NotebookCommand):
                     log("=" * 60)
                     log("PHASE 4: FLOWBOOK MEMORY (HeapSizer)")
                     log("=" * 60)
-                    flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout, rerun_k, staleness_mode)
+                    flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout, rerun_k, staleness_mode, df_subset_optimization)
                     log("")
 
                 # Build comparison result with new structure
@@ -2227,6 +2255,7 @@ class CompareBaselineCommand(NotebookCommand):
                     "num_cells": len(code_cells),
                     "timeout_seconds": cell_timeout,
                     "staleness_mode": staleness_mode,
+                    "df_subset_optimization": df_subset_optimization,
                 }
                 if rerun_k > 0:
                     metadata_dict["rerun_k"] = rerun_k
