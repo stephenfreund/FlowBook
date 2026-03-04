@@ -2,11 +2,13 @@
 
 [![Github Actions Status](/workflows/Build/badge.svg)](/actions/workflows/build.yml)
 
-A JupyterLab extension.
 
-This extension is composed of a Python package named `flowbook`
-for the server extension and a NPM package named `flowbook`
-for the frontend extension.
+## TL;DR
+
+- Clone repository
+- Install: `pip install -e .`
+- Run: `flowlab examples`
+
 
 ## Requirements
 
