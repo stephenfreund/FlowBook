@@ -819,7 +819,14 @@ class HeapSizer:
 
         # __slots__
         if hasattr(obj, '__slots__') and obj.__slots__ is not None:
-            for slot in obj.__slots__:
+            slots = obj.__slots__
+            # Validate __slots__ is actually iterable (some objects have sentinel values)
+            if not isinstance(slots, (tuple, list, set, frozenset)):
+                try:
+                    slots = tuple(slots)
+                except TypeError:
+                    slots = ()  # Not iterable, skip
+            for slot in slots:
                 try:
                     val = getattr(obj, slot, None)
                     if val is not None:
