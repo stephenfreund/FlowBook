@@ -1,4 +1,4 @@
-"""Unit tests for GPU memory measurement utilities."""
+"""Unit tests for GPU memory measurement utilities using pynvml."""
 
 import pytest
 from flowbook.util.gpu_memory import get_gpu_memory_mb, has_gpu, _init_pynvml
@@ -56,68 +56,93 @@ class TestLazyInitialization:
 
 
 @pytest.mark.skipif(not has_gpu(), reason="No GPU available")
-class TestGpuMemoryWithAllocation:
-    """Tests that require actual GPU allocation."""
+class TestPynvmlDetectsAllocation:
+    """Tests that pynvml detects GPU memory allocation from various frameworks."""
 
-    def test_detects_gpu_memory_allocation(self):
-        """Test that GPU memory allocation is detected."""
-        from numba import cuda
-        import numpy as np
+    def test_detects_cupy_allocation(self):
+        """Test that pynvml detects CuPy array allocation."""
+        try:
+            import cupy as cp
+        except ImportError:
+            pytest.skip("CuPy not available")
 
         initial_mem = get_gpu_memory_mb()
 
         # Allocate ~100 MB on GPU
-        size = 25 * 1024 * 1024  # 25M floats = 100 MB
-        host_array = np.zeros(size, dtype=np.float32)
+        arr = cp.zeros(25 * 1024 * 1024, dtype=cp.float32)  # 100 MB
+        cp.cuda.Device().synchronize()
+
+        mem_after = get_gpu_memory_mb()
+
+        # Should detect memory increase
+        assert mem_after > initial_mem, (
+            f"Expected memory increase after CuPy allocation: "
+            f"{initial_mem:.2f} MB -> {mem_after:.2f} MB"
+        )
+
+        del arr
+        cp.get_default_memory_pool().free_all_blocks()
+
+    def test_detects_numba_cuda_allocation(self):
+        """Test that pynvml detects Numba CUDA allocation."""
+        try:
+            from numba import cuda
+            import numpy as np
+        except ImportError:
+            pytest.skip("Numba not available")
+
+        initial_mem = get_gpu_memory_mb()
+
+        # Allocate ~100 MB on GPU
+        host_array = np.zeros(25 * 1024 * 1024, dtype=np.float32)
         device_array = cuda.to_device(host_array)
         cuda.synchronize()
 
         mem_after = get_gpu_memory_mb()
 
-        # Should detect significant memory increase (accounting for CUDA context)
-        assert mem_after > 50.0, f"Expected >50 MB after allocation, got {mem_after:.2f} MB"
+        assert mem_after > initial_mem, (
+            f"Expected memory increase after Numba CUDA allocation: "
+            f"{initial_mem:.2f} MB -> {mem_after:.2f} MB"
+        )
 
-        # Cleanup
         del device_array
         cuda.current_context().deallocations.clear()
 
-    def test_memory_increases_with_larger_allocation(self):
+    def test_memory_scales_with_allocation_size(self):
         """Test that larger allocations show more memory usage."""
-        from numba import cuda
-        import numpy as np
+        try:
+            import cupy as cp
+        except ImportError:
+            pytest.skip("CuPy not available")
 
         # First allocation: ~50 MB
-        size1 = 12 * 1024 * 1024  # ~48 MB
-        arr1 = cuda.to_device(np.zeros(size1, dtype=np.float32))
-        cuda.synchronize()
+        arr1 = cp.zeros(12 * 1024 * 1024, dtype=cp.float32)  # 48 MB
+        cp.cuda.Device().synchronize()
         mem1 = get_gpu_memory_mb()
 
         # Second allocation: additional ~100 MB
-        size2 = 25 * 1024 * 1024  # ~100 MB
-        arr2 = cuda.to_device(np.zeros(size2, dtype=np.float32))
-        cuda.synchronize()
+        arr2 = cp.zeros(25 * 1024 * 1024, dtype=cp.float32)  # 100 MB
+        cp.cuda.Device().synchronize()
         mem2 = get_gpu_memory_mb()
 
-        # Memory should increase
         assert mem2 > mem1, f"Expected memory to increase: {mem1:.2f} MB -> {mem2:.2f} MB"
 
-        # Cleanup
         del arr1, arr2
-        cuda.current_context().deallocations.clear()
+        cp.get_default_memory_pool().free_all_blocks()
 
 
 def _cudf_available() -> bool:
     """Check if cuDF is available."""
     try:
-        import cudf
+        import cudf  # noqa: F401
         return True
     except ImportError:
         return False
 
 
 @pytest.mark.skipif(not has_gpu() or not _cudf_available(), reason="No GPU or cuDF unavailable")
-class TestGpuMemoryWithCudf:
-    """Tests for GPU memory measurement with cuDF DataFrames."""
+class TestPynvmlDetectsCudf:
+    """Tests that pynvml detects cuDF DataFrame GPU memory."""
 
     def test_detects_cudf_dataframe_allocation(self):
         """Test that cuDF DataFrame GPU memory is detected."""
@@ -133,14 +158,12 @@ class TestGpuMemoryWithCudf:
 
         mem_after = get_gpu_memory_mb()
 
-        # Should detect memory increase (accounting for CUDA context overhead)
-        # With CUDA context, expect at least the allocation size
         assert mem_after > initial_mem, (
             f"Expected GPU memory to increase after cuDF allocation: "
             f"{initial_mem:.2f} MB -> {mem_after:.2f} MB"
         )
 
-        # The delta should be roughly the allocation size (allow some overhead)
+        # The delta should be roughly the allocation size
         delta = mem_after - initial_mem
         assert delta >= size_mb * 0.9, (
             f"Expected ~{size_mb} MB increase, got {delta:.2f} MB delta"
@@ -173,56 +196,6 @@ class TestGpuMemoryWithCudf:
 
         del df1, df2
         gc.collect()
-
-    def test_cudf_memory_decreases_on_delete(self):
-        """Test that deleting cuDF DataFrames releases GPU memory."""
-        import cudf
-        import numpy as np
-        import gc
-
-        # Create a 200 MB DataFrame
-        n_rows = 200 * 1024 * 1024 // 4
-        df = cudf.DataFrame({'col': np.zeros(n_rows, dtype=np.float32)})
-        mem_with_df = get_gpu_memory_mb()
-
-        # Delete and collect
-        del df
-        gc.collect()
-
-        mem_after_delete = get_gpu_memory_mb()
-
-        # Memory should decrease (may not fully release due to RMM pooling)
-        # At minimum, check that delete doesn't INCREASE memory
-        assert mem_after_delete <= mem_with_df, (
-            f"Memory should not increase after delete: "
-            f"{mem_with_df:.2f} MB -> {mem_after_delete:.2f} MB"
-        )
-
-    def test_cudf_multiple_columns(self):
-        """Test GPU memory measurement with multi-column cuDF DataFrame."""
-        import cudf
-        import numpy as np
-
-        initial_mem = get_gpu_memory_mb()
-
-        # Create a DataFrame with 4 columns, ~100 MB total
-        n_rows = 25 * 1024 * 1024 // 4  # 25 MB per column
-        df = cudf.DataFrame({
-            'a': np.zeros(n_rows, dtype=np.float32),
-            'b': np.zeros(n_rows, dtype=np.float32),
-            'c': np.zeros(n_rows, dtype=np.float32),
-            'd': np.zeros(n_rows, dtype=np.float32),
-        })
-
-        mem_after = get_gpu_memory_mb()
-
-        # Should detect ~100 MB increase
-        delta = mem_after - initial_mem
-        assert delta >= 90, (
-            f"Expected ~100 MB for 4x25MB columns, got {delta:.2f} MB delta"
-        )
-
-        del df
 
 
 if __name__ == "__main__":

@@ -400,44 +400,44 @@ def create_flowbook_kernel(
                 kernel_manager = KernelManager(kernel_name=kernel_name)
                 kernel_manager.start_kernel()
 
-            kernel_client = FlowbookKernelClient()
-            kernel_client.load_connection_info(kernel_manager.get_connection_info())
-            kernel_client.start_channels()
+                kernel_client = FlowbookKernelClient()
+                kernel_client.load_connection_info(kernel_manager.get_connection_info())
+                kernel_client.start_channels()
 
-            time.sleep(2)
-            while True:
-                try:
-                    kernel_client.wait_for_ready(timeout=30)
-                    break
-                except Exception as e:
-                    log(f"Error waiting for kernel to be ready: {e}")
-                    log(traceback.format_exc())
-                    time.sleep(0.5)
-
-            return kernel_manager, kernel_client
-
-        except Exception as e:
-            log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
-            log(traceback.format_exc())
-            if kernel_manager is not None and kernel_manager.is_alive():
-                kernel_manager.shutdown_kernel(now=True)
-                while kernel_manager.is_alive():
-                    time.sleep(1)
-
-            if attempt < max_attempts - 1:
                 time.sleep(2)
-            else:
-                if kernel_client is not None:
+                while True:
                     try:
-                        kernel_client.stop_channels()
-                    except Exception:
-                        pass
-                if kernel_manager is not None:
-                    try:
-                        kernel_manager.shutdown_kernel(now=True)
-                    except Exception:
-                        pass
-                raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
+                        kernel_client.wait_for_ready(timeout=30)
+                        break
+                    except Exception as e:
+                        log(f"Error waiting for kernel to be ready: {e}")
+                        log(traceback.format_exc())
+                        time.sleep(0.5)
+
+                return kernel_manager, kernel_client
+
+            except Exception as e:
+                log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
+                log(traceback.format_exc())
+                if kernel_manager is not None and kernel_manager.is_alive():
+                    kernel_manager.shutdown_kernel(now=True)
+                    while kernel_manager.is_alive():
+                        time.sleep(1)
+
+                if attempt < max_attempts - 1:
+                    time.sleep(2)
+                else:
+                    if kernel_client is not None:
+                        try:
+                            kernel_client.stop_channels()
+                        except Exception:
+                            pass
+                    if kernel_manager is not None:
+                        try:
+                            kernel_manager.shutdown_kernel(now=True)
+                        except Exception:
+                            pass
+                    raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
 
         raise Exception("Kernel failed to start")
     finally:

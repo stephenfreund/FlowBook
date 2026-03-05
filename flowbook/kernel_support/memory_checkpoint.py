@@ -2005,14 +2005,10 @@ class MemoryCheckpoints:
         loop_start = time.time()
         for k, v in variables.items():
             try:
-                # Measure object size only when profiling (expensive for cudf proxies)
-                if _PROFILE_CHECKPOINT:
-                    sizeof_start = time.time()
-                    obj_size = sizer.sizeof(v, owned_only=True)
-                    sizeof_ms = (time.time() - sizeof_start) * 1000
-                else:
-                    obj_size = 0
-                    sizeof_ms = 0
+                # Measure object size for per-variable memory tracking
+                sizeof_start = time.time()
+                obj_size = sizer.sizeof(v, owned_only=True)
+                sizeof_ms = (time.time() - sizeof_start) * 1000
 
                 # Use custom deepcopy which handles pandas and functions specially
                 start_time = time.time()
