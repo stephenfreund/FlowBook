@@ -190,9 +190,12 @@ class HeapSizer:
         self._seen_data_ptrs.clear()
 
         # Second pass: measure each variable
+        # Use owned_only=False to count actual memory, even for arrays with .base
+        # (e.g., pandas CoW internal arrays). Deduplication via _seen_data_ptrs
+        # and shares_memory() prevents double-counting shared buffers.
         for var_name in vars_to_measure:
             obj = ns[var_name]
-            size = self._sizeof(obj, owned_only=True)
+            size = self._sizeof(obj, owned_only=False)
             by_variable[var_name] = size
             total_bytes += size
 

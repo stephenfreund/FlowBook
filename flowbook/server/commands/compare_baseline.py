@@ -356,9 +356,14 @@ def create_baseline_kernel() -> Tuple[KernelManager, BlockingKernelClient]:
     raise Exception("Kernel failed to start")
 
 
-def create_flowbook_kernel() -> Tuple[KernelManager, FlowbookKernelClient]:
+def create_flowbook_kernel(
+    extra_env: Optional[Dict[str, str]] = None
+) -> Tuple[KernelManager, FlowbookKernelClient]:
     """
     Start a flowbook_kernel.
+
+    Args:
+        extra_env: Optional dict of extra environment variables to set for the kernel process.
 
     Returns:
         Tuple of (KernelManager, FlowbookKernelClient)
@@ -385,7 +390,7 @@ def create_flowbook_kernel() -> Tuple[KernelManager, FlowbookKernelClient]:
                     pass
 
             kernel_manager = KernelManager(kernel_name=kernel_name)
-            kernel_manager.start_kernel()
+            kernel_manager.start_kernel(extra_env=extra_env)
 
             kernel_client = FlowbookKernelClient()
             kernel_client.load_connection_info(kernel_manager.get_connection_info())
@@ -1869,7 +1874,10 @@ def run_flowbook_memory(
 
     try:
         log("FlowBook Memory: Starting flowbook_kernel...")
-        kernel_manager, kernel_client = create_flowbook_kernel()
+        # Enable FLOWBOOK_PROFILE_CHECKPOINT to populate per-variable memory bytes
+        kernel_manager, kernel_client = create_flowbook_kernel(
+            extra_env={"FLOWBOOK_PROFILE_CHECKPOINT": "1"}
+        )
         log("FlowBook Memory: Kernel ready")
 
         # Enable continue_after_violation

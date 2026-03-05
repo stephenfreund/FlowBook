@@ -2029,6 +2029,111 @@ except ImportError:
     pass  # CatBoost not installed
 
 
+# CatBoost model handler - properly serializes GPU-trained models
+try:
+    from catboost import CatBoostRegressor, CatBoostClassifier, CatBoostRanker
+    import io
+
+    def _deepcopy_catboost_model(model, memo: dict[int, Any]):
+        """
+        Deep copy a CatBoost model using save_model/load_model.
+
+        This properly captures the full model state including GPU-trained weights.
+        Standard deepcopy may not correctly handle CatBoost's internal C++ state,
+        especially for GPU-trained models.
+
+        Uses binary 'cbm' format for complete state preservation.
+
+        Args:
+            model: CatBoostRegressor, CatBoostClassifier, or CatBoostRanker
+            memo: Shared memo dict for tracking copied objects
+
+        Returns:
+            Independent copy of the model with full state
+        """
+        obj_id = id(model)
+        if obj_id in memo:
+            return memo[obj_id]
+
+        # Check if model is fitted (has trees)
+        if not model.is_fitted():
+            # Unfitted model - just copy the parameters
+            model_copy = type(model)(**model.get_params())
+            memo[obj_id] = model_copy
+            return model_copy
+
+        # Fitted model - serialize to binary format
+        buffer = io.BytesIO()
+        model.save_model(buffer, format='cbm')
+
+        # Create new model and load from binary
+        model_copy = type(model)()
+        buffer.seek(0)
+        model_copy.load_model(buffer, format='cbm')
+
+        memo[obj_id] = model_copy
+        return model_copy
+
+    d[CatBoostRegressor] = _deepcopy_catboost_model
+    d[CatBoostClassifier] = _deepcopy_catboost_model
+    d[CatBoostRanker] = _deepcopy_catboost_model
+except ImportError:
+    pass  # CatBoost not installed
+
+
+# XGBoost model handler - properly serializes GPU-trained models
+try:
+    from xgboost import XGBRegressor, XGBClassifier, XGBRanker, XGBRFRegressor, XGBRFClassifier
+    import io
+
+    def _deepcopy_xgboost_model(model, memo: dict[int, Any]):
+        """
+        Deep copy an XGBoost model using save_model/load_model.
+
+        This properly captures the full model state including GPU-trained weights.
+        XGBoost sklearn API models wrap a Booster which can be serialized via
+        save_model() in JSON or binary format.
+
+        Args:
+            model: XGBRegressor, XGBClassifier, XGBRanker, or RF variants
+            memo: Shared memo dict for tracking copied objects
+
+        Returns:
+            Independent copy of the model with full state
+        """
+        obj_id = id(model)
+        if obj_id in memo:
+            return memo[obj_id]
+
+        # Check if model is fitted (has booster)
+        booster = getattr(model, '_Booster', None)
+        if booster is None:
+            # Unfitted model - just copy the parameters
+            model_copy = type(model)(**model.get_params())
+            memo[obj_id] = model_copy
+            return model_copy
+
+        # Fitted model - serialize to binary format (ubj = universal binary json)
+        buffer = io.BytesIO()
+        model.save_model(buffer)
+
+        # Create new model and load from binary
+        model_copy = type(model)()
+        buffer.seek(0)
+        model_copy.load_model(buffer)
+
+        memo[obj_id] = model_copy
+        return model_copy
+
+    d[XGBRegressor] = _deepcopy_xgboost_model
+    d[XGBClassifier] = _deepcopy_xgboost_model
+    d[XGBRanker] = _deepcopy_xgboost_model
+    d[XGBRFRegressor] = _deepcopy_xgboost_model
+    d[XGBRFClassifier] = _deepcopy_xgboost_model
+except ImportError:
+    pass  # XGBoost not installed
+
+
 # Keras model handler - uses opaque handler pattern for efficient copying
 # NOTE: We don't import Keras at module load time to avoid triggering
 # matplotlib backend initialization before the kernel is ready.
