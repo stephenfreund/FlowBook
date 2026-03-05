@@ -2035,20 +2035,20 @@ except ImportError:
     pass  # CatBoost not installed
 
 
-# CatBoost model handler - properly serializes GPU-trained models
+# CatBoost model handler - delegates to copy.deepcopy which handles these correctly
 try:
     from catboost import CatBoostRegressor, CatBoostClassifier, CatBoostRanker
-    import io
+    import copy as _copy
 
     def _deepcopy_catboost_model(model, memo: dict[int, Any]):
         """
-        Deep copy a CatBoost model using save_model/load_model.
+        Deep copy a CatBoost model using Python's copy.deepcopy.
 
-        This properly captures the full model state including GPU-trained weights.
-        Standard deepcopy may not correctly handle CatBoost's internal C++ state,
-        especially for GPU-trained models.
+        CatBoost models implement __reduce__ for proper pickling/deepcopy support.
+        This works correctly for both CPU and GPU-trained models.
 
-        Uses binary 'cbm' format for complete state preservation.
+        Note: CatBoost 1.2+ no longer accepts BytesIO in save_model(), so we use
+        copy.deepcopy instead of save_model/load_model serialization.
 
         Args:
             model: CatBoostRegressor, CatBoostClassifier, or CatBoostRanker
@@ -2061,22 +2061,8 @@ try:
         if obj_id in memo:
             return memo[obj_id]
 
-        # Check if model is fitted (has trees)
-        if not model.is_fitted():
-            # Unfitted model - just copy the parameters
-            model_copy = type(model)(**model.get_params())
-            memo[obj_id] = model_copy
-            return model_copy
-
-        # Fitted model - serialize to binary format
-        buffer = io.BytesIO()
-        model.save_model(buffer, format='cbm')
-
-        # Create new model and load from binary
-        model_copy = type(model)()
-        buffer.seek(0)
-        model_copy.load_model(buffer, format='cbm')
-
+        # Use standard deepcopy - CatBoost implements __reduce__ correctly
+        model_copy = _copy.deepcopy(model, memo)
         memo[obj_id] = model_copy
         return model_copy
 
