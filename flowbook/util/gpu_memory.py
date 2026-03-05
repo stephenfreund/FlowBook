@@ -37,6 +37,25 @@ def _init_pynvml() -> bool:
     return _pynvml_available
 
 
+def _get_physical_gpu_index() -> int:
+    """Get the physical GPU index respecting CUDA_VISIBLE_DEVICES.
+
+    CUDA_VISIBLE_DEVICES remaps logical device 0 to a physical device.
+    pynvml bypasses CUDA and needs the physical index directly.
+
+    Returns:
+        Physical GPU index (from CUDA_VISIBLE_DEVICES if set, else 0)
+    """
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if cuda_visible:
+        # Take first GPU in the list (e.g., "1,2" -> 1)
+        try:
+            return int(cuda_visible.split(",")[0])
+        except (ValueError, IndexError):
+            pass
+    return 0
+
+
 def get_gpu_memory_mb() -> float:
     """Get current process GPU memory usage in MB.
 
@@ -44,13 +63,17 @@ def get_gpu_memory_mb() -> float:
     all GPU memory allocated by the process regardless of framework
     (CuPy, PyTorch, cuDF/RMM, CatBoost, XGBoost, etc.).
 
+    Respects CUDA_VISIBLE_DEVICES to query the correct physical GPU when
+    running under SLURM or other job schedulers that assign specific GPUs.
+
     Returns GPU memory in MB, or 0.0 if unavailable.
     """
     if not _init_pynvml():
         return 0.0
 
     try:
-        handle = _pynvml.nvmlDeviceGetHandleByIndex(0)  # Primary GPU
+        gpu_index = _get_physical_gpu_index()
+        handle = _pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
         # Query compute running processes
         processes = _pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
         for proc in processes:
