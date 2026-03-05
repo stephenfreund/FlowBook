@@ -588,6 +588,101 @@ def get_cudf_type(obj: Any) -> Optional[type]:
 
 
 # =============================================================================
+# GPU Buffer Detection for Deduplication
+# =============================================================================
+
+def _get_column_buffer_info(col: Any) -> Optional[tuple]:
+    """
+    Get GPU buffer info for a cudf column.
+
+    Returns (buffer_ptr, offset, size) or None if not detectable.
+    - buffer_ptr: GPU memory pointer for the BASE underlying buffer (shared by views)
+    - offset: Offset into the buffer (for views/slices)
+    - size: Number of elements in this column
+
+    Columns sharing the same buffer_ptr with different offsets are views
+    of the same underlying data and can share CPU memory after conversion.
+    """
+    try:
+        # cudf columns have a _column attribute with the actual data
+        if hasattr(col, '_column'):
+            col = col._column
+
+        # Get the BASE data buffer (the shared buffer that views point to)
+        # This is critical for detecting views - use base_data first, not data
+        data = None
+        if hasattr(col, 'base_data') and col.base_data is not None:
+            data = col.base_data
+        elif hasattr(col, 'data'):
+            data = col.data
+
+        if data is None:
+            return None
+
+        # Get buffer pointer from base buffer
+        buf_ptr = None
+        if hasattr(data, '__cuda_array_interface__'):
+            buf_ptr = data.__cuda_array_interface__['data'][0]
+        elif hasattr(data, 'ptr'):
+            buf_ptr = data.ptr
+
+        if buf_ptr is None:
+            return None
+
+        # Get offset (for views/slices)
+        offset = getattr(col, 'offset', 0) or 0
+
+        # Get size
+        size = len(col) if hasattr(col, '__len__') else 0
+
+        return (buf_ptr, offset, size)
+    except Exception:
+        return None
+
+
+def get_dataframe_buffer_map(df: Any) -> Dict[str, tuple]:
+    """
+    Get GPU buffer info for all columns in a cudf DataFrame.
+
+    Returns dict mapping column_name -> (buffer_ptr, offset, size).
+    Columns with the same buffer_ptr share underlying GPU memory.
+
+    Works with both native cudf.DataFrame and cudf.pandas proxy DataFrames.
+    """
+    result = {}
+
+    # Unwrap proxy if needed
+    if is_cudf_proxy(df):
+        unwrapped = unwrap_cudf_proxy(df)
+        if unwrapped is not None and unwrapped is not df:
+            df = unwrapped
+
+    # Get column data
+    try:
+        if hasattr(df, '_data'):
+            # Native cudf DataFrame
+            for col_name in df._data.names:
+                col = df._data[col_name]
+                info = _get_column_buffer_info(col)
+                if info is not None:
+                    result[col_name] = info
+        elif hasattr(df, 'columns'):
+            # Try accessing columns directly
+            for col_name in df.columns:
+                try:
+                    col = df[col_name]
+                    info = _get_column_buffer_info(col)
+                    if info is not None:
+                        result[col_name] = info
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return result
+
+
+# =============================================================================
 # Hash-Based Checkpoint Cache
 # =============================================================================
 
@@ -621,6 +716,10 @@ class CuDFCheckpointCache:
         self._cache: Dict[int, tuple] = {}
         # Maps id(cudf_obj) -> deepcopied pandas object
         self._deepcopy_cache: Dict[int, Any] = {}
+        # Buffer-based cache for deduplication: maps (buffer_ptr, dtype) -> numpy array
+        # This allows detecting when multiple cudf objects share underlying GPU data
+        # and reusing the same numpy array (or views of it) in checkpoints.
+        self._buffer_cache: Dict[tuple, 'np.ndarray'] = {}
 
     def _fingerprint(self, obj: Any) -> Optional[tuple]:
         """
@@ -766,15 +865,144 @@ class CuDFCheckpointCache:
 
         self._cache[obj_id] = (fp, pandas_copy, weak_ref)
 
+    def _get_or_create_column_array(
+        self, col: Any, col_name: str, buf_info: Optional[tuple], dtype_hint: Optional[str] = None
+    ) -> 'np.ndarray':
+        """
+        Get or create a numpy array for a cudf column, with buffer-based deduplication.
+
+        If this column shares a GPU buffer with a previously converted column,
+        returns a view into the cached array instead of creating a new copy.
+        """
+        import numpy as np
+
+        if buf_info is not None:
+            buf_ptr, offset, size = buf_info
+
+            # Try to get dtype from the column without converting
+            if dtype_hint is None:
+                try:
+                    if hasattr(col, 'dtype'):
+                        dtype_hint = str(col.dtype)
+                except Exception:
+                    pass
+
+            # Check cache BEFORE converting to avoid unnecessary GPU->CPU copy
+            if dtype_hint:
+                cache_key = (buf_ptr, dtype_hint)
+                if cache_key in self._buffer_cache:
+                    cached_arr = self._buffer_cache[cache_key]
+
+                    # If sizes match and offset is 0, return cached array directly
+                    if offset == 0 and size == len(cached_arr):
+                        return cached_arr
+
+                    # If this is a prefix/view of a larger cached array, return a view
+                    if size <= len(cached_arr):
+                        if offset == 0:
+                            # Prefix view (e.g., train.iloc[:80000])
+                            return cached_arr[:size]
+                        elif offset + size <= len(cached_arr):
+                            # Slice view (e.g., train.iloc[80000:100000])
+                            return cached_arr[offset:offset + size]
+
+                    # If the cached array is smaller, we need to convert and update cache
+                    # Fall through to conversion below
+
+        # No cache hit - convert column to numpy
+        if hasattr(col, 'to_pandas'):
+            pandas_col = col.to_pandas()
+            arr = pandas_col.values if hasattr(pandas_col, 'values') else np.asarray(pandas_col)
+        else:
+            arr = np.asarray(col)
+
+        if buf_info is None:
+            return arr
+
+        buf_ptr, offset, size = buf_info
+        cache_key = (buf_ptr, str(arr.dtype))
+
+        if cache_key in self._buffer_cache:
+            cached_arr = self._buffer_cache[cache_key]
+            # We got here because the cached array was smaller - update cache if this is larger
+            if len(arr) > len(cached_arr):
+                self._buffer_cache[cache_key] = arr
+                return arr
+            # Otherwise return the newly converted array (shouldn't happen often)
+            return arr
+
+        # Not in cache - store and return
+        self._buffer_cache[cache_key] = arr
+        return arr
+
+    def _convert_dataframe_with_sharing(self, df: Any) -> Any:
+        """
+        Convert a cudf DataFrame to pandas with buffer-based deduplication.
+
+        Columns that share GPU memory will share numpy arrays in the result.
+        """
+        import pandas as pd
+
+        # Get buffer map for this DataFrame
+        buffer_map = get_dataframe_buffer_map(df)
+
+        # Unwrap proxy for conversion
+        cudf_df = df
+        if is_cudf_proxy(df):
+            unwrapped = unwrap_cudf_proxy(df)
+            if unwrapped is not None:
+                cudf_df = unwrapped
+
+        # Convert each column with deduplication
+        result_data = {}
+        for col_name in df.columns:
+            buf_info = buffer_map.get(col_name)
+            try:
+                col = cudf_df[col_name] if hasattr(cudf_df, '__getitem__') else df[col_name]
+                arr = self._get_or_create_column_array(col, col_name, buf_info)
+                result_data[col_name] = arr
+            except Exception:
+                # Fallback: convert normally
+                if hasattr(df[col_name], 'to_pandas'):
+                    result_data[col_name] = df[col_name].to_pandas()
+                else:
+                    result_data[col_name] = df[col_name]
+
+        # Convert index
+        try:
+            if hasattr(df, 'index') and hasattr(df.index, 'to_pandas'):
+                index = df.index.to_pandas()
+            else:
+                index = df.index if hasattr(df, 'index') else None
+        except Exception:
+            index = None
+
+        # Use copy=False to preserve view relationships with cached arrays
+        # This enables memory deduplication: views into cached arrays remain views
+        return pd.DataFrame(result_data, index=index, copy=False)
+
     def get_or_convert(self, obj: Any) -> Any:
-        """Get cached pandas copy or convert from GPU."""
+        """Get cached pandas copy or convert from GPU with buffer deduplication."""
         cached = self.get_cached(obj)
         if cached is not None:
             return cached
 
         # Handle cudf.pandas proxy objects
         if is_cudf_proxy(obj):
-            if hasattr(obj, '_fsproxy_slow'):
+            # Check if it's a DataFrame that might share buffers
+            if _is_proxy_dataframe(obj):
+                unwrapped = unwrap_cudf_proxy(obj)
+                if is_cudf_dataframe(unwrapped):
+                    # Use buffer-aware conversion
+                    pandas_copy = self._convert_dataframe_with_sharing(obj)
+                elif hasattr(obj, '_fsproxy_slow'):
+                    slow_obj = obj._fsproxy_slow
+                    if callable(slow_obj):
+                        slow_obj = slow_obj()
+                    pandas_copy = slow_obj.copy() if hasattr(slow_obj, 'copy') else slow_obj
+                else:
+                    pandas_copy = obj.to_pandas() if hasattr(obj, 'to_pandas') else obj
+            elif hasattr(obj, '_fsproxy_slow'):
                 slow_obj = obj._fsproxy_slow
                 if callable(slow_obj):
                     slow_obj = slow_obj()
@@ -783,17 +1011,21 @@ class CuDFCheckpointCache:
                 pandas_copy = obj.to_pandas()
             else:
                 pandas_copy = obj
+        elif is_cudf_dataframe(obj):
+            # Native cudf DataFrame - use buffer-aware conversion
+            pandas_copy = self._convert_dataframe_with_sharing(obj)
         else:
-            # Native cudf object
+            # Native cudf Series/Index
             pandas_copy = obj.to_pandas()
 
         self.cache(obj, pandas_copy)
         return pandas_copy
 
     def clear(self) -> None:
-        """Clear both caches."""
+        """Clear all caches."""
         self._cache.clear()
         self._deepcopy_cache.clear()
+        self._buffer_cache.clear()
 
 
 # Global cache instance
@@ -970,11 +1202,14 @@ def deepcopy_cudf(obj: Any, memo: Dict[int, Any]) -> Any:
     """
     Deep copy a cuDF object by converting to pandas (CPU memory).
 
-    Uses two-level caching for performance:
-    1. cudf cache: GPU→pandas conversion (avoids GPU transfer)
-    2. deepcopy cache: pandas deepcopy result (avoids redundant deepcopy)
+    Uses buffer-based deduplication to ensure that cudf objects sharing GPU
+    memory also share numpy arrays in the checkpoint. This dramatically reduces
+    checkpoint size when notebooks have views/subsets (e.g., train, X_train, X_valid).
 
-    On cache HIT, returns a shallow copy of the cached deepcopy (fast with CoW).
+    Memory sharing is preserved via numpy views and pandas CoW:
+    - Arrays from the same GPU buffer share memory via views
+    - CoW protects against mutations creating unexpected changes
+    - The resulting pandas DataFrames are safe to use independently
 
     Args:
         obj: cuDF DataFrame, Series, or Index
@@ -989,49 +1224,33 @@ def deepcopy_cudf(obj: Any, memo: Dict[int, Any]) -> Any:
     if obj_id in memo:
         return memo[obj_id]
 
-    # Rollback path: skip optimization if disabled
-    if _DISABLE_DEEPCOPY_CACHE:
-        pandas_copy = to_pandas_cached(obj)
-        from flowbook.kernel_support.deepcopy import deepcopy as flowbook_deepcopy
-        result = flowbook_deepcopy(pandas_copy, memo)
-        memo[obj_id] = result
-        return result
-
     cache = get_checkpoint_cache()
 
-    # Level 1: Check if cudf cache has valid entry (data unchanged)
-    is_cache_hit = cache.has_valid_cache(obj)
-
-    if is_cache_hit:
-        # Level 2: Check if we have a cached deepcopy
-        cached_deepcopy = cache.get_deepcopied(obj_id)
-
-        if cached_deepcopy is not None:
-            # Fast path: O(1) shallow copy of cached deepcopy
-            # Safe because: CoW protects data, Index is immutable, cache is read-only
-            from flowbook.util.output import log
-            log(f"cudf cache HIT for {type(obj).__name__} id={obj_id} - using shallow copy")
-            result = _shallow_copy_for_checkpoint(cached_deepcopy)
-            memo[obj_id] = result
-            return result
-        else:
-            from flowbook.util.output import log
-            log(f"cudf cache partial HIT for {type(obj).__name__} id={obj_id} - pandas cached but no deepcopy")
-    else:
-        from flowbook.util.output import log
-        log(f"cudf cache MISS for {type(obj).__name__} id={obj_id} - fingerprint changed or not cached")
-
-    # Cache MISS or no deepcopy cached - do full conversion + deepcopy
+    # Convert GPU→pandas with buffer-based deduplication
+    # This may return a DataFrame whose arrays are views into cached arrays
     pandas_copy = to_pandas_cached(obj)
 
-    from flowbook.kernel_support.deepcopy import deepcopy as flowbook_deepcopy
-    result = flowbook_deepcopy(pandas_copy, memo)
+    # Use shallow copy to preserve buffer-sharing views
+    # This is safe because:
+    # 1. pandas CoW: data buffers are copy-on-write, mutations create new arrays
+    # 2. pandas Index is immutable
+    # 3. cudf object columns contain only immutable types (strings, tuples)
+    # 4. Checkpoint values are not modified after creation
+    result = _shallow_copy_for_checkpoint(pandas_copy)
 
-    # Cache the deepcopy for future HITs
-    if is_cache_hit or cache.has_valid_cache(obj):
-        cache.cache_deepcopy(obj_id, result)
-        from flowbook.util.output import log
-        log(f"cudf cache stored deepcopy for {type(obj).__name__} id={obj_id}")
+    # Register underlying arrays in memo to handle deepcopy traversal
+    # This ensures HeapSizer sees the shared arrays
+    if hasattr(result, '_data') or hasattr(result, '_mgr'):
+        try:
+            # Get the underlying block arrays and add to memo
+            if hasattr(result, '_mgr') and hasattr(result._mgr, 'arrays'):
+                for arr in result._mgr.arrays:
+                    if hasattr(arr, '_ndarray'):
+                        arr_id = id(arr._ndarray)
+                        if arr_id not in memo:
+                            memo[arr_id] = arr._ndarray
+        except Exception:
+            pass  # Best effort - don't fail checkpoint on memo issues
 
     memo[obj_id] = result
     return result
