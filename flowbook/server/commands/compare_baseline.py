@@ -376,21 +376,29 @@ def create_flowbook_kernel(
     kernel_manager = None
     kernel_client = None
 
-    for attempt in range(max_attempts):
-        try:
-            if kernel_client is not None:
-                try:
-                    kernel_client.stop_channels()
-                except Exception:
-                    pass
-            if kernel_manager is not None:
-                try:
-                    kernel_manager.shutdown_kernel(now=True)
-                except Exception:
-                    pass
+    # Set extra environment variables (kernel inherits from parent process)
+    old_env = {}
+    if extra_env:
+        for key, value in extra_env.items():
+            old_env[key] = os.environ.get(key)
+            os.environ[key] = value
 
-            kernel_manager = KernelManager(kernel_name=kernel_name)
-            kernel_manager.start_kernel(extra_env=extra_env)
+    try:
+        for attempt in range(max_attempts):
+            try:
+                if kernel_client is not None:
+                    try:
+                        kernel_client.stop_channels()
+                    except Exception:
+                        pass
+                if kernel_manager is not None:
+                    try:
+                        kernel_manager.shutdown_kernel(now=True)
+                    except Exception:
+                        pass
+
+                kernel_manager = KernelManager(kernel_name=kernel_name)
+                kernel_manager.start_kernel()
 
             kernel_client = FlowbookKernelClient()
             kernel_client.load_connection_info(kernel_manager.get_connection_info())
@@ -431,7 +439,15 @@ def create_flowbook_kernel(
                         pass
                 raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
 
-    raise Exception("Kernel failed to start")
+        raise Exception("Kernel failed to start")
+    finally:
+        # Restore original environment
+        if extra_env:
+            for key, old_value in old_env.items():
+                if old_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_value
 
 
 def cleanup_kernel(kernel_manager, kernel_client) -> None:
