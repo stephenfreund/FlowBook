@@ -1265,6 +1265,12 @@ d[types.BuiltinFunctionType] = _deepcopy_atomic
 # NOTE: FunctionType is NOT atomic - we override it below
 d[property] = _deepcopy_atomic
 
+# Logging handlers - loggers are effectively singletons (retrieved by name from global registry)
+# and contain unpicklable stream handlers, so return the same instance
+import logging
+d[logging.Logger] = _deepcopy_atomic
+d[logging.RootLogger] = _deepcopy_atomic
+
 
 def _deepcopy_list(x, memo):
     """
