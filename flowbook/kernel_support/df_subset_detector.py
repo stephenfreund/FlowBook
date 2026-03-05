@@ -23,7 +23,6 @@ Example:
 from dataclasses import dataclass, field
 from typing import Any
 import time
-import pickle
 
 import numpy as np
 import pandas as pd
@@ -96,6 +95,10 @@ class DataFrameSubsetDetector:
         min_savings_bytes: Minimum savings to create a relation (default: 10 KB)
         max_dataframes: Maximum DataFrames to analyze (default: 20)
         timeout_ms: Maximum time for detection (default: 1000 ms)
+
+    Caching:
+        Results are cached based on DataFrame identity (id()). Cache is invalidated
+        when a DataFrame's id changes (indicating a new or modified DataFrame).
     """
 
     def __init__(
@@ -109,6 +112,10 @@ class DataFrameSubsetDetector:
         self.min_savings_bytes = min_savings_bytes
         self.max_dataframes = max_dataframes
         self.timeout_ms = timeout_ms
+        # Cache: (parent_id, child_id) -> SubsetRelation or None
+        # Also store (parent_id, child_id) -> (parent_shape, child_shape) for validation
+        self._cache: dict[tuple[int, int], SubsetRelation | None] = {}
+        self._cache_shapes: dict[tuple[int, int], tuple[tuple, tuple]] = {}
 
     def detect(self, variables: dict[str, Any]) -> SubsetDetectionResult:
         """
@@ -127,6 +134,17 @@ class DataFrameSubsetDetector:
         for name, value in variables.items():
             if isinstance(value, pd.DataFrame) and len(value) >= self.min_rows:
                 dataframes[name] = value
+
+        # Early exit: need at least 2 DataFrames for subset relationships
+        if len(dataframes) < 2:
+            return SubsetDetectionResult(
+                relations=[],
+                parent_vars=set(),
+                child_vars=set(),
+                standalone_vars=set(dataframes.keys()),
+                total_estimated_savings_bytes=0,
+                detection_time_ms=(time.time() - start_time) * 1000,
+            )
 
         # 2. Limit to max_dataframes (largest first)
         if len(dataframes) > self.max_dataframes:
@@ -165,9 +183,11 @@ class DataFrameSubsetDetector:
                     continue
 
                 # Check subset relationship
-                relation = self._check_subset(
-                    child_name, child_df, parent_name, parent_df
-                )
+                from flowbook.util.output import timer
+                with timer(key="subset:00_check_call"):
+                    relation = self._check_subset(
+                        child_name, child_df, parent_name, parent_df
+                    )
                 if (
                     relation is not None
                     and relation.estimated_savings_bytes >= self.min_savings_bytes
@@ -203,55 +223,108 @@ class DataFrameSubsetDetector:
         """
         Check if child_df is a row subset of parent_df.
 
-        Returns SubsetRelation if valid, None otherwise.
+        Uses fast checks only:
+        1. Cache lookup (instant if cached)
+        2. Index type compatibility (instant)
+        3. Index subset check (fast) - required for row_indices
+        4. Single-value spot check (fast) - quick validation
         """
-        # 1. Check if child's index is subset of parent's index
-        child_index_set = set(child_df.index)
-        parent_index_set = set(parent_df.index)
-        if not child_index_set.issubset(parent_index_set):
+        from flowbook.util.output import timer
+
+        # 0. Check cache first
+        with timer(key="subset:00a_cache_check"):
+            cache_key = (id(parent_df), id(child_df))
+            shapes = (parent_df.shape, child_df.shape)
+            if cache_key in self._cache:
+                # Validate shapes haven't changed (DataFrame was modified in place)
+                if self._cache_shapes.get(cache_key) == shapes:
+                    cached = self._cache[cache_key]
+                    if cached is not None:
+                        # Update variable names in case they changed
+                        return SubsetRelation(
+                            child_var=child_name,
+                            parent_var=parent_name,
+                            row_indices=cached.row_indices,
+                            common_columns=cached.common_columns,
+                            extra_columns=cached.extra_columns,
+                            extra_data=cached.extra_data,
+                            estimated_savings_bytes=cached.estimated_savings_bytes,
+                            child_columns=cached.child_columns,
+                        )
+                    return None
+
+        # Helper to cache and return None
+        def _cache_none():
+            self._cache[cache_key] = None
+            self._cache_shapes[cache_key] = shapes
             return None
 
-        # 2. Get integer positions (handles non-integer indices)
-        try:
-            row_indices = parent_df.index.get_indexer(child_df.index)
-            if -1 in row_indices:
-                return None  # Some indices not found
-        except Exception:
-            return None
+        # 1. Quick index type check - different types can't be subsets
+        with timer(key="subset:00b_index_type"):
+            child_idx_type = type(child_df.index)
+            parent_idx_type = type(parent_df.index)
+            if child_idx_type != parent_idx_type:
+                # Allow RangeIndex to match Int64Index
+                if not (
+                    child_idx_type.__name__ in ("RangeIndex", "Int64Index", "Index")
+                    and parent_idx_type.__name__ in ("RangeIndex", "Int64Index", "Index")
+                    and child_df.index.dtype == parent_df.index.dtype
+                ):
+                    return _cache_none()
 
-        # 3. Identify common and extra columns
-        child_cols = set(child_df.columns)
-        parent_cols = set(parent_df.columns)
-        # Preserve child's column order for common columns
-        common_columns = [c for c in child_df.columns if c in parent_cols]
-        extra_columns = [c for c in child_df.columns if c not in parent_cols]
+        # 2. Identify common columns
+        with timer(key="subset:01_parent_cols"):
+            parent_cols = set(parent_df.columns)
+
+        with timer(key="subset:02_common_cols"):
+            common_columns = [c for c in child_df.columns if c in parent_cols]
 
         if not common_columns:
-            return None  # No common columns, can't be a meaningful subset
+            return _cache_none()
 
-        # 4. Verify common columns have matching values
-        try:
-            parent_subset = parent_df.iloc[row_indices][common_columns]
-            child_common = child_df[common_columns]
+        # 3. Check index subset (required for row_indices)
+        with timer(key="subset:03_get_indexer"):
+            try:
+                row_indices = parent_df.index.get_indexer(child_df.index)
+                if -1 in row_indices:
+                    return _cache_none()
+            except Exception:
+                return _cache_none()
 
-            # Reset indices for comparison (they should have same values)
-            parent_subset_reset = parent_subset.reset_index(drop=True)
-            child_common_reset = child_common.reset_index(drop=True)
+        # 4. Spot check: compare just 3 values using fast array access
+        with timer(key="subset:04_spot_check"):
+            col = common_columns[0]
+            try:
+                # Use .values for faster array access
+                child_arr = child_df[col].values
+                parent_arr = parent_df[col].values
+                n = len(child_arr)
+                for idx in (0, n // 2, n - 1):
+                    if idx < n:
+                        cv = child_arr[idx]
+                        pv = parent_arr[row_indices[idx]]
+                        if cv != pv:
+                            # Check for NaN (NaN != NaN is True)
+                            if not (cv != cv and pv != pv):
+                                return _cache_none()
+            except Exception:
+                return _cache_none()
 
-            if not child_common_reset.equals(parent_subset_reset):
-                return None  # Values differ
-        except Exception:
-            return None
+        # 5. Passed spot check - assume valid subset
+        with timer(key="subset:05_extra_cols"):
+            extra_columns = [c for c in child_df.columns if c not in parent_cols]
 
-        # 5. Extract extra column data
-        extra_data = None
-        if extra_columns:
-            extra_data = child_df[extra_columns].copy()
+        # 6. Extract extra column data
+        with timer(key="subset:06_extra_copy"):
+            extra_data = None
+            if extra_columns:
+                extra_data = child_df[extra_columns].copy()
 
-        # 6. Estimate savings
-        estimated_savings = self._estimate_savings(child_df, row_indices, extra_data)
+        # 7. Estimate savings
+        with timer(key="subset:07_estimate"):
+            estimated_savings = self._estimate_savings(child_df, row_indices, extra_data)
 
-        return SubsetRelation(
+        result = SubsetRelation(
             child_var=child_name,
             parent_var=parent_name,
             row_indices=row_indices,
@@ -262,29 +335,36 @@ class DataFrameSubsetDetector:
             child_columns=list(child_df.columns),
         )
 
+        # Cache the successful result
+        self._cache[cache_key] = result
+        self._cache_shapes[cache_key] = shapes
+
+        return result
+
     def _estimate_savings(
         self,
         child_df: pd.DataFrame,
         row_indices: np.ndarray,
         extra_data: pd.DataFrame | None,
     ) -> int:
-        """Estimate bytes saved by storing indices instead of full DataFrame."""
-        try:
-            # Size of full DataFrame
-            full_size = len(pickle.dumps(child_df, protocol=pickle.HIGHEST_PROTOCOL))
+        """Estimate bytes saved by storing indices instead of full DataFrame.
 
-            # Size of indices + extra data
-            indices_size = len(
-                pickle.dumps(row_indices, protocol=pickle.HIGHEST_PROTOCOL)
-            )
+        Uses fast shallow memory estimate (deep=False) to avoid slow object inspection.
+        """
+        try:
+            # Fast shallow estimate - avoids inspecting object dtype contents
+            full_size = child_df.memory_usage(deep=False).sum()
+
+            # Size of indices (numpy array bytes + small overhead)
+            indices_size = row_indices.nbytes + 128
+
+            # Size of extra columns data (also shallow)
             extra_size = 0
             if extra_data is not None:
-                extra_size = len(
-                    pickle.dumps(extra_data, protocol=pickle.HIGHEST_PROTOCOL)
-                )
+                extra_size = extra_data.memory_usage(deep=False).sum()
 
             optimized_size = indices_size + extra_size
-            return max(0, full_size - optimized_size)
+            return max(0, int(full_size - optimized_size))
         except Exception:
             return 0
 
