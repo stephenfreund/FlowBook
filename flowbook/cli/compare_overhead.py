@@ -783,6 +783,26 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     # This gives a proportion: 0 = no overhead, 1 = checkpoint equals base memory size
     # Uses the new simplified fields: checkpoint_delta_mb, namespace_mb, gpu_mb
     min_meaningful_base_mb = 1.0
+
+    # Pre-compute cumulative checkpoint totals for delta calculation (fallback)
+    # Same logic as Panel 6's get_cumulative_total()
+    def get_cumulative_total(c):
+        checkpoint_cumulative = c.get("checkpoint_cumulative_mb")
+        if checkpoint_cumulative is not None and checkpoint_cumulative > 0:
+            return checkpoint_cumulative
+        cumulative_by_var = c.get("cumulative_by_var") or {}
+        if cumulative_by_var:
+            return sum(cumulative_by_var.values()) / (1024 * 1024)
+        cumulative_by_type = c.get("cumulative_by_type") or {}
+        if cumulative_by_type:
+            return sum(cumulative_by_type.values()) / (1024 * 1024)
+        var_costs = c.get("checkpoint_var_costs") or {}
+        if var_costs:
+            return sum(v.get("bytes", 0) for v in var_costs.values()) / (1024 * 1024)
+        return 0
+
+    cumulative_totals = [get_cumulative_total(c) for c in flowbook_mem_cells]
+
     for i, fc in enumerate(flowbook_mem_cells):
         if i == 0:
             base_mb = 0  # No prior namespace for first cell
@@ -796,11 +816,18 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             base_mb = namespace + gpu
 
         # Get checkpoint delta (new field) or compute from old fields
+        # NOTE: Check > 0, not just "is not None", because field may be 0 when
+        # saved checkpoints are empty but checkpoint_var_costs has data
         delta_mb = fc.get("checkpoint_delta_mb")
-        if delta_mb is None:
-            # Fall back to old field computation
+        if not (delta_mb is not None and delta_mb > 0):
             overhead = fc.get("overhead_breakdown") or {}
-            delta_mb = overhead.get("checkpoints_mb", 0)
+            delta_mb = overhead.get("checkpoints_mb")
+        if not (delta_mb is not None and delta_mb > 0):
+            # Derive from cumulative totals
+            if i == 0:
+                delta_mb = cumulative_totals[0]
+            else:
+                delta_mb = max(0, cumulative_totals[i] - cumulative_totals[i - 1])
 
         if base_mb >= min_meaningful_base_mb:
             ratio = delta_mb / base_mb
