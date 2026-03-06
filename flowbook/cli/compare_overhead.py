@@ -2696,9 +2696,11 @@ def plot_combined_v2(
                 return sum(v.get("bytes", 0) for v in var_costs.values()) / (1024 * 1024)
             return 0
 
-        checkpoint_cumulative_mb = np.array(
+        checkpoint_cumulative_mb_raw = np.array(
             [get_checkpoint_mb(c) for c in flowbook_mem_cells]
         )
+        # Ensure cumulative: carry forward max seen so far (checkpoints don't shrink)
+        checkpoint_cumulative_mb = np.maximum.accumulate(checkpoint_cumulative_mb_raw)
         gpu_mb = np.array(
             [c.get("gpu_mb", c.get("gpu_mem_samples", 0)) for c in flowbook_mem_cells]
         )
@@ -2994,7 +2996,9 @@ def plot_combined_v2(
                 return sum(v.get("bytes", 0) for v in var_costs.values()) / (1024 * 1024)
             return 0
 
-        cumulative_totals = [get_cumulative_total(c) for c in flowbook_mem_cells]
+        cumulative_totals_raw = [get_cumulative_total(c) for c in flowbook_mem_cells]
+        # Ensure cumulative: carry forward max seen so far (checkpoints don't shrink)
+        cumulative_totals = list(np.maximum.accumulate(cumulative_totals_raw))
 
         ratios = []
         for i, c in enumerate(flowbook_mem_cells):
