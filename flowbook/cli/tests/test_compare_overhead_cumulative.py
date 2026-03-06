@@ -401,8 +401,8 @@ class TestExtractCheckpointVarDataWithNewFormat:
 class TestExtractCheckpointVarDataFallback:
     """Tests for extract_checkpoint_var_data with checkpoint_by_var field."""
 
-    def test_returns_none_for_no_checkpoint_by_var(self):
-        """Test returns None when checkpoint_by_var missing (old format not supported)."""
+    def test_falls_back_to_checkpoint_var_costs(self):
+        """Test falls back to checkpoint_var_costs when checkpoint_by_var missing."""
         cells = [
             create_cell_with_old_format(
                 "cell1", 0,
@@ -416,8 +416,10 @@ class TestExtractCheckpointVarDataFallback:
 
         result = extract_checkpoint_var_data(data)
 
-        # Now requires checkpoint_by_var - old format returns None
-        assert result is None
+        # Now falls back to checkpoint_var_costs
+        assert result is not None
+        assert "arr" in result["vars_ordered"]
+        assert result["by_var"]["arr"] == [1000]  # Cumulative from first cell
 
     def test_returns_none_for_no_data(self):
         """Test returns None when no checkpoint data available."""
@@ -528,9 +530,9 @@ class TestBackwardsCompatibility:
         assert type_result is not None
         assert "DataFrame" in type_result["by_type"]
 
-    def test_old_format_var_extraction_requires_checkpoint_by_var(self):
-        """Test that VAR extraction requires checkpoint_by_var field."""
-        # Old format only has checkpoint_var_costs - var extraction won't work
+    def test_old_format_var_extraction_uses_fallback(self):
+        """Test that VAR extraction falls back to checkpoint_var_costs."""
+        # Old format only has checkpoint_var_costs - fallback should work
         cells = [
             {
                 "cell_id": "abc1",
@@ -548,8 +550,10 @@ class TestBackwardsCompatibility:
 
         var_result = extract_checkpoint_var_data(data)
 
-        # Var extraction requires checkpoint_by_var or cumulative_by_var
-        assert var_result is None
+        # Var extraction now falls back to checkpoint_var_costs
+        assert var_result is not None
+        assert "df" in var_result["vars_ordered"]
+        assert var_result["by_var"]["df"] == [1000000]  # Cumulative value
 
 
 # =============================================================================

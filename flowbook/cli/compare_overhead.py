@@ -2019,6 +2019,7 @@ def extract_checkpoint_var_data(
 
     Uses cumulative_by_var field when available (TRUE cumulative accounting for sharing).
     Otherwise uses checkpoint_by_var which contains the CURRENT checkpoint state at each cell.
+    Falls back to deriving from checkpoint_var_costs for backwards compatibility.
 
     Args:
         data: Comparison data dict
@@ -2072,35 +2073,68 @@ def extract_checkpoint_var_data(
             v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names
         }
     else:
-        # Use checkpoint_by_var - contains correct CURRENT state in MB
+        # Try checkpoint_by_var first (contains correct CURRENT state in MB)
         has_by_var = any(c.get("checkpoint_by_var") for c in memory_cells)
 
-        if not has_by_var:
-            return None
+        if has_by_var:
+            all_var_names: set = set()
+            for c in memory_cells:
+                by_var = c.get("checkpoint_by_var") or {}
+                all_var_names.update(by_var.keys())
 
-        all_var_names: set = set()
-        for c in memory_cells:
-            by_var = c.get("checkpoint_by_var") or {}
-            all_var_names.update(by_var.keys())
+            if not all_var_names:
+                return None
 
-        if not all_var_names:
-            return None
+            var_by_cell: Dict[str, List[int]] = {v: [] for v in all_var_names}
+            mb_to_bytes = 1024 * 1024
 
-        var_by_cell: Dict[str, List[int]] = {v: [] for v in all_var_names}
-        mb_to_bytes = 1024 * 1024
+            for c in memory_cells:
+                by_var = c.get("checkpoint_by_var") or {}
 
-        for c in memory_cells:
-            by_var = c.get("checkpoint_by_var") or {}
+                for var_name in all_var_names:
+                    # checkpoint_by_var is in MB, convert to bytes for consistency
+                    var_mb = by_var.get(var_name, 0)
+                    var_by_cell[var_name].append(int(var_mb * mb_to_bytes))
 
-            for var_name in all_var_names:
-                # checkpoint_by_var is in MB, convert to bytes for consistency
-                var_mb = by_var.get(var_name, 0)
-                var_by_cell[var_name].append(int(var_mb * mb_to_bytes))
+            # Get MAX for ordering
+            var_max: Dict[str, int] = {
+                v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names
+            }
+        else:
+            # Fall back to old method - derives from checkpoint_var_costs (may overcount)
+            has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
 
-        # Get MAX for ordering
-        var_max: Dict[str, int] = {
-            v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names
-        }
+            if not has_costs:
+                return None
+
+            # First pass: collect all variable names
+            all_var_names: set = set()
+            for c in memory_cells:
+                costs = c.get("checkpoint_var_costs") or {}
+                all_var_names.update(costs.keys())
+
+            if not all_var_names:
+                return None
+
+            # Initialize tracking - cumulative totals per variable
+            var_cumulative: Dict[str, int] = {v: 0 for v in all_var_names}
+            var_by_cell: Dict[str, List[int]] = {v: [] for v in all_var_names}
+
+            # Second pass: collect CUMULATIVE data (OLD method - overcounts sharing)
+            for c in memory_cells:
+                costs = c.get("checkpoint_var_costs") or {}
+
+                for var_name in all_var_names:
+                    if var_name in costs:
+                        var_bytes = costs[var_name].get("bytes", 0)
+                        var_cumulative[var_name] += var_bytes
+                    # Append current cumulative value for this variable
+                    var_by_cell[var_name].append(var_cumulative[var_name])
+
+            # Get MAX cumulative for ordering (captures peak contribution)
+            var_max: Dict[str, int] = {
+                v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names
+            }
 
     # Order variables by MAX cumulative size descending (not final - captures vars that get cleaned up)
     vars_ordered = sorted(var_max.keys(), key=lambda v: var_max[v], reverse=True)
@@ -2612,14 +2646,27 @@ def plot_combined_v2(
                 for c in flowbook_mem_cells
             ]
         )
+        # Get checkpoint cumulative MB - try multiple sources
+        def get_checkpoint_mb(c):
+            # 1. Try explicit field
+            if c.get("checkpoint_cumulative_mb") is not None:
+                return c["checkpoint_cumulative_mb"]
+            # 2. Try overhead_breakdown.checkpoints_mb
+            overhead = c.get("overhead_breakdown") or {}
+            if overhead.get("checkpoints_mb"):
+                return overhead["checkpoints_mb"]
+            # 3. Fall back to summing cumulative_by_var (bytes -> MB)
+            cumulative_by_var = c.get("cumulative_by_var") or {}
+            if cumulative_by_var:
+                return sum(cumulative_by_var.values()) / (1024 * 1024)
+            # 4. Fall back to summing cumulative_by_type (bytes -> MB)
+            cumulative_by_type = c.get("cumulative_by_type") or {}
+            if cumulative_by_type:
+                return sum(cumulative_by_type.values()) / (1024 * 1024)
+            return 0
+
         checkpoint_cumulative_mb = np.array(
-            [
-                c.get(
-                    "checkpoint_cumulative_mb",
-                    (c.get("overhead_breakdown") or {}).get("checkpoints_mb", 0),
-                )
-                for c in flowbook_mem_cells
-            ]
+            [get_checkpoint_mb(c) for c in flowbook_mem_cells]
         )
         gpu_mb = np.array(
             [c.get("gpu_mb", c.get("gpu_mem_samples", 0)) for c in flowbook_mem_cells]
@@ -2895,13 +2942,36 @@ def plot_combined_v2(
         cell_nums = list(range(1, len(flowbook_mem_cells) + 1))
         min_meaningful_base_mb = 1.0
 
+        # Pre-compute cumulative checkpoint totals for delta calculation
+        cumulative_totals = []
+        for c in flowbook_mem_cells:
+            # Use same fallback logic as Panel 3
+            if c.get("checkpoint_cumulative_mb") is not None:
+                cumulative_totals.append(c["checkpoint_cumulative_mb"])
+            else:
+                cumulative_by_var = c.get("cumulative_by_var") or {}
+                if cumulative_by_var:
+                    cumulative_totals.append(sum(cumulative_by_var.values()) / (1024 * 1024))
+                else:
+                    cumulative_by_type = c.get("cumulative_by_type") or {}
+                    if cumulative_by_type:
+                        cumulative_totals.append(sum(cumulative_by_type.values()) / (1024 * 1024))
+                    else:
+                        cumulative_totals.append(0)
+
         ratios = []
         for i, c in enumerate(flowbook_mem_cells):
-            # Get checkpoint delta (new field) or fall back to old computation
+            # Get checkpoint delta (new field) or derive from cumulative
             delta_mb = c.get("checkpoint_delta_mb")
             if delta_mb is None:
                 overhead = c.get("overhead_breakdown") or {}
-                delta_mb = overhead.get("checkpoints_mb", 0)
+                delta_mb = overhead.get("checkpoints_mb")
+            if delta_mb is None:
+                # Derive from cumulative totals
+                if i == 0:
+                    delta_mb = cumulative_totals[0]
+                else:
+                    delta_mb = max(0, cumulative_totals[i] - cumulative_totals[i - 1])
 
             if i == 0:
                 base_mb = 0  # No prior namespace for first cell
