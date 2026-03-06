@@ -3402,11 +3402,14 @@ def plot_overhead_cdfs(
             ax.set_title("Memory Overhead Ratio", fontsize=title_size)
             ax.set_ylim(0, 1.05)
 
-            # Log scale x-axis from 1/1000 to 1
+            # Log scale x-axis - auto-scale to data range
             ax.set_xscale("log")
-            ax.set_xlim(0.001, 1)
-            ax.set_xticks([0.0001, 0.001, 0.01, 0.1, 1])
-            ax.set_xticklabels(["0.0001", "0.001", "0.01", "0.1", "1"])
+
+            # Use plain formatting (no scientific notation) for x-axis
+            from matplotlib.ticker import ScalarFormatter
+            formatter = ScalarFormatter()
+            formatter.set_scientific(False)
+            ax.xaxis.set_major_formatter(formatter)
 
             textstr = f"N={len(memory_data_ratio)}"
             props = dict(
