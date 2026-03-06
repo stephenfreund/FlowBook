@@ -2972,11 +2972,13 @@ def plot_combined_v2(
         ratios = []
         for i, c in enumerate(flowbook_mem_cells):
             # Get checkpoint delta (new field) or derive from cumulative
+            # NOTE: Check > 0, not just "is not None", because field may be 0 when
+            # saved checkpoints are empty but checkpoint_var_costs has data
             delta_mb = c.get("checkpoint_delta_mb")
-            if delta_mb is None:
+            if not (delta_mb is not None and delta_mb > 0):
                 overhead = c.get("overhead_breakdown") or {}
                 delta_mb = overhead.get("checkpoints_mb")
-            if delta_mb is None:
+            if not (delta_mb is not None and delta_mb > 0):
                 # Derive from cumulative totals
                 if i == 0:
                     delta_mb = cumulative_totals[0]
