@@ -435,6 +435,8 @@ class FileStats:
     last_cell_state_overhead_pct: float = 0.0
     last_cell_check_overhead_pct: float = 0.0
     last_cell_memory_overhead_pct: float = 0.0
+    # Peak memory overhead (max checkpoint / base across all cells)
+    peak_memory_overhead_pct: float = 0.0
     # Rerun stats (optional)
     num_reruns: int = 0
     rerun_baseline_runtime_ms: float = 0.0
@@ -448,7 +450,8 @@ class FileStats:
     # Per-cell data for aggregate statistics
     per_cell_checkpoint_overhead_ms: List[float] = field(default_factory=list)
     per_cell_total_overhead_ms: List[float] = field(default_factory=list)
-    per_cell_memory_overhead_mb: List[float] = field(default_factory=list)
+    per_cell_memory_overhead_mb: List[float] = field(default_factory=list)  # Actually ratio
+    per_cell_checkpoint_mb: List[float] = field(default_factory=list)  # Raw MB values
     # Checking results (staleness summary)
     checking_clean_cells: int = 0
     checking_stale_cells: int = 0
@@ -514,7 +517,10 @@ class AggregateStats:
     memory_overhead_per_cell_p99: float = 0.0
     # Raw per-cell data for histograms
     all_total_overhead_per_cell: List[float] = field(default_factory=list)
-    all_memory_overhead_per_cell: List[float] = field(default_factory=list)
+    all_memory_overhead_per_cell: List[float] = field(default_factory=list)  # Ratio
+    all_checkpoint_mb_per_cell: List[float] = field(default_factory=list)  # Raw MB
+    # Per-notebook peak memory overhead percentages (for CDF)
+    all_peak_memory_overhead_pct: List[float] = field(default_factory=list)
     # Aggregate checking results (staleness summary across all files)
     total_checking_clean_cells: int = 0
     total_checking_stale_cells: int = 0
@@ -764,7 +770,8 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     # Collect per-cell overhead data for aggregate statistics
     per_cell_checkpoint_overhead_ms: List[float] = []
     per_cell_total_overhead_ms: List[float] = []
-    per_cell_memory_overhead_mb: List[float] = []
+    per_cell_memory_overhead_mb: List[float] = []  # Actually ratio
+    per_cell_checkpoint_mb: List[float] = []  # Raw MB values
 
     # Per-cell timing overhead (checkpoint = state_duration_ms, total = state + check + other)
     for fc in flowbook_timing_cells:
@@ -803,6 +810,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
 
     cumulative_totals = [get_cumulative_total(c) for c in flowbook_mem_cells]
 
+    # Get staleness mode to determine how to compute checkpoint overhead
+    staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
+
     for i, fc in enumerate(flowbook_mem_cells):
         if i == 0:
             base_mb = 0  # No prior namespace for first cell
@@ -824,10 +834,15 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             delta_mb = overhead.get("checkpoints_mb")
         if not (delta_mb is not None and delta_mb > 0):
             # Derive from cumulative totals
-            if i == 0:
-                delta_mb = cumulative_totals[0]
+            if staleness_mode == "semantic":
+                # Semantic mode: checkpoints accumulate, compute delta
+                if i == 0:
+                    delta_mb = cumulative_totals[0]
+                else:
+                    delta_mb = max(0, cumulative_totals[i] - cumulative_totals[i - 1])
             else:
-                delta_mb = max(0, cumulative_totals[i] - cumulative_totals[i - 1])
+                # Syntactic mode: only one checkpoint, use current value directly
+                delta_mb = cumulative_totals[i]
 
         if base_mb >= min_meaningful_base_mb:
             ratio = delta_mb / base_mb
@@ -836,6 +851,14 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         per_cell_memory_overhead_mb.append(
             ratio
         )  # Note: field name kept for compatibility
+        per_cell_checkpoint_mb.append(delta_mb if delta_mb is not None else 0.0)
+
+    # Compute peak memory overhead percentage (max ratio * 100)
+    peak_memory_overhead_pct = (
+        max(per_cell_memory_overhead_mb) * 100
+        if per_cell_memory_overhead_mb
+        else 0.0
+    )
 
     return FileStats(
         notebook_path=notebook_path,
@@ -857,6 +880,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         last_cell_state_overhead_pct=last_cell_state_pct,
         last_cell_check_overhead_pct=last_cell_check_pct,
         last_cell_memory_overhead_pct=last_cell_memory_pct,
+        peak_memory_overhead_pct=peak_memory_overhead_pct,
         num_reruns=num_reruns,
         rerun_baseline_runtime_ms=rerun_baseline_runtime,
         rerun_flowbook_runtime_ms=rerun_flowbook_runtime,
@@ -868,6 +892,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         per_cell_checkpoint_overhead_ms=per_cell_checkpoint_overhead_ms,
         per_cell_total_overhead_ms=per_cell_total_overhead_ms,
         per_cell_memory_overhead_mb=per_cell_memory_overhead_mb,
+        per_cell_checkpoint_mb=per_cell_checkpoint_mb,
         checking_clean_cells=checking_clean_cells,
         checking_stale_cells=checking_stale_cells,
         checking_error_cells=checking_error_cells,
@@ -902,14 +927,19 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
     check_pcts = np.array([s.last_cell_check_overhead_pct for s in stats_list])
     memory_pcts = np.array([s.last_cell_memory_overhead_pct for s in stats_list])
 
+    # Collect per-notebook peak memory overhead percentages
+    peak_memory_pcts = [s.peak_memory_overhead_pct for s in stats_list]
+
     # Collect all per-cell data across all files for aggregate per-cell statistics
     all_checkpoint_overhead = []
     all_total_overhead = []
     all_memory_overhead = []
+    all_checkpoint_mb = []
     for s in stats_list:
         all_checkpoint_overhead.extend(s.per_cell_checkpoint_overhead_ms)
         all_total_overhead.extend(s.per_cell_total_overhead_ms)
         all_memory_overhead.extend(s.per_cell_memory_overhead_mb)
+        all_checkpoint_mb.extend(s.per_cell_checkpoint_mb)
 
     # Compute per-cell statistics
     checkpoint_arr = (
@@ -920,6 +950,9 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
     total_arr = np.array(all_total_overhead) if all_total_overhead else np.array([0.0])
     memory_arr = (
         np.array(all_memory_overhead) if all_memory_overhead else np.array([0.0])
+    )
+    checkpoint_mb_arr = (
+        np.array(all_checkpoint_mb) if all_checkpoint_mb else np.array([0.0])
     )
 
     # Aggregate checking results (staleness summary)
@@ -987,6 +1020,8 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
         # Raw per-cell data for histograms
         all_total_overhead_per_cell=list(total_arr),
         all_memory_overhead_per_cell=list(memory_arr),
+        all_checkpoint_mb_per_cell=list(checkpoint_mb_arr),
+        all_peak_memory_overhead_pct=peak_memory_pcts,
         # Aggregate checking results
         total_checking_clean_cells=total_clean_cells,
         total_checking_stale_cells=total_stale_cells,
@@ -2161,9 +2196,12 @@ def extract_checkpoint_var_data(
                 v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names
             }
 
-    # Ensure cumulative: carry forward max seen so far per variable (checkpoints don't shrink)
-    for var_name in var_by_cell:
-        var_by_cell[var_name] = list(np.maximum.accumulate(var_by_cell[var_name]))
+    # In semantic mode, checkpoints accumulate - carry forward max seen per variable
+    # In syntactic mode, there's only one checkpoint, so use raw values
+    staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
+    if staleness_mode == "semantic":
+        for var_name in var_by_cell:
+            var_by_cell[var_name] = list(np.maximum.accumulate(var_by_cell[var_name]))
 
     # Order variables by MAX cumulative size descending (not final - captures vars that get cleaned up)
     vars_ordered = sorted(var_max.keys(), key=lambda v: var_max[v], reverse=True)
@@ -2675,6 +2713,7 @@ def plot_combined_v2(
                 for c in flowbook_mem_cells
             ]
         )
+
         # Get checkpoint cumulative MB - try multiple sources
         def get_checkpoint_mb(c):
             # 1. Try explicit field - but only if > 0 (may be 0 when saved checkpoints empty)
@@ -2697,14 +2736,21 @@ def plot_combined_v2(
             # 5. Fall back to summing checkpoint_var_costs (per-cell total)
             var_costs = c.get("checkpoint_var_costs") or {}
             if var_costs:
-                return sum(v.get("bytes", 0) for v in var_costs.values()) / (1024 * 1024)
+                return sum(v.get("bytes", 0) for v in var_costs.values()) / (
+                    1024 * 1024
+                )
             return 0
 
         checkpoint_cumulative_mb_raw = np.array(
             [get_checkpoint_mb(c) for c in flowbook_mem_cells]
         )
-        # Ensure cumulative: carry forward max seen so far (checkpoints don't shrink)
-        checkpoint_cumulative_mb = np.maximum.accumulate(checkpoint_cumulative_mb_raw)
+        # In semantic mode, checkpoints accumulate - carry forward max seen
+        # In syntactic mode, there's only one checkpoint, so use raw values
+        staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
+        if staleness_mode == "semantic":
+            checkpoint_cumulative_mb = np.maximum.accumulate(checkpoint_cumulative_mb_raw)
+        else:
+            checkpoint_cumulative_mb = checkpoint_cumulative_mb_raw
         gpu_mb = np.array(
             [c.get("gpu_mb", c.get("gpu_mem_samples", 0)) for c in flowbook_mem_cells]
         )
@@ -2997,12 +3043,19 @@ def plot_combined_v2(
             # 4. Fall back to summing checkpoint_var_costs (per-cell total)
             var_costs = c.get("checkpoint_var_costs") or {}
             if var_costs:
-                return sum(v.get("bytes", 0) for v in var_costs.values()) / (1024 * 1024)
+                return sum(v.get("bytes", 0) for v in var_costs.values()) / (
+                    1024 * 1024
+                )
             return 0
 
         cumulative_totals_raw = [get_cumulative_total(c) for c in flowbook_mem_cells]
-        # Ensure cumulative: carry forward max seen so far (checkpoints don't shrink)
-        cumulative_totals = list(np.maximum.accumulate(cumulative_totals_raw))
+        # In semantic mode, checkpoints accumulate - carry forward max seen
+        # In syntactic mode, there's only one checkpoint, so use raw values
+        staleness_mode_p6 = data.get("metadata", {}).get("staleness_mode", "semantic")
+        if staleness_mode_p6 == "semantic":
+            cumulative_totals = list(np.maximum.accumulate(cumulative_totals_raw))
+        else:
+            cumulative_totals = cumulative_totals_raw
 
         ratios = []
         for i, c in enumerate(flowbook_mem_cells):
@@ -3273,21 +3326,22 @@ def plot_overhead_cdfs(
     import matplotlib.pyplot as plt
     import seaborn as sns
 
-    sns.set_theme(style="whitegrid")
+    # Use minimal style - we'll add our own subtle grid
+    sns.set_theme(style="white")
 
-    # Font sizes
-    label_size = 18 if large_fonts else 12
-    title_size = 20 if large_fonts else 14
-    tick_size = 14 if large_fonts else 10
-    annotation_size = 12 if large_fonts else 9
+    # Font sizes - larger for readability, legend stays compact
+    label_size = 22 if large_fonts else 14
+    title_size = 24 if large_fonts else 16
+    tick_size = 18 if large_fonts else 12
+    annotation_size = 18 if large_fonts else 12
+    legend_fontsize = 14 if large_fonts else 10  # Keep legend compact
 
     total_overhead = np.array(aggregate.all_total_overhead_per_cell)
     memory_overhead = np.array(aggregate.all_memory_overhead_per_cell)
 
-    # Prepare data - keep in ms, convert memory from MB to bytes for log scale
+    # Prepare data - keep in ms
     if len(total_overhead) > 0:
         total_data = np.sort(total_overhead)  # Keep in ms
-        total_xlabel = "Total Overhead per Cell (ms)"
         total_cdf = np.arange(1, len(total_data) + 1) / len(total_data)
         total_stats = {
             "P50": np.percentile(total_data, 50),
@@ -3311,16 +3365,12 @@ def plot_overhead_cdfs(
     else:
         memory_data_ratio = None
 
-    def format_ratio(r):
-        """Format ratio to human readable."""
-        return f"{r:.2f}"
-
-    def add_percentile_markers(ax, data, cdf, stats, unit_fmt, color, legend_fontsize):
+    def add_percentile_markers(ax, data, cdf, stats, unit_fmt, color, lfontsize):
         """Add percentile markers with vertical lines and labels, plus legend."""
         percentiles = ["P50", "P90", "P95", "P99"]
         y_positions = [0.5, 0.9, 0.95, 0.99]
-        # Stagger labels: alternate above/below to avoid crowding
-        label_offsets = [(5, 5), (5, -15), (5, 5), (5, -15)]  # (x, y) offsets
+        # Larger offsets to avoid curve overlap; use leader lines
+        label_offsets = [(12, 8), (12, -18), (12, 8), (12, -18)]  # (x, y) offsets
         label_vas = ["bottom", "top", "bottom", "top"]  # vertical alignments
 
         for pname, y_val, offset, va in zip(
@@ -3329,22 +3379,18 @@ def plot_overhead_cdfs(
             if pname not in stats:
                 continue
             x_val = stats[pname]
-            # Vertical line from x-axis to the point (lighter)
-            ax.vlines(
-                x_val, 0, y_val, color=color, linestyle="--", linewidth=1, alpha=0.4
-            )
             # Small point on the curve
             ax.scatter(
                 [x_val],
                 [y_val],
                 color=color,
-                s=30,
+                s=40,
                 marker="o",
                 zorder=5,
-                edgecolors="black",
-                linewidths=0.5,
+                edgecolors="white",
+                linewidths=1.5,
             )
-            # Staggered label by the dot
+            # Label with leader line (arrow)
             ax.annotate(
                 pname,
                 (x_val, y_val),
@@ -3354,6 +3400,13 @@ def plot_overhead_cdfs(
                 ha="left",
                 va=va,
                 fontweight="bold",
+                arrowprops=dict(
+                    arrowstyle="-",
+                    color="gray",
+                    lw=0.8,
+                    shrinkA=0,
+                    shrinkB=3,
+                ),
             )
 
         # Add max point on the curve (at CDF = 1.0) with label
@@ -3363,21 +3416,28 @@ def plot_overhead_cdfs(
                 [max_val],
                 [1.0],
                 color=color,
-                s=30,
+                s=40,
                 marker="o",
                 zorder=5,
-                edgecolors="black",
-                linewidths=0.5,
+                edgecolors="white",
+                linewidths=1.5,
             )
             ax.annotate(
                 "Max",
                 (max_val, 1.0),
                 textcoords="offset points",
-                xytext=(5, -15),
+                xytext=(12, -18),
                 fontsize=annotation_size,
                 ha="left",
                 va="top",
                 fontweight="bold",
+                arrowprops=dict(
+                    arrowstyle="-",
+                    color="gray",
+                    lw=0.8,
+                    shrinkA=0,
+                    shrinkB=3,
+                ),
             )
 
         # Add legend box with values in lower right (right-aligned values)
@@ -3389,31 +3449,50 @@ def plot_overhead_cdfs(
         max_val_len = (
             max(len(v) for v in formatted_values.values()) if formatted_values else 0
         )
+        # Pad keys to align columns (P50, P90, P95, P99, Max -> all 3 chars)
         legend_keys = [p for p in percentiles if p in formatted_values] + (
             ["Max"] if "Max" in formatted_values else []
         )
         legend_lines = [
-            f"{pname}: {formatted_values[pname]:>{max_val_len}}"
+            f"{pname:>3}  {formatted_values[pname]:>{max_val_len}}"
             for pname in legend_keys
         ]
         legend_text = "\n".join(legend_lines)
-        props = dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray")
+        props = dict(
+            boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
+        )
         ax.text(
             0.98,
             0.02,
             legend_text,
             transform=ax.transAxes,
-            fontsize=legend_fontsize,
+            fontsize=lfontsize,
             verticalalignment="bottom",
             horizontalalignment="right",
             bbox=props,
-            family="monospace",
+            family="monospace",  # Monospace for column alignment
         )
 
-    def add_percentile_gridlines(ax):
-        """Add horizontal gridlines at percentile levels."""
-        for y in [0.5, 0.9, 0.95, 0.99]:
-            ax.axhline(y, color="gray", linestyle=":", linewidth=0.8, alpha=0.5)
+    def add_subtle_grid(ax, stats=None):
+        """Add subtle grid with fewer gridlines."""
+        # Horizontal lines at key percentile levels
+        for y in [0.5, 0.9, 0.99]:
+            ax.axhline(y, color="gray", linestyle="--", linewidth=0.6, alpha=0.5)
+        # Vertical lines at percentile x-values if provided
+        if stats:
+            for pname in ["P50", "P90", "P95", "P99"]:
+                if pname in stats:
+                    ax.axvline(
+                        stats[pname],
+                        color="gray",
+                        linestyle="--",
+                        linewidth=0.6,
+                        alpha=0.3,
+                    )
+        # Subtle spines
+        for spine in ax.spines.values():
+            spine.set_color("lightgray")
+            spine.set_linewidth(0.5)
 
     figures = []
 
@@ -3429,7 +3508,7 @@ def plot_overhead_cdfs(
                 total_data[pos_mask],
                 0,
                 total_cdf[pos_mask],
-                alpha=0.3,
+                alpha=0.12,  # Reduced opacity
                 color="steelblue",
                 edgecolor="none",
             )
@@ -3437,7 +3516,7 @@ def plot_overhead_cdfs(
                 total_data[pos_mask],
                 total_cdf[pos_mask],
                 color="steelblue",
-                linewidth=2,
+                linewidth=2.5,  # Slightly thicker line
             )
 
             add_percentile_markers(
@@ -3446,15 +3525,20 @@ def plot_overhead_cdfs(
                 total_cdf[pos_mask],
                 total_stats,
                 lambda x: f"{x:.1f}ms",
-                "black",
-                tick_size,
+                "steelblue",
+                legend_fontsize,
             )
-            add_percentile_gridlines(ax)
+            add_subtle_grid(ax, total_stats)
 
             ax.set_xscale("log")
-            ax.set_xlabel(total_xlabel, fontsize=label_size)
-            ax.set_ylabel("Cumulative Probability", fontsize=label_size)
-            ax.set_title("Total Overhead (Log Scale)", fontsize=title_size)
+            ax.set_xlabel(
+                "Checkpoint + Analysis Time (ms, log scale)", fontsize=label_size
+            )
+            ax.set_ylabel("Cumulative Proportion", fontsize=label_size)
+            ax.set_title(
+                "Time Overhead Distribution",
+                fontsize=title_size,
+            )
             ax.set_ylim(0, 1.05)
 
             # Use plain formatting (no scientific notation) for x-axis
@@ -3464,9 +3548,9 @@ def plot_overhead_cdfs(
             formatter.set_scientific(False)
             ax.xaxis.set_major_formatter(formatter)
 
-            textstr = f"N={len(total_data)}"
+            textstr = f"N={len(total_data):,}"
             props = dict(
-                boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray"
+                boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
             )
             ax.text(
                 0.02,
@@ -3480,7 +3564,7 @@ def plot_overhead_cdfs(
             )
     else:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
-        ax.set_title("Total Overhead (Log Scale)", fontsize=title_size)
+        ax.set_title("Time Overhead Distribution", fontsize=title_size)
     ax.tick_params(axis="both", labelsize=tick_size)
 
     # Memory overhead ratio (checkpoint / user_ns)
@@ -3492,7 +3576,7 @@ def plot_overhead_cdfs(
                 memory_data_ratio[pos_mask],
                 0,
                 memory_cdf[pos_mask],
-                alpha=0.3,
+                alpha=0.12,  # Reduced opacity
                 color="seagreen",
                 edgecolor="none",
             )
@@ -3500,37 +3584,57 @@ def plot_overhead_cdfs(
                 memory_data_ratio[pos_mask],
                 memory_cdf[pos_mask],
                 color="seagreen",
-                linewidth=2,
+                linewidth=2.5,  # Slightly thicker line
             )
+
+            # Format ratio as percentage for legend with adaptive precision
+            def format_ratio_pct(r):
+                if r >= 1:
+                    return f"{r * 100:.0f}%"
+                elif r >= 0.1:
+                    return f"{r * 100:.0f}%"
+                elif r >= 0.01:
+                    return f"{r * 100:.1f}%"
+                elif r >= 0.001:
+                    return f"{r * 100:.2f}%"
+                elif r >= 0.0001:
+                    return f"{r * 100:.3f}%"
+                elif r > 0:
+                    return "<0.01%"
+                else:
+                    return "0%"
 
             add_percentile_markers(
                 ax,
                 memory_data_ratio[pos_mask],
                 memory_cdf[pos_mask],
                 memory_stats_ratio,
-                format_ratio,
-                "black",
-                tick_size,
+                format_ratio_pct,
+                "seagreen",
+                legend_fontsize,
             )
-            add_percentile_gridlines(ax)
+            add_subtle_grid(ax, memory_stats_ratio)
 
-            ax.set_xlabel("Checkpoint / User NS Ratio", fontsize=label_size)
-            ax.set_ylabel("Cumulative Probability", fontsize=label_size)
-            ax.set_title("Memory Overhead Ratio", fontsize=title_size)
+            ax.set_xlabel(
+                "Checkpoint / Namespace Size",
+                fontsize=label_size,
+            )
+            ax.set_ylabel("Cumulative Proportion", fontsize=label_size)
+            ax.set_title(
+                "Memory Overhead Distribution",
+                fontsize=title_size,
+            )
             ax.set_ylim(0, 1.05)
 
-            # Log scale x-axis - auto-scale to data range
-            ax.set_xscale("log")
+            # Log scale x-axis with percentage tick labels
+            # ax.set_xscale("log")
+            ax.set_xlim(-0.05, 1.05)  # Add whitespace on left and right
+            ax.set_xticks([0, 0.25, 0.5, 0.75, 1])
+            ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
 
-            # Use plain formatting (no scientific notation) for x-axis
-            from matplotlib.ticker import ScalarFormatter
-            formatter = ScalarFormatter()
-            formatter.set_scientific(False)
-            ax.xaxis.set_major_formatter(formatter)
-
-            textstr = f"N={len(memory_data_ratio)}"
+            textstr = f"N={len(memory_data_ratio):,}"
             props = dict(
-                boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray"
+                boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
             )
             ax.text(
                 0.02,
@@ -3544,12 +3648,94 @@ def plot_overhead_cdfs(
             )
     else:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
-        ax.set_title("Memory Overhead Ratio", fontsize=title_size)
+        ax.set_title("Memory Overhead Distribution", fontsize=title_size)
     ax.tick_params(axis="both", labelsize=tick_size)
 
-    fig1.suptitle("Per-Cell Overhead CDFs", fontsize=title_size + 2, fontweight="bold")
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.tight_layout()
     figures.append(fig1)
+
+    # --- Figure 2: Peak Memory Overhead % CDF (per notebook) ---
+    peak_pcts = np.array(aggregate.all_peak_memory_overhead_pct)
+    if len(peak_pcts) > 0:
+        peak_data = np.sort(peak_pcts)
+        peak_cdf = np.arange(1, len(peak_data) + 1) / len(peak_data)
+        peak_stats = {
+            "P50": np.percentile(peak_data, 50),
+            "P90": np.percentile(peak_data, 90),
+            "P95": np.percentile(peak_data, 95),
+            "P99": np.percentile(peak_data, 99),
+        }
+
+        fig2, ax2 = plt.subplots(1, 1, figsize=(8, 6))
+
+        ax2.fill_between(
+            peak_data,
+            0,
+            peak_cdf,
+            alpha=0.12,
+            color="darkorange",
+            edgecolor="none",
+        )
+        ax2.plot(
+            peak_data,
+            peak_cdf,
+            color="darkorange",
+            linewidth=2.5,
+        )
+
+        # Format percentage values for legend
+        def format_pct(v):
+            if v >= 100:
+                return f"{v:.0f}%"
+            elif v >= 10:
+                return f"{v:.1f}%"
+            elif v >= 1:
+                return f"{v:.2f}%"
+            else:
+                return f"{v:.3f}%"
+
+        add_percentile_markers(
+            ax2,
+            peak_data,
+            peak_cdf,
+            peak_stats,
+            format_pct,
+            "darkorange",
+            legend_fontsize,
+        )
+        add_subtle_grid(ax2, peak_stats)
+
+        ax2.set_xlabel("Checkpoints / Namespace Size", fontsize=label_size)
+        ax2.set_ylabel("Cumulative Proportion", fontsize=label_size)
+        ax2.set_title("Peak Memory Overhead Distribution", fontsize=title_size)
+        ax2.set_ylim(0, 1.05)
+        ax2.set_xlim(0, 100)
+        ax2.set_xticks([0, 25, 50, 75, 100])
+        ax2.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+
+        textstr = f"N={len(peak_data):,}"
+        props = dict(
+            boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
+        )
+        ax2.text(
+            0.02,
+            0.98,
+            textstr,
+            transform=ax2.transAxes,
+            fontsize=tick_size,
+            verticalalignment="top",
+            horizontalalignment="left",
+            bbox=props,
+        )
+
+        ax2.tick_params(axis="both", labelsize=tick_size)
+        # Subtle spines
+        for spine in ax2.spines.values():
+            spine.set_color("lightgray")
+            spine.set_linewidth(0.5)
+
+        plt.tight_layout()
+        figures.append(fig2)
 
     if output_path is not None:
         # Save first figure only (for standalone file output)
