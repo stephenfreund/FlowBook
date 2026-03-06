@@ -69,7 +69,6 @@ flowbook compare-baseline notebook.ipynb --staleness-mode syntactic
 | `--trials N` | 1 | Number of independent trials (saved as `notebook-1.json`, `notebook-2.json`, ...) |
 | `--start N` | 1 | Starting trial number |
 | `--staleness-mode` | semantic | `syntactic` (set intersection) or `semantic` (checkpoint diff) |
-| `--df-subset-optimization` | off | Store DataFrame row-subset indices instead of full copies |
 
 #### Output JSON (v3.0)
 

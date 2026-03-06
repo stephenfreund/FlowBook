@@ -1856,7 +1856,7 @@ class MemoryCheckpoints:
         self,
         sanity_check: bool = False,
         warn_classes: bool = True,
-        optimize_df_subsets: bool = False,
+        optimize_df_subsets: bool = True,
         df_subset_min_rows: int = 100,
         df_subset_min_savings_bytes: int = 10 * 1024,
         df_subset_max_dataframes: int = 20,
@@ -1870,7 +1870,7 @@ class MemoryCheckpoints:
             warn_classes: If True, warn when user-defined classes are checkpointed, since
                 class variables won't be properly restored. Default True.
             optimize_df_subsets: If True, detect DataFrame subset relationships and
-                store indices instead of full copies. Default False.
+                store indices instead of full copies. Default True.
             df_subset_min_rows: Minimum rows for a DataFrame to be considered for
                 subset optimization. Default 100.
             df_subset_min_savings_bytes: Minimum bytes saved to create a subset

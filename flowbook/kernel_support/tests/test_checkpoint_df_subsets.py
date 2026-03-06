@@ -23,22 +23,15 @@ from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 class TestBasicSubsetOptimization:
     """Test basic save/restore with DataFrame subset optimization."""
 
-    def test_optimization_disabled_by_default(self):
-        """Test that optimization is disabled by default."""
+    def test_optimization_enabled_by_default(self):
+        """Test that optimization is enabled by default."""
         cp = MemoryCheckpoints()
-        status = cp.get_df_subset_optimization_status()
-        assert status["enabled"] is False
-
-    def test_enable_optimization(self):
-        """Test enabling optimization."""
-        cp = MemoryCheckpoints()
-        cp.set_df_subset_optimization(True)
         status = cp.get_df_subset_optimization_status()
         assert status["enabled"] is True
 
     def test_disable_optimization(self):
         """Test disabling optimization."""
-        cp = MemoryCheckpoints(optimize_df_subsets=True)
+        cp = MemoryCheckpoints()
         cp.set_df_subset_optimization(False)
         status = cp.get_df_subset_optimization_status()
         assert status["enabled"] is False
