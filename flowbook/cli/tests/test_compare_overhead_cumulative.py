@@ -402,7 +402,11 @@ class TestExtractCheckpointVarDataFallback:
     """Tests for extract_checkpoint_var_data with checkpoint_by_var field."""
 
     def test_falls_back_to_checkpoint_var_costs(self):
-        """Test falls back to checkpoint_var_costs when checkpoint_by_var missing."""
+        """Test falls back to checkpoint_var_costs when checkpoint_by_var missing.
+
+        checkpoint_var_costs contains per-cell state (not deltas), so values
+        should be used directly without accumulation.
+        """
         cells = [
             create_cell_with_old_format(
                 "cell1", 0,
@@ -411,15 +415,22 @@ class TestExtractCheckpointVarDataFallback:
                 },
                 checkpoints_mb=0.001
             ),
+            create_cell_with_old_format(
+                "cell2", 1,
+                checkpoint_var_costs={
+                    "arr": {"bytes": 1000, "type": "ndarray"}  # Same value - stable var
+                },
+                checkpoints_mb=0.001
+            ),
         ]
         data = create_v2_comparison_data(cells)
 
         result = extract_checkpoint_var_data(data)
 
-        # Now falls back to checkpoint_var_costs
+        # Should use per-cell values directly (NOT accumulated)
         assert result is not None
         assert "arr" in result["vars_ordered"]
-        assert result["by_var"]["arr"] == [1000]  # Cumulative from first cell
+        assert result["by_var"]["arr"] == [1000, 1000]  # Per-cell values, not cumulative
 
     def test_returns_none_for_no_data(self):
         """Test returns None when no checkpoint data available."""
@@ -531,7 +542,11 @@ class TestBackwardsCompatibility:
         assert "DataFrame" in type_result["by_type"]
 
     def test_old_format_var_extraction_uses_fallback(self):
-        """Test that VAR extraction falls back to checkpoint_var_costs."""
+        """Test that VAR extraction falls back to checkpoint_var_costs.
+
+        checkpoint_var_costs contains per-cell state (not deltas), so values
+        should be used directly without accumulation.
+        """
         # Old format only has checkpoint_var_costs - fallback should work
         cells = [
             {
@@ -545,15 +560,30 @@ class TestBackwardsCompatibility:
                 "overhead_breakdown": {"checkpoints_mb": 1.0},
                 "status": "ok"
             },
+            {
+                "cell_id": "def2",
+                "cell_index": 1,
+                "current_footprint_mb": 15.0,
+                "max_footprint_mb": 15.0,
+                "checkpoint_var_costs": {
+                    "df": {"bytes": 1000000, "type": "DataFrame", "module": "pandas"},
+                    "arr": {"bytes": 800000, "type": "ndarray", "module": "numpy"}
+                },
+                "overhead_breakdown": {"checkpoints_mb": 2.3},
+                "status": "ok"
+            },
         ]
         data = create_v2_comparison_data(cells)
 
         var_result = extract_checkpoint_var_data(data)
 
-        # Var extraction now falls back to checkpoint_var_costs
+        # Var extraction now falls back to checkpoint_var_costs (per-cell, not cumulative)
         assert var_result is not None
         assert "df" in var_result["vars_ordered"]
-        assert var_result["by_var"]["df"] == [1000000]  # Cumulative value
+        # Per-cell values: df has 1000000 in both cells
+        assert var_result["by_var"]["df"] == [1000000, 1000000]
+        # arr only appears in cell2, so cell1 should be 0
+        assert var_result["by_var"]["arr"] == [0, 800000]
 
 
 # =============================================================================

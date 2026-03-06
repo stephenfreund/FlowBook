@@ -215,6 +215,34 @@ class HeapSizer:
             shared_bytes=shared_bytes,
         )
 
+    def sizeof_user_namespace(self, globals_dict: Dict[str, Any]) -> NamespaceSize:
+        """
+        Filter and measure user namespace from globals().
+
+        Filters out:
+        - Private variables (starting with '_')
+        - Modules
+        - Functions (regular and builtin)
+        - Types/classes
+
+        This method handles the filtering internally to avoid requiring
+        __import__('types') in user_expressions, which can trigger dbm
+        imports on some systems.
+
+        Args:
+            globals_dict: The globals() dictionary from the kernel
+
+        Returns:
+            NamespaceSize with total, per-variable, per-type, and shared bytes
+        """
+        filtered = {
+            k: v for k, v in globals_dict.items()
+            if not k.startswith('_')
+            and not isinstance(v, types.ModuleType)
+            and not isinstance(v, (types.FunctionType, types.BuiltinFunctionType, type))
+        }
+        return self.sizeof_namespace(filtered)
+
     def sizeof_checkpoint(
         self,
         checkpoint,

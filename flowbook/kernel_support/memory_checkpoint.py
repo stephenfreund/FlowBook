@@ -2859,6 +2859,34 @@ class MemoryCheckpoints:
             'cumulative': dict(result.cumulative),
         }
 
+    def get_overhead_beyond_user_namespace(
+        self,
+        cell_id: str,
+        globals_dict: dict,
+    ) -> dict:
+        """
+        Get checkpoint memory overhead beyond what's in the user namespace.
+
+        This is a convenience wrapper around get_overhead_beyond_namespace that
+        handles filtering of globals() internally to avoid __import__('types')
+        in user_expressions, which can trigger dbm imports on some systems.
+
+        Args:
+            cell_id: Cell ID to measure up to (inclusive)
+            globals_dict: The globals() dictionary from the kernel
+
+        Returns:
+            Dict with total_mb, by_checkpoint, by_variable, cumulative
+        """
+        import types
+        filtered = {
+            k: v for k, v in globals_dict.items()
+            if not k.startswith('_')
+            and not isinstance(v, types.ModuleType)
+            and not isinstance(v, (types.FunctionType, types.BuiltinFunctionType, type))
+        }
+        return self.get_overhead_beyond_namespace(cell_id, filtered)
+
     def get_pre_post_checkpoint_sizes_at_cell(self, cell_id: str) -> dict:
         """
         Get separate sizes for pre and post checkpoints up to and including a cell.

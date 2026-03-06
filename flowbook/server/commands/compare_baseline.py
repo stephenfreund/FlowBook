@@ -101,11 +101,20 @@ MemoryCellMetrics:
   "max_footprint_mb": float,
   "allocation_delta_mb": float,
   "gpu_mem_samples": float,
+  "namespace_mb": float,                   # User namespace size in MB (alias for base_namespace_mb)
+  "checkpoint_delta_mb": float,            # This cell's checkpoint contribution in MB
+  "checkpoint_cumulative_mb": float,       # Total checkpoint overhead in MB
+                                           # NOTE: May be 0 when saved checkpoints empty (syntactic mode)
+                                           #       Use checkpoint_var_costs as fallback for visualization
+  "gpu_mb": float,                         # GPU memory usage in MB (alias for gpu_mem_samples)
   "status": str,
   "error": str | null,
   "is_rerun": bool,
   # FlowBook-only fields:
-  "checkpoint_var_costs": {var: {bytes, deepcopy_ms}, ...} | null,
+  "checkpoint_var_costs": {                # Per-cell checkpoint state (current sizes, NOT deltas)
+    var: {bytes, deepcopy_ms, type, module}, ...
+  } | null,                                # Use for memory visualization when checkpoint_cumulative_mb is 0
+  "checkpoint_by_var": {var: bytes, ...} | null,  # Per-variable checkpoint sizes in MB
   "overhead_breakdown": {                  # Memory breakdown by category
     "checkpoints_mb": float,               # Cumulative checkpoint memory
     "execution_records_mb": float,
@@ -725,20 +734,10 @@ def get_namespace_size(kernel_client, timeout: float = 30.0) -> Dict[str, Any]:
     # Filter out private/system variables, functions, and modules.
     # NOTE: callable() is too aggressive - it excludes DataFrames (which have __call__
     # via the type system) and cudf.pandas proxy objects. Use explicit type checks instead.
-    expr_code = """(lambda: (
-        __import__('flowbook.kernel_support.heap_size', fromlist=['HeapSizer'])
-        .HeapSizer()
-        .sizeof_namespace(
-            {k: v for k, v in globals().items()
-             if not k.startswith('_')
-             and not isinstance(v, __import__('types').ModuleType)
-             and not isinstance(v, (
-                 __import__('types').FunctionType,
-                 __import__('types').BuiltinFunctionType,
-                 type,
-             ))}
-        ).__dict__
-    ))()"""
+    # NOTE: We use sizeof_user_namespace() which handles filtering internally
+    # to avoid __import__('types') in user_expressions, which can trigger
+    # dbm imports on systems without _gdbm/_dbm C extensions.
+    expr_code = """__import__('flowbook.kernel_support.heap_size', fromlist=['HeapSizer']).HeapSizer().sizeof_user_namespace(globals()).__dict__"""
 
     msg_id = kernel_client.execute(
         '',  # Empty code - no checkpoints created
@@ -1048,17 +1047,12 @@ def get_checkpoint_overhead(
         - by_variable: Per-variable totals in MB
         - cumulative: Running total at each checkpoint in MB
     """
-    # Filter namespace same way as sizeof_namespace (exclude private, functions, modules)
-    ns_filter = (
-        "{k: v for k, v in globals().items()"
-        " if not k.startswith('_')"
-        " and not isinstance(v, __import__('types').ModuleType)"
-        " and not isinstance(v, (__import__('types').FunctionType, __import__('types').BuiltinFunctionType, type))}"
-    )
-
+    # Use get_overhead_beyond_user_namespace() which handles filtering internally
+    # to avoid __import__('types') in user_expressions, which can trigger
+    # dbm imports on systems without _gdbm/_dbm C extensions.
     expr = (
         f"__import__('flowbook.kernel_support.memory_checkpoint', fromlist=['MemoryCheckpoints'])"
-        f".MemoryCheckpoints._instance.get_overhead_beyond_namespace('{cell_id}', {ns_filter})"
+        f".MemoryCheckpoints._instance.get_overhead_beyond_user_namespace('{cell_id}', globals())"
     )
 
     msg_id = kernel_client.execute('', user_expressions={'_overhead': expr}, silent=True)
