@@ -3,8 +3,8 @@ Tests for compare_overhead extract functions using cumulative checkpoint data.
 
 These tests verify that:
 1. extract_checkpoint_type_data_v2 uses cumulative_by_type when available
-2. extract_checkpoint_var_data uses cumulative_by_var when available
-3. Both functions fall back to checkpoint_var_costs for backwards compatibility
+2. extract_checkpoint_var_data uses cumulative_by_var or checkpoint_by_var
+3. extract_checkpoint_type_data_v2 falls back to checkpoint_var_costs
 4. The extracted data is consistent with overhead_breakdown.checkpoints_mb
 """
 
@@ -399,10 +399,10 @@ class TestExtractCheckpointVarDataWithNewFormat:
 
 
 class TestExtractCheckpointVarDataFallback:
-    """Tests for extract_checkpoint_var_data falling back to old format."""
+    """Tests for extract_checkpoint_var_data with checkpoint_by_var field."""
 
-    def test_falls_back_to_var_costs(self):
-        """Test fallback to checkpoint_var_costs when cumulative_by_var missing."""
+    def test_returns_none_for_no_checkpoint_by_var(self):
+        """Test returns None when checkpoint_by_var missing (old format not supported)."""
         cells = [
             create_cell_with_old_format(
                 "cell1", 0,
@@ -411,21 +411,13 @@ class TestExtractCheckpointVarDataFallback:
                 },
                 checkpoints_mb=0.001
             ),
-            create_cell_with_old_format(
-                "cell2", 1,
-                checkpoint_var_costs={
-                    "arr": {"bytes": 500, "type": "ndarray"}
-                },
-                checkpoints_mb=0.0015
-            ),
         ]
         data = create_v2_comparison_data(cells)
 
         result = extract_checkpoint_var_data(data)
 
-        assert result is not None
-        # Should derive cumulative: 1000, 1000+500=1500
-        assert result["by_var"]["arr"] == [1000, 1500]
+        # Now requires checkpoint_by_var - old format returns None
+        assert result is None
 
     def test_returns_none_for_no_data(self):
         """Test returns None when no checkpoint data available."""
@@ -500,8 +492,8 @@ class TestConsistencyBetweenExtracts:
 class TestBackwardsCompatibility:
     """Test backwards compatibility with old comparison files."""
 
-    def test_old_format_still_works(self):
-        """Test that old format files (no cumulative fields) still work."""
+    def test_old_format_type_extraction_works(self):
+        """Test that old format files work for TYPE extraction (uses checkpoint_var_costs)."""
         # Old format only has checkpoint_var_costs
         cells = [
             {
@@ -531,15 +523,33 @@ class TestBackwardsCompatibility:
         data = create_v2_comparison_data(cells)
 
         type_result = extract_checkpoint_type_data_v2(data)
+
+        # Type extraction should work with old format (derives from checkpoint_var_costs)
+        assert type_result is not None
+        assert "DataFrame" in type_result["by_type"]
+
+    def test_old_format_var_extraction_requires_checkpoint_by_var(self):
+        """Test that VAR extraction requires checkpoint_by_var field."""
+        # Old format only has checkpoint_var_costs - var extraction won't work
+        cells = [
+            {
+                "cell_id": "abc1",
+                "cell_index": 0,
+                "current_footprint_mb": 10.0,
+                "max_footprint_mb": 10.0,
+                "checkpoint_var_costs": {
+                    "df": {"bytes": 1000000, "type": "DataFrame", "module": "pandas"}
+                },
+                "overhead_breakdown": {"checkpoints_mb": 1.0},
+                "status": "ok"
+            },
+        ]
+        data = create_v2_comparison_data(cells)
+
         var_result = extract_checkpoint_var_data(data)
 
-        # Should work with old format
-        assert type_result is not None
-        assert var_result is not None
-
-        # Should derive cumulative from per-cell costs
-        assert "DataFrame" in type_result["by_type"]
-        assert "df" in var_result["by_var"]
+        # Var extraction requires checkpoint_by_var or cumulative_by_var
+        assert var_result is None
 
 
 # =============================================================================
