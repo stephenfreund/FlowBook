@@ -2161,6 +2161,10 @@ def extract_checkpoint_var_data(
                 v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names
             }
 
+    # Ensure cumulative: carry forward max seen so far per variable (checkpoints don't shrink)
+    for var_name in var_by_cell:
+        var_by_cell[var_name] = list(np.maximum.accumulate(var_by_cell[var_name]))
+
     # Order variables by MAX cumulative size descending (not final - captures vars that get cleaned up)
     vars_ordered = sorted(var_max.keys(), key=lambda v: var_max[v], reverse=True)
 
