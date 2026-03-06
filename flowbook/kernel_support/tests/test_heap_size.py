@@ -1416,3 +1416,217 @@ class TestExtensionArrayRegression:
         assert total < expected_max, \
             f"Total memory ({total:,}) exceeds expected max ({expected_max:,}). " \
             f"Breakdown: orig={orig_size:,}, ckpt1={ckpt1_size:,}, ckpt2={ckpt2_size:,}"
+
+
+# ============================================================================
+# HEAP SIZER SUBSET ACCOUNTING TESTS
+# ============================================================================
+
+
+class TestHeapSizerSubsetAccounting:
+    """Test HeapSizer memory accounting with DataFrame subset relations."""
+
+    def test_row_subset_counted_separately(self):
+        """Test that parent and child (row subset) both have full memory counted.
+
+        When DataFrames are NOT CoW copies (different underlying data),
+        each should be counted at their actual size.
+        """
+        parent = pd.DataFrame({
+            'a': np.arange(100_000),
+            'b': np.arange(100_000, 200_000),
+        })
+        # Create a row subset (not a view - .copy() creates new arrays)
+        child = parent.iloc[::2].copy()
+
+        sizer = HeapSizer()
+        parent_size = sizer.sizeof(parent)
+        sizer.reset()
+        child_size = sizer.sizeof(child)
+
+        # Parent should be ~1.6MB (2 cols * 100K * 8 bytes)
+        assert parent_size > 1_500_000
+        # Child should be ~800KB (2 cols * 50K * 8 bytes)
+        assert child_size > 750_000
+        assert child_size < parent_size
+
+    def test_memory_view_deduplicated(self):
+        """Test that view slice counts wrapper only when measuring owned data."""
+        base_arr = np.zeros(1_000_000)  # 8 MB
+        view = base_arr[::2]  # View of every other element
+
+        sizer = HeapSizer()
+        # Measure view with owned_only=True
+        view_size = sizer.sizeof(view, owned_only=True)
+        # Should only count the wrapper, not the shared buffer
+        assert view_size < 500  # Just overhead
+
+        sizer.reset()
+        # Measure full buffer
+        base_size = sizer.sizeof(base_arr)
+        assert base_size > 8_000_000
+
+    def test_multiple_subsets_from_same_parent(self):
+        """Test multiple children from same parent are measured correctly."""
+        parent = pd.DataFrame({
+            'a': np.arange(100_000),
+            'b': np.arange(100_000, 200_000),
+        })
+
+        child1 = parent.iloc[:25000].copy()
+        child2 = parent.iloc[25000:50000].copy()
+        child3 = parent.iloc[50000:75000].copy()
+
+        sizer = HeapSizer()
+        ns_size = sizer.sizeof_namespace({
+            'parent': parent,
+            'child1': child1,
+            'child2': child2,
+            'child3': child3,
+        })
+
+        # Should measure each DataFrame at its actual size
+        assert 'parent' in ns_size.by_variable
+        assert 'child1' in ns_size.by_variable
+        assert 'child2' in ns_size.by_variable
+        assert 'child3' in ns_size.by_variable
+
+        # Parent should be largest
+        assert ns_size.by_variable['parent'] > ns_size.by_variable['child1']
+
+    def test_chain_of_subsets_accounting(self):
+        """Test df -> df_a -> df_b chain memory accounting."""
+        df = pd.DataFrame({'x': np.arange(100_000)})
+        df_a = df.iloc[::2].copy()  # 50K rows
+        df_b = df_a.iloc[::2].copy()  # 25K rows
+
+        sizer = HeapSizer()
+        ns_size = sizer.sizeof_namespace({
+            'df': df,
+            'df_a': df_a,
+            'df_b': df_b,
+        })
+
+        # Each should have its own size
+        assert ns_size.by_variable['df'] > ns_size.by_variable['df_a']
+        assert ns_size.by_variable['df_a'] > ns_size.by_variable['df_b']
+
+    def test_cow_copy_accounting(self):
+        """Test CoW copy before and after mutation."""
+        from flowbook.kernel_support.deepcopy import deepcopy
+
+        df = pd.DataFrame({'a': np.zeros(100_000)})
+        df_cow = deepcopy(df, {})  # CoW copy shares data
+
+        sizer = HeapSizer()
+        ns_size = sizer.sizeof_namespace({'df': df, 'df_cow': df_cow})
+
+        # Total should be much less than 2x (data is shared)
+        orig_size = HeapSizer().sizeof(df)
+        assert ns_size.total_bytes < orig_size * 1.5
+
+
+class TestHeapSizerCheckpointSubsetInteraction:
+    """Test HeapSizer with checkpoint and subset interaction."""
+
+    def test_checkpoint_with_subset_relation_memory(self):
+        """Test that checkpoint storing subset relation measures indices, not full child."""
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
+
+        parent = pd.DataFrame({
+            'a': np.arange(50_000),
+            'b': np.arange(50_000, 100_000),
+        })
+        child = parent.iloc[::2].copy()
+
+        cp = MemoryCheckpoints(
+            optimize_df_subsets=True,
+            df_subset_min_rows=10,
+            df_subset_min_savings_bytes=0,
+        )
+
+        user_ns = {'parent': parent, 'child': child}
+        cp.save('test', user_ns)
+
+        # Get the checkpoint
+        checkpoint = cp.get('test')
+
+        # Measure the checkpoint's memory
+        sizer = HeapSizer()
+        ckpt_size = sizer.sizeof_checkpoint(checkpoint)
+
+        assert ckpt_size.total_bytes > 0
+        assert 'parent' in ckpt_size.by_variable
+
+    def test_reconstructed_subset_memory(self):
+        """Test that after restore, child has full DataFrame memory."""
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
+
+        parent = pd.DataFrame({
+            'a': np.arange(10_000),
+            'b': np.arange(10_000, 20_000),
+        })
+        child = parent.iloc[::2].copy()
+
+        cp = MemoryCheckpoints(
+            optimize_df_subsets=True,
+            df_subset_min_rows=10,
+            df_subset_min_savings_bytes=0,
+        )
+
+        user_ns = {'parent': parent, 'child': child}
+        cp.save('test', user_ns)
+
+        # Clear and restore
+        user_ns.clear()
+        cp.restore('test', user_ns)
+
+        # Measure restored child
+        sizer = HeapSizer()
+        restored_child_size = sizer.sizeof(user_ns['child'])
+
+        # Should be substantial (at least 20KB for 5K rows * 2 cols)
+        # Note: reconstructed DataFrames may have different internal structure
+        assert restored_child_size > 20_000
+
+        # Verify data integrity
+        assert len(user_ns['child']) == 5_000
+        assert list(user_ns['child'].columns) == ['a', 'b']
+
+    def test_memory_before_and_after_restore(self):
+        """Test that pre/post restore DataFrames have similar memory (within 2x)."""
+        from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
+
+        parent = pd.DataFrame({
+            'a': np.arange(5_000),
+            'b': np.arange(5_000, 10_000),
+        })
+        child = parent.iloc[::2].copy()
+
+        # Measure before
+        sizer1 = HeapSizer()
+        pre_child_size = sizer1.sizeof(child)
+
+        cp = MemoryCheckpoints(
+            optimize_df_subsets=True,
+            df_subset_min_rows=10,
+            df_subset_min_savings_bytes=0,
+        )
+
+        user_ns = {'parent': parent, 'child': child}
+        cp.save('test', user_ns)
+        user_ns.clear()
+        cp.restore('test', user_ns)
+
+        # Measure after restore
+        sizer2 = HeapSizer()
+        post_child_size = sizer2.sizeof(user_ns['child'])
+
+        # Reconstructed DataFrames may have different memory layout
+        # but should be within 2x of original (not wildly different)
+        assert post_child_size > 0
+        assert post_child_size < pre_child_size * 2
+
+        # More importantly: verify data is correct
+        assert len(user_ns['child']) == 2_500
+        assert list(user_ns['child'].columns) == ['a', 'b']

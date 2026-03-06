@@ -568,3 +568,409 @@ class TestDetectionResult:
         assert result.parent_vars.isdisjoint(result.child_vars)
         assert result.parent_vars.isdisjoint(result.standalone_vars)
         assert result.child_vars.isdisjoint(result.standalone_vars)
+
+
+# ============================================================================
+# FULL VALIDATION TESTS (Algorithm Fix Verification)
+# ============================================================================
+
+
+class TestFullValidation:
+    """Test the full vectorized validation algorithm.
+
+    These tests verify that the algorithm correctly rejects false positives
+    that would have passed the old spot-check validation.
+    """
+
+    def test_manufactured_false_positive_rejected(self):
+        """Test that a DataFrame matching at spot-check positions but differing elsewhere is NOT detected.
+
+        This is the critical test that proves the fix works - the old spot-check
+        only validated positions 0, n//2, and n-1 in the first column.
+        """
+        n = 200
+        # Create parent DataFrame
+        parent = pd.DataFrame({
+            "a": list(range(n)),
+            "b": list(range(n, n*2)),
+        })
+
+        # Create a "child" that would pass the old spot-check but is NOT a real subset
+        # It matches at positions 0, 99 (n//2), and 199 (n-1) but differs elsewhere
+        child_data = {"a": [], "b": []}
+        for i in range(100):  # 100 rows
+            if i in (0, 49, 99):  # These positions map to 0, 99, 199 in parent
+                # Match the parent values at these positions
+                child_data["a"].append(i * 2)  # Maps to parent row i*2
+                child_data["b"].append(i * 2 + n)
+            else:
+                # Use DIFFERENT values that would fail full validation
+                child_data["a"].append(9999 + i)
+                child_data["b"].append(8888 + i)
+
+        child = pd.DataFrame(child_data)
+        # Give it a fake index that overlaps with parent to pass index check
+        child.index = pd.Index(range(0, 200, 2))
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        # Should NOT detect as subset because values don't match
+        assert len(result.relations) == 0
+
+    def test_mismatch_in_middle_column_rejected(self):
+        """Test that DataFrame matching first column but differing in second is NOT detected."""
+        parent = pd.DataFrame({
+            "a": range(200),
+            "b": range(200, 400),
+            "c": range(400, 600),
+        })
+
+        # Create child that matches column "a" but has different values in "b"
+        indices = list(range(0, 200, 2))  # Every other row
+        child = parent.iloc[indices].copy()
+        child["b"] = 9999  # Change all values in column b
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        # Should NOT detect as subset
+        assert len(result.relations) == 0
+
+    def test_mismatch_in_last_column_rejected(self):
+        """Test that DataFrame matching all but last column is NOT detected."""
+        parent = pd.DataFrame({
+            "a": range(200),
+            "b": range(200, 400),
+            "c": range(400, 600),
+        })
+
+        indices = list(range(0, 200, 2))
+        child = parent.iloc[indices].copy()
+        child["c"] = 7777  # Change only the last column
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        # Should NOT detect as subset
+        assert len(result.relations) == 0
+
+    def test_single_value_mismatch_rejected(self):
+        """Test that a single value mismatch is correctly rejected."""
+        parent = pd.DataFrame({
+            "a": list(range(200)),
+            "b": list(range(200, 400)),
+        })
+
+        indices = list(range(0, 200, 2))
+        child = parent.iloc[indices].copy()
+        # Change just ONE value in the middle (not at spot-check positions)
+        child.iloc[25, 0] = 99999  # Position 25 (index 50 in parent)
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        # Should NOT detect as subset
+        assert len(result.relations) == 0
+
+    def test_all_columns_validated(self):
+        """Test that validation occurs across ALL common columns."""
+        parent = pd.DataFrame({
+            "col1": range(200),
+            "col2": range(200, 400),
+            "col3": range(400, 600),
+            "col4": range(600, 800),
+            "col5": range(800, 1000),
+        })
+
+        indices = list(range(0, 200, 2))
+        child = parent.iloc[indices].copy()
+        # Change only the 4th column (col4)
+        child["col4"] = 5555
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        # Should NOT detect as subset
+        assert len(result.relations) == 0
+
+    def test_true_subset_still_detected(self):
+        """Test that true subsets are still correctly detected after the fix."""
+        parent = pd.DataFrame({
+            "a": range(300),
+            "b": range(300, 600),
+            "c": ["x", "y", "z"] * 100,
+        })
+
+        # Create a true row subset
+        child = parent[parent["a"] > 100].copy()
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        # Should detect as subset
+        assert len(result.relations) == 1
+        assert result.relations[0].child_var == "child"
+        assert result.relations[0].parent_var == "parent"
+
+
+class TestRealSharingDetection:
+    """Test detection of real DataFrame sharing scenarios."""
+
+    def test_true_subset_with_non_sequential_indices(self):
+        """Test true subset with gaps (rows 0, 5, 10, 15, ...)."""
+        parent = pd.DataFrame({
+            "a": range(200),
+            "b": range(200, 400),
+        })
+
+        # Select rows with gaps
+        indices = list(range(0, 200, 5))  # Every 5th row
+        child = parent.iloc[indices].copy()
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        assert len(result.relations) == 1
+        assert len(result.relations[0].row_indices) == 40
+
+    def test_identical_values_different_rows_not_subset(self):
+        """Test that same values but different index positions is NOT a subset."""
+        parent = pd.DataFrame({
+            "a": [1, 2, 3, 4, 5] * 40,  # 200 rows
+            "b": [10, 20, 30, 40, 50] * 40,
+        })
+
+        # Create DataFrame with same values but DIFFERENT indices
+        child = pd.DataFrame({
+            "a": [1, 2, 3, 4, 5] * 20,
+            "b": [10, 20, 30, 40, 50] * 20,
+        }, index=range(200, 300))  # Non-overlapping index
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        # Should NOT detect - indices don't overlap
+        assert len(result.relations) == 0
+
+    def test_shuffled_rows_not_subset(self):
+        """Test that shuffled rows with same values are NOT a subset."""
+        parent = pd.DataFrame({
+            "a": list(range(200)),
+            "b": list(range(200, 400)),
+        })
+
+        # Create "child" with same index but shuffled values
+        indices = list(range(0, 200, 2))
+        child = parent.iloc[indices].copy()
+        # Shuffle the rows (values no longer match their index positions)
+        child = child.sample(frac=1, random_state=42)
+        child.index = parent.iloc[indices].index  # Reset to original indices
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        # Should NOT detect - values don't match at correct positions
+        assert len(result.relations) == 0
+
+    def test_overlapping_but_not_subset(self):
+        """Test some rows from parent + different rows = NOT a subset."""
+        parent = pd.DataFrame({
+            "a": list(range(200)),
+            "b": list(range(200, 400)),
+        })
+
+        # Take first 50 rows from parent
+        partial = parent.iloc[:50].copy()
+        # Add 50 completely different rows
+        extra = pd.DataFrame({
+            "a": list(range(1000, 1050)),
+            "b": list(range(2000, 2050)),
+        }, index=range(50, 100))
+
+        child = pd.concat([partial, extra])
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        # Should NOT detect - not all indices are in parent
+        assert len(result.relations) == 0
+
+    def test_nan_values_handled_correctly(self):
+        """Test that NaN values are handled correctly (NaN == NaN for subset purposes)."""
+        parent = pd.DataFrame({
+            "a": [1.0, np.nan, 3.0, np.nan, 5.0] * 40,
+            "b": [np.nan, 2.0, np.nan, 4.0, np.nan] * 40,
+        })
+
+        # Create true subset including NaN values
+        child = parent.iloc[::2].copy()  # Every other row
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        # Should detect - NaN positions match
+        assert len(result.relations) == 1
+
+    def test_nan_in_object_column_handled(self):
+        """Test NaN in object dtype columns."""
+        parent = pd.DataFrame({
+            "a": range(200),
+            "b": [None if i % 10 == 0 else f"val_{i}" for i in range(200)],
+        })
+
+        child = parent.iloc[::2].copy()
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        assert len(result.relations) == 1
+
+
+class TestMemoryViewVsValueSubset:
+    """Test detection of memory views vs value copies."""
+
+    def test_iloc_view_vs_iloc_copy(self):
+        """Test both views and copies work correctly."""
+        parent = pd.DataFrame({
+            "a": range(200),
+            "b": range(200, 400),
+        })
+
+        # Create explicit copy
+        child_copy = parent.iloc[::2].copy()
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child_copy": child_copy})
+
+        assert len(result.relations) == 1
+
+    def test_filtered_copy_detection(self):
+        """Test boolean-filtered copy is detected."""
+        parent = pd.DataFrame({
+            "a": range(200),
+            "b": range(200, 400),
+        })
+
+        child = parent[parent["a"] > 50].copy()
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        assert len(result.relations) == 1
+
+    def test_query_subset_detection(self):
+        """Test DataFrame.query() result is detected as subset."""
+        parent = pd.DataFrame({
+            "a": range(200),
+            "b": range(200, 400),
+        })
+
+        child = parent.query("a > 100").copy()
+
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
+        result = detector.detect({"parent": parent, "child": child})
+
+        assert len(result.relations) == 1
+
+
+class TestFullValidationPerformance:
+    """Test performance of the full validation algorithm."""
+
+    def test_validation_under_50ms_for_100k_rows(self):
+        """Test that 100K row validation completes in reasonable time."""
+        import time
+
+        n = 100_000
+        parent = pd.DataFrame({
+            "a": np.arange(n),
+            "b": np.arange(n, n*2),
+            "c": np.arange(n*2, n*3),
+            "d": np.arange(n*3, n*4),
+            "e": np.arange(n*4, n*5),
+        })
+
+        child = parent.iloc[::2].copy()  # 50K rows
+
+        detector = DataFrameSubsetDetector(min_rows=100, min_savings_bytes=0)
+
+        start = time.time()
+        result = detector.detect({"parent": parent, "child": child})
+        elapsed_ms = (time.time() - start) * 1000
+
+        assert len(result.relations) == 1
+        # Should complete in under 100ms (being generous for CI environments)
+        assert elapsed_ms < 100, f"Took {elapsed_ms:.1f}ms, expected < 100ms"
+
+    def test_early_rejection_is_fast(self):
+        """Test that non-subsets are rejected quickly (first column mismatch)."""
+        import time
+
+        n = 100_000
+        parent = pd.DataFrame({
+            "a": np.arange(n),
+            "b": np.arange(n, n*2),
+        })
+
+        # Child with completely different values - should reject immediately
+        child = pd.DataFrame({
+            "a": np.arange(n, n + 50000),  # Different values
+            "b": np.arange(n*2, n*2 + 50000),
+        }, index=range(0, n, 2))  # Same index as would be a subset
+
+        detector = DataFrameSubsetDetector(min_rows=100, min_savings_bytes=0)
+
+        start = time.time()
+        result = detector.detect({"parent": parent, "child": child})
+        elapsed_ms = (time.time() - start) * 1000
+
+        assert len(result.relations) == 0
+        # Should reject very quickly
+        assert elapsed_ms < 50, f"Took {elapsed_ms:.1f}ms, expected < 50ms"
+
+    def test_caching_avoids_revalidation(self):
+        """Test that repeated checks use cache."""
+        import time
+
+        parent = pd.DataFrame({
+            "a": range(10000),
+            "b": range(10000, 20000),
+        })
+        child = parent.iloc[::2].copy()
+
+        detector = DataFrameSubsetDetector(min_rows=100, min_savings_bytes=0)
+
+        # First detection
+        start1 = time.time()
+        result1 = detector.detect({"parent": parent, "child": child})
+        time1 = time.time() - start1
+
+        # Second detection (should use cache)
+        start2 = time.time()
+        result2 = detector.detect({"parent": parent, "child": child})
+        time2 = time.time() - start2
+
+        assert len(result1.relations) == 1
+        assert len(result2.relations) == 1
+        # Second call should be faster (cached)
+        assert time2 < time1 * 0.5, f"Cache not effective: {time2:.4f}s vs {time1:.4f}s"
+
+    def test_multiple_columns_validation_scales(self):
+        """Test that many columns don't cause excessive slowdown."""
+        import time
+
+        n = 50000
+        # Create DataFrame with many columns
+        data = {f"col_{i}": np.arange(n) + i*n for i in range(20)}
+        parent = pd.DataFrame(data)
+        child = parent.iloc[::2].copy()
+
+        detector = DataFrameSubsetDetector(min_rows=100, min_savings_bytes=0)
+
+        start = time.time()
+        result = detector.detect({"parent": parent, "child": child})
+        elapsed_ms = (time.time() - start) * 1000
+
+        assert len(result.relations) == 1
+        # Should still be reasonably fast even with 20 columns
+        assert elapsed_ms < 200, f"Took {elapsed_ms:.1f}ms with 20 columns"

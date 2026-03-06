@@ -291,26 +291,44 @@ class DataFrameSubsetDetector:
             except Exception:
                 return _cache_none()
 
-        # 4. Spot check: compare just 3 values using fast array access
-        with timer(key="subset:04_spot_check"):
-            col = common_columns[0]
-            try:
-                # Use .values for faster array access
-                child_arr = child_df[col].values
-                parent_arr = parent_df[col].values
-                n = len(child_arr)
-                for idx in (0, n // 2, n - 1):
-                    if idx < n:
-                        cv = child_arr[idx]
-                        pv = parent_arr[row_indices[idx]]
-                        if cv != pv:
-                            # Check for NaN (NaN != NaN is True)
-                            if not (cv != cv and pv != pv):
-                                return _cache_none()
-            except Exception:
-                return _cache_none()
+        # 4. Validate ALL values in ALL common columns (vectorized, fast)
+        # This guarantees zero false positives - critical for data integrity on restore
+        with timer(key="subset:04_full_validation"):
+            for col in common_columns:
+                try:
+                    child_arr = child_df[col].values
+                    parent_arr = parent_df[col].values
+                    parent_subset = parent_arr[row_indices]
 
-        # 5. Passed spot check - assume valid subset
+                    # Handle different dtypes appropriately:
+                    # - Floating point: use equal_nan=True to handle NaN correctly
+                    # - Object/string: use pandas isna + element comparison
+                    # - Other (int, bool, etc.): basic array_equal works
+                    if np.issubdtype(child_arr.dtype, np.floating):
+                        if not np.array_equal(child_arr, parent_subset, equal_nan=True):
+                            return _cache_none()
+                    elif child_arr.dtype == object or child_arr.dtype.kind in ('U', 'S'):
+                        # For object/string dtypes, handle NaN specially
+                        # Use pandas isna which handles None, NaN, NaT correctly
+                        child_na = pd.isna(child_arr)
+                        parent_na = pd.isna(parent_subset)
+                        if not np.array_equal(child_na, parent_na):
+                            return _cache_none()
+                        # Compare non-NA values
+                        non_na_mask = ~child_na
+                        if non_na_mask.any():
+                            if not np.array_equal(
+                                child_arr[non_na_mask], parent_subset[non_na_mask]
+                            ):
+                                return _cache_none()
+                    else:
+                        # For non-float, non-object types (int, bool, etc.)
+                        if not np.array_equal(child_arr, parent_subset):
+                            return _cache_none()
+                except Exception:
+                    return _cache_none()
+
+        # 5. Passed full validation - confirmed valid subset
         with timer(key="subset:05_extra_cols"):
             extra_columns = [c for c in child_df.columns if c not in parent_cols]
 

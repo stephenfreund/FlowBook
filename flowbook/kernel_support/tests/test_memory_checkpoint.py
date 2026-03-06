@@ -1685,5 +1685,443 @@ class TestCheckpointMemoryCosts:
         assert cp._var_memory_costs_by_checkpoint == {}
 
 
+# ============================================================================
+# RESTORE RELIABILITY TESTS
+# ============================================================================
+
+
+class TestRestoreReliability:
+    """Test that checkpoint restore always produces correct results."""
+
+    def test_restore_multiple_times_same_checkpoint(self):
+        """Test that restoring 50x with mutations between produces identical state."""
+        cp = MemoryCheckpoints()
+
+        original_df = pd.DataFrame({
+            'a': [1, 2, 3, 4, 5],
+            'b': ['x', 'y', 'z', 'w', 'v'],
+        })
+        original_lst = [10, 20, 30]
+
+        user_ns = {'df': original_df.copy(), 'lst': original_lst.copy()}
+        cp.save('test', user_ns)
+
+        for i in range(50):
+            # Mutate everything
+            user_ns['df']['a'] = user_ns['df']['a'] + i
+            user_ns['df']['new_col'] = i
+            user_ns['lst'].append(i * 100)
+            user_ns['new_var'] = f"iteration_{i}"
+
+            # Restore
+            cp.restore('test', user_ns)
+
+            # Verify state
+            assert list(user_ns['df']['a']) == [1, 2, 3, 4, 5]
+            assert list(user_ns['df']['b']) == ['x', 'y', 'z', 'w', 'v']
+            assert 'new_col' not in user_ns['df'].columns
+            assert user_ns['lst'] == [10, 20, 30]
+            assert 'new_var' not in user_ns
+
+    def test_restore_alternating_checkpoints(self):
+        """Test alternating between two checkpoints produces correct state."""
+        cp = MemoryCheckpoints()
+
+        user_ns = {'x': 1, 'arr': np.array([1, 2, 3])}
+        cp.save('cp1', user_ns)
+
+        user_ns['x'] = 999
+        user_ns['arr'] = np.array([10, 20, 30])
+        cp.save('cp2', user_ns)
+
+        for _ in range(20):
+            cp.restore('cp1', user_ns)
+            assert user_ns['x'] == 1
+            assert np.array_equal(user_ns['arr'], np.array([1, 2, 3]))
+
+            cp.restore('cp2', user_ns)
+            assert user_ns['x'] == 999
+            assert np.array_equal(user_ns['arr'], np.array([10, 20, 30]))
+
+    def test_restore_after_heavy_mutation(self):
+        """Test restore after modifying every cell in DataFrame."""
+        cp = MemoryCheckpoints()
+
+        df = pd.DataFrame({
+            'a': list(range(100)),
+            'b': list(range(100, 200)),
+            'c': ['val'] * 100,
+        })
+        user_ns = {'df': df.copy()}
+        cp.save('test', user_ns)
+
+        # Mutate every cell
+        for col in user_ns['df'].columns:
+            user_ns['df'][col] = 'MODIFIED'
+
+        # Add new columns and rows
+        user_ns['df']['new1'] = 'new'
+        user_ns['df']['new2'] = 'new'
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # Verify original data
+        assert list(user_ns['df']['a']) == list(range(100))
+        assert list(user_ns['df']['b']) == list(range(100, 200))
+        assert list(user_ns['df']['c']) == ['val'] * 100
+        assert 'new1' not in user_ns['df'].columns
+        assert 'new2' not in user_ns['df'].columns
+
+    def test_restore_removes_new_variables(self):
+        """Test that variables added after save are removed on restore."""
+        cp = MemoryCheckpoints()
+
+        user_ns = {'original': 42}
+        cp.save('test', user_ns)
+
+        # Add many new variables
+        for i in range(20):
+            user_ns[f'new_var_{i}'] = i * 100
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # Should only have original
+        assert set(user_ns.keys()) == {'original'}
+        assert user_ns['original'] == 42
+
+    def test_restore_with_deleted_variables(self):
+        """Test that deleted variables are restored."""
+        cp = MemoryCheckpoints()
+
+        user_ns = {
+            'a': 1,
+            'b': [1, 2, 3],
+            'c': {'key': 'value'},
+            'd': np.array([1, 2, 3]),
+        }
+        cp.save('test', user_ns)
+
+        # Delete all variables
+        user_ns.clear()
+        assert len(user_ns) == 0
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # All should be back
+        assert user_ns['a'] == 1
+        assert user_ns['b'] == [1, 2, 3]
+        assert user_ns['c'] == {'key': 'value'}
+        assert np.array_equal(user_ns['d'], np.array([1, 2, 3]))
+
+
+class TestSubsetReconstructionReliability:
+    """Test DataFrame subset reconstruction reliability."""
+
+    def test_reconstruct_after_parent_mutation(self):
+        """Test that both parent and child are correct after restore."""
+        cp = MemoryCheckpoints(
+            optimize_df_subsets=True,
+            df_subset_min_rows=10,
+            df_subset_min_savings_bytes=0,
+        )
+
+        parent = pd.DataFrame({
+            'a': list(range(200)),
+            'b': list(range(200, 400)),
+        })
+        child = parent.iloc[::2].copy()
+
+        user_ns = {'parent': parent.copy(), 'child': child.copy()}
+        cp.save('test', user_ns)
+
+        # Mutate parent
+        user_ns['parent']['a'] = 9999
+        user_ns['parent']['new'] = 'added'
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # Both should be correct
+        assert list(user_ns['parent']['a']) == list(range(200))
+        assert 'new' not in user_ns['parent'].columns
+        assert len(user_ns['child']) == 100
+
+    def test_reconstruct_chain_order(self):
+        """Test topological sort works for chain A -> B -> C."""
+        cp = MemoryCheckpoints(
+            optimize_df_subsets=True,
+            df_subset_min_rows=10,
+            df_subset_min_savings_bytes=0,
+        )
+
+        df_a = pd.DataFrame({'x': list(range(300))})
+        df_b = df_a.iloc[::2].copy()  # 150 rows
+        df_c = df_b.iloc[::2].copy()  # 75 rows
+
+        user_ns = {
+            'df_a': df_a.copy(),
+            'df_b': df_b.copy(),
+            'df_c': df_c.copy(),
+        }
+        cp.save('test', user_ns)
+
+        # Mutate all
+        for var in ['df_a', 'df_b', 'df_c']:
+            user_ns[var]['x'] = -1
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # All should have correct values
+        assert list(user_ns['df_a']['x']) == list(range(300))
+        assert len(user_ns['df_b']) == 150
+        assert len(user_ns['df_c']) == 75
+
+    def test_reconstruct_with_extra_columns_mutation(self):
+        """Test that extra columns are correctly restored."""
+        cp = MemoryCheckpoints(
+            optimize_df_subsets=True,
+            df_subset_min_rows=10,
+            df_subset_min_savings_bytes=0,
+        )
+
+        parent = pd.DataFrame({'a': list(range(200))})
+        child = parent.iloc[::2].copy()
+        child['extra1'] = 'extra_value'
+        child['extra2'] = list(range(100))
+
+        user_ns = {'parent': parent.copy(), 'child': child.copy()}
+        cp.save('test', user_ns)
+
+        # Modify extra columns
+        user_ns['child']['extra1'] = 'MODIFIED'
+        user_ns['child']['extra2'] = -1
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # Extra columns should be restored
+        assert list(user_ns['child']['extra1']) == ['extra_value'] * 100
+        assert list(user_ns['child']['extra2']) == list(range(100))
+
+    def test_reconstruct_column_order_preserved(self):
+        """Test that child column order is preserved after reconstruction."""
+        cp = MemoryCheckpoints(
+            optimize_df_subsets=True,
+            df_subset_min_rows=10,
+            df_subset_min_savings_bytes=0,
+        )
+
+        parent = pd.DataFrame({
+            'a': list(range(200)),
+            'b': list(range(200)),
+            'c': list(range(200)),
+        })
+        # Create child with reordered columns
+        child = parent.iloc[::2][['c', 'a', 'b']].copy()
+        original_cols = list(child.columns)
+
+        user_ns = {'parent': parent.copy(), 'child': child.copy()}
+        cp.save('test', user_ns)
+        user_ns.clear()
+        cp.restore('test', user_ns)
+
+        # Column order should match original
+        assert list(user_ns['child'].columns) == original_cols
+
+    def test_reconstruct_with_string_index(self):
+        """Test subset reconstruction with string index."""
+        cp = MemoryCheckpoints(
+            optimize_df_subsets=True,
+            df_subset_min_rows=10,
+            df_subset_min_savings_bytes=0,
+        )
+
+        parent = pd.DataFrame(
+            {'a': list(range(200))},
+            index=[f'row_{i}' for i in range(200)]
+        )
+        selected_idx = [f'row_{i}' for i in range(0, 200, 2)]
+        child = parent.loc[selected_idx].copy()
+
+        user_ns = {'parent': parent.copy(), 'child': child.copy()}
+        cp.save('test', user_ns)
+        user_ns.clear()
+        cp.restore('test', user_ns)
+
+        # Index labels should be preserved
+        assert list(user_ns['child'].index) == selected_idx
+
+    def test_reconstruct_deep_chain_3_levels(self):
+        """Test A -> B -> C -> D chain reconstruction."""
+        cp = MemoryCheckpoints(
+            optimize_df_subsets=True,
+            df_subset_min_rows=10,
+            df_subset_min_savings_bytes=0,
+        )
+
+        df_a = pd.DataFrame({'x': list(range(400))})
+        df_b = df_a.iloc[::2].copy()  # 200 rows
+        df_c = df_b.iloc[::2].copy()  # 100 rows
+        df_d = df_c.iloc[::2].copy()  # 50 rows
+
+        user_ns = {
+            'df_a': df_a.copy(),
+            'df_b': df_b.copy(),
+            'df_c': df_c.copy(),
+            'df_d': df_d.copy(),
+        }
+        cp.save('test', user_ns)
+        user_ns.clear()
+        cp.restore('test', user_ns)
+
+        # All levels should be correct
+        assert len(user_ns['df_a']) == 400
+        assert len(user_ns['df_b']) == 200
+        assert len(user_ns['df_c']) == 100
+        assert len(user_ns['df_d']) == 50
+
+    def test_reconstruct_concurrent_children(self):
+        """Test multiple children from same parent are all correct."""
+        cp = MemoryCheckpoints(
+            optimize_df_subsets=True,
+            df_subset_min_rows=10,
+            df_subset_min_savings_bytes=0,
+        )
+
+        parent = pd.DataFrame({
+            'a': list(range(200)),
+            'b': ['x', 'y', 'z', 'w'] * 50,
+        })
+        child_x = parent[parent['b'] == 'x'].copy()
+        child_y = parent[parent['b'] == 'y'].copy()
+        child_z = parent[parent['b'] == 'z'].copy()
+
+        user_ns = {
+            'parent': parent.copy(),
+            'child_x': child_x.copy(),
+            'child_y': child_y.copy(),
+            'child_z': child_z.copy(),
+        }
+        cp.save('test', user_ns)
+        user_ns.clear()
+        cp.restore('test', user_ns)
+
+        # All children should have correct data
+        assert len(user_ns['child_x']) == 50
+        assert len(user_ns['child_y']) == 50
+        assert len(user_ns['child_z']) == 50
+        assert all(user_ns['child_x']['b'] == 'x')
+        assert all(user_ns['child_y']['b'] == 'y')
+        assert all(user_ns['child_z']['b'] == 'z')
+
+
+class TestRestoreDataIntegrity:
+    """Test data type preservation and integrity after restore."""
+
+    def test_restore_float_precision(self):
+        """Test that float precision is preserved."""
+        cp = MemoryCheckpoints()
+
+        precise_floats = [1.123456789012345, 2.987654321098765, 3.141592653589793]
+        user_ns = {
+            'arr': np.array(precise_floats),
+            'df': pd.DataFrame({'vals': precise_floats}),
+        }
+        cp.save('test', user_ns)
+        user_ns.clear()
+        cp.restore('test', user_ns)
+
+        # Check precision preserved
+        np.testing.assert_array_equal(user_ns['arr'], np.array(precise_floats))
+        np.testing.assert_array_equal(
+            user_ns['df']['vals'].values, np.array(precise_floats)
+        )
+
+    def test_restore_datetime_precision(self):
+        """Test that datetime precision is preserved."""
+        cp = MemoryCheckpoints()
+
+        # Nanosecond precision datetime
+        dates = pd.date_range('2020-01-01', periods=5, freq='ns')
+        user_ns = {'dates': dates.copy()}
+        cp.save('test', user_ns)
+        user_ns.clear()
+        cp.restore('test', user_ns)
+
+        pd.testing.assert_index_equal(user_ns['dates'], dates)
+
+    def test_restore_categorical_categories(self):
+        """Test that categorical order is preserved."""
+        cp = MemoryCheckpoints()
+
+        cat = pd.Categorical(
+            ['c', 'a', 'b', 'a', 'c'],
+            categories=['a', 'b', 'c'],
+            ordered=True
+        )
+        user_ns = {'cat': cat.copy()}
+        cp.save('test', user_ns)
+        user_ns.clear()
+        cp.restore('test', user_ns)
+
+        # Check categories and order preserved
+        assert list(user_ns['cat'].categories) == ['a', 'b', 'c']
+        assert user_ns['cat'].ordered is True
+
+    def test_restore_object_column_identity(self):
+        """Test that mutable containers in object columns are independent."""
+        cp = MemoryCheckpoints()
+
+        df = pd.DataFrame({
+            'lists': [[1, 2], [3, 4], [5, 6]],
+            'dicts': [{'a': 1}, {'b': 2}, {'c': 3}],
+        })
+        user_ns = {'df': df}
+        cp.save('test', user_ns)
+
+        # Mutate original
+        df.iloc[0, 0].append(999)
+        df.iloc[0, 1]['new'] = 'value'
+
+        # Restore
+        cp.restore('test', user_ns)
+
+        # Restored should have original values (new objects)
+        assert user_ns['df'].iloc[0, 0] == [1, 2]
+        assert user_ns['df'].iloc[0, 1] == {'a': 1}
+
+    def test_restore_numpy_dtypes(self):
+        """Test various numpy dtypes are preserved."""
+        cp = MemoryCheckpoints()
+
+        user_ns = {
+            'int8': np.array([1, 2, 3], dtype=np.int8),
+            'int16': np.array([1, 2, 3], dtype=np.int16),
+            'int32': np.array([1, 2, 3], dtype=np.int32),
+            'int64': np.array([1, 2, 3], dtype=np.int64),
+            'float32': np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            'float64': np.array([1.0, 2.0, 3.0], dtype=np.float64),
+            'bool': np.array([True, False, True], dtype=bool),
+            'complex': np.array([1+2j, 3+4j], dtype=np.complex128),
+        }
+        cp.save('test', user_ns)
+        user_ns.clear()
+        cp.restore('test', user_ns)
+
+        # Check all dtypes preserved
+        assert user_ns['int8'].dtype == np.int8
+        assert user_ns['int16'].dtype == np.int16
+        assert user_ns['int32'].dtype == np.int32
+        assert user_ns['int64'].dtype == np.int64
+        assert user_ns['float32'].dtype == np.float32
+        assert user_ns['float64'].dtype == np.float64
+        assert user_ns['bool'].dtype == bool
+        assert user_ns['complex'].dtype == np.complex128
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
