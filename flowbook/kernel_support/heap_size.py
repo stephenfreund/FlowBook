@@ -803,7 +803,9 @@ class HeapSizer:
     def _sizeof_dict(self, d: dict, owned_only: bool) -> int:
         """Measure dict memory including keys and values."""
         total = sys.getsizeof(d)
-        for k, v in d.items():
+        # Use list() snapshot to avoid "dictionary changed size during iteration"
+        # which can happen if traversal triggers side effects or in concurrent contexts
+        for k, v in list(d.items()):
             total += self._sizeof(k, owned_only)
             total += self._sizeof(v, owned_only)
         return total
@@ -811,7 +813,8 @@ class HeapSizer:
     def _sizeof_set(self, s, owned_only: bool) -> int:
         """Measure set/frozenset memory including elements."""
         total = sys.getsizeof(s)
-        for item in s:
+        # Use list() snapshot to avoid "set changed size during iteration"
+        for item in list(s):
             total += self._sizeof(item, owned_only)
         return total
 
@@ -843,28 +846,37 @@ class HeapSizer:
         """Measure generic object with __dict__ and/or __slots__."""
         total = sys.getsizeof(obj)
 
-        # __dict__
-        if hasattr(obj, '__dict__'):
-            obj_dict = obj.__dict__
-            if isinstance(obj_dict, dict):
-                total += self._sizeof_dict(obj_dict, owned_only)
+        # Wrap attribute access in try/except to handle lazy import proxies
+        # (e.g., six.moves) that trigger module imports when accessed.
+        # If the lazy import fails (e.g., _gdbm not installed), skip the object.
+        try:
+            # __dict__
+            if hasattr(obj, '__dict__'):
+                obj_dict = obj.__dict__
+                if isinstance(obj_dict, dict):
+                    total += self._sizeof_dict(obj_dict, owned_only)
 
-        # __slots__
-        if hasattr(obj, '__slots__') and obj.__slots__ is not None:
-            slots = obj.__slots__
-            # Validate __slots__ is actually iterable (some objects have sentinel values)
-            if not isinstance(slots, (tuple, list, set, frozenset)):
-                try:
-                    slots = tuple(slots)
-                except TypeError:
-                    slots = ()  # Not iterable, skip
-            for slot in slots:
-                try:
-                    val = getattr(obj, slot, None)
-                    if val is not None:
-                        total += self._sizeof(val, owned_only)
-                except Exception:
-                    pass
+            # __slots__
+            if hasattr(obj, '__slots__') and obj.__slots__ is not None:
+                slots = obj.__slots__
+                # Validate __slots__ is actually iterable (some objects have sentinel values)
+                if not isinstance(slots, (tuple, list, set, frozenset)):
+                    try:
+                        slots = tuple(slots)
+                    except TypeError:
+                        slots = ()  # Not iterable, skip
+                for slot in slots:
+                    try:
+                        val = getattr(obj, slot, None)
+                        if val is not None:
+                            total += self._sizeof(val, owned_only)
+                    except Exception:
+                        pass
+        except (ImportError, ModuleNotFoundError, RuntimeError):
+            # Lazy import proxy (e.g., six.moves.dbm_gnu) tried to import
+            # an unavailable module (e.g., _gdbm), or a library raised an error
+            # during lazy initialization (e.g., grpc version mismatch). Skip.
+            pass
 
         return total
 
