@@ -12,6 +12,12 @@ Memory measurement uses HeapSizer for accurate heap traversal with proper handli
 - Pandas DataFrame/Series Copy-on-Write sharing
 - Object deduplication across shared references
 
+v3.0 adds pre-cell memory measurements for cross-run comparison:
+- Base_i = pre_namespace + pre_gpu (baseline run, before step i)
+- Flow_i = pre_namespace + pre_gpu + pre_checkpoint + pre_enforcer (FlowBook run, before step i)
+- MemoryOverhead_i = Flow_i - Base_i
+- Checkpoint_i = MemoryOverhead_{i+1} - MemoryOverhead_i
+
 Usage via CLI:
     flowbook compare-baseline notebook.ipynb                              # FlowBook only (default)
     flowbook compare-baseline notebook.ipynb --run-baseline               # Include baseline comparison
@@ -19,9 +25,9 @@ Usage via CLI:
     flowbook compare-baseline notebook.ipynb --df-subset-optimization     # Enable DF subset optimization
     flowbook compare-baseline notebook.ipynb --timeout 14400              # optional timeout (default: 4 hours)
 
-OUTPUT JSON SCHEMA (version 2.0):
+OUTPUT JSON SCHEMA (version 3.0):
 {
-  "version": "2.0",
+  "version": "3.0",
   "notebook_path": str,                    # Path to the notebook file
   "timestamp": str,                        # ISO format timestamp
   "scalene_available": bool,               # Whether HeapSizer was available
@@ -35,47 +41,44 @@ OUTPUT JSON SCHEMA (version 2.0):
     "num_trials": int                      # Total trials (optional)
   },
   "kernels": {
-    "baseline": {                          # Only present if --run-baseline
+    "baseline": {                          # Always present (memory/timing null if skipped)
       "kernel_name": "baseline_kernel",
-      "timing": TimingResults,             # See below
-      "memory": MemoryResults              # See below (optional)
+      "timing": TimingResults | null,
+      "memory": MemoryResults | null
     },
     "flowbook": {
       "kernel_name": "flowbook_kernel",
       "timing": TimingResults,
-      "memory": MemoryResults              # Only present if HeapSizer available
+      "memory": MemoryResults | null       # null if --skip-memory
     }
   }
 }
 
-TimingResults:
+TimingResults: (unchanged from v2.0)
 {
   "kernel_name": str,
-  "cells": [TimingCellMetrics, ...],       # Initial execution cells
-  "rerun_cells": [TimingCellMetrics, ...], # Rerun cells (if rerun_k > 0)
+  "cells": [TimingCellMetrics, ...],
+  "rerun_cells": [TimingCellMetrics, ...],
   "totals": {
-    "total_runtime_ms": float,
-    "state_overhead_ms": float,            # FlowBook only
-    "check_overhead_ms": float             # FlowBook only
+    "execute_duration_ms": float,
+    "code_duration_ms": float,             # FlowBook only
+    "state_duration_ms": float,            # FlowBook only
+    "check_duration_ms": float             # FlowBook only
   }
 }
 
-TimingCellMetrics:
+TimingCellMetrics: (unchanged from v2.0)
 {
   "cell_id": str,
   "cell_index": int,
-  "execute_duration_ms": float,            # Total execution time
-  "code_duration_ms": float,               # User code time (FlowBook only)
-  "state_duration_ms": float,              # Checkpoint time (FlowBook only)
-  "check_duration_ms": float,              # Reproducibility check time (FlowBook only)
-  "status": str,                           # "ok" or "error"
+  "execute_duration_ms": float,
+  "code_duration_ms": float,
+  "state_duration_ms": float,
+  "check_duration_ms": float,
+  "status": str,
   "error": str | null,
   "is_rerun": bool,
-  "checking_result": {                     # FlowBook only (optional)
-    "cell_status": str,                    # "clean", "stale", or "error"
-    "reasons": [dict, ...],
-    "errors": [dict, ...]
-  }
+  "checking_result": { ... } | null
 }
 
 MemoryResults:
@@ -84,12 +87,13 @@ MemoryResults:
   "cells": [MemoryCellMetrics, ...],
   "rerun_cells": [MemoryCellMetrics, ...],
   "totals": {
-    "final_footprint_mb": float,
-    "max_footprint_mb": float,
-    "total_allocation_mb": float,
-    "gpu_mem_samples": float,
-    "base_namespace_mb": float,            # FlowBook only
-    "total_overhead_mb": float             # FlowBook only
+    "final_namespace_mb": float,           # User namespace after all cells
+    "final_gpu_mb": float,                 # GPU memory after all cells
+    "max_namespace_mb": float,             # Peak namespace across all cells
+    # FlowBook only:
+    "final_checkpoint_cumulative_mb": float,  # Checkpoint overhead after all cells
+    "final_enforcer_overhead_mb": float,      # Enforcer metadata after all cells
+    "memory_overhead_ratio": float            # (namespace + checkpoints) / namespace
   }
 }
 
@@ -97,38 +101,19 @@ MemoryCellMetrics:
 {
   "cell_id": str,
   "cell_index": int,
-  "current_footprint_mb": float,           # Total memory at end of cell
-  "max_footprint_mb": float,
-  "allocation_delta_mb": float,
-  "gpu_mem_samples": float,
-  "namespace_mb": float,                   # User namespace size in MB (alias for base_namespace_mb)
-  "checkpoint_delta_mb": float,            # This cell's checkpoint contribution in MB
-  "checkpoint_cumulative_mb": float,       # Total checkpoint overhead in MB
-                                           # NOTE: May be 0 when saved checkpoints empty (syntactic mode)
-                                           #       Use checkpoint_var_costs as fallback for visualization
-  "gpu_mb": float,                         # GPU memory usage in MB (alias for gpu_mem_samples)
+  "pre_namespace_mb": float,               # User namespace BEFORE this cell
+  "pre_gpu_mb": float,                     # GPU memory BEFORE this cell
+  "namespace_mb": float,                   # User namespace AFTER this cell
+  "gpu_mb": float,                         # GPU memory AFTER this cell
+  "checkpoint_delta_mb": float,            # This cell's checkpoint contribution (FlowBook only)
+  "checkpoint_cumulative_mb": float,       # Cumulative checkpoint overhead (FlowBook only)
+  "pre_checkpoint_cumulative_mb": float,   # Checkpoints BEFORE this cell (FlowBook only)
+  "pre_enforcer_overhead_mb": float,       # Enforcer metadata BEFORE this cell (FlowBook only)
+  "checkpoint_by_var": {var: mb} | null,   # Per-variable checkpoint breakdown
+  "checkpoint_var_costs": {var: {bytes, deepcopy_ms}} | null,
   "status": str,
   "error": str | null,
-  "is_rerun": bool,
-  # FlowBook-only fields:
-  "checkpoint_var_costs": {                # Per-cell checkpoint state (current sizes, NOT deltas)
-    var: {bytes, deepcopy_ms, type, module}, ...
-  } | null,                                # Use for memory visualization when checkpoint_cumulative_mb is 0
-  "checkpoint_by_var": {var: bytes, ...} | null,  # Per-variable checkpoint sizes in MB
-  "overhead_breakdown": {                  # Memory breakdown by category
-    "checkpoints_mb": float,               # Cumulative checkpoint memory
-    "execution_records_mb": float,
-    "tracking_metadata_mb": float,
-    "other_mb": float
-  } | null,
-  "cumulative_by_type": {type_name: bytes, ...} | null,
-  "cumulative_by_var": {var_name: bytes, ...} | null,
-  "pre_only_bytes": int,                   # Pre-checkpoint size (for syntactic mode)
-  "post_savings_bytes": int,               # Memory saved without post checkpoints
-  "base_namespace_mb": float,              # TODO: Currently set to current_footprint_mb, should be
-                                           #       current_footprint_mb - total_overhead to represent
-                                           #       user namespace without FlowBook overhead
-  "total_overhead_mb": float               # Sum of overhead_breakdown values
+  "is_rerun": bool
 }
 """
 
@@ -220,18 +205,24 @@ class MemoryCellMetrics:
     """Memory metrics for a single cell execution.
 
     Simplified structure with clear semantics:
-    - namespace_mb: Size of user namespace (what the user's code uses)
+    - pre_namespace_mb / pre_gpu_mb: Memory BEFORE this cell executes (for cross-run comparison)
+    - namespace_mb / gpu_mb: Memory AFTER this cell executes (for Plot 4 stacked area)
     - checkpoint_delta_mb: What THIS cell's checkpoint adds (beyond ns + prior ckpts)
-    - checkpoint_cumulative_mb: Total checkpoint overhead so far
-    - gpu_mb: GPU memory usage
+    - checkpoint_cumulative_mb: Total checkpoint overhead so far (after this cell)
+    - pre_checkpoint_cumulative_mb: Checkpoint overhead BEFORE this cell (FlowBook only)
+    - pre_enforcer_overhead_mb: Enforcer metadata BEFORE this cell (FlowBook only)
     - checkpoint_by_var: Per-variable breakdown of checkpoint memory
     """
     cell_id: str
     cell_index: int
-    namespace_mb: float              # User namespace size
+    pre_namespace_mb: float          # User namespace BEFORE this cell
+    pre_gpu_mb: float                # GPU memory BEFORE this cell
+    namespace_mb: float              # User namespace AFTER this cell
     checkpoint_delta_mb: float       # This cell's checkpoint contribution
-    checkpoint_cumulative_mb: float  # Total checkpoint overhead so far
-    gpu_mb: float                    # GPU memory
+    checkpoint_cumulative_mb: float  # Total checkpoint overhead after this cell
+    gpu_mb: float                    # GPU memory AFTER this cell
+    pre_checkpoint_cumulative_mb: float = 0.0  # Checkpoints BEFORE this cell (FlowBook only)
+    pre_enforcer_overhead_mb: float = 0.0      # Enforcer metadata BEFORE this cell (FlowBook only)
     checkpoint_by_var: Optional[Dict[str, float]] = None  # Per-variable MB (for memory plots)
     checkpoint_var_costs: Optional[Dict[str, Any]] = None  # Per-variable timing (for timing plots)
     status: str = "ok"
@@ -268,7 +259,7 @@ class KernelResults:
 @dataclass
 class ComparisonResult:
     """Complete comparison result with 4-phase execution."""
-    version: str = "2.0"
+    version: str = "3.0"
     notebook_path: str = ""
     timestamp: str = ""
     kernels: Dict[str, KernelResults] = field(default_factory=dict)
@@ -1753,14 +1744,17 @@ def run_baseline_memory(
 
             log(f"Baseline Memory: Executing cell {idx+1}/{len(code_cells)} ({cell_id})...")
 
-            # Get namespace size before cell
+            # Measure BEFORE cell execution (for cross-run comparison)
             pre_stats = get_namespace_size(kernel_client)
+            pre_gpu = get_kernel_gpu_memory_mb(kernel_client)
 
             timing = execute_cell_baseline(kernel_client, source, cell_timeout)
 
-            # Get namespace size after cell
+            # Measure AFTER cell execution (for Plot 4 stacked area)
             post_stats = get_namespace_size(kernel_client)
+            post_gpu = get_kernel_gpu_memory_mb(kernel_client)
 
+            pre_mb = pre_stats.get("total_mb", 0.0)
             current_mb = post_stats.get("total_mb", 0.0)
             max_footprint_mb = max(max_footprint_mb, current_mb)
 
@@ -1769,25 +1763,28 @@ def run_baseline_memory(
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
+                    pre_namespace_mb=pre_mb,
+                    pre_gpu_mb=pre_gpu,
                     namespace_mb=0.0,
                     checkpoint_delta_mb=0.0,
                     checkpoint_cumulative_mb=0.0,
-                    gpu_mb=get_kernel_gpu_memory_mb(kernel_client),
+                    gpu_mb=post_gpu,
                     status="error",
                     error=timing["error"]
                 ))
             else:
-                gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
+                    pre_namespace_mb=pre_mb,
+                    pre_gpu_mb=pre_gpu,
                     namespace_mb=current_mb,
                     checkpoint_delta_mb=0.0,  # Baseline has no checkpoints
                     checkpoint_cumulative_mb=0.0,
-                    gpu_mb=gpu_mem,
+                    gpu_mb=post_gpu,
                     status="ok",
                 ))
-                log(f"  Namespace: {current_mb:.1f}MB")
+                log(f"  Pre: {pre_mb:.1f}MB, Post: {current_mb:.1f}MB")
 
         # Execute reruns: run all cells k extra times (top-to-bottom)
         if rerun_k > 0:
@@ -1808,14 +1805,17 @@ def run_baseline_memory(
                     rerun_count += 1
                     log(f"Baseline Memory: Rerun {rerun_count}/{total_rerun_cells} - pass {pass_num+1}, cell {idx+1} ({cell_id})...")
 
-                    # Get namespace size before cell
+                    # Measure BEFORE cell execution
                     pre_stats = get_namespace_size(kernel_client)
+                    pre_gpu = get_kernel_gpu_memory_mb(kernel_client)
 
                     timing = execute_cell_baseline(kernel_client, source, cell_timeout)
 
-                    # Get namespace size after cell
+                    # Measure AFTER cell execution
                     post_stats = get_namespace_size(kernel_client)
+                    post_gpu = get_kernel_gpu_memory_mb(kernel_client)
 
+                    pre_mb = pre_stats.get("total_mb", 0.0)
                     current_mb = post_stats.get("total_mb", 0.0)
                     max_footprint_mb = max(max_footprint_mb, current_mb)
 
@@ -1824,36 +1824,38 @@ def run_baseline_memory(
                         results.rerun_cells.append(MemoryCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
+                            pre_namespace_mb=pre_mb,
+                            pre_gpu_mb=pre_gpu,
                             namespace_mb=0.0,
                             checkpoint_delta_mb=0.0,
                             checkpoint_cumulative_mb=0.0,
-                            gpu_mb=get_kernel_gpu_memory_mb(kernel_client),
+                            gpu_mb=post_gpu,
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
                         ))
                     else:
-                        gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
                         results.rerun_cells.append(MemoryCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
+                            pre_namespace_mb=pre_mb,
+                            pre_gpu_mb=pre_gpu,
                             namespace_mb=current_mb,
                             checkpoint_delta_mb=0.0,
                             checkpoint_cumulative_mb=0.0,
-                            gpu_mb=gpu_mem,
+                            gpu_mb=post_gpu,
                             status="ok",
                             is_rerun=True,
                         ))
-                        log(f"  Rerun Namespace: {current_mb:.1f}MB, Delta: {allocation_delta:.1f}MB")
+                        log(f"  Rerun Pre: {pre_mb:.1f}MB, Post: {current_mb:.1f}MB")
 
-        # Get final stats
+        # Get final stats (used as Base_{N} in cross-run formula)
         final_stats = get_namespace_size(kernel_client)
         final_gpu_mem = get_kernel_gpu_memory_mb(kernel_client)
         results.totals = {
-            "final_footprint_mb": final_stats.get("total_mb", 0.0),
-            "max_footprint_mb": max_footprint_mb,
-            "total_allocation_mb": final_stats.get("total_mb", 0.0) - before_stats.get("total_mb", 0.0),
-            "gpu_mem_samples": final_gpu_mem,
+            "final_namespace_mb": final_stats.get("total_mb", 0.0),
+            "final_gpu_mb": final_gpu_mem,
+            "max_namespace_mb": max_footprint_mb,
         }
 
         log(f"Baseline Memory: Final namespace {final_stats.get('total_mb', 0):.1f}MB, "
@@ -1929,13 +1931,20 @@ def run_flowbook_memory(
         )
         log(f"FlowBook Memory: Warm-up complete (took {warmup_result.get('execute_duration_ms', 0):.0f}ms)")
 
-        # Get initial namespace size
-        before_stats = get_namespace_size(kernel_client)
         max_footprint_mb = 0.0
+        prev_cell_id = None
 
-        # Track cumulative checkpoint costs across all cells
-        # Track var count for metadata overhead estimate
-        cumulative_var_count = 0
+        def _get_pre_flowbook_overhead(kc, prev_cid):
+            """Get checkpoint + enforcer overhead BEFORE the current cell."""
+            if prev_cid is None:
+                return 0.0, 0.0
+            pre_ckpt = get_checkpoint_overhead(kc, prev_cid)
+            pre_ckpt_mb = pre_ckpt.get('total_mb', 0.0)
+            breakdown = get_flowbook_overhead_breakdown(kc)
+            pre_enforcer_mb = (breakdown.get("execution_records_mb", 0.0)
+                               + breakdown.get("tracking_metadata_mb", 0.0)
+                               + breakdown.get("other_mb", 0.0))
+            return pre_ckpt_mb, pre_enforcer_mb
 
         for idx, cell in enumerate(code_cells):
             cell_id = cell.get("id", f"cell_{idx}")
@@ -1948,21 +1957,24 @@ def run_flowbook_memory(
 
             log(f"FlowBook Memory: Executing cell {idx+1}/{len(code_cells)} ({cell_id})...")
 
-            # Get namespace size before cell
+            # Measure BEFORE cell execution (for cross-run comparison)
             pre_stats = get_namespace_size(kernel_client)
+            pre_gpu = get_kernel_gpu_memory_mb(kernel_client)
+            pre_ckpt_mb, pre_enforcer_mb = _get_pre_flowbook_overhead(kernel_client, prev_cell_id)
 
             timing = execute_cell_flowbook(
                 kernel_client, source, cell_id, cell_order, cell_timeout
             )
 
-            # Get namespace size after cell
+            # Measure AFTER cell execution (for Plot 4 stacked area)
             post_stats = get_namespace_size(kernel_client)
+            post_gpu = get_kernel_gpu_memory_mb(kernel_client)
 
-            # Get namespace size (this is what the user's code uses)
+            pre_mb = pre_stats.get("total_mb", 0.0)
             namespace_mb = post_stats.get("total_mb", 0.0)
             max_footprint_mb = max(max_footprint_mb, namespace_mb)
 
-            # Get checkpoint overhead using the new cumulative measurement approach
+            # Get checkpoint overhead using the cumulative measurement approach
             # This properly handles CoW sharing - measures checkpoints BEYOND namespace
             overhead = get_checkpoint_overhead(kernel_client, cell_id)
 
@@ -1979,12 +1991,10 @@ def run_flowbook_memory(
             # Get per-variable checkpoint costs (includes deepcopy_ms for timing plots)
             checkpoint_var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id) or None
 
-            # Get GPU memory
-            gpu_mb = get_kernel_gpu_memory_mb(kernel_client)
-
             # Debug logging
-            log(f"  Namespace: {namespace_mb:.1f}MB, Checkpoint delta: {checkpoint_delta_mb:.1f}MB, "
-                f"Cumulative: {checkpoint_cumulative_mb:.1f}MB, GPU: {gpu_mb:.1f}MB")
+            log(f"  Pre: {pre_mb:.1f}MB, Post: {namespace_mb:.1f}MB, "
+                f"Ckpt delta: {checkpoint_delta_mb:.1f}MB, Cumulative: {checkpoint_cumulative_mb:.1f}MB, "
+                f"GPU: {post_gpu:.1f}MB, Pre-ckpt: {pre_ckpt_mb:.1f}MB, Enforcer: {pre_enforcer_mb:.3f}MB")
             if checkpoint_by_var:
                 top_vars = sorted(checkpoint_by_var.items(), key=lambda x: x[1], reverse=True)[:3]
                 log(f"  Top checkpoint vars: {', '.join(f'{k}={v:.2f}MB' for k, v in top_vars)}")
@@ -1994,10 +2004,14 @@ def run_flowbook_memory(
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
+                    pre_namespace_mb=pre_mb,
+                    pre_gpu_mb=pre_gpu,
                     namespace_mb=0.0,
                     checkpoint_delta_mb=checkpoint_delta_mb,
                     checkpoint_cumulative_mb=checkpoint_cumulative_mb,
-                    gpu_mb=gpu_mb,
+                    gpu_mb=post_gpu,
+                    pre_checkpoint_cumulative_mb=pre_ckpt_mb,
+                    pre_enforcer_overhead_mb=pre_enforcer_mb,
                     checkpoint_by_var=checkpoint_by_var,
                     checkpoint_var_costs=checkpoint_var_costs,
                     status="error",
@@ -2007,14 +2021,20 @@ def run_flowbook_memory(
                 results.cells.append(MemoryCellMetrics(
                     cell_id=cell_id,
                     cell_index=idx,
+                    pre_namespace_mb=pre_mb,
+                    pre_gpu_mb=pre_gpu,
                     namespace_mb=namespace_mb,
                     checkpoint_delta_mb=checkpoint_delta_mb,
                     checkpoint_cumulative_mb=checkpoint_cumulative_mb,
-                    gpu_mb=gpu_mb,
+                    gpu_mb=post_gpu,
+                    pre_checkpoint_cumulative_mb=pre_ckpt_mb,
+                    pre_enforcer_overhead_mb=pre_enforcer_mb,
                     checkpoint_by_var=checkpoint_by_var,
                     checkpoint_var_costs=checkpoint_var_costs,
                     status="ok",
                 ))
+
+            prev_cell_id = cell_id
 
         # Execute reruns: run all cells k extra times (top-to-bottom)
         if rerun_k > 0:
@@ -2035,15 +2055,19 @@ def run_flowbook_memory(
                     rerun_count += 1
                     log(f"FlowBook Memory: Rerun {rerun_count}/{total_rerun_cells} - pass {pass_num+1}, cell {idx+1} ({cell_id})...")
 
-                    # Get namespace size before cell
+                    # Measure BEFORE cell execution
                     pre_stats = get_namespace_size(kernel_client)
+                    pre_gpu = get_kernel_gpu_memory_mb(kernel_client)
+                    pre_ckpt_mb, pre_enforcer_mb = _get_pre_flowbook_overhead(kernel_client, prev_cell_id)
 
                     timing = execute_cell_flowbook(
                         kernel_client, source, cell_id, cell_order, cell_timeout
                     )
 
-                    # Get namespace size after cell
+                    # Measure AFTER cell execution
                     post_stats = get_namespace_size(kernel_client)
+                    post_gpu = get_kernel_gpu_memory_mb(kernel_client)
+                    pre_mb = pre_stats.get("total_mb", 0.0)
                     namespace_mb = post_stats.get("total_mb", 0.0)
                     max_footprint_mb = max(max_footprint_mb, namespace_mb)
 
@@ -2061,17 +2085,19 @@ def run_flowbook_memory(
                     # Get per-variable checkpoint costs (includes deepcopy_ms for timing plots)
                     checkpoint_var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id) or None
 
-                    gpu_mb = get_kernel_gpu_memory_mb(kernel_client)
-
                     if timing.get("error") and timing.get("cell_runtime_ms") is None:
                         log(f"  Rerun Error:\n{timing['error']}")
                         results.rerun_cells.append(MemoryCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
+                            pre_namespace_mb=pre_mb,
+                            pre_gpu_mb=pre_gpu,
                             namespace_mb=0.0,
                             checkpoint_delta_mb=checkpoint_delta_mb,
                             checkpoint_cumulative_mb=checkpoint_cumulative_mb,
-                            gpu_mb=gpu_mb,
+                            gpu_mb=post_gpu,
+                            pre_checkpoint_cumulative_mb=pre_ckpt_mb,
+                            pre_enforcer_overhead_mb=pre_enforcer_mb,
                             checkpoint_by_var=checkpoint_by_var,
                             checkpoint_var_costs=checkpoint_var_costs,
                             status="error",
@@ -2082,19 +2108,25 @@ def run_flowbook_memory(
                         results.rerun_cells.append(MemoryCellMetrics(
                             cell_id=cell_id,
                             cell_index=idx,
+                            pre_namespace_mb=pre_mb,
+                            pre_gpu_mb=pre_gpu,
                             namespace_mb=namespace_mb,
                             checkpoint_delta_mb=checkpoint_delta_mb,
                             checkpoint_cumulative_mb=checkpoint_cumulative_mb,
-                            gpu_mb=gpu_mb,
+                            gpu_mb=post_gpu,
+                            pre_checkpoint_cumulative_mb=pre_ckpt_mb,
+                            pre_enforcer_overhead_mb=pre_enforcer_mb,
                             checkpoint_by_var=checkpoint_by_var,
                             checkpoint_var_costs=checkpoint_var_costs,
                             status="ok",
                             is_rerun=True,
                         ))
-                        log(f"  Rerun Namespace: {namespace_mb:.1f}MB, Delta: {checkpoint_delta_mb:.1f}MB, "
-                            f"Cumulative: {checkpoint_cumulative_mb:.1f}MB")
+                        log(f"  Rerun Pre: {pre_mb:.1f}MB, Post: {namespace_mb:.1f}MB, "
+                            f"Delta: {checkpoint_delta_mb:.1f}MB, Cumulative: {checkpoint_cumulative_mb:.1f}MB")
 
-        # Get final stats
+                    prev_cell_id = cell_id
+
+        # Get final stats (used as Flow_{N} in cross-run formula)
         final_stats = get_namespace_size(kernel_client)
         final_gpu_mb = get_kernel_gpu_memory_mb(kernel_client)
 
@@ -2106,6 +2138,12 @@ def run_flowbook_memory(
         else:
             total_checkpoint_mb = 0.0
 
+        # Get final enforcer overhead
+        final_breakdown = get_flowbook_overhead_breakdown(kernel_client)
+        final_enforcer_mb = (final_breakdown.get("execution_records_mb", 0.0)
+                             + final_breakdown.get("tracking_metadata_mb", 0.0)
+                             + final_breakdown.get("other_mb", 0.0))
+
         namespace_mb = final_stats.get("total_mb", 0.0)
         if namespace_mb > 0:
             # Ratio = (namespace + checkpoint_overhead) / namespace
@@ -2115,14 +2153,16 @@ def run_flowbook_memory(
 
         results.totals = {
             "final_namespace_mb": namespace_mb,
+            "final_gpu_mb": final_gpu_mb,
+            "final_checkpoint_cumulative_mb": total_checkpoint_mb,
+            "final_enforcer_overhead_mb": final_enforcer_mb,
             "max_namespace_mb": max_footprint_mb,
-            "total_checkpoint_mb": total_checkpoint_mb,
-            "gpu_mb": final_gpu_mb,
             "memory_overhead_ratio": memory_overhead_ratio,
         }
 
         log(f"FlowBook Memory: Final namespace {namespace_mb:.1f}MB, "
-            f"Max {max_footprint_mb:.1f}MB, Checkpoints {total_checkpoint_mb:.1f}MB (ratio: {memory_overhead_ratio:.3f}x)" +
+            f"Max {max_footprint_mb:.1f}MB, Checkpoints {total_checkpoint_mb:.1f}MB, "
+            f"Enforcer {final_enforcer_mb:.3f}MB (ratio: {memory_overhead_ratio:.3f}x)" +
             (f", GPU {final_gpu_mb:.1f}MB" if final_gpu_mb > 0 else ""))
 
     finally:
@@ -2177,9 +2217,14 @@ class CompareBaselineCommand(NotebookCommand):
             help="Skip memory measurement phases (timing only)",
         )
         subparser.add_argument(
-            "--run-baseline",
+            "--skip-baseline",
             action="store_true",
-            help="Run baseline kernel (skipped by default)",
+            help="Skip baseline memory run (runs by default for cross-run comparison)",
+        )
+        subparser.add_argument(
+            "--baseline-timing",
+            action="store_true",
+            help="Also run baseline timing phase (skipped by default)",
         )
         subparser.add_argument(
             "--rerun-k",
@@ -2241,7 +2286,8 @@ class CompareBaselineCommand(NotebookCommand):
         """
         cell_timeout = kwargs.get("timeout", 14400.0)  # 4 hours default
         skip_memory = kwargs.get("skip_memory", False)
-        run_baseline = kwargs.get("run_baseline", False)
+        run_baseline_memory = not kwargs.get("skip_baseline", False)
+        run_baseline_timing_flag = kwargs.get("baseline_timing", False)
         rerun_k = kwargs.get("rerun_k", 0)
         num_trials = kwargs.get("trials", 1)
         start_trial = kwargs.get("start", 1)
@@ -2274,14 +2320,18 @@ class CompareBaselineCommand(NotebookCommand):
         staleness_mismatch_warned = False
 
         with self.timing_context() as get_elapsed:
-            if run_baseline:
-                log(f"Starting 4-phase baseline vs FlowBook comparison...")
-            else:
-                log(f"Starting FlowBook-only comparison (use --run-baseline to include baseline)...")
+            phases = ["FlowBook timing"]
+            if run_baseline_timing_flag:
+                phases.append("baseline timing")
+            if run_baseline_memory:
+                phases.append("baseline memory")
+            if heapsizer_available:
+                phases.append("FlowBook memory")
+            log(f"Starting comparison: {', '.join(phases)}")
             log(f"Notebook: {notebook_path}")
             log(f"Cell timeout: {cell_timeout}s" if cell_timeout else "Cell timeout: none")
             log(f"HeapSizer available: {heapsizer_available}")
-            log(f"Run baseline: {run_baseline}")
+            log(f"Baseline memory: {run_baseline_memory}, Baseline timing: {run_baseline_timing_flag}")
             if rerun_k > 0:
                 log(f"Rerun passes: {rerun_k} (will execute all {len(code_cells)} cells {rerun_k} extra time(s))")
             if num_trials > 1:
@@ -2308,10 +2358,10 @@ class CompareBaselineCommand(NotebookCommand):
                 log("")
 
                 # ============================================================
-                # PHASE 2: Baseline Timing (Scalene OFF) - if run_baseline
+                # PHASE 2: Baseline Timing (Scalene OFF) - if --baseline-timing
                 # ============================================================
                 baseline_timing = None
-                if run_baseline:
+                if run_baseline_timing_flag:
                     log("=" * 60)
                     log("PHASE 2: BASELINE TIMING (Scalene OFF)")
                     log("=" * 60)
@@ -2319,15 +2369,15 @@ class CompareBaselineCommand(NotebookCommand):
                     log("")
                 else:
                     log("=" * 60)
-                    log("PHASE 2: BASELINE TIMING - SKIPPED (use --run-baseline to enable)")
+                    log("PHASE 2: BASELINE TIMING - SKIPPED (use --baseline-timing to enable)")
                     log("=" * 60)
                     log("")
 
                 # ============================================================
-                # PHASE 3: Baseline Memory (HeapSizer) - if available and run_baseline
+                # PHASE 3: Baseline Memory (HeapSizer) - if available and not --skip-baseline
                 # ============================================================
                 baseline_memory = None
-                if heapsizer_available and run_baseline:
+                if heapsizer_available and run_baseline_memory:
                     log("=" * 60)
                     log("PHASE 3: BASELINE MEMORY (HeapSizer)")
                     log("=" * 60)
@@ -2335,7 +2385,7 @@ class CompareBaselineCommand(NotebookCommand):
                     log("")
                 elif heapsizer_available:
                     log("=" * 60)
-                    log("PHASE 3: BASELINE MEMORY - SKIPPED (use --run-baseline to enable)")
+                    log("PHASE 3: BASELINE MEMORY - SKIPPED (use default to enable)")
                     log("=" * 60)
                     log("")
 
@@ -2364,7 +2414,7 @@ class CompareBaselineCommand(NotebookCommand):
                     metadata_dict["num_trials"] = num_trials
 
                 comparison = ComparisonResult(
-                    version="2.0",
+                    version="3.0",
                     notebook_path=str(notebook_path),
                     timestamp=datetime.now().isoformat(),
                     kernels={

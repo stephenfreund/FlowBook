@@ -558,6 +558,12 @@ def is_v2_format(data: Dict[str, Any]) -> bool:
     return str(version).startswith("2")
 
 
+def is_v3_format(data: Dict[str, Any]) -> bool:
+    """Check if data is v3.0 format (with pre-cell memory measurements for cross-run comparison)."""
+    version = data.get("_version") or data.get("version", "1.0")
+    return str(version).startswith("3")
+
+
 def extract_warnings(data: Dict[str, Any]) -> List[str]:
     """Extract all memory warnings from comparison data."""
     warnings = []
@@ -2077,7 +2083,7 @@ def extract_checkpoint_var_data(
     data: Dict[str, Any], top_n: int = 10
 ) -> Optional[Dict[str, Any]]:
     """
-    Extract per-variable checkpoint memory from v2.0 comparison data.
+    Extract per-variable checkpoint memory from comparison data.
 
     Uses cumulative_by_var field when available (TRUE cumulative accounting for sharing).
     Otherwise uses checkpoint_by_var which contains the CURRENT checkpoint state at each cell.
@@ -2095,7 +2101,7 @@ def extract_checkpoint_var_data(
 
     Returns None if no checkpoint data available.
     """
-    if not is_v2_format(data):
+    if not (is_v2_format(data) or is_v3_format(data)):
         return None
 
     flowbook = data.get("kernels", {}).get("flowbook", {})
@@ -2258,7 +2264,7 @@ def extract_checkpoint_timing_var_data(
 
     Returns None if no checkpoint timing data available.
     """
-    if not is_v2_format(data):
+    if not (is_v2_format(data) or is_v3_format(data)):
         return None
 
     flowbook = data.get("kernels", {}).get("flowbook", {})
@@ -3879,6 +3885,21 @@ def main():
     if not stats_list:
         print("Error: No valid comparison files found", file=sys.stderr)
         sys.exit(1)
+
+    # Check for v3 format and dispatch to v3 module
+    has_v3 = any(is_v3_format(d) for d in file_data.values())
+    has_non_v3 = any(not is_v3_format(d) for d in file_data.values())
+
+    if has_v3 and has_non_v3:
+        print("Error: Cannot mix v2 and v3 comparison files. "
+              "Re-run older notebooks with current compare-baseline to produce v3 output.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    if has_v3:
+        from flowbook.cli.compare_overhead_v3 import process_v3
+        process_v3(file_data, args)
+        return
 
     # Sort
     sort_key = {
