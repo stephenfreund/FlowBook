@@ -486,6 +486,10 @@ class HeapSizer:
         if self._is_catboost_pool(obj):
             return self._sizeof_catboost_pool(obj, owned_only)
 
+        # Matplotlib objects - opaque, don't traverse internals
+        if self._is_matplotlib_object(obj):
+            return self._sizeof_matplotlib(obj)
+
         # Generic object with __dict__
         return self._sizeof_object(obj, owned_only)
 
@@ -918,6 +922,44 @@ class HeapSizer:
         except Exception:
             pass
         return total
+
+    # Matplotlib handling
+
+    _MATPLOTLIB_MODULES = ('matplotlib',)
+    _MATPLOTLIB_TYPES = ('Figure', 'Axes', 'AxesSubplot', 'Subplot',
+                         'FigureCanvas', 'FigureCanvasBase')
+
+    def _is_matplotlib_object(self, obj) -> bool:
+        """Check if object is a matplotlib Figure, Axes, or related type.
+
+        Matplotlib objects have deeply nested internal structures (transforms,
+        artists, event handlers, etc.) that can cause HeapSizer to traverse
+        millions of objects and time out. Treat as opaque.
+        """
+        try:
+            module = type(obj).__module__ or ''
+            if not any(m in module for m in self._MATPLOTLIB_MODULES):
+                return False
+            type_name = type(obj).__name__
+            # Match known types or any Axes subclass
+            if type_name in self._MATPLOTLIB_TYPES:
+                return True
+            # Catch subclasses like AxesSubplot, Axes3D, etc.
+            if 'Axes' in type_name or 'Figure' in type_name:
+                return True
+            # Check MRO for Artist base class (all plot elements)
+            for cls in type(obj).__mro__:
+                if cls.__name__ == 'Artist' and 'matplotlib' in (cls.__module__ or ''):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _sizeof_matplotlib(self, obj) -> int:
+        """Return a flat estimate for matplotlib objects without traversal."""
+        # Matplotlib objects use negligible memory compared to data arrays.
+        # The actual data (numpy arrays) is tracked via the variables they came from.
+        return 4096
 
 
 # Convenience function

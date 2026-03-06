@@ -722,13 +722,21 @@ def get_namespace_size(kernel_client, timeout: float = 30.0) -> Dict[str, Any]:
         - by_type: Dict mapping type name to bytes
     """
     # Use a single execute with user_expressions to get namespace size
-    # Filter out private/system variables and callables
+    # Filter out private/system variables, functions, and modules.
+    # NOTE: callable() is too aggressive - it excludes DataFrames (which have __call__
+    # via the type system) and cudf.pandas proxy objects. Use explicit type checks instead.
     expr_code = """(lambda: (
         __import__('flowbook.kernel_support.heap_size', fromlist=['HeapSizer'])
         .HeapSizer()
         .sizeof_namespace(
             {k: v for k, v in globals().items()
-             if not k.startswith('_') and not callable(v) and not isinstance(v, type(__builtins__))}
+             if not k.startswith('_')
+             and not isinstance(v, __import__('types').ModuleType)
+             and not isinstance(v, (
+                 __import__('types').FunctionType,
+                 __import__('types').BuiltinFunctionType,
+                 type,
+             ))}
         ).__dict__
     ))()"""
 
@@ -1040,8 +1048,13 @@ def get_checkpoint_overhead(
         - by_variable: Per-variable totals in MB
         - cumulative: Running total at each checkpoint in MB
     """
-    # Filter namespace same way as sizeof_namespace (exclude private, callable, modules)
-    ns_filter = "{k: v for k, v in globals().items() if not k.startswith('_') and not callable(v) and not isinstance(v, type(__builtins__))}"
+    # Filter namespace same way as sizeof_namespace (exclude private, functions, modules)
+    ns_filter = (
+        "{k: v for k, v in globals().items()"
+        " if not k.startswith('_')"
+        " and not isinstance(v, __import__('types').ModuleType)"
+        " and not isinstance(v, (__import__('types').FunctionType, __import__('types').BuiltinFunctionType, type))}"
+    )
 
     expr = (
         f"__import__('flowbook.kernel_support.memory_checkpoint', fromlist=['MemoryCheckpoints'])"

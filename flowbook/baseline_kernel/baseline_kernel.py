@@ -18,6 +18,7 @@ Does NOT include:
 """
 
 import time
+import types
 from typing import Any, Dict, Optional
 
 from ipykernel.ipkernel import IPythonKernel
@@ -52,7 +53,7 @@ class MemoryMagics(Magics):
             # Filter to user variables
             user_vars = {
                 k: v for k, v in user_ns.items()
-                if not k.startswith('_') and not callable(v)
+                if not k.startswith('_') and not isinstance(v, (type, types.FunctionType, types.BuiltinFunctionType, types.ModuleType))
             }
             ns_size = sizer.sizeof_namespace(user_vars)
             print(f"Namespace memory: {ns_size.total_bytes / (1024*1024):.1f} MB")
@@ -71,7 +72,7 @@ class MemoryMagics(Magics):
             user_ns = self.shell.user_ns
             user_vars = {
                 k: v for k, v in user_ns.items()
-                if not k.startswith('_') and not callable(v)
+                if not k.startswith('_') and not isinstance(v, (type, types.FunctionType, types.BuiltinFunctionType, types.ModuleType))
             }
             ns_size = sizer.sizeof_namespace(user_vars)
 
