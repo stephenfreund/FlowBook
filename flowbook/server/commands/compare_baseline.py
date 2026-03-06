@@ -2264,7 +2264,7 @@ class CompareBaselineCommand(NotebookCommand):
         """
         cell_timeout = kwargs.get("timeout", 14400.0)  # 4 hours default
         skip_memory = kwargs.get("skip_memory", False)
-        run_baseline_memory = not kwargs.get("skip_baseline", False)
+        do_baseline_memory = not kwargs.get("skip_baseline", False)
         run_baseline_timing_flag = kwargs.get("baseline_timing", False)
         rerun_k = kwargs.get("rerun_k", 0)
         num_trials = kwargs.get("trials", 1)
@@ -2301,7 +2301,7 @@ class CompareBaselineCommand(NotebookCommand):
             phases = ["FlowBook timing"]
             if run_baseline_timing_flag:
                 phases.append("baseline timing")
-            if run_baseline_memory:
+            if do_baseline_memory:
                 phases.append("baseline memory")
             if heapsizer_available:
                 phases.append("FlowBook memory")
@@ -2309,7 +2309,7 @@ class CompareBaselineCommand(NotebookCommand):
             log(f"Notebook: {notebook_path}")
             log(f"Cell timeout: {cell_timeout}s" if cell_timeout else "Cell timeout: none")
             log(f"HeapSizer available: {heapsizer_available}")
-            log(f"Baseline memory: {run_baseline_memory}, Baseline timing: {run_baseline_timing_flag}")
+            log(f"Baseline memory: {do_baseline_memory}, Baseline timing: {run_baseline_timing_flag}")
             if rerun_k > 0:
                 log(f"Rerun passes: {rerun_k} (will execute all {len(code_cells)} cells {rerun_k} extra time(s))")
             if num_trials > 1:
@@ -2355,7 +2355,7 @@ class CompareBaselineCommand(NotebookCommand):
                 # PHASE 3: Baseline Memory (HeapSizer) - if available and not --skip-baseline
                 # ============================================================
                 baseline_memory = None
-                if heapsizer_available and run_baseline_memory:
+                if heapsizer_available and do_baseline_memory:
                     log("=" * 60)
                     log("PHASE 3: BASELINE MEMORY (HeapSizer)")
                     log("=" * 60)
