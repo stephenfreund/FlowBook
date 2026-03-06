@@ -54,7 +54,7 @@ def group_trial_files(file_paths: List[str]) -> Dict[str, List[str]]:
     for path in file_paths:
         name = Path(path).stem
         # Match pattern: name-N where N is a number (trial suffix)
-        match = re.match(r'^(.+)-(\d+)$', name)
+        match = re.match(r"^(.+)-(\d+)$", name)
         if match:
             stem = match.group(1)
         else:
@@ -86,7 +86,9 @@ def average_dict_values(dicts: List[Dict]) -> Dict:
 
     for key in all_keys:
         values = [d.get(key) for d in dicts if d and key in d]
-        if values and all(isinstance(v, (int, float)) and v is not None for v in values):
+        if values and all(
+            isinstance(v, (int, float)) and v is not None for v in values
+        ):
             result[key] = sum(values) / len(values)
         elif values:
             result[key] = values[0]  # Non-numeric, use first
@@ -109,10 +111,17 @@ def average_cell_metrics(cells: List[Dict]) -> Dict:
     avg = {"cell_id": cells[0].get("cell_id"), "cell_index": cells[0].get("cell_index")}
 
     numeric_fields = [
-        "execute_duration_ms", "code_duration_ms", "state_duration_ms", "check_duration_ms",
+        "execute_duration_ms",
+        "code_duration_ms",
+        "state_duration_ms",
+        "check_duration_ms",
         "cell_runtime_ms",  # For compatibility with older formats
-        "current_footprint_mb", "max_footprint_mb", "allocation_delta_mb", "gpu_mem_samples",
-        "pre_only_bytes", "post_savings_bytes",
+        "current_footprint_mb",
+        "max_footprint_mb",
+        "allocation_delta_mb",
+        "gpu_mem_samples",
+        "pre_only_bytes",
+        "post_savings_bytes",
     ]
     for field in numeric_fields:
         values = [c.get(field) for c in cells if c.get(field) is not None]
@@ -158,7 +167,12 @@ def average_trial_data(trial_datas: List[Dict]) -> Dict:
                 # Collect cells from all trials by (cell_id, cell_index)
                 all_cells_by_key: Dict[Tuple, List[Dict]] = defaultdict(list)
                 for trial in trial_datas:
-                    cells = trial.get("kernels", {}).get(kernel, {}).get(phase, {}).get(cell_list_key, [])
+                    cells = (
+                        trial.get("kernels", {})
+                        .get(kernel, {})
+                        .get(phase, {})
+                        .get(cell_list_key, [])
+                    )
                     for c in cells:
                         key = (c.get("cell_id"), c.get("cell_index"))
                         all_cells_by_key[key].append(c)
@@ -167,7 +181,7 @@ def average_trial_data(trial_datas: List[Dict]) -> Dict:
                 averaged_cells = []
                 for (cell_id, cell_index), trial_cells in sorted(
                     all_cells_by_key.items(),
-                    key=lambda x: x[0][1] if x[0][1] is not None else 0
+                    key=lambda x: x[0][1] if x[0][1] is not None else 0,
                 ):
                     avg_cell = average_cell_metrics(trial_cells)
                     averaged_cells.append(avg_cell)
@@ -183,24 +197,35 @@ def average_trial_data(trial_datas: List[Dict]) -> Dict:
 
             # Check staleness consistency across trials (flowbook timing only)
             if kernel == "flowbook" and phase == "timing":
-                first_checking = all_totals[0].get("checking_summary", {}) if all_totals else {}
+                first_checking = (
+                    all_totals[0].get("checking_summary", {}) if all_totals else {}
+                )
                 first_staleness = (
                     first_checking.get("clean_cells", 0),
                     first_checking.get("stale_cells", 0),
-                    tuple(sorted(first_checking.get("reason_counts", {}).items()))
+                    tuple(sorted(first_checking.get("reason_counts", {}).items())),
                 )
                 for i, totals in enumerate(all_totals[1:], start=2):
                     checking = totals.get("checking_summary", {})
                     staleness = (
                         checking.get("clean_cells", 0),
                         checking.get("stale_cells", 0),
-                        tuple(sorted(checking.get("reason_counts", {}).items()))
+                        tuple(sorted(checking.get("reason_counts", {}).items())),
                     )
                     if staleness != first_staleness:
                         notebook_path = result.get("notebook_path", "unknown")
-                        print(f"WARNING: Staleness differs across trials for {notebook_path}:", file=sys.stderr)
-                        print(f"  Trial 1: clean={first_staleness[0]}, stale={first_staleness[1]}, reasons={dict(first_staleness[2])}", file=sys.stderr)
-                        print(f"  Trial {i}: clean={staleness[0]}, stale={staleness[1]}, reasons={dict(staleness[2])}", file=sys.stderr)
+                        print(
+                            f"WARNING: Staleness differs across trials for {notebook_path}:",
+                            file=sys.stderr,
+                        )
+                        print(
+                            f"  Trial 1: clean={first_staleness[0]}, stale={first_staleness[1]}, reasons={dict(first_staleness[2])}",
+                            file=sys.stderr,
+                        )
+                        print(
+                            f"  Trial {i}: clean={staleness[0]}, stale={staleness[1]}, reasons={dict(staleness[2])}",
+                            file=sys.stderr,
+                        )
                         break  # Only warn once per notebook
 
                 # Don't average checking_summary - use first trial's values (should be identical)
@@ -222,16 +247,16 @@ def parse_remote_path(path: str) -> Tuple[bool, str, str, str]:
         For local paths, returns (False, '', '', path)
     """
     # Pattern: [user@]host:path
-    match = re.match(r'^(?:([^@:]+)@)?([^:/]+):(.+)$', path)
+    match = re.match(r"^(?:([^@:]+)@)?([^:/]+):(.+)$", path)
     if match:
-        user = match.group(1) or ''
+        user = match.group(1) or ""
         host = match.group(2)
         remote_path = match.group(3)
         # Exclude Windows drive letters (single letter before colon)
         if len(host) == 1 and host.isalpha():
-            return (False, '', '', path)
+            return (False, "", "", path)
         return (True, user, host, remote_path)
-    return (False, '', '', path)
+    return (False, "", "", path)
 
 
 def get_cache_dir(remote_spec: str) -> str:
@@ -249,8 +274,7 @@ def get_cache_dir(remote_spec: str) -> str:
 
 
 def rsync_remote_files(
-    remote_spec: str,
-    force_download: bool = False
+    remote_spec: str, force_download: bool = False
 ) -> Tuple[List[str], str]:
     """
     Rsync files from a remote location to local cache.
@@ -276,7 +300,10 @@ def rsync_remote_files(
     print(f"Cache:  {cache_dir}/", file=sys.stderr)
 
     if cache_exists and not force_download:
-        print("Status: Using cached files (use --force-download to refresh)", file=sys.stderr)
+        print(
+            "Status: Using cached files (use --force-download to refresh)",
+            file=sys.stderr,
+        )
     else:
         if force_download and cache_exists:
             print("Status: Force downloading (clearing cache)...", file=sys.stderr)
@@ -288,34 +315,39 @@ def rsync_remote_files(
         os.makedirs(cache_dir, exist_ok=True)
 
         # Build rsync command
-        if '*' in remote_path or '?' in remote_path:
+        if "*" in remote_path or "?" in remote_path:
             remote_dir = os.path.dirname(remote_path)
             pattern = os.path.basename(remote_path)
 
             rsync_cmd = [
-                'rsync', '-avz',
-                '--include', pattern,
-                '--exclude', '*',
+                "rsync",
+                "-avz",
+                "--include",
+                pattern,
+                "--exclude",
+                "*",
                 f"{remote_host}:{remote_dir}/",
-                cache_dir + "/"
+                cache_dir + "/",
             ]
         else:
             rsync_cmd = [
-                'rsync', '-avz',
+                "rsync",
+                "-avz",
                 f"{remote_host}:{remote_path}",
-                cache_dir + "/"
+                cache_dir + "/",
             ]
 
         try:
             result = subprocess.run(
-                rsync_cmd,
-                capture_output=True,
-                text=True,
-                check=True
+                rsync_cmd, capture_output=True, text=True, check=True
             )
             if result.stdout:
-                lines = result.stdout.strip().split('\n')
-                file_lines = [l for l in lines if l and not l.startswith(('sending', 'sent', 'total', 'receiving'))]
+                lines = result.stdout.strip().split("\n")
+                file_lines = [
+                    l
+                    for l in lines
+                    if l and not l.startswith(("sending", "sent", "total", "receiving"))
+                ]
                 if file_lines:
                     print(f"Files:  {len(file_lines)} file(s) synced", file=sys.stderr)
         except subprocess.CalledProcessError as e:
@@ -325,7 +357,7 @@ def rsync_remote_files(
     print("", file=sys.stderr)
 
     # Find the local files matching the pattern
-    if '*' in remote_path or '?' in remote_path:
+    if "*" in remote_path or "?" in remote_path:
         pattern = os.path.basename(remote_path)
         local_files = glob.glob(os.path.join(cache_dir, pattern))
     else:
@@ -337,8 +369,7 @@ def rsync_remote_files(
 
 
 def resolve_file_paths(
-    file_paths: List[str],
-    force_download: bool = False
+    file_paths: List[str], force_download: bool = False
 ) -> List[str]:
     """
     Resolve file paths, downloading remote files as needed.
@@ -360,7 +391,7 @@ def resolve_file_paths(
             resolved.extend(local_files)
         else:
             # Handle local wildcards
-            if '*' in path or '?' in path:
+            if "*" in path or "?" in path:
                 matched = glob.glob(path)
                 resolved.extend(sorted(matched))
             else:
@@ -381,6 +412,7 @@ def clear_cache() -> None:
 @dataclass
 class FileStats:
     """Statistics for a single comparison file."""
+
     notebook_path: str
     notebook_name: str
     num_cells: int
@@ -396,7 +428,9 @@ class FileStats:
     flowbook_memory_bytes: int
     memory_overhead_bytes: int
     memory_overhead_pct: float
-    memory_overhead_ratio: float  # flowbook_memory / baseline_memory (like slowdown for time)
+    memory_overhead_ratio: (
+        float  # flowbook_memory / baseline_memory (like slowdown for time)
+    )
     # Last cell overhead percentages
     last_cell_state_overhead_pct: float = 0.0
     last_cell_check_overhead_pct: float = 0.0
@@ -426,6 +460,7 @@ class FileStats:
 @dataclass
 class AggregateStats:
     """Aggregate statistics across multiple files."""
+
     num_files: int
     total_cells: int
     # Overall slowdown
@@ -495,9 +530,13 @@ def load_comparison_json(file_path: str) -> Dict[str, Any]:
 
     # Validate structure
     if "kernels" not in data:
-        raise ValueError(f"Invalid comparison file: missing 'kernels' key in {file_path}")
+        raise ValueError(
+            f"Invalid comparison file: missing 'kernels' key in {file_path}"
+        )
     if "baseline" not in data["kernels"] or "flowbook" not in data["kernels"]:
-        raise ValueError(f"Invalid comparison file: missing baseline or flowbook results in {file_path}")
+        raise ValueError(
+            f"Invalid comparison file: missing baseline or flowbook results in {file_path}"
+        )
 
     # Detect version
     version = data.get("version", "1.0")
@@ -540,8 +579,12 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     flowbook_totals = flowbook_timing.get("totals", {}) if flowbook_timing else {}
 
     # Support both v1.0 (cell_runtime_ms) and v2.0 (execute_duration_ms) key names
-    baseline_runtime = baseline_totals.get("cell_runtime_ms") or baseline_totals.get("execute_duration_ms", 0.0)
-    flowbook_runtime = flowbook_totals.get("cell_runtime_ms") or flowbook_totals.get("execute_duration_ms", 0.0)
+    baseline_runtime = baseline_totals.get("cell_runtime_ms") or baseline_totals.get(
+        "execute_duration_ms", 0.0
+    )
+    flowbook_runtime = flowbook_totals.get("cell_runtime_ms") or flowbook_totals.get(
+        "execute_duration_ms", 0.0
+    )
     state_overhead = flowbook_totals.get("state_duration_ms", 0.0)
     check_overhead = flowbook_totals.get("check_duration_ms", 0.0)
     flowbook_total = flowbook_runtime
@@ -560,7 +603,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         check_pct = (check_overhead / baseline_runtime) * 100
     elif flowbook_runtime > 0:
         # No baseline: compute slowdown as overhead ratio relative to flowbook execution time
-        slowdown = (flowbook_runtime + state_overhead + check_overhead) / flowbook_runtime
+        slowdown = (
+            flowbook_runtime + state_overhead + check_overhead
+        ) / flowbook_runtime
         state_pct = (state_overhead / flowbook_runtime) * 100
         check_pct = (check_overhead / flowbook_runtime) * 100
     else:
@@ -571,14 +616,24 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     # Memory from v2.0 Scalene data
     baseline_memory_data = baseline.get("memory", {})
     flowbook_memory_data = flowbook.get("memory", {})
-    baseline_mem_totals = baseline_memory_data.get("totals", {}) if baseline_memory_data else {}
-    flowbook_mem_totals = flowbook_memory_data.get("totals", {}) if flowbook_memory_data else {}
+    baseline_mem_totals = (
+        baseline_memory_data.get("totals", {}) if baseline_memory_data else {}
+    )
+    flowbook_mem_totals = (
+        flowbook_memory_data.get("totals", {}) if flowbook_memory_data else {}
+    )
 
     # Convert MB to bytes for consistency with old format
     mb_to_bytes = 1024 * 1024
-    baseline_memory = int(baseline_mem_totals.get("final_footprint_mb", 0) * mb_to_bytes)
-    flowbook_memory = int(flowbook_mem_totals.get("final_footprint_mb", 0) * mb_to_bytes)
-    memory_overhead = flowbook_memory - baseline_memory if flowbook_memory > baseline_memory else 0
+    baseline_memory = int(
+        baseline_mem_totals.get("final_footprint_mb", 0) * mb_to_bytes
+    )
+    flowbook_memory = int(
+        flowbook_mem_totals.get("final_footprint_mb", 0) * mb_to_bytes
+    )
+    memory_overhead = (
+        flowbook_memory - baseline_memory if flowbook_memory > baseline_memory else 0
+    )
 
     # Check if FlowBook JSON has precomputed memory_overhead_ratio (new format)
     if "memory_overhead_ratio" in flowbook_mem_totals:
@@ -588,22 +643,30 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         memory_pct = (memory_overhead_ratio - 1.0) * 100
         # For baseline_memory, use base_namespace_mb if no baseline kernel was run
         if baseline_memory == 0:
-            baseline_memory = int(flowbook_mem_totals.get("base_namespace_mb", 0) * mb_to_bytes)
-            memory_overhead = int(flowbook_mem_totals.get("total_overhead_mb", 0) * mb_to_bytes)
+            baseline_memory = int(
+                flowbook_mem_totals.get("base_namespace_mb", 0) * mb_to_bytes
+            )
+            memory_overhead = int(
+                flowbook_mem_totals.get("total_overhead_mb", 0) * mb_to_bytes
+            )
     elif baseline_memory > 0:
         memory_pct = (memory_overhead / baseline_memory) * 100
         memory_overhead_ratio = flowbook_memory / baseline_memory
     else:
         # No baseline and no precomputed ratio: compute ratio from checkpoint overhead
         # Get checkpoint overhead from last memory cell's overhead_breakdown
-        flowbook_mem_cells = flowbook_memory_data.get("cells", []) if flowbook_memory_data else []
+        flowbook_mem_cells = (
+            flowbook_memory_data.get("cells", []) if flowbook_memory_data else []
+        )
         checkpoint_overhead_mb = 0.0
         if flowbook_mem_cells:
             last_mem_cell = flowbook_mem_cells[-1]
             overhead_breakdown = last_mem_cell.get("overhead_breakdown", {})
             checkpoint_overhead_mb = overhead_breakdown.get("checkpoints_mb", 0.0)
 
-        flowbook_memory_mb = flowbook_memory / mb_to_bytes if flowbook_memory > 0 else 0.0
+        flowbook_memory_mb = (
+            flowbook_memory / mb_to_bytes if flowbook_memory > 0 else 0.0
+        )
 
         if flowbook_memory_mb > 0 and checkpoint_overhead_mb > 0:
             # No baseline: report checkpoint/total as the overhead ratio
@@ -623,24 +686,42 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     num_trials = data.get("metadata", {}).get("averaged_trials", 1)
 
     # Extract rerun statistics from v2.0 format
-    rerun_baseline_cells = baseline_timing.get("rerun_cells", []) if baseline_timing else []
-    rerun_flowbook_cells = flowbook_timing.get("rerun_cells", []) if flowbook_timing else []
+    rerun_baseline_cells = (
+        baseline_timing.get("rerun_cells", []) if baseline_timing else []
+    )
+    rerun_flowbook_cells = (
+        flowbook_timing.get("rerun_cells", []) if flowbook_timing else []
+    )
     num_reruns = len(rerun_flowbook_cells)
 
-    rerun_baseline_runtime = sum(c.get("cell_runtime_ms") or c.get("execute_duration_ms", 0) for c in rerun_baseline_cells)
-    rerun_flowbook_runtime = sum(c.get("cell_runtime_ms") or c.get("execute_duration_ms", 0) for c in rerun_flowbook_cells)
-    rerun_state_overhead = sum(c.get("state_duration_ms", 0) for c in rerun_flowbook_cells)
-    rerun_check_overhead = sum(c.get("check_duration_ms", 0) for c in rerun_flowbook_cells)
+    rerun_baseline_runtime = sum(
+        c.get("cell_runtime_ms") or c.get("execute_duration_ms", 0)
+        for c in rerun_baseline_cells
+    )
+    rerun_flowbook_runtime = sum(
+        c.get("cell_runtime_ms") or c.get("execute_duration_ms", 0)
+        for c in rerun_flowbook_cells
+    )
+    rerun_state_overhead = sum(
+        c.get("state_duration_ms", 0) for c in rerun_flowbook_cells
+    )
+    rerun_check_overhead = sum(
+        c.get("check_duration_ms", 0) for c in rerun_flowbook_cells
+    )
     rerun_flowbook_total = rerun_flowbook_runtime
 
     # Get final checkpoint size from last rerun cell (if available)
     rerun_final_checkpoint = 0
-    flowbook_mem_rerun = flowbook_memory_data.get("rerun_cells", []) if flowbook_memory_data else []
+    flowbook_mem_rerun = (
+        flowbook_memory_data.get("rerun_cells", []) if flowbook_memory_data else []
+    )
     if flowbook_mem_rerun:
         last_rerun_mem = flowbook_mem_rerun[-1]
         overhead_breakdown = last_rerun_mem.get("overhead_breakdown", {})
         if overhead_breakdown:
-            rerun_final_checkpoint = int(overhead_breakdown.get("checkpoints_mb", 0) * 1024 * 1024)
+            rerun_final_checkpoint = int(
+                overhead_breakdown.get("checkpoints_mb", 0) * 1024 * 1024
+            )
 
     # Last cell overhead from timing data
     baseline_timing_cells = baseline_timing.get("cells", []) if baseline_timing else []
@@ -654,7 +735,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         last_fc = flowbook_timing_cells[-1]
         last_bc = baseline_timing_cells[-1]
 
-        last_baseline_runtime = last_bc.get("cell_runtime_ms") or last_bc.get("execute_duration_ms", 0.0)
+        last_baseline_runtime = last_bc.get("cell_runtime_ms") or last_bc.get(
+            "execute_duration_ms", 0.0
+        )
         last_state = last_fc.get("state_duration_ms", 0.0)
         last_check = last_fc.get("check_duration_ms", 0.0)
 
@@ -663,14 +746,20 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             last_cell_check_pct = (last_check / last_baseline_runtime) * 100
 
     # Memory overhead from memory data
-    baseline_mem_cells = baseline_memory_data.get("cells", []) if baseline_memory_data else []
-    flowbook_mem_cells = flowbook_memory_data.get("cells", []) if flowbook_memory_data else []
+    baseline_mem_cells = (
+        baseline_memory_data.get("cells", []) if baseline_memory_data else []
+    )
+    flowbook_mem_cells = (
+        flowbook_memory_data.get("cells", []) if flowbook_memory_data else []
+    )
 
     if flowbook_mem_cells and baseline_mem_cells:
         last_baseline_mem = baseline_mem_cells[-1].get("current_footprint_mb", 0)
         last_flowbook_mem = flowbook_mem_cells[-1].get("current_footprint_mb", 0)
         if last_baseline_mem > 0:
-            last_cell_memory_pct = ((last_flowbook_mem - last_baseline_mem) / last_baseline_mem) * 100
+            last_cell_memory_pct = (
+                (last_flowbook_mem - last_baseline_mem) / last_baseline_mem
+            ) * 100
 
     # Collect per-cell overhead data for aggregate statistics
     per_cell_checkpoint_overhead_ms: List[float] = []
@@ -700,7 +789,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         else:
             prev_cell = flowbook_mem_cells[i - 1]
             # Support both old and new field names for backward compatibility during transition
-            namespace = prev_cell.get("namespace_mb", prev_cell.get("current_footprint_mb", 0))
+            namespace = prev_cell.get(
+                "namespace_mb", prev_cell.get("current_footprint_mb", 0)
+            )
             gpu = prev_cell.get("gpu_mb", prev_cell.get("gpu_mem_samples", 0))
             base_mb = namespace + gpu
 
@@ -715,7 +806,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             ratio = delta_mb / base_mb
         else:
             ratio = 0.0  # Namespace too small for meaningful ratio
-        per_cell_memory_overhead_mb.append(ratio)  # Note: field name kept for compatibility
+        per_cell_memory_overhead_mb.append(
+            ratio
+        )  # Note: field name kept for compatibility
 
     return FileStats(
         notebook_path=notebook_path,
@@ -792,9 +885,15 @@ def compute_aggregate_stats(stats_list: List[FileStats]) -> AggregateStats:
         all_memory_overhead.extend(s.per_cell_memory_overhead_mb)
 
     # Compute per-cell statistics
-    checkpoint_arr = np.array(all_checkpoint_overhead) if all_checkpoint_overhead else np.array([0.0])
+    checkpoint_arr = (
+        np.array(all_checkpoint_overhead)
+        if all_checkpoint_overhead
+        else np.array([0.0])
+    )
     total_arr = np.array(all_total_overhead) if all_total_overhead else np.array([0.0])
-    memory_arr = np.array(all_memory_overhead) if all_memory_overhead else np.array([0.0])
+    memory_arr = (
+        np.array(all_memory_overhead) if all_memory_overhead else np.array([0.0])
+    )
 
     # Aggregate checking results (staleness summary)
     total_clean_cells = sum(s.checking_clean_cells for s in stats_list)
@@ -904,7 +1003,11 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
         lines.append("-" * 110)
         for s in stats_list:
             if s.num_reruns > 0:
-                name = s.notebook_name[:28] if len(s.notebook_name) > 28 else s.notebook_name
+                name = (
+                    s.notebook_name[:28]
+                    if len(s.notebook_name) > 28
+                    else s.notebook_name
+                )
                 ckpt_mb = s.rerun_final_checkpoint_bytes / (1024 * 1024)
                 row = f"{name:<30} {s.num_reruns:>6} {s.num_trials:>6} {s.rerun_baseline_runtime_ms:>9.0f}ms {s.rerun_flowbook_total_ms:>9.0f}ms {s.rerun_state_overhead_ms:>7.0f}ms {s.rerun_check_overhead_ms:>7.0f}ms {ckpt_mb:>10.1f}MB"
                 lines.append(row)
@@ -991,16 +1094,26 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
         # No baseline memory - show checkpoint overhead ratio
         lines.append("CHECKPOINT MEMORY RATIO")
         lines.append(f"AGGREGATE (N={aggregate.num_files})")
-        lines.append(f"  Per-Cell Mean:      {aggregate.memory_overhead_per_cell_mean:.2f}")
-        lines.append(f"  Per-Cell Median:    {aggregate.memory_overhead_per_cell_median:.2f}")
-        lines.append(f"  Per-Cell Max:       {aggregate.memory_overhead_per_cell_max:.2f}")
-        lines.append(f"  Per-Cell P99:       {aggregate.memory_overhead_per_cell_p99:.2f}")
+        lines.append(
+            f"  Per-Cell Mean:      {aggregate.memory_overhead_per_cell_mean:.2f}"
+        )
+        lines.append(
+            f"  Per-Cell Median:    {aggregate.memory_overhead_per_cell_median:.2f}"
+        )
+        lines.append(
+            f"  Per-Cell Max:       {aggregate.memory_overhead_per_cell_max:.2f}"
+        )
+        lines.append(
+            f"  Per-Cell P99:       {aggregate.memory_overhead_per_cell_p99:.2f}"
+        )
 
     # Checking results summary (staleness)
     # Note: Staleness consistency across trials is checked during averaging in average_trial_data
-    total_checked = (aggregate.total_checking_clean_cells +
-                     aggregate.total_checking_stale_cells +
-                     aggregate.total_checking_error_cells)
+    total_checked = (
+        aggregate.total_checking_clean_cells
+        + aggregate.total_checking_stale_cells
+        + aggregate.total_checking_error_cells
+    )
     if total_checked > 0:
         lines.append("")
         lines.append("CHECKING RESULTS")
@@ -1041,7 +1154,11 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
         # Per-file rows (only files with errors)
         for s in stats_list:
             if s.checking_error_cells > 0:
-                name = s.notebook_name[:28] if len(s.notebook_name) > 28 else s.notebook_name
+                name = (
+                    s.notebook_name[:28]
+                    if len(s.notebook_name) > 28
+                    else s.notebook_name
+                )
                 row = f"{name:<30} {s.num_cells:>5} {s.checking_error_cells:>6}"
                 for etype in error_types:
                     count = s.checking_error_counts.get(etype, 0)
@@ -1101,22 +1218,22 @@ def format_json_output(stats_list: List[FileStats], aggregate: AggregateStats) -
 def format_csv(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
     """Format results as CSV."""
     lines = []
-    lines.append("notebook,cells,trials,baseline_ms,flowbook_ms,state_ms,check_ms,slowdown,state_pct,check_pct,memory_pct")
+    lines.append(
+        "notebook,cells,trials,baseline_ms,flowbook_ms,state_ms,check_ms,slowdown,state_pct,check_pct,memory_pct"
+    )
 
     for s in stats_list:
         lines.append(
             f'"{s.notebook_name}",{s.num_cells},{s.num_trials},{s.baseline_runtime_ms:.1f},{s.flowbook_total_ms:.1f},'
-            f'{s.state_overhead_ms:.1f},{s.check_overhead_ms:.1f},{s.slowdown:.3f},'
-            f'{s.state_overhead_pct:.1f},{s.check_overhead_pct:.1f},{s.memory_overhead_pct:.1f}'
+            f"{s.state_overhead_ms:.1f},{s.check_overhead_ms:.1f},{s.slowdown:.3f},"
+            f"{s.state_overhead_pct:.1f},{s.check_overhead_pct:.1f},{s.memory_overhead_pct:.1f}"
         )
 
     return "\n".join(lines)
 
 
 def plot_slowdown(
-    data: Dict[str, Any],
-    output_path: str,
-    large_fonts: bool = False
+    data: Dict[str, Any], output_path: str, large_fonts: bool = False
 ) -> None:
     """
     Plot slowdown: baseline cell runtimes with state/check time stacked on top.
@@ -1147,7 +1264,9 @@ def plot_slowdown(
 
     # Convert to arrays
     cell_ids = list(cell_data.keys())
-    baseline_runtimes = [cell_data[cid].get("baseline_runtime_ms", 0) for cid in cell_ids]
+    baseline_runtimes = [
+        cell_data[cid].get("baseline_runtime_ms", 0) for cid in cell_ids
+    ]
     state_times = [cell_data[cid].get("state_ms", 0) for cid in cell_ids]
     check_times = [cell_data[cid].get("check_ms", 0) for cid in cell_ids]
 
@@ -1168,27 +1287,72 @@ def plot_slowdown(
     fig, ax = plt.subplots(figsize=(10, 6))
 
     # Stacked areas
-    ax.fill_between(cells, 0, baseline_cumsum / 1000, alpha=0.3, color=colors[0], label="Cell Run Time")
-    ax.fill_between(cells, baseline_cumsum / 1000, (baseline_cumsum + state_cumsum) / 1000, alpha=0.3, color=colors[1], label="State Checkpoint")
-    ax.fill_between(cells, (baseline_cumsum + state_cumsum) / 1000, total_cumsum / 1000, alpha=0.3, color=colors[2], label="Reproducibility Check")
+    ax.fill_between(
+        cells,
+        0,
+        baseline_cumsum / 1000,
+        alpha=0.3,
+        color=colors[0],
+        label="Cell Run Time",
+    )
+    ax.fill_between(
+        cells,
+        baseline_cumsum / 1000,
+        (baseline_cumsum + state_cumsum) / 1000,
+        alpha=0.3,
+        color=colors[1],
+        label="State Checkpoint",
+    )
+    ax.fill_between(
+        cells,
+        (baseline_cumsum + state_cumsum) / 1000,
+        total_cumsum / 1000,
+        alpha=0.3,
+        color=colors[2],
+        label="Reproducibility Check",
+    )
 
     # Lines with markers
-    ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4)
-    ax.plot(cells, (baseline_cumsum + state_cumsum) / 1000, color=colors[1], linewidth=2, marker='o', markersize=4)
-    ax.plot(cells, total_cumsum / 1000, color=colors[2], linewidth=2, marker='o', markersize=4)
+    ax.plot(
+        cells,
+        baseline_cumsum / 1000,
+        color=colors[0],
+        linewidth=2,
+        marker="o",
+        markersize=4,
+    )
+    ax.plot(
+        cells,
+        (baseline_cumsum + state_cumsum) / 1000,
+        color=colors[1],
+        linewidth=2,
+        marker="o",
+        markersize=4,
+    )
+    ax.plot(
+        cells,
+        total_cumsum / 1000,
+        color=colors[2],
+        linewidth=2,
+        marker="o",
+        markersize=4,
+    )
 
     ax.set_xlabel("Cell Number", fontsize=label_size)
     ax.set_ylabel("Cumulative Time (seconds)", fontsize=label_size)
 
     notebook_name = Path(data.get("notebook_path", "notebook")).stem
-    ax.set_title(f"Cumulative Cell Run and Checkpointing Times\n{notebook_name}", fontsize=title_size)
+    ax.set_title(
+        f"Cumulative Cell Run and Checkpointing Times\n{notebook_name}",
+        fontsize=title_size,
+    )
     ax.legend(loc="upper left", fontsize=legend_size)
     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
     ax.set_xlim(left=1)
     ax.set_ylim(bottom=0)
 
     if large_fonts:
-        ax.tick_params(axis='both', labelsize=tick_size)
+        ax.tick_params(axis="both", labelsize=tick_size)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
@@ -1198,9 +1362,7 @@ def plot_slowdown(
 
 
 def plot_memory_comparison(
-    data: Dict[str, Any],
-    output_path: str,
-    large_fonts: bool = False
+    data: Dict[str, Any], output_path: str, large_fonts: bool = False
 ) -> None:
     """
     Plot memory usage: user namespace + checkpoint overhead.
@@ -1234,24 +1396,33 @@ def plot_memory_comparison(
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    ax.fill_between(cells, 0, user_mb, alpha=0.3, color=colors[0], label='User Namespace')
-    ax.fill_between(cells, user_mb, total_mb, alpha=0.3, color=colors[1], label='Checkpoint Overhead')
+    ax.fill_between(
+        cells, 0, user_mb, alpha=0.3, color=colors[0], label="User Namespace"
+    )
+    ax.fill_between(
+        cells,
+        user_mb,
+        total_mb,
+        alpha=0.3,
+        color=colors[1],
+        label="Checkpoint Overhead",
+    )
 
-    ax.plot(cells, user_mb, color=colors[0], linewidth=2, marker='o', markersize=4)
-    ax.plot(cells, total_mb, color=colors[1], linewidth=2, marker='o', markersize=4)
+    ax.plot(cells, user_mb, color=colors[0], linewidth=2, marker="o", markersize=4)
+    ax.plot(cells, total_mb, color=colors[1], linewidth=2, marker="o", markersize=4)
 
-    ax.set_xlabel('Cell Number', fontsize=label_size)
-    ax.set_ylabel('Memory (MB)', fontsize=label_size)
+    ax.set_xlabel("Cell Number", fontsize=label_size)
+    ax.set_ylabel("Memory (MB)", fontsize=label_size)
 
     notebook_name = Path(data.get("notebook_path", "notebook")).stem
-    ax.set_title(f'Memory Usage\n{notebook_name}', fontsize=title_size)
-    ax.legend(loc='upper left', fontsize=legend_size)
+    ax.set_title(f"Memory Usage\n{notebook_name}", fontsize=title_size)
+    ax.legend(loc="upper left", fontsize=legend_size)
     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
     ax.set_xlim(left=1)
     ax.set_ylim(bottom=0)
 
     if large_fonts:
-        ax.tick_params(axis='both', labelsize=tick_size)
+        ax.tick_params(axis="both", labelsize=tick_size)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
@@ -1260,7 +1431,9 @@ def plot_memory_comparison(
     print(f"Memory plot saved to: {output_path}")
 
 
-def extract_checkpoint_type_data(data: Dict[str, Any], top_n: int = 10) -> Optional[Dict[str, Any]]:
+def extract_checkpoint_type_data(
+    data: Dict[str, Any], top_n: int = 10
+) -> Optional[Dict[str, Any]]:
     """
     Extract checkpoint type breakdown data from comparison JSON.
 
@@ -1319,7 +1492,9 @@ def extract_checkpoint_type_data(data: Dict[str, Any], top_n: int = 10) -> Optio
                 type_by_cell[type_name].append(0)
 
     # Order types by total size descending
-    types_ordered = sorted(type_totals.keys(), key=lambda t: type_totals[t], reverse=True)
+    types_ordered = sorted(
+        type_totals.keys(), key=lambda t: type_totals[t], reverse=True
+    )
 
     # Limit to top types, aggregate rest as "other"
     if len(types_ordered) > top_n:
@@ -1345,7 +1520,9 @@ def extract_checkpoint_type_data(data: Dict[str, Any], top_n: int = 10) -> Optio
     }
 
 
-def extract_checkpoint_type_data_v2(data: Dict[str, Any], top_n: int = 10) -> Optional[Dict[str, Any]]:
+def extract_checkpoint_type_data_v2(
+    data: Dict[str, Any], top_n: int = 10
+) -> Optional[Dict[str, Any]]:
     """
     Extract CUMULATIVE checkpoint type breakdown from v2.0 format.
 
@@ -1406,7 +1583,9 @@ def extract_checkpoint_type_data_v2(data: Dict[str, Any], top_n: int = 10) -> Op
             total_bytes.append(cell_total)
 
         # Get final cumulative for ordering
-        type_final: Dict[str, int] = {t: type_by_cell[t][-1] if type_by_cell[t] else 0 for t in all_type_names}
+        type_final: Dict[str, int] = {
+            t: type_by_cell[t][-1] if type_by_cell[t] else 0 for t in all_type_names
+        }
     else:
         # Fall back to old method - derives from checkpoint_var_costs (may overcount)
         has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
@@ -1476,9 +1655,7 @@ def extract_checkpoint_type_data_v2(data: Dict[str, Any], top_n: int = 10) -> Op
 
 
 def plot_checkpoint_types(
-    data: Dict[str, Any],
-    output_path: Optional[str] = None,
-    large_fonts: bool = False
+    data: Dict[str, Any], output_path: Optional[str] = None, large_fonts: bool = False
 ) -> Optional[Any]:
     """
     Plot checkpoint memory usage broken down by variable type.
@@ -1518,16 +1695,26 @@ def plot_checkpoint_types(
     # Stacked areas
     cumulative = np.zeros(len(cells))
     for i, (t, data_mb) in enumerate(zip(type_data["types_ordered"], stacked)):
-        ax.fill_between(cells, cumulative, cumulative + data_mb, alpha=0.7, color=colors[i], label=t)
+        ax.fill_between(
+            cells, cumulative, cumulative + data_mb, alpha=0.7, color=colors[i], label=t
+        )
         cumulative = cumulative + data_mb
 
     # Total line on top
-    ax.plot(cells, cumulative, color='black', linewidth=1.5, linestyle='--', label='Total')
+    ax.plot(
+        cells, cumulative, color="black", linewidth=1.5, linestyle="--", label="Total"
+    )
 
     # Add separator for rerun phase if present
     initial_count = type_data.get("initial_count", len(cells))
     if initial_count < len(cells):
-        ax.axvline(x=initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+        ax.axvline(
+            x=initial_count + 0.5,
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label="Rerun Start",
+        )
 
     ax.set_xlabel("Cell Number", fontsize=label_size)
     ax.set_ylabel("Checkpoint Memory (MB)", fontsize=label_size)
@@ -1543,7 +1730,7 @@ def plot_checkpoint_types(
     ax.set_ylim(bottom=0)
 
     if large_fonts:
-        ax.tick_params(axis='both', labelsize=tick_size)
+        ax.tick_params(axis="both", labelsize=tick_size)
 
     plt.tight_layout()
 
@@ -1557,9 +1744,7 @@ def plot_checkpoint_types(
 
 
 def plot_combined(
-    data: Dict[str, Any],
-    output_path: Optional[str] = None,
-    large_fonts: bool = True
+    data: Dict[str, Any], output_path: Optional[str] = None, large_fonts: bool = True
 ) -> Optional[Any]:
     """
     Create combined multi-panel plot (time + memory + checkpoint types).
@@ -1594,11 +1779,17 @@ def plot_combined(
             cell_data[c["cell_id"]]["state_ms"] = c["state_duration_ms"]
             cell_data[c["cell_id"]]["check_ms"] = c["check_duration_ms"]
             cell_data[c["cell_id"]]["user_ns_bytes"] = c.get("user_ns_bytes", 0)
-            cell_data[c["cell_id"]]["total_bytes"] = c.get("user_ns_and_checkpoint_bytes", 0)
+            cell_data[c["cell_id"]]["total_bytes"] = c.get(
+                "user_ns_and_checkpoint_bytes", 0
+            )
 
     cell_ids = list(cell_data.keys())
-    baseline_runtimes = [cell_data[cid].get("baseline_runtime_ms", 0) for cid in cell_ids]
-    flowbook_runtimes = [cell_data[cid].get("flowbook_runtime_ms", 0) for cid in cell_ids]
+    baseline_runtimes = [
+        cell_data[cid].get("baseline_runtime_ms", 0) for cid in cell_ids
+    ]
+    flowbook_runtimes = [
+        cell_data[cid].get("flowbook_runtime_ms", 0) for cid in cell_ids
+    ]
     state_times = [cell_data[cid].get("state_ms", 0) for cid in cell_ids]
     check_times = [cell_data[cid].get("check_ms", 0) for cid in cell_ids]
     user_ns_bytes = [cell_data[cid].get("user_ns_bytes", 0) for cid in cell_ids]
@@ -1639,12 +1830,34 @@ def plot_combined(
     # Panel 1: Time comparison (Baseline vs FlowBook)
     # Use lines only (not shaded areas) since these are independent measurements
     ax = axes[0]
-    ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label="Baseline")
-    ax.plot(cells, flowbook_cumsum / 1000, color=colors[1], linewidth=2, marker='o', markersize=4, label="FlowBook")
+    ax.plot(
+        cells,
+        baseline_cumsum / 1000,
+        color=colors[0],
+        linewidth=2,
+        marker="o",
+        markersize=4,
+        label="Baseline",
+    )
+    ax.plot(
+        cells,
+        flowbook_cumsum / 1000,
+        color=colors[1],
+        linewidth=2,
+        marker="o",
+        markersize=4,
+        label="FlowBook",
+    )
 
     # Add separator for rerun phase
     if initial_count < len(cells):
-        ax.axvline(x=initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+        ax.axvline(
+            x=initial_count + 0.5,
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label="Rerun Start",
+        )
 
     ax.set_xlabel("Cell Number", fontsize=label_size)
     ax.set_ylabel("Cumulative Time (seconds)", fontsize=label_size)
@@ -1656,49 +1869,76 @@ def plot_combined(
     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
     ax.set_xlim(left=1)
     ax.set_ylim(bottom=0)
-    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
 
     # Add overhead percentage label at end of run
     if baseline_cumsum[-1] > 0:
-        time_overhead_pct = (flowbook_cumsum[-1] - baseline_cumsum[-1]) / baseline_cumsum[-1] * 100
-        ax.annotate(f'{time_overhead_pct:.1f}% overhead',
-                    xy=(cells[-1], flowbook_cumsum[-1] / 1000),
-                    xytext=(5, 0), textcoords='offset points',
-                    fontsize=legend_size, va='center', ha='left',
-                    color=colors[1])
+        time_overhead_pct = (
+            (flowbook_cumsum[-1] - baseline_cumsum[-1]) / baseline_cumsum[-1] * 100
+        )
+        ax.annotate(
+            f"{time_overhead_pct:.1f}% overhead",
+            xy=(cells[-1], flowbook_cumsum[-1] / 1000),
+            xytext=(5, 0),
+            textcoords="offset points",
+            fontsize=legend_size,
+            va="center",
+            ha="left",
+            color=colors[1],
+        )
 
     # Panel 2: Memory
     ax = axes[1]
-    ax.fill_between(cells, 0, user_mb, alpha=0.3, color=colors[0], label='User Namespace')
-    ax.fill_between(cells, user_mb, total_mb, alpha=0.3, color=colors[1], label='Checkpoint Overhead')
+    ax.fill_between(
+        cells, 0, user_mb, alpha=0.3, color=colors[0], label="User Namespace"
+    )
+    ax.fill_between(
+        cells,
+        user_mb,
+        total_mb,
+        alpha=0.3,
+        color=colors[1],
+        label="Checkpoint Overhead",
+    )
 
-    ax.plot(cells, user_mb, color=colors[0], linewidth=2, marker='o', markersize=4)
-    ax.plot(cells, total_mb, color=colors[1], linewidth=2, marker='o', markersize=4)
+    ax.plot(cells, user_mb, color=colors[0], linewidth=2, marker="o", markersize=4)
+    ax.plot(cells, total_mb, color=colors[1], linewidth=2, marker="o", markersize=4)
 
     # Add separator for rerun phase
     if initial_count < len(cells):
-        ax.axvline(x=initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+        ax.axvline(
+            x=initial_count + 0.5,
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label="Rerun Start",
+        )
 
-    ax.set_xlabel('Cell Number', fontsize=label_size)
-    ax.set_ylabel('Memory (MB)', fontsize=label_size)
-    title = 'Memory Usage'
+    ax.set_xlabel("Cell Number", fontsize=label_size)
+    ax.set_ylabel("Memory (MB)", fontsize=label_size)
+    title = "Memory Usage"
     if initial_count < len(cells):
-        title += f' (cells 1-{initial_count} + {len(cells) - initial_count} reruns)'
+        title += f" (cells 1-{initial_count} + {len(cells) - initial_count} reruns)"
     ax.set_title(title, fontsize=title_size)
-    ax.legend(loc='upper left', fontsize=legend_size)
+    ax.legend(loc="upper left", fontsize=legend_size)
     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
     ax.set_xlim(left=1)
     ax.set_ylim(bottom=0)
-    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
 
     # Add overhead percentage label at end of run
     if user_mb[-1] > 0:
         mem_overhead_pct = (total_mb[-1] - user_mb[-1]) / user_mb[-1] * 100
-        ax.annotate(f'{mem_overhead_pct:.1f}% overhead',
-                    xy=(cells[-1], total_mb[-1]),
-                    xytext=(5, 0), textcoords='offset points',
-                    fontsize=legend_size, va='center', ha='left',
-                    color=colors[1])
+        ax.annotate(
+            f"{mem_overhead_pct:.1f}% overhead",
+            xy=(cells[-1], total_mb[-1]),
+            xytext=(5, 0),
+            textcoords="offset points",
+            fontsize=legend_size,
+            va="center",
+            ha="left",
+            color=colors[1],
+        )
 
     # Panel 3: Checkpoint types (if data available)
     if type_data is not None:
@@ -1714,16 +1954,36 @@ def plot_combined(
         # Stacked areas
         cumulative = np.zeros(len(type_cells))
         for i, (t, data_mb) in enumerate(zip(type_data["types_ordered"], stacked)):
-            ax.fill_between(type_cells, cumulative, cumulative + data_mb, alpha=0.7, color=type_colors[i], label=t)
+            ax.fill_between(
+                type_cells,
+                cumulative,
+                cumulative + data_mb,
+                alpha=0.7,
+                color=type_colors[i],
+                label=t,
+            )
             cumulative = cumulative + data_mb
 
         # Total line on top
-        ax.plot(type_cells, cumulative, color='black', linewidth=1.5, linestyle='--', label='Total')
+        ax.plot(
+            type_cells,
+            cumulative,
+            color="black",
+            linewidth=1.5,
+            linestyle="--",
+            label="Total",
+        )
 
         # Add separator for rerun phase if present
         type_initial_count = type_data.get("initial_count", len(type_cells))
         if type_initial_count < len(type_cells):
-            ax.axvline(x=type_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+            ax.axvline(
+                x=type_initial_count + 0.5,
+                color="red",
+                linestyle="--",
+                linewidth=2,
+                label="Rerun Start",
+            )
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Checkpoint Memory (MB)", fontsize=label_size)
@@ -1735,11 +1995,11 @@ def plot_combined(
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
-        ax.tick_params(axis='both', labelsize=tick_size)
+        ax.tick_params(axis="both", labelsize=tick_size)
 
     # Add notebook name as figure title
     notebook_name = Path(data.get("notebook_path", "notebook")).stem
-    fig.suptitle(notebook_name, fontsize=title_size + 2, fontweight='bold')
+    fig.suptitle(notebook_name, fontsize=title_size + 2, fontweight="bold")
     plt.tight_layout(rect=[0, 0, 1, 0.95])  # Leave room for suptitle
 
     if output_path is not None:
@@ -1751,12 +2011,14 @@ def plot_combined(
         return fig
 
 
-def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Optional[Dict[str, Any]]:
+def extract_checkpoint_var_data(
+    data: Dict[str, Any], top_n: int = 10
+) -> Optional[Dict[str, Any]]:
     """
-    Extract CUMULATIVE per-variable checkpoint costs from v2.0 comparison data.
+    Extract per-variable checkpoint memory from v2.0 comparison data.
 
     Uses cumulative_by_var field when available (TRUE cumulative accounting for sharing).
-    Falls back to deriving from checkpoint_var_costs for backwards compatibility.
+    Otherwise uses checkpoint_by_var which contains the CURRENT checkpoint state at each cell.
 
     Args:
         data: Comparison data dict
@@ -1764,8 +2026,8 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
 
     Returns dict with:
         cells: list of cell indices
-        by_var: dict mapping variable name to list of CUMULATIVE bytes per cell
-        vars_ordered: list of variable names ordered by total size descending
+        by_var: dict mapping variable name to list of bytes per cell
+        vars_ordered: list of variable names ordered by max size descending
         initial_count: number of initial execution cells (before reruns)
 
     Returns None if no checkpoint data available.
@@ -1806,37 +2068,39 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
                 var_by_cell[var_name].append(var_bytes)
 
         # Get MAX cumulative for ordering (captures peak contribution, not just final)
-        var_max: Dict[str, int] = {v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names}
+        var_max: Dict[str, int] = {
+            v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names
+        }
     else:
-        # Fall back to old method - derives from checkpoint_var_costs (may overcount)
-        has_costs = any(c.get("checkpoint_var_costs") for c in memory_cells)
+        # Use checkpoint_by_var - contains correct CURRENT state in MB
+        has_by_var = any(c.get("checkpoint_by_var") for c in memory_cells)
 
-        if not has_costs:
+        if not has_by_var:
             return None
 
-        # First pass: collect all variable names
-        all_var_names = set()
+        all_var_names: set = set()
         for c in memory_cells:
-            costs = c.get("checkpoint_var_costs") or {}
-            all_var_names.update(costs.keys())
+            by_var = c.get("checkpoint_by_var") or {}
+            all_var_names.update(by_var.keys())
 
-        # Initialize tracking - cumulative totals per variable
-        var_cumulative: Dict[str, int] = {v: 0 for v in all_var_names}
-        var_by_cell = {v: [] for v in all_var_names}
+        if not all_var_names:
+            return None
 
-        # Second pass: collect CUMULATIVE data (OLD method - overcounts sharing)
+        var_by_cell: Dict[str, List[int]] = {v: [] for v in all_var_names}
+        mb_to_bytes = 1024 * 1024
+
         for c in memory_cells:
-            costs = c.get("checkpoint_var_costs") or {}
+            by_var = c.get("checkpoint_by_var") or {}
 
             for var_name in all_var_names:
-                if var_name in costs:
-                    var_bytes = costs[var_name].get("bytes", 0)
-                    var_cumulative[var_name] += var_bytes
-                # Append current cumulative value for this variable
-                var_by_cell[var_name].append(var_cumulative[var_name])
+                # checkpoint_by_var is in MB, convert to bytes for consistency
+                var_mb = by_var.get(var_name, 0)
+                var_by_cell[var_name].append(int(var_mb * mb_to_bytes))
 
-        # Get MAX cumulative for ordering (captures peak contribution)
-        var_max = {v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names}
+        # Get MAX for ordering
+        var_max: Dict[str, int] = {
+            v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names
+        }
 
     # Order variables by MAX cumulative size descending (not final - captures vars that get cleaned up)
     vars_ordered = sorted(var_max.keys(), key=lambda v: var_max[v], reverse=True)
@@ -1873,7 +2137,9 @@ def extract_checkpoint_var_data(data: Dict[str, Any], top_n: int = 10) -> Option
     }
 
 
-def extract_checkpoint_timing_var_data(data: Dict[str, Any], top_n: int = 10) -> Optional[Dict[str, Any]]:
+def extract_checkpoint_timing_var_data(
+    data: Dict[str, Any], top_n: int = 10
+) -> Optional[Dict[str, Any]]:
     """
     Extract PER-CELL per-variable checkpoint TIMING from v2.0 comparison data.
 
@@ -1977,7 +2243,7 @@ def plot_combined_v2(
     data: Dict[str, Any],
     output_path: Optional[str] = None,
     large_fonts: bool = True,
-    top_n: int = 10
+    top_n: int = 10,
 ) -> Optional[Any]:
     """
     Create combined 6-panel plot (2x3 grid) for v2.0 data with HeapSizer memory:
@@ -2008,8 +2274,12 @@ def plot_combined_v2(
     flowbook_timing = flowbook.get("timing", {})
     baseline_initial_cells = baseline_timing.get("cells", []) if baseline_timing else []
     flowbook_initial_cells = flowbook_timing.get("cells", []) if flowbook_timing else []
-    baseline_rerun_cells = baseline_timing.get("rerun_cells", []) if baseline_timing else []
-    flowbook_rerun_cells = flowbook_timing.get("rerun_cells", []) if flowbook_timing else []
+    baseline_rerun_cells = (
+        baseline_timing.get("rerun_cells", []) if baseline_timing else []
+    )
+    flowbook_rerun_cells = (
+        flowbook_timing.get("rerun_cells", []) if flowbook_timing else []
+    )
     baseline_cells = baseline_initial_cells + baseline_rerun_cells
     flowbook_cells = flowbook_initial_cells + flowbook_rerun_cells
     timing_initial_count = len(baseline_initial_cells)
@@ -2019,8 +2289,12 @@ def plot_combined_v2(
     flowbook_memory = flowbook.get("memory", {})
     baseline_mem_initial = baseline_memory.get("cells", []) if baseline_memory else []
     flowbook_mem_initial = flowbook_memory.get("cells", []) if flowbook_memory else []
-    baseline_mem_rerun = baseline_memory.get("rerun_cells", []) if baseline_memory else []
-    flowbook_mem_rerun = flowbook_memory.get("rerun_cells", []) if flowbook_memory else []
+    baseline_mem_rerun = (
+        baseline_memory.get("rerun_cells", []) if baseline_memory else []
+    )
+    flowbook_mem_rerun = (
+        flowbook_memory.get("rerun_cells", []) if flowbook_memory else []
+    )
     baseline_mem_cells = baseline_mem_initial + baseline_mem_rerun
     flowbook_mem_cells = flowbook_mem_initial + flowbook_mem_rerun
     memory_initial_count = len(baseline_mem_initial)
@@ -2040,9 +2314,12 @@ def plot_combined_v2(
     # Always use 2x3 grid layout
     fig, axes_2d = plt.subplots(3, 2, figsize=(14, 18))
     axes = [
-        axes_2d[0, 0], axes_2d[0, 1],  # Row 1: Timing, Checkpoint Time by Variable
-        axes_2d[1, 0], axes_2d[1, 1],  # Row 2: Memory, Checkpoint Memory by Variable
-        axes_2d[2, 0], axes_2d[2, 1],  # Row 3: Overhead per Cell, Memory Overhead per Cell
+        axes_2d[0, 0],
+        axes_2d[0, 1],  # Row 1: Timing, Checkpoint Time by Variable
+        axes_2d[1, 0],
+        axes_2d[1, 1],  # Row 2: Memory, Checkpoint Memory by Variable
+        axes_2d[2, 0],
+        axes_2d[2, 1],  # Row 3: Overhead per Cell, Memory Overhead per Cell
     ]
 
     # Prepare shared data for timing
@@ -2051,7 +2328,9 @@ def plot_combined_v2(
     if baseline_cells and flowbook_cells:
         # Both baseline and flowbook available - align by cell_id
         for c in baseline_cells:
-            cell_data_map[c["cell_id"]] = {"baseline_ms": c.get("execute_duration_ms", c.get("cell_runtime_ms", 0))}
+            cell_data_map[c["cell_id"]] = {
+                "baseline_ms": c.get("execute_duration_ms", c.get("cell_runtime_ms", 0))
+            }
         for c in flowbook_cells:
             if c["cell_id"] in cell_data_map:
                 execute_ms = c.get("execute_duration_ms", c.get("cell_runtime_ms", 0))
@@ -2087,12 +2366,36 @@ def plot_combined_v2(
     cells = np.arange(1, len(cell_ids) + 1) if cell_ids else np.array([])
 
     # Arrays for timing data
-    baseline_arr = np.array([cell_data_map[cid].get("baseline_ms", 0) for cid in cell_ids]) if cell_ids else np.array([])
-    code_arr = np.array([cell_data_map[cid].get("code_ms", 0) for cid in cell_ids]) if cell_ids else np.array([])
-    state_arr = np.array([cell_data_map[cid].get("state_ms", 0) for cid in cell_ids]) if cell_ids else np.array([])
-    check_arr = np.array([cell_data_map[cid].get("check_ms", 0) for cid in cell_ids]) if cell_ids else np.array([])
-    execute_arr = np.array([cell_data_map[cid].get("execute_ms", 0) for cid in cell_ids]) if cell_ids else np.array([])
-    other_arr = np.maximum(execute_arr - (code_arr + state_arr + check_arr), 0) if cell_ids else np.array([])
+    baseline_arr = (
+        np.array([cell_data_map[cid].get("baseline_ms", 0) for cid in cell_ids])
+        if cell_ids
+        else np.array([])
+    )
+    code_arr = (
+        np.array([cell_data_map[cid].get("code_ms", 0) for cid in cell_ids])
+        if cell_ids
+        else np.array([])
+    )
+    state_arr = (
+        np.array([cell_data_map[cid].get("state_ms", 0) for cid in cell_ids])
+        if cell_ids
+        else np.array([])
+    )
+    check_arr = (
+        np.array([cell_data_map[cid].get("check_ms", 0) for cid in cell_ids])
+        if cell_ids
+        else np.array([])
+    )
+    execute_arr = (
+        np.array([cell_data_map[cid].get("execute_ms", 0) for cid in cell_ids])
+        if cell_ids
+        else np.array([])
+    )
+    other_arr = (
+        np.maximum(execute_arr - (code_arr + state_arr + check_arr), 0)
+        if cell_ids
+        else np.array([])
+    )
 
     # Cumulative sums
     baseline_cumsum = np.cumsum(baseline_arr) if len(baseline_arr) > 0 else np.array([])
@@ -2106,13 +2409,49 @@ def plot_combined_v2(
     if len(cells) > 0:
         # Plot baseline/code line (baseline if available, otherwise code time)
         baseline_label = "Baseline" if has_baseline else "Code (no baseline)"
-        ax.plot(cells, baseline_cumsum / 1000, color=colors[0], linewidth=2, marker='o', markersize=4, label=baseline_label)
+        ax.plot(
+            cells,
+            baseline_cumsum / 1000,
+            color=colors[0],
+            linewidth=2,
+            marker="o",
+            markersize=4,
+            label=baseline_label,
+        )
 
         # FlowBook as stacked area: code (bottom) + state + check + other (top)
-        ax.fill_between(cells, 0, code_cumsum / 1000, alpha=0.3, color=colors[1], label="FlowBook Code")
-        ax.fill_between(cells, code_cumsum / 1000, (code_cumsum + state_cumsum) / 1000, alpha=0.4, color=colors[2], label="State")
-        ax.fill_between(cells, (code_cumsum + state_cumsum) / 1000, (code_cumsum + state_cumsum + check_cumsum) / 1000, alpha=0.4, color=colors[3], label="Check")
-        ax.fill_between(cells, (code_cumsum + state_cumsum + check_cumsum) / 1000, (code_cumsum + state_cumsum + check_cumsum + other_cumsum) / 1000, alpha=0.4, color=colors[4], label="Other")
+        ax.fill_between(
+            cells,
+            0,
+            code_cumsum / 1000,
+            alpha=0.3,
+            color=colors[1],
+            label="FlowBook Code",
+        )
+        ax.fill_between(
+            cells,
+            code_cumsum / 1000,
+            (code_cumsum + state_cumsum) / 1000,
+            alpha=0.4,
+            color=colors[2],
+            label="State",
+        )
+        ax.fill_between(
+            cells,
+            (code_cumsum + state_cumsum) / 1000,
+            (code_cumsum + state_cumsum + check_cumsum) / 1000,
+            alpha=0.4,
+            color=colors[3],
+            label="Check",
+        )
+        ax.fill_between(
+            cells,
+            (code_cumsum + state_cumsum + check_cumsum) / 1000,
+            (code_cumsum + state_cumsum + check_cumsum + other_cumsum) / 1000,
+            alpha=0.4,
+            color=colors[4],
+            label="Other",
+        )
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Cumulative Time (seconds)", fontsize=label_size)
@@ -2123,11 +2462,17 @@ def plot_combined_v2(
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
-        ax.tick_params(axis='both', labelsize=tick_size)
+        ax.tick_params(axis="both", labelsize=tick_size)
 
         # Add separator line for rerun phase
         if timing_initial_count < len(cells):
-            ax.axvline(x=timing_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+            ax.axvline(
+                x=timing_initial_count + 0.5,
+                color="red",
+                linestyle="--",
+                linewidth=2,
+                label="Rerun Start",
+            )
 
         ax.legend(loc="upper left", fontsize=legend_size)
 
@@ -2140,23 +2485,41 @@ def plot_combined_v2(
         total_baseline_s = baseline_cumsum[-1] / 1000
 
         if has_baseline:
-            textstr = f'Baseline: {total_baseline_s:.2f}s\nFlowBook: {total_flowbook_s:.2f}s'
+            textstr = (
+                f"Baseline: {total_baseline_s:.2f}s\nFlowBook: {total_flowbook_s:.2f}s"
+            )
         else:
-            textstr = f'Code: {total_code_s:.2f}s\nTotal: {total_flowbook_s:.2f}s'
-        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-        ax.text(0.02, 0.70, textstr, transform=ax.transAxes, fontsize=legend_size,
-                verticalalignment='top', horizontalalignment='left', bbox=props)
+            textstr = f"Code: {total_code_s:.2f}s\nTotal: {total_flowbook_s:.2f}s"
+        props = dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray")
+        ax.text(
+            0.02,
+            0.70,
+            textstr,
+            transform=ax.transAxes,
+            fontsize=legend_size,
+            verticalalignment="top",
+            horizontalalignment="left",
+            bbox=props,
+        )
 
         # Annotate overhead percentage relative to FlowBook Code time
         total_overhead_s = total_state_s + total_check_s + total_other_s
         if total_code_s > 0:
             overhead_pct = (total_overhead_s / total_code_s) * 100
-            ax.annotate(f'{overhead_pct:.1f}% overhead (vs code)',
-                        xy=(cells[-1], total_flowbook_s),
-                        xytext=(5, 0), textcoords='offset points',
-                        fontsize=legend_size, va='center', ha='left', color=colors[1])
+            ax.annotate(
+                f"{overhead_pct:.1f}% overhead (vs code)",
+                xy=(cells[-1], total_flowbook_s),
+                xytext=(5, 0),
+                textcoords="offset points",
+                fontsize=legend_size,
+                va="center",
+                ha="left",
+                color=colors[1],
+            )
     else:
-        ax.text(0.5, 0.5, 'No timing data', ha='center', va='center', transform=ax.transAxes)
+        ax.text(
+            0.5, 0.5, "No timing data", ha="center", va="center", transform=ax.transAxes
+        )
         ax.set_title("Timing Comparison", fontsize=title_size)
 
     # ========== Panel 2: Checkpoint Time by Variable (top-right) ==========
@@ -2167,21 +2530,48 @@ def plot_combined_v2(
         timing_var_types = timing_var_data.get("var_types", {})
 
         # Stack checkpoint timing by variable (ms -> seconds)
-        stacked = [np.array(timing_var_data["by_var"][v]) / 1000 for v in timing_var_data["vars_ordered"]]
+        stacked = [
+            np.array(timing_var_data["by_var"][v]) / 1000
+            for v in timing_var_data["vars_ordered"]
+        ]
         cumulative_timing = np.zeros(len(timing_cells))
-        for i, (v, data_sec) in enumerate(zip(timing_var_data["vars_ordered"], stacked)):
+        for i, (v, data_sec) in enumerate(
+            zip(timing_var_data["vars_ordered"], stacked)
+        ):
             var_type = timing_var_types.get(v, "")
             label = f"{v} ({var_type})" if var_type else v
-            ax.fill_between(timing_cells, cumulative_timing, cumulative_timing + data_sec, alpha=0.7, color=var_colors[i], label=label)
+            ax.fill_between(
+                timing_cells,
+                cumulative_timing,
+                cumulative_timing + data_sec,
+                alpha=0.7,
+                color=var_colors[i],
+                label=label,
+            )
             cumulative_timing = cumulative_timing + data_sec
 
         # Draw total line
-        ax.plot(timing_cells, cumulative_timing, color='black', linewidth=1.5, linestyle='--', label='Total')
+        ax.plot(
+            timing_cells,
+            cumulative_timing,
+            color="black",
+            linewidth=1.5,
+            linestyle="--",
+            label="Total",
+        )
 
         # Add separator line for rerun phase
-        timing_var_initial_count = timing_var_data.get("initial_count", len(timing_cells))
+        timing_var_initial_count = timing_var_data.get(
+            "initial_count", len(timing_cells)
+        )
         if timing_var_initial_count < len(timing_cells):
-            ax.axvline(x=timing_var_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+            ax.axvline(
+                x=timing_var_initial_count + 0.5,
+                color="red",
+                linestyle="--",
+                linewidth=2,
+                label="Rerun Start",
+            )
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Checkpoint Time (seconds)", fontsize=label_size)
@@ -2194,9 +2584,16 @@ def plot_combined_v2(
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
     else:
-        ax.text(0.5, 0.5, 'No checkpoint timing data', ha='center', va='center', transform=ax.transAxes)
+        ax.text(
+            0.5,
+            0.5,
+            "No checkpoint timing data",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
         ax.set_title("Checkpoint Time by Variable", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
 
     # ========== Panel 3: Memory Overhead (middle-left) ==========
     # Uses simplified fields: namespace_mb, checkpoint_cumulative_mb, gpu_mb
@@ -2206,39 +2603,69 @@ def plot_combined_v2(
 
         # Extract namespace, checkpoint, and GPU memory using new simplified fields
         # (with fallback to old field names for backward compatibility)
-        namespace_mb = np.array([
-            c.get("namespace_mb", c.get("current_footprint_mb", c.get("base_namespace_mb", 0)))
-            for c in flowbook_mem_cells
-        ])
-        checkpoint_cumulative_mb = np.array([
-            c.get("checkpoint_cumulative_mb", (c.get("overhead_breakdown") or {}).get("checkpoints_mb", 0))
-            for c in flowbook_mem_cells
-        ])
-        gpu_mb = np.array([
-            c.get("gpu_mb", c.get("gpu_mem_samples", 0))
-            for c in flowbook_mem_cells
-        ])
+        namespace_mb = np.array(
+            [
+                c.get(
+                    "namespace_mb",
+                    c.get("current_footprint_mb", c.get("base_namespace_mb", 0)),
+                )
+                for c in flowbook_mem_cells
+            ]
+        )
+        checkpoint_cumulative_mb = np.array(
+            [
+                c.get(
+                    "checkpoint_cumulative_mb",
+                    (c.get("overhead_breakdown") or {}).get("checkpoints_mb", 0),
+                )
+                for c in flowbook_mem_cells
+            ]
+        )
+        gpu_mb = np.array(
+            [c.get("gpu_mb", c.get("gpu_mem_samples", 0)) for c in flowbook_mem_cells]
+        )
 
         has_gpu = np.any(gpu_mb > 0)
         stack_colors = sns.color_palette("Set2", 5)
 
         # Layer 1: User namespace (bottom - gray)
-        ax.fill_between(mem_cells_arr, 0, namespace_mb, alpha=0.4, color='gray', label='User Namespace')
+        ax.fill_between(
+            mem_cells_arr,
+            0,
+            namespace_mb,
+            alpha=0.4,
+            color="gray",
+            label="User Namespace",
+        )
         cumulative_mem = namespace_mb.copy()
 
         # Layer 2: GPU memory (if present)
         if has_gpu:
             next_level = cumulative_mem + gpu_mb
-            ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.4, color='orange', label='GPU Memory')
+            ax.fill_between(
+                mem_cells_arr,
+                cumulative_mem,
+                next_level,
+                alpha=0.4,
+                color="orange",
+                label="GPU Memory",
+            )
             cumulative_mem = next_level
 
         # Layer 3: Checkpoint overhead
         next_level = cumulative_mem + checkpoint_cumulative_mb
-        ax.fill_between(mem_cells_arr, cumulative_mem, next_level, alpha=0.5, color='steelblue', label='Checkpoints')
+        ax.fill_between(
+            mem_cells_arr,
+            cumulative_mem,
+            next_level,
+            alpha=0.5,
+            color="steelblue",
+            label="Checkpoints",
+        )
         cumulative_mem = next_level
 
         # Draw namespace line for reference
-        ax.plot(mem_cells_arr, namespace_mb, color='gray', linewidth=2, linestyle='--')
+        ax.plot(mem_cells_arr, namespace_mb, color="gray", linewidth=2, linestyle="--")
 
         # Calculate and annotate PEAK overhead percentage
         base_mem = namespace_mb + gpu_mb  # Base = namespace + GPU
@@ -2246,26 +2673,40 @@ def plot_combined_v2(
         peak_idx = np.argmax(cumulative_mem - base_mem)
         if base_mem[peak_idx] > 0:
             peak_overhead_pct = peak_overhead / base_mem[peak_idx] * 100
-            ax.annotate(f'{peak_overhead_pct:.1f}% peak overhead',
-                        xy=(mem_cells_arr[peak_idx], cumulative_mem[peak_idx]),
-                        xytext=(5, 5), textcoords='offset points',
-                        fontsize=legend_size, va='bottom', ha='left', color=colors[1])
+            ax.annotate(
+                f"{peak_overhead_pct:.1f}% peak overhead",
+                xy=(mem_cells_arr[peak_idx], cumulative_mem[peak_idx]),
+                xytext=(5, 5),
+                textcoords="offset points",
+                fontsize=legend_size,
+                va="bottom",
+                ha="left",
+                color=colors[1],
+            )
 
-        ax.set_title('Memory Overhead', fontsize=title_size)
-        ax.set_xlabel('Cell Number', fontsize=label_size)
-        ax.set_ylabel('Memory (MB)', fontsize=label_size)
+        ax.set_title("Memory Overhead", fontsize=title_size)
+        ax.set_xlabel("Cell Number", fontsize=label_size)
+        ax.set_ylabel("Memory (MB)", fontsize=label_size)
 
         if memory_initial_count < len(mem_cells_arr):
-            ax.axvline(x=memory_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+            ax.axvline(
+                x=memory_initial_count + 0.5,
+                color="red",
+                linestyle="--",
+                linewidth=2,
+                label="Rerun Start",
+            )
 
-        ax.legend(loc='upper left', fontsize=legend_size - 2)
+        ax.legend(loc="upper left", fontsize=legend_size - 2)
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
     else:
-        ax.text(0.5, 0.5, 'No memory data', ha='center', va='center', transform=ax.transAxes)
+        ax.text(
+            0.5, 0.5, "No memory data", ha="center", va="center", transform=ax.transAxes
+        )
         ax.set_title("Memory Overhead", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
 
     # ========== Panel 4: Checkpoint Memory by Variable (middle-right) ==========
     ax = axes[3]
@@ -2279,43 +2720,87 @@ def plot_combined_v2(
         namespace_var = np.zeros(len(var_cells))
         gpu_mem_var = np.zeros(len(var_cells))
         if has_baseline_memory and len(baseline_mem_cells) >= len(var_cells):
-            namespace_var = np.array([c.get("namespace_mb", c.get("current_footprint_mb", 0)) for c in baseline_mem_cells[:len(var_cells)]])
-            gpu_mem_var = np.array([c.get("gpu_mb", c.get("gpu_mem_samples", 0)) for c in baseline_mem_cells[:len(var_cells)]])
+            namespace_var = np.array(
+                [
+                    c.get("namespace_mb", c.get("current_footprint_mb", 0))
+                    for c in baseline_mem_cells[: len(var_cells)]
+                ]
+            )
+            gpu_mem_var = np.array(
+                [
+                    c.get("gpu_mb", c.get("gpu_mem_samples", 0))
+                    for c in baseline_mem_cells[: len(var_cells)]
+                ]
+            )
         elif has_memory and len(flowbook_mem_cells) >= len(var_cells):
             # Use FlowBook namespace
-            namespace_var = np.array([
-                c.get("namespace_mb", c.get("current_footprint_mb", c.get("base_namespace_mb", 0)))
-                for c in flowbook_mem_cells[:len(var_cells)]
-            ])
-            gpu_mem_var = np.array([c.get("gpu_mb", c.get("gpu_mem_samples", 0)) for c in flowbook_mem_cells[:len(var_cells)]])
+            namespace_var = np.array(
+                [
+                    c.get(
+                        "namespace_mb",
+                        c.get("current_footprint_mb", c.get("base_namespace_mb", 0)),
+                    )
+                    for c in flowbook_mem_cells[: len(var_cells)]
+                ]
+            )
+            gpu_mem_var = np.array(
+                [
+                    c.get("gpu_mb", c.get("gpu_mem_samples", 0))
+                    for c in flowbook_mem_cells[: len(var_cells)]
+                ]
+            )
 
         has_gpu_var = any(g > 0 for g in gpu_mem_var)
 
         # Draw namespace memory first (bottom layer)
-        ax.fill_between(var_cells, 0, namespace_var, alpha=0.3, color='gray', label='User Namespace')
+        ax.fill_between(
+            var_cells, 0, namespace_var, alpha=0.3, color="gray", label="User Namespace"
+        )
         cumulative_var = namespace_var.copy()
 
         # Layer 2: GPU memory (if present) - between namespace and checkpoints
         if has_gpu_var:
             next_level = cumulative_var + gpu_mem_var
-            ax.fill_between(var_cells, cumulative_var, next_level, alpha=0.4, color='orange', label='GPU Memory')
+            ax.fill_between(
+                var_cells,
+                cumulative_var,
+                next_level,
+                alpha=0.4,
+                color="orange",
+                label="GPU Memory",
+            )
             cumulative_var = next_level
 
         # Stack checkpoint variables on top
-        stacked = [np.array(var_data["by_var"][v]) / mb for v in var_data["vars_ordered"]]
+        stacked = [
+            np.array(var_data["by_var"][v]) / mb for v in var_data["vars_ordered"]
+        ]
         for i, (v, data_mb) in enumerate(zip(var_data["vars_ordered"], stacked)):
             var_type = mem_var_types.get(v, "")
             label = f"{v} ({var_type})" if var_type else v
-            ax.fill_between(var_cells, cumulative_var, cumulative_var + data_mb, alpha=0.7, color=var_colors[i], label=label)
+            ax.fill_between(
+                var_cells,
+                cumulative_var,
+                cumulative_var + data_mb,
+                alpha=0.7,
+                color=var_colors[i],
+                label=label,
+            )
             cumulative_var = cumulative_var + data_mb
 
         # Draw namespace line (for reference)
-        ax.plot(var_cells, namespace_var, color='gray', linewidth=2, linestyle='--')
+        ax.plot(var_cells, namespace_var, color="gray", linewidth=2, linestyle="--")
 
         # Add separator line for rerun phase
         var_initial_count = var_data.get("initial_count", len(var_cells))
         if var_initial_count < len(var_cells):
-            ax.axvline(x=var_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+            ax.axvline(
+                x=var_initial_count + 0.5,
+                color="red",
+                linestyle="--",
+                linewidth=2,
+                label="Rerun Start",
+            )
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Memory (MB)", fontsize=label_size)
@@ -2328,9 +2813,16 @@ def plot_combined_v2(
         ax.set_xlim(left=1)
         ax.set_ylim(bottom=0)
     else:
-        ax.text(0.5, 0.5, 'No checkpoint memory data', ha='center', va='center', transform=ax.transAxes)
+        ax.text(
+            0.5,
+            0.5,
+            "No checkpoint memory data",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
         ax.set_title("Checkpoint Memory by Variable", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
 
     # ========== Panel 5: Overhead Time per Cell (bottom-left) ==========
     ax = axes[4]
@@ -2340,9 +2832,32 @@ def plot_combined_v2(
         bar_width = 0.6
 
         # Stacked bar chart with breakdown
-        ax.bar(cells, state_arr / 1000, width=bar_width, alpha=0.7, color=colors[2], label='State')
-        ax.bar(cells, check_arr / 1000, width=bar_width, alpha=0.7, color=colors[3], label='Check', bottom=state_arr / 1000)
-        ax.bar(cells, other_arr / 1000, width=bar_width, alpha=0.7, color=colors[4], label='Other', bottom=(state_arr + check_arr) / 1000)
+        ax.bar(
+            cells,
+            state_arr / 1000,
+            width=bar_width,
+            alpha=0.7,
+            color=colors[2],
+            label="State",
+        )
+        ax.bar(
+            cells,
+            check_arr / 1000,
+            width=bar_width,
+            alpha=0.7,
+            color=colors[3],
+            label="Check",
+            bottom=state_arr / 1000,
+        )
+        ax.bar(
+            cells,
+            other_arr / 1000,
+            width=bar_width,
+            alpha=0.7,
+            color=colors[4],
+            label="Other",
+            bottom=(state_arr + check_arr) / 1000,
+        )
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Overhead per Cell (seconds)", fontsize=label_size)
@@ -2352,16 +2867,24 @@ def plot_combined_v2(
         ax.set_title(title, fontsize=title_size)
 
         if timing_initial_count < len(cells):
-            ax.axvline(x=timing_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+            ax.axvline(
+                x=timing_initial_count + 0.5,
+                color="red",
+                linestyle="--",
+                linewidth=2,
+                label="Rerun Start",
+            )
 
         ax.legend(loc="upper right", fontsize=legend_size)
         ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax.set_xlim(left=0.5, right=len(cells) + 0.5)
         ax.set_ylim(bottom=0)
     else:
-        ax.text(0.5, 0.5, 'No timing data', ha='center', va='center', transform=ax.transAxes)
+        ax.text(
+            0.5, 0.5, "No timing data", ha="center", va="center", transform=ax.transAxes
+        )
         ax.set_title("Overhead Time per Cell", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
 
     # ========== Panel 6: Checkpoint Memory Overhead Ratio per Cell (bottom-right) ==========
     # Shows checkpoint_delta / (prev_namespace + prev_gpu) - the ratio of new checkpoint data to base memory
@@ -2385,7 +2908,9 @@ def plot_combined_v2(
             else:
                 prev_cell = flowbook_mem_cells[i - 1]
                 # Support both old and new field names
-                namespace = prev_cell.get("namespace_mb", prev_cell.get("current_footprint_mb", 0))
+                namespace = prev_cell.get(
+                    "namespace_mb", prev_cell.get("current_footprint_mb", 0)
+                )
                 gpu = prev_cell.get("gpu_mb", prev_cell.get("gpu_mem_samples", 0))
                 base_mb = namespace + gpu
 
@@ -2396,7 +2921,7 @@ def plot_combined_v2(
             ratios.append(ratio)
 
         bar_width = 0.6
-        ax.bar(cell_nums, ratios, width=bar_width, alpha=0.7, color='#66c2a5')
+        ax.bar(cell_nums, ratios, width=bar_width, alpha=0.7, color="#66c2a5")
 
         ax.set_xlabel("Cell Number", fontsize=label_size)
         ax.set_ylabel("Checkpoint / Base Memory", fontsize=label_size)
@@ -2404,7 +2929,13 @@ def plot_combined_v2(
         title = "Checkpoint Overhead Ratio"
         if memory_initial_count < len(flowbook_mem_cells):
             title += f" (cells 1-{memory_initial_count} + {len(flowbook_mem_cells) - memory_initial_count} reruns)"
-            ax.axvline(x=memory_initial_count + 0.5, color='red', linestyle='--', linewidth=2, label='Rerun Start')
+            ax.axvline(
+                x=memory_initial_count + 0.5,
+                color="red",
+                linestyle="--",
+                linewidth=2,
+                label="Rerun Start",
+            )
             ax.legend(loc="upper right", fontsize=legend_size)
         ax.set_title(title, fontsize=title_size)
 
@@ -2412,13 +2943,15 @@ def plot_combined_v2(
         ax.set_xlim(left=0.5, right=len(cell_nums) + 0.5)
         ax.set_ylim(bottom=0)
     else:
-        ax.text(0.5, 0.5, 'No memory data', ha='center', va='center', transform=ax.transAxes)
+        ax.text(
+            0.5, 0.5, "No memory data", ha="center", va="center", transform=ax.transAxes
+        )
         ax.set_title("Checkpoint Memory per Cell", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
 
     # Add notebook name as figure title
     notebook_name = Path(data.get("notebook_path", "notebook")).stem
-    fig.suptitle(notebook_name, fontsize=title_size + 2, fontweight='bold')
+    fig.suptitle(notebook_name, fontsize=title_size + 2, fontweight="bold")
     plt.tight_layout(rect=[0, 0, 1, 0.97])
 
     if output_path is not None:
@@ -2433,7 +2966,7 @@ def plot_combined_v2(
 def plot_overhead_histograms(
     aggregate: "AggregateStats",
     output_path: Optional[str] = None,
-    large_fonts: bool = True
+    large_fonts: bool = True,
 ) -> Optional[Any]:
     """
     Create histogram plots for per-cell overhead distributions.
@@ -2493,9 +3026,21 @@ def plot_overhead_histograms(
             data_plot = total_overhead_filtered
             xlabel = "Total Overhead per Cell (ms)"
 
-        ax.hist(data_plot, bins=30, alpha=0.3, color='steelblue', edgecolor='black')
-        ax.axvline(np.median(data_plot), color='red', linestyle='--', linewidth=2, label=f'Median: {np.median(data_plot):.2f}')
-        ax.axvline(np.mean(data_plot), color='orange', linestyle='-', linewidth=2, label=f'Mean: {np.mean(data_plot):.2f}')
+        ax.hist(data_plot, bins=30, alpha=0.3, color="steelblue", edgecolor="black")
+        ax.axvline(
+            np.median(data_plot),
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label=f"Median: {np.median(data_plot):.2f}",
+        )
+        ax.axvline(
+            np.mean(data_plot),
+            color="orange",
+            linestyle="-",
+            linewidth=2,
+            label=f"Mean: {np.mean(data_plot):.2f}",
+        )
         ax.set_xlabel(xlabel, fontsize=label_size)
         ax.set_ylabel("Frequency", fontsize=label_size)
         ax.set_title("Total Overhead per Cell Distribution", fontsize=title_size)
@@ -2505,23 +3050,47 @@ def plot_overhead_histograms(
         n_total = len(total_overhead)
         n_filtered = len(total_overhead_filtered)
         outliers_removed = n_total - n_filtered
-        textstr = f'N={n_filtered} (removed {outliers_removed} outliers)'
-        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-        ax.text(0.98, 0.95, textstr, transform=ax.transAxes, fontsize=tick_size,
-                verticalalignment='top', horizontalalignment='right', bbox=props)
+        textstr = f"N={n_filtered} (removed {outliers_removed} outliers)"
+        props = dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray")
+        ax.text(
+            0.98,
+            0.95,
+            textstr,
+            transform=ax.transAxes,
+            fontsize=tick_size,
+            verticalalignment="top",
+            horizontalalignment="right",
+            bbox=props,
+        )
     else:
-        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
         ax.set_title("Total Overhead per Cell Distribution", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
 
     # Histogram 2: Memory Overhead Ratio per Cell (checkpoint / user_ns)
     ax = axes[1]
     if len(memory_overhead_filtered) > 0:
-        ax.hist(memory_overhead_filtered, bins=30, alpha=0.3, color='seagreen', edgecolor='black')
-        ax.axvline(np.median(memory_overhead_filtered), color='red', linestyle='--', linewidth=2,
-                   label=f'Median: {np.median(memory_overhead_filtered):.2f}')
-        ax.axvline(np.mean(memory_overhead_filtered), color='orange', linestyle='-', linewidth=2,
-                   label=f'Mean: {np.mean(memory_overhead_filtered):.2f}')
+        ax.hist(
+            memory_overhead_filtered,
+            bins=30,
+            alpha=0.3,
+            color="seagreen",
+            edgecolor="black",
+        )
+        ax.axvline(
+            np.median(memory_overhead_filtered),
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label=f"Median: {np.median(memory_overhead_filtered):.2f}",
+        )
+        ax.axvline(
+            np.mean(memory_overhead_filtered),
+            color="orange",
+            linestyle="-",
+            linewidth=2,
+            label=f"Mean: {np.mean(memory_overhead_filtered):.2f}",
+        )
         ax.set_xlabel("Checkpoint / User NS Ratio", fontsize=label_size)
         ax.set_ylabel("Frequency", fontsize=label_size)
         ax.set_title("Memory Overhead Ratio Distribution", fontsize=title_size)
@@ -2531,16 +3100,28 @@ def plot_overhead_histograms(
         n_total = len(memory_overhead)
         n_filtered = len(memory_overhead_filtered)
         outliers_removed = n_total - n_filtered
-        textstr = f'N={n_filtered} (removed {outliers_removed} outliers)'
-        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-        ax.text(0.98, 0.95, textstr, transform=ax.transAxes, fontsize=tick_size,
-                verticalalignment='top', horizontalalignment='right', bbox=props)
+        textstr = f"N={n_filtered} (removed {outliers_removed} outliers)"
+        props = dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray")
+        ax.text(
+            0.98,
+            0.95,
+            textstr,
+            transform=ax.transAxes,
+            fontsize=tick_size,
+            verticalalignment="top",
+            horizontalalignment="right",
+            bbox=props,
+        )
     else:
-        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
         ax.set_title("Memory Overhead per Cell Distribution", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
 
-    fig.suptitle("Per-Cell Overhead Distributions (Outliers Removed)", fontsize=title_size + 2, fontweight='bold')
+    fig.suptitle(
+        "Per-Cell Overhead Distributions (Outliers Removed)",
+        fontsize=title_size + 2,
+        fontweight="bold",
+    )
     plt.tight_layout(rect=[0, 0, 1, 0.95])
 
     if output_path is not None:
@@ -2555,7 +3136,7 @@ def plot_overhead_histograms(
 def plot_overhead_cdfs(
     aggregate: "AggregateStats",
     output_path: Optional[str] = None,
-    large_fonts: bool = True
+    large_fonts: bool = True,
 ) -> Optional[List[Any]]:
     """
     Create CDF plots for per-cell overhead distributions.
@@ -2592,10 +3173,10 @@ def plot_overhead_cdfs(
         total_xlabel = "Total Overhead per Cell (ms)"
         total_cdf = np.arange(1, len(total_data) + 1) / len(total_data)
         total_stats = {
-            'P50': np.percentile(total_data, 50),
-            'P90': np.percentile(total_data, 90),
-            'P95': np.percentile(total_data, 95),
-            'P99': np.percentile(total_data, 99),
+            "P50": np.percentile(total_data, 50),
+            "P90": np.percentile(total_data, 90),
+            "P95": np.percentile(total_data, 95),
+            "P99": np.percentile(total_data, 99),
         }
     else:
         total_data = None
@@ -2605,61 +3186,117 @@ def plot_overhead_cdfs(
         memory_data_ratio = np.sort(memory_overhead)
         memory_cdf = np.arange(1, len(memory_data_ratio) + 1) / len(memory_data_ratio)
         memory_stats_ratio = {
-            'P50': np.percentile(memory_data_ratio, 50),
-            'P90': np.percentile(memory_data_ratio, 90),
-            'P95': np.percentile(memory_data_ratio, 95),
-            'P99': np.percentile(memory_data_ratio, 99),
+            "P50": np.percentile(memory_data_ratio, 50),
+            "P90": np.percentile(memory_data_ratio, 90),
+            "P95": np.percentile(memory_data_ratio, 95),
+            "P99": np.percentile(memory_data_ratio, 99),
         }
     else:
         memory_data_ratio = None
 
     def format_ratio(r):
         """Format ratio to human readable."""
-        return f'{r:.2f}'
+        return f"{r:.2f}"
 
     def add_percentile_markers(ax, data, cdf, stats, unit_fmt, color, legend_fontsize):
         """Add percentile markers with vertical lines and labels, plus legend."""
-        percentiles = ['P50', 'P90', 'P95', 'P99']
+        percentiles = ["P50", "P90", "P95", "P99"]
         y_positions = [0.5, 0.9, 0.95, 0.99]
         # Stagger labels: alternate above/below to avoid crowding
         label_offsets = [(5, 5), (5, -15), (5, 5), (5, -15)]  # (x, y) offsets
-        label_vas = ['bottom', 'top', 'bottom', 'top']  # vertical alignments
+        label_vas = ["bottom", "top", "bottom", "top"]  # vertical alignments
 
-        for pname, y_val, offset, va in zip(percentiles, y_positions, label_offsets, label_vas):
+        for pname, y_val, offset, va in zip(
+            percentiles, y_positions, label_offsets, label_vas
+        ):
             if pname not in stats:
                 continue
             x_val = stats[pname]
             # Vertical line from x-axis to the point (lighter)
-            ax.vlines(x_val, 0, y_val, color=color, linestyle='--', linewidth=1, alpha=0.4)
+            ax.vlines(
+                x_val, 0, y_val, color=color, linestyle="--", linewidth=1, alpha=0.4
+            )
             # Small point on the curve
-            ax.scatter([x_val], [y_val], color=color, s=30, marker='o', zorder=5, edgecolors='black', linewidths=0.5)
+            ax.scatter(
+                [x_val],
+                [y_val],
+                color=color,
+                s=30,
+                marker="o",
+                zorder=5,
+                edgecolors="black",
+                linewidths=0.5,
+            )
             # Staggered label by the dot
-            ax.annotate(pname, (x_val, y_val), textcoords='offset points',
-                       xytext=offset, fontsize=annotation_size, ha='left', va=va, fontweight='bold')
+            ax.annotate(
+                pname,
+                (x_val, y_val),
+                textcoords="offset points",
+                xytext=offset,
+                fontsize=annotation_size,
+                ha="left",
+                va=va,
+                fontweight="bold",
+            )
 
         # Add max point on the curve (at CDF = 1.0) with label
         if len(data) > 0:
             max_val = np.max(data)
-            ax.scatter([max_val], [1.0], color=color, s=30, marker='o', zorder=5, edgecolors='black', linewidths=0.5)
-            ax.annotate('Max', (max_val, 1.0), textcoords='offset points',
-                       xytext=(5, -15), fontsize=annotation_size, ha='left', va='top', fontweight='bold')
+            ax.scatter(
+                [max_val],
+                [1.0],
+                color=color,
+                s=30,
+                marker="o",
+                zorder=5,
+                edgecolors="black",
+                linewidths=0.5,
+            )
+            ax.annotate(
+                "Max",
+                (max_val, 1.0),
+                textcoords="offset points",
+                xytext=(5, -15),
+                fontsize=annotation_size,
+                ha="left",
+                va="top",
+                fontweight="bold",
+            )
 
         # Add legend box with values in lower right (right-aligned values)
-        formatted_values = {pname: unit_fmt(stats[pname]) for pname in percentiles if pname in stats}
+        formatted_values = {
+            pname: unit_fmt(stats[pname]) for pname in percentiles if pname in stats
+        }
         if len(data) > 0:
-            formatted_values['Max'] = unit_fmt(np.max(data))
-        max_val_len = max(len(v) for v in formatted_values.values()) if formatted_values else 0
-        legend_keys = [p for p in percentiles if p in formatted_values] + (['Max'] if 'Max' in formatted_values else [])
-        legend_lines = [f'{pname}: {formatted_values[pname]:>{max_val_len}}' for pname in legend_keys]
-        legend_text = '\n'.join(legend_lines)
-        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-        ax.text(0.98, 0.02, legend_text, transform=ax.transAxes, fontsize=legend_fontsize,
-                verticalalignment='bottom', horizontalalignment='right', bbox=props, family='monospace')
+            formatted_values["Max"] = unit_fmt(np.max(data))
+        max_val_len = (
+            max(len(v) for v in formatted_values.values()) if formatted_values else 0
+        )
+        legend_keys = [p for p in percentiles if p in formatted_values] + (
+            ["Max"] if "Max" in formatted_values else []
+        )
+        legend_lines = [
+            f"{pname}: {formatted_values[pname]:>{max_val_len}}"
+            for pname in legend_keys
+        ]
+        legend_text = "\n".join(legend_lines)
+        props = dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray")
+        ax.text(
+            0.98,
+            0.02,
+            legend_text,
+            transform=ax.transAxes,
+            fontsize=legend_fontsize,
+            verticalalignment="bottom",
+            horizontalalignment="right",
+            bbox=props,
+            family="monospace",
+        )
 
     def add_percentile_gridlines(ax):
         """Add horizontal gridlines at percentile levels."""
         for y in [0.5, 0.9, 0.95, 0.99]:
-            ax.axhline(y, color='gray', linestyle=':', linewidth=0.8, alpha=0.5)
+            ax.axhline(y, color="gray", linestyle=":", linewidth=0.8, alpha=0.5)
 
     figures = []
 
@@ -2671,38 +3308,86 @@ def plot_overhead_cdfs(
     if total_data is not None:
         pos_mask = total_data > 0
         if np.any(pos_mask):
-            ax.fill_between(total_data[pos_mask], 0, total_cdf[pos_mask], alpha=0.3, color='steelblue', edgecolor='none')
-            ax.plot(total_data[pos_mask], total_cdf[pos_mask], color='steelblue', linewidth=2)
+            ax.fill_between(
+                total_data[pos_mask],
+                0,
+                total_cdf[pos_mask],
+                alpha=0.3,
+                color="steelblue",
+                edgecolor="none",
+            )
+            ax.plot(
+                total_data[pos_mask],
+                total_cdf[pos_mask],
+                color="steelblue",
+                linewidth=2,
+            )
 
-            add_percentile_markers(ax, total_data[pos_mask], total_cdf[pos_mask],
-                                  total_stats, lambda x: f'{x:.1f}ms', 'black', tick_size)
+            add_percentile_markers(
+                ax,
+                total_data[pos_mask],
+                total_cdf[pos_mask],
+                total_stats,
+                lambda x: f"{x:.1f}ms",
+                "black",
+                tick_size,
+            )
             add_percentile_gridlines(ax)
 
-            ax.set_xscale('log')
+            ax.set_xscale("log")
             ax.set_xlabel(total_xlabel, fontsize=label_size)
             ax.set_ylabel("Cumulative Probability", fontsize=label_size)
             ax.set_title("Total Overhead (Log Scale)", fontsize=title_size)
             ax.set_ylim(0, 1.05)
 
-            textstr = f'N={len(total_data)}'
-            props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-            ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
-                    verticalalignment='top', horizontalalignment='left', bbox=props)
+            textstr = f"N={len(total_data)}"
+            props = dict(
+                boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray"
+            )
+            ax.text(
+                0.02,
+                0.98,
+                textstr,
+                transform=ax.transAxes,
+                fontsize=tick_size,
+                verticalalignment="top",
+                horizontalalignment="left",
+                bbox=props,
+            )
     else:
-        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
         ax.set_title("Total Overhead (Log Scale)", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
 
     # Memory overhead ratio (checkpoint / user_ns)
     ax = axes1[1]
     if memory_data_ratio is not None:
         pos_mask = memory_data_ratio > 0
         if np.any(pos_mask):
-            ax.fill_between(memory_data_ratio[pos_mask], 0, memory_cdf[pos_mask], alpha=0.3, color='seagreen', edgecolor='none')
-            ax.plot(memory_data_ratio[pos_mask], memory_cdf[pos_mask], color='seagreen', linewidth=2)
+            ax.fill_between(
+                memory_data_ratio[pos_mask],
+                0,
+                memory_cdf[pos_mask],
+                alpha=0.3,
+                color="seagreen",
+                edgecolor="none",
+            )
+            ax.plot(
+                memory_data_ratio[pos_mask],
+                memory_cdf[pos_mask],
+                color="seagreen",
+                linewidth=2,
+            )
 
-            add_percentile_markers(ax, memory_data_ratio[pos_mask], memory_cdf[pos_mask],
-                                  memory_stats_ratio, format_ratio, 'black', tick_size)
+            add_percentile_markers(
+                ax,
+                memory_data_ratio[pos_mask],
+                memory_cdf[pos_mask],
+                memory_stats_ratio,
+                format_ratio,
+                "black",
+                tick_size,
+            )
             add_percentile_gridlines(ax)
 
             ax.set_xlabel("Checkpoint / User NS Ratio", fontsize=label_size)
@@ -2710,84 +3395,34 @@ def plot_overhead_cdfs(
             ax.set_title("Memory Overhead Ratio", fontsize=title_size)
             ax.set_ylim(0, 1.05)
 
-            textstr = f'N={len(memory_data_ratio)}'
-            props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-            ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
-                    verticalalignment='top', horizontalalignment='left', bbox=props)
-    else:
-        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-        ax.set_title("Memory Overhead Ratio", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
+            # Log scale x-axis from 1/100 to 1
+            ax.set_xscale("log")
+            ax.set_xlim(0.01, 1)
+            ax.set_xticks([0.01, 0.1, 1])
+            ax.set_xticklabels(["1/100", "1/10", "1"])
 
-    fig1.suptitle("Per-Cell Overhead CDFs (Full Distribution)", fontsize=title_size + 2, fontweight='bold')
+            textstr = f"N={len(memory_data_ratio)}"
+            props = dict(
+                boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray"
+            )
+            ax.text(
+                0.02,
+                0.98,
+                textstr,
+                transform=ax.transAxes,
+                fontsize=tick_size,
+                verticalalignment="top",
+                horizontalalignment="left",
+                bbox=props,
+            )
+    else:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Memory Overhead Ratio", fontsize=title_size)
+    ax.tick_params(axis="both", labelsize=tick_size)
+
+    fig1.suptitle("Per-Cell Overhead CDFs", fontsize=title_size + 2, fontweight="bold")
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     figures.append(fig1)
-
-    # --- Figure 2: Linear scale zoomed to P99 ---
-    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
-
-    # Total overhead - linear, zoomed to P99
-    ax = axes2[0]
-    if total_data is not None:
-        p99_val = total_stats['P99']
-        mask = total_data <= p99_val * 1.05
-        ax.fill_between(total_data[mask], 0, total_cdf[mask], alpha=0.3, color='steelblue', edgecolor='none')
-        ax.plot(total_data[mask], total_cdf[mask], color='steelblue', linewidth=2)
-
-        # Filter stats to those within range
-        stats_in_range = {k: v for k, v in total_stats.items() if v <= p99_val * 1.05}
-        add_percentile_markers(ax, total_data[mask], total_cdf[mask],
-                              stats_in_range, lambda x: f'{x:.1f}ms', 'black', tick_size)
-        add_percentile_gridlines(ax)
-
-        ax.set_xlabel(total_xlabel, fontsize=label_size)
-        ax.set_ylabel("Cumulative Probability", fontsize=label_size)
-        ax.set_title("Total Overhead (Zoomed to P99)", fontsize=title_size)
-        ax.set_ylim(0, 1.05)
-        ax.set_xlim(left=0)
-
-        n_excluded = np.sum(~mask)
-        textstr = f'N={np.sum(mask)} (excluded {n_excluded} > P99)'
-        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
-                verticalalignment='top', horizontalalignment='left', bbox=props)
-    else:
-        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-        ax.set_title("Total Overhead (Zoomed to P99)", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
-
-    # Memory overhead ratio - linear, zoomed to P99
-    ax = axes2[1]
-    if memory_data_ratio is not None:
-        p99_val = memory_stats_ratio['P99']
-        mask = memory_data_ratio <= p99_val * 1.05
-        ax.fill_between(memory_data_ratio[mask], 0, memory_cdf[mask], alpha=0.3, color='seagreen', edgecolor='none')
-        ax.plot(memory_data_ratio[mask], memory_cdf[mask], color='seagreen', linewidth=2)
-
-        stats_in_range = {k: v for k, v in memory_stats_ratio.items() if v <= p99_val * 1.05}
-        add_percentile_markers(ax, memory_data_ratio[mask], memory_cdf[mask],
-                              stats_in_range, format_ratio, 'black', tick_size)
-        add_percentile_gridlines(ax)
-
-        ax.set_xlabel("Checkpoint / User NS Ratio", fontsize=label_size)
-        ax.set_ylabel("Cumulative Probability", fontsize=label_size)
-        ax.set_title("Memory Overhead Ratio (Zoomed to P99)", fontsize=title_size)
-        ax.set_ylim(0, 1.05)
-        ax.set_xlim(left=0)
-
-        n_excluded = np.sum(~mask)
-        textstr = f'N={np.sum(mask)} (excluded {n_excluded} > P99)'
-        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
-                verticalalignment='top', horizontalalignment='left', bbox=props)
-    else:
-        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-        ax.set_title("Memory Overhead Ratio (Zoomed to P99)", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
-
-    fig2.suptitle("Per-Cell Overhead CDFs (Zoomed to P99)", fontsize=title_size + 2, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    figures.append(fig2)
 
     if output_path is not None:
         # Save first figure only (for standalone file output)
@@ -2809,55 +3444,53 @@ def main():
     parser.add_argument(
         "files",
         nargs="*",
-        help="Comparison JSON files to process (supports remote paths like user@host:/path/*.json)"
+        help="Comparison JSON files to process (supports remote paths like user@host:/path/*.json)",
     )
     parser.add_argument(
         "--format",
         choices=["table", "json", "csv"],
         default="table",
-        help="Output format (default: table)"
+        help="Output format (default: table)",
     )
     parser.add_argument(
         "--sort-by",
         choices=["slowdown", "memory", "runtime", "name"],
         default="slowdown",
-        help="Sort files by metric (default: slowdown)"
+        help="Sort files by metric (default: slowdown)",
     )
     parser.add_argument(
-        "--plot",
-        action="store_true",
-        help="Generate PDF plots for each file"
+        "--plot", action="store_true", help="Generate PDF plots for each file"
     )
     parser.add_argument(
         "--output-dir",
         default=".",
-        help="Directory for plot output files (default: current directory)"
+        help="Directory for plot output files (default: current directory)",
     )
     parser.add_argument(
         "--large-fonts",
         action="store_true",
-        help="Use larger fonts for paper-ready plots"
+        help="Use larger fonts for paper-ready plots",
     )
     parser.add_argument(
         "--force-download",
         action="store_true",
-        help="Force re-download of remote files (ignore cache)"
+        help="Force re-download of remote files (ignore cache)",
     )
     parser.add_argument(
         "--clear-cache",
         action="store_true",
-        help="Clear all cached remote files and exit"
+        help="Clear all cached remote files and exit",
     )
     parser.add_argument(
         "--top-n",
         type=int,
         default=10,
-        help="Number of top types/variables to show individually in plots (default: 10)"
+        help="Number of top types/variables to show individually in plots (default: 10)",
     )
     parser.add_argument(
         "--output",
         default="all_overhead.pdf",
-        help="Output PDF filename for combined plots (default: all_overhead.pdf)"
+        help="Output PDF filename for combined plots (default: all_overhead.pdf)",
     )
 
     args = parser.parse_args()
@@ -2899,7 +3532,10 @@ def main():
         try:
             if len(existing_files) > 1:
                 # Multiple trials - load all and average
-                print(f"Averaging {len(existing_files)} trials for {stem}", file=sys.stderr)
+                print(
+                    f"Averaging {len(existing_files)} trials for {stem}",
+                    file=sys.stderr,
+                )
                 trial_datas = []
                 for trial_file in sorted(existing_files):
                     trial_data = load_comparison_json(trial_file)
@@ -2919,7 +3555,10 @@ def main():
             # Print any memory measurement warnings
             warnings = extract_warnings(data)
             for w in warnings:
-                print(f"Memory warning ({Path(representative_path).name}): {w}", file=sys.stderr)
+                print(
+                    f"Memory warning ({Path(representative_path).name}): {w}",
+                    file=sys.stderr,
+                )
         except Exception as e:
             print(f"Warning: Error loading {stem}: {e}", file=sys.stderr)
             continue
@@ -2962,11 +3601,19 @@ def main():
         for file_path, data in file_data.items():
             # Combined plot with all 3 panels side by side
             try:
-                fig = plot_combined_v2(data, output_path=None, large_fonts=args.large_fonts, top_n=args.top_n)
+                fig = plot_combined_v2(
+                    data,
+                    output_path=None,
+                    large_fonts=args.large_fonts,
+                    top_n=args.top_n,
+                )
                 if fig is not None:
                     combined_figures.append(fig)
             except Exception as e:
-                print(f"Warning: Could not generate plot for {file_path}: {e}", file=sys.stderr)
+                print(
+                    f"Warning: Could not generate plot for {file_path}: {e}",
+                    file=sys.stderr,
+                )
 
         # Save combined plots to a single PDF
         if combined_figures:
@@ -2977,14 +3624,21 @@ def main():
                     plt.close(fig)
 
                 # Add histogram plots at the end if we have aggregate data
-                if aggregate.all_total_overhead_per_cell or aggregate.all_memory_overhead_per_cell:
-                    hist_fig = plot_overhead_histograms(aggregate, output_path=None, large_fonts=args.large_fonts)
+                if (
+                    aggregate.all_total_overhead_per_cell
+                    or aggregate.all_memory_overhead_per_cell
+                ):
+                    hist_fig = plot_overhead_histograms(
+                        aggregate, output_path=None, large_fonts=args.large_fonts
+                    )
                     if hist_fig is not None:
                         pdf.savefig(hist_fig, dpi=150)
                         plt.close(hist_fig)
 
                     # Add CDF plots (returns list of figures)
-                    cdf_figs = plot_overhead_cdfs(aggregate, output_path=None, large_fonts=args.large_fonts)
+                    cdf_figs = plot_overhead_cdfs(
+                        aggregate, output_path=None, large_fonts=args.large_fonts
+                    )
                     if cdf_figs is not None:
                         for cdf_fig in cdf_figs:
                             pdf.savefig(cdf_fig, dpi=150)
