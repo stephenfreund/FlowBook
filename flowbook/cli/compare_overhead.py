@@ -3340,6 +3340,12 @@ def plot_overhead_cdfs(
             ax.set_title("Total Overhead (Log Scale)", fontsize=title_size)
             ax.set_ylim(0, 1.05)
 
+            # Use plain formatting (no scientific notation) for x-axis
+            from matplotlib.ticker import ScalarFormatter
+            formatter = ScalarFormatter()
+            formatter.set_scientific(False)
+            ax.xaxis.set_major_formatter(formatter)
+
             textstr = f"N={len(total_data)}"
             props = dict(
                 boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray"
