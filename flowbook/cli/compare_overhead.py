@@ -831,77 +831,111 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
 
     # Per-cell memory overhead as ratio of checkpoint_delta / (prev_namespace + prev_gpu)
     # This gives a proportion: 0 = no overhead, 1 = checkpoint equals base memory size
-    # Uses the new simplified fields: checkpoint_delta_mb, namespace_mb, gpu_mb
-    min_meaningful_base_mb = 1.0
+    from flowbook.cli.plot_extraction import MIN_BASE_MB
+    min_meaningful_base_mb = MIN_BASE_MB  # 0.1 MB threshold
 
-    # Pre-compute cumulative checkpoint totals for delta calculation (fallback)
-    # Same logic as Panel 6's get_cumulative_total()
-    def get_cumulative_total(c):
-        checkpoint_cumulative = c.get("checkpoint_cumulative_mb")
-        if checkpoint_cumulative is not None and checkpoint_cumulative > 0:
-            return checkpoint_cumulative
-        cumulative_by_var = c.get("cumulative_by_var") or {}
-        if cumulative_by_var:
-            return sum(cumulative_by_var.values()) / (1024 * 1024)
-        cumulative_by_type = c.get("cumulative_by_type") or {}
-        if cumulative_by_type:
-            return sum(cumulative_by_type.values()) / (1024 * 1024)
-        var_costs = c.get("checkpoint_var_costs") or {}
-        if var_costs:
-            return sum(v.get("bytes", 0) for v in var_costs.values()) / (1024 * 1024)
-        return 0
+    # Detect v5 format
+    version = data.get("version", "4.0")
+    is_v5 = str(version).startswith("5")
 
-    cumulative_totals = [get_cumulative_total(c) for c in flowbook_mem_cells]
+    if is_v5:
+        # V5 format: use simplified fields directly
+        # checkpoint_mb is cumulative, so delta = cell[i].checkpoint_mb - cell[i-1].checkpoint_mb
+        for i, cell in enumerate(flowbook_mem_cells):
+            # Compute checkpoint delta (new checkpoint data at this cell)
+            curr_ckpt = cell.get("checkpoint_mb", 0)
+            prev_ckpt = flowbook_mem_cells[i - 1].get("checkpoint_mb", 0) if i > 0 else 0
+            delta_mb = max(0, curr_ckpt - prev_ckpt)
 
-    # Get staleness mode to determine how to compute checkpoint overhead
-    staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
-
-    for i, fc in enumerate(flowbook_mem_cells):
-        if i == 0:
-            base_mb = 0  # No prior namespace for first cell
-        else:
-            prev_cell = flowbook_mem_cells[i - 1]
-            # Support both old and new field names for backward compatibility during transition
-            namespace = prev_cell.get(
-                "namespace_mb", prev_cell.get("current_footprint_mb", 0)
-            )
-            gpu = prev_cell.get("gpu_mb", prev_cell.get("gpu_mem_samples", 0))
-            base_mb = namespace + gpu
-
-        # Get checkpoint delta (new field) or compute from old fields
-        # NOTE: Check > 0, not just "is not None", because field may be 0 when
-        # saved checkpoints are empty but checkpoint_var_costs has data
-        delta_mb = fc.get("checkpoint_delta_mb")
-        if not (delta_mb is not None and delta_mb > 0):
-            overhead = fc.get("overhead_breakdown") or {}
-            delta_mb = overhead.get("checkpoints_mb")
-        if not (delta_mb is not None and delta_mb > 0):
-            # Derive from cumulative totals
-            if staleness_mode == "semantic":
-                # Semantic mode: checkpoints accumulate, compute delta
-                if i == 0:
-                    delta_mb = cumulative_totals[0]
-                else:
-                    delta_mb = max(0, cumulative_totals[i] - cumulative_totals[i - 1])
+            # Get base (prev cell's namespace + gpu)
+            if i == 0:
+                base_mb = 0
             else:
-                # Syntactic mode: only one checkpoint, use current value directly
-                delta_mb = cumulative_totals[i]
+                prev_cell = flowbook_mem_cells[i - 1]
+                base_mb = prev_cell.get("user_ns_mb", 0) + prev_cell.get("gpu_mb", 0)
 
-        if base_mb >= min_meaningful_base_mb:
-            ratio = delta_mb / base_mb
+            # Compute ratio
+            if base_mb >= min_meaningful_base_mb:
+                ratio = delta_mb / base_mb
+            else:
+                ratio = 0.0
+
+            per_cell_memory_overhead_mb.append(ratio)
+            per_cell_checkpoint_mb.append(delta_mb)
+
+        # Peak memory overhead: max(checkpoint_mb) / max(user_ns_mb) * 100
+        if flowbook_mem_cells:
+            peak_ckpt = max(c.get("checkpoint_mb", 0) for c in flowbook_mem_cells)
+            peak_ns = max(c.get("user_ns_mb", 0) for c in flowbook_mem_cells)
+            if peak_ns >= min_meaningful_base_mb:
+                peak_memory_overhead_pct = (peak_ckpt / peak_ns) * 100
+            else:
+                peak_memory_overhead_pct = 0.0
         else:
-            ratio = 0.0  # Namespace too small for meaningful ratio
-        per_cell_memory_overhead_mb.append(
-            ratio
-        )  # Note: field name kept for compatibility
-        per_cell_checkpoint_mb.append(delta_mb if delta_mb is not None else 0.0)
+            peak_memory_overhead_pct = 0.0
+    else:
+        # V4 format: use legacy field names and computation
+        # Pre-compute cumulative checkpoint totals for delta calculation (fallback)
+        def get_cumulative_total(c):
+            checkpoint_cumulative = c.get("checkpoint_cumulative_mb")
+            if checkpoint_cumulative is not None and checkpoint_cumulative > 0:
+                return checkpoint_cumulative
+            cumulative_by_var = c.get("cumulative_by_var") or {}
+            if cumulative_by_var:
+                return sum(cumulative_by_var.values()) / (1024 * 1024)
+            cumulative_by_type = c.get("cumulative_by_type") or {}
+            if cumulative_by_type:
+                return sum(cumulative_by_type.values()) / (1024 * 1024)
+            var_costs = c.get("checkpoint_var_costs") or {}
+            if var_costs:
+                return sum(v.get("bytes", 0) for v in var_costs.values()) / (1024 * 1024)
+            return 0
 
-    # Compute peak memory overhead percentage (max ratio * 100)
-    peak_memory_overhead_pct = (
-        max(per_cell_memory_overhead_mb) * 100
-        if per_cell_memory_overhead_mb
-        else 0.0
-    )
+        cumulative_totals = [get_cumulative_total(c) for c in flowbook_mem_cells]
+
+        # Get staleness mode to determine how to compute checkpoint overhead
+        staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
+
+        for i, fc in enumerate(flowbook_mem_cells):
+            if i == 0:
+                base_mb = 0  # No prior namespace for first cell
+            else:
+                prev_cell = flowbook_mem_cells[i - 1]
+                # Support both old and new field names for backward compatibility
+                namespace = prev_cell.get(
+                    "namespace_mb", prev_cell.get("current_footprint_mb", 0)
+                )
+                gpu = prev_cell.get("gpu_mb", prev_cell.get("gpu_mem_samples", 0))
+                base_mb = namespace + gpu
+
+            # Get checkpoint delta (new field) or compute from old fields
+            delta_mb = fc.get("checkpoint_delta_mb")
+            if not (delta_mb is not None and delta_mb > 0):
+                overhead = fc.get("overhead_breakdown") or {}
+                delta_mb = overhead.get("checkpoints_mb")
+            if not (delta_mb is not None and delta_mb > 0):
+                # Derive from cumulative totals
+                if staleness_mode == "semantic":
+                    if i == 0:
+                        delta_mb = cumulative_totals[0]
+                    else:
+                        delta_mb = max(0, cumulative_totals[i] - cumulative_totals[i - 1])
+                else:
+                    delta_mb = cumulative_totals[i]
+
+            if base_mb >= min_meaningful_base_mb:
+                ratio = delta_mb / base_mb
+            else:
+                ratio = 0.0
+            per_cell_memory_overhead_mb.append(ratio)
+            per_cell_checkpoint_mb.append(delta_mb if delta_mb is not None else 0.0)
+
+        # Compute peak memory overhead percentage (max ratio * 100)
+        peak_memory_overhead_pct = (
+            max(per_cell_memory_overhead_mb) * 100
+            if per_cell_memory_overhead_mb
+            else 0.0
+        )
 
     return FileStats(
         notebook_path=notebook_path,
