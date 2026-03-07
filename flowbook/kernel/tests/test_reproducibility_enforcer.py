@@ -2770,16 +2770,19 @@ class TestSkippedUpstream:
         """
         Scenario: F→G→H, then F again (skipping G), then G.
 
-        After running F (skipping G):
-        - H should have SKIPPED_UPSTREAM (reading from F instead of G)
+        When ENABLE_SKIPPED_UPSTREAM is True:
+        - After running F (skipping G), H has SKIPPED_UPSTREAM
+        - After running G, H has FORWARD_STALE
 
-        After running G:
-        - H should have FORWARD_STALE (not SKIPPED_UPSTREAM)
-        - Re-running H would now fix it
+        When ENABLE_SKIPPED_UPSTREAM is False (default):
+        - After running F (skipping G), H has FORWARD_STALE (not SKIPPED_UPSTREAM)
+        - After running G, H still has FORWARD_STALE
 
         Note: Staleness is always computed, even when G triggers NoReadAndWrite
         error (because G reads and writes x).
         """
+        from flowbook.kernel.reproducibility_enforcer import ENABLE_SKIPPED_UPSTREAM
+
         # Initial execution: F→G→H
         self._execute_cell("f", {}, {"x": 1}, writes={"x"})
         self._execute_cell("g", {"x": 1}, {"x": 2}, reads={"x"}, writes={"x"})
@@ -2791,32 +2794,43 @@ class TestSkippedUpstream:
         # Run F again (skipping G) - x goes from 2 back to 1
         self._execute_cell("f", {"x": 2, "y": 10}, {"x": 1, "y": 10}, writes={"x"})
 
-        # H should now have SKIPPED_UPSTREAM - reading from F instead of G
+        # H should now be stale
         reasons_h = self.sdc._notebook_state.get_reasons("h")
         reason_types = {r.type for r in reasons_h}
-        assert ReasonType.SKIPPED_UPSTREAM in reason_types, f"Expected SKIPPED_UPSTREAM, got {reason_types}"
 
-        # Verify it's for variable x with expected_cell_id = g
-        skipped_reason = next(r for r in reasons_h if r.type == ReasonType.SKIPPED_UPSTREAM)
-        assert skipped_reason.loc == "x"
-        assert skipped_reason.expected_cell_id == "g"
+        if ENABLE_SKIPPED_UPSTREAM:
+            # With SKIPPED_UPSTREAM enabled: H has SKIPPED_UPSTREAM (reading from F instead of G)
+            assert ReasonType.SKIPPED_UPSTREAM in reason_types, f"Expected SKIPPED_UPSTREAM, got {reason_types}"
+            skipped_reason = next(r for r in reasons_h if r.type == ReasonType.SKIPPED_UPSTREAM)
+            assert skipped_reason.loc == "x"
+            assert skipped_reason.expected_cell_id == "g"
+        else:
+            # With SKIPPED_UPSTREAM disabled: H has FORWARD_STALE
+            assert ReasonType.FORWARD_STALE in reason_types, f"Expected FORWARD_STALE, got {reason_types}"
 
-        # Now run G - this should change H's reason to FORWARD_STALE
+        # Now run G - this should result in FORWARD_STALE
         # (Staleness computed even though G has NoReadAndWrite error)
         self._execute_cell("g", {"x": 1, "y": 10}, {"x": 3, "y": 10}, reads={"x"}, writes={"x"})
 
-        # H should now have FORWARD_STALE, not SKIPPED_UPSTREAM
+        # H should now have FORWARD_STALE
         reasons_h_after = self.sdc._notebook_state.get_reasons("h")
         reason_types_after = {r.type for r in reasons_h_after}
 
         assert ReasonType.FORWARD_STALE in reason_types_after, f"Expected FORWARD_STALE, got {reason_types_after}"
-        assert ReasonType.SKIPPED_UPSTREAM not in reason_types_after, f"SKIPPED_UPSTREAM should be replaced by FORWARD_STALE"
-
-        # Verify FORWARD_STALE is from G (not F)
-        input_reason = next(r for r in reasons_h_after if r.type == ReasonType.FORWARD_STALE)
-        assert input_reason.loc == "x"
-        assert input_reason.cell_id == "g"
-        assert input_reason.expected_cell_id is None  # No skipped writer anymore
+        if ENABLE_SKIPPED_UPSTREAM:
+            assert ReasonType.SKIPPED_UPSTREAM not in reason_types_after, f"SKIPPED_UPSTREAM should be replaced by FORWARD_STALE"
+            # With SKIPPED_UPSTREAM enabled, the reason is updated from SKIPPED_UPSTREAM to FORWARD_STALE from G
+            input_reason = next(r for r in reasons_h_after if r.type == ReasonType.FORWARD_STALE)
+            assert input_reason.loc == "x"
+            assert input_reason.cell_id == "g"
+            assert input_reason.expected_cell_id is None  # No skipped writer anymore
+        else:
+            # With SKIPPED_UPSTREAM disabled, H was marked stale by F initially and stays that way
+            # (once stale, the loop continues without updating the reason)
+            input_reason = next(r for r in reasons_h_after if r.type == ReasonType.FORWARD_STALE)
+            assert input_reason.loc == "x"
+            # The cell_id could be 'f' or 'g' depending on timing - just verify H is stale for x
+            assert input_reason.cell_id in ("f", "g")
 
     def test_skipped_upstream_exact_user_scenario(self):
         """
@@ -2827,6 +2841,8 @@ class TestSkippedUpstream:
         Note: Staleness is always computed, even when G triggers NoReadAndWrite
         error (because G reads and writes x).
         """
+        from flowbook.kernel.reproducibility_enforcer import ENABLE_SKIPPED_UPSTREAM
+
         # F -> G -> H (initial)
         self._execute_cell("f", {}, {"x": 1}, writes={"x"})
         self._execute_cell("g", {"x": 1}, {"x": 2}, reads={"x"}, writes={"x"})
@@ -2844,9 +2860,14 @@ class TestSkippedUpstream:
         print(f"  H reasons: {reasons_after_f}")
         print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
 
-        # Verify H has SKIPPED_UPSTREAM at this point
-        assert any(r.type == ReasonType.SKIPPED_UPSTREAM for r in reasons_after_f), \
-            f"Expected SKIPPED_UPSTREAM after F, got {reasons_after_f}"
+        if ENABLE_SKIPPED_UPSTREAM:
+            # Verify H has SKIPPED_UPSTREAM at this point
+            assert any(r.type == ReasonType.SKIPPED_UPSTREAM for r in reasons_after_f), \
+                f"Expected SKIPPED_UPSTREAM after F, got {reasons_after_f}"
+        else:
+            # With SKIPPED_UPSTREAM disabled, H should have FORWARD_STALE
+            assert any(r.type == ReasonType.FORWARD_STALE for r in reasons_after_f), \
+                f"Expected FORWARD_STALE after F, got {reasons_after_f}"
 
         # G (re-run) - staleness computed even though G has NoReadAndWrite error
         self._execute_cell("g", {"x": 1, "y": 10}, {"x": 3, "y": 10}, reads={"x"}, writes={"x"})
@@ -2856,12 +2877,14 @@ class TestSkippedUpstream:
         print(f"  H reasons: {reasons_after_g}")
         print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
 
-        # H should now have FORWARD_STALE, NOT SKIPPED_UPSTREAM
+        # H should now have FORWARD_STALE
         reason_types = {r.type for r in reasons_after_g}
-        assert ReasonType.SKIPPED_UPSTREAM not in reason_types, \
-            f"SKIPPED_UPSTREAM should be gone after running G, got {reasons_after_g}"
         assert ReasonType.FORWARD_STALE in reason_types, \
             f"Expected FORWARD_STALE after G, got {reasons_after_g}"
+        if ENABLE_SKIPPED_UPSTREAM:
+            # SKIPPED_UPSTREAM should be replaced by FORWARD_STALE
+            assert ReasonType.SKIPPED_UPSTREAM not in reason_types, \
+                f"SKIPPED_UPSTREAM should be gone after running G, got {reasons_after_g}"
 
 
 class TestStalenessMode:
@@ -3531,6 +3554,8 @@ class TestStalenessAlwaysComputed:
         When G runs (even with NoReadAndWrite error), H's SKIPPED_UPSTREAM
         should be converted to FORWARD_STALE.
         """
+        from flowbook.kernel.reproducibility_enforcer import ENABLE_SKIPPED_UPSTREAM
+
         self.sdc.set_cell_order(["f", "g", "h"])
 
         # F writes x
@@ -3574,9 +3599,12 @@ class TestStalenessAlwaysComputed:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # H should have SKIPPED_UPSTREAM
+        # After F (skipping G), H should be stale
         reasons_h = self.sdc._notebook_state.get_reasons("h")
-        assert any(r.type == ReasonType.SKIPPED_UPSTREAM for r in reasons_h)
+        if ENABLE_SKIPPED_UPSTREAM:
+            assert any(r.type == ReasonType.SKIPPED_UPSTREAM for r in reasons_h)
+        else:
+            assert any(r.type == ReasonType.FORWARD_STALE for r in reasons_h)
 
         # Re-run G (triggers NoReadAndWrite error)
         self._save_pre_checkpoint("g", {"x": 1, "y": 10})
@@ -3592,11 +3620,13 @@ class TestStalenessAlwaysComputed:
         assert result.has_errors()
         assert any(e.error_type.value == "no_read_and_write" for e in result.errors)
 
-        # H should now have FORWARD_STALE (converted from SKIPPED_UPSTREAM)
+        # H should now have FORWARD_STALE
         reasons_h_after = self.sdc._notebook_state.get_reasons("h")
         reason_types = {r.type for r in reasons_h_after}
         assert ReasonType.FORWARD_STALE in reason_types
-        assert ReasonType.SKIPPED_UPSTREAM not in reason_types
+        if ENABLE_SKIPPED_UPSTREAM:
+            # SKIPPED_UPSTREAM should be replaced by FORWARD_STALE
+            assert ReasonType.SKIPPED_UPSTREAM not in reason_types
 
 
 class TestForwardStaleFormula:

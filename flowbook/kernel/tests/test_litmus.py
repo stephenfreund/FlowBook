@@ -606,12 +606,24 @@ def litmus_test():
 
 def test_litmus(litmus_test):
     """Run a single litmus test."""
+    from flowbook.kernel.reproducibility_enforcer import ENABLE_SKIPPED_UPSTREAM
+
     name = litmus_test.get("name", "unnamed")
     description = litmus_test.get("description", "")
     cell_order = litmus_test.get("cell_order", [])
     cells = litmus_test.get("cells", {})  # Initial cell code definitions
     operations = litmus_test.get("operations", [])
     expect = litmus_test.get("expect", {})
+
+    # When SKIPPED_UPSTREAM is disabled, transform expectations
+    if not ENABLE_SKIPPED_UPSTREAM and "reasons" in expect:
+        for cell_id, reasons in expect["reasons"].items():
+            for reason in reasons:
+                if reason.get("type") == "skipped_upstream":
+                    # Convert to forward_stale, keeping only relevant fields
+                    reason["type"] = "forward_stale"
+                    # Remove expected_cell_id field (only used for skipped_upstream)
+                    reason.pop("expected_cell_id", None)
 
     # Create runner
     runner = LitmusTestRunner(cell_order, cells)

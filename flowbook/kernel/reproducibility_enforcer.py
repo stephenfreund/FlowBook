@@ -341,6 +341,14 @@ OPT_CONFLICT_LOOP_SKIP = _env_flag("FLOWBOOK_OPT_CONFLICT_LOOP_SKIP", default=Tr
 # This can provide 5-10x speedup when cells access few variables.
 OPT_ACCESSED_VARS_ONLY = _env_flag("FLOWBOOK_OPT_ACCESSED_VARS_ONLY", default=True)
 
+# ENABLE_SKIPPED_UPSTREAM: When True, checks if cells read from the "wrong" writer
+# (runtime provenance differs from expected notebook-order provenance). This is a
+# UX convenience that warns users proactively when cells are executed out of order.
+# When False (default), ForwardStale handles these cases reactively when the
+# skipped cell is eventually executed. Disabling simplifies the model without
+# losing soundness.
+ENABLE_SKIPPED_UPSTREAM = _env_flag("FLOWBOOK_ENABLE_SKIPPED_UPSTREAM", default=False)
+
 
 # ============================================================================
 # FORMAL PREDICATE HELPERS
@@ -1176,9 +1184,15 @@ class ReproducibilityEnforcer:
         changed_vars = list(current_diff.differences.keys()) if current_diff.differences else []
         column_changed = _extract_column_changes(current_diff, tracking)
 
+        # Separate value-level changes from column-only changes for last_writer tracking.
+        # Value-level changes (ValueChanged, RowsAdded, etc.) update last_writer[var].
+        # Column-only changes (ColumnAdded, ColumnModified, etc.) only update column_last_writer.
+        # This prevents false SKIPPED_UPSTREAM when a cell only mutates columns.
+        value_level_changed_vars = _get_value_level_changed_vars(typed_changes)
+
         # Convert LocSet to Set[str] for backward compatibility with NotebookState
         R_i_vars = tracking.reads_before_writes  # Use tracking directly
-        W_i_vars = set(changed_vars)  # Variables that changed
+        W_i_vars = set(changed_vars)  # Variables that changed (for staleness computation)
 
         # Extract structural warnings from diff
         structural_warnings = list(current_diff.warnings) if current_diff.warnings else []
@@ -1191,7 +1205,7 @@ class ReproducibilityEnforcer:
             self._notebook_state.record_execution(
                 cell_id,
                 tracking=tracking,
-                changed_vars=W_i_vars if W_i_vars else None,
+                changed_vars=value_level_changed_vars if value_level_changed_vars else None,
                 column_changed={k: set(v) for k, v in column_changed.items()} if column_changed else None,
                 execution_seq=self.seq_counter,
                 structural_reads_values=structural_read_values,
@@ -1288,7 +1302,7 @@ class ReproducibilityEnforcer:
         self._notebook_state.record_execution(
             cell_id,
             tracking=tracking,
-            changed_vars=W_i_vars if W_i_vars else None,
+            changed_vars=value_level_changed_vars if value_level_changed_vars else None,
             column_changed={k: set(v) for k, v in column_changed.items()} if column_changed else None,
             execution_seq=self.seq_counter,
             structural_reads_values=structural_read_values,
@@ -1306,7 +1320,12 @@ class ReproducibilityEnforcer:
         # skipped_writers which always causes staleness.
         # ================================================================
         # Check for skipped writers (provenance mismatch)
-        skipped_writers = self._check_skipped_writers(cell_id)
+        # When ENABLE_SKIPPED_UPSTREAM is False, we skip this check - ForwardStale
+        # handles these cases reactively when the skipped cell is eventually executed.
+        if ENABLE_SKIPPED_UPSTREAM:
+            skipped_writers = self._check_skipped_writers(cell_id)
+        else:
+            skipped_writers = []
 
         # Collect staleness reasons for this cell
         # Only add predicate violation reasons if NOT continuing (i.e., they will be rejected)
@@ -1416,9 +1435,11 @@ class ReproducibilityEnforcer:
             log(f"[Inst-Run] {cell_id}: BackwardStale marked {len(backward_stale)} cells")
             stale.extend(backward_stale)
 
-        # Update last_writer (L) for changed variables
-        if changed_vars:
-            for loc in changed_vars:
+        # Update last_writer (L) for value-level changed variables only.
+        # Column-only changes update column_last_writer below, not last_writer.
+        # This prevents false SKIPPED_UPSTREAM when a cell only mutates columns.
+        if value_level_changed_vars:
+            for loc in value_level_changed_vars:
                 self._notebook_state.last_writer[loc] = cell_id
         if column_changed:
             for var, cols in column_changed.items():
@@ -1914,14 +1935,15 @@ class ReproducibilityEnforcer:
 
             if not self._notebook_state.is_clean(cell_id):
                 # Update SKIPPED_UPSTREAM → FORWARD_STALE if expected cell just ran
-                reasons = self._notebook_state.get_reasons(cell_id)
-                for reason in list(reasons):
-                    if (reason.type == ReasonType.SKIPPED_UPSTREAM and
-                            reason.expected_cell_id == just_executed):
-                        self._notebook_state.add_reason(
-                            cell_id,
-                            Reason(ReasonType.FORWARD_STALE, loc=reason.loc, cell_id=just_executed)
-                        )
+                if ENABLE_SKIPPED_UPSTREAM:
+                    reasons = self._notebook_state.get_reasons(cell_id)
+                    for reason in list(reasons):
+                        if (reason.type == ReasonType.SKIPPED_UPSTREAM and
+                                reason.expected_cell_id == just_executed):
+                            self._notebook_state.add_reason(
+                                cell_id,
+                                Reason(ReasonType.FORWARD_STALE, loc=reason.loc, cell_id=just_executed)
+                            )
                 continue
 
             # File staleness check
@@ -1940,22 +1962,39 @@ class ReproducibilityEnforcer:
             read_overlap = W_i_union & cell_reads   # Overlap with reads
             write_overlap = W_i_union & cell_writes  # Overlap with writes
 
-            if read_overlap or write_overlap:
-                # First handle read overlaps (FORWARD_STALE or SKIPPED_UPSTREAM)
-                for var in read_overlap:
-                    expected_writer = self._notebook_state.last_writer_for(var, cell_id)
-                    if expected_writer != just_executed and expected_writer is not None:
-                        self._notebook_state.add_reason(
-                            cell_id,
-                            Reason(ReasonType.SKIPPED_UPSTREAM, loc=var, cell_id=just_executed, expected_cell_id=expected_writer)
-                        )
+            # Also check column-level overlap for column-only changes
+            # This ensures cells reading df['z'] are marked stale when df['z'] changes,
+            # even if df is not in W_i_union (value-level changes only).
+            has_column_overlap = self._has_relevant_overlap_by_id(cell_id, set(column_changed.keys()), column_changed)
+
+            if read_overlap or write_overlap or has_column_overlap:
+                # Determine which variables caused staleness
+                stale_vars = read_overlap.copy()
+                if has_column_overlap:
+                    # Add variables with column overlap to stale_vars
+                    stale_vars |= set(column_changed.keys()) & cell_reads
+
+                # Handle read overlaps (FORWARD_STALE or SKIPPED_UPSTREAM)
+                for var in stale_vars:
+                    if ENABLE_SKIPPED_UPSTREAM:
+                        expected_writer = self._notebook_state.last_writer_for(var, cell_id)
+                        if expected_writer != just_executed and expected_writer is not None:
+                            self._notebook_state.add_reason(
+                                cell_id,
+                                Reason(ReasonType.SKIPPED_UPSTREAM, loc=var, cell_id=just_executed, expected_cell_id=expected_writer)
+                            )
+                        else:
+                            self._notebook_state.add_reason(
+                                cell_id,
+                                Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
+                            )
                     else:
                         self._notebook_state.add_reason(
                             cell_id,
                             Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
                         )
                 # Then handle write-only overlaps (WRITE_OVERLAP - no convergence)
-                for var in write_overlap - read_overlap:
+                for var in write_overlap - stale_vars:
                     self._notebook_state.add_reason(
                         cell_id,
                         Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
@@ -1997,14 +2036,15 @@ class ReproducibilityEnforcer:
 
             if not self._notebook_state.is_clean(cell_id):
                 # Update SKIPPED_UPSTREAM → FORWARD_STALE if expected cell just ran
-                reasons = self._notebook_state.get_reasons(cell_id)
-                for reason in list(reasons):
-                    if (reason.type == ReasonType.SKIPPED_UPSTREAM and
-                            reason.expected_cell_id == just_executed):
-                        self._notebook_state.add_reason(
-                            cell_id,
-                            Reason(ReasonType.FORWARD_STALE, loc=reason.loc, cell_id=just_executed)
-                        )
+                if ENABLE_SKIPPED_UPSTREAM:
+                    reasons = self._notebook_state.get_reasons(cell_id)
+                    for reason in list(reasons):
+                        if (reason.type == ReasonType.SKIPPED_UPSTREAM and
+                                reason.expected_cell_id == just_executed):
+                            self._notebook_state.add_reason(
+                                cell_id,
+                                Reason(ReasonType.FORWARD_STALE, loc=reason.loc, cell_id=just_executed)
+                            )
                 continue
 
             # File staleness check
@@ -2085,12 +2125,18 @@ class ReproducibilityEnforcer:
 
             if diff_result.differences:
                 for var in diff_result.differences.keys():
-                    expected_writer = self._notebook_state.last_writer_for(var, cell_id)
-                    if expected_writer != just_executed and expected_writer is not None:
-                        self._notebook_state.add_reason(
-                            cell_id,
-                            Reason(ReasonType.SKIPPED_UPSTREAM, loc=var, cell_id=just_executed, expected_cell_id=expected_writer)
-                        )
+                    if ENABLE_SKIPPED_UPSTREAM:
+                        expected_writer = self._notebook_state.last_writer_for(var, cell_id)
+                        if expected_writer != just_executed and expected_writer is not None:
+                            self._notebook_state.add_reason(
+                                cell_id,
+                                Reason(ReasonType.SKIPPED_UPSTREAM, loc=var, cell_id=just_executed, expected_cell_id=expected_writer)
+                            )
+                        else:
+                            self._notebook_state.add_reason(
+                                cell_id,
+                                Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
+                            )
                     else:
                         self._notebook_state.add_reason(
                             cell_id,
@@ -2335,14 +2381,16 @@ class ReproducibilityEnforcer:
 
         Args:
             cell_id: The cell to check
-            changed_vars: Variables that changed in current execution
+            changed_vars: Variables that changed in current execution (value-level)
             column_changed: Dict mapping var names to changed column names
 
         Returns:
             True if the cell might be affected by the changes
         """
         reads = self._notebook_state.reads.get(cell_id, set())
-        var_overlap = reads & changed_vars
+        # Include both value-level changes AND column-level changes in overlap check
+        all_changed = changed_vars | set(column_changed.keys())
+        var_overlap = reads & all_changed
 
         if not var_overlap:
             return False  # No variable-level overlap at all
@@ -2650,6 +2698,43 @@ def _get_changed_columns_from_diff_node(node: DiffNode) -> Set[str]:
                 changed_cols.add(column_name)
 
     return changed_cols
+
+
+def _get_value_level_changed_vars(typed_changes: List) -> Set[str]:
+    """
+    Extract variables that had value-level changes (not just column changes).
+
+    Value-level changes indicate the variable identity or structure changed:
+    - ValueChanged: Variable was reassigned or replaced
+    - RowsAdded/RowsRemoved: DataFrame row count changed
+    - IndexChanged: DataFrame/Series index changed
+
+    Column-only changes do NOT make a variable "changed" at value level:
+    - ColumnAdded/ColumnModified/ColumnRemoved: Only specific columns changed
+    - DtypeChanged: Only column dtype changed
+
+    This distinction matters for last_writer tracking: if only columns changed,
+    the variable's "owner" shouldn't change. The original creator still owns
+    the variable; the mutator just modified columns within it.
+
+    Args:
+        typed_changes: List of Change objects from change_detector
+
+    Returns:
+        Set of variable names with value-level changes
+    """
+    from flowbook.kernel.changes import (
+        ValueChanged, RowsAdded, RowsRemoved, IndexChanged
+    )
+
+    value_level_types = (ValueChanged, RowsAdded, RowsRemoved, IndexChanged)
+
+    vars_with_value_change: Set[str] = set()
+    for change in typed_changes:
+        if isinstance(change, value_level_types):
+            vars_with_value_change.add(change.variable)
+
+    return vars_with_value_change
 
 
 def _check_for_truncation(diff_result: MemoryCheckpointDiffResult) -> List[str]:
