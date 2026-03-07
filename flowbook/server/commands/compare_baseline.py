@@ -735,7 +735,7 @@ def get_namespace_size(kernel_client, timeout: float = 30.0) -> Dict[str, Any]:
         silent=True,
     )
 
-    # Wait for idle on iopub channel
+    # Wait for idle on iopub channel, capturing any stream output
     start_time = time.time()
     while True:
         if time.time() - start_time > timeout:
@@ -746,7 +746,13 @@ def get_namespace_size(kernel_client, timeout: float = 30.0) -> Dict[str, Any]:
             continue
         if msg['parent_header'].get('msg_id') != msg_id:
             continue
-        if msg['header']['msg_type'] == 'status':
+        msg_type = msg['header']['msg_type']
+        # Print any stream output (stdout/stderr) from the kernel
+        if msg_type == 'stream':
+            text = msg['content'].get('text', '')
+            if text.strip():
+                log(f"[kernel {msg['content'].get('name', 'output')}] {text.strip()}")
+        if msg_type == 'status':
             if msg['content']['execution_state'] == 'idle':
                 break
 
@@ -1216,8 +1222,15 @@ try:
         enforcer = _flowbook_enforcer
         if hasattr(enforcer, 'get_execution_records_size'):
             _overhead_breakdown['execution_records_mb'] = enforcer.get_execution_records_size() / (1024 * 1024)
+        del enforcer
 except Exception:
     pass
+
+# Clean up temp variables to avoid polluting namespace
+for _v in ['mc', 'all_sizes', 'num_vars']:
+    if _v in dir():
+        exec(f'del {_v}')
+del _v
 """
     msg_id = kernel_client.execute(code, silent=True)
     _wait_for_idle(kernel_client, timeout)
@@ -1260,11 +1273,20 @@ except Exception:
             expr = reply['content'].get('user_expressions', {}).get('_breakdown', {})
             if expr.get('status') == 'ok':
                 text = expr['data']['text/plain']
-                return ast.literal_eval(text)
+                result = ast.literal_eval(text)
+                # Clean up _overhead_breakdown from namespace
+                kernel_client.execute('del _overhead_breakdown', silent=True)
+                return result
             break
     except Exception as e:
         log(f"Failed to get overhead breakdown: {e}")
         log(traceback.format_exc())
+
+    # Clean up even on failure
+    try:
+        kernel_client.execute('del _overhead_breakdown', silent=True)
+    except Exception:
+        pass
 
     return {}
 

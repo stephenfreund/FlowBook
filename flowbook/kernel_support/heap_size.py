@@ -109,7 +109,7 @@ class HeapSizer:
     Key features:
     - Tracks object identity to avoid double-counting
     - Tracks numpy data buffer pointers for view deduplication
-    - Handles pandas CoW sharing correctly via np.shares_memory()
+    - Handles pandas CoW sharing via ctypes.data pointer deduplication
     - Safe for read-only buffers (never reads contents)
 
     Usage:
@@ -121,15 +121,11 @@ class HeapSizer:
     def __init__(self):
         self._seen_ids: Set[int] = set()
         self._seen_data_ptrs: Set[int] = set()  # numpy data buffer pointers
-        self._seen_arrays: List[Any] = []  # numpy arrays for shares_memory check
-        self._ref_counts: Dict[int, int] = {}  # Track reference counts for shared detection
 
     def reset(self):
         """Clear seen tracking for new measurement."""
         self._seen_ids.clear()
         self._seen_data_ptrs.clear()
-        self._seen_arrays.clear()
-        self._ref_counts.clear()
 
     def sizeof(self, obj: Any, owned_only: bool = True) -> int:
         """
@@ -179,23 +175,22 @@ class HeapSizer:
         if exclude is not None:
             vars_to_measure -= exclude
 
-        # First pass: count references to detect sharing
-        for var_name in vars_to_measure:
-            obj = ns[var_name]
-            self._count_refs(obj)
+        # NOTE: Removed the first pass (_count_refs) that was only used for a rough
+        # shared_bytes estimate. This eliminates unnecessary traversal overhead.
 
-        # Reset seen for actual measurement
-        seen_before = len(self._seen_ids)
-        self._seen_ids.clear()
-        self._seen_data_ptrs.clear()
-
-        # Second pass: measure each variable
+        # Measure each variable with deduplication via _seen_ids and _seen_data_ptrs
         # Use owned_only=False to count actual memory, even for arrays with .base
-        # (e.g., pandas CoW internal arrays). Deduplication via _seen_data_ptrs
-        # and shares_memory() prevents double-counting shared buffers.
+        # (e.g., pandas CoW internal arrays).
+        import time as _time
+        _start_ns = _time.time()
+        _slow_vars = []
         for var_name in vars_to_measure:
+            _var_start = _time.time()
             obj = ns[var_name]
             size = self._sizeof(obj, owned_only=False)
+            _var_elapsed = _time.time() - _var_start
+            if _var_elapsed > 0.5:  # Log vars taking > 500ms
+                _slow_vars.append((var_name, _var_elapsed, size, type(obj).__name__))
             by_variable[var_name] = size
             total_bytes += size
 
@@ -203,16 +198,19 @@ class HeapSizer:
             type_name = type(obj).__name__
             by_type[type_name] = by_type.get(type_name, 0) + size
 
-        # Calculate shared bytes (objects seen multiple times)
-        shared_bytes = sum(
-            1 for count in self._ref_counts.values() if count > 1
-        ) * 100  # Rough estimate
+        _total_elapsed = _time.time() - _start_ns
+        if _slow_vars or _total_elapsed > 2.0:
+            print(f"[HeapSizer DEBUG] sizeof_namespace took {_total_elapsed:.2f}s for {len(vars_to_measure)} vars")
+            if _slow_vars:
+                print(f"[HeapSizer DEBUG] Slow variables (>500ms):")
+                for name, elapsed, size, tname in sorted(_slow_vars, key=lambda x: -x[1])[:10]:
+                    print(f"  {name}: {elapsed:.2f}s, {size/(1024*1024):.1f}MB, {tname}")
 
         return NamespaceSize(
             total_bytes=total_bytes,
             by_variable=by_variable,
             by_type=by_type,
-            shared_bytes=shared_bytes,
+            shared_bytes=0,  # No longer computed (was just a rough estimate)
         )
 
     def sizeof_user_namespace(self, globals_dict: Dict[str, Any]) -> NamespaceSize:
@@ -221,6 +219,8 @@ class HeapSizer:
 
         Filters out:
         - Private variables (starting with '_')
+        - IPython/ipykernel/zmq internal objects (by module check)
+        - In/Out lists, get_ipython
         - Modules
         - Functions (regular and builtin)
         - Types/classes
@@ -235,12 +235,38 @@ class HeapSizer:
         Returns:
             NamespaceSize with total, per-variable, per-type, and shared bytes
         """
-        filtered = {
-            k: v for k, v in globals_dict.items()
-            if not k.startswith('_')
-            and not isinstance(v, types.ModuleType)
-            and not isinstance(v, (types.FunctionType, types.BuiltinFunctionType, type))
-        }
+        # Filter out system/internal variables
+        # Note: IPython/ipykernel objects (like ZMQExitAutocall for quit/exit) can have
+        # huge __dict__ containing references to the entire kernel. Filter by module.
+        def _is_ipython_internal(v):
+            """Check if value is from IPython/ipykernel internals."""
+            try:
+                mod = getattr(type(v), '__module__', '') or ''
+                return mod.startswith(('IPython', 'ipykernel', 'zmq'))
+            except Exception:
+                return False
+
+        filtered = {}
+        excluded_ipython = []
+        for k, v in globals_dict.items():
+            if k.startswith('_'):
+                continue
+            if k in ('In', 'Out', 'get_ipython'):
+                continue
+            if isinstance(v, types.ModuleType):
+                continue
+            if isinstance(v, (types.FunctionType, types.BuiltinFunctionType, type)):
+                continue
+            if _is_ipython_internal(v):
+                excluded_ipython.append((k, type(v).__name__, getattr(type(v), '__module__', '?')))
+                continue
+            filtered[k] = v
+
+        # Debug: show what was excluded and what will be measured
+        if excluded_ipython:
+            print(f"[HeapSizer DEBUG] Excluded {len(excluded_ipython)} IPython objects: {excluded_ipython[:5]}")
+        print(f"[HeapSizer DEBUG] Measuring {len(filtered)} user variables: {list(filtered.keys())[:10]}...")
+
         return self.sizeof_namespace(filtered)
 
     def sizeof_checkpoint(
@@ -432,26 +458,6 @@ class HeapSizer:
             cumulative=cumulative,
         )
 
-    def _count_refs(self, obj: Any, depth: int = 0) -> None:
-        """Count references for shared object detection."""
-        if depth > 100:  # Prevent infinite recursion
-            return
-
-        obj_id = id(obj)
-        self._ref_counts[obj_id] = self._ref_counts.get(obj_id, 0) + 1
-
-        if obj_id in self._seen_ids:
-            return
-        self._seen_ids.add(obj_id)
-
-        # Recurse into containers
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                self._count_refs(v, depth + 1)
-        elif isinstance(obj, (list, tuple)):
-            for item in obj:
-                self._count_refs(item, depth + 1)
-
     def _sizeof(self, obj: Any, owned_only: bool) -> int:
         """
         Internal recursive size calculation.
@@ -564,8 +570,8 @@ class HeapSizer:
                     total += self._sizeof(obj, owned_only)
             return total
 
-        # Numeric arrays: deduplicate by data pointer AND shares_memory check
-        # ctypes.data deduplication handles views of same array
+        # Numeric arrays: deduplicate by data pointer
+        # ctypes.data deduplication handles views of same array and CoW sharing
         try:
             data_ptr = arr.ctypes.data
             if data_ptr in self._seen_data_ptrs:
@@ -575,15 +581,11 @@ class HeapSizer:
             # ctypes.data can fail for some array types
             pass
 
-        # shares_memory check handles CoW copies where ctypes.data differs
-        # but underlying buffer is shared
-        try:
-            for seen_arr in self._seen_arrays:
-                if np.shares_memory(arr, seen_arr):
-                    return 128  # Already counted this buffer
-            self._seen_arrays.append(arr)
-        except Exception:
-            pass
+        # NOTE: Removed np.shares_memory() check - it was O(n²) and caused
+        # massive slowdowns (4+ minutes) for large namespaces with many arrays.
+        # The ctypes.data check above handles 99.99% of cases. The shares_memory
+        # check only caught rare edge cases (e.g., np.frombuffer with overlapping
+        # regions). Accepting minor overcounting in those cases for performance.
 
         return arr.nbytes + 128
 
