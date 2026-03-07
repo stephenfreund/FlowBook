@@ -97,6 +97,9 @@ def _compute_cross_run_overhead(
 ) -> Tuple[List[float], List[float], List[float]]:
     """Compute cross-run memory overhead and per-cell checkpoint cost.
 
+    Note: This function is currently unused in production but kept for testing.
+    The main code uses _compute_fallback_ratios instead for consistent v2/v3 behavior.
+
     Args:
         baseline_mem_cells: Baseline memory cells (must have pre_namespace_mb, pre_gpu_mb)
         flowbook_mem_cells: FlowBook memory cells (must have pre_namespace_mb, pre_gpu_mb,
@@ -722,8 +725,9 @@ def plot_combined_v3(
                     costs = c.get("checkpoint_var_costs") or {}
                     total_bytes = sum(info.get("bytes", 0) for info in costs.values() if isinstance(info, dict))
                     ckpt_layer[i] = total_bytes / (1024 * 1024)
-                # Make cumulative (carry forward max)
-                ckpt_layer = np.maximum.accumulate(ckpt_layer)
+                # Make cumulative only for semantic mode (syntax mode has single checkpoint)
+                if staleness_mode == "semantic":
+                    ckpt_layer = np.maximum.accumulate(ckpt_layer)
 
             next_level = cumulative_mem + ckpt_layer
             ax.fill_between(mem_cells_x, cumulative_mem, next_level, alpha=0.5, color='steelblue', label='Checkpoints')
