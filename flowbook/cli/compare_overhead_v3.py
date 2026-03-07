@@ -45,6 +45,50 @@ def _get_cell_field(cell: Dict, field: str, fallback: float = 0.0) -> float:
     return cell.get(field, fallback)
 
 
+def _get_checkpoint_mb(cell: Dict) -> float:
+    """Get checkpoint cumulative MB with fallback to checkpoint_var_costs.
+
+    The checkpoint_cumulative_mb field may be 0 even when checkpoint data exists
+    in checkpoint_var_costs. This mirrors v2's get_checkpoint_mb() fallback logic.
+    """
+    # 1. Try explicit field if > 0
+    checkpoint_cumulative = cell.get("checkpoint_cumulative_mb", 0)
+    if checkpoint_cumulative > 0:
+        return checkpoint_cumulative
+    # 2. Try overhead_breakdown.checkpoints_mb
+    overhead = cell.get("overhead_breakdown") or {}
+    checkpoints_mb = overhead.get("checkpoints_mb")
+    if checkpoints_mb is not None and checkpoints_mb > 0:
+        return checkpoints_mb
+    # 3. Fall back to summing cumulative_by_var (bytes -> MB)
+    cumulative_by_var = cell.get("cumulative_by_var") or {}
+    if cumulative_by_var:
+        return sum(cumulative_by_var.values()) / (1024 * 1024)
+    # 4. Fall back to summing cumulative_by_type (bytes -> MB)
+    cumulative_by_type = cell.get("cumulative_by_type") or {}
+    if cumulative_by_type:
+        return sum(cumulative_by_type.values()) / (1024 * 1024)
+    # 5. Fall back to summing checkpoint_var_costs (per-cell total)
+    var_costs = cell.get("checkpoint_var_costs") or {}
+    if var_costs:
+        return sum(v.get("bytes", 0) for v in var_costs.values() if isinstance(v, dict)) / (1024 * 1024)
+    return 0.0
+
+
+def _get_pre_checkpoint_mb(cell: Dict) -> float:
+    """Get pre-cell checkpoint cumulative MB with fallback.
+
+    For cross-run comparison, we need pre_checkpoint_cumulative_mb. If that's 0,
+    we fall back to the previous cell's checkpoint_var_costs total.
+    Note: This is an approximation since we're using post-cell data as pre-cell estimate.
+    """
+    pre_ckpt = cell.get("pre_checkpoint_cumulative_mb", 0)
+    if pre_ckpt > 0:
+        return pre_ckpt
+    # No direct pre_ field - will be handled at call site using previous cell's data
+    return 0.0
+
+
 def _compute_cross_run_overhead(
     baseline_mem_cells: List[Dict],
     flowbook_mem_cells: List[Dict],
@@ -69,6 +113,28 @@ def _compute_cross_run_overhead(
     """
     num_cells = min(len(baseline_mem_cells), len(flowbook_mem_cells))
 
+    # Check if pre_checkpoint_cumulative_mb is populated
+    has_pre_checkpoint = any(
+        _get_cell_field(fc, "pre_checkpoint_cumulative_mb") > 0
+        for fc in flowbook_mem_cells[:num_cells]
+    )
+
+    # If pre_checkpoint_cumulative_mb is 0, derive from checkpoint_var_costs
+    # pre_checkpoint for cell i ≈ checkpoint_var_costs total from cell i-1
+    if not has_pre_checkpoint:
+        ckpt_totals = []
+        for fc in flowbook_mem_cells[:num_cells]:
+            costs = fc.get("checkpoint_var_costs") or {}
+            total_bytes = sum(v.get("bytes", 0) for v in costs.values() if isinstance(v, dict))
+            ckpt_totals.append(total_bytes / (1024 * 1024))
+        # Make cumulative
+        for i in range(1, len(ckpt_totals)):
+            ckpt_totals[i] = max(ckpt_totals[i], ckpt_totals[i - 1])
+        # pre_checkpoint[i] = ckpt_totals[i-1] (0 for first cell)
+        pre_checkpoint_derived = [0.0] + ckpt_totals[:-1] if ckpt_totals else []
+    else:
+        pre_checkpoint_derived = None
+
     # Build MemoryOverhead sequence: overhead[i] = Flow_i - Base_i
     overhead = []
     base_values = []
@@ -77,9 +143,16 @@ def _compute_cross_run_overhead(
         fc = flowbook_mem_cells[i]
 
         base_i = _get_cell_field(bc, "pre_namespace_mb") + _get_cell_field(bc, "pre_gpu_mb")
+
+        # Use derived pre_checkpoint if pre_checkpoint_cumulative_mb is 0
+        if pre_checkpoint_derived is not None:
+            pre_ckpt = pre_checkpoint_derived[i] if i < len(pre_checkpoint_derived) else 0.0
+        else:
+            pre_ckpt = _get_cell_field(fc, "pre_checkpoint_cumulative_mb")
+
         flow_i = (_get_cell_field(fc, "pre_namespace_mb")
                   + _get_cell_field(fc, "pre_gpu_mb")
-                  + _get_cell_field(fc, "pre_checkpoint_cumulative_mb")
+                  + pre_ckpt
                   + _get_cell_field(fc, "pre_enforcer_overhead_mb"))
 
         base_values.append(base_i)
@@ -87,9 +160,16 @@ def _compute_cross_run_overhead(
 
     # Final overhead (after last cell)
     base_final = baseline_totals.get("final_namespace_mb", 0) + baseline_totals.get("final_gpu_mb", 0)
+
+    # For final checkpoint, use derived value or explicit field
+    if pre_checkpoint_derived is not None and ckpt_totals:
+        final_ckpt = ckpt_totals[-1]
+    else:
+        final_ckpt = flowbook_totals.get("final_checkpoint_cumulative_mb", 0)
+
     flow_final = (flowbook_totals.get("final_namespace_mb", 0)
                   + flowbook_totals.get("final_gpu_mb", 0)
-                  + flowbook_totals.get("final_checkpoint_cumulative_mb", 0)
+                  + final_ckpt
                   + flowbook_totals.get("final_enforcer_overhead_mb", 0))
     overhead.append(flow_final - base_final)
 
@@ -584,7 +664,12 @@ def plot_combined_v3(
 
         flowbook_namespace_mb = np.array([_get_cell_field(c, "namespace_mb") for c in flowbook_mem_cells])
         flowbook_gpu_mb = np.array([_get_cell_field(c, "gpu_mb") for c in flowbook_mem_cells])
-        checkpoint_cumulative_mb = np.array([_get_cell_field(c, "checkpoint_cumulative_mb") for c in flowbook_mem_cells])
+        # Use helper with fallback to checkpoint_var_costs
+        checkpoint_cumulative_mb = np.array([_get_checkpoint_mb(c) for c in flowbook_mem_cells])
+        # Make cumulative (carry forward max) for semantic mode
+        staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
+        if staleness_mode == "semantic":
+            checkpoint_cumulative_mb = np.maximum.accumulate(checkpoint_cumulative_mb)
 
         if has_baseline_memory and len(baseline_mem_cells) >= len(flowbook_mem_cells):
             # Cross-run: show baseline namespace as bottom, FlowBook overhead on top
