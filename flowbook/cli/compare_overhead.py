@@ -28,6 +28,26 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+# Import v4.0 models and extraction/rendering
+from flowbook.cli.models import ComparisonResult as ComparisonResultV4
+from flowbook.cli.plot_extraction import (
+    extract_plot1_data,
+    extract_plot2_data,
+    extract_plot3_data,
+    extract_plot4_data,
+    extract_plot5_data,
+    extract_plot6_data,
+    extract_cdf_data,
+    # V5 extraction functions
+    extract_plot2_data_v5,
+    extract_plot3_data_v5,
+    extract_plot4_data_v5,
+    extract_plot6_data_v5,
+    extract_v5_memory_result,
+    extract_baseline_cells,
+)
+from flowbook.cli.plot_rendering import render_combined_6panel
+
 # Base directory for cached remote files
 CACHE_BASE_DIR = "/tmp/flowbook_compare_overhead"
 
@@ -562,6 +582,23 @@ def is_v3_format(data: Dict[str, Any]) -> bool:
     """Check if data is v3.0 format (with pre-cell memory measurements for cross-run comparison)."""
     version = data.get("_version") or data.get("version", "1.0")
     return str(version).startswith("3")
+
+
+def is_v4_format(data: Dict[str, Any]) -> bool:
+    """Check if data is v4.0 format (dataclass-based with checkpoint_vars)."""
+    version = data.get("_version") or data.get("version", "1.0")
+    return str(version).startswith("4")
+
+
+def is_v5_format(data: Dict[str, Any]) -> bool:
+    """Check if data is v5.0 format (simplified memory structure)."""
+    version = data.get("_version") or data.get("version", "1.0")
+    return str(version).startswith("5")
+
+
+def is_v4_or_v5_format(data: Dict[str, Any]) -> bool:
+    """Check if data is v4 or v5 format."""
+    return is_v4_format(data) or is_v5_format(data)
 
 
 def extract_warnings(data: Dict[str, Any]) -> List[str]:
@@ -2202,12 +2239,13 @@ def extract_checkpoint_var_data(
                 v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names
             }
 
-    # In semantic mode, checkpoints accumulate - carry forward max seen per variable
-    # In syntactic mode, there's only one checkpoint, so use raw values
+    # In semantic mode, checkpoints accumulate - each cell adds a new checkpoint
+    # so we cumulative SUM across cells (not max). Each checkpoint is retained.
+    # In syntactic mode, there's only one checkpoint, so use raw values (current cell only)
     staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
     if staleness_mode == "semantic":
         for var_name in var_by_cell:
-            var_by_cell[var_name] = list(np.maximum.accumulate(var_by_cell[var_name]))
+            var_by_cell[var_name] = list(np.cumsum(var_by_cell[var_name]))
 
     # Order variables by MAX cumulative size descending (not final - captures vars that get cleaned up)
     vars_ordered = sorted(var_max.keys(), key=lambda v: var_max[v], reverse=True)
@@ -3755,6 +3793,127 @@ def plot_overhead_cdfs(
         return figures
 
 
+def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
+    """Process v4.0 format files using new dataclass models and extraction functions.
+
+    Args:
+        file_data: Dict mapping file paths to loaded JSON dicts
+        args: Parsed command line arguments
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    # Convert to ComparisonResultV4 objects
+    results: Dict[str, ComparisonResultV4] = {}
+    raw_data: Dict[str, Dict] = {}  # Keep raw data for v5 detection
+    for path, data in file_data.items():
+        results[path] = ComparisonResultV4.from_dict(data)
+        raw_data[path] = data
+
+    # Generate plots
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    combined_figures = []
+
+    for file_path, result in results.items():
+        notebook_name = Path(file_path).stem.replace("_comparison", "")
+
+        # Detect v5 format and use appropriate extraction
+        data = raw_data[file_path]
+        version = data.get("version", "4.0")
+
+        # Extract plot data
+        # Plot 1 and 5 are timing-only, version-independent
+        p1 = extract_plot1_data(result)
+        p5 = extract_plot5_data(result)
+
+        # Memory plots: use v5 extraction if available
+        # Extract baseline cells for cross-run comparison (Plot 3)
+        baseline_cells = extract_baseline_cells(data)
+
+        if version.startswith("5"):
+            # Native v5 format
+            v5_memory = extract_v5_memory_result(data)
+            if v5_memory and v5_memory.all_cells:
+                # Plot 2: try v5 extraction (uses checkpoint_var_timing)
+                p2 = extract_plot2_data_v5(v5_memory.all_cells, top_n=args.top_n)
+                if p2 is None:
+                    # Fall back to v4 extraction from timing data
+                    p2 = extract_plot2_data(result, top_n=args.top_n)
+                p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells)
+                p4 = extract_plot4_data_v5(v5_memory.all_cells, top_n=args.top_n)
+                p6 = extract_plot6_data_v5(v5_memory.all_cells)
+            else:
+                # Fall back to v4 extraction
+                p2 = extract_plot2_data(result, top_n=args.top_n)
+                p3 = extract_plot3_data(result)
+                p4 = extract_plot4_data(result, top_n=args.top_n)
+                p6 = extract_plot6_data(result)
+        else:
+            # v4 format - try v5 extraction first (handles conversion)
+            v5_memory = extract_v5_memory_result(data)
+            if v5_memory and v5_memory.all_cells:
+                p2 = extract_plot2_data_v5(v5_memory.all_cells, top_n=args.top_n)
+                if p2 is None:
+                    p2 = extract_plot2_data(result, top_n=args.top_n)
+                p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells)
+                p4 = extract_plot4_data_v5(v5_memory.all_cells, top_n=args.top_n)
+                p6 = extract_plot6_data_v5(v5_memory.all_cells)
+            else:
+                # Pure v4 extraction
+                p2 = extract_plot2_data(result, top_n=args.top_n)
+                p3 = extract_plot3_data(result)
+                p4 = extract_plot4_data(result, top_n=args.top_n)
+                p6 = extract_plot6_data(result)
+
+        # Create 6-panel figure
+        fig, axes_2d = plt.subplots(3, 2, figsize=(14, 18))
+        axes = [
+            axes_2d[0, 0], axes_2d[0, 1],
+            axes_2d[1, 0], axes_2d[1, 1],
+            axes_2d[2, 0], axes_2d[2, 1],
+        ]
+
+        try:
+            render_combined_6panel(
+                fig, axes, p1, p2, p3, p4, p5, p6,
+                large_fonts=args.large_fonts,
+                notebook_name=notebook_name,
+            )
+            combined_figures.append(fig)
+        except Exception as e:
+            print(f"Warning: Could not generate plot for {file_path}: {e}",
+                  file=sys.stderr)
+            plt.close(fig)
+
+    # Save to PDF
+    if combined_figures:
+        combined_path = output_dir / args.output
+        with PdfPages(str(combined_path)) as pdf:
+            for fig in combined_figures:
+                pdf.savefig(fig, dpi=150)
+                plt.close(fig)
+
+            # Add CDF plot if we have multiple notebooks
+            if len(results) > 1:
+                cdf_data = extract_cdf_data(list(results.values()))
+                if cdf_data:
+                    from flowbook.cli.plot_rendering import render_cdf_panel
+                    import seaborn as sns
+                    sns.set_theme(style="whitegrid")
+
+                    cdf_fig, cdf_axes = plt.subplots(1, 3, figsize=(15, 5))
+                    render_cdf_panel(cdf_axes[0], cdf_data, "time", large_fonts=args.large_fonts)
+                    render_cdf_panel(cdf_axes[1], cdf_data, "memory", large_fonts=args.large_fonts)
+                    render_cdf_panel(cdf_axes[2], cdf_data, "peak", large_fonts=args.large_fonts)
+                    cdf_fig.tight_layout()
+                    pdf.savefig(cdf_fig, dpi=150)
+                    plt.close(cdf_fig)
+
+        print(f"Combined plots saved to: {combined_path}")
+
+
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -3886,20 +4045,17 @@ def main():
         print("Error: No valid comparison files found", file=sys.stderr)
         sys.exit(1)
 
-    # Check for v3 format and dispatch to v3 module
-    has_v3 = any(is_v3_format(d) for d in file_data.values())
-    has_non_v3 = any(not is_v3_format(d) for d in file_data.values())
+    # Check for v4/v5 format - older formats not supported
+    has_supported_format = all(is_v4_or_v5_format(d) for d in file_data.values())
 
-    if has_v3 and has_non_v3:
-        print("Error: Cannot mix v2 and v3 comparison files. "
-              "Re-run older notebooks with current compare-baseline to produce v3 output.",
+    if not has_supported_format:
+        print("Error: Only v4.0 or v5.0 format is supported. "
+              "Re-run notebooks with current compare-baseline to produce v4/v5 output.",
               file=sys.stderr)
         sys.exit(1)
 
-    if has_v3:
-        from flowbook.cli.compare_overhead_v3 import process_v3
-        process_v3(file_data, args)
-        return
+    process_v4(file_data, args)  # Handles both v4 and v5
+    return
 
     # Sort
     sort_key = {

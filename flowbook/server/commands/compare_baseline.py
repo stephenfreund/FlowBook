@@ -138,6 +138,21 @@ from flowbook.kernel.flowbook_client import FlowbookKernelClient
 from flowbook.server.base import NotebookCommand, ProcessingResult
 from flowbook.server.config import FlowbookConfig
 from flowbook.util.output import log
+from flowbook.cli.models import (
+    BaselineMemorySnapshot,
+    BaselineCellMemory,
+    BaselineMemoryResult,
+    CheckpointVarInfo,
+    CheckpointVarSizes,
+    FlowBookMemorySnapshot,
+    FlowBookCellMemory,
+    FlowBookMemoryResult,
+    ComparisonMetadata,
+    ComparisonResult as ComparisonResultV4,
+    # V5 simplified models
+    V5CellMemory,
+    V5MemoryResult,
+)
 
 
 def generate_comparison_filename(notebook_path: str, num_components: int = 3) -> str:
@@ -210,7 +225,8 @@ class MemoryCellMetrics:
     - checkpoint_cumulative_mb: Total checkpoint overhead so far (after this cell)
     - pre_checkpoint_cumulative_mb: Checkpoint overhead BEFORE this cell (FlowBook only)
     - pre_enforcer_overhead_mb: Enforcer metadata BEFORE this cell (FlowBook only)
-    - checkpoint_by_var: Per-variable breakdown of checkpoint memory
+    - checkpoint_by_var: Per-variable breakdown of checkpoint memory (aggregated)
+    - by_checkpoint_by_var: Per-checkpoint, per-variable breakdown (for v4.0 format)
     """
     cell_id: str
     cell_index: int
@@ -222,8 +238,9 @@ class MemoryCellMetrics:
     gpu_mb: float                    # GPU memory AFTER this cell
     pre_checkpoint_cumulative_mb: float = 0.0  # Checkpoints BEFORE this cell (FlowBook only)
     pre_enforcer_overhead_mb: float = 0.0      # Enforcer metadata BEFORE this cell (FlowBook only)
-    checkpoint_by_var: Optional[Dict[str, float]] = None  # Per-variable MB (for memory plots)
+    checkpoint_by_var: Optional[Dict[str, float]] = None  # Per-variable MB (aggregated)
     checkpoint_var_costs: Optional[Dict[str, Any]] = None  # Per-variable timing (for timing plots)
+    by_checkpoint_by_var: Optional[Dict[str, Dict[str, float]]] = None  # {ckpt: {var: mb}}
     status: str = "ok"
     error: Optional[str] = None
     is_rerun: bool = False
@@ -264,6 +281,300 @@ class ComparisonResult:
     kernels: Dict[str, KernelResults] = field(default_factory=dict)
     scalene_available: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+# ============ V4 Conversion Functions ============
+
+
+def _convert_checkpoint_vars_to_v4(
+    by_checkpoint_by_var: Dict[str, Dict[str, float]],
+    checkpoint_var_costs: Optional[Dict[str, Any]] = None,
+) -> Dict[str, CheckpointVarSizes]:
+    """Convert per-checkpoint, per-variable data to v4.0 format.
+
+    Args:
+        by_checkpoint_by_var: {checkpoint_name: {var_name: size_mb}}
+        checkpoint_var_costs: Optional timing info {var_name: {bytes, type, module, ...}}
+
+    Returns:
+        Dict[checkpoint_name, CheckpointVarSizes]
+    """
+    result: Dict[str, CheckpointVarSizes] = {}
+    for ckpt_name, var_sizes in by_checkpoint_by_var.items():
+        vars_info: Dict[str, CheckpointVarInfo] = {}
+        for var_name, size_mb in var_sizes.items():
+            # Get type info from checkpoint_var_costs if available
+            type_name = ""
+            module = ""
+            if checkpoint_var_costs and var_name in checkpoint_var_costs:
+                cost_info = checkpoint_var_costs[var_name]
+                if isinstance(cost_info, dict):
+                    type_name = cost_info.get("type", "")
+                    module = cost_info.get("module", "")
+            vars_info[var_name] = CheckpointVarInfo(
+                size_mb=size_mb,
+                type_name=type_name,
+                module=module,
+            )
+        result[ckpt_name] = CheckpointVarSizes(vars=vars_info)
+    return result
+
+
+def _convert_flowbook_cell_to_v4(cell: MemoryCellMetrics) -> FlowBookCellMemory:
+    """Convert internal MemoryCellMetrics to v4.0 FlowBookCellMemory.
+
+    Args:
+        cell: Internal cell metrics
+
+    Returns:
+        FlowBookCellMemory in v4.0 format
+    """
+    # Build checkpoint_vars from by_checkpoint_by_var if available
+    post_checkpoint_vars = {}
+    if cell.by_checkpoint_by_var:
+        post_checkpoint_vars = _convert_checkpoint_vars_to_v4(
+            cell.by_checkpoint_by_var, cell.checkpoint_var_costs
+        )
+
+    return FlowBookCellMemory(
+        cell_id=cell.cell_id,
+        cell_index=cell.cell_index,
+        pre=FlowBookMemorySnapshot(
+            user_ns_mb=cell.pre_namespace_mb,
+            gpu_mb=cell.pre_gpu_mb,
+            overhead_mb=cell.pre_checkpoint_cumulative_mb + cell.pre_enforcer_overhead_mb,
+            checkpoint_vars={},  # Pre-checkpoints not tracked at this granularity
+        ),
+        post=FlowBookMemorySnapshot(
+            user_ns_mb=cell.namespace_mb,
+            gpu_mb=cell.gpu_mb,
+            overhead_mb=cell.checkpoint_cumulative_mb,
+            checkpoint_vars=post_checkpoint_vars,
+        ),
+        status=cell.status,
+        error=cell.error,
+    )
+
+
+def _convert_baseline_cell_to_v4(cell: MemoryCellMetrics) -> BaselineCellMemory:
+    """Convert internal MemoryCellMetrics to v4.0 BaselineCellMemory."""
+    return BaselineCellMemory(
+        cell_id=cell.cell_id,
+        cell_index=cell.cell_index,
+        pre=BaselineMemorySnapshot(
+            user_ns_mb=cell.pre_namespace_mb,
+            gpu_mb=cell.pre_gpu_mb,
+        ),
+        post=BaselineMemorySnapshot(
+            user_ns_mb=cell.namespace_mb,
+            gpu_mb=cell.gpu_mb,
+        ),
+        status=cell.status,
+        error=cell.error,
+    )
+
+
+def _convert_memory_results_to_v4(
+    results: MemoryResults,
+    is_flowbook: bool,
+):
+    """Convert MemoryResults to v4.0 format.
+
+    Args:
+        results: Internal memory results
+        is_flowbook: True for FlowBook kernel, False for baseline
+
+    Returns:
+        FlowBookMemoryResult or BaselineMemoryResult in v4.0 format
+    """
+    if is_flowbook:
+        return FlowBookMemoryResult(
+            cells=[_convert_flowbook_cell_to_v4(c) for c in results.cells],
+            rerun_cells=[_convert_flowbook_cell_to_v4(c) for c in results.rerun_cells],
+        )
+    else:
+        return BaselineMemoryResult(
+            cells=[_convert_baseline_cell_to_v4(c) for c in results.cells],
+            rerun_cells=[_convert_baseline_cell_to_v4(c) for c in results.rerun_cells],
+        )
+
+
+def create_v4_comparison_result(
+    notebook_path: str,
+    timestamp: str,
+    metadata_dict: Dict[str, Any],
+    baseline_timing: Optional[TimingResults],
+    flowbook_timing: Optional[TimingResults],
+    baseline_memory: Optional[MemoryResults],
+    flowbook_memory: Optional[MemoryResults],
+) -> Dict[str, Any]:
+    """Create v4.0 format comparison result dict ready for JSON serialization.
+
+    Args:
+        notebook_path: Path to notebook
+        timestamp: ISO timestamp
+        metadata_dict: Metadata dict
+        baseline_timing: Baseline timing results
+        flowbook_timing: FlowBook timing results
+        baseline_memory: Baseline memory results
+        flowbook_memory: FlowBook memory results
+
+    Returns:
+        Dict in v4.0 format ready for json.dump()
+    """
+    # Build metadata
+    metadata = ComparisonMetadata(
+        staleness_mode=metadata_dict.get("staleness_mode", "semantic"),
+        num_cells=metadata_dict.get("num_cells", 0),
+        timeout_seconds=metadata_dict.get("timeout_seconds", 0.0),
+        notebook_path=notebook_path,
+        timestamp=timestamp,
+    )
+
+    # Convert memory results
+    baseline_v4 = None
+    if baseline_memory:
+        baseline_v4 = _convert_memory_results_to_v4(baseline_memory, is_flowbook=False)
+
+    flowbook_v4 = None
+    if flowbook_memory:
+        flowbook_v4 = _convert_memory_results_to_v4(flowbook_memory, is_flowbook=True)
+
+    # Build result
+    result = ComparisonResultV4(
+        version="4.0",
+        metadata=metadata,
+        baseline=baseline_v4,
+        flowbook=flowbook_v4,
+        timing=None,  # Will add below
+    )
+
+    # Build dict
+    result_dict = result.to_dict()
+
+    # Add timing data to kernels (kept in original format for now)
+    if "kernels" not in result_dict:
+        result_dict["kernels"] = {}
+
+    if baseline_timing or baseline_v4:
+        if "baseline" not in result_dict["kernels"]:
+            result_dict["kernels"]["baseline"] = {}
+        if baseline_timing:
+            result_dict["kernels"]["baseline"]["timing"] = _timing_results_to_dict(baseline_timing)
+
+    if flowbook_timing or flowbook_v4:
+        if "flowbook" not in result_dict["kernels"]:
+            result_dict["kernels"]["flowbook"] = {}
+        if flowbook_timing:
+            result_dict["kernels"]["flowbook"]["timing"] = _timing_results_to_dict(flowbook_timing)
+
+    return result_dict
+
+
+# ============ V5 Conversion Functions ============
+
+
+def create_v5_comparison_result(
+    notebook_path: str,
+    timestamp: str,
+    metadata_dict: Dict[str, Any],
+    baseline_timing: Optional[TimingResults],
+    flowbook_timing: Optional[TimingResults],
+    baseline_memory: Optional["V5MemoryResult"],
+    flowbook_memory: Optional["V5MemoryResult"],
+) -> Dict[str, Any]:
+    """Create v5.0 format comparison result dict ready for JSON serialization.
+
+    V5 simplifies memory data by:
+    - Removing pre_* fields (only post-execution state needed)
+    - Flattening nested checkpoint structure to single checkpoint_mb
+    - Aggregating per-variable checkpoint sizes across all checkpoints
+
+    Args:
+        notebook_path: Path to notebook
+        timestamp: ISO timestamp
+        metadata_dict: Metadata dict
+        baseline_timing: Baseline timing results
+        flowbook_timing: FlowBook timing results
+        baseline_memory: Baseline memory results (V5MemoryResult)
+        flowbook_memory: FlowBook memory results (V5MemoryResult)
+
+    Returns:
+        Dict in v5.0 format ready for json.dump()
+    """
+    result: Dict[str, Any] = {
+        "version": "5.0",
+        "metadata": {
+            "staleness_mode": metadata_dict.get("staleness_mode", "semantic"),
+            "num_cells": metadata_dict.get("num_cells", 0),
+            "timeout_seconds": metadata_dict.get("timeout_seconds", 0.0),
+            "notebook_path": notebook_path,
+            "timestamp": timestamp,
+        },
+        "kernels": {},
+    }
+
+    # Add baseline if present
+    if baseline_timing or baseline_memory:
+        result["kernels"]["baseline"] = {}
+        if baseline_timing:
+            result["kernels"]["baseline"]["timing"] = _timing_results_to_dict(baseline_timing)
+        if baseline_memory:
+            result["kernels"]["baseline"]["memory"] = baseline_memory.to_dict()
+
+    # Add flowbook if present
+    if flowbook_timing or flowbook_memory:
+        result["kernels"]["flowbook"] = {}
+        if flowbook_timing:
+            result["kernels"]["flowbook"]["timing"] = _timing_results_to_dict(flowbook_timing)
+        if flowbook_memory:
+            result["kernels"]["flowbook"]["memory"] = flowbook_memory.to_dict()
+
+    return result
+
+
+def _timing_results_to_dict(timing: TimingResults) -> Dict[str, Any]:
+    """Convert TimingResults to dict for JSON serialization."""
+    def cell_to_dict(cell: TimingCellMetrics) -> Dict[str, Any]:
+        d = {
+            "cell_id": cell.cell_id,
+            "cell_index": cell.cell_index,
+            "execute_duration_ms": cell.execute_duration_ms,
+            "code_duration_ms": cell.code_duration_ms,
+            "state_duration_ms": cell.state_duration_ms,
+            "check_duration_ms": cell.check_duration_ms,
+            "status": cell.status,
+            "error": cell.error,
+            "is_rerun": cell.is_rerun,
+        }
+        if cell.checking_result:
+            d["checking_result"] = cell.checking_result.to_dict()
+        return d
+
+    return {
+        "kernel_name": timing.kernel_name,
+        "cells": [cell_to_dict(c) for c in timing.cells],
+        "rerun_cells": [cell_to_dict(c) for c in timing.rerun_cells],
+        "totals": timing.totals,
+    }
+
+
+def _convert_memory_results_to_v5(memory: MemoryResults) -> "V5MemoryResult":
+    """Convert MemoryResults to V5MemoryResult for baseline compatibility.
+
+    Baseline doesn't have checkpoints, so checkpoint_mb is always 0.
+    """
+    v5_cells = []
+    for cell in memory.cells:
+        v5_cells.append(V5CellMemory(
+            cell_id=cell.cell_id,
+            cell_index=cell.cell_index,
+            user_ns_mb=cell.namespace_mb,
+            gpu_mb=cell.gpu_mb,
+            checkpoint_mb=0.0,  # Baseline has no checkpoints
+            checkpoint_vars={},
+        ))
+    return V5MemoryResult(cells=v5_cells)
 
 
 def _is_heapsizer_available() -> bool:
@@ -1092,6 +1403,146 @@ def get_checkpoint_overhead(
         log(traceback.format_exc())
 
     return {'total_mb': 0, 'by_checkpoint': {}, 'by_variable': {}, 'cumulative': {}}
+
+
+def get_v5_memory_snapshot(kernel_client, timeout: float = 30.0) -> Dict[str, Any]:
+    """Get unified v5 memory snapshot: namespace + checkpoint overhead.
+
+    This is the simplified v5 API that measures everything in a single call:
+    1. User namespace size (filtered)
+    2. Total checkpoint overhead BEYOND namespace (handles CoW sharing)
+    3. Per-variable checkpoint sizes aggregated across all checkpoints
+
+    The key simplification is that HeapSizer measures namespace FIRST (populating
+    seen_ids), then measures checkpoints (only counting IDs NOT already seen).
+    This correctly handles CoW sharing without complex intermediate structures.
+
+    Args:
+        kernel_client: Kernel client to execute code on
+        timeout: Timeout in seconds
+
+    Returns:
+        Dict with:
+        - user_ns_bytes: int - Size of user namespace objects
+        - gpu_bytes: int - GPU memory (if torch available)
+        - checkpoint_bytes: int - Total checkpoint overhead beyond namespace
+        - checkpoint_vars: Dict[str, int] - {var_name: bytes} aggregated across checkpoints
+    """
+    expr = (
+        "__import__('flowbook.kernel_support.memory_checkpoint', fromlist=['MemoryCheckpoints'])"
+        ".MemoryCheckpoints._instance.get_memory_snapshot(globals())"
+    )
+
+    msg_id = kernel_client.execute('', user_expressions={'_snapshot': expr}, silent=True)
+
+    # Wait for idle on iopub
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            return {'user_ns_bytes': 0, 'gpu_bytes': 0, 'checkpoint_bytes': 0, 'checkpoint_vars': {}}
+        try:
+            msg = kernel_client.get_iopub_msg(timeout=1.0)
+        except Exception:
+            continue
+        if msg['parent_header'].get('msg_id') != msg_id:
+            continue
+        if msg['header']['msg_type'] == 'status':
+            if msg['content']['execution_state'] == 'idle':
+                break
+
+    # Get the execute_reply
+    try:
+        import ast
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                reply = kernel_client.get_shell_msg(timeout=1.0)
+            except Exception:
+                continue
+            if reply['parent_header'].get('msg_id') != msg_id:
+                continue
+            if reply['header']['msg_type'] != 'execute_reply':
+                continue
+
+            expr_result = reply['content'].get('user_expressions', {}).get('_snapshot', {})
+            if expr_result.get('status') == 'ok':
+                text = expr_result['data']['text/plain']
+                return ast.literal_eval(text)
+            break
+    except Exception as e:
+        log(f"Failed to get v5 memory snapshot: {e}")
+        log(traceback.format_exc())
+
+    return {'user_ns_bytes': 0, 'gpu_bytes': 0, 'checkpoint_bytes': 0, 'checkpoint_vars': {}}
+
+
+def get_logical_checkpoint_sizes(
+    kernel_client, cell_id: str, timeout: float = 30.0
+) -> Dict[str, Any]:
+    """Get LOGICAL checkpoint sizes - what's stored, regardless of sharing.
+
+    Unlike get_checkpoint_overhead which measures UNIQUE memory not shared
+    with namespace, this measures what data IS in each checkpoint. Useful
+    for understanding checkpoint content even when CoW means overhead is 0.
+
+    Args:
+        kernel_client: Kernel client to execute code on
+        cell_id: Cell ID to measure up to (inclusive)
+        timeout: Timeout in seconds
+
+    Returns:
+        Dict with:
+        - total_mb: Sum of all checkpoint logical sizes
+        - by_checkpoint: Per-checkpoint logical size in MB
+        - by_variable: Per-variable totals in MB (across all checkpoints)
+        - by_checkpoint_by_var: {checkpoint_name: {var_name: mb}}
+    """
+    expr = (
+        f"__import__('flowbook.kernel_support.memory_checkpoint', fromlist=['MemoryCheckpoints'])"
+        f".MemoryCheckpoints._instance.get_logical_checkpoint_sizes('{cell_id}')"
+    )
+
+    msg_id = kernel_client.execute('', user_expressions={'_logical': expr}, silent=True)
+
+    # Wait for idle on iopub
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            return {'total_mb': 0, 'by_checkpoint': {}, 'by_variable': {}, 'by_checkpoint_by_var': {}}
+        try:
+            msg = kernel_client.get_iopub_msg(timeout=1.0)
+        except Exception:
+            continue
+        if msg['parent_header'].get('msg_id') != msg_id:
+            continue
+        if msg['header']['msg_type'] == 'status':
+            if msg['content']['execution_state'] == 'idle':
+                break
+
+    # Get the execute_reply
+    try:
+        import ast
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                reply = kernel_client.get_shell_msg(timeout=1.0)
+            except Exception:
+                continue
+            if reply['parent_header'].get('msg_id') != msg_id:
+                continue
+            if reply['header']['msg_type'] != 'execute_reply':
+                continue
+
+            expr_result = reply['content'].get('user_expressions', {}).get('_logical', {})
+            if expr_result.get('status') == 'ok':
+                text = expr_result['data']['text/plain']
+                return ast.literal_eval(text)
+            break
+    except Exception as e:
+        log(f"Failed to get logical checkpoint sizes: {e}")
+        log(traceback.format_exc())
+
+    return {'total_mb': 0, 'by_checkpoint': {}, 'by_variable': {}, 'by_checkpoint_by_var': {}}
 
 
 def get_flowbook_pre_post_checkpoint_sizes(
@@ -1992,6 +2443,7 @@ def run_flowbook_memory(
             )
             checkpoint_cumulative_mb = overhead.get('total_mb', 0.0)
             checkpoint_by_var = overhead.get('by_variable') or None
+            by_checkpoint_by_var = overhead.get('by_checkpoint_by_var') or None
 
             # Get per-variable checkpoint costs (includes deepcopy_ms for timing plots)
             checkpoint_var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id) or None
@@ -2019,6 +2471,7 @@ def run_flowbook_memory(
                     pre_enforcer_overhead_mb=pre_enforcer_mb,
                     checkpoint_by_var=checkpoint_by_var,
                     checkpoint_var_costs=checkpoint_var_costs,
+                    by_checkpoint_by_var=by_checkpoint_by_var,
                     status="error",
                     error=timing["error"]
                 ))
@@ -2036,6 +2489,7 @@ def run_flowbook_memory(
                     pre_enforcer_overhead_mb=pre_enforcer_mb,
                     checkpoint_by_var=checkpoint_by_var,
                     checkpoint_var_costs=checkpoint_var_costs,
+                    by_checkpoint_by_var=by_checkpoint_by_var,
                     status="ok",
                 ))
 
@@ -2086,6 +2540,7 @@ def run_flowbook_memory(
                     )
                     checkpoint_cumulative_mb = overhead.get('total_mb', 0.0)
                     checkpoint_by_var = overhead.get('by_variable') or None
+                    by_checkpoint_by_var = overhead.get('by_checkpoint_by_var') or None
 
                     # Get per-variable checkpoint costs (includes deepcopy_ms for timing plots)
                     checkpoint_var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id) or None
@@ -2105,6 +2560,7 @@ def run_flowbook_memory(
                             pre_enforcer_overhead_mb=pre_enforcer_mb,
                             checkpoint_by_var=checkpoint_by_var,
                             checkpoint_var_costs=checkpoint_var_costs,
+                            by_checkpoint_by_var=by_checkpoint_by_var,
                             status="error",
                             error=timing["error"],
                             is_rerun=True,
@@ -2123,6 +2579,7 @@ def run_flowbook_memory(
                             pre_enforcer_overhead_mb=pre_enforcer_mb,
                             checkpoint_by_var=checkpoint_by_var,
                             checkpoint_var_costs=checkpoint_var_costs,
+                            by_checkpoint_by_var=by_checkpoint_by_var,
                             status="ok",
                             is_rerun=True,
                         ))
@@ -2174,6 +2631,194 @@ def run_flowbook_memory(
         cleanup_kernel(kernel_manager, kernel_client)
 
     return results
+
+
+def run_flowbook_memory_v5(
+    notebook_content: Dict[str, Any],
+    cell_timeout: float,
+    rerun_k: int = 0,
+    staleness_mode: str = "semantic",
+) -> V5MemoryResult:
+    """
+    Run notebook on FlowBook kernel and collect v5 simplified MEMORY metrics.
+
+    This is a simplified version of run_flowbook_memory() that uses a single
+    get_memory_snapshot() call per cell instead of multiple separate API calls.
+    The result is a cleaner data flow that correctly handles CoW sharing.
+
+    Args:
+        notebook_content: Notebook JSON
+        cell_timeout: Timeout per cell in seconds
+        rerun_k: Number of rerun iterations
+        staleness_mode: Staleness computation mode ('syntactic' or 'semantic')
+
+    Returns:
+        V5MemoryResult with simplified cell memory data
+    """
+    cells = notebook_content.get("cells", [])
+    code_cells = [c for c in cells if c.get("cell_type") == "code"]
+    cell_order = [c.get("id", f"cell_{i}") for i, c in enumerate(code_cells)]
+
+    log(f"FlowBook Memory v5: Found {len(code_cells)} code cells")
+
+    kernel_manager = None
+    kernel_client = None
+    result = V5MemoryResult()
+
+    try:
+        log("FlowBook Memory v5: Starting flowbook_kernel...")
+        kernel_manager, kernel_client = create_flowbook_kernel()
+        log("FlowBook Memory v5: Kernel ready")
+
+        # Enable continue_after_violation
+        kernel_client.execute("%continue_after_violation on", silent=True)
+        _wait_for_idle(kernel_client)
+
+        # Set staleness computation mode
+        kernel_client.execute(f"%staleness_mode {staleness_mode}", silent=True)
+        _wait_for_idle(kernel_client)
+        log(f"FlowBook Memory v5: staleness_mode set to {staleness_mode}")
+
+        # Run a warm-up cell
+        log("FlowBook Memory v5: Running warm-up cell...")
+        warmup_result = execute_cell_flowbook(
+            kernel_client,
+            "_warmup_var_ = 1; del _warmup_var_",
+            "_warmup_",
+            ["_warmup_"],
+            timeout=60.0
+        )
+        log(f"FlowBook Memory v5: Warm-up complete")
+
+        for idx, cell in enumerate(code_cells):
+            cell_id = cell.get("id", f"cell_{idx}")
+            source = cell.get("source", "")
+            if isinstance(source, list):
+                source = "".join(source)
+
+            if not source.strip():
+                continue
+
+            log(f"FlowBook Memory v5: Executing cell {idx+1}/{len(code_cells)} ({cell_id})...")
+
+            # Execute the cell
+            timing = execute_cell_flowbook(
+                kernel_client, source, cell_id, cell_order, cell_timeout
+            )
+
+            # Get unified memory snapshot AFTER cell execution
+            snapshot = get_v5_memory_snapshot(kernel_client)
+
+            # Get per-variable timing data (deepcopy_ms per variable)
+            var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id) or {}
+            checkpoint_var_timing = {}
+            for var_name, cost_info in var_costs.items():
+                if isinstance(cost_info, dict):
+                    checkpoint_var_timing[var_name] = cost_info.get('deepcopy_ms', 0.0)
+
+            # Convert bytes to MB
+            user_ns_mb = snapshot['user_ns_bytes'] / (1024 * 1024)
+            gpu_mb = snapshot['gpu_bytes'] / (1024 * 1024)
+            checkpoint_mb = snapshot['checkpoint_bytes'] / (1024 * 1024)
+            checkpoint_vars = {k: v / (1024 * 1024) for k, v in snapshot['checkpoint_vars'].items()}
+
+            log(f"  NS: {user_ns_mb:.1f}MB, Ckpt: {checkpoint_mb:.1f}MB, GPU: {gpu_mb:.1f}MB")
+            if checkpoint_vars:
+                top_vars = sorted(checkpoint_vars.items(), key=lambda x: x[1], reverse=True)[:3]
+                log(f"  Top checkpoint vars: {', '.join(f'{k}={v:.2f}MB' for k, v in top_vars)}")
+
+            if timing.get("error") and timing.get("cell_runtime_ms") is None:
+                log(f"  Error:\n{timing['error']}")
+                result.cells.append(V5CellMemory(
+                    cell_id=cell_id,
+                    cell_index=idx,
+                    user_ns_mb=0.0,
+                    gpu_mb=gpu_mb,
+                    checkpoint_mb=checkpoint_mb,
+                    checkpoint_vars=checkpoint_vars,
+                    checkpoint_var_timing=checkpoint_var_timing,
+                ))
+            else:
+                result.cells.append(V5CellMemory(
+                    cell_id=cell_id,
+                    cell_index=idx,
+                    user_ns_mb=user_ns_mb,
+                    gpu_mb=gpu_mb,
+                    checkpoint_mb=checkpoint_mb,
+                    checkpoint_vars=checkpoint_vars,
+                    checkpoint_var_timing=checkpoint_var_timing,
+                ))
+
+        # Execute reruns
+        if rerun_k > 0:
+            total_rerun_cells = rerun_k * len(code_cells)
+            log(f"FlowBook Memory v5: Executing {rerun_k} rerun pass(es) ({total_rerun_cells} cell executions)...")
+            rerun_count = 0
+            for pass_num in range(rerun_k):
+                log(f"FlowBook Memory v5: Rerun pass {pass_num + 1}/{rerun_k}...")
+                for idx, cell in enumerate(code_cells):
+                    cell_id = cell.get("id", f"cell_{idx}")
+                    source = cell.get("source", "")
+                    if isinstance(source, list):
+                        source = "".join(source)
+
+                    if not source.strip():
+                        continue
+
+                    rerun_count += 1
+                    log(f"FlowBook Memory v5: Rerun {rerun_count}/{total_rerun_cells} - pass {pass_num+1}, cell {idx+1} ({cell_id})...")
+
+                    timing = execute_cell_flowbook(
+                        kernel_client, source, cell_id, cell_order, cell_timeout
+                    )
+
+                    snapshot = get_v5_memory_snapshot(kernel_client)
+
+                    # Get per-variable timing for rerun
+                    var_costs = get_flowbook_checkpoint_var_costs(kernel_client, cell_id) or {}
+                    checkpoint_var_timing = {}
+                    for var_name, cost_info in var_costs.items():
+                        if isinstance(cost_info, dict):
+                            checkpoint_var_timing[var_name] = cost_info.get('deepcopy_ms', 0.0)
+
+                    user_ns_mb = snapshot['user_ns_bytes'] / (1024 * 1024)
+                    gpu_mb = snapshot['gpu_bytes'] / (1024 * 1024)
+                    checkpoint_mb = snapshot['checkpoint_bytes'] / (1024 * 1024)
+                    checkpoint_vars = {k: v / (1024 * 1024) for k, v in snapshot['checkpoint_vars'].items()}
+
+                    if timing.get("error") and timing.get("cell_runtime_ms") is None:
+                        result.rerun_cells.append(V5CellMemory(
+                            cell_id=cell_id,
+                            cell_index=idx,
+                            user_ns_mb=0.0,
+                            gpu_mb=gpu_mb,
+                            checkpoint_mb=checkpoint_mb,
+                            checkpoint_vars=checkpoint_vars,
+                            checkpoint_var_timing=checkpoint_var_timing,
+                        ))
+                    else:
+                        result.rerun_cells.append(V5CellMemory(
+                            cell_id=cell_id,
+                            cell_index=idx,
+                            user_ns_mb=user_ns_mb,
+                            gpu_mb=gpu_mb,
+                            checkpoint_mb=checkpoint_mb,
+                            checkpoint_vars=checkpoint_vars,
+                            checkpoint_var_timing=checkpoint_var_timing,
+                        ))
+                        log(f"  Rerun: NS={user_ns_mb:.1f}MB, Ckpt={checkpoint_mb:.1f}MB")
+
+        # Log final summary
+        if result.all_cells:
+            final = result.all_cells[-1]
+            peak_ckpt = result.peak_checkpoint_mb
+            log(f"FlowBook Memory v5: Final NS={final.user_ns_mb:.1f}MB, "
+                f"Peak Ckpt={peak_ckpt:.1f}MB, GPU={final.gpu_mb:.1f}MB")
+
+    finally:
+        cleanup_kernel(kernel_manager, kernel_client)
+
+    return result
 
 
 class CompareBaselineCommand(NotebookCommand):
@@ -2286,8 +2931,8 @@ class CompareBaselineCommand(NotebookCommand):
         """
         cell_timeout = kwargs.get("timeout", 14400.0)  # 4 hours default
         skip_memory = kwargs.get("skip_memory", False)
-        do_baseline_memory = not kwargs.get("skip_baseline", False)
-        run_baseline_timing_flag = kwargs.get("baseline_timing", False)
+        do_baseline_memory = False# not kwargs.get("skip_baseline", False)
+        run_baseline_timing_flag = True# kwargs.get("baseline_timing", False)
         rerun_k = kwargs.get("rerun_k", 0)
         num_trials = kwargs.get("trials", 1)
         start_trial = kwargs.get("start", 1)
@@ -2395,9 +3040,9 @@ class CompareBaselineCommand(NotebookCommand):
                 flowbook_memory = None
                 if heapsizer_available:
                     log("=" * 60)
-                    log("PHASE 4: FLOWBOOK MEMORY (HeapSizer)")
+                    log("PHASE 4: FLOWBOOK MEMORY (HeapSizer) - v5")
                     log("=" * 60)
-                    flowbook_memory = run_flowbook_memory(notebook_content, cell_timeout, rerun_k, staleness_mode)
+                    flowbook_memory = run_flowbook_memory_v5(notebook_content, cell_timeout, rerun_k, staleness_mode)
                     log("")
 
                 # Build comparison result with new structure
@@ -2412,43 +3057,18 @@ class CompareBaselineCommand(NotebookCommand):
                     metadata_dict["trial"] = trial_num
                     metadata_dict["num_trials"] = num_trials
 
-                comparison = ComparisonResult(
-                    version="3.0",
+                # Create v5.0 format comparison dict
+                # Convert baseline_memory to v5 format if present
+                baseline_memory_v5 = _convert_memory_results_to_v5(baseline_memory) if baseline_memory else None
+                comparison_dict = create_v5_comparison_result(
                     notebook_path=str(notebook_path),
                     timestamp=datetime.now().isoformat(),
-                    kernels={
-                        "baseline": KernelResults(
-                            kernel_name="baseline_kernel",
-                            timing=baseline_timing,
-                            memory=baseline_memory,
-                        ),
-                        "flowbook": KernelResults(
-                            kernel_name="flowbook_kernel",
-                            timing=flowbook_timing,
-                            memory=flowbook_memory,
-                        ),
-                    },
-                    scalene_available=heapsizer_available,  # Keep field name for compatibility
-                    metadata=metadata_dict,
+                    metadata_dict=metadata_dict,
+                    baseline_timing=baseline_timing,
+                    flowbook_timing=flowbook_timing,
+                    baseline_memory=baseline_memory_v5,
+                    flowbook_memory=flowbook_memory,
                 )
-
-                # Convert to dict for JSON serialization
-                def to_dict(obj):
-                    if obj is None:
-                        return None
-                    if hasattr(obj, '__dict__'):
-                        result = {}
-                        for key, value in obj.__dict__.items():
-                            result[key] = to_dict(value)
-                        return result
-                    elif isinstance(obj, list):
-                        return [to_dict(item) for item in obj]
-                    elif isinstance(obj, dict):
-                        return {k: to_dict(v) for k, v in obj.items()}
-                    else:
-                        return obj
-
-                comparison_dict = to_dict(comparison)
 
                 # Save JSON output - numbered for multi-trial
                 if num_trials > 1:
@@ -2503,18 +3123,25 @@ class CompareBaselineCommand(NotebookCommand):
                     log(f"  FlowBook check time:  {flowbook_check:,.1f}ms")
                 log("")
 
-                if heapsizer_available and flowbook_memory:
-                    flowbook_mem = flowbook_memory.totals.get("final_footprint_mb", 0)
-                    log("MEMORY (from HeapSizer):")
-                    if baseline_memory:
-                        baseline_mem = baseline_memory.totals.get("final_footprint_mb", 0)
-                        mem_overhead = flowbook_mem - baseline_mem
-                        log(f"  Baseline namespace:   {baseline_mem:,.1f}MB")
-                        log(f"  FlowBook namespace:   {flowbook_mem:,.1f}MB")
-                        log(f"  Memory overhead:      {mem_overhead:+,.1f}MB")
+                if heapsizer_available and flowbook_memory and flowbook_memory.cells:
+                    # V5 format: get final cell's total_mb
+                    final_cell = flowbook_memory.cells[-1]
+                    flowbook_ns = final_cell.user_ns_mb
+                    flowbook_ckpt = flowbook_memory.peak_checkpoint_mb
+                    flowbook_total = final_cell.total_mb
+                    log("MEMORY (from HeapSizer v5):")
+                    if baseline_memory and baseline_memory.cells:
+                        baseline_ns = baseline_memory.cells[-1].user_ns_mb
+                        ns_overhead = flowbook_ns - baseline_ns
+                        log(f"  Baseline namespace:   {baseline_ns:,.1f}MB")
+                        log(f"  FlowBook namespace:   {flowbook_ns:,.1f}MB (overhead: {ns_overhead:+,.1f}MB)")
+                        log(f"  FlowBook checkpoints: {flowbook_ckpt:,.1f}MB (peak)")
+                        log(f"  FlowBook total:       {flowbook_total:,.1f}MB")
                     else:
                         log(f"  Baseline:             SKIPPED")
-                        log(f"  FlowBook namespace:   {flowbook_mem:,.1f}MB")
+                        log(f"  FlowBook namespace:   {flowbook_ns:,.1f}MB")
+                        log(f"  FlowBook checkpoints: {flowbook_ckpt:,.1f}MB (peak)")
+                        log(f"  FlowBook total:       {flowbook_total:,.1f}MB")
                     log("")
 
                 if rerun_k > 0:

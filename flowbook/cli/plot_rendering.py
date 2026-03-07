@@ -1,0 +1,656 @@
+"""Plot rendering functions for compare_overhead.
+
+This module takes PlotNData dataclasses from plot_extraction.py and renders
+matplotlib figures. Each render_plotN function takes a PlotNData and axes,
+producing a visualization.
+
+Usage:
+    from flowbook.cli.plot_extraction import extract_plot3_data
+    from flowbook.cli.plot_rendering import render_plot3
+
+    p3 = extract_plot3_data(result)
+    fig, ax = plt.subplots()
+    render_plot3(ax, p3)
+"""
+
+from typing import List, Optional
+
+import numpy as np
+
+from flowbook.cli.models import (
+    Plot1Data,
+    Plot2Data,
+    Plot3Data,
+    Plot4Data,
+    Plot5Data,
+    Plot6Data,
+    CDFData,
+)
+
+
+def render_plot1(
+    ax,
+    data: Plot1Data,
+    colors=None,
+    large_fonts: bool = True,
+    show_legend: bool = True,
+    notebook_name: str = "",
+) -> None:
+    """Render Plot 1: Execution Time per Cell.
+
+    Stacked area chart showing cumulative time:
+    - Code execution (bottom)
+    - State management
+    - Check operations
+    - Other overhead (top)
+
+    Args:
+        ax: Matplotlib axes
+        data: Plot1Data with timing arrays
+        colors: Color palette (uses seaborn default if None)
+        large_fonts: Use larger fonts for readability
+        show_legend: Whether to show legend
+        notebook_name: Optional notebook name for title
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    if colors is None:
+        colors = sns.color_palette()
+
+    label_size = 18 if large_fonts else 12
+    title_size = 20 if large_fonts else 14
+    legend_size = 14 if large_fonts else 10
+    tick_size = 14 if large_fonts else 10
+
+    cells = np.array(data.cells)
+    code_arr = np.array(data.run_time_sec)
+    state_arr = np.array(data.state_time_sec)
+    check_arr = np.array(data.check_time_sec)
+    other_arr = np.array(data.other_time_sec)
+
+    # Cumulative sums
+    code_cumsum = np.cumsum(code_arr)
+    state_cumsum = np.cumsum(state_arr)
+    check_cumsum = np.cumsum(check_arr)
+    other_cumsum = np.cumsum(other_arr)
+
+    # Blue line with markers showing code time (baseline-like reference)
+    ax.plot(
+        cells, code_cumsum,
+        color=colors[0], linewidth=2, marker="o", markersize=4,
+        label="Code (no baseline)"
+    )
+
+    # Stacked areas: code (bottom) + state + check + other (top)
+    ax.fill_between(cells, 0, code_cumsum, alpha=0.3, color=colors[1], label="FlowBook Code")
+    ax.fill_between(
+        cells, code_cumsum, code_cumsum + state_cumsum,
+        alpha=0.4, color=colors[2], label="State"
+    )
+    ax.fill_between(
+        cells, code_cumsum + state_cumsum, code_cumsum + state_cumsum + check_cumsum,
+        alpha=0.4, color=colors[3], label="Check"
+    )
+    ax.fill_between(
+        cells,
+        code_cumsum + state_cumsum + check_cumsum,
+        code_cumsum + state_cumsum + check_cumsum + other_cumsum,
+        alpha=0.4, color=colors[4], label="Other"
+    )
+
+    ax.set_xlabel("Cell Number", fontsize=label_size)
+    ax.set_ylabel("Cumulative Time (seconds)", fontsize=label_size)
+
+    title = "Execution Time"
+    if notebook_name:
+        title = f"{title}\n{notebook_name}"
+    if data.initial_count < len(cells):
+        title += f" (cells 1-{data.initial_count} + {len(cells) - data.initial_count} reruns)"
+    ax.set_title(title, fontsize=title_size)
+
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.set_xlim(left=1)
+    ax.set_ylim(bottom=0)
+    ax.tick_params(axis="both", labelsize=tick_size)
+
+    # Rerun separator
+    if data.initial_count < len(cells):
+        ax.axvline(
+            x=data.initial_count + 0.5,
+            color="red", linestyle="--", linewidth=2, label="Rerun Start"
+        )
+
+    if show_legend:
+        ax.legend(loc="upper left", fontsize=legend_size)
+
+    # Summary text
+    total_code = code_cumsum[-1] if len(code_cumsum) > 0 else 0
+    total_overhead = (state_cumsum[-1] + check_cumsum[-1] + other_cumsum[-1]) if len(state_cumsum) > 0 else 0
+    total = total_code + total_overhead
+
+    textstr = f"Code: {total_code:.2f}s\nTotal: {total:.2f}s"
+    props = dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray")
+    ax.text(0.02, 0.70, textstr, transform=ax.transAxes, fontsize=legend_size,
+            verticalalignment="top", horizontalalignment="left", bbox=props)
+
+    # Overhead percentage (vs code time)
+    if total_code > 0:
+        overhead_pct = (total_overhead / total_code) * 100
+        ax.annotate(
+            f"{overhead_pct:.1f}% overhead (vs code)",
+            xy=(cells[-1], total),
+            xytext=(5, 0), textcoords="offset points",
+            fontsize=legend_size, va="center", ha="left", color=colors[1]
+        )
+
+
+def render_plot2(
+    ax,
+    data: Plot2Data,
+    colors=None,
+    large_fonts: bool = True,
+    show_legend: bool = True,
+    notebook_name: str = "",
+) -> None:
+    """Render Plot 2: Checkpoint Time by Variable.
+
+    Stacked area chart showing checkpoint deepcopy time per variable.
+
+    Args:
+        ax: Matplotlib axes
+        data: Plot2Data with per-variable timing
+        colors: Color palette
+        large_fonts: Use larger fonts
+        show_legend: Whether to show legend
+        notebook_name: Optional notebook name for title
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    if colors is None:
+        colors = sns.color_palette("husl", len(data.vars_ordered))
+
+    label_size = 18 if large_fonts else 12
+    title_size = 20 if large_fonts else 14
+    legend_size = 14 if large_fonts else 10
+    tick_size = 14 if large_fonts else 10
+
+    cells = np.array(data.cells)
+    cumulative = np.zeros(len(cells))
+
+    for i, var in enumerate(data.vars_ordered):
+        var_data = np.array(data.var_series[var])
+        label = var if var != "other" else f"other ({len(data.vars_ordered)} vars)"
+        ax.fill_between(
+            cells, cumulative, cumulative + var_data,
+            alpha=0.7, color=colors[i % len(colors)], label=label
+        )
+        cumulative = cumulative + var_data
+
+    ax.set_xlabel("Cell Number", fontsize=label_size)
+    ax.set_ylabel("Checkpoint Time (seconds)", fontsize=label_size)
+
+    title = "Checkpoint Time by Variable"
+    if notebook_name:
+        title = f"{title}\n{notebook_name}"
+    ax.set_title(title, fontsize=title_size)
+
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.set_xlim(left=1)
+    ax.set_ylim(bottom=0)
+    ax.tick_params(axis="both", labelsize=tick_size)
+
+    # Rerun separator
+    if data.initial_count < len(cells):
+        ax.axvline(
+            x=data.initial_count + 0.5,
+            color="red", linestyle="--", linewidth=2
+        )
+
+    if show_legend:
+        ax.legend(loc="upper left", fontsize=legend_size, ncol=2)
+
+
+def render_plot3(
+    ax,
+    data: Plot3Data,
+    colors=None,
+    large_fonts: bool = True,
+    show_legend: bool = True,
+    notebook_name: str = "",
+) -> None:
+    """Render Plot 3: Memory Overhead.
+
+    Stacked area chart showing:
+    - Base memory (user namespace + GPU)
+    - Overhead (checkpoint + enforcer state)
+
+    Args:
+        ax: Matplotlib axes
+        data: Plot3Data with memory arrays
+        colors: Color palette
+        large_fonts: Use larger fonts
+        show_legend: Whether to show legend
+        notebook_name: Optional notebook name for title
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    if colors is None:
+        colors = sns.color_palette()
+
+    label_size = 18 if large_fonts else 12
+    title_size = 20 if large_fonts else 14
+    legend_size = 14 if large_fonts else 10
+    tick_size = 14 if large_fonts else 10
+
+    cells = np.array(data.cells)
+    base = np.array(data.base_mb)
+    overhead = np.array(data.overhead_mb)
+
+    # Base label depends on whether we have baseline comparison
+    base_label = "Baseline Memory" if data.has_baseline else "User Namespace"
+
+    ax.fill_between(cells, 0, base, alpha=0.3, color=colors[0], label=base_label)
+    ax.fill_between(cells, base, base + overhead, alpha=0.3, color=colors[1], label="Checkpoint Overhead")
+
+    ax.plot(cells, base, color=colors[0], linewidth=2, marker="o", markersize=4)
+    ax.plot(cells, base + overhead, color=colors[1], linewidth=2, marker="o", markersize=4)
+
+    ax.set_xlabel("Cell Number", fontsize=label_size)
+    ax.set_ylabel("Memory (MB)", fontsize=label_size)
+
+    title = "Memory Overhead"
+    if notebook_name:
+        title = f"{title}\n{notebook_name}"
+    if data.initial_count < len(cells):
+        title += f" (cells 1-{data.initial_count} + {len(cells) - data.initial_count} reruns)"
+    ax.set_title(title, fontsize=title_size)
+
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.set_xlim(left=1)
+    ax.set_ylim(bottom=0)
+    ax.tick_params(axis="both", labelsize=tick_size)
+
+    # Rerun separator
+    if data.initial_count < len(cells):
+        ax.axvline(
+            x=data.initial_count + 0.5,
+            color="red", linestyle="--", linewidth=2, label="Rerun Start"
+        )
+
+    if show_legend:
+        ax.legend(loc="upper left", fontsize=legend_size)
+
+    # Peak overhead annotation
+    if data.peak_overhead_mb > 0:
+        ax.annotate(
+            f"Peak: {data.peak_overhead_pct:.1f}%",
+            xy=(data.peak_cell + 1, base[data.peak_cell] + overhead[data.peak_cell]),
+            xytext=(5, 5), textcoords="offset points",
+            fontsize=legend_size, va="bottom", ha="left",
+            color=colors[1], fontweight="bold"
+        )
+
+
+def render_plot4(
+    ax,
+    data: Plot4Data,
+    colors=None,
+    large_fonts: bool = True,
+    show_legend: bool = True,
+    notebook_name: str = "",
+) -> None:
+    """Render Plot 4: Checkpoint Memory by Variable.
+
+    Stacked area chart showing:
+    - User namespace (bottom, gray)
+    - GPU memory (orange)
+    - Per-variable checkpoint sizes (colors)
+
+    Args:
+        ax: Matplotlib axes
+        data: Plot4Data with per-variable memory
+        colors: Color palette
+        large_fonts: Use larger fonts
+        show_legend: Whether to show legend
+        notebook_name: Optional notebook name for title
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    label_size = 18 if large_fonts else 12
+    title_size = 20 if large_fonts else 14
+    legend_size = 14 if large_fonts else 10
+    tick_size = 14 if large_fonts else 10
+
+    cells = np.array(data.cells)
+    namespace = np.array(data.namespace_mb)
+    gpu = np.array(data.gpu_mb)
+
+    # Variable colors
+    var_colors = sns.color_palette("husl", len(data.vars_ordered))
+
+    cumulative = np.zeros(len(cells))
+
+    # Namespace (gray)
+    ax.fill_between(cells, cumulative, namespace, alpha=0.3, color="gray", label="Namespace")
+    cumulative = namespace.copy()
+
+    # GPU (orange)
+    if np.any(gpu > 0):
+        ax.fill_between(cells, cumulative, cumulative + gpu, alpha=0.4, color="orange", label="GPU")
+        cumulative = cumulative + gpu
+
+    # Per-variable checkpoints
+    for i, var in enumerate(data.vars_ordered):
+        var_data = np.array(data.var_series[var])
+        var_type = data.var_types.get(var, "")
+        label = f"{var} ({var_type})" if var_type else var
+        if var == "other":
+            label = f"other ({len(data.vars_ordered)} vars)"
+
+        ax.fill_between(
+            cells, cumulative, cumulative + var_data,
+            alpha=0.7, color=var_colors[i % len(var_colors)], label=label
+        )
+        cumulative = cumulative + var_data
+
+    ax.set_xlabel("Cell Number", fontsize=label_size)
+    ax.set_ylabel("Memory (MB)", fontsize=label_size)
+
+    title = "Checkpoint Memory by Variable"
+    if notebook_name:
+        title = f"{title}\n{notebook_name}"
+    ax.set_title(title, fontsize=title_size)
+
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.set_xlim(left=1)
+    ax.set_ylim(bottom=0)
+    ax.tick_params(axis="both", labelsize=tick_size)
+
+    # Rerun separator
+    if data.initial_count < len(cells):
+        ax.axvline(
+            x=data.initial_count + 0.5,
+            color="red", linestyle="--", linewidth=2
+        )
+
+    if show_legend:
+        ax.legend(loc="upper left", fontsize=legend_size, ncol=2)
+
+
+def render_plot5(
+    ax,
+    data: Plot5Data,
+    colors=None,
+    large_fonts: bool = True,
+    show_legend: bool = True,
+    notebook_name: str = "",
+) -> None:
+    """Render Plot 5: Overhead Time per Cell.
+
+    Bar chart showing overhead breakdown per cell:
+    - State management time
+    - Check time
+    - Other overhead
+
+    Args:
+        ax: Matplotlib axes
+        data: Plot5Data with overhead arrays
+        colors: Color palette
+        large_fonts: Use larger fonts
+        show_legend: Whether to show legend
+        notebook_name: Optional notebook name for title
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    if colors is None:
+        colors = sns.color_palette()
+
+    label_size = 18 if large_fonts else 12
+    title_size = 20 if large_fonts else 14
+    legend_size = 14 if large_fonts else 10
+    tick_size = 14 if large_fonts else 10
+
+    cells = np.array(data.cells)
+    state = np.array(data.state_sec)
+    check = np.array(data.check_sec)
+    other = np.array(data.other_sec)
+
+    width = 0.8
+    ax.bar(cells, state, width, label="State", color=colors[2], alpha=0.7)
+    ax.bar(cells, check, width, bottom=state, label="Check", color=colors[3], alpha=0.7)
+    ax.bar(cells, other, width, bottom=state + check, label="Other", color=colors[4], alpha=0.7)
+
+    ax.set_xlabel("Cell Number", fontsize=label_size)
+    ax.set_ylabel("Overhead Time (seconds)", fontsize=label_size)
+
+    title = "Overhead Time per Cell"
+    if notebook_name:
+        title = f"{title}\n{notebook_name}"
+    ax.set_title(title, fontsize=title_size)
+
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.set_xlim(left=0.5, right=len(cells) + 0.5)
+    ax.set_ylim(bottom=0)
+    ax.tick_params(axis="both", labelsize=tick_size)
+
+    # Rerun separator
+    if data.initial_count < len(cells):
+        ax.axvline(
+            x=data.initial_count + 0.5,
+            color="red", linestyle="--", linewidth=2, label="Rerun Start"
+        )
+
+    if show_legend:
+        ax.legend(loc="upper right", fontsize=legend_size)
+
+
+def render_plot6(
+    ax,
+    data: Plot6Data,
+    colors=None,
+    large_fonts: bool = True,
+    show_legend: bool = True,
+    notebook_name: str = "",
+) -> None:
+    """Render Plot 6: Checkpoint Overhead Ratio per Cell.
+
+    Bar chart showing checkpoint_delta / base_memory ratio for each cell.
+
+    Args:
+        ax: Matplotlib axes
+        data: Plot6Data with per-cell ratios
+        colors: Color palette
+        large_fonts: Use larger fonts
+        show_legend: Whether to show legend
+        notebook_name: Optional notebook name for title
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    if colors is None:
+        colors = sns.color_palette()
+
+    label_size = 18 if large_fonts else 12
+    title_size = 20 if large_fonts else 14
+    legend_size = 14 if large_fonts else 10
+    tick_size = 14 if large_fonts else 10
+
+    cells = np.array(data.cells)
+    ratios = np.array(data.ratios)
+
+    # Bar chart of ratios per cell
+    bar_width = 0.6
+    ax.bar(cells, ratios, width=bar_width, alpha=0.7, color="#66c2a5")
+
+    ax.set_xlabel("Cell Number", fontsize=label_size)
+    ax.set_ylabel("Checkpoint / Base Memory", fontsize=label_size)
+
+    title = "Checkpoint Overhead Ratio"
+    if notebook_name:
+        title = f"{title}\n{notebook_name}"
+    ax.set_title(title, fontsize=title_size)
+
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.set_xlim(left=0.5, right=len(cells) + 0.5)
+    ax.set_ylim(bottom=0)
+    ax.tick_params(axis="both", labelsize=tick_size)
+
+    # Rerun separator
+    if data.initial_count < len(cells):
+        ax.axvline(
+            x=data.initial_count + 0.5,
+            color="red", linestyle="--", linewidth=2, label="Rerun Start"
+        )
+        if show_legend:
+            ax.legend(loc="upper right", fontsize=legend_size)
+
+
+def render_cdf_panel(
+    ax,
+    data: CDFData,
+    metric: str,
+    colors=None,
+    large_fonts: bool = True,
+    show_legend: bool = True,
+) -> None:
+    """Render a single CDF panel for aggregate data.
+
+    Args:
+        ax: Matplotlib axes
+        data: CDFData with aggregate ratios
+        metric: One of "time", "memory", "peak"
+        colors: Color palette
+        large_fonts: Use larger fonts
+        show_legend: Whether to show legend
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    if colors is None:
+        colors = sns.color_palette()
+
+    label_size = 18 if large_fonts else 12
+    title_size = 20 if large_fonts else 14
+    legend_size = 14 if large_fonts else 10
+    tick_size = 14 if large_fonts else 10
+
+    if metric == "time":
+        sorted_vals = data.time_sorted
+        percentiles = data.time_percentiles
+        title = "Time Overhead Ratio CDF"
+        xlabel = "Overhead / Run Time"
+        n = len(data.time_ratios)
+    elif metric == "memory":
+        sorted_vals = data.memory_sorted
+        percentiles = data.memory_percentiles
+        title = "Memory Overhead Ratio CDF"
+        xlabel = "Overhead / Base Memory"
+        n = len(data.memory_ratios)
+    elif metric == "peak":
+        sorted_vals = data.peak_sorted
+        percentiles = data.peak_percentiles
+        title = "Peak Memory Overhead CDF"
+        xlabel = "Peak Overhead %"
+        n = len(data.peak_memory_pct)
+    else:
+        raise ValueError(f"Unknown metric: {metric}")
+
+    if not sorted_vals:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title(title, fontsize=title_size)
+        return
+
+    ax.step(sorted_vals, percentiles, where="post", color=colors[0], linewidth=2)
+    ax.fill_between(sorted_vals, 0, percentiles, step="post", alpha=0.3, color=colors[0])
+
+    ax.set_xlabel(xlabel, fontsize=label_size)
+    ax.set_ylabel("Cumulative Fraction", fontsize=label_size)
+    ax.set_title(title, fontsize=title_size)
+
+    ax.set_xlim(left=0)
+    ax.set_ylim(0, 1.05)
+    ax.tick_params(axis="both", labelsize=tick_size)
+
+    # Summary
+    textstr = f"n={n}"
+    props = dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray")
+    ax.text(0.98, 0.02, textstr, transform=ax.transAxes, fontsize=legend_size,
+            verticalalignment="bottom", horizontalalignment="right", bbox=props)
+
+
+def render_combined_6panel(
+    fig,
+    axes,
+    p1: Optional[Plot1Data],
+    p2: Optional[Plot2Data],
+    p3: Optional[Plot3Data],
+    p4: Optional[Plot4Data],
+    p5: Optional[Plot5Data],
+    p6: Optional[Plot6Data],
+    large_fonts: bool = True,
+    notebook_name: str = "",
+) -> None:
+    """Render all 6 panels in a 2x3 grid.
+
+    Layout:
+    - Row 1: Timing (P1) | Checkpoint Time by Variable (P2)
+    - Row 2: Memory Overhead (P3) | Checkpoint Memory by Variable (P4)
+    - Row 3: Overhead per Cell (P5) | Checkpoint Ratio CDF (P6)
+
+    Args:
+        fig: Matplotlib figure
+        axes: 6-element list of axes in order [P1, P2, P3, P4, P5, P6]
+        p1-p6: Plot data (can be None for missing data)
+        large_fonts: Use larger fonts
+        notebook_name: Optional notebook name for titles
+    """
+    import matplotlib.pyplot as plt
+
+    # Panel 1: Timing
+    if p1 is not None:
+        render_plot1(axes[0], p1, large_fonts=large_fonts, notebook_name=notebook_name)
+    else:
+        axes[0].text(0.5, 0.5, "No timing data", ha="center", va="center", transform=axes[0].transAxes)
+        axes[0].set_title("Execution Time", fontsize=20 if large_fonts else 14)
+
+    # Panel 2: Checkpoint Time by Variable
+    if p2 is not None:
+        render_plot2(axes[1], p2, large_fonts=large_fonts, notebook_name=notebook_name)
+    else:
+        axes[1].text(0.5, 0.5, "No checkpoint timing data", ha="center", va="center", transform=axes[1].transAxes)
+        axes[1].set_title("Checkpoint Time by Variable", fontsize=20 if large_fonts else 14)
+
+    # Panel 3: Memory Overhead
+    if p3 is not None:
+        render_plot3(axes[2], p3, large_fonts=large_fonts, notebook_name=notebook_name)
+    else:
+        axes[2].text(0.5, 0.5, "No memory data", ha="center", va="center", transform=axes[2].transAxes)
+        axes[2].set_title("Memory Overhead", fontsize=20 if large_fonts else 14)
+
+    # Panel 4: Checkpoint Memory by Variable
+    if p4 is not None:
+        render_plot4(axes[3], p4, large_fonts=large_fonts, notebook_name=notebook_name)
+    else:
+        axes[3].text(0.5, 0.5, "No checkpoint memory data", ha="center", va="center", transform=axes[3].transAxes)
+        axes[3].set_title("Checkpoint Memory by Variable", fontsize=20 if large_fonts else 14)
+
+    # Panel 5: Overhead per Cell
+    if p5 is not None:
+        render_plot5(axes[4], p5, large_fonts=large_fonts, notebook_name=notebook_name)
+    else:
+        axes[4].text(0.5, 0.5, "No overhead timing data", ha="center", va="center", transform=axes[4].transAxes)
+        axes[4].set_title("Overhead Time per Cell", fontsize=20 if large_fonts else 14)
+
+    # Panel 6: Checkpoint Ratio CDF
+    if p6 is not None:
+        render_plot6(axes[5], p6, large_fonts=large_fonts, notebook_name=notebook_name)
+    else:
+        axes[5].text(0.5, 0.5, "No ratio data", ha="center", va="center", transform=axes[5].transAxes)
+        axes[5].set_title("Checkpoint Overhead Ratio CDF", fontsize=20 if large_fonts else 14)
+
+    fig.tight_layout()

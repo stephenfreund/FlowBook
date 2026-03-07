@@ -2857,6 +2857,7 @@ class MemoryCheckpoints:
             'by_checkpoint': dict(result.by_checkpoint),
             'by_variable': dict(result.by_variable),
             'cumulative': dict(result.cumulative),
+            'by_checkpoint_by_var': {k: dict(v) for k, v in result.by_checkpoint_by_var.items()},
         }
 
     def get_overhead_beyond_user_namespace(
@@ -2886,6 +2887,58 @@ class MemoryCheckpoints:
             and not isinstance(v, (types.FunctionType, types.BuiltinFunctionType, type))
         }
         return self.get_overhead_beyond_namespace(cell_id, filtered)
+
+    def get_logical_checkpoint_sizes(
+        self,
+        cell_id: str,
+    ) -> dict:
+        """
+        Get LOGICAL checkpoint sizes - what's stored, regardless of sharing.
+
+        Unlike get_overhead_beyond_namespace which measures UNIQUE memory not
+        shared with namespace, this measures what data IS in each checkpoint.
+        Useful for understanding checkpoint content even when CoW means overhead is 0.
+
+        Args:
+            cell_id: Cell ID to measure up to (inclusive)
+
+        Returns:
+            Dict with:
+            - total_mb: Sum of all checkpoint logical sizes
+            - by_checkpoint: Per-checkpoint logical size in MB
+            - by_variable: Per-variable totals in MB (across all checkpoints)
+            - by_checkpoint_by_var: {checkpoint_name: {var_name: mb}}
+        """
+        from flowbook.kernel_support.heap_size import HeapSizer
+
+        pre_name = f"_pre_{cell_id}"
+        post_name = f"_post_{cell_id}"
+
+        # Collect checkpoints in order up to this cell
+        checkpoints = []
+        for name, ckpt in self.saved.items():
+            checkpoints.append((name, ckpt))
+            if name == post_name or name == pre_name:
+                break
+
+        if not checkpoints:
+            return {
+                'total_mb': 0.0,
+                'by_checkpoint': {},
+                'by_variable': {},
+                'by_checkpoint_by_var': {},
+            }
+
+        sizer = HeapSizer()
+        result = sizer.sizeof_checkpoints_logical(checkpoints)
+
+        # Convert dataclass to dict for easy serialization
+        return {
+            'total_mb': result.total_mb,
+            'by_checkpoint': dict(result.by_checkpoint),
+            'by_variable': dict(result.by_variable),
+            'by_checkpoint_by_var': {k: dict(v) for k, v in result.by_checkpoint_by_var.items()},
+        }
 
     def get_pre_post_checkpoint_sizes_at_cell(self, cell_id: str) -> dict:
         """
@@ -3077,3 +3130,87 @@ class MemoryCheckpoints:
             True if checkpoint exists, False otherwise
         """
         return name in self.saved
+
+    def get_memory_snapshot(self, globals_dict: dict[str, Any]) -> dict[str, Any]:
+        """
+        Get unified memory snapshot: namespace + ALL checkpoint overhead.
+
+        This is the simplified v5 API for memory measurement. It measures:
+        1. User namespace size (filtered)
+        2. Total checkpoint overhead BEYOND namespace (handles CoW sharing)
+        3. Per-variable checkpoint overhead aggregated across all checkpoints
+
+        The key insight is that HeapSizer's sizeof_checkpoints_beyond_namespace()
+        measures namespace FIRST (populating seen_ids), then measures checkpoints
+        (only counting IDs NOT already seen). This correctly handles CoW sharing.
+
+        Args:
+            globals_dict: The kernel globals() dictionary
+
+        Returns:
+            Dictionary with:
+            - user_ns_bytes: int - Size of user namespace objects
+            - gpu_bytes: int - GPU memory (if torch available)
+            - checkpoint_bytes: int - Total checkpoint overhead beyond namespace
+            - checkpoint_vars: Dict[str, int] - {var_name: bytes} aggregated across checkpoints
+        """
+        from flowbook.kernel_support.heap_size import HeapSizer
+
+        # Filter namespace (exclude private, modules, functions, types)
+        filtered = {}
+        for k, v in globals_dict.items():
+            if k.startswith('_'):
+                continue
+            if k in ('In', 'Out', 'get_ipython'):
+                continue
+            if isinstance(v, types.ModuleType):
+                continue
+            if isinstance(v, (types.FunctionType, types.BuiltinFunctionType, type)):
+                continue
+            # Exclude IPython internal objects
+            try:
+                mod = getattr(type(v), '__module__', '') or ''
+                if mod.startswith(('IPython', 'ipykernel', 'zmq')):
+                    continue
+            except Exception:
+                pass
+            filtered[k] = v
+
+        # Get ALL checkpoints as list of (name, checkpoint) tuples
+        checkpoints = list(self.saved.items())
+
+        # Create a fresh HeapSizer for this measurement
+        sizer = HeapSizer()
+
+        # Measure namespace first (this populates seen_ids)
+        ns_result = sizer.sizeof_user_namespace(globals_dict)
+
+        if checkpoints:
+            # Measure checkpoints beyond namespace (uses accumulated seen_ids)
+            overhead = sizer.sizeof_checkpoints_beyond_namespace(filtered, checkpoints)
+            total_checkpoint_bytes = int(overhead.total_mb * 1024 * 1024)
+
+            # Aggregate per-variable across all checkpoints (already in MB)
+            checkpoint_vars = {}
+            for ckpt_vars in overhead.by_checkpoint_by_var.values():
+                for var_name, mb in ckpt_vars.items():
+                    checkpoint_vars[var_name] = checkpoint_vars.get(var_name, 0) + int(mb * 1024 * 1024)
+        else:
+            total_checkpoint_bytes = 0
+            checkpoint_vars = {}
+
+        # Get GPU memory if available
+        gpu_bytes = 0
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_bytes = torch.cuda.memory_allocated()
+        except ImportError:
+            pass
+
+        return {
+            'user_ns_bytes': ns_result.total_bytes,
+            'gpu_bytes': gpu_bytes,
+            'checkpoint_bytes': total_checkpoint_bytes,
+            'checkpoint_vars': checkpoint_vars,
+        }
