@@ -414,6 +414,13 @@ def compute_file_stats_v3(data: Dict[str, Any], file_path: str) -> FileStats:
         per_cell_checkpoint_overhead_ms.append(state_ms)
         per_cell_total_overhead_ms.append(state_ms + check_ms + other_ms)
 
+    # Compute peak memory overhead percentage (max ratio * 100)
+    peak_memory_overhead_pct = (
+        max(per_cell_memory_overhead) * 100
+        if per_cell_memory_overhead
+        else 0.0
+    )
+
     return FileStats(
         notebook_path=notebook_path,
         notebook_name=notebook_name,
@@ -434,6 +441,7 @@ def compute_file_stats_v3(data: Dict[str, Any], file_path: str) -> FileStats:
         last_cell_state_overhead_pct=last_cell_state_pct,
         last_cell_check_overhead_pct=last_cell_check_pct,
         last_cell_memory_overhead_pct=last_cell_memory_pct,
+        peak_memory_overhead_pct=peak_memory_overhead_pct,
         num_reruns=num_reruns,
         rerun_baseline_runtime_ms=rerun_baseline_runtime,
         rerun_flowbook_runtime_ms=rerun_flowbook_runtime,
@@ -887,8 +895,11 @@ def plot_overhead_cdfs_v3(
 ) -> Optional[List[Any]]:
     """Create CDF plots for per-cell overhead distributions (v3 data).
 
-    Two pages: log scale (full distribution) and linear scale (zoomed to P99).
-    Memory overhead uses cross-run Checkpoint_i / Base_i ratios.
+    Creates three figures (matching v2):
+    1. Two side-by-side CDFs: Time overhead (log scale) + Memory ratio
+    2. Single CDF: Peak memory overhead % per notebook
+
+    Memory overhead ratio uses checkpoint_delta / prev_namespace (same as v2).
     """
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -1019,58 +1030,52 @@ def plot_overhead_cdfs_v3(
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     figures.append(fig1)
 
-    # --- Figure 2: Linear scale zoomed to P99 ---
-    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
+    # --- Figure 2: Peak Memory Overhead % CDF (per notebook) ---
+    peak_pcts = np.array(aggregate.all_peak_memory_overhead_pct)
+    if len(peak_pcts) > 0:
+        peak_data = np.sort(peak_pcts)
+        peak_cdf = np.arange(1, len(peak_data) + 1) / len(peak_data)
+        peak_stats = {
+            'P50': np.percentile(peak_data, 50),
+            'P90': np.percentile(peak_data, 90),
+            'P95': np.percentile(peak_data, 95),
+            'P99': np.percentile(peak_data, 99),
+        }
 
-    ax = axes2[0]
-    if total_data is not None:
-        p99_val = total_stats['P99']
-        mask = total_data <= p99_val * 1.05
-        ax.fill_between(total_data[mask], 0, total_cdf[mask], alpha=0.3, color='steelblue', edgecolor='none')
-        ax.plot(total_data[mask], total_cdf[mask], color='steelblue', linewidth=2)
-        stats_in_range = {k: v for k, v in total_stats.items() if v <= p99_val * 1.05}
-        add_percentile_markers(ax, total_data[mask], total_cdf[mask], stats_in_range, lambda x: f'{x:.1f}ms', 'black', tick_size)
-        add_percentile_gridlines(ax)
-        ax.set_xlabel(total_xlabel, fontsize=label_size)
-        ax.set_ylabel("Cumulative Probability", fontsize=label_size)
-        ax.set_title("Total Overhead (Zoomed to P99)", fontsize=title_size)
-        ax.set_ylim(0, 1.05)
-        ax.set_xlim(left=0)
-        n_excluded = np.sum(~mask)
+        fig2, ax2 = plt.subplots(1, 1, figsize=(8, 6))
+
+        ax2.fill_between(peak_data, 0, peak_cdf, alpha=0.3, color='darkorange', edgecolor='none')
+        ax2.plot(peak_data, peak_cdf, color='darkorange', linewidth=2)
+
+        # Format percentage values for legend
+        def format_pct(v):
+            if v >= 100:
+                return f'{v:.0f}%'
+            elif v >= 10:
+                return f'{v:.1f}%'
+            elif v >= 1:
+                return f'{v:.2f}%'
+            else:
+                return f'{v:.3f}%'
+
+        add_percentile_markers(ax2, peak_data, peak_cdf, peak_stats, format_pct, 'darkorange', tick_size)
+        add_percentile_gridlines(ax2)
+
+        ax2.set_xlabel("Checkpoints / Namespace Size", fontsize=label_size)
+        ax2.set_ylabel("Cumulative Probability", fontsize=label_size)
+        ax2.set_title("Peak Memory Overhead Distribution", fontsize=title_size)
+        ax2.set_ylim(0, 1.05)
+        ax2.set_xlim(0, 100)
+        ax2.set_xticks([0, 25, 50, 75, 100])
+        ax2.set_xticklabels(['0%', '25%', '50%', '75%', '100%'])
+
         props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-        ax.text(0.02, 0.98, f'N={np.sum(mask)} (excluded {n_excluded} > P99)', transform=ax.transAxes,
-                fontsize=tick_size, verticalalignment='top', horizontalalignment='left', bbox=props)
-    else:
-        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-        ax.set_title("Total Overhead (Zoomed to P99)", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
+        ax2.text(0.02, 0.98, f'N={len(peak_data)}', transform=ax2.transAxes, fontsize=tick_size,
+                verticalalignment='top', horizontalalignment='left', bbox=props)
+        ax2.tick_params(axis='both', labelsize=tick_size)
 
-    ax = axes2[1]
-    if memory_data is not None:
-        p99_val = memory_stats['P99']
-        mask = memory_data <= p99_val * 1.05
-        ax.fill_between(memory_data[mask], 0, memory_cdf[mask], alpha=0.3, color='seagreen', edgecolor='none')
-        ax.plot(memory_data[mask], memory_cdf[mask], color='seagreen', linewidth=2)
-        stats_in_range = {k: v for k, v in memory_stats.items() if v <= p99_val * 1.05}
-        add_percentile_markers(ax, memory_data[mask], memory_cdf[mask], stats_in_range, format_ratio, 'black', tick_size)
-        add_percentile_gridlines(ax)
-        ax.set_xlabel("Checkpoint / Base Memory Ratio", fontsize=label_size)
-        ax.set_ylabel("Cumulative Probability", fontsize=label_size)
-        ax.set_title("Memory Overhead Ratio (Zoomed to P99)", fontsize=title_size)
-        ax.set_ylim(0, 1.05)
-        ax.set_xlim(left=0)
-        n_excluded = np.sum(~mask)
-        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
-        ax.text(0.02, 0.98, f'N={np.sum(mask)} (excluded {n_excluded} > P99)', transform=ax.transAxes,
-                fontsize=tick_size, verticalalignment='top', horizontalalignment='left', bbox=props)
-    else:
-        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-        ax.set_title("Memory Overhead Ratio (Zoomed to P99)", fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
-
-    fig2.suptitle("Per-Cell Overhead CDFs (Zoomed to P99)", fontsize=title_size + 2, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    figures.append(fig2)
+        plt.tight_layout()
+        figures.append(fig2)
 
     if output_path is not None:
         import matplotlib.pyplot as plt
