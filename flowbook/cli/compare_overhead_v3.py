@@ -297,12 +297,7 @@ def compute_file_stats_v3(data: Dict[str, Any], file_path: str) -> FileStats:
     mb_to_bytes = 1024 * 1024
 
     if has_baseline_memory and flowbook_mem_cells:
-        # Cross-run comparison
-        base_values, checkpoint_costs, per_cell_ratios = _compute_cross_run_overhead(
-            baseline_mem_cells, flowbook_mem_cells,
-            baseline_mem_totals, flowbook_mem_totals,
-        )
-
+        # Cross-run comparison for overall stats
         # Overall memory stats from cross-run final totals
         baseline_final_mb = (baseline_mem_totals.get("final_namespace_mb", 0)
                              + baseline_mem_totals.get("final_gpu_mb", 0))
@@ -323,7 +318,9 @@ def compute_file_stats_v3(data: Dict[str, Any], file_path: str) -> FileStats:
             memory_overhead_ratio = 1.0
             memory_pct = 0.0
 
-        per_cell_memory_overhead = per_cell_ratios
+        # Per-cell ratios: use same formula as v2 (checkpoint_delta / prev_namespace)
+        # This ensures CDFs match between v2 and v3
+        per_cell_memory_overhead = _compute_fallback_ratios(flowbook_mem_cells)
 
     elif flowbook_mem_cells:
         # FlowBook-only fallback
@@ -840,22 +837,13 @@ def plot_combined_v3(
     ax.tick_params(axis='both', labelsize=tick_size)
 
     # ========== Panel 6: Checkpoint Overhead Ratio per Cell (bottom-right) — Plot 6 ==========
+    # Always use v2-style ratio (checkpoint_delta / prev_namespace) for consistency with CDFs
     ax = axes[5]
 
     if flowbook_mem_cells:
-        if has_baseline_memory:
-            # Cross-run: Checkpoint_i / Base_i
-            baseline_mem_totals = baseline_memory.get("totals", {}) if baseline_memory else {}
-            flowbook_mem_totals = flowbook_memory.get("totals", {}) if flowbook_memory else {}
-            _, _, ratios = _compute_cross_run_overhead(
-                baseline_mem_cells, flowbook_mem_cells,
-                baseline_mem_totals, flowbook_mem_totals,
-            )
-            ratio_title = "Checkpoint Overhead Ratio (Cross-Run)"
-        else:
-            # Fallback: FlowBook-only
-            ratios = _compute_fallback_ratios(flowbook_mem_cells)
-            ratio_title = "Checkpoint Overhead Ratio (FlowBook Only)"
+        # Use same formula as v2: checkpoint_delta_mb / prev_namespace_mb
+        ratios = _compute_fallback_ratios(flowbook_mem_cells)
+        ratio_title = "Checkpoint Overhead Ratio"
 
         cell_nums = list(range(1, len(ratios) + 1))
         bar_width = 0.6
