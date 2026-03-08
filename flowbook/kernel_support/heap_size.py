@@ -463,6 +463,15 @@ class HeapSizer:
         if isinstance(obj, _ATOMIC_TYPES):
             return sys.getsizeof(obj)
 
+        # cuDF proxy objects: convert to pandas via _fsproxy_slow to avoid
+        # triggering _fsproxy_fast access, which can fail with
+        # NotImplementedError for certain column types (e.g., category dtype
+        # after factorize()).  Measure the pandas representation instead.
+        from flowbook.kernel_support import cudf_compat
+        if cudf_compat.is_cudf_object(obj):
+            pandas_obj = cudf_compat.to_pandas(obj)
+            return self._sizeof(pandas_obj, owned_only)
+
         # NumPy array
         np = _get_numpy()
         if np is not None and isinstance(obj, np.ndarray):

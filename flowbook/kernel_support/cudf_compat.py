@@ -267,46 +267,34 @@ def unwrap_cudf_proxy(obj: Any) -> Any:
     Get the underlying object from a cudf.pandas proxy.
 
     In cudf.pandas mode, objects are wrapped in _FastSlowProxy.
+    Returns the fast (cudf) object if it is already materialized, which is
+    needed for GPU-based fingerprinting, buffer deduplication, and efficient
+    conversion.  Falls back to the slow (pandas) object otherwise.
 
-    IMPORTANT: We prefer _fsproxy_slow (pandas) over _fsproxy_fast (cudf) because:
-    1. For checkpointing, we want the pandas version anyway
-    2. Accessing _fsproxy_fast triggers lazy conversion from pandas→cudf
-    3. This conversion can fail with NotImplementedError for certain column types
-       (e.g., category dtype after factorize())
-
-    We use _fsproxy_wrapped to access the current state without triggering
-    any conversion. This attribute holds whichever version is currently
-    materialized (fast or slow).
+    IMPORTANT: We must NOT access _fsproxy_fast directly — it is a property
+    that triggers slow→fast conversion, which can raise NotImplementedError
+    for certain column types (e.g., category dtype after factorize()).
+    Instead we read _fsproxy_wrapped, which holds whichever version is
+    currently materialized without triggering any conversion.
     """
     if not is_cudf_proxy(obj):
         return obj
 
-    # Try _fsproxy_wrapped first - this is the currently materialized object
-    # and accessing it won't trigger any conversion
+    # _fsproxy_wrapped holds the currently materialized object (fast or slow)
+    # without triggering any conversion.  If it's a cudf object, use it
+    # for fingerprinting and buffer dedup.  If it's pandas, that's fine too.
     if hasattr(obj, '_fsproxy_wrapped'):
         wrapped = obj._fsproxy_wrapped
         if wrapped is not None:
             return wrapped
 
-    # Fallback to slow (pandas) object - this is safe and what we prefer
-    # for checkpointing anyway
+    # Fallback to slow (pandas) object — safe, never triggers fast conversion
     if hasattr(obj, '_fsproxy_slow'):
         slow_obj = obj._fsproxy_slow
         if callable(slow_obj):
             slow_obj = slow_obj()
         if slow_obj is not None:
             return slow_obj
-
-    # Last resort: access _fsproxy_fast, but this may trigger conversion
-    # which can fail for certain column types
-    try:
-        if hasattr(obj, '_fsproxy_fast'):
-            fast_obj = obj._fsproxy_fast
-            if fast_obj is not None:
-                return fast_obj
-    except NotImplementedError:
-        # Conversion failed - stick with the proxy
-        pass
 
     return obj
 
