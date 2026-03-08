@@ -182,30 +182,15 @@ class HeapSizer:
         # Measure each variable with deduplication via _seen_ids and _seen_data_ptrs
         # Use owned_only=False to count actual memory, even for arrays with .base
         # (e.g., pandas CoW internal arrays).
-        import time as _time
-        _start_ns = _time.time()
-        _slow_vars = []
         for var_name in vars_to_measure:
-            _var_start = _time.time()
             obj = ns[var_name]
             size = self._sizeof(obj, owned_only=False)
-            _var_elapsed = _time.time() - _var_start
-            if _var_elapsed > 0.5:  # Log vars taking > 500ms
-                _slow_vars.append((var_name, _var_elapsed, size, type(obj).__name__))
             by_variable[var_name] = size
             total_bytes += size
 
             # Track by type
             type_name = type(obj).__name__
             by_type[type_name] = by_type.get(type_name, 0) + size
-
-        _total_elapsed = _time.time() - _start_ns
-        if _slow_vars or _total_elapsed > 2.0:
-            print(f"[HeapSizer DEBUG] sizeof_namespace took {_total_elapsed:.2f}s for {len(vars_to_measure)} vars")
-            if _slow_vars:
-                print(f"[HeapSizer DEBUG] Slow variables (>500ms):")
-                for name, elapsed, size, tname in sorted(_slow_vars, key=lambda x: -x[1])[:10]:
-                    print(f"  {name}: {elapsed:.2f}s, {size/(1024*1024):.1f}MB, {tname}")
 
         return NamespaceSize(
             total_bytes=total_bytes,
@@ -248,7 +233,6 @@ class HeapSizer:
                 return False
 
         filtered = {}
-        excluded_ipython = []
         for k, v in globals_dict.items():
             if k.startswith('_'):
                 continue
@@ -259,14 +243,8 @@ class HeapSizer:
             if isinstance(v, (types.FunctionType, types.BuiltinFunctionType, type)):
                 continue
             if _is_ipython_internal(v):
-                excluded_ipython.append((k, type(v).__name__, getattr(type(v), '__module__', '?')))
                 continue
             filtered[k] = v
-
-        # Debug: show what was excluded and what will be measured
-        if excluded_ipython:
-            print(f"[HeapSizer DEBUG] Excluded {len(excluded_ipython)} IPython objects: {excluded_ipython[:5]}")
-        print(f"[HeapSizer DEBUG] Measuring {len(filtered)} user variables: {list(filtered.keys())[:10]}...")
 
         return self.sizeof_namespace(filtered)
 
