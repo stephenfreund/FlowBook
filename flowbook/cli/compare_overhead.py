@@ -3931,7 +3931,10 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
 
             # Add CDF plot if we have multiple notebooks
             if len(results) > 1:
-                cdf_data = extract_cdf_data(list(results.values()))
+                # Pass raw data for v5 extraction
+                results_list = list(results.values())
+                raw_data_list = [raw_data[p] for p in results.keys()]
+                cdf_data = extract_cdf_data(results_list, raw_data_list)
                 if cdf_data:
                     from flowbook.cli.plot_rendering import render_cdf_panel
                     import seaborn as sns

@@ -461,7 +461,10 @@ def extract_plot6_data(result: ComparisonResult) -> Optional[Plot6Data]:
     )
 
 
-def extract_cdf_data(results: List[ComparisonResult]) -> Optional[CDFData]:
+def extract_cdf_data(
+    results: List[ComparisonResult],
+    raw_data: Optional[List[Dict]] = None,
+) -> Optional[CDFData]:
     """Extract data for aggregate CDF plots across multiple notebooks.
 
     Builds CDFs for:
@@ -471,6 +474,7 @@ def extract_cdf_data(results: List[ComparisonResult]) -> Optional[CDFData]:
 
     Args:
         results: List of ComparisonResults from multiple notebooks
+        raw_data: Optional list of raw JSON dicts (for v5 extraction)
 
     Returns:
         CDFData or None if no data
@@ -479,7 +483,7 @@ def extract_cdf_data(results: List[ComparisonResult]) -> Optional[CDFData]:
     memory_ratios = []
     peak_memory_pct = []
 
-    for result in results:
+    for i, result in enumerate(results):
         # Time ratios from timing data
         timing = result.timing
         if timing:
@@ -502,8 +506,20 @@ def extract_cdf_data(results: List[ComparisonResult]) -> Optional[CDFData]:
                     ratio = overhead_ms / code_ms
                     time_ratios.append(ratio)
 
-        # Memory ratios
-        p3 = extract_plot3_data(result)
+        # Memory ratios - use v5 extraction if raw data provided
+        p3 = None
+        if raw_data and i < len(raw_data):
+            data = raw_data[i]
+            version = str(data.get("version", "4.0"))
+            if version.startswith("5"):
+                v5_memory = extract_v5_memory_result(data)
+                if v5_memory and v5_memory.all_cells:
+                    p3 = extract_plot3_data_v5(v5_memory.all_cells)
+
+        # Fall back to v4 extraction
+        if p3 is None:
+            p3 = extract_plot3_data(result)
+
         if p3:
             for base, overhead in zip(p3.base_mb, p3.overhead_mb):
                 if base >= MIN_BASE_MB:

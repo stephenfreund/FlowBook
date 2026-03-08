@@ -229,7 +229,7 @@ class TestExtractPlot6Data:
         assert extract_plot6_data(result) is None
 
     def test_computes_ratios_correctly(self):
-        """ratio = checkpoint_mb / user_ns_mb."""
+        """ratio = checkpoint_delta / prev_cell_base."""
         flowbook = FlowBookMemoryResult(cells=[
             make_flowbook_cell("a", 0, 100, 50, {"_pre_a": {"df": 50}}),
             make_flowbook_cell("b", 1, 200, 100, {"_pre_b": {"df": 100}}),
@@ -240,36 +240,47 @@ class TestExtractPlot6Data:
 
         assert p6 is not None
         assert len(p6.ratios) == 2
-        assert p6.ratios[0] == 0.5  # 50/100
-        assert p6.ratios[1] == 0.5  # 100/200
+        # Cell 0: base_mb = 0 (no prior cell), so ratio = 0
+        assert p6.ratios[0] == 0.0
+        # Cell 1: delta = 100 - 50 = 50, base = 100, ratio = 0.5
+        assert p6.ratios[1] == 0.5
 
     def test_excludes_small_namespace(self):
-        """Cells with user_ns < 1MB are excluded."""
+        """Cells with prev_user_ns < MIN_BASE_MB (0.1) get ratio=0."""
         flowbook = FlowBookMemoryResult(cells=[
-            make_flowbook_cell("a", 0, 0.5, 10, {"_pre_a": {"df": 10}}),  # Excluded
-            make_flowbook_cell("b", 1, 100, 50, {"_pre_b": {"df": 50}}),
+            make_flowbook_cell("a", 0, 0.05, 10, {"_pre_a": {"df": 10}}),  # base=0 (no prior)
+            make_flowbook_cell("b", 1, 100, 50, {"_pre_b": {"df": 50}}),  # base=0.05 < 0.1 → ratio=0
         ])
         result = ComparisonResult(flowbook=flowbook)
 
         p6 = extract_plot6_data(result)
 
-        assert len(p6.ratios) == 1
+        # Both cells have ratio=0 (cell 0: no prior, cell 1: prev base too small)
+        assert len(p6.ratios) == 2
+        assert p6.ratios[0] == 0.0
+        assert p6.ratios[1] == 0.0
 
-    def test_sorted_ratios_ascending(self):
-        """sorted_ratios in ascending order."""
+    def test_ratios_per_cell(self):
+        """Ratios computed for each cell based on prev_cell_base."""
         flowbook = FlowBookMemoryResult(cells=[
             make_flowbook_cell("a", 0, 100, 80, {"_pre_a": {"df": 80}}),
-            make_flowbook_cell("b", 1, 100, 20, {"_pre_b": {"df": 20}}),
-            make_flowbook_cell("c", 2, 100, 50, {"_pre_c": {"df": 50}}),
+            make_flowbook_cell("b", 1, 100, 20, {"_pre_b": {"df": 20}}),  # delta=20-80=-60 -> 0
+            make_flowbook_cell("c", 2, 100, 50, {"_pre_c": {"df": 50}}),  # delta=50-20=30
         ])
         result = ComparisonResult(flowbook=flowbook)
 
         p6 = extract_plot6_data(result)
 
-        assert p6.sorted_ratios == sorted(p6.sorted_ratios)
+        # Cell 0: no prior, ratio=0
+        # Cell 1: delta=max(0, 20-80)=0, ratio=0
+        # Cell 2: delta=50-20=30, base=100, ratio=0.3
+        assert len(p6.ratios) == 3
+        assert p6.ratios[0] == 0.0
+        assert p6.ratios[1] == 0.0
+        assert p6.ratios[2] == 0.3
 
-    def test_percentiles_0_to_1(self):
-        """Percentiles range from > 0 to 1.0."""
+    def test_handles_increasing_checkpoints(self):
+        """Handles cells with increasing checkpoint values."""
         flowbook = FlowBookMemoryResult(cells=[
             make_flowbook_cell(f"c{i}", i, 100, i * 10, {f"_pre_{i}": {"df": i * 10}})
             for i in range(10)
@@ -278,22 +289,28 @@ class TestExtractPlot6Data:
 
         p6 = extract_plot6_data(result)
 
-        assert p6.percentiles[0] > 0
-        assert p6.percentiles[-1] == 1.0
+        # Should have 10 cells
+        assert len(p6.ratios) == 10
+        assert len(p6.cells) == 10
 
-    def test_median_computed(self):
-        """Median is approximately 50th percentile."""
+    def test_ratios_computed_from_deltas(self):
+        """Ratios are computed from checkpoint deltas."""
         flowbook = FlowBookMemoryResult(cells=[
             make_flowbook_cell(f"c{i}", i, 100, (i + 1) * 10, {f"_pre_{i}": {"df": (i + 1) * 10}})
-            for i in range(10)
+            for i in range(5)
         ])
         result = ComparisonResult(flowbook=flowbook)
 
         p6 = extract_plot6_data(result)
 
-        # Ratios: 0.1, 0.2, ..., 1.0
-        # Median should be around 0.55
-        assert 0.5 <= p6.median_ratio <= 0.6
+        # Ratios should be based on checkpoint deltas / prev_base
+        # Cell 0: base=0 -> ratio=0
+        # Cell 1: delta=20-10=10, base=100 -> ratio=0.1
+        # Cell 2: delta=30-20=10, base=100 -> ratio=0.1
+        # etc.
+        assert p6.ratios[0] == 0.0
+        assert p6.ratios[1] == 0.1
+        assert p6.ratios[2] == 0.1
 
 
 class TestExtractCDFData:
@@ -359,7 +376,9 @@ class TestSyntacticVsSemanticExtraction:
 
         # Each cell has 50MB overhead
         assert p3.overhead_mb == [50, 50]
-        assert p6.median_ratio == 0.5
+        # Cell 0: base=0 -> ratio=0
+        # Cell 1: delta=0 (50-50), base=100 -> ratio=0
+        assert p6.ratios == [0.0, 0.0]
 
     def test_semantic_checkpoints_accumulate(self):
         """Semantic mode: checkpoints accumulate, overhead grows."""
@@ -379,9 +398,11 @@ class TestSyntacticVsSemanticExtraction:
         p3 = extract_plot3_data(result)
         p6 = extract_plot6_data(result)
 
-        # Cell 1 has double overhead
+        # Cell 1 has accumulated overhead
         assert p3.overhead_mb == [50, 100]
-        assert p6.ratios == [0.5, 1.0]
+        # Cell 0: base=0 -> ratio=0
+        # Cell 1: delta=100-50=50, base=100 -> ratio=0.5
+        assert p6.ratios == [0.0, 0.5]
 
     def test_semantic_larger_than_syntactic(self):
         """Semantic mode shows larger overhead than syntactic for same notebook."""
