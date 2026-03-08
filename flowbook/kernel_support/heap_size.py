@@ -82,6 +82,7 @@ class CheckpointOverhead:
     by_checkpoint: Dict[str, float]  # Delta per checkpoint (in MB)
     by_variable: Dict[str, float]  # Per-variable totals (in MB)
     cumulative: Dict[str, float]  # Running total at each checkpoint (in MB)
+    by_checkpoint_by_var: Dict[str, Dict[str, float]]  # {checkpoint: {var: mb}}
 
 
 # Types that are atomic (no internal references to measure)
@@ -428,16 +429,19 @@ class HeapSizer:
         # Objects already seen (from namespace or prior checkpoints) return 0
         by_checkpoint: Dict[str, float] = {}
         by_variable: Dict[str, float] = {}
+        by_checkpoint_by_var: Dict[str, Dict[str, float]] = {}
         cumulative: Dict[str, float] = {}
         running_total_bytes = 0
 
         for ckpt_name, ckpt in checkpoints:
             if not hasattr(ckpt, 'user_ns'):
                 by_checkpoint[ckpt_name] = 0.0
+                by_checkpoint_by_var[ckpt_name] = {}
                 cumulative[ckpt_name] = running_total_bytes / (1024 * 1024)
                 continue
 
             ckpt_delta_bytes = 0
+            ckpt_vars: Dict[str, float] = {}
             for var_name, obj in ckpt.user_ns.items():
                 # owned_only=True: don't follow views to base arrays owned elsewhere
                 size = self._sizeof(obj, owned_only=True)
@@ -445,9 +449,11 @@ class HeapSizer:
                 if size > 0:
                     var_mb = size / (1024 * 1024)
                     by_variable[var_name] = by_variable.get(var_name, 0.0) + var_mb
+                    ckpt_vars[var_name] = var_mb
 
             delta_mb = ckpt_delta_bytes / (1024 * 1024)
             by_checkpoint[ckpt_name] = delta_mb
+            by_checkpoint_by_var[ckpt_name] = ckpt_vars
             running_total_bytes += ckpt_delta_bytes
             cumulative[ckpt_name] = running_total_bytes / (1024 * 1024)
 
@@ -456,6 +462,7 @@ class HeapSizer:
             by_checkpoint=by_checkpoint,
             by_variable=by_variable,
             cumulative=cumulative,
+            by_checkpoint_by_var=by_checkpoint_by_var,
         )
 
     def _sizeof(self, obj: Any, owned_only: bool) -> int:

@@ -264,23 +264,49 @@ def is_cudf_groupby(obj: Any) -> bool:
 
 def unwrap_cudf_proxy(obj: Any) -> Any:
     """
-    Get the underlying cudf object from a proxy.
+    Get the underlying object from a cudf.pandas proxy.
 
     In cudf.pandas mode, objects are wrapped in _FastSlowProxy.
-    This returns the fast (cudf) object if available.
+
+    IMPORTANT: We prefer _fsproxy_slow (pandas) over _fsproxy_fast (cudf) because:
+    1. For checkpointing, we want the pandas version anyway
+    2. Accessing _fsproxy_fast triggers lazy conversion from pandas→cudf
+    3. This conversion can fail with NotImplementedError for certain column types
+       (e.g., category dtype after factorize())
+
+    We use _fsproxy_wrapped to access the current state without triggering
+    any conversion. This attribute holds whichever version is currently
+    materialized (fast or slow).
     """
     if not is_cudf_proxy(obj):
         return obj
 
-    # _FastSlowProxy stores the fast object in _fsproxy_fast
-    if hasattr(obj, '_fsproxy_fast'):
-        fast_obj = obj._fsproxy_fast
-        if fast_obj is not None:
-            return fast_obj
+    # Try _fsproxy_wrapped first - this is the currently materialized object
+    # and accessing it won't trigger any conversion
+    if hasattr(obj, '_fsproxy_wrapped'):
+        wrapped = obj._fsproxy_wrapped
+        if wrapped is not None:
+            return wrapped
 
-    # Fallback to slow (pandas) object
+    # Fallback to slow (pandas) object - this is safe and what we prefer
+    # for checkpointing anyway
     if hasattr(obj, '_fsproxy_slow'):
-        return obj._fsproxy_slow
+        slow_obj = obj._fsproxy_slow
+        if callable(slow_obj):
+            slow_obj = slow_obj()
+        if slow_obj is not None:
+            return slow_obj
+
+    # Last resort: access _fsproxy_fast, but this may trigger conversion
+    # which can fail for certain column types
+    try:
+        if hasattr(obj, '_fsproxy_fast'):
+            fast_obj = obj._fsproxy_fast
+            if fast_obj is not None:
+                return fast_obj
+    except NotImplementedError:
+        # Conversion failed - stick with the proxy
+        pass
 
     return obj
 
