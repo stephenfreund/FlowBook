@@ -222,9 +222,10 @@ def render_plot3(
 ) -> None:
     """Render Plot 3: Memory Overhead.
 
-    Stacked area chart showing:
-    - Base memory (user namespace + GPU)
-    - Overhead (checkpoint + enforcer state)
+    Stacked area chart showing three layers:
+    - User namespace (gray)
+    - GPU memory (orange)
+    - Checkpoint overhead (blue)
 
     Args:
         ax: Matplotlib axes
@@ -246,17 +247,27 @@ def render_plot3(
     tick_size = 14 if large_fonts else 10
 
     cells = np.array(data.cells)
-    base = np.array(data.base_mb)
+    user_ns = np.array(data.user_ns_mb)
+    gpu = np.array(data.gpu_mb)
     overhead = np.array(data.overhead_mb)
 
-    # Base label depends on whether we have baseline comparison
-    base_label = "Baseline Memory" if data.has_baseline else "User Namespace"
+    # Stack layers: namespace, then GPU, then overhead
+    layer1 = user_ns
+    layer2 = user_ns + gpu
+    layer3 = user_ns + gpu + overhead
 
-    ax.fill_between(cells, 0, base, alpha=0.3, color=colors[0], label=base_label)
-    ax.fill_between(cells, base, base + overhead, alpha=0.3, color=colors[1], label="Checkpoint Overhead")
+    # Colors: gray for namespace, orange for GPU, blue for overhead
+    ns_color = "gray"
+    gpu_color = colors[1] if len(colors) > 1 else "orange"  # orange-ish
+    overhead_color = colors[0] if len(colors) > 0 else "steelblue"  # blue
 
-    ax.plot(cells, base, color=colors[0], linewidth=2, marker="o", markersize=4)
-    ax.plot(cells, base + overhead, color=colors[1], linewidth=2, marker="o", markersize=4)
+    ax.fill_between(cells, 0, layer1, alpha=0.3, color=ns_color, label="User Namespace")
+    ax.fill_between(cells, layer1, layer2, alpha=0.3, color=gpu_color, label="GPU Memory")
+    ax.fill_between(cells, layer2, layer3, alpha=0.3, color=overhead_color, label="Checkpoint Overhead")
+
+    ax.plot(cells, layer1, color=ns_color, linewidth=1.5, marker="o", markersize=3)
+    ax.plot(cells, layer2, color=gpu_color, linewidth=1.5, marker="o", markersize=3)
+    ax.plot(cells, layer3, color=overhead_color, linewidth=2, marker="o", markersize=4)
 
     ax.set_xlabel("Cell Number", fontsize=label_size)
     ax.set_ylabel("Memory (MB)", fontsize=label_size)
@@ -287,10 +298,10 @@ def render_plot3(
     if data.peak_overhead_mb > 0:
         ax.annotate(
             f"Peak: {data.peak_overhead_pct:.1f}%",
-            xy=(data.peak_cell + 1, base[data.peak_cell] + overhead[data.peak_cell]),
+            xy=(data.peak_cell + 1, layer3[data.peak_cell]),
             xytext=(5, 5), textcoords="offset points",
             fontsize=legend_size, va="bottom", ha="left",
-            color=colors[1], fontweight="bold"
+            color=overhead_color, fontweight="bold"
         )
 
 

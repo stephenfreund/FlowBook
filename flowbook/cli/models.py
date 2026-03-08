@@ -543,17 +543,24 @@ class Plot3Data:
     """Data for Plot 3: Memory Overhead.
 
     Shows stacked area chart:
-    - Bottom: baseline namespace (gray)
-    - Top: FlowBook overhead (blue)
+    - Bottom: user namespace (gray)
+    - Middle: GPU memory (orange)
+    - Top: FlowBook checkpoint overhead (blue)
     """
     cells: List[int]
-    base_mb: List[float]  # baseline or flowbook namespace + gpu
-    overhead_mb: List[float]  # flowbook overhead beyond base
+    user_ns_mb: List[float]  # user namespace size
+    gpu_mb: List[float]  # GPU memory
+    overhead_mb: List[float]  # flowbook checkpoint overhead
     has_baseline: bool
     peak_overhead_mb: float
     peak_overhead_pct: float
     peak_cell: int
     initial_count: int
+
+    @property
+    def base_mb(self) -> List[float]:
+        """Base memory (namespace + GPU) for backward compatibility."""
+        return [ns + gpu for ns, gpu in zip(self.user_ns_mb, self.gpu_mb)]
 
 
 @dataclass

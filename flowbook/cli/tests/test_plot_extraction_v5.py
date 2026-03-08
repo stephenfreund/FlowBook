@@ -109,8 +109,11 @@ class TestExtractPlot3DataV5:
 
         assert result is not None
         assert result.has_baseline is True
-        # base_mb comes from baseline
-        assert result.base_mb == [10.0, 18.0]
+        # user_ns_mb and gpu_mb come from FlowBook cells
+        assert result.user_ns_mb == [10.0, 20.0]
+        assert result.gpu_mb == [0.0, 0.0]
+        # base_mb = user_ns_mb + gpu_mb (FlowBook values)
+        assert result.base_mb == [10.0, 20.0]
         # overhead = flowbook.total - baseline.total
         # Cell 0: 15 - 10 = 5
         # Cell 1: 30 - 18 = 12

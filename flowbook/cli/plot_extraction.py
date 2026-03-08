@@ -188,12 +188,15 @@ def extract_plot2_data(result: ComparisonResult, top_n: int = 10) -> Optional[Pl
 def extract_plot3_data(result: ComparisonResult) -> Optional[Plot3Data]:
     """Extract data for Plot 3: Memory Overhead.
 
+    Shows stacked area chart with three layers:
+    - user_ns_mb: User namespace memory
+    - gpu_mb: GPU memory
+    - overhead_mb: FlowBook checkpoint overhead
+
     When baseline available:
-        base = baseline.user_ns + baseline.gpu
-        overhead = flowbook.total - base
+        overhead = flowbook.total - baseline.total
 
     When no baseline:
-        base = flowbook.user_ns + flowbook.gpu
         overhead = flowbook.overhead_mb
 
     Args:
@@ -211,7 +214,8 @@ def extract_plot3_data(result: ComparisonResult) -> Optional[Plot3Data]:
     has_baseline = bl is not None and len(bl.cells) > 0
 
     cells = []
-    base_mb = []
+    user_ns_mb = []
+    gpu_mb = []
     overhead_mb = []
 
     fb_all = fb.all_cells
@@ -222,22 +226,23 @@ def extract_plot3_data(result: ComparisonResult) -> Optional[Plot3Data]:
 
         if has_baseline and i < len(bl_all):
             # Cross-run comparison
-            base = bl_all[i].post.total_mb
-            flow = fb_cell.post.total_mb
-            overhead = max(0, flow - base)
+            bl_total = bl_all[i].post.total_mb
+            flow_total = fb_cell.post.total_mb
+            overhead = max(0, flow_total - bl_total)
         else:
             # FlowBook only
-            base = fb_cell.post.user_ns_mb + fb_cell.post.gpu_mb
             overhead = fb_cell.post.overhead_mb
 
-        base_mb.append(base)
+        user_ns_mb.append(fb_cell.post.user_ns_mb)
+        gpu_mb.append(fb_cell.post.gpu_mb)
         overhead_mb.append(overhead)
 
-    # Find peak
+    # Find peak (peak overhead relative to base = user_ns + gpu)
     if overhead_mb:
         peak_idx = overhead_mb.index(max(overhead_mb))
         peak_overhead = overhead_mb[peak_idx]
-        peak_pct = 100 * peak_overhead / base_mb[peak_idx] if base_mb[peak_idx] > 0 else 0
+        base_at_peak = user_ns_mb[peak_idx] + gpu_mb[peak_idx]
+        peak_pct = 100 * peak_overhead / base_at_peak if base_at_peak > 0 else 0
     else:
         peak_idx = 0
         peak_overhead = 0
@@ -247,7 +252,8 @@ def extract_plot3_data(result: ComparisonResult) -> Optional[Plot3Data]:
 
     return Plot3Data(
         cells=cells,
-        base_mb=base_mb,
+        user_ns_mb=user_ns_mb,
+        gpu_mb=gpu_mb,
         overhead_mb=overhead_mb,
         has_baseline=has_baseline,
         peak_overhead_mb=peak_overhead,
@@ -633,12 +639,15 @@ def extract_plot3_data_v5(
 ) -> Optional[Plot3Data]:
     """Extract data for Plot 3 from v5 memory cells.
 
+    Shows stacked area chart with three layers:
+    - user_ns_mb: User namespace memory
+    - gpu_mb: GPU memory
+    - overhead_mb: FlowBook checkpoint overhead
+
     When baseline_cells provided (cross-run comparison):
-        base = baseline.user_ns + baseline.gpu
-        overhead = flowbook.total - base
+        overhead = flowbook.total - baseline.total
 
     When no baseline (FlowBook only):
-        base = flowbook.user_ns + flowbook.gpu
         overhead = flowbook.checkpoint_mb (direct from kernel API)
 
     Args:
@@ -654,7 +663,8 @@ def extract_plot3_data_v5(
     has_baseline = baseline_cells is not None and len(baseline_cells) > 0
 
     cell_nums = []
-    base_mb = []
+    user_ns_mb = []
+    gpu_mb = []
     overhead_mb = []
 
     for i, cell in enumerate(cells):
@@ -663,27 +673,26 @@ def extract_plot3_data_v5(
         if has_baseline and i < len(baseline_cells):
             # Cross-run comparison: overhead = flowbook.total - baseline.total
             bl_cell = baseline_cells[i]
-            # Baseline cells have post.total_mb or user_ns_mb + gpu_mb
             if hasattr(bl_cell, 'post'):
-                base = bl_cell.post.total_mb
+                bl_total = bl_cell.post.total_mb
             else:
-                # V5 baseline would be just user_ns + gpu
-                base = getattr(bl_cell, 'user_ns_mb', 0) + getattr(bl_cell, 'gpu_mb', 0)
+                bl_total = getattr(bl_cell, 'user_ns_mb', 0) + getattr(bl_cell, 'gpu_mb', 0)
             flow_total = cell.total_mb  # user_ns + gpu + checkpoint
-            overhead = max(0, flow_total - base)
+            overhead = max(0, flow_total - bl_total)
         else:
             # FlowBook only: use checkpoint_mb directly
-            base = cell.base_mb
             overhead = cell.checkpoint_mb
 
-        base_mb.append(base)
+        user_ns_mb.append(cell.user_ns_mb)
+        gpu_mb.append(cell.gpu_mb)
         overhead_mb.append(overhead)
 
-    # Find peak
+    # Find peak (peak overhead relative to base = user_ns + gpu)
     if overhead_mb:
         peak_idx = overhead_mb.index(max(overhead_mb))
         peak_overhead = overhead_mb[peak_idx]
-        peak_pct = 100 * peak_overhead / base_mb[peak_idx] if base_mb[peak_idx] > 0 else 0
+        base_at_peak = user_ns_mb[peak_idx] + gpu_mb[peak_idx]
+        peak_pct = 100 * peak_overhead / base_at_peak if base_at_peak > 0 else 0
     else:
         peak_idx = 0
         peak_overhead = 0
@@ -694,7 +703,8 @@ def extract_plot3_data_v5(
 
     return Plot3Data(
         cells=cell_nums,
-        base_mb=base_mb,
+        user_ns_mb=user_ns_mb,
+        gpu_mb=gpu_mb,
         overhead_mb=overhead_mb,
         has_baseline=has_baseline,
         peak_overhead_mb=peak_overhead,
