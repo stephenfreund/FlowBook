@@ -3951,6 +3951,228 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
 
         print(f"Combined plots saved to: {combined_path}")
 
+    # Print summary table
+    print_v5_summary(raw_data, results)
+
+
+def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None:
+    """Print summary table for v5 format data.
+
+    Args:
+        raw_data: Dict mapping file paths to raw JSON dicts
+        results: Dict mapping file paths to ComparisonResultV4 objects
+    """
+    from flowbook.cli.plot_extraction import extract_v5_memory_result
+
+    print()
+    print("=" * 120)
+    print("FLOWBOOK OVERHEAD SUMMARY")
+    print("=" * 120)
+    print(f"Notebooks: {len(raw_data)}")
+    print("=" * 120)
+    print()
+
+    # Per-notebook header
+    header = (
+        f"{'Notebook':<35} {'Cells':>5} "
+        f"{'User NS':>10} {'GPU':>8} {'Ckpt':>10} {'Ckpt/Base':>10} "
+        f"{'State ms':>10} {'Check ms':>10}"
+    )
+    print(header)
+    print("-" * 120)
+
+    # Collect aggregate data
+    all_overhead_ms = []
+    all_memory_ratios = []
+    all_peak_pcts = []
+
+    # Staleness data per notebook
+    staleness_data = []  # (name, clean, stale, error, reason_counts, error_counts)
+    total_clean = 0
+    total_stale = 0
+    total_error = 0
+    total_reason_counts: Dict[str, int] = {}
+    total_error_counts: Dict[str, int] = {}
+
+    for path, data in raw_data.items():
+        notebook_name = Path(path).stem.replace("_comparison", "")
+        if len(notebook_name) > 33:
+            notebook_name = notebook_name[:30] + "..."
+
+        # Get v5 memory data
+        v5_memory = extract_v5_memory_result(data)
+        if not v5_memory or not v5_memory.all_cells:
+            continue
+
+        cells = v5_memory.all_cells
+        num_cells = len(cells)
+
+        # Final cell values
+        final = cells[-1]
+        user_ns_mb = final.user_ns_mb
+        gpu_mb = final.gpu_mb
+        checkpoint_mb = final.checkpoint_mb
+        base_mb = user_ns_mb + gpu_mb
+
+        # Peak checkpoint ratio
+        peak_ratio = 0.0
+        for c in cells:
+            c_base = c.user_ns_mb + c.gpu_mb
+            if c_base > 0.1:
+                ratio = c.checkpoint_mb / c_base
+                peak_ratio = max(peak_ratio, ratio)
+
+        all_peak_pcts.append(peak_ratio * 100)
+
+        # Per-cell overhead data
+        for i, c in enumerate(cells):
+            c_base = c.user_ns_mb + c.gpu_mb
+            if i > 0 and c_base > 0.1:
+                prev = cells[i - 1]
+                delta = max(0, c.checkpoint_mb - prev.checkpoint_mb)
+                prev_base = prev.user_ns_mb + prev.gpu_mb
+                if prev_base > 0.1:
+                    all_memory_ratios.append(delta / prev_base)
+
+        # Get timing data
+        result = results.get(path)
+        timing = result.timing if result else None
+        state_ms = 0.0
+        check_ms = 0.0
+        clean_cells = 0
+        stale_cells = 0
+        error_cells = 0
+        reason_counts: Dict[str, int] = {}
+        error_counts: Dict[str, int] = {}
+        if timing:
+            fb_timing = timing.get("kernels", {}).get("flowbook", {}).get("timing", {})
+            for cell in fb_timing.get("cells", []):
+                s_ms = cell.get("state_ms", 0) or cell.get("state_duration_ms", 0) or 0
+                c_ms = cell.get("check_ms", 0) or cell.get("check_duration_ms", 0) or 0
+                state_ms += s_ms
+                check_ms += c_ms
+                all_overhead_ms.append(s_ms + c_ms)
+
+            # Get checking summary (staleness data)
+            totals = fb_timing.get("totals", {})
+            checking = totals.get("checking_summary", {})
+            clean_cells = checking.get("clean_cells", 0)
+            stale_cells = checking.get("stale_cells", 0)
+            error_cells = checking.get("error_cells", 0)
+            reason_counts = checking.get("reason_counts", {})
+            error_counts = checking.get("error_counts", {})
+
+            # Accumulate totals
+            total_clean += clean_cells
+            total_stale += stale_cells
+            total_error += error_cells
+            for r, c in reason_counts.items():
+                total_reason_counts[r] = total_reason_counts.get(r, 0) + c
+            for e, c in error_counts.items():
+                total_error_counts[e] = total_error_counts.get(e, 0) + c
+
+        staleness_data.append(
+            (notebook_name, clean_cells, stale_cells, error_cells, reason_counts, error_counts)
+        )
+
+        # Format ratio
+        ratio_str = f"{peak_ratio * 100:.1f}%" if base_mb > 0.1 else "N/A"
+
+        row = (
+            f"{notebook_name:<35} {num_cells:>5} "
+            f"{user_ns_mb:>9.1f}M {gpu_mb:>7.1f}M {checkpoint_mb:>9.1f}M {ratio_str:>10} "
+            f"{state_ms:>9.0f}ms {check_ms:>9.0f}ms"
+        )
+        print(row)
+
+    print("-" * 120)
+    print()
+
+    # Aggregate statistics
+    print("AGGREGATE STATISTICS")
+    print("-" * 60)
+
+    if all_overhead_ms:
+        arr = np.array(all_overhead_ms)
+        print("Per-Cell Time Overhead (state + check):")
+        print(f"  P50: {np.percentile(arr, 50):.1f}ms")
+        print(f"  P95: {np.percentile(arr, 95):.1f}ms")
+        print(f"  P99: {np.percentile(arr, 99):.1f}ms")
+        print(f"  Max: {np.max(arr):.1f}ms")
+        print()
+
+    if all_memory_ratios:
+        arr = np.array(all_memory_ratios)
+        print("Per-Cell Memory Overhead (checkpoint_delta / prev_base):")
+        print(f"  P50: {np.percentile(arr, 50) * 100:.1f}%")
+        print(f"  P95: {np.percentile(arr, 95) * 100:.1f}%")
+        print(f"  P99: {np.percentile(arr, 99) * 100:.1f}%")
+        print(f"  Max: {np.max(arr) * 100:.1f}%")
+        print()
+
+    if all_peak_pcts:
+        arr = np.array(all_peak_pcts)
+        print("Peak Memory Overhead (per notebook):")
+        print(f"  P50: {np.percentile(arr, 50):.1f}%")
+        print(f"  P95: {np.percentile(arr, 95):.1f}%")
+        print(f"  P99: {np.percentile(arr, 99):.1f}%")
+        print(f"  Max: {np.max(arr):.1f}%")
+        print()
+
+    # Staleness and error statistics
+    total_checked = total_clean + total_stale + total_error
+    if total_checked > 0:
+        print("CHECKING RESULTS")
+        print("-" * 60)
+        print(f"  Clean cells:        {total_clean}")
+        print(f"  Stale cells:        {total_stale}")
+        print(f"  Error cells:        {total_error}")
+        if total_reason_counts:
+            print("  Staleness reasons:")
+            for rtype, count in sorted(total_reason_counts.items()):
+                print(f"    {rtype}: {count}")
+        if total_error_counts:
+            print("  Error types:")
+            for etype, count in sorted(total_error_counts.items()):
+                print(f"    {etype}: {count}")
+        print()
+
+    # Per-notebook error table (if any notebook has errors)
+    any_errors = any(s[3] > 0 for s in staleness_data)  # s[3] = error_cells
+    if any_errors:
+        # Collect all error types across all notebooks
+        all_error_types: set = set()
+        for s in staleness_data:
+            all_error_types.update(s[5].keys())  # s[5] = error_counts
+        error_types = sorted(all_error_types)
+
+        print("PER-NOTEBOOK ERROR SUMMARY")
+        print("-" * 110)
+
+        # Build header with dynamic error type columns
+        header = f"{'Notebook':<35} {'Cells':>5} {'Errors':>6}"
+        for etype in error_types:
+            # Shorten error type names for column headers
+            short_name = etype.replace("no_", "").replace("_", " ")[:12]
+            header += f" {short_name:>12}"
+        print(header)
+        print("-" * 110)
+
+        # Per-notebook rows (only notebooks with errors)
+        for name, clean, stale, errors, reasons, err_counts in staleness_data:
+            if errors > 0:
+                display_name = name[:33] if len(name) > 33 else name
+                row = f"{display_name:<35} {clean + stale + errors:>5} {errors:>6}"
+                for etype in error_types:
+                    count = err_counts.get(etype, 0)
+                    row += f" {count:>12}"
+                print(row)
+
+        print("-" * 110)
+        print()
+
+    print("=" * 120)
+
 
 def main():
     """CLI entry point."""
