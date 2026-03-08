@@ -1474,6 +1474,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             cell_id=self._cell_id,
         )
 
+        # Mark this cell as clean - it was executed (even if it has no code effect)
+        # This clears staleness from source edits or other reasons
+        if self._cell_id:
+            self._enforcer._notebook_state.set_clean(self._cell_id)
+
         # Send empty metadata to clear any stale metadata from previous executions
         # This ensures the frontend shows empty reads/writes for magic-only cells
         if not silent and self._cell_id:
