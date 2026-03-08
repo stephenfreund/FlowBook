@@ -3199,14 +3199,10 @@ class MemoryCheckpoints:
             total_checkpoint_bytes = 0
             checkpoint_vars = {}
 
-        # Get GPU memory if available
-        gpu_bytes = 0
-        try:
-            import torch
-            if torch.cuda.is_available():
-                gpu_bytes = torch.cuda.memory_allocated()
-        except ImportError:
-            pass
+        # Get GPU memory using the proper API (pynvml-based, per-process)
+        from flowbook.util.gpu_memory import get_gpu_memory_mb
+        gpu_mb = get_gpu_memory_mb()
+        gpu_bytes = int(gpu_mb * 1024 * 1024)
 
         return {
             'user_ns_bytes': ns_result.total_bytes,
