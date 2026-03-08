@@ -4149,14 +4149,15 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
         print("PER-NOTEBOOK ERROR SUMMARY")
         print("-" * 110)
 
-        # Build header with dynamic error type columns
+        # Build header with dynamic error type columns (wider for readability)
+        col_width = 22
         header = f"{'Notebook':<35} {'Cells':>5} {'Errors':>6}"
         for etype in error_types:
-            # Shorten error type names for column headers
-            short_name = etype.replace("no_", "").replace("_", " ")[:12]
-            header += f" {short_name:>12}"
+            # Format error type names for column headers
+            short_name = etype.replace("no_", "").replace("_", " ")[:col_width]
+            header += f" {short_name:>{col_width}}"
         print(header)
-        print("-" * 110)
+        print("-" * (47 + (col_width + 1) * len(error_types)))
 
         # Per-notebook rows (only notebooks with errors)
         for name, clean, stale, errors, reasons, err_counts in staleness_data:
@@ -4165,10 +4166,10 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
                 row = f"{display_name:<35} {clean + stale + errors:>5} {errors:>6}"
                 for etype in error_types:
                     count = err_counts.get(etype, 0)
-                    row += f" {count:>12}"
+                    row += f" {count:>{col_width}}"
                 print(row)
 
-        print("-" * 110)
+        print("-" * (47 + (col_width + 1) * len(error_types)))
         print()
 
     print("=" * 120)
