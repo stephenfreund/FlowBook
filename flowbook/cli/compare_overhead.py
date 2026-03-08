@@ -863,12 +863,13 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             per_cell_memory_overhead_mb.append(ratio)
             per_cell_checkpoint_mb.append(delta_mb)
 
-        # Peak memory overhead: max(checkpoint_mb) / max(user_ns_mb) * 100
+        # Peak memory overhead: max(checkpoint_mb) / max(base_mb) * 100
+        # base_mb = user_ns_mb + gpu_mb
         if flowbook_mem_cells:
             peak_ckpt = max(c.get("checkpoint_mb", 0) for c in flowbook_mem_cells)
-            peak_ns = max(c.get("user_ns_mb", 0) for c in flowbook_mem_cells)
-            if peak_ns >= min_meaningful_base_mb:
-                peak_memory_overhead_pct = (peak_ckpt / peak_ns) * 100
+            peak_base = max(c.get("user_ns_mb", 0) + c.get("gpu_mb", 0) for c in flowbook_mem_cells)
+            if peak_base >= min_meaningful_base_mb:
+                peak_memory_overhead_pct = (peak_ckpt / peak_base) * 100
             else:
                 peak_memory_overhead_pct = 0.0
         else:
