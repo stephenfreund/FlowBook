@@ -432,21 +432,24 @@ def _overwritten(
 def _forward_stale(
     R_j: Set[str],
     W_j: Set[str],
-    W_i: Set[str],
+    W_i_old: Set[str],
+    W_i_new: Set[str],
     i: int,
     j: int,
 ) -> bool:
     """
-    ForwardStale(R, W, i, j) ≝ j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+    ForwardStale(R, W, W', i, j) ≝ j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
 
-    Cell j (after i) becomes stale if i wrote to a location that j reads or writes.
+    Cell j (after i) becomes stale if cell i's old OR new writes overlap with
+    what cell j reads or writes.
 
     Formal ref: main.tex §Staleness predicates, FORMAL_DEVELOPMENT.md §3.3
 
     Args:
         R_j: Read set of cell j
         W_j: Write set of cell j
-        W_i: Write set of cell i (the executing cell)
+        W_i_old: Old write set of cell i (Wᵢ, from previous execution)
+        W_i_new: New write set of cell i (W'ᵢ, from current execution)
         i: Position of executing cell
         j: Position of cell to check
 
@@ -455,7 +458,8 @@ def _forward_stale(
     """
     if j <= i:
         return False
-    return bool(W_i & (R_j | W_j))
+    W_i_union = W_i_old | W_i_new
+    return bool(W_i_union & (R_j | W_j))
 
 
 def _backward_stale(
@@ -1116,7 +1120,7 @@ class ReproducibilityEnforcer:
            - NoWriteAfterRead(R', W', i)  ≝ Wᵢ ∩ R_{1..i-1} = ∅
         4. If all pass: T'ᵢ = CLEAN; else T'ᵢ = STALE with problem list
         5. For j ≠ i, compute staleness (§3.3, lines 187-188):
-           - ForwardStale(R', W', i, j)   ≝ j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+           - ForwardStale(R, W, W', i, j) ≝ j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
            - BackwardStale(W, W', i, j)   ≝ j < i ∧ j = LastWriter(W,i,y) for y ∈ Wᵢ\\W'ᵢ
 
         Args:
@@ -1400,7 +1404,7 @@ class ReproducibilityEnforcer:
         # STEP 5: Compute staleness for all j ≠ i
         # Ref: FORMAL_DEVELOPMENT.md §3.4, lines 215-217
         # ================================================================
-        # ForwardStale(R', W', i, j) ≝ j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+        # ForwardStale(R, W, W', i, j) ≝ j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
         # Ref: FORMAL_DEVELOPMENT.md §3.3, line 187
         #
         # Staleness is ALWAYS computed, even when there are errors:
@@ -1894,7 +1898,7 @@ class ReproducibilityEnforcer:
         """
         if self._staleness_mode == StalenessMode.SYNTACTIC:
             return self._compute_forward_staleness_syntactic(
-                old_writes, changed_vars, column_changed, just_executed, my_position, changed_file_paths
+                old_writes, current_writes, column_changed, just_executed, my_position, changed_file_paths
             )
         else:
             return self._compute_forward_staleness_semantic(
@@ -1904,7 +1908,7 @@ class ReproducibilityEnforcer:
     def _compute_forward_staleness_syntactic(
         self,
         old_writes: Set[str],
-        changed_vars: Set[str],
+        current_writes: Set[str],
         column_changed: Dict[str, List[str]],
         just_executed: str,
         my_position: int,
@@ -1925,7 +1929,7 @@ class ReproducibilityEnforcer:
         all_warnings: List[str] = []
 
         # Wᵢ ∪ W'ᵢ: all locations cell i has written (old or new)
-        W_i_union = old_writes | changed_vars
+        W_i_union = old_writes | current_writes
 
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:
@@ -1962,9 +1966,9 @@ class ReproducibilityEnforcer:
             read_overlap = W_i_union & cell_reads   # Overlap with reads
             write_overlap = W_i_union & cell_writes  # Overlap with writes
 
-            # Also check column-level overlap for column-only changes
+            # Also check column-level overlap for precise DataFrame tracking.
             # This ensures cells reading df['z'] are marked stale when df['z'] changes,
-            # even if df is not in W_i_union (value-level changes only).
+            # providing column-level granularity beyond variable-level W_i_union check.
             has_column_overlap = self._has_relevant_overlap_by_id(cell_id, set(column_changed.keys()), column_changed)
 
             if read_overlap or write_overlap or has_column_overlap:
@@ -2026,7 +2030,7 @@ class ReproducibilityEnforcer:
         all_warnings: List[str] = []
 
         # Wᵢ ∪ W'ᵢ: all locations cell i has written (old or new)
-        W_i_union = old_writes | changed_vars
+        W_i_union = old_writes | current_writes
 
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:

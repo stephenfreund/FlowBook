@@ -324,7 +324,7 @@ For Run(i), we show that the new state S' is well-formed by case analysis on j:
   establish the well-formedness conditions directly.
 
 - **Case j > i:** If j remains CLEAN, then ForwardStale did not trigger, meaning
-  Wᵢ ∩ (Rⱼ ∪ Wⱼ) = ∅. The well-formedness conditions transfer from the pre-state.
+  (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) = ∅. The well-formedness conditions transfer from the pre-state.
 
 ---
 
@@ -520,7 +520,7 @@ WriteBeforeRead(R, W, i)   ≝  Rᵢ ⊆ W_{1..i-1}
 NoReadBeforeWrite(R, W, i) ≝  Rᵢ ∩ W_{i+1..n} = ∅
 NoWriteAfterRead(R, W, i)  ≝  Wᵢ ∩ R_{1..i-1} = ∅  (clean cells only)
 
-ForwardStale(R, W, i, j)   ≝  j > i ∧ Wᵢ ∩ Rⱼ ≠ ∅
+ForwardStale(R, W, W', i, j) ≝  j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
 ```
 
 **Properties**:
@@ -544,7 +544,7 @@ pre_checkpoint[i] : Σ → Value   — namespace state when cell i executed
 **Predicates** (with semantic override):
 ```
 ForwardStale_semantic(i, j) ≝
-    j > i ∧ Wᵢ ∩ Rⱼ ≠ ∅ ∧ diff(pre_checkpoint[j], Σ, Rⱼ) ≠ ∅
+    j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅ ∧ diff(pre_checkpoint[j], Σ, Rⱼ) ≠ ∅
 ```
 
 **Convergence rule**:
@@ -563,7 +563,7 @@ If `Converged(j)` and cell j was stale, mark j clean.
 | Property | Syntactic | Semantic |
 |----------|-----------|----------|
 | Checkpoint retention | Discard after computing W | Keep permanently |
-| Staleness check | W_i ∩ R_j ≠ ∅ | diff(pre_checkpoint[j], Σ, R_j) ≠ ∅ |
+| Staleness check | (W_i ∪ W'_i) ∩ (R_j ∪ W_j) ≠ ∅ | diff(pre_checkpoint[j], Σ, R_j) ≠ ∅ |
 | Un-staleness | Never | When diff becomes empty |
 | Memory | O(cells × names) | O(cells × values) |
 | Precision | Conservative | Exact |
