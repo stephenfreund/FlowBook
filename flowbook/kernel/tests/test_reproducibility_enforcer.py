@@ -483,9 +483,10 @@ class TestColumnAwareBackwardMutation:
         )
 
         # Violation - conservative when prior has no column info
+        # Now shows column-level detail: df.price instead of just df
         assert result_b.violation is not None
         assert result_b.violation.affected_cell == "a"
-        assert "df" in result_b.violation.variables
+        assert "df.price" in result_b.violation.variables
 
     def test_conflict_current_no_column_info_conservative(self):
         """Cell A reads df.price, Cell B modifies df (no column info) - violation (conservative)."""
@@ -1101,8 +1102,9 @@ class TestStructuralTrackingOff:
             ),
         )
         # SHOULD cause violation - prior cell read whole variable (not just structural)
+        # Now shows column-level detail: raw_data.x instead of just raw_data
         assert result_c.violation is not None
-        assert "raw_data" in result_c.violation.variables
+        assert "raw_data.x" in result_c.violation.variables
 
 
 class TestStructuralTrackingWarn:
@@ -1268,8 +1270,9 @@ class TestStructuralTrackingEnforce:
             ),
         )
         # SHOULD cause violation - ENFORCE mode protects structural reads
+        # Now shows column-level detail: raw_data.x instead of just raw_data
         assert result_c.violation is not None
-        assert "raw_data" in result_c.violation.variables
+        assert "raw_data.x" in result_c.violation.variables
 
     def test_structural_violation_with_column_reads_and_new_column(self):
         """
@@ -1330,8 +1333,9 @@ class TestStructuralTrackingEnforce:
             ),
         )
         # SHOULD cause violation - prior cell read .columns, we added column x
+        # Now shows column-level detail: df.x instead of just df
         assert result_c.violation is not None
-        assert "df" in result_c.violation.variables
+        assert "df.x" in result_c.violation.variables
 
 
 # =============================================================================

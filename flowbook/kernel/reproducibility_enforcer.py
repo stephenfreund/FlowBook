@@ -1313,6 +1313,12 @@ class ReproducibilityEnforcer:
             typed_changes=typed_changes,
         )
 
+        # Clear pre-execution reasons (NEVER_EXECUTED, CODE_CHANGED) since the cell
+        # has now been executed. These reasons are no longer accurate - if the cell
+        # has errors, those will be recorded separately; if it's clean, set_clean()
+        # will be called below.
+        self._notebook_state.clear_pre_execution_reasons(cell_id)
+
         # ================================================================
         # STEP 4: Determine cell status T'ᵢ
         # T'ᵢ = CLEAN only if ALL validity predicates pass
@@ -1724,13 +1730,11 @@ class ReproducibilityEnforcer:
             if not violations:
                 continue
 
-            # Build conflict list
+            # Build conflict list - always show column info when change was at column level
             conflicts = []
             for v in violations:
                 var = v.change.variable
-                if isinstance(v.read, (VariableRead, StructuralRead)):
-                    conflicts.append(var)
-                elif hasattr(v.change, 'column'):
+                if hasattr(v.change, 'column') and v.change.column:
                     conflicts.append(f"{var}.{v.change.column}")
                 else:
                     conflicts.append(var)
@@ -1848,15 +1852,41 @@ class ReproducibilityEnforcer:
         R_i = tracking.reads_before_writes or set()
         W_i = tracking.writes or set()
 
-        overlap = R_i & W_i
-        if overlap:
+        # Build detailed location list with column info
+        locations: List[str] = []
+
+        # Variable-level overlap
+        var_overlap = R_i & W_i
+
+        # For each overlapping variable, check if we have column-level detail
+        col_reads = tracking.column_reads_before_writes or {}
+        col_writes = tracking.column_writes or {}
+
+        for var in sorted(var_overlap):
+            var_col_reads = col_reads.get(var, set())
+            var_col_writes = col_writes.get(var, set())
+            col_overlap = var_col_reads & var_col_writes
+
+            if col_overlap:
+                # Have column-level detail - show each column
+                for col in sorted(col_overlap):
+                    locations.append(f"{var}.{col}")
+            elif var_col_writes:
+                # Have column writes but no column reads (read whole var, write column)
+                for col in sorted(var_col_writes):
+                    locations.append(f"{var}.{col}")
+            else:
+                # No column info - just show variable
+                locations.append(var)
+
+        if locations:
             cell_alpha = self._cell_id_to_alpha(cell_id)
-            vars_str = format_variable_list(sorted(overlap))
+            vars_str = format_variable_list(locations)
             message = f"Cell {cell_alpha} reads and writes the same locations: {vars_str}"
             return ReproducibilityError(
                 error_type=ErrorType.NO_READ_AND_WRITE,
                 cell_id=cell_id,
-                locations=sorted(overlap),
+                locations=locations,
                 message=message,
             )
         return None

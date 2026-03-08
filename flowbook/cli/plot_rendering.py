@@ -727,13 +727,33 @@ def render_cdf_panel(
         # Format with commas (e.g., "1,000" instead of "1000")
         ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
     elif metric == "memory":
-        ax.set_xlim(-0.05, 1.05)
-        ax.set_xticks([0, 0.25, 0.5, 0.75, 1])
-        ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+        # Extend x-axis beyond 100% if data exceeds it
+        x_max = max(1.05, max_val * 1.05)
+        ax.set_xlim(-0.05, x_max)
+        # Dynamic ticks based on range
+        if x_max <= 1.05:
+            ax.set_xticks([0, 0.25, 0.5, 0.75, 1])
+            ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+        else:
+            # Generate ticks up to max value
+            tick_step = 0.5 if x_max <= 2.5 else 1.0
+            ticks = np.arange(0, x_max + tick_step, tick_step)
+            ax.set_xticks(ticks)
+            ax.set_xticklabels([f"{int(t * 100)}%" for t in ticks])
     elif metric == "peak":
-        ax.set_xlim(0, 100)
-        ax.set_xticks([0, 25, 50, 75, 100])
-        ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+        # Extend x-axis beyond 100% if data exceeds it
+        x_max = max(105, max_val * 1.05)
+        ax.set_xlim(0, x_max)
+        # Dynamic ticks based on range
+        if x_max <= 105:
+            ax.set_xticks([0, 25, 50, 75, 100])
+            ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+        else:
+            # Generate ticks up to max value
+            tick_step = 50 if x_max <= 250 else 100
+            ticks = np.arange(0, x_max + tick_step, tick_step)
+            ax.set_xticks(ticks)
+            ax.set_xticklabels([f"{int(t)}%" for t in ticks])
 
 
 def render_combined_6panel(

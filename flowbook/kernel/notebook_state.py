@@ -103,6 +103,19 @@ class NotebookState:
         """Get all reasons for a cell's staleness."""
         return self.get_status(cell_id).reasons
 
+    def clear_pre_execution_reasons(self, cell_id: str) -> None:
+        """Clear pre-execution reasons (NEVER_EXECUTED, CODE_CHANGED) from a cell.
+
+        Called when a cell executes - these reasons are no longer valid since
+        the cell has been executed. If this was the only reason, marks cell clean.
+        """
+        status = self.get_status(cell_id)
+        pre_exec_types = {ReasonType.NEVER_EXECUTED, ReasonType.CODE_CHANGED}
+        status.reasons = {r for r in status.reasons if r.type not in pre_exec_types}
+        # If no reasons remain, mark clean
+        if not status.reasons:
+            status.is_clean = True
+
     # =========================================================================
     # Stale Cell Queries
     # =========================================================================
