@@ -103,8 +103,6 @@ def render_plot1(
     ax.set_ylabel("Cumulative Time (seconds)", fontsize=label_size)
 
     title = "Execution Time"
-    if notebook_name:
-        title = f"{title}\n{notebook_name}"
     if data.initial_count < len(cells):
         title += f" (cells 1-{data.initial_count} + {len(cells) - data.initial_count} reruns)"
     ax.set_title(title, fontsize=title_size)
@@ -192,8 +190,6 @@ def render_plot2(
     ax.set_ylabel("Checkpoint Time (seconds)", fontsize=label_size)
 
     title = "Checkpoint Time by Variable"
-    if notebook_name:
-        title = f"{title}\n{notebook_name}"
     ax.set_title(title, fontsize=title_size)
 
     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
@@ -256,14 +252,14 @@ def render_plot3(
     layer2 = user_ns + gpu
     layer3 = user_ns + gpu + overhead
 
-    # Colors: gray for namespace, orange for GPU, blue for overhead
+    # Fixed colors: gray for namespace, orange for GPU, steelblue for overhead
     ns_color = "gray"
-    gpu_color = colors[1] if len(colors) > 1 else "orange"  # orange-ish
-    overhead_color = colors[0] if len(colors) > 0 else "steelblue"  # blue
+    gpu_color = "orange"
+    overhead_color = "steelblue"
 
     ax.fill_between(cells, 0, layer1, alpha=0.3, color=ns_color, label="User Namespace")
     ax.fill_between(cells, layer1, layer2, alpha=0.3, color=gpu_color, label="GPU Memory")
-    ax.fill_between(cells, layer2, layer3, alpha=0.3, color=overhead_color, label="Checkpoint Overhead")
+    ax.fill_between(cells, layer2, layer3, alpha=0.3, color=overhead_color, label="FlowBook Overhead")
 
     ax.plot(cells, layer1, color=ns_color, linewidth=1.5, marker="o", markersize=3)
     ax.plot(cells, layer2, color=gpu_color, linewidth=1.5, marker="o", markersize=3)
@@ -272,9 +268,8 @@ def render_plot3(
     ax.set_xlabel("Cell Number", fontsize=label_size)
     ax.set_ylabel("Memory (MB)", fontsize=label_size)
 
+    # Title without notebook name (notebook name goes in figure suptitle)
     title = "Memory Overhead"
-    if notebook_name:
-        title = f"{title}\n{notebook_name}"
     if data.initial_count < len(cells):
         title += f" (cells 1-{data.initial_count} + {len(cells) - data.initial_count} reruns)"
     ax.set_title(title, fontsize=title_size)
@@ -372,8 +367,6 @@ def render_plot4(
     ax.set_ylabel("Memory (MB)", fontsize=label_size)
 
     title = "Checkpoint Memory by Variable"
-    if notebook_name:
-        title = f"{title}\n{notebook_name}"
     ax.set_title(title, fontsize=title_size)
 
     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
@@ -440,8 +433,6 @@ def render_plot5(
     ax.set_ylabel("Overhead Time (seconds)", fontsize=label_size)
 
     title = "Overhead Time per Cell"
-    if notebook_name:
-        title = f"{title}\n{notebook_name}"
     ax.set_title(title, fontsize=title_size)
 
     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
@@ -502,8 +493,6 @@ def render_plot6(
     ax.set_ylabel("Checkpoint / Base Memory", fontsize=label_size)
 
     title = "Checkpoint Overhead Ratio"
-    if notebook_name:
-        title = f"{title}\n{notebook_name}"
     ax.set_title(title, fontsize=title_size)
 
     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
@@ -618,50 +607,57 @@ def render_combined_6panel(
         axes: 6-element list of axes in order [P1, P2, P3, P4, P5, P6]
         p1-p6: Plot data (can be None for missing data)
         large_fonts: Use larger fonts
-        notebook_name: Optional notebook name for titles
+        notebook_name: Optional notebook name for figure suptitle
     """
     import matplotlib.pyplot as plt
 
+    title_size = 20 if large_fonts else 14
+
+    # Add notebook name as figure suptitle
+    if notebook_name:
+        fig.suptitle(notebook_name, fontsize=22 if large_fonts else 16, fontweight='bold', y=0.995)
+
     # Panel 1: Timing
     if p1 is not None:
-        render_plot1(axes[0], p1, large_fonts=large_fonts, notebook_name=notebook_name)
+        render_plot1(axes[0], p1, large_fonts=large_fonts)
     else:
         axes[0].text(0.5, 0.5, "No timing data", ha="center", va="center", transform=axes[0].transAxes)
-        axes[0].set_title("Execution Time", fontsize=20 if large_fonts else 14)
+        axes[0].set_title("Execution Time", fontsize=title_size)
 
     # Panel 2: Checkpoint Time by Variable
     if p2 is not None:
-        render_plot2(axes[1], p2, large_fonts=large_fonts, notebook_name=notebook_name)
+        render_plot2(axes[1], p2, large_fonts=large_fonts)
     else:
         axes[1].text(0.5, 0.5, "No checkpoint timing data", ha="center", va="center", transform=axes[1].transAxes)
-        axes[1].set_title("Checkpoint Time by Variable", fontsize=20 if large_fonts else 14)
+        axes[1].set_title("Checkpoint Time by Variable", fontsize=title_size)
 
     # Panel 3: Memory Overhead
     if p3 is not None:
-        render_plot3(axes[2], p3, large_fonts=large_fonts, notebook_name=notebook_name)
+        render_plot3(axes[2], p3, large_fonts=large_fonts)
     else:
         axes[2].text(0.5, 0.5, "No memory data", ha="center", va="center", transform=axes[2].transAxes)
-        axes[2].set_title("Memory Overhead", fontsize=20 if large_fonts else 14)
+        axes[2].set_title("Memory Overhead", fontsize=title_size)
 
     # Panel 4: Checkpoint Memory by Variable
     if p4 is not None:
-        render_plot4(axes[3], p4, large_fonts=large_fonts, notebook_name=notebook_name)
+        render_plot4(axes[3], p4, large_fonts=large_fonts)
     else:
         axes[3].text(0.5, 0.5, "No checkpoint memory data", ha="center", va="center", transform=axes[3].transAxes)
-        axes[3].set_title("Checkpoint Memory by Variable", fontsize=20 if large_fonts else 14)
+        axes[3].set_title("Checkpoint Memory by Variable", fontsize=title_size)
 
     # Panel 5: Overhead per Cell
     if p5 is not None:
-        render_plot5(axes[4], p5, large_fonts=large_fonts, notebook_name=notebook_name)
+        render_plot5(axes[4], p5, large_fonts=large_fonts)
     else:
         axes[4].text(0.5, 0.5, "No overhead timing data", ha="center", va="center", transform=axes[4].transAxes)
-        axes[4].set_title("Overhead Time per Cell", fontsize=20 if large_fonts else 14)
+        axes[4].set_title("Overhead Time per Cell", fontsize=title_size)
 
     # Panel 6: Checkpoint Ratio CDF
     if p6 is not None:
-        render_plot6(axes[5], p6, large_fonts=large_fonts, notebook_name=notebook_name)
+        render_plot6(axes[5], p6, large_fonts=large_fonts)
     else:
         axes[5].text(0.5, 0.5, "No ratio data", ha="center", va="center", transform=axes[5].transAxes)
-        axes[5].set_title("Checkpoint Overhead Ratio CDF", fontsize=20 if large_fonts else 14)
+        axes[5].set_title("Checkpoint Overhead Ratio", fontsize=title_size)
 
-    fig.tight_layout()
+    # Adjust layout to make room for suptitle
+    fig.tight_layout(rect=[0, 0, 1, 0.97] if notebook_name else None)
