@@ -321,13 +321,19 @@ class TestExtractCDFData:
         assert extract_cdf_data([]) is None
 
     def test_aggregates_memory_ratios(self):
-        """Memory ratios collected from all results."""
+        """Memory ratios collected from all results using delta-based formula.
+
+        CDF uses same formula as Plot 6: delta_overhead / prev_base.
+        This requires at least 2 cells to compute a ratio (cell 0 is skipped).
+        """
         results = [
             ComparisonResult(flowbook=FlowBookMemoryResult(cells=[
-                make_flowbook_cell("a", 0, 100, 50, {"_pre_a": {"df": 50}}),
+                make_flowbook_cell("a0", 0, 100, 0, {}),  # base=100, overhead=0
+                make_flowbook_cell("a1", 1, 100, 50, {"_pre_a1": {"df": 50}}),  # delta=50, ratio=0.5
             ])),
             ComparisonResult(flowbook=FlowBookMemoryResult(cells=[
-                make_flowbook_cell("b", 0, 100, 100, {"_pre_b": {"df": 100}}),
+                make_flowbook_cell("b0", 0, 100, 0, {}),  # base=100, overhead=0
+                make_flowbook_cell("b1", 1, 100, 100, {"_pre_b1": {"df": 100}}),  # delta=100, ratio=1.0
             ])),
         ]
 

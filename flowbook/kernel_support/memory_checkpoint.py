@@ -3192,12 +3192,21 @@ class MemoryCheckpoints:
 
             # Aggregate per-variable across all checkpoints (already in MB)
             checkpoint_vars = {}
-            for ckpt_vars in overhead.by_checkpoint_by_var.values():
+            checkpoint_var_types = {}
+            for ckpt_name, ckpt_vars in overhead.by_checkpoint_by_var.items():
                 for var_name, mb in ckpt_vars.items():
                     checkpoint_vars[var_name] = checkpoint_vars.get(var_name, 0) + int(mb * 1024 * 1024)
+                    # Get type from the checkpoint's user_ns
+                    if var_name not in checkpoint_var_types:
+                        for name, ckpt in checkpoints:
+                            if name == ckpt_name and hasattr(ckpt, 'user_ns') and var_name in ckpt.user_ns:
+                                val = ckpt.user_ns[var_name]
+                                checkpoint_var_types[var_name] = type(val).__name__
+                                break
         else:
             total_checkpoint_bytes = 0
             checkpoint_vars = {}
+            checkpoint_var_types = {}
 
         # Get GPU memory using the proper API (pynvml-based, per-process)
         from flowbook.util.gpu_memory import get_gpu_memory_mb
@@ -3209,4 +3218,5 @@ class MemoryCheckpoints:
             'gpu_bytes': gpu_bytes,
             'checkpoint_bytes': total_checkpoint_bytes,
             'checkpoint_vars': checkpoint_vars,
+            'checkpoint_var_types': checkpoint_var_types,
         }

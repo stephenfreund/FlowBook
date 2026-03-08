@@ -485,32 +485,23 @@ def extract_cdf_data(
     Returns:
         CDFData or None if no data
     """
-    time_ratios = []
+    time_overhead_ms = []
     memory_ratios = []
     peak_memory_pct = []
 
     for i, result in enumerate(results):
-        # Time ratios from timing data
+        # Time overhead from timing data (raw ms values)
         timing = result.timing
         if timing:
             fb_timing = timing.get("kernels", {}).get("flowbook", {}).get("timing", {})
             for cell in fb_timing.get("cells", []):
                 # Get timing values with fallbacks for different JSON format versions
-                execute_ms = cell.get("execute_duration_ms", 0) or 0
                 state_ms = cell.get("state_ms", 0) or cell.get("state_duration_ms", 0) or 0
                 check_ms = cell.get("check_ms", 0) or cell.get("check_duration_ms", 0) or 0
 
-                # Code time: try code_duration_ms first, then legacy field names
-                code_ms = cell.get("code_duration_ms")
-                if code_ms is None:
-                    code_ms = cell.get("run_ms", 0) or cell.get("cell_runtime_ms", 0) or 0
-                    if code_ms == 0 and execute_ms > 0:
-                        code_ms = max(execute_ms - state_ms - check_ms, 0)
-
-                if code_ms >= MIN_RUN_SEC * 1000:
-                    overhead_ms = state_ms + check_ms
-                    ratio = overhead_ms / code_ms
-                    time_ratios.append(ratio)
+                overhead_ms = state_ms + check_ms
+                if overhead_ms > 0:
+                    time_overhead_ms.append(overhead_ms)
 
         # Memory ratios - use v5 extraction if raw data provided
         p3 = None
@@ -527,13 +518,20 @@ def extract_cdf_data(
             p3 = extract_plot3_data(result)
 
         if p3:
-            for base, overhead in zip(p3.base_mb, p3.overhead_mb):
-                if base >= MIN_BASE_MB:
-                    memory_ratios.append(overhead / base)
+            # Use same delta-based ratio as Plot 6: checkpoint_delta / prev_base
+            # This measures incremental overhead per cell, not cumulative
+            for j in range(len(p3.overhead_mb)):
+                if j == 0:
+                    # First cell: delta = overhead, prev_base = 0 (skip)
+                    continue
+                prev_base = p3.base_mb[j - 1]
+                if prev_base >= MIN_BASE_MB:
+                    delta = max(0, p3.overhead_mb[j] - p3.overhead_mb[j - 1])
+                    memory_ratios.append(delta / prev_base)
 
             peak_memory_pct.append(p3.peak_overhead_pct)
 
-    if not time_ratios and not memory_ratios:
+    if not time_overhead_ms and not memory_ratios:
         return None
 
     def build_cdf(values: List[float]):
@@ -544,14 +542,14 @@ def extract_cdf_data(
         pcts = [(i + 1) / n for i in range(n)]
         return sorted_vals, pcts
 
-    time_sorted, time_pct = build_cdf(time_ratios)
+    time_sorted, time_pct = build_cdf(time_overhead_ms)
     memory_sorted, memory_pct = build_cdf(memory_ratios)
     peak_sorted, peak_pct = build_cdf(peak_memory_pct)
 
-    log(f"CDF: {len(time_ratios)} time ratios, {len(memory_ratios)} memory ratios, {len(peak_memory_pct)} notebooks")
+    log(f"CDF: {len(time_overhead_ms)} time samples, {len(memory_ratios)} memory ratios, {len(peak_memory_pct)} notebooks")
 
     return CDFData(
-        time_ratios=time_ratios,
+        time_overhead_ms=time_overhead_ms,
         time_sorted=time_sorted,
         time_percentiles=time_pct,
         memory_ratios=memory_ratios,
@@ -595,12 +593,18 @@ def extract_plot2_data_v5(
     # Build per-variable time series (convert ms to seconds for plotting)
     cell_nums: List[int] = []
     var_series: Dict[str, List[float]] = {v: [] for v in all_vars}
+    var_types: Dict[str, str] = {}
 
     for cell in cells:
         cell_nums.append(cell.cell_index + 1)
         for v in all_vars:
             ms = cell.checkpoint_var_timing.get(v, 0.0)
             var_series[v].append(ms / 1000)  # Convert to seconds
+
+        # Aggregate var types from all cells (first type found wins)
+        for v, t in cell.checkpoint_var_types.items():
+            if v not in var_types and t:
+                var_types[v] = t
 
     # Order by total time
     var_totals = {v: sum(var_series[v]) for v in all_vars}
@@ -630,6 +634,7 @@ def extract_plot2_data_v5(
         var_series={v: var_series[v] for v in vars_ordered},
         vars_ordered=vars_ordered,
         initial_count=initial_count if initial_count > 0 else len(cells),
+        var_types=var_types,
     )
 
 
@@ -745,6 +750,7 @@ def extract_plot4_data_v5(cells: List[V5CellMemory], top_n: int = 10) -> Optiona
     namespace_mb = []
     gpu_mb = []
     var_series: Dict[str, List[float]] = {v: [] for v in all_vars}
+    var_types: Dict[str, str] = {}
 
     for cell in cells:
         cell_nums.append(cell.cell_index + 1)
@@ -753,6 +759,11 @@ def extract_plot4_data_v5(cells: List[V5CellMemory], top_n: int = 10) -> Optiona
 
         for v in all_vars:
             var_series[v].append(cell.checkpoint_vars.get(v, 0.0))
+
+        # Aggregate var types from all cells (first type found wins)
+        for v, t in cell.checkpoint_var_types.items():
+            if v not in var_types and t:
+                var_types[v] = t
 
     # Order by max size
     var_maxes = {v: max(var_series[v]) for v in all_vars}
@@ -780,7 +791,7 @@ def extract_plot4_data_v5(cells: List[V5CellMemory], top_n: int = 10) -> Optiona
         gpu_mb=gpu_mb,
         var_series={v: var_series[v] for v in vars_ordered},
         vars_ordered=vars_ordered,
-        var_types={},  # v5 doesn't track type info
+        var_types=var_types,
         initial_count=len(cells),
     )
 

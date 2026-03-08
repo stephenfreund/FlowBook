@@ -416,6 +416,7 @@ class V5CellMemory:
         checkpoint_mb: Total checkpoint overhead BEYOND namespace
         checkpoint_vars: Per-variable checkpoint sizes aggregated across all checkpoints
         checkpoint_var_timing: Per-variable deepcopy times in milliseconds
+        checkpoint_var_types: Per-variable type names (e.g., "DataFrame", "ndarray")
     """
     cell_id: str
     cell_index: int
@@ -424,6 +425,7 @@ class V5CellMemory:
     checkpoint_mb: float
     checkpoint_vars: Dict[str, float] = field(default_factory=dict)
     checkpoint_var_timing: Dict[str, float] = field(default_factory=dict)
+    checkpoint_var_types: Dict[str, str] = field(default_factory=dict)
 
     @property
     def base_mb(self) -> float:
@@ -444,9 +446,11 @@ class V5CellMemory:
             "checkpoint_mb": self.checkpoint_mb,
             "checkpoint_vars": self.checkpoint_vars,
         }
-        # Only include timing if present (for backward compatibility)
+        # Only include optional fields if present (for backward compatibility)
         if self.checkpoint_var_timing:
             d["checkpoint_var_timing"] = self.checkpoint_var_timing
+        if self.checkpoint_var_types:
+            d["checkpoint_var_types"] = self.checkpoint_var_types
         return d
 
     @classmethod
@@ -459,6 +463,7 @@ class V5CellMemory:
             checkpoint_mb=d.get("checkpoint_mb", 0.0),
             checkpoint_vars=d.get("checkpoint_vars", {}),
             checkpoint_var_timing=d.get("checkpoint_var_timing", {}),
+            checkpoint_var_types=d.get("checkpoint_var_types", {}),
         )
 
 
@@ -536,6 +541,7 @@ class Plot2Data:
     var_series: Dict[str, List[float]]  # {var_name: [sec_at_cell_0, ...]}
     vars_ordered: List[str]  # ordered by total time
     initial_count: int
+    var_types: Dict[str, str] = field(default_factory=dict)  # {var_name: type_name}
 
 
 @dataclass
@@ -608,8 +614,8 @@ class Plot6Data:
 @dataclass
 class CDFData:
     """Data for aggregate CDF plots across multiple notebooks."""
-    # Time overhead ratio CDF
-    time_ratios: List[float]
+    # Time overhead CDF (raw ms values)
+    time_overhead_ms: List[float]
     time_sorted: List[float]
     time_percentiles: List[float]
 

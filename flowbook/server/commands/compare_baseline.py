@@ -2721,6 +2721,7 @@ def run_flowbook_memory_v5(
             gpu_mb = snapshot['gpu_bytes'] / (1024 * 1024)
             checkpoint_mb = snapshot['checkpoint_bytes'] / (1024 * 1024)
             checkpoint_vars = {k: v / (1024 * 1024) for k, v in snapshot['checkpoint_vars'].items()}
+            checkpoint_var_types = snapshot.get('checkpoint_var_types', {})
 
             log(f"  NS: {user_ns_mb:.1f}MB, Ckpt: {checkpoint_mb:.1f}MB, GPU: {gpu_mb:.1f}MB")
             if checkpoint_vars:
@@ -2737,6 +2738,7 @@ def run_flowbook_memory_v5(
                     checkpoint_mb=checkpoint_mb,
                     checkpoint_vars=checkpoint_vars,
                     checkpoint_var_timing=checkpoint_var_timing,
+                    checkpoint_var_types=checkpoint_var_types,
                 ))
             else:
                 result.cells.append(V5CellMemory(
@@ -2747,6 +2749,7 @@ def run_flowbook_memory_v5(
                     checkpoint_mb=checkpoint_mb,
                     checkpoint_vars=checkpoint_vars,
                     checkpoint_var_timing=checkpoint_var_timing,
+                    checkpoint_var_types=checkpoint_var_types,
                 ))
 
         # Execute reruns
@@ -2785,6 +2788,7 @@ def run_flowbook_memory_v5(
                     gpu_mb = snapshot['gpu_bytes'] / (1024 * 1024)
                     checkpoint_mb = snapshot['checkpoint_bytes'] / (1024 * 1024)
                     checkpoint_vars = {k: v / (1024 * 1024) for k, v in snapshot['checkpoint_vars'].items()}
+                    checkpoint_var_types = snapshot.get('checkpoint_var_types', {})
 
                     if timing.get("error") and timing.get("cell_runtime_ms") is None:
                         result.rerun_cells.append(V5CellMemory(
@@ -2795,6 +2799,7 @@ def run_flowbook_memory_v5(
                             checkpoint_mb=checkpoint_mb,
                             checkpoint_vars=checkpoint_vars,
                             checkpoint_var_timing=checkpoint_var_timing,
+                            checkpoint_var_types=checkpoint_var_types,
                         ))
                     else:
                         result.rerun_cells.append(V5CellMemory(
@@ -2805,6 +2810,7 @@ def run_flowbook_memory_v5(
                             checkpoint_mb=checkpoint_mb,
                             checkpoint_vars=checkpoint_vars,
                             checkpoint_var_timing=checkpoint_var_timing,
+                            checkpoint_var_types=checkpoint_var_types,
                         ))
                         log(f"  Rerun: NS={user_ns_mb:.1f}MB, Ckpt={checkpoint_mb:.1f}MB")
 

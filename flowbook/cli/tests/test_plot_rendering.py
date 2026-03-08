@@ -51,7 +51,8 @@ def sample_plot3_data():
     """Sample Plot3Data for testing."""
     return Plot3Data(
         cells=[1, 2, 3],
-        base_mb=[100, 150, 200],
+        user_ns_mb=[100, 150, 200],
+        gpu_mb=[0, 0, 0],
         overhead_mb=[10, 20, 30],
         has_baseline=True,
         peak_overhead_mb=30,
@@ -79,12 +80,9 @@ def sample_plot4_data():
 def sample_plot6_data():
     """Sample Plot6Data for testing."""
     return Plot6Data(
+        cells=[1, 2, 3, 4, 5],
         ratios=[0.1, 0.2, 0.3, 0.4, 0.5],
-        sorted_ratios=[0.1, 0.2, 0.3, 0.4, 0.5],
-        percentiles=[0.2, 0.4, 0.6, 0.8, 1.0],
-        median_ratio=0.3,
-        p90_ratio=0.5,
-        p99_ratio=0.5,
+        initial_count=5,
     )
 
 
@@ -110,21 +108,14 @@ class TestRenderPlot3:
         """Rendering completes without error."""
         render_plot3(mock_axes, sample_plot3_data)
 
-    def test_shows_baseline_label_when_has_baseline(self, mock_axes, sample_plot3_data):
-        """Shows 'Baseline Memory' label when has_baseline is True."""
-        render_plot3(mock_axes, sample_plot3_data)
-        # Check legend contains baseline label
-        legend = mock_axes.get_legend()
-        labels = [t.get_text() for t in legend.get_texts()]
-        assert "Baseline Memory" in labels
-
-    def test_shows_namespace_label_when_no_baseline(self, mock_axes, sample_plot3_data):
-        """Shows 'User Namespace' label when has_baseline is False."""
-        sample_plot3_data.has_baseline = False
+    def test_shows_expected_labels(self, mock_axes, sample_plot3_data):
+        """Shows correct labels for the three layers."""
         render_plot3(mock_axes, sample_plot3_data)
         legend = mock_axes.get_legend()
         labels = [t.get_text() for t in legend.get_texts()]
         assert "User Namespace" in labels
+        assert "GPU Memory" in labels
+        assert "FlowBook Overhead" in labels
 
 
 class TestRenderPlot4:
@@ -149,12 +140,11 @@ class TestRenderPlot6:
         """Rendering completes without error."""
         render_plot6(mock_axes, sample_plot6_data)
 
-    def test_shows_median_line(self, mock_axes, sample_plot6_data):
-        """Median line is shown in legend."""
+    def test_shows_bars(self, mock_axes, sample_plot6_data):
+        """Bar chart is rendered with expected data."""
         render_plot6(mock_axes, sample_plot6_data)
-        legend = mock_axes.get_legend()
-        labels = [t.get_text() for t in legend.get_texts()]
-        assert any("Median" in label for label in labels)
+        # Should have bar containers
+        assert len(mock_axes.containers) > 0
 
 
 class TestRenderCombined6Panel:
