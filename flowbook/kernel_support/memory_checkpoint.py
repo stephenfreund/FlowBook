@@ -2052,6 +2052,10 @@ class MemoryCheckpoints:
                 elif 'thread' in str(type(v)).lower() or 'lock' in str(type(v)).lower():
                     error_msg += "\n  Hint: Thread/lock objects cannot be pickled"
 
+                # add traceback to error message
+                import traceback
+                error_msg += "\n  Traceback:\n" + "".join(traceback.format_tb(e.__traceback__))
+
                 log(error_msg)
                 # Track variables that failed to copy
                 failed[k] = e

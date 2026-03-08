@@ -82,6 +82,23 @@ class CheckpointOverhead:
     by_checkpoint: Dict[str, float]  # Delta per checkpoint (in MB)
     by_variable: Dict[str, float]  # Per-variable totals (in MB)
     cumulative: Dict[str, float]  # Running total at each checkpoint (in MB)
+    # Per-checkpoint, per-variable breakdown: {checkpoint_name: {var_name: mb}}
+    by_checkpoint_by_var: Dict[str, Dict[str, float]] = field(default_factory=dict)
+
+
+@dataclass
+class CheckpointLogicalSize:
+    """Result of measuring logical checkpoint sizes (what's stored, regardless of sharing).
+
+    This is different from CheckpointOverhead which measures UNIQUE memory not shared
+    with namespace. LogicalSize shows what data IS stored in checkpoints, useful for
+    understanding checkpoint content even when CoW means overhead is 0.
+    """
+    total_mb: float  # Sum of all checkpoint logical sizes
+    by_checkpoint: Dict[str, float]  # Logical size of each checkpoint (in MB)
+    by_variable: Dict[str, float]  # Per-variable totals across checkpoints (in MB)
+    # Per-checkpoint, per-variable breakdown: {checkpoint_name: {var_name: mb}}
+    by_checkpoint_by_var: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
 
 # Types that are atomic (no internal references to measure)
@@ -181,30 +198,15 @@ class HeapSizer:
         # Measure each variable with deduplication via _seen_ids and _seen_data_ptrs
         # Use owned_only=False to count actual memory, even for arrays with .base
         # (e.g., pandas CoW internal arrays).
-        import time as _time
-        _start_ns = _time.time()
-        _slow_vars = []
         for var_name in vars_to_measure:
-            _var_start = _time.time()
             obj = ns[var_name]
             size = self._sizeof(obj, owned_only=False)
-            _var_elapsed = _time.time() - _var_start
-            if _var_elapsed > 0.5:  # Log vars taking > 500ms
-                _slow_vars.append((var_name, _var_elapsed, size, type(obj).__name__))
             by_variable[var_name] = size
             total_bytes += size
 
             # Track by type
             type_name = type(obj).__name__
             by_type[type_name] = by_type.get(type_name, 0) + size
-
-        _total_elapsed = _time.time() - _start_ns
-        if _slow_vars or _total_elapsed > 2.0:
-            print(f"[HeapSizer DEBUG] sizeof_namespace took {_total_elapsed:.2f}s for {len(vars_to_measure)} vars")
-            if _slow_vars:
-                print(f"[HeapSizer DEBUG] Slow variables (>500ms):")
-                for name, elapsed, size, tname in sorted(_slow_vars, key=lambda x: -x[1])[:10]:
-                    print(f"  {name}: {elapsed:.2f}s, {size/(1024*1024):.1f}MB, {tname}")
 
         return NamespaceSize(
             total_bytes=total_bytes,
@@ -247,7 +249,6 @@ class HeapSizer:
                 return False
 
         filtered = {}
-        excluded_ipython = []
         for k, v in globals_dict.items():
             if k.startswith('_'):
                 continue
@@ -258,14 +259,8 @@ class HeapSizer:
             if isinstance(v, (types.FunctionType, types.BuiltinFunctionType, type)):
                 continue
             if _is_ipython_internal(v):
-                excluded_ipython.append((k, type(v).__name__, getattr(type(v), '__module__', '?')))
                 continue
             filtered[k] = v
-
-        # Debug: show what was excluded and what will be measured
-        if excluded_ipython:
-            print(f"[HeapSizer DEBUG] Excluded {len(excluded_ipython)} IPython objects: {excluded_ipython[:5]}")
-        print(f"[HeapSizer DEBUG] Measuring {len(filtered)} user variables: {list(filtered.keys())[:10]}...")
 
         return self.sizeof_namespace(filtered)
 
@@ -428,16 +423,19 @@ class HeapSizer:
         # Objects already seen (from namespace or prior checkpoints) return 0
         by_checkpoint: Dict[str, float] = {}
         by_variable: Dict[str, float] = {}
+        by_checkpoint_by_var: Dict[str, Dict[str, float]] = {}
         cumulative: Dict[str, float] = {}
         running_total_bytes = 0
 
         for ckpt_name, ckpt in checkpoints:
             if not hasattr(ckpt, 'user_ns'):
                 by_checkpoint[ckpt_name] = 0.0
+                by_checkpoint_by_var[ckpt_name] = {}
                 cumulative[ckpt_name] = running_total_bytes / (1024 * 1024)
                 continue
 
             ckpt_delta_bytes = 0
+            ckpt_vars: Dict[str, float] = {}
             for var_name, obj in ckpt.user_ns.items():
                 # owned_only=True: don't follow views to base arrays owned elsewhere
                 size = self._sizeof(obj, owned_only=True)
@@ -445,9 +443,11 @@ class HeapSizer:
                 if size > 0:
                     var_mb = size / (1024 * 1024)
                     by_variable[var_name] = by_variable.get(var_name, 0.0) + var_mb
+                    ckpt_vars[var_name] = var_mb
 
             delta_mb = ckpt_delta_bytes / (1024 * 1024)
             by_checkpoint[ckpt_name] = delta_mb
+            by_checkpoint_by_var[ckpt_name] = ckpt_vars
             running_total_bytes += ckpt_delta_bytes
             cumulative[ckpt_name] = running_total_bytes / (1024 * 1024)
 
@@ -456,6 +456,70 @@ class HeapSizer:
             by_checkpoint=by_checkpoint,
             by_variable=by_variable,
             cumulative=cumulative,
+            by_checkpoint_by_var=by_checkpoint_by_var,
+        )
+
+    def sizeof_checkpoints_logical(
+        self,
+        checkpoints: List[tuple],
+    ) -> CheckpointLogicalSize:
+        """
+        Measure LOGICAL checkpoint sizes - what's stored, regardless of sharing.
+
+        Unlike sizeof_checkpoints_beyond_namespace which measures UNIQUE memory
+        not shared with namespace, this measures what data IS in each checkpoint.
+        Useful for understanding checkpoint content even when CoW means overhead is 0.
+
+        Each checkpoint is measured independently (reset between checkpoints) so
+        we get the true logical size of what's stored.
+
+        Args:
+            checkpoints: List of (checkpoint_name, MemoryCheckpoint) in any order
+
+        Returns:
+            CheckpointLogicalSize with:
+            - total_mb: Sum of all checkpoint logical sizes
+            - by_checkpoint: Dict of checkpoint_name -> logical size MB
+            - by_variable: Dict of var_name -> total MB across all checkpoints
+            - by_checkpoint_by_var: Dict of checkpoint_name -> {var_name: mb}
+        """
+        by_checkpoint: Dict[str, float] = {}
+        by_variable: Dict[str, float] = {}
+        by_checkpoint_by_var: Dict[str, Dict[str, float]] = {}
+        total_bytes = 0
+
+        for ckpt_name, ckpt in checkpoints:
+            if not hasattr(ckpt, 'user_ns'):
+                by_checkpoint[ckpt_name] = 0.0
+                by_checkpoint_by_var[ckpt_name] = {}
+                continue
+
+            # Reset for each checkpoint to measure independently
+            self.reset()
+
+            ckpt_bytes = 0
+            ckpt_vars: Dict[str, float] = {}
+
+            for var_name, obj in ckpt.user_ns.items():
+                # owned_only=False to include full data size
+                size = self._sizeof(obj, owned_only=False)
+                ckpt_bytes += size
+
+                if size > 0:
+                    var_mb = size / (1024 * 1024)
+                    by_variable[var_name] = by_variable.get(var_name, 0.0) + var_mb
+                    ckpt_vars[var_name] = var_mb
+
+            delta_mb = ckpt_bytes / (1024 * 1024)
+            by_checkpoint[ckpt_name] = delta_mb
+            by_checkpoint_by_var[ckpt_name] = ckpt_vars
+            total_bytes += ckpt_bytes
+
+        return CheckpointLogicalSize(
+            total_mb=total_bytes / (1024 * 1024),
+            by_checkpoint=by_checkpoint,
+            by_variable=by_variable,
+            by_checkpoint_by_var=by_checkpoint_by_var,
         )
 
     def _sizeof(self, obj: Any, owned_only: bool) -> int:
