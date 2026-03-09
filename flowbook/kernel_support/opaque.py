@@ -311,6 +311,10 @@ class OpaqueRegistry:
         # Check if this looks like a PyTorch model and register handler if needed
         _maybe_register_pytorch_handler(obj)
 
+        # Check if this looks like a known ML library object (catboost, xgboost,
+        # lightgbm, shap, sklearn) and register alias-only handler if needed
+        _maybe_register_ml_handler(obj)
+
         for handler in cls._handlers:
             if handler.can_handle(obj):
                 return handler
@@ -1033,3 +1037,120 @@ def reset_pytorch_handler():
     """Reset PyTorch handler registration. For testing."""
     global _pytorch_handler_registered
     _pytorch_handler_registered = False
+
+
+# =============================================================================
+# ML Model Handler (alias-only)
+# =============================================================================
+#
+# Handles ML library objects that have deeply nested __dict__ hierarchies
+# which cause expensive alias traversal but don't need full opaque handling
+# (deepcopy/diff already handled by their respective dispatch tables).
+#
+# Covered types (matching deepcopy.py dispatch):
+# - CatBoost: CatBoostRegressor, CatBoostClassifier, CatBoostRanker, Pool
+# - XGBoost: XGBRegressor, XGBClassifier, XGBRanker, XGBRFRegressor, XGBRFClassifier
+# - LightGBM: LGBMRegressor, LGBMClassifier, LGBMRanker, LGBMModel
+# - SHAP: Explanation, TreeExplainer
+# - sklearn: TargetEncoder, StackingRegressor, StackingClassifier
+
+# Module prefixes and class names for each library
+_ML_LIBRARY_SPECS: Dict[str, set] = {
+    'catboost': {
+        'CatBoostRegressor', 'CatBoostClassifier', 'CatBoostRanker',
+        'Pool', '_PoolBase',
+    },
+    'xgboost': {
+        'XGBRegressor', 'XGBClassifier', 'XGBRanker',
+        'XGBRFRegressor', 'XGBRFClassifier',
+    },
+    'lightgbm': {
+        'LGBMRegressor', 'LGBMClassifier', 'LGBMRanker', 'LGBMModel',
+    },
+    'shap': {
+        'Explanation', 'TreeExplainer',
+    },
+    'sklearn': {
+        'TargetEncoder', 'StackingRegressor', 'StackingClassifier',
+    },
+}
+
+
+class MLModelOpaqueHandler(OpaqueHandler):
+    """
+    Alias-only opaque handler for ML library objects.
+
+    These objects have deeply nested __dict__ structures (model internals,
+    fitted state, etc.) that cause O(100K+) object traversal during alias
+    collection, but their internals never alias with user notebook variables.
+
+    This handler short-circuits _collect_reachable_ids at the top level,
+    reducing alias:collect from ~700ms to ~2ms for namespaces with ML models.
+
+    Deepcopy and diff are handled by existing dispatch tables in deepcopy.py
+    and diff.py respectively — this handler only participates in alias detection.
+    """
+
+    def can_handle(self, obj: Any) -> bool:
+        """Check if obj is a known ML library object by module and class name."""
+        cls = type(obj)
+        module = getattr(cls, '__module__', '') or ''
+        class_name = cls.__name__
+
+        for module_prefix, class_names in _ML_LIBRARY_SPECS.items():
+            if module_prefix in module and class_name in class_names:
+                return True
+
+        return False
+
+    def is_checkpointable(self, obj: Any) -> Tuple[bool, Optional[str]]:
+        """ML objects are checkpointable via deepcopy dispatch, not opaque handler."""
+        return True, None
+
+    def get_mutable_state(self, obj: Any) -> Any:
+        """Not used — deepcopy.py handles checkpointing for these types."""
+        raise NotImplementedError(
+            "MLModelOpaqueHandler is alias-only. "
+            "Checkpointing is handled by deepcopy.py dispatch."
+        )
+
+    def copy_with_state(self, obj: Any, state: Any, memo: dict) -> Any:
+        """Not used — deepcopy.py handles copying for these types."""
+        raise NotImplementedError(
+            "MLModelOpaqueHandler is alias-only. "
+            "Copying is handled by deepcopy.py dispatch."
+        )
+
+    def states_equal(self, state1: Any, state2: Any) -> bool:
+        """Not used — diff.py handles comparison for these types."""
+        raise NotImplementedError(
+            "MLModelOpaqueHandler is alias-only. "
+            "Comparison is handled by diff.py dispatch."
+        )
+
+    def get_traversable_attrs(self, obj: Any) -> Dict[str, Any]:
+        """No traversal — ML model internals don't alias notebook variables."""
+        return {}
+
+
+_ml_handler_registered = False
+
+
+def _maybe_register_ml_handler(obj: Any) -> None:
+    """Register ML model handler if obj looks like a known ML library object."""
+    global _ml_handler_registered
+    if _ml_handler_registered:
+        return
+
+    module = getattr(type(obj), '__module__', '') or ''
+    for module_prefix in _ML_LIBRARY_SPECS:
+        if module_prefix in module:
+            OpaqueRegistry.register(MLModelOpaqueHandler())
+            _ml_handler_registered = True
+            return
+
+
+def reset_ml_handler():
+    """Reset ML handler registration. For testing."""
+    global _ml_handler_registered
+    _ml_handler_registered = False
