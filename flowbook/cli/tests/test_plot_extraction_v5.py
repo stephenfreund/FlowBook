@@ -130,8 +130,11 @@ class TestExtractPlot3DataV5:
 
         assert result.peak_overhead_mb == 5.0
         assert result.peak_cell == 1  # Cell index 1 (0-indexed)
-        # Peak % = 5.0 / 20.0 * 100 = 25%
-        assert result.peak_overhead_pct == pytest.approx(25.0)
+        # Peak % = (max_flowbook_total / max_base_total - 1) * 100
+        # max_flowbook = max(11, 25, 33) = 33
+        # max_base = max(10, 20, 30) = 30
+        # (33/30 - 1) * 100 = 10%
+        assert result.peak_overhead_pct == pytest.approx(10.0)
 
     def test_empty_cells_returns_none(self):
         """Returns None for empty input."""

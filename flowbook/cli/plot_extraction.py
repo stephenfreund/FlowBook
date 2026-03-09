@@ -545,20 +545,22 @@ def extract_cdf_data(
                     p3 = extract_plot3_data_v5(v5_memory.all_cells)
 
         if p3 and p3.gpu_checkpoint_mb:
-            # Per-cell GPU checkpoint delta / prev_base ratio
+            # Per-cell GPU checkpoint delta / prev_gpu ratio
+            # Use GPU-only base (not CPU+GPU) for GPU-specific overhead
             for j in range(1, len(p3.gpu_checkpoint_mb)):
-                prev_base = p3.base_mb[j - 1]
-                if prev_base >= MIN_BASE_MB:
+                prev_gpu_base = p3.gpu_mb[j - 1]
+                if prev_gpu_base >= MIN_BASE_MB:
                     delta = max(0, p3.gpu_checkpoint_mb[j] - p3.gpu_checkpoint_mb[j - 1])
-                    gpu_memory_ratios.append(delta / prev_base)
+                    gpu_memory_ratios.append(delta / prev_gpu_base)
 
             # Peak GPU checkpoint overhead %
-            base_totals = p3.base_mb
-            gpu_totals = [b + g for b, g in zip(base_totals, p3.gpu_checkpoint_mb)]
-            peak_base = max(base_totals) if base_totals else 0
+            # Use GPU-only base (not CPU+GPU) for GPU-specific overhead
+            gpu_base_totals = p3.gpu_mb
+            gpu_totals = [g + gc for g, gc in zip(gpu_base_totals, p3.gpu_checkpoint_mb)]
+            peak_gpu_base = max(gpu_base_totals) if gpu_base_totals else 0
             peak_gpu_total = max(gpu_totals) if gpu_totals else 0
-            if peak_base > 0:
-                gpu_peak_memory_pct.append((peak_gpu_total / peak_base - 1) * 100)
+            if peak_gpu_base > 0:
+                gpu_peak_memory_pct.append((peak_gpu_total / peak_gpu_base - 1) * 100)
 
     if not time_overhead_ms and not memory_ratios:
         return None

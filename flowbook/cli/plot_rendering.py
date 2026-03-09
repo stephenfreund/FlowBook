@@ -736,8 +736,10 @@ def render_cdf_panel(
     # Select formatter based on metric
     if metric == "time":
         unit_fmt = fmt_ms
-    elif metric == "memory":
+    elif metric in ("memory", "gpu_memory"):
         unit_fmt = fmt_ratio_pct
+    elif metric in ("peak", "gpu_peak"):
+        unit_fmt = fmt_pct
     else:
         unit_fmt = fmt_pct
 
@@ -769,7 +771,7 @@ def render_cdf_panel(
         ax.set_xscale("log")
         # Format with commas (e.g., "1,000" instead of "1000")
         ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
-    elif metric == "memory":
+    elif metric in ("memory", "gpu_memory"):
         # Extend x-axis beyond 100% if data exceeds it
         x_max = max(1.05, max_val * 1.05)
         ax.set_xlim(-0.05, x_max)
@@ -783,7 +785,7 @@ def render_cdf_panel(
             ticks = np.arange(0, x_max + tick_step, tick_step)
             ax.set_xticks(ticks)
             ax.set_xticklabels([f"{int(t * 100)}%" for t in ticks])
-    elif metric == "peak":
+    elif metric in ("peak", "gpu_peak"):
         # Extend x-axis beyond 100% if data exceeds it
         x_max = max(105, max_val * 1.05)
         ax.set_xlim(0, x_max)

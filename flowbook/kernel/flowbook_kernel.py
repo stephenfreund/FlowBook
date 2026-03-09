@@ -620,6 +620,40 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             )
 
     @line_magic
+    def diagnostic(self, line: str) -> None:
+        """
+        Mark a cell as diagnostic-only (no reproducibility tracking).
+
+        When %diagnostic appears at the start of a cell:
+        - The cell executes normally (code runs as usual)
+        - No checkpoint is taken (faster execution)
+        - No reproducibility checks are performed
+        - Read/write sets are recorded as empty
+        - Cell is marked as clean (never stale)
+
+        This is useful for cells that only inspect or visualize data without
+        modifying it, such as:
+        - df.info(), df.describe(), df.head()
+        - print() statements for debugging
+        - Plots and visualizations
+        - Profiling or timing code
+
+        Usage:
+            %diagnostic
+            df.info()
+            df.describe()
+
+        Note: This magic is processed before cell execution and stripped from
+        the code. The remaining code in the cell executes normally.
+        """
+        # This magic is handled specially in _process_diagnostic_magic()
+        # If we reach here, the magic was used standalone which is a no-op
+        self._display.display_icon_and_text(
+            "ℹ️",
+            "Diagnostic mode: cell will execute without reproducibility tracking"
+        )
+
+    @line_magic
     def exec_restore(self, line: str) -> None:
         """Deprecated: EXEC-RESTORE has been removed.
 
@@ -1183,6 +1217,18 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 # Check for notebook_structure magic (parse and remove if present)
                 code = self._process_structure_magic(code)
 
+                # Check for %diagnostic magic - execute without reproducibility tracking
+                code, is_diagnostic = self._process_diagnostic_magic(code)
+                if is_diagnostic:
+                    return await self._execute_without_enforcer(
+                        code,
+                        silent,
+                        store_history,
+                        user_expressions,
+                        allow_stdin,
+                        cell_meta,
+                    )
+
                 # Extract timeout from code directive or cell_meta
                 code, timeout = self._extract_timeout(code, cell_meta)
 
@@ -1417,6 +1463,38 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 self._enforcer.set_cell_order(parts)
             return "\n".join(lines[1:])
         return code
+
+    def _process_diagnostic_magic(self, code: str) -> Tuple[str, bool]:
+        """
+        Process %diagnostic magic if present at start of code.
+
+        The %diagnostic magic marks a cell as diagnostic-only, meaning:
+        - The cell executes normally (its code runs)
+        - No checkpoint is taken
+        - No reproducibility checks are performed
+        - Read/write sets are empty
+        - Cell is marked as clean
+
+        This is useful for cells that only inspect data (df.info(), print(),
+        visualization) and don't need to participate in reproducibility tracking.
+
+        Returns:
+            Tuple of (remaining_code, is_diagnostic)
+        """
+        lines = code.split("\n")
+        # Skip leading comments and blank lines to find the magic
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("%diagnostic"):
+                # Found the magic - remove it and return remaining code
+                remaining_lines = lines[:i] + lines[i + 1 :]
+                return "\n".join(remaining_lines), True
+            else:
+                # First non-comment, non-blank line is not %diagnostic
+                break
+        return code, False
 
     def _parse_timeout_from_code(self, code: str) -> Tuple[str, float]:
         """Parse timeout directive from code if present."""
