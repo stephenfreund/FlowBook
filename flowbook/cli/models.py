@@ -426,6 +426,8 @@ class V5CellMemory:
     checkpoint_vars: Dict[str, float] = field(default_factory=dict)
     checkpoint_var_timing: Dict[str, float] = field(default_factory=dict)
     checkpoint_var_types: Dict[str, str] = field(default_factory=dict)
+    gpu_checkpoint_mb: float = 0.0
+    gpu_checkpoint_vars: Dict[str, float] = field(default_factory=dict)
 
     @property
     def base_mb(self) -> float:
@@ -434,8 +436,8 @@ class V5CellMemory:
 
     @property
     def total_mb(self) -> float:
-        """Total memory: base + checkpoint overhead."""
-        return self.base_mb + self.checkpoint_mb
+        """Total memory: base + checkpoint overhead (CPU + GPU)."""
+        return self.base_mb + self.checkpoint_mb + self.gpu_checkpoint_mb
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -451,6 +453,10 @@ class V5CellMemory:
             d["checkpoint_var_timing"] = self.checkpoint_var_timing
         if self.checkpoint_var_types:
             d["checkpoint_var_types"] = self.checkpoint_var_types
+        if self.gpu_checkpoint_mb > 0:
+            d["gpu_checkpoint_mb"] = self.gpu_checkpoint_mb
+        if self.gpu_checkpoint_vars:
+            d["gpu_checkpoint_vars"] = self.gpu_checkpoint_vars
         return d
 
     @classmethod
@@ -464,6 +470,8 @@ class V5CellMemory:
             checkpoint_vars=d.get("checkpoint_vars", {}),
             checkpoint_var_timing=d.get("checkpoint_var_timing", {}),
             checkpoint_var_types=d.get("checkpoint_var_types", {}),
+            gpu_checkpoint_mb=d.get("gpu_checkpoint_mb", 0.0),
+            gpu_checkpoint_vars=d.get("gpu_checkpoint_vars", {}),
         )
 
 
@@ -556,7 +564,7 @@ class Plot3Data:
     cells: List[int]
     user_ns_mb: List[float]  # user namespace size
     gpu_mb: List[float]  # GPU memory
-    overhead_mb: List[float]  # flowbook checkpoint overhead
+    overhead_mb: List[float]  # flowbook checkpoint overhead (CPU)
     has_baseline: bool
     peak_overhead_mb: float
     peak_overhead_pct: float
@@ -564,6 +572,7 @@ class Plot3Data:
     initial_count: int
     peak_flowbook_mb: float = 0.0  # max(user_ns + gpu + checkpoint) across all cells
     peak_base_mb: float = 0.0  # max(user_ns + gpu) across all cells
+    gpu_checkpoint_mb: List[float] = field(default_factory=list)  # GPU checkpoint overhead
 
     @property
     def base_mb(self) -> List[float]:
@@ -609,8 +618,9 @@ class Plot6Data:
     Bar chart of checkpoint_delta_mb / base_mb for each cell.
     """
     cells: List[int]  # 1-indexed cell numbers
-    ratios: List[float]  # ratio per cell (0 if base < threshold)
-    initial_count: int  # cells before reruns
+    ratios: List[float]  # CPU checkpoint ratio per cell (0 if base < threshold)
+    gpu_ratios: List[float] = field(default_factory=list)  # GPU checkpoint ratio per cell
+    initial_count: int = 0  # cells before reruns
 
 
 @dataclass
@@ -630,6 +640,16 @@ class CDFData:
     peak_memory_pct: List[float]
     peak_sorted: List[float]
     peak_percentiles: List[float]
+
+    # GPU checkpoint memory overhead CDF
+    gpu_memory_ratios: List[float] = field(default_factory=list)
+    gpu_memory_sorted: List[float] = field(default_factory=list)
+    gpu_memory_percentiles: List[float] = field(default_factory=list)
+
+    # GPU peak memory overhead CDF (per notebook)
+    gpu_peak_memory_pct: List[float] = field(default_factory=list)
+    gpu_peak_sorted: List[float] = field(default_factory=list)
+    gpu_peak_percentiles: List[float] = field(default_factory=list)
 
 
 # ============ Comparison Result Model ============

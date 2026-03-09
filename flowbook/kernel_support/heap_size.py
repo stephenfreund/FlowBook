@@ -83,6 +83,12 @@ class CheckpointOverhead:
     by_variable: Dict[str, float]  # Per-variable totals (in MB)
     cumulative: Dict[str, float]  # Running total at each checkpoint (in MB)
     by_checkpoint_by_var: Dict[str, Dict[str, float]]  # {checkpoint: {var: mb}}
+    # GPU checkpoint fields (populated only in GPU checkpoint mode)
+    gpu_total_mb: float = 0.0
+    gpu_by_checkpoint: Dict[str, float] = field(default_factory=dict)
+    gpu_by_variable: Dict[str, float] = field(default_factory=dict)
+    gpu_cumulative: Dict[str, float] = field(default_factory=dict)
+    gpu_by_checkpoint_by_var: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
 
 # Types that are atomic (no internal references to measure)
@@ -435,12 +441,51 @@ class HeapSizer:
             running_total_bytes += ckpt_delta_bytes
             cumulative[ckpt_name] = running_total_bytes / (1024 * 1024)
 
+        # GPU checkpoint measurement: measure cudf objects in checkpoints
+        # using GPU-native memory_usage() (no dedup needed, each copy is independent)
+        gpu_by_checkpoint: Dict[str, float] = {}
+        gpu_by_variable: Dict[str, float] = {}
+        gpu_by_checkpoint_by_var: Dict[str, Dict[str, float]] = {}
+        gpu_cumulative: Dict[str, float] = {}
+        gpu_running_total_bytes = 0
+
+        from flowbook.kernel_support import cudf_compat
+        if cudf_compat.is_gpu_checkpoint_mode():
+            for ckpt_name, ckpt in checkpoints:
+                if not hasattr(ckpt, 'user_ns'):
+                    gpu_by_checkpoint[ckpt_name] = 0.0
+                    gpu_by_checkpoint_by_var[ckpt_name] = {}
+                    gpu_cumulative[ckpt_name] = gpu_running_total_bytes / (1024 * 1024)
+                    continue
+
+                ckpt_gpu_bytes = 0
+                ckpt_gpu_vars: Dict[str, float] = {}
+                for var_name, obj in ckpt.user_ns.items():
+                    if cudf_compat.is_cudf_object(obj):
+                        size = self._sizeof_cudf_gpu(obj)
+                        ckpt_gpu_bytes += size
+                        if size > 0:
+                            var_mb = size / (1024 * 1024)
+                            gpu_by_variable[var_name] = gpu_by_variable.get(var_name, 0.0) + var_mb
+                            ckpt_gpu_vars[var_name] = var_mb
+
+                gpu_delta_mb = ckpt_gpu_bytes / (1024 * 1024)
+                gpu_by_checkpoint[ckpt_name] = gpu_delta_mb
+                gpu_by_checkpoint_by_var[ckpt_name] = ckpt_gpu_vars
+                gpu_running_total_bytes += ckpt_gpu_bytes
+                gpu_cumulative[ckpt_name] = gpu_running_total_bytes / (1024 * 1024)
+
         return CheckpointOverhead(
             total_mb=running_total_bytes / (1024 * 1024),
             by_checkpoint=by_checkpoint,
             by_variable=by_variable,
             cumulative=cumulative,
             by_checkpoint_by_var=by_checkpoint_by_var,
+            gpu_total_mb=gpu_running_total_bytes / (1024 * 1024),
+            gpu_by_checkpoint=gpu_by_checkpoint,
+            gpu_by_variable=gpu_by_variable,
+            gpu_cumulative=gpu_cumulative,
+            gpu_by_checkpoint_by_var=gpu_by_checkpoint_by_var,
         )
 
     def _sizeof(self, obj: Any, owned_only: bool) -> int:
@@ -463,12 +508,14 @@ class HeapSizer:
         if isinstance(obj, _ATOMIC_TYPES):
             return sys.getsizeof(obj)
 
-        # cuDF proxy objects: convert to pandas via _fsproxy_slow to avoid
-        # triggering _fsproxy_fast access, which can fail with
-        # NotImplementedError for certain column types (e.g., category dtype
-        # after factorize()).  Measure the pandas representation instead.
+        # cuDF objects: in GPU checkpoint mode, measure GPU memory directly;
+        # otherwise convert to pandas via _fsproxy_slow to avoid triggering
+        # _fsproxy_fast access, which can fail with NotImplementedError for
+        # certain column types (e.g., category dtype after factorize()).
         from flowbook.kernel_support import cudf_compat
         if cudf_compat.is_cudf_object(obj):
+            if cudf_compat.is_gpu_checkpoint_mode():
+                return self._sizeof_cudf_gpu(obj)
             pandas_obj = cudf_compat.to_pandas(obj)
             return self._sizeof(pandas_obj, owned_only)
 
@@ -582,6 +629,22 @@ class HeapSizer:
         # regions). Accepting minor overcounting in those cases for performance.
 
         return arr.nbytes + 128
+
+    def _sizeof_cudf_gpu(self, obj) -> int:
+        """Measure GPU memory for a cudf object using memory_usage(deep=True)."""
+        try:
+            from flowbook.kernel_support import cudf_compat
+            unwrapped = cudf_compat.unwrap_cudf_proxy(obj)
+            if hasattr(unwrapped, 'memory_usage'):
+                usage = unwrapped.memory_usage(deep=True)
+                if hasattr(usage, 'sum'):
+                    return int(usage.sum())
+                return int(usage)
+            elif hasattr(unwrapped, 'nbytes'):
+                return int(unwrapped.nbytes)
+        except Exception:
+            pass
+        return 0
 
     def _sizeof_dataframe(self, df, owned_only: bool) -> int:
         """Measure DataFrame memory, handling CoW sharing."""

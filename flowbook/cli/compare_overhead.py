@@ -3983,6 +3983,15 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
                     pdf.savefig(cdf_fig, dpi=150)
                     plt.close(cdf_fig)
 
+                    # GPU checkpoint CDF page (if any GPU data exists)
+                    if cdf_data.gpu_memory_ratios or cdf_data.gpu_peak_memory_pct:
+                        gpu_cdf_fig, gpu_cdf_axes = plt.subplots(1, 2, figsize=(12, 5))
+                        render_cdf_panel(gpu_cdf_axes[0], cdf_data, "gpu_memory", large_fonts=args.large_fonts)
+                        render_cdf_panel(gpu_cdf_axes[1], cdf_data, "gpu_peak", large_fonts=args.large_fonts)
+                        gpu_cdf_fig.tight_layout()
+                        pdf.savefig(gpu_cdf_fig, dpi=150)
+                        plt.close(gpu_cdf_fig)
+
         print(f"Combined plots saved to: {combined_path}")
 
     # Print summary table

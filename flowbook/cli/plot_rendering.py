@@ -253,23 +253,32 @@ def render_plot3(
     gpu = np.array(data.gpu_mb)
     overhead = np.array(data.overhead_mb)
 
-    # Stack layers: namespace, then GPU, then overhead
+    # Stack layers: namespace, then GPU, then CPU overhead, then GPU checkpoint
     layer1 = user_ns
     layer2 = user_ns + gpu
     layer3 = user_ns + gpu + overhead
 
-    # Fixed colors: gray for namespace, orange for GPU, steelblue for overhead
+    gpu_ckpt = np.array(data.gpu_checkpoint_mb) if data.gpu_checkpoint_mb else np.zeros_like(cells, dtype=float)
+    has_gpu_ckpt = np.any(gpu_ckpt > 0)
+    layer4 = layer3 + gpu_ckpt
+
+    # Fixed colors: gray for namespace, orange for GPU, steelblue for overhead, red for GPU checkpoint
     ns_color = "gray"
     gpu_color = "orange"
     overhead_color = "steelblue"
+    gpu_ckpt_color = "red"
 
     ax.fill_between(cells, 0, layer1, alpha=0.3, color=ns_color, label="User Namespace")
     ax.fill_between(cells, layer1, layer2, alpha=0.3, color=gpu_color, label="GPU Memory")
     ax.fill_between(cells, layer2, layer3, alpha=0.3, color=overhead_color, label="FlowBook Overhead")
+    if has_gpu_ckpt:
+        ax.fill_between(cells, layer3, layer4, alpha=0.3, color=gpu_ckpt_color, label="GPU Checkpoint")
 
     ax.plot(cells, layer1, color=ns_color, linewidth=1.5, marker="o", markersize=3)
     ax.plot(cells, layer2, color=gpu_color, linewidth=1.5, marker="o", markersize=3)
     ax.plot(cells, layer3, color=overhead_color, linewidth=2, marker="o", markersize=4)
+    if has_gpu_ckpt:
+        ax.plot(cells, layer4, color=gpu_ckpt_color, linewidth=2, marker="o", markersize=4)
 
     ax.set_xlabel("Cell Number", fontsize=label_size)
     ax.set_ylabel("Memory (MB)", fontsize=label_size)
@@ -499,10 +508,18 @@ def render_plot6(
 
     cells = np.array(data.cells)
     ratios = np.array(data.ratios)
+    gpu_ratios = np.array(data.gpu_ratios) if data.gpu_ratios else np.zeros_like(ratios)
+    has_gpu = np.any(gpu_ratios > 0)
 
-    # Bar chart of ratios per cell
-    bar_width = 0.6
-    ax.bar(cells, ratios, width=bar_width, alpha=0.7, color="#66c2a5")
+    if has_gpu:
+        # Grouped bars: CPU and GPU side by side
+        bar_width = 0.35
+        ax.bar(cells - bar_width/2, ratios, width=bar_width, alpha=0.7, color="#66c2a5", label="CPU Checkpoint")
+        ax.bar(cells + bar_width/2, gpu_ratios, width=bar_width, alpha=0.7, color="red", label="GPU Checkpoint")
+    else:
+        # Single bar (no GPU data)
+        bar_width = 0.6
+        ax.bar(cells, ratios, width=bar_width, alpha=0.7, color="#66c2a5")
 
     ax.set_xlabel("Cell Number", fontsize=label_size)
     ax.set_ylabel("Checkpoint / Base Memory", fontsize=label_size)
@@ -521,8 +538,9 @@ def render_plot6(
             x=data.initial_count + 0.5,
             color="red", linestyle="--", linewidth=2, label="Rerun Start"
         )
-        if show_legend:
-            ax.legend(loc="upper right", fontsize=legend_size)
+
+    if show_legend and (has_gpu or data.initial_count < len(cells)):
+        ax.legend(loc="upper right", fontsize=legend_size)
 
 
 def render_cdf_panel(
@@ -577,6 +595,22 @@ def render_cdf_panel(
         xlabel = "Peak Checkpoint / Base Memory Size"
         n = len(data.peak_memory_pct)
         color = "darkorange"
+        use_log = False
+    elif metric == "gpu_memory":
+        sorted_vals = list(data.gpu_memory_sorted)
+        percentiles = list(data.gpu_memory_percentiles)
+        title = "GPU Checkpoint Memory Distribution"
+        xlabel = "GPU Checkpoint / Base Memory Size"
+        n = len(data.gpu_memory_ratios)
+        color = "red"
+        use_log = False
+    elif metric == "gpu_peak":
+        sorted_vals = list(data.gpu_peak_sorted)
+        percentiles = list(data.gpu_peak_percentiles)
+        title = "Peak GPU Checkpoint Overhead Distribution"
+        xlabel = "Peak GPU Checkpoint / Base Memory Size"
+        n = len(data.gpu_peak_memory_pct)
+        color = "darkred"
         use_log = False
     else:
         raise ValueError(f"Unknown metric: {metric}")

@@ -3217,10 +3217,21 @@ class MemoryCheckpoints:
         gpu_mb = get_gpu_memory_mb()
         gpu_bytes = int(gpu_mb * 1024 * 1024)
 
+        # GPU checkpoint overhead (separate from CPU checkpoint overhead)
+        gpu_checkpoint_bytes = 0
+        gpu_checkpoint_vars = {}
+        if checkpoints and hasattr(overhead, 'gpu_total_mb'):
+            gpu_checkpoint_bytes = int(overhead.gpu_total_mb * 1024 * 1024)
+            for ckpt_name, ckpt_vars in overhead.gpu_by_checkpoint_by_var.items():
+                for var_name, mb in ckpt_vars.items():
+                    gpu_checkpoint_vars[var_name] = gpu_checkpoint_vars.get(var_name, 0) + int(mb * 1024 * 1024)
+
         return {
             'user_ns_bytes': ns_result.total_bytes,
             'gpu_bytes': gpu_bytes,
             'checkpoint_bytes': total_checkpoint_bytes,
             'checkpoint_vars': checkpoint_vars,
             'checkpoint_var_types': checkpoint_var_types,
+            'gpu_checkpoint_bytes': gpu_checkpoint_bytes,
+            'gpu_checkpoint_vars': gpu_checkpoint_vars,
         }

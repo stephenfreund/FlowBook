@@ -691,6 +691,48 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             )
 
     @line_magic
+    def cudf_gpu_checkpoint(self, line: str) -> None:
+        """
+        Toggle GPU-side checkpointing for cudf objects.
+
+        When enabled, cudf DataFrames/Series are checkpointed on GPU via
+        deep copy instead of being converted to pandas (CPU). This is much
+        faster (~3ms vs ~1.3s) but uses GPU memory for checkpoints.
+
+        Usage:
+            %cudf_gpu_checkpoint        - Show current mode
+            %cudf_gpu_checkpoint on      - Enable GPU checkpointing
+            %cudf_gpu_checkpoint off     - Disable GPU checkpointing
+
+        Can also be set via FLOWBOOK_CUDF_GPU_CHECKPOINT=1 environment variable.
+        """
+        from flowbook.kernel_support.cudf_compat import (
+            is_gpu_checkpoint_mode,
+            set_gpu_checkpoint_mode,
+            has_cudf,
+        )
+
+        args = line.strip().lower()
+        if not args:
+            mode = "ON" if is_gpu_checkpoint_mode() else "OFF"
+            cudf_available = "yes" if has_cudf() else "no"
+            self._display.display_icon_and_text(
+                "\U0001F3AE",
+                f"GPU checkpoint mode: {mode} (cudf available: {cudf_available})"
+            )
+        elif args == "on":
+            set_gpu_checkpoint_mode(True)
+            if is_gpu_checkpoint_mode():
+                self._display.display_icon_and_text("\u2705", "GPU checkpoint mode enabled")
+            else:
+                self._display.display_icon_and_text("\u274C", "Cannot enable: cudf not available")
+        elif args == "off":
+            set_gpu_checkpoint_mode(False)
+            self._display.display_icon_and_text("\u2705", "GPU checkpoint mode disabled")
+        else:
+            self._display.display_icon_and_text("\u274C", "Usage: %cudf_gpu_checkpoint [on|off]")
+
+    @line_magic
     def staleness_mode(self, line: str) -> None:
         """
         Set staleness computation mode.

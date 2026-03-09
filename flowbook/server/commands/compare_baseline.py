@@ -1439,7 +1439,7 @@ def get_v5_memory_snapshot(kernel_client, timeout: float = 30.0) -> Dict[str, An
     start_time = time.time()
     while True:
         if time.time() - start_time > timeout:
-            return {'user_ns_bytes': 0, 'gpu_bytes': 0, 'checkpoint_bytes': 0, 'checkpoint_vars': {}}
+            return {'user_ns_bytes': 0, 'gpu_bytes': 0, 'checkpoint_bytes': 0, 'checkpoint_vars': {}, 'gpu_checkpoint_bytes': 0, 'gpu_checkpoint_vars': {}}
         try:
             msg = kernel_client.get_iopub_msg(timeout=1.0)
         except Exception:
@@ -1473,7 +1473,7 @@ def get_v5_memory_snapshot(kernel_client, timeout: float = 30.0) -> Dict[str, An
         log(f"Failed to get v5 memory snapshot: {e}")
         log(traceback.format_exc())
 
-    return {'user_ns_bytes': 0, 'gpu_bytes': 0, 'checkpoint_bytes': 0, 'checkpoint_vars': {}}
+    return {'user_ns_bytes': 0, 'gpu_bytes': 0, 'checkpoint_bytes': 0, 'checkpoint_vars': {}, 'gpu_checkpoint_bytes': 0, 'gpu_checkpoint_vars': {}}
 
 
 def get_logical_checkpoint_sizes(
@@ -2722,6 +2722,8 @@ def run_flowbook_memory_v5(
             checkpoint_mb = snapshot['checkpoint_bytes'] / (1024 * 1024)
             checkpoint_vars = {k: v / (1024 * 1024) for k, v in snapshot['checkpoint_vars'].items()}
             checkpoint_var_types = snapshot.get('checkpoint_var_types', {})
+            gpu_checkpoint_mb = snapshot.get('gpu_checkpoint_bytes', 0) / (1024 * 1024)
+            gpu_checkpoint_vars = {k: v / (1024 * 1024) for k, v in snapshot.get('gpu_checkpoint_vars', {}).items()}
 
             log(f"  NS: {user_ns_mb:.1f}MB, Ckpt: {checkpoint_mb:.1f}MB, GPU: {gpu_mb:.1f}MB")
             if checkpoint_vars:
@@ -2739,6 +2741,8 @@ def run_flowbook_memory_v5(
                     checkpoint_vars=checkpoint_vars,
                     checkpoint_var_timing=checkpoint_var_timing,
                     checkpoint_var_types=checkpoint_var_types,
+                    gpu_checkpoint_mb=gpu_checkpoint_mb,
+                    gpu_checkpoint_vars=gpu_checkpoint_vars,
                 ))
             else:
                 result.cells.append(V5CellMemory(
@@ -2750,6 +2754,8 @@ def run_flowbook_memory_v5(
                     checkpoint_vars=checkpoint_vars,
                     checkpoint_var_timing=checkpoint_var_timing,
                     checkpoint_var_types=checkpoint_var_types,
+                    gpu_checkpoint_mb=gpu_checkpoint_mb,
+                    gpu_checkpoint_vars=gpu_checkpoint_vars,
                 ))
 
         # Execute reruns
@@ -2789,6 +2795,8 @@ def run_flowbook_memory_v5(
                     checkpoint_mb = snapshot['checkpoint_bytes'] / (1024 * 1024)
                     checkpoint_vars = {k: v / (1024 * 1024) for k, v in snapshot['checkpoint_vars'].items()}
                     checkpoint_var_types = snapshot.get('checkpoint_var_types', {})
+                    gpu_checkpoint_mb = snapshot.get('gpu_checkpoint_bytes', 0) / (1024 * 1024)
+                    gpu_checkpoint_vars = {k: v / (1024 * 1024) for k, v in snapshot.get('gpu_checkpoint_vars', {}).items()}
 
                     if timing.get("error") and timing.get("cell_runtime_ms") is None:
                         result.rerun_cells.append(V5CellMemory(
@@ -2800,6 +2808,8 @@ def run_flowbook_memory_v5(
                             checkpoint_vars=checkpoint_vars,
                             checkpoint_var_timing=checkpoint_var_timing,
                             checkpoint_var_types=checkpoint_var_types,
+                            gpu_checkpoint_mb=gpu_checkpoint_mb,
+                            gpu_checkpoint_vars=gpu_checkpoint_vars,
                         ))
                     else:
                         result.rerun_cells.append(V5CellMemory(
@@ -2811,6 +2821,8 @@ def run_flowbook_memory_v5(
                             checkpoint_vars=checkpoint_vars,
                             checkpoint_var_timing=checkpoint_var_timing,
                             checkpoint_var_types=checkpoint_var_types,
+                            gpu_checkpoint_mb=gpu_checkpoint_mb,
+                            gpu_checkpoint_vars=gpu_checkpoint_vars,
                         ))
                         log(f"  Rerun: NS={user_ns_mb:.1f}MB, Ckpt={checkpoint_mb:.1f}MB")
 

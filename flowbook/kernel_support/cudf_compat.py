@@ -1077,9 +1077,16 @@ class CuDFOriginTracker:
         return self._origins.get(name)
 
     def restore_value(self, name: str, value: Any) -> Any:
-        """Restore a value, converting to cuDF if it originated from cuDF."""
+        """Restore a value, converting to cuDF if it originated from cuDF.
+
+        In GPU checkpoint mode, values are already cudf objects, so skip
+        the from_pandas() conversion.
+        """
         origin_type = self.get_origin(name)
         if origin_type is not None:
+            # If value is already a cudf object (GPU checkpoint mode), skip conversion
+            if is_cudf_object(value):
+                return value
             return from_pandas(value, origin_type)
         return value
 
@@ -1188,6 +1195,22 @@ import os
 
 _DISABLE_DEEPCOPY_CACHE = os.environ.get('FLOWBOOK_DISABLE_CUDF_DEEPCOPY_CACHE', '0') == '1'
 
+# GPU-side checkpointing: keep cudf objects on GPU instead of converting to pandas.
+# When enabled, deepcopy_cudf uses cudf.DataFrame.copy(deep=True) (~3ms) instead of
+# GPU→CPU conversion via _fsproxy_slow (~1.3s for 4M×302 DataFrame).
+_CUDF_GPU_CHECKPOINT = os.environ.get('FLOWBOOK_CUDF_GPU_CHECKPOINT', '0') == '1'
+
+
+def set_gpu_checkpoint_mode(enabled: bool) -> None:
+    """Enable or disable GPU-side checkpointing for cudf objects."""
+    global _CUDF_GPU_CHECKPOINT
+    _CUDF_GPU_CHECKPOINT = enabled
+
+
+def is_gpu_checkpoint_mode() -> bool:
+    """Check if GPU-side checkpointing is enabled (and cudf is available)."""
+    return _CUDF_GPU_CHECKPOINT and has_cudf()
+
 
 def _shallow_copy_for_checkpoint(df: Any) -> Any:
     """
@@ -1213,25 +1236,40 @@ def _shallow_copy_for_checkpoint(df: Any) -> Any:
         return df
 
 
+def _gpu_deep_copy(obj: Any) -> Any:
+    """
+    Deep copy a cuDF object on GPU using cudf's native copy.
+
+    ~3ms for a 4M×302 DataFrame (vs ~1.3s for GPU→CPU conversion).
+    The result stays on GPU as a native cudf or proxy object.
+    """
+    # For proxy objects, .copy(deep=True) dispatches to the GPU path
+    # automatically via cudf.pandas proxy machinery.
+    if hasattr(obj, 'copy'):
+        try:
+            return obj.copy(deep=True)
+        except Exception:
+            pass
+
+    # Fallback: return as-is (shouldn't happen for DataFrame/Series/Index)
+    return obj
+
+
 def deepcopy_cudf(obj: Any, memo: Dict[int, Any]) -> Any:
     """
-    Deep copy a cuDF object by converting to pandas (CPU memory).
+    Deep copy a cuDF object for checkpointing.
 
-    Uses buffer-based deduplication to ensure that cudf objects sharing GPU
-    memory also share numpy arrays in the checkpoint. This dramatically reduces
-    checkpoint size when notebooks have views/subsets (e.g., train, X_train, X_valid).
-
-    Memory sharing is preserved via numpy views and pandas CoW:
-    - Arrays from the same GPU buffer share memory via views
-    - CoW protects against mutations creating unexpected changes
-    - The resulting pandas DataFrames are safe to use independently
+    Two modes controlled by is_gpu_checkpoint_mode():
+    - GPU mode: cudf.copy(deep=True) on GPU (~3ms). Checkpoint stays on GPU.
+    - CPU mode: convert to pandas via _fsproxy_slow (~1.3s). Checkpoint on CPU.
 
     Args:
         obj: cuDF DataFrame, Series, or Index
         memo: deepcopy memo dict
 
     Returns:
-        pandas equivalent (stored in CPU memory)
+        GPU mode: cudf copy (stays on GPU)
+        CPU mode: pandas equivalent (stored in CPU memory)
     """
     obj_id = id(obj)
 
@@ -1239,10 +1277,16 @@ def deepcopy_cudf(obj: Any, memo: Dict[int, Any]) -> Any:
     if obj_id in memo:
         return memo[obj_id]
 
+    # GPU-side checkpoint: copy on GPU, no CPU transfer
+    if is_gpu_checkpoint_mode():
+        result = _gpu_deep_copy(obj)
+        memo[obj_id] = result
+        return result
+
+    # CPU-side checkpoint: convert to pandas
     cache = get_checkpoint_cache()
 
-    # Convert GPU→pandas with buffer-based deduplication
-    # This may return a DataFrame whose arrays are views into cached arrays
+    # Convert GPU→pandas with batch conversion (preserves compact dtypes)
     pandas_copy = to_pandas_cached(obj)
 
     # Use shallow copy to preserve buffer-sharing views
@@ -1301,36 +1345,177 @@ def _is_proxy_index(obj: Any) -> bool:
     return 'Index' in type_name
 
 
+def _is_cudf_dataframe_any(obj: Any) -> bool:
+    """Check if obj is a cudf DataFrame (native or proxy)."""
+    return is_cudf_dataframe(obj) or _is_proxy_dataframe(obj)
+
+
+def _is_cudf_series_any(obj: Any) -> bool:
+    """Check if obj is a cudf Series (native or proxy)."""
+    return is_cudf_series(obj) or _is_proxy_series(obj)
+
+
+def _is_cudf_index_any(obj: Any) -> bool:
+    """Check if obj is a cudf Index (native or proxy)."""
+    return is_cudf_index(obj) or _is_proxy_index(obj)
+
+
 def are_both_cudf_same_type(obj1: Any, obj2: Any) -> bool:
     """Check if both objects are cuDF objects of the same type.
 
-    Handles both native cudf objects and cudf.pandas proxy objects.
+    Handles both native cudf objects and cudf.pandas proxy objects,
+    including cross-type matches (native cudf vs proxy) which occur
+    when GPU checkpoints (native cudf) are compared against live
+    namespace (proxy cudf).
     """
     if not has_cudf():
         return False
 
-    # Check native cudf types
-    if is_cudf_dataframe(obj1) and is_cudf_dataframe(obj2):
+    if _is_cudf_dataframe_any(obj1) and _is_cudf_dataframe_any(obj2):
         return True
-    if is_cudf_series(obj1) and is_cudf_series(obj2):
+    if _is_cudf_series_any(obj1) and _is_cudf_series_any(obj2):
         return True
-    if is_cudf_index(obj1) and is_cudf_index(obj2):
-        return True
-
-    # Check cudf.pandas proxy types
-    if _is_proxy_dataframe(obj1) and _is_proxy_dataframe(obj2):
-        return True
-    if _is_proxy_series(obj1) and _is_proxy_series(obj2):
-        return True
-    if _is_proxy_index(obj1) and _is_proxy_index(obj2):
+    if _is_cudf_index_any(obj1) and _is_cudf_index_any(obj2):
         return True
 
     return False
 
 
+def _diff_cudf_gpu_dataframe(obj1: Any, obj2: Any, path: str, differ: Any) -> Optional[Any]:
+    """
+    GPU-native DataFrame diff. Compares cudf DataFrames entirely on GPU.
+
+    Fast path: cudf.DataFrame.equals() handles the common case (no changes)
+    with zero GPU→CPU transfer (~1ms).
+
+    Slow path: for changed DataFrames, compares column-by-column on GPU
+    using cudf operations, producing the same CompoundDiff output as the
+    pandas path.
+    """
+    from flowbook.kernel_support.types import CompoundDiff, ValueComparison
+
+    children = {}
+
+    # Structural checks (metadata only, no GPU transfer)
+    len1, len2 = len(obj1), len(obj2)
+    cols1 = list(obj1.columns)
+    cols2 = list(obj2.columns)
+
+    if len1 != len2:
+        children['_structural_rows'] = ValueComparison(
+            status="different", value1=len1, value2=len2,
+            message=f"from {len1} to {len2}",
+        )
+
+    if cols1 != cols2:
+        added = set(cols2) - set(cols1)
+        removed = set(cols1) - set(cols2)
+        if added or removed:
+            parts = []
+            if added:
+                parts.append(f"added {sorted(added)}")
+            if removed:
+                parts.append(f"removed {sorted(removed)}")
+            children['_structural_columns'] = ValueComparison(
+                status="different", value1=cols1, value2=cols2,
+                message="; ".join(parts),
+            )
+
+    # If row count changed, return early (can't compare column values)
+    if len1 != len2:
+        if children:
+            return CompoundDiff(source_type="dataframe", children=children)
+        return None
+
+    # Fast path: check full equality on GPU
+    try:
+        if obj1.equals(obj2):
+            # No changes at all — most common case
+            if not children:
+                return None
+            return CompoundDiff(source_type="dataframe", children=children)
+    except Exception:
+        pass  # Fall through to per-column comparison
+
+    # Determine which columns to compare (respect column_rbw filter)
+    common_cols = [c for c in cols1 if c in set(cols2)]
+    if hasattr(differ, 'column_rbw') and differ.column_rbw:
+        # Only compare columns that were read-before-write
+        rbw_cols = differ.column_rbw.get(path, None)
+        if rbw_cols is not None:
+            common_cols = [c for c in common_cols if c in rbw_cols]
+
+    # Per-column comparison on GPU
+    for col in common_cols:
+        try:
+            col1 = obj1[col]
+            col2 = obj2[col]
+
+            # dtype change
+            if str(col1.dtype) != str(col2.dtype):
+                children[f"['{col}']"] = ValueComparison(
+                    status="different", value1=str(col1.dtype), value2=str(col2.dtype),
+                    message=f"dtype changed from {col1.dtype} to {col2.dtype}",
+                )
+                continue
+
+            # Value equality on GPU
+            try:
+                if col1.equals(col2):
+                    continue
+            except Exception:
+                pass
+
+            # Not equal — record as changed (don't need element-level detail
+            # for conflict resolution, just that the column changed)
+            children[f"['{col}']"] = ValueComparison(
+                status="different", value1="<cudf column>", value2="<cudf column (changed)>",
+                message="values differ",
+            )
+        except Exception:
+            # If column access fails, record as changed to be safe
+            children[f"['{col}']"] = ValueComparison(
+                status="different", value1="<error>", value2="<error>",
+                message="comparison error",
+            )
+
+    if children:
+        return CompoundDiff(source_type="dataframe", children=children)
+    return None
+
+
+def _diff_cudf_gpu_series(obj1: Any, obj2: Any, path: str) -> Optional[Any]:
+    """GPU-native Series diff."""
+    from flowbook.kernel_support.types import CompoundDiff, ValueComparison
+
+    children = {}
+
+    if len(obj1) != len(obj2):
+        children['_structural_len'] = ValueComparison(
+            status="different", value1=len(obj1), value2=len(obj2),
+            message=f"from {len(obj1)} to {len(obj2)}",
+        )
+        return CompoundDiff(source_type="series", children=children)
+
+    try:
+        if obj1.equals(obj2):
+            return None
+    except Exception:
+        pass
+
+    children['_values'] = ValueComparison(
+        status="different", value1="<cudf series>", value2="<cudf series (changed)>",
+        message="values differ",
+    )
+    return CompoundDiff(source_type="series", children=children)
+
+
 def diff_cudf(obj1: Any, obj2: Any, path: str, differ: Any) -> Optional[Any]:
     """
-    Compare two cuDF objects by converting to pandas.
+    Compare two cuDF objects.
+
+    In GPU checkpoint mode, compares directly on GPU using cudf operations
+    (~1ms for the common no-change case). In CPU mode, converts to pandas.
 
     Args:
         obj1: First cudf object (native cudf or cudf.pandas proxy)
@@ -1340,18 +1525,31 @@ def diff_cudf(obj1: Any, obj2: Any, path: str, differ: Any) -> Optional[Any]:
 
     Returns None if equal, or a DiffNode if different.
     """
-    # Convert both to pandas (uncached - we want fresh copies for comparison)
+    # GPU-native diff when both objects are on GPU
+    if is_gpu_checkpoint_mode():
+        # Unwrap proxies to get native cudf objects for GPU comparison
+        u1 = unwrap_cudf_proxy(obj1) if is_cudf_proxy(obj1) else obj1
+        u2 = unwrap_cudf_proxy(obj2) if is_cudf_proxy(obj2) else obj2
+
+        # Both must be native cudf for GPU diff
+        if is_cudf_dataframe(u1) and is_cudf_dataframe(u2):
+            with timer(key="cudf:diff", message="GPU-native DataFrame diff"):
+                return _diff_cudf_gpu_dataframe(u1, u2, path, differ)
+        elif is_cudf_series(u1) and is_cudf_series(u2):
+            with timer(key="cudf:diff", message="GPU-native Series diff"):
+                return _diff_cudf_gpu_series(u1, u2, path)
+        # Fall through to pandas path if unwrap didn't produce native cudf
+
+    # CPU path: convert to pandas
     with timer(key="cudf:diff", message="Convert cuDF to pandas"):
         pdf1 = to_pandas(obj1)
         pdf2 = to_pandas(obj2)
 
-    # Use the Diff instance's comparison methods
-    # Check both native cudf types and cudf.pandas proxy types
-    if is_cudf_dataframe(obj1) or _is_proxy_dataframe(obj1):
+    if _is_cudf_dataframe_any(obj1):
         return differ._compare_dataframe(pdf1, pdf2, path)
-    elif is_cudf_series(obj1) or _is_proxy_series(obj1):
+    elif _is_cudf_series_any(obj1):
         return differ._compare_series(pdf1, pdf2, path)
-    elif is_cudf_index(obj1) or _is_proxy_index(obj1):
+    elif _is_cudf_index_any(obj1):
         return differ._compare_index(pdf1, pdf2, path)
 
     return None

@@ -531,6 +531,35 @@ def extract_cdf_data(
 
             peak_memory_pct.append(p3.peak_overhead_pct)
 
+    # GPU checkpoint memory ratios and peak
+    gpu_memory_ratios = []
+    gpu_peak_memory_pct = []
+    for i, result in enumerate(results):
+        p3 = None
+        if raw_data and i < len(raw_data):
+            data = raw_data[i]
+            version = str(data.get("version", "4.0"))
+            if version.startswith("5"):
+                v5_memory = extract_v5_memory_result(data)
+                if v5_memory and v5_memory.all_cells:
+                    p3 = extract_plot3_data_v5(v5_memory.all_cells)
+
+        if p3 and p3.gpu_checkpoint_mb:
+            # Per-cell GPU checkpoint delta / prev_base ratio
+            for j in range(1, len(p3.gpu_checkpoint_mb)):
+                prev_base = p3.base_mb[j - 1]
+                if prev_base >= MIN_BASE_MB:
+                    delta = max(0, p3.gpu_checkpoint_mb[j] - p3.gpu_checkpoint_mb[j - 1])
+                    gpu_memory_ratios.append(delta / prev_base)
+
+            # Peak GPU checkpoint overhead %
+            base_totals = p3.base_mb
+            gpu_totals = [b + g for b, g in zip(base_totals, p3.gpu_checkpoint_mb)]
+            peak_base = max(base_totals) if base_totals else 0
+            peak_gpu_total = max(gpu_totals) if gpu_totals else 0
+            if peak_base > 0:
+                gpu_peak_memory_pct.append((peak_gpu_total / peak_base - 1) * 100)
+
     if not time_overhead_ms and not memory_ratios:
         return None
 
@@ -545,6 +574,8 @@ def extract_cdf_data(
     time_sorted, time_pct = build_cdf(time_overhead_ms)
     memory_sorted, memory_pct = build_cdf(memory_ratios)
     peak_sorted, peak_pct = build_cdf(peak_memory_pct)
+    gpu_memory_sorted, gpu_memory_pct = build_cdf(gpu_memory_ratios)
+    gpu_peak_sorted, gpu_peak_pct = build_cdf(gpu_peak_memory_pct)
 
     log(f"CDF: {len(time_overhead_ms)} time samples, {len(memory_ratios)} memory ratios, {len(peak_memory_pct)} notebooks")
 
@@ -558,6 +589,12 @@ def extract_cdf_data(
         peak_memory_pct=peak_memory_pct,
         peak_sorted=peak_sorted,
         peak_percentiles=peak_pct,
+        gpu_memory_ratios=gpu_memory_ratios,
+        gpu_memory_sorted=gpu_memory_sorted,
+        gpu_memory_percentiles=gpu_memory_pct,
+        gpu_peak_memory_pct=gpu_peak_memory_pct,
+        gpu_peak_sorted=gpu_peak_sorted,
+        gpu_peak_percentiles=gpu_peak_pct,
     )
 
 
@@ -718,6 +755,9 @@ def extract_plot3_data_v5(
     log(f"Plot 3 v5 ({mode}): {len(cells)} cells, peak overhead {peak_pct:.1f}% "
         f"(FlowBook: {peak_flowbook_mb:.1f} MB, Base: {peak_base_mb:.1f} MB)")
 
+    # GPU checkpoint overhead per cell
+    gpu_ckpt_mb = [getattr(cell, 'gpu_checkpoint_mb', 0.0) for cell in cells]
+
     return Plot3Data(
         cells=cell_nums,
         user_ns_mb=user_ns_mb,
@@ -730,6 +770,7 @@ def extract_plot3_data_v5(
         initial_count=len(cells),
         peak_flowbook_mb=peak_flowbook_mb,
         peak_base_mb=peak_base_mb,
+        gpu_checkpoint_mb=gpu_ckpt_mb,
     )
 
 
@@ -830,6 +871,7 @@ def extract_plot6_data_v5(cells: List[V5CellMemory]) -> Optional[Plot6Data]:
 
     cell_nums = []
     ratios = []
+    gpu_ratios = []
 
     for i, cell in enumerate(cells):
         cell_nums.append(cell.cell_index + 1)
@@ -837,18 +879,23 @@ def extract_plot6_data_v5(cells: List[V5CellMemory]) -> Optional[Plot6Data]:
         # Compute checkpoint delta (new checkpoint data at this cell)
         if i == 0:
             delta_mb = cell.checkpoint_mb
+            gpu_delta_mb = getattr(cell, 'gpu_checkpoint_mb', 0.0)
             prev_base_mb = 0.0
         else:
             prev_cell = cells[i - 1]
             delta_mb = max(0, cell.checkpoint_mb - prev_cell.checkpoint_mb)
+            gpu_delta_mb = max(0, getattr(cell, 'gpu_checkpoint_mb', 0.0) - getattr(prev_cell, 'gpu_checkpoint_mb', 0.0))
             prev_base_mb = prev_cell.base_mb
 
         # Compute ratio (0 if base is too small)
         if prev_base_mb >= MIN_BASE_MB:
             ratio = delta_mb / prev_base_mb
+            gpu_ratio = gpu_delta_mb / prev_base_mb
         else:
             ratio = 0.0
+            gpu_ratio = 0.0
         ratios.append(ratio)
+        gpu_ratios.append(gpu_ratio)
 
     nonzero_count = sum(1 for r in ratios if r > 0)
     log(f"Plot 6 v5: {len(cells)} cells, {nonzero_count} with nonzero ratios")
@@ -856,6 +903,7 @@ def extract_plot6_data_v5(cells: List[V5CellMemory]) -> Optional[Plot6Data]:
     return Plot6Data(
         cells=cell_nums,
         ratios=ratios,
+        gpu_ratios=gpu_ratios,
         initial_count=len(cells),
     )
 
