@@ -692,19 +692,31 @@ def extract_plot3_data_v5(
         gpu_mb.append(cell.gpu_mb)
         overhead_mb.append(overhead)
 
-    # Find peak (peak overhead relative to base = user_ns + gpu)
+    # Compute peak FlowBook total and peak base total across all cells
+    # flowbook_total = user_ns + gpu + checkpoint
+    # base_total = user_ns + gpu
+    flowbook_totals = [cell.user_ns_mb + cell.gpu_mb + cell.checkpoint_mb for cell in cells]
+    base_totals = [cell.user_ns_mb + cell.gpu_mb for cell in cells]
+    peak_flowbook_mb = max(flowbook_totals) if flowbook_totals else 0
+    peak_base_mb = max(base_totals) if base_totals else 0
+
+    # Peak overhead percentage: (max_flowbook / max_base - 1) * 100
+    if peak_base_mb > 0:
+        peak_pct = (peak_flowbook_mb / peak_base_mb - 1) * 100
+    else:
+        peak_pct = 0
+
+    # Find cell with max overhead for annotation placement
     if overhead_mb:
         peak_idx = overhead_mb.index(max(overhead_mb))
         peak_overhead = overhead_mb[peak_idx]
-        base_at_peak = user_ns_mb[peak_idx] + gpu_mb[peak_idx]
-        peak_pct = 100 * peak_overhead / base_at_peak if base_at_peak > 0 else 0
     else:
         peak_idx = 0
         peak_overhead = 0
-        peak_pct = 0
 
     mode = "cross-run" if has_baseline else "FlowBook-only"
-    log(f"Plot 3 v5 ({mode}): {len(cells)} cells, peak overhead {peak_pct:.1f}% at cell {peak_idx + 1}")
+    log(f"Plot 3 v5 ({mode}): {len(cells)} cells, peak overhead {peak_pct:.1f}% "
+        f"(FlowBook: {peak_flowbook_mb:.1f} MB, Base: {peak_base_mb:.1f} MB)")
 
     return Plot3Data(
         cells=cell_nums,
@@ -716,6 +728,8 @@ def extract_plot3_data_v5(
         peak_overhead_pct=peak_pct,
         peak_cell=peak_idx,
         initial_count=len(cells),
+        peak_flowbook_mb=peak_flowbook_mb,
+        peak_base_mb=peak_base_mb,
     )
 
 

@@ -295,8 +295,17 @@ def render_plot3(
     if show_legend:
         ax.legend(loc="upper left", fontsize=legend_size)
 
-    # Peak overhead annotation
-    if data.peak_overhead_mb > 0:
+    # Peak overhead annotation showing FlowBook total and Base total
+    if data.peak_flowbook_mb > 0 and data.peak_base_mb > 0:
+        ax.annotate(
+            f"Peak: {data.peak_overhead_pct:.1f}% ({data.peak_flowbook_mb:.1f} / {data.peak_base_mb:.1f} MB)",
+            xy=(data.peak_cell + 1, layer3[data.peak_cell]),
+            xytext=(5, 5), textcoords="offset points",
+            fontsize=legend_size, va="bottom", ha="left",
+            color=overhead_color, fontweight="bold"
+        )
+    elif data.peak_overhead_mb > 0:
+        # Fallback for older data without peak_flowbook_mb/peak_base_mb
         ax.annotate(
             f"Peak: {data.peak_overhead_pct:.1f}%",
             xy=(data.peak_cell + 1, layer3[data.peak_cell]),

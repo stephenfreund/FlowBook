@@ -863,13 +863,20 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             per_cell_memory_overhead_mb.append(ratio)
             per_cell_checkpoint_mb.append(delta_mb)
 
-        # Peak memory overhead: max(checkpoint_mb) / max(base_mb) * 100
-        # base_mb = user_ns_mb + gpu_mb
+        # Peak memory overhead: (max_flowbook_total / max_base_total - 1) * 100
+        # flowbook_total = user_ns_mb + gpu_mb + checkpoint_mb
+        # base_total = user_ns_mb + gpu_mb
         if flowbook_mem_cells:
-            peak_ckpt = max(c.get("checkpoint_mb", 0) for c in flowbook_mem_cells)
-            peak_base = max(c.get("user_ns_mb", 0) + c.get("gpu_mb", 0) for c in flowbook_mem_cells)
-            if peak_base >= min_meaningful_base_mb:
-                peak_memory_overhead_pct = (peak_ckpt / peak_base) * 100
+            max_flowbook_total = max(
+                c.get("user_ns_mb", 0) + c.get("gpu_mb", 0) + c.get("checkpoint_mb", 0)
+                for c in flowbook_mem_cells
+            )
+            max_base_total = max(
+                c.get("user_ns_mb", 0) + c.get("gpu_mb", 0)
+                for c in flowbook_mem_cells
+            )
+            if max_base_total >= min_meaningful_base_mb:
+                peak_memory_overhead_pct = (max_flowbook_total / max_base_total - 1) * 100
             else:
                 peak_memory_overhead_pct = 0.0
         else:
@@ -3784,7 +3791,7 @@ def plot_overhead_cdfs(
         )
         add_subtle_grid(ax2, peak_stats)
 
-        ax2.set_xlabel("Checkpoints / Namespace Size", fontsize=label_size)
+        ax2.set_xlabel("Peak Memory Overhead (%)", fontsize=label_size)
         ax2.set_ylabel("Cumulative Proportion", fontsize=label_size)
         ax2.set_title("Peak Memory Overhead Distribution", fontsize=title_size)
         ax2.set_ylim(0, 1.05)
@@ -3850,6 +3857,7 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     combined_figures = []
+    peak_overhead_stats = []  # Collect (notebook_name, peak_flowbook_mb, peak_base_mb, peak_pct) for table
 
     for file_path, result in results.items():
         notebook_name = Path(file_path).stem.replace("_comparison", "")
@@ -3902,6 +3910,15 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
                 p4 = extract_plot4_data(result, top_n=args.top_n)
                 p6 = extract_plot6_data(result)
 
+        # Collect peak overhead stats for table
+        if p3 is not None and p3.peak_base_mb > 0:
+            peak_overhead_stats.append((
+                notebook_name,
+                p3.peak_flowbook_mb,
+                p3.peak_base_mb,
+                p3.peak_overhead_pct,
+            ))
+
         # Create 6-panel figure
         fig, axes_2d = plt.subplots(3, 2, figsize=(14, 18))
         axes = [
@@ -3921,6 +3938,23 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
             print(f"Warning: Could not generate plot for {file_path}: {e}",
                   file=sys.stderr)
             plt.close(fig)
+
+    # Print peak memory overhead table
+    if peak_overhead_stats:
+        print("\nPeak Memory Overhead by Notebook:")
+        print("-" * 80)
+        print(f"{'Notebook':<40} {'FlowBook':>12} {'Base':>12} {'Overhead':>10}")
+        print(f"{'':<40} {'(MB)':>12} {'(MB)':>12} {'(%)':>10}")
+        print("-" * 80)
+        for name, fb_mb, base_mb, pct in sorted(peak_overhead_stats, key=lambda x: -x[3]):
+            # Truncate long names with ellipsis
+            display_name = name[:37] + "..." if len(name) > 40 else name
+            print(f"{display_name:<40} {fb_mb:>12.1f} {base_mb:>12.1f} {pct:>10.1f}")
+        print("-" * 80)
+        # Summary stats
+        pcts = [x[3] for x in peak_overhead_stats]
+        print(f"P50: {np.percentile(pcts, 50):.1f}%   P90: {np.percentile(pcts, 90):.1f}%")
+        print()
 
     # Save to PDF
     if combined_figures:

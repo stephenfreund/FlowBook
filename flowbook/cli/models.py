@@ -562,6 +562,8 @@ class Plot3Data:
     peak_overhead_pct: float
     peak_cell: int
     initial_count: int
+    peak_flowbook_mb: float = 0.0  # max(user_ns + gpu + checkpoint) across all cells
+    peak_base_mb: float = 0.0  # max(user_ns + gpu) across all cells
 
     @property
     def base_mb(self) -> List[float]:
