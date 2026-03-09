@@ -1198,7 +1198,8 @@ _DISABLE_DEEPCOPY_CACHE = os.environ.get('FLOWBOOK_DISABLE_CUDF_DEEPCOPY_CACHE',
 # GPU-side checkpointing: keep cudf objects on GPU instead of converting to pandas.
 # When enabled, deepcopy_cudf uses cudf.DataFrame.copy(deep=True) (~3ms) instead of
 # GPU→CPU conversion via _fsproxy_slow (~1.3s for 4M×302 DataFrame).
-_CUDF_GPU_CHECKPOINT = os.environ.get('FLOWBOOK_CUDF_GPU_CHECKPOINT', '0') == '1'
+# Enabled by default; set FLOWBOOK_CUDF_GPU_CHECKPOINT=0 to disable.
+_CUDF_GPU_CHECKPOINT = os.environ.get('FLOWBOOK_CUDF_GPU_CHECKPOINT', '1') == '1'
 
 
 def set_gpu_checkpoint_mode(enabled: bool) -> None:

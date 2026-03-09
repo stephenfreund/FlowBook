@@ -695,8 +695,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         """
         Toggle GPU-side checkpointing for cudf objects.
 
-        When enabled, cudf DataFrames/Series are checkpointed on GPU via
-        deep copy instead of being converted to pandas (CPU). This is much
+        When enabled (default), cudf DataFrames/Series are checkpointed on GPU
+        via deep copy instead of being converted to pandas (CPU). This is much
         faster (~3ms vs ~1.3s) but uses GPU memory for checkpoints.
 
         Usage:
@@ -704,7 +704,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             %cudf_gpu_checkpoint on      - Enable GPU checkpointing
             %cudf_gpu_checkpoint off     - Disable GPU checkpointing
 
-        Can also be set via FLOWBOOK_CUDF_GPU_CHECKPOINT=1 environment variable.
+        Can also be set via FLOWBOOK_CUDF_GPU_CHECKPOINT=0 environment variable
+        to disable by default.
         """
         from flowbook.kernel_support.cudf_compat import (
             is_gpu_checkpoint_mode,
