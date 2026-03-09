@@ -411,6 +411,12 @@ class HeapSizer:
 
         # Step 2: Measure each checkpoint cumulatively (don't reset between)
         # Objects already seen (from namespace or prior checkpoints) return 0
+        #
+        # In GPU checkpoint mode, cudf objects are skipped here and measured
+        # separately in the GPU loop below, preventing double-counting.
+        from flowbook.kernel_support import cudf_compat as _cudf_compat
+        gpu_skip_cudf = _cudf_compat.is_gpu_checkpoint_mode()
+
         by_checkpoint: Dict[str, float] = {}
         by_variable: Dict[str, float] = {}
         by_checkpoint_by_var: Dict[str, Dict[str, float]] = {}
@@ -427,6 +433,12 @@ class HeapSizer:
             ckpt_delta_bytes = 0
             ckpt_vars: Dict[str, float] = {}
             for var_name, obj in ckpt.user_ns.items():
+                # In GPU checkpoint mode, skip cudf objects here — they are
+                # measured separately in the GPU loop below to avoid
+                # double-counting their GPU memory in both checkpoint_mb
+                # and gpu_checkpoint_mb.
+                if gpu_skip_cudf and _cudf_compat.is_cudf_object(obj):
+                    continue
                 # owned_only=True: don't follow views to base arrays owned elsewhere
                 size = self._sizeof(obj, owned_only=True)
                 ckpt_delta_bytes += size
