@@ -1848,14 +1848,29 @@ class ReproducibilityEnforcer:
         like `x = x + 1` or `df['col'] = df['col'] * 2`.
 
         This predicate ensures cells have clear input/output boundaries.
+
+        Implementation note: We include column_writes.keys() in W_i because
+        in-place DataFrame column modifications (e.g., df['a'] = df['a'] * 2)
+        don't trigger namespace-level writes (tracking.writes), only column-level
+        writes. Without this, patterns like `df['a'] = df['a'] * 10` would pass
+        the check even though they read and write the same location.
         """
-        R_i = tracking.reads_before_writes or set()
-        W_i = tracking.writes or set()
+        # R_i: variables read (including those with column-level reads)
+        R_i = (tracking.reads_before_writes or set()) | set(
+            (tracking.column_reads_before_writes or {}).keys()
+        )
+
+        # W_i: variables written (including those with column-level writes)
+        # Column-level writes (e.g., df['a'] = ...) don't appear in tracking.writes
+        # because the variable binding doesn't change, only the object's contents.
+        W_i = (tracking.writes or set()) | set(
+            (tracking.column_writes or {}).keys()
+        )
 
         # Build detailed location list with column info
         locations: List[str] = []
 
-        # Variable-level overlap
+        # Variable-level overlap (now includes vars with column-only access)
         var_overlap = R_i & W_i
 
         # For each overlapping variable, check if we have column-level detail
@@ -1868,13 +1883,27 @@ class ReproducibilityEnforcer:
             col_overlap = var_col_reads & var_col_writes
 
             if col_overlap:
-                # Have column-level detail - show each column
+                # Have column-level detail with overlap - show each overlapping column
                 for col in sorted(col_overlap):
                     locations.append(f"{var}.{col}")
-            elif var_col_writes:
-                # Have column writes but no column reads (read whole var, write column)
-                for col in sorted(var_col_writes):
-                    locations.append(f"{var}.{col}")
+            elif var_col_reads and var_col_writes:
+                # Have column detail but no overlap - different columns read vs written
+                # This is fine (e.g., read df['a'], write df['b']) - skip this variable
+                pass
+            elif var_col_writes and not var_col_reads:
+                # Have column writes but no column reads
+                # Variable was read (in R_i) but only columns were written
+                # Check if variable-level read overlaps with column writes
+                if var in (tracking.reads_before_writes or set()):
+                    # Variable itself was read, then columns written - show columns
+                    for col in sorted(var_col_writes):
+                        locations.append(f"{var}.{col}")
+            elif var_col_reads and not var_col_writes:
+                # Have column reads but no column writes
+                # Check if variable-level write overlaps with column reads
+                if var in (tracking.writes or set()):
+                    # Columns were read, then variable itself was written
+                    locations.append(var)
             else:
                 # No column info - just show variable
                 locations.append(var)
@@ -2308,7 +2337,8 @@ class ReproducibilityEnforcer:
         Syntactic BackwardStale: W_i ∩ R_j ≠ ∅ for j < i.
 
         Uses pure set intersection on R/W sets. Marks cells before i as stale
-        if they read variables that i wrote to.
+        if they read variables that i wrote to. Also checks column-level overlap
+        for DataFrame column changes.
 
         Formal ref: FORMAL_DEVELOPMENT.md §10.1
         """
@@ -2324,12 +2354,27 @@ class ReproducibilityEnforcer:
             prior_reads = self._notebook_state.reads.get(prior_cell_id, set())
             overlap = changed_vars & prior_reads
 
-            if overlap:
+            # Also check column-level overlap for precise DataFrame tracking.
+            # This ensures cells reading df['z'] are marked stale when df['z'] changes.
+            has_column_overlap = self._has_relevant_overlap_by_id(
+                prior_cell_id, set(column_changed.keys()), column_changed
+            )
+
+            if overlap or has_column_overlap:
+                # Add reasons for variable-level overlap
                 for var in overlap:
                     self._notebook_state.add_reason(
                         prior_cell_id,
                         Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
                     )
+                # Add reasons for column-level overlap (variables not in var overlap)
+                if has_column_overlap:
+                    col_overlap_vars = set(column_changed.keys()) & prior_reads
+                    for var in col_overlap_vars - overlap:
+                        self._notebook_state.add_reason(
+                            prior_cell_id,
+                            Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
+                        )
                 newly_stale.append(prior_cell_id)
 
         return newly_stale
