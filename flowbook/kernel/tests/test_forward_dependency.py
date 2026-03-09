@@ -22,7 +22,7 @@ import pytest
 from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
 
-from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX, format_forward_dependency_message
+from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX, format_forward_dependency_message, StalenessMode
 from flowbook.kernel.tests.conftest import make_tracking
 
 
@@ -1163,14 +1163,17 @@ class TestForwardDependencyStaleness:
 
 
 class TestForwardDependencyColumnStaleness:
-    """Tests for column-level staleness with forward dependencies."""
+    """Tests for column-level staleness with forward dependencies.
+
+    These tests require semantic staleness mode for column-level convergence checks.
+    """
 
     def setup_method(self):
         self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
-        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc = ReproducibilityEnforcer(self.checkpoints, staleness_mode=StalenessMode.SEMANTIC)
         self.sdc.set_cell_order(["a", "b", "c", "d"])
 
     def _save_pre_checkpoint(self, cell_id: str, namespace: dict):

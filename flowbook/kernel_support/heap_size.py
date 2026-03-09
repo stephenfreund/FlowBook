@@ -450,7 +450,7 @@ class HeapSizer:
         gpu_running_total_bytes = 0
 
         from flowbook.kernel_support import cudf_compat
-        if cudf_compat.is_gpu_checkpoint_mode():
+        if checkpoints:
             for ckpt_name, ckpt in checkpoints:
                 if not hasattr(ckpt, 'user_ns'):
                     gpu_by_checkpoint[ckpt_name] = 0.0

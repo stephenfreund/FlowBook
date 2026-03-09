@@ -1892,7 +1892,7 @@ def run_flowbook_timing(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
     rerun_k: int = 0,
-    staleness_mode: str = "semantic",
+    staleness_mode: str = "syntactic",
 ) -> TimingResults:
     """
     Run notebook on FlowBook kernel and collect TIMING metrics only (Scalene OFF).
@@ -2335,7 +2335,7 @@ def run_flowbook_memory(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
     rerun_k: int = 0,
-    staleness_mode: str = "semantic",
+    staleness_mode: str = "syntactic",
 ) -> MemoryResults:
     """
     Run notebook on FlowBook kernel and collect MEMORY metrics using HeapSizer.
@@ -2637,7 +2637,7 @@ def run_flowbook_memory_v5(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
     rerun_k: int = 0,
-    staleness_mode: str = "semantic",
+    staleness_mode: str = "syntactic",
 ) -> V5MemoryResult:
     """
     Run notebook on FlowBook kernel and collect v5 simplified MEMORY metrics.
@@ -2916,8 +2916,8 @@ class CompareBaselineCommand(NotebookCommand):
             "--staleness-mode",
             type=str,
             choices=["syntactic", "semantic"],
-            default="semantic",
-            help="Staleness computation mode: 'syntactic' (set intersection, lower memory) or 'semantic' (checkpoint diff, precise). Default: semantic",
+            default="syntactic",
+            help="Staleness computation mode: 'syntactic' (set intersection, lower memory) or 'semantic' (checkpoint diff, precise). Default: syntactic",
         )
         return subparser
 
@@ -2954,7 +2954,7 @@ class CompareBaselineCommand(NotebookCommand):
         rerun_k = kwargs.get("rerun_k", 0)
         num_trials = kwargs.get("trials", 1)
         start_trial = kwargs.get("start", 1)
-        staleness_mode = kwargs.get("staleness_mode", "semantic")
+        staleness_mode = kwargs.get("staleness_mode", "syntactic")
 
         notebook_path = kwargs.get("notebook_path", "unknown.ipynb")
 

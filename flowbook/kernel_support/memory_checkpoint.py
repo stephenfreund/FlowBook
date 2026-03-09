@@ -904,6 +904,7 @@ from flowbook.kernel_support.deepcopy import (
     _large_set_cache,
     _ndarray_cache,
 )
+from flowbook.kernel_support import cudf_compat
 from flowbook.kernel_support.diff import Diff
 from flowbook.kernel_support.opaque import OpaqueRegistry
 from pandas.api.types import infer_dtype
@@ -1336,6 +1337,10 @@ def _collect_reachable_ids_with_paths(
                 return
             for item in obj:
                 _collect_reachable_ids_with_paths(item, f"{path}<set>", visited, id_to_path)
+        elif cudf_compat.is_cudf_object(obj):
+            # cuDF objects live on GPU — their internal buffers can't alias with
+            # other Python-level notebook variables. Just track the top-level ID.
+            return
         elif isinstance(obj, pd.DataFrame):
             # Track internal block manager (persistent object)
             if hasattr(obj, '_mgr'):
@@ -1475,6 +1480,13 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
                 return
             for item in obj:
                 _collect_reachable_ids(item, visited)
+        elif cudf_compat.is_cudf_object(obj):
+            # cuDF objects live on GPU — their internal buffers (rmm DeviceBuffer,
+            # cudf Column, etc.) can't alias with other Python-level notebook
+            # variables. Just track the top-level ID and skip internal traversal.
+            # This avoids O(num_columns) __dict__ traversal that causes check times
+            # to scale severely with DataFrame width.
+            return
         elif isinstance(obj, pd.DataFrame):
             # Track internal block manager (persistent object)
             if hasattr(obj, '_mgr'):

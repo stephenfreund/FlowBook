@@ -6,7 +6,7 @@ from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint, MemoryCh
 from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 
-from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX
+from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX, StalenessMode
 from flowbook.kernel.models import ReasonType
 from flowbook.kernel.tests.conftest import make_tracking
 
@@ -116,11 +116,18 @@ class TestReproducibilityEnforcer:
         assert "b" in result.stale_cells
 
     def test_no_staleness_if_value_unchanged(self):
-        """Semantic check: no staleness if value didn't actually change."""
+        """Semantic check: no staleness if value didn't actually change.
+
+        Requires semantic staleness mode for convergence detection.
+        """
+        # Use semantic mode for this test (convergence requires it)
+        sdc = ReproducibilityEnforcer(self.checkpoints, staleness_mode=StalenessMode.SEMANTIC)
+        sdc.set_cell_order(["a", "b", "c", "d"])
+
         # A writes x=1
         self._save_pre_checkpoint("a", {})
         ns_a = self._make_namespace( {"x": 1})
-        self.sdc.check(
+        sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             namespace=ns_a,
@@ -130,7 +137,7 @@ class TestReproducibilityEnforcer:
         # B reads x
         self._save_pre_checkpoint("b", {"x": 1})
         ns_b = self._make_namespace( {"x": 1, "y": 2})
-        self.sdc.check(
+        sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
@@ -141,7 +148,7 @@ class TestReproducibilityEnforcer:
         # Note: pre-checkpoint for A now reflects current state
         self._save_pre_checkpoint("a", {"x": 1, "y": 2})
         ns_a2 = self._make_namespace( {"x": 1, "y": 2})
-        result = self.sdc.check(
+        result = sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
             namespace=ns_a2,
@@ -2912,9 +2919,9 @@ class TestStalenessMode:
         """Return namespace dict for use with check()."""
         return namespace
 
-    def test_default_mode_is_semantic(self):
-        """Default staleness mode should be SEMANTIC."""
-        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
+    def test_default_mode_is_syntactic(self):
+        """Default staleness mode should be SYNTACTIC."""
+        assert self.sdc.staleness_mode == self.StalenessMode.SYNTACTIC
 
     def test_set_staleness_mode_syntactic(self):
         """Can switch to syntactic mode."""
@@ -2929,6 +2936,8 @@ class TestStalenessMode:
 
     def test_syntactic_mode_clears_checkpoints_on_switch(self):
         """Switching from semantic to syntactic should clear pre-checkpoints."""
+        # Start in semantic mode
+        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
         # Execute a cell in semantic mode
         self._save_pre_checkpoint("a", {})
         ns_a = self._make_namespace({"x": 1})
@@ -3046,7 +3055,8 @@ class TestStalenessMode:
         value (B stale), then A re-writes x back to original (B becomes clean
         in semantic mode due to convergence detection).
         """
-        # Default is semantic mode
+        # Use semantic mode for convergence detection
+        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
         assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
 
         # A writes x=1
@@ -3134,7 +3144,7 @@ class TestStalenessMode:
 
     def test_semantic_mode_keeps_checkpoint(self):
         """Semantic mode keeps pre-checkpoint for convergence detection."""
-        # Default is semantic mode
+        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
         assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
 
         # Execute cell A
@@ -3207,7 +3217,7 @@ class TestStalenessMode:
         If cell C writes x but the value converges to what A originally saw,
         A should NOT be marked stale in semantic mode.
         """
-        # Default is semantic mode
+        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
         assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
 
         # A reads x=1
@@ -3251,7 +3261,7 @@ class TestStalenessMode:
         Note: Staleness is always computed, even when C triggers NoWriteAfterRead
         error (because C writes to x that A read).
         """
-        # Default is semantic mode
+        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
         assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
 
         # A reads x=1

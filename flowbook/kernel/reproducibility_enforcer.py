@@ -678,7 +678,7 @@ class ReproducibilityEnforcer:
         self,
         checkpoints: MemoryCheckpoints,
         structural_mode: StructuralTrackingMode = StructuralTrackingMode.ENFORCE,
-        staleness_mode: StalenessMode = StalenessMode.SEMANTIC,
+        staleness_mode: StalenessMode = StalenessMode.SYNTACTIC,
     ):
         self.checkpoints = checkpoints
         self.seq_counter: int = 0
@@ -2484,9 +2484,10 @@ class ReproducibilityEnforcer:
             cell_tracking = self._notebook_state.get_tracking(cell_id)
             if cell_tracking is None:
                 continue
-            pre_checkpoint = self.checkpoints.get(f"{PRE_CHECKPOINT_PREFIX}{cell_id}")
-            if pre_checkpoint is None:
-                continue
+            ckpt_name = f"{PRE_CHECKPOINT_PREFIX}{cell_id}"
+            if not self.checkpoints.exists(ckpt_name):
+                continue  # Checkpoint may have been deleted (syntactic mode)
+            pre_checkpoint = self.checkpoints.get(ckpt_name)
 
             diff_result = MemoryCheckpoint.diff(
                 pre_checkpoint,
