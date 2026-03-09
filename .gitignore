@@ -128,3 +128,7 @@ dmypy.json
 
 # Yarn cache
 .yarn/
+
+# Claude Code local files
+.claude/settings.local.json
+.claude/agent-memory/
