@@ -996,37 +996,38 @@ class CuDFCheckpointCache:
         return pd.DataFrame(result_data, index=index, copy=False)
 
     def get_or_convert(self, obj: Any) -> Any:
-        """Get cached pandas copy or convert from GPU with buffer deduplication."""
+        """Get cached pandas copy or convert from GPU.
+
+        For proxy objects, prefer _fsproxy_slow (cudf's batch DataFrame.to_pandas())
+        over column-by-column conversion via _convert_dataframe_with_sharing.
+
+        The batch path preserves compact dtypes (e.g., int8, float32), while
+        column-by-column Series.to_pandas() can inflate dtypes (e.g., int8 →
+        float64 to accommodate NaN in numpy). In first-place-single-model-lb-38-81
+        (cudf notebook with ~210 int8 pair columns + ~21 float32 factorized
+        columns), this inflation caused checkpoint_mb = 9254MB vs namespace
+        1757MB — a 5.3x blowup from dtype widening alone.
+        """
         cached = self.get_cached(obj)
         if cached is not None:
             return cached
 
-        # Handle cudf.pandas proxy objects
+        # Handle cudf.pandas proxy objects — use _fsproxy_slow for compact conversion
         if is_cudf_proxy(obj):
-            # Check if it's a DataFrame that might share buffers
-            if _is_proxy_dataframe(obj):
-                unwrapped = unwrap_cudf_proxy(obj)
-                if is_cudf_dataframe(unwrapped):
-                    # Use buffer-aware conversion
-                    pandas_copy = self._convert_dataframe_with_sharing(obj)
-                elif hasattr(obj, '_fsproxy_slow'):
-                    slow_obj = obj._fsproxy_slow
-                    if callable(slow_obj):
-                        slow_obj = slow_obj()
-                    pandas_copy = slow_obj.copy() if hasattr(slow_obj, 'copy') else slow_obj
-                else:
-                    pandas_copy = obj.to_pandas() if hasattr(obj, 'to_pandas') else obj
-            elif hasattr(obj, '_fsproxy_slow'):
+            if hasattr(obj, '_fsproxy_slow'):
                 slow_obj = obj._fsproxy_slow
                 if callable(slow_obj):
                     slow_obj = slow_obj()
-                pandas_copy = slow_obj.copy() if hasattr(slow_obj, 'copy') else slow_obj
+                if slow_obj is not None:
+                    pandas_copy = slow_obj.copy() if hasattr(slow_obj, 'copy') else slow_obj
+                else:
+                    pandas_copy = obj.to_pandas() if hasattr(obj, 'to_pandas') else obj
             elif hasattr(obj, 'to_pandas'):
                 pandas_copy = obj.to_pandas()
             else:
                 pandas_copy = obj
         elif is_cudf_dataframe(obj):
-            # Native cudf DataFrame - use buffer-aware conversion
+            # Native cudf DataFrame (not a proxy) - use buffer-aware conversion
             pandas_copy = self._convert_dataframe_with_sharing(obj)
         else:
             # Native cudf Series/Index
