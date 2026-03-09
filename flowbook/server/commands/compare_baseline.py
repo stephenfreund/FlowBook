@@ -212,6 +212,7 @@ class TimingCellMetrics:
     error: Optional[str] = None
     is_rerun: bool = False
     checking_result: Optional[CheckingResult] = None  # Reproducibility checking result
+    gpu_mb: float = 0.0  # GPU memory after this cell (pynvml, for GPU overhead diff)
 
 
 @dataclass
@@ -547,6 +548,8 @@ def _timing_results_to_dict(timing: TimingResults) -> Dict[str, Any]:
             "error": cell.error,
             "is_rerun": cell.is_rerun,
         }
+        if cell.gpu_mb > 0:
+            d["gpu_mb"] = cell.gpu_mb
         if cell.checking_result:
             d["checking_result"] = cell.checking_result.to_dict()
         return d
@@ -1792,6 +1795,9 @@ def run_baseline_timing(
 
             timing = execute_cell_baseline(kernel_client, source, cell_timeout)
 
+            # Capture GPU memory from kernel process (for diff-based overhead)
+            cell_gpu_mb = get_kernel_gpu_memory_mb(kernel_client)
+
             if timing.get("error"):
                 log(f"  Error:\n{timing['error']}")
                 results.cells.append(TimingCellMetrics(
@@ -1804,6 +1810,7 @@ def run_baseline_timing(
                     status="error",
                     error=timing["error"],
                     checking_result=None,  # Baseline has no checking
+                    gpu_mb=cell_gpu_mb,
                 ))
             else:
                 runtime_ms = timing["cell_runtime_ms"]
@@ -1818,6 +1825,7 @@ def run_baseline_timing(
                     check_duration_ms=0.0,
                     status="ok",
                     checking_result=None,  # Baseline has no checking
+                    gpu_mb=cell_gpu_mb,
                 ))
                 log(f"  Runtime: {runtime_ms:.1f}ms")
 
@@ -1963,6 +1971,9 @@ def run_flowbook_timing(
                 kernel_client, source, cell_id, cell_order, cell_timeout
             )
 
+            # Capture GPU memory from kernel process (for diff-based overhead)
+            cell_gpu_mb = get_kernel_gpu_memory_mb(kernel_client)
+
             if timing.get("error") and timing.get("execute_duration_ms") is None:
                 log(f"  Error:\n{timing['error']}")
                 results.cells.append(TimingCellMetrics(
@@ -1975,6 +1986,7 @@ def run_flowbook_timing(
                     status="error",
                     error=timing["error"],
                     checking_result=None,
+                    gpu_mb=cell_gpu_mb,
                 ))
             else:
                 if timing.get("violation"):
@@ -2016,6 +2028,7 @@ def run_flowbook_timing(
                     status=status,
                     error=timing.get("violation") or timing.get("error"),
                     checking_result=checking_result,
+                    gpu_mb=cell_gpu_mb,
                 ))
                 log(f"  Execute: {execute_ms:.1f}ms, Code: {code_ms:.1f}ms, State: {state_ms:.1f}ms, Check: {check_ms:.1f}ms")
 
@@ -3063,6 +3076,31 @@ class CompareBaselineCommand(NotebookCommand):
                     flowbook_memory = run_flowbook_memory_v5(notebook_content, cell_timeout, rerun_k, staleness_mode)
                     log("")
 
+                # Override gpu_checkpoint_mb using diff-based measurement:
+                # GPU overhead = FlowBook timing GPU - Baseline timing GPU per cell.
+                # This is more accurate than measuring cudf objects via
+                # memory_usage(), which can misreport under managed memory.
+                if (flowbook_memory and flowbook_memory.cells
+                        and flowbook_timing and flowbook_timing.cells
+                        and baseline_timing and baseline_timing.cells):
+                    # Build baseline GPU lookup by cell index
+                    baseline_gpu_by_idx = {
+                        c.cell_index: c.gpu_mb
+                        for c in baseline_timing.cells if not c.is_rerun
+                    }
+                    flowbook_gpu_by_idx = {
+                        c.cell_index: c.gpu_mb
+                        for c in flowbook_timing.cells if not c.is_rerun
+                    }
+                    for cell in flowbook_memory.cells:
+                        fb_gpu = flowbook_gpu_by_idx.get(cell.cell_index, 0.0)
+                        bl_gpu = baseline_gpu_by_idx.get(cell.cell_index, 0.0)
+                        if fb_gpu > 0 and bl_gpu > 0:
+                            # Diff-based GPU checkpoint overhead (floor at 0)
+                            cell.gpu_checkpoint_mb = max(0.0, fb_gpu - bl_gpu)
+                            # Per-variable breakdown not available from diff
+                            cell.gpu_checkpoint_vars = {}
+
                 # Build comparison result with new structure
                 metadata_dict: Dict[str, Any] = {
                     "num_cells": len(code_cells),
@@ -3160,6 +3198,18 @@ class CompareBaselineCommand(NotebookCommand):
                         log(f"  FlowBook namespace:   {flowbook_ns:,.1f}MB")
                         log(f"  FlowBook checkpoints: {flowbook_ckpt:,.1f}MB (peak)")
                         log(f"  FlowBook total:       {flowbook_total:,.1f}MB")
+
+                    # GPU overhead from timing phase diff
+                    if flowbook_timing and baseline_timing:
+                        fb_gpu_cells = [c for c in flowbook_timing.cells if not c.is_rerun]
+                        bl_gpu_cells = [c for c in baseline_timing.cells if not c.is_rerun]
+                        if fb_gpu_cells and bl_gpu_cells and fb_gpu_cells[-1].gpu_mb > 0:
+                            fb_final_gpu = fb_gpu_cells[-1].gpu_mb
+                            bl_final_gpu = bl_gpu_cells[-1].gpu_mb
+                            gpu_overhead = max(0.0, fb_final_gpu - bl_final_gpu)
+                            log(f"  GPU (FlowBook):       {fb_final_gpu:,.1f}MB")
+                            log(f"  GPU (Baseline):       {bl_final_gpu:,.1f}MB")
+                            log(f"  GPU overhead:         {gpu_overhead:,.1f}MB")
                     log("")
 
                 if rerun_k > 0:

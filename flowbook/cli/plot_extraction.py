@@ -39,6 +39,50 @@ MIN_RUN_SEC = 0.01
 MIN_BASE_MB = 0.1  # 100KB - low enough for small notebooks, high enough to filter noise
 
 
+def extract_gpu_overhead_from_timing(data: Dict) -> Optional[List[float]]:
+    """Extract per-cell GPU checkpoint overhead from timing phase diff.
+
+    Computes gpu_overhead[i] = max(0, flowbook_timing_gpu[i] - baseline_timing_gpu[i])
+    using pynvml-measured GPU memory captured during timing phases.
+
+    This is more accurate than measuring cudf objects via memory_usage()
+    because it measures actual GPU memory impact (pynvml / nvidia-smi level).
+
+    Args:
+        data: Full comparison JSON dict
+
+    Returns:
+        List of per-cell GPU overhead in MB, or None if timing GPU data unavailable
+    """
+    kernels = data.get("kernels", {})
+    fb_timing = kernels.get("flowbook", {}).get("timing", {})
+    bl_timing = kernels.get("baseline", {}).get("timing", {})
+
+    if not fb_timing or not bl_timing:
+        return None
+
+    fb_cells = [c for c in fb_timing.get("cells", []) if not c.get("is_rerun")]
+    bl_cells = [c for c in bl_timing.get("cells", []) if not c.get("is_rerun")]
+
+    if not fb_cells or not bl_cells:
+        return None
+
+    # Check that timing cells have gpu_mb data
+    if not any(c.get("gpu_mb", 0) > 0 for c in fb_cells):
+        return None
+
+    # Build baseline GPU lookup by cell index
+    bl_gpu = {c["cell_index"]: c.get("gpu_mb", 0.0) for c in bl_cells}
+
+    result = []
+    for c in fb_cells:
+        fb_gpu = c.get("gpu_mb", 0.0)
+        base_gpu = bl_gpu.get(c["cell_index"], 0.0)
+        result.append(max(0.0, fb_gpu - base_gpu))
+
+    return result
+
+
 def extract_plot1_data(result: ComparisonResult) -> Optional[Plot1Data]:
     """Extract data for Plot 1: Execution Time per Cell.
 
@@ -511,7 +555,11 @@ def extract_cdf_data(
             if version.startswith("5"):
                 v5_memory = extract_v5_memory_result(data)
                 if v5_memory and v5_memory.all_cells:
-                    p3 = extract_plot3_data_v5(v5_memory.all_cells)
+                    gpu_from_timing = extract_gpu_overhead_from_timing(data)
+                    p3 = extract_plot3_data_v5(
+                        v5_memory.all_cells,
+                        gpu_overhead_from_timing=gpu_from_timing,
+                    )
 
         # Fall back to v4 extraction
         if p3 is None:
@@ -542,7 +590,11 @@ def extract_cdf_data(
             if version.startswith("5"):
                 v5_memory = extract_v5_memory_result(data)
                 if v5_memory and v5_memory.all_cells:
-                    p3 = extract_plot3_data_v5(v5_memory.all_cells)
+                    gpu_from_timing = extract_gpu_overhead_from_timing(data)
+                    p3 = extract_plot3_data_v5(
+                        v5_memory.all_cells,
+                        gpu_overhead_from_timing=gpu_from_timing,
+                    )
 
         if p3 and p3.gpu_checkpoint_mb:
             # Per-cell GPU checkpoint delta / prev_gpu ratio
@@ -680,6 +732,7 @@ def extract_plot2_data_v5(
 def extract_plot3_data_v5(
     cells: List[V5CellMemory],
     baseline_cells: Optional[List] = None,
+    gpu_overhead_from_timing: Optional[List[float]] = None,
 ) -> Optional[Plot3Data]:
     """Extract data for Plot 3 from v5 memory cells.
 
@@ -697,6 +750,9 @@ def extract_plot3_data_v5(
     Args:
         cells: List of V5CellMemory objects (FlowBook)
         baseline_cells: Optional list of baseline cell memory (for cross-run comparison)
+        gpu_overhead_from_timing: Optional per-cell GPU overhead computed from
+            timing phase diff (flowbook_gpu - baseline_gpu). When provided,
+            overrides the cudf-based gpu_checkpoint_mb measurement.
 
     Returns:
         Plot3Data or None if no cells
@@ -758,7 +814,11 @@ def extract_plot3_data_v5(
         f"(FlowBook: {peak_flowbook_mb:.1f} MB, Base: {peak_base_mb:.1f} MB)")
 
     # GPU checkpoint overhead per cell
-    gpu_ckpt_mb = [getattr(cell, 'gpu_checkpoint_mb', 0.0) for cell in cells]
+    # Prefer timing-derived diff (flowbook_gpu - baseline_gpu) over cudf-based measurement
+    if gpu_overhead_from_timing is not None and len(gpu_overhead_from_timing) == len(cells):
+        gpu_ckpt_mb = list(gpu_overhead_from_timing)
+    else:
+        gpu_ckpt_mb = [getattr(cell, 'gpu_checkpoint_mb', 0.0) for cell in cells]
 
     return Plot3Data(
         cells=cell_nums,

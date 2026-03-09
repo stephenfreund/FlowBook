@@ -45,6 +45,7 @@ from flowbook.cli.plot_extraction import (
     extract_plot6_data_v5,
     extract_v5_memory_result,
     extract_baseline_cells,
+    extract_gpu_overhead_from_timing,
 )
 from flowbook.cli.plot_rendering import render_combined_6panel
 
@@ -3884,7 +3885,8 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
                 if p2 is None:
                     # Fall back to v4 extraction from timing data
                     p2 = extract_plot2_data(result, top_n=args.top_n)
-                p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells)
+                gpu_from_timing = extract_gpu_overhead_from_timing(data)
+                p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells, gpu_overhead_from_timing=gpu_from_timing)
                 p4 = extract_plot4_data_v5(v5_memory.all_cells, top_n=args.top_n)
                 p6 = extract_plot6_data_v5(v5_memory.all_cells)
             else:
@@ -3900,7 +3902,8 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
                 p2 = extract_plot2_data_v5(v5_memory.all_cells, top_n=args.top_n)
                 if p2 is None:
                     p2 = extract_plot2_data(result, top_n=args.top_n)
-                p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells)
+                gpu_from_timing = extract_gpu_overhead_from_timing(data)
+                p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells, gpu_overhead_from_timing=gpu_from_timing)
                 p4 = extract_plot4_data_v5(v5_memory.all_cells, top_n=args.top_n)
                 p6 = extract_plot6_data_v5(v5_memory.all_cells)
             else:
