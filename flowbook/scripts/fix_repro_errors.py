@@ -48,8 +48,15 @@ def save_notebook(notebook: dict, path: Path) -> None:
 
 
 def get_fixed_path(original_path: Path) -> Path:
-    """Get the path for the -fixed.ipynb version."""
+    """Get the path for the -fixed.ipynb version.
+
+    If the input is already a -fixed.ipynb, return it as-is (modify in place).
+    Otherwise, append -fixed to the stem.
+    """
     stem = original_path.stem
+    # If already a -fixed notebook, return as-is to avoid -fixed-fixed
+    if stem.endswith("-fixed"):
+        return original_path
     return original_path.parent / f"{stem}-fixed.ipynb"
 
 

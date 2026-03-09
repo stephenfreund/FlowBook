@@ -51,6 +51,43 @@ from flowbook.kernel_support.column_tracking import ColumnAccessTracker, walk_da
 from flowbook.kernel_support.structural_tracking import StructuralAccessTracker, StructuralTrackingMode
 
 
+def _is_ipython_result_var(key: str) -> bool:
+    """Check if key is an IPython auto-result variable.
+
+    These variables are automatically created by IPython to store cell outputs
+    and history. We should not let them overwrite real variable paths in column
+    tracking, because that would break NoReadAndWrite detection (e.g., if cell
+    reads 'train' and writes to 'train', but 'train' gets re-registered as '_3'
+    when IPython stores the cell result, we'd miss the read-write conflict).
+
+    IPython special variables include:
+    - _  : last output
+    - __ : second-to-last output
+    - ___: third-to-last output
+    - _1, _2, etc.: numbered output history
+    - _i, _ii, _iii: input history (strings, not DataFrames, but check anyway)
+    - _oh, _ih: output/input history dicts
+    """
+    if not key.startswith('_'):
+        return False
+    # Single underscore
+    if key == '_':
+        return True
+    # Double/triple underscore (__, ___)
+    if key in ('__', '___'):
+        return True
+    # Numbered outputs: _1, _2, _3, etc.
+    if len(key) > 1 and key[1:].isdigit():
+        return True
+    # Input history: _i, _ii, _iii
+    if key in ('_i', '_ii', '_iii'):
+        return True
+    # History dicts: _ih, _oh
+    if key in ('_ih', '_oh'):
+        return True
+    return False
+
+
 class TrackingDict(dict):
     """
     A dict that delegates storage to an underlying namespace while tracking access.
@@ -114,11 +151,14 @@ class TrackingDict(dict):
             self._writes.add(key)
             # Lazy registration: register DataFrames/Series when assigned to namespace
             # This eliminates the need to walk the namespace at start/stop time
+            # Skip IPython result variables (_1, _2, etc.) to avoid overwriting real paths
             if isinstance(value, pd.DataFrame):
-                self._column_tracker.register_df(value, key)
-                self._structural_tracker.register(value, key)
+                if not _is_ipython_result_var(key):
+                    self._column_tracker.register_df(value, key)
+                    self._structural_tracker.register(value, key)
             elif isinstance(value, pd.Series):
-                self._structural_tracker.register(value, key)
+                if not _is_ipython_result_var(key):
+                    self._structural_tracker.register(value, key)
         self._real_ns[key] = value
 
     def __delitem__(self, key):
