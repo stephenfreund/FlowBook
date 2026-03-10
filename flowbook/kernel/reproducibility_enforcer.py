@@ -2779,13 +2779,14 @@ class ReproducibilityEnforcer:
                         self._conflict_resolver.get_violations(later_changes, my_read_events)
 
                 # Simulate backward mutation check using cell's original writes
-                # This measures the actual conflict resolution work
+                # This measures worst-case conflict resolution work
+                # Note: We check against ALL prior cells (not just clean ones) to
+                # measure true worst-case overhead
                 if my_typed_changes:
                     for prior_cell_id in self._cell_order[:my_position]:
                         if not self._notebook_state.has_record(prior_cell_id):
                             continue
-                        if not self._notebook_state.is_clean(prior_cell_id):
-                            continue
+                        # Don't skip stale cells - measure worst-case overhead
                         prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
                         if prior_tracking is None:
                             continue
