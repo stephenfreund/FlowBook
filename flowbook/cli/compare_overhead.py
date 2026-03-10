@@ -65,7 +65,6 @@ class RerunOverheadCDFData:
     total_sorted: List[float]
     total_percentiles: List[float]
     checkpoint_ms: List[float]
-    diff_ms: List[float]
     check_ms: List[float]
 
 
@@ -80,7 +79,6 @@ def extract_rerun_overhead_data(raw_data_list: List[Dict]) -> Optional[RerunOver
     """
     total_overhead_ms = []
     checkpoint_ms = []
-    diff_ms = []
     check_ms = []
 
     for data in raw_data_list:
@@ -92,7 +90,6 @@ def extract_rerun_overhead_data(raw_data_list: List[Dict]) -> Optional[RerunOver
         for m in measurements:
             total_overhead_ms.append(m.get("total_overhead_ms", 0.0))
             checkpoint_ms.append(m.get("checkpoint_ms", 0.0))
-            diff_ms.append(m.get("diff_ms", 0.0))
             check_ms.append(m.get("check_ms", 0.0))
 
     if not total_overhead_ms:
@@ -108,7 +105,6 @@ def extract_rerun_overhead_data(raw_data_list: List[Dict]) -> Optional[RerunOver
         total_sorted=total_sorted,
         total_percentiles=total_percentiles,
         checkpoint_ms=checkpoint_ms,
-        diff_ms=diff_ms,
         check_ms=check_ms,
     )
 
@@ -212,12 +208,11 @@ def render_rerun_checkpoint_breakdown(
 
     # Calculate averages
     avg_checkpoint = sum(data.checkpoint_ms) / n
-    avg_diff = sum(data.diff_ms) / n
     avg_check = sum(data.check_ms) / n
 
-    categories = ['Checkpoint', 'Diff', 'Check']
-    values = [avg_checkpoint, avg_diff, avg_check]
-    colors = ['#3498DB', '#E74C3C', '#2ECC71']  # Blue, Red, Green
+    categories = ['Checkpoint', 'Check']
+    values = [avg_checkpoint, avg_check]
+    colors = ['#3498DB', '#2ECC71']  # Blue, Green
 
     bars = ax.bar(categories, values, color=colors, edgecolor='black', linewidth=0.5)
 
@@ -4196,7 +4191,6 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
                                 total_sorted=sorted([m.get("total_overhead_ms", 0) for m in measurements]),
                                 total_percentiles=[],  # Not needed for breakdown
                                 checkpoint_ms=[m.get("checkpoint_ms", 0) for m in measurements],
-                                diff_ms=[m.get("diff_ms", 0) for m in measurements],
                                 check_ms=[m.get("check_ms", 0) for m in measurements],
                             )
                             breakdown_fig, breakdown_ax = plt.subplots(figsize=(8, 6))

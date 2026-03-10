@@ -2686,7 +2686,6 @@ class ReproducibilityEnforcer:
         result = {
             "cell_id": cell_id,
             "checkpoint_ms": 0.0,
-            "diff_ms": 0.0,
             "check_ms": 0.0,
             "total_overhead_ms": 0.0,
             "checkpoint_by_var": {},
@@ -2719,8 +2718,8 @@ class ReproducibilityEnforcer:
                     "deepcopy_ms": cost_info.get("deepcopy_ms", 0.0),
                 }
 
-        # 2. Full diff against the checkpoint (timed - will be empty)
-        with timer(key="rerun:diff", message=f"[Rerun] Diff for {cell_id}") as diff_timer:
+        # 2. Check phase: diff + conflict resolution (timed together, like normal execution)
+        with timer(key="rerun:check", message=f"[Rerun] Check for {cell_id}") as check_timer:
             # Prepare accessed columns for diff
             all_accessed_columns = {}
             for var, cols in tracking.column_reads_before_writes.items():
@@ -2742,60 +2741,40 @@ class ReproducibilityEnforcer:
                 structural_mode=self._structural_mode,
             )
 
-        result["diff_ms"] = diff_timer.duration()
-
-        # 3. Full check using the cell's original R/W (timed)
-        # We simulate the check by synthesizing typed_changes from the cell's
-        # original writes (not using stored typed_changes which may be empty)
-        with timer(key="rerun:check", message=f"[Rerun] Check for {cell_id}") as check_timer:
+            # Conflict resolution
             my_position = self._get_position(cell_id)
             if my_position >= 0:
-                # Synthesize typed_changes from the cell's original writes
-                # This simulates worst-case where the cell makes the same writes
-                from flowbook.kernel.changes import ValueChanged, ColumnModified
-                my_typed_changes = []
-                for var in tracking.writes:
-                    my_typed_changes.append(ValueChanged(variable=var))
-                for var, cols in tracking.column_writes.items():
-                    for col in cols:
-                        my_typed_changes.append(ColumnModified(variable=var, column=col))
+                from flowbook.kernel.changes import ValueChanged
 
                 # Simulate forward contamination check
                 my_read_events = tracking.to_read_events()
                 for later_cell_id in self._cell_order[my_position + 1:]:
                     if not self._notebook_state.has_record(later_cell_id):
                         continue
-                    # Synthesize changes from later cell's writes
                     later_tracking = self._notebook_state.get_tracking(later_cell_id)
                     if later_tracking is None:
                         continue
-                    later_changes = []
-                    for var in later_tracking.writes:
-                        later_changes.append(ValueChanged(variable=var))
-                    for var, cols in later_tracking.column_writes.items():
-                        for col in cols:
-                            later_changes.append(ColumnModified(variable=var, column=col))
+                    later_changes = [ValueChanged(variable=var) for var in later_tracking.writes]
                     if later_changes and my_read_events:
                         self._conflict_resolver.get_violations(later_changes, my_read_events)
 
-                # Simulate backward mutation check using cell's original writes
-                # This measures worst-case conflict resolution work
-                # Note: We check against ALL prior cells (not just clean ones) to
-                # measure true worst-case overhead
-                if my_typed_changes:
-                    for prior_cell_id in self._cell_order[:my_position]:
-                        if not self._notebook_state.has_record(prior_cell_id):
-                            continue
-                        # Don't skip stale cells - measure worst-case overhead
-                        prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
-                        if prior_tracking is None:
-                            continue
-                        prior_reads = prior_tracking.to_read_events()
-                        if prior_reads:
-                            self._conflict_resolver.get_violations(my_typed_changes, prior_reads)
+                # Simulate backward mutation check
+                for prior_cell_id in self._cell_order[:my_position]:
+                    if not self._notebook_state.has_record(prior_cell_id):
+                        continue
+                    if not self._notebook_state.is_clean(prior_cell_id):
+                        continue
+                    prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
+                    if prior_tracking is None:
+                        continue
+                    prior_reads = prior_tracking.to_read_events()
+                    if prior_reads:
+                        fake_changes = [ValueChanged(variable=var) for var in prior_tracking.reads_before_writes]
+                        if fake_changes:
+                            self._conflict_resolver.get_violations(fake_changes, prior_reads)
 
         result["check_ms"] = check_timer.duration()
-        result["total_overhead_ms"] = result["checkpoint_ms"] + result["diff_ms"] + result["check_ms"]
+        result["total_overhead_ms"] = result["checkpoint_ms"] + result["check_ms"]
 
         return result
 
