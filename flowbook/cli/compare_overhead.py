@@ -1299,19 +1299,18 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
         lines.append(header)
         lines.append("-" * 110)
 
-        # Per-file rows (only files with errors)
+        # Per-file rows (all files)
         for s in stats_list:
-            if s.checking_error_cells > 0:
-                name = (
-                    s.notebook_name[:28]
-                    if len(s.notebook_name) > 28
-                    else s.notebook_name
-                )
-                row = f"{name:<30} {s.num_cells:>5} {s.checking_error_cells:>6}"
-                for etype in error_types:
-                    count = s.checking_error_counts.get(etype, 0)
-                    row += f" {count:>12}"
-                lines.append(row)
+            name = (
+                s.notebook_name[:28]
+                if len(s.notebook_name) > 28
+                else s.notebook_name
+            )
+            row = f"{name:<30} {s.num_cells:>5} {s.checking_error_cells:>6}"
+            for etype in error_types:
+                count = s.checking_error_counts.get(etype, 0)
+                row += f" {count:>12}"
+            lines.append(row)
 
         lines.append("-" * 110)
 
@@ -4205,15 +4204,14 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
         print(header)
         print("-" * (47 + (col_width + 1) * len(error_types)))
 
-        # Per-notebook rows (only notebooks with errors)
+        # Per-notebook rows (all notebooks)
         for name, clean, stale, errors, reasons, err_counts in staleness_data:
-            if errors > 0:
-                display_name = name[:33] if len(name) > 33 else name
-                row = f"{display_name:<35} {clean + stale + errors:>5} {errors:>6}"
-                for etype in error_types:
-                    count = err_counts.get(etype, 0)
-                    row += f" {count:>{col_width}}"
-                print(row)
+            display_name = name[:33] if len(name) > 33 else name
+            row = f"{display_name:<35} {clean + stale + errors:>5} {errors:>6}"
+            for etype in error_types:
+                count = err_counts.get(etype, 0)
+                row += f" {count:>{col_width}}"
+            print(row)
 
         print("-" * (47 + (col_width + 1) * len(error_types)))
         print()
