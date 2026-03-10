@@ -2648,6 +2648,134 @@ class ReproducibilityEnforcer:
 
         return total
 
+    def measure_rerun_overhead(
+        self,
+        cell_id: str,
+        namespace: dict,
+    ) -> Dict[str, Any]:
+        """
+        Measure the overhead of re-running a cell without actually executing code.
+
+        This is used by compare-baseline's --rerun=N option to measure worst-case
+        overhead at quartile-boundary cells. It performs:
+        1. Take a full checkpoint (timed)
+        2. Full diff against the checkpoint (timed - will be empty but measures work)
+        3. Full check using the cell's original R/W (timed)
+
+        Note: This method does NOT restore state. The checkpoint taken becomes
+        part of the checkpoint store and accumulates overhead.
+
+        Args:
+            cell_id: ID of the cell to measure rerun overhead for
+            namespace: Current user namespace (for checkpoint/diff)
+
+        Returns:
+            Dictionary with timing and checkpoint cost data:
+            {
+                "cell_id": str,
+                "checkpoint_ms": float,
+                "diff_ms": float,
+                "check_ms": float,
+                "total_overhead_ms": float,
+                "checkpoint_by_var": {var: mb, ...},
+                "checkpoint_var_costs": {var: {"bytes": int, "deepcopy_ms": float}, ...}
+            }
+        """
+        from flowbook.util.output import timer
+
+        result = {
+            "cell_id": cell_id,
+            "checkpoint_ms": 0.0,
+            "diff_ms": 0.0,
+            "check_ms": 0.0,
+            "total_overhead_ms": 0.0,
+            "checkpoint_by_var": {},
+            "checkpoint_var_costs": {},
+        }
+
+        # Get the cell's tracking data (original R/W)
+        tracking = self._notebook_state.get_tracking(cell_id)
+        if tracking is None:
+            # Cell has no execution record - return zeros
+            return result
+
+        # 1. Take a full checkpoint (timed)
+        checkpoint_name = f"_rerun_overhead_{cell_id}"
+        with timer(key="rerun:checkpoint", message=f"[Rerun] Checkpoint for {cell_id}") as ckpt_timer:
+            ns_dict = dict(namespace) if not isinstance(namespace, dict) else namespace
+            self.checkpoints.save(checkpoint_name, ns_dict, max_size_mb=None)
+            pre_checkpoint = self.checkpoints.get(checkpoint_name)
+
+        result["checkpoint_ms"] = ckpt_timer.duration()
+
+        # Get checkpoint variable costs
+        if hasattr(self.checkpoints, '_var_memory_costs_by_checkpoint'):
+            var_costs = self.checkpoints._var_memory_costs_by_checkpoint.get(checkpoint_name, {})
+            # Convert to checkpoint_by_var (MB) and checkpoint_var_costs
+            for var_name, cost_info in var_costs.items():
+                result["checkpoint_by_var"][var_name] = cost_info.get("bytes", 0) / (1024 * 1024)
+                result["checkpoint_var_costs"][var_name] = {
+                    "bytes": cost_info.get("bytes", 0),
+                    "deepcopy_ms": cost_info.get("deepcopy_ms", 0.0),
+                }
+
+        # 2. Full diff against the checkpoint (timed - will be empty)
+        with timer(key="rerun:diff", message=f"[Rerun] Diff for {cell_id}") as diff_timer:
+            # Prepare accessed columns for diff
+            all_accessed_columns = {}
+            for var, cols in tracking.column_reads_before_writes.items():
+                all_accessed_columns[var] = set(cols)
+            for var, cols in tracking.column_writes.items():
+                if var in all_accessed_columns:
+                    all_accessed_columns[var].update(cols)
+                else:
+                    all_accessed_columns[var] = set(cols)
+
+            # Do a full diff (no optimization - diff all vars)
+            current_diff = MemoryCheckpoint.diff(
+                pre_checkpoint,
+                namespace,
+                keys_to_include=None,  # Full diff
+                use_leq=False,
+                column_rbw=all_accessed_columns,
+                structural_reads={},
+                structural_mode=self._structural_mode,
+            )
+
+        result["diff_ms"] = diff_timer.duration()
+
+        # 3. Full check using the cell's original R/W (timed)
+        # We simulate the check without actually updating state
+        with timer(key="rerun:check", message=f"[Rerun] Check for {cell_id}") as check_timer:
+            my_position = self._get_position(cell_id)
+            if my_position >= 0:
+                # Simulate forward contamination check
+                my_read_events = tracking.to_read_events()
+                for later_cell_id in self._cell_order[my_position + 1:]:
+                    if not self._notebook_state.has_record(later_cell_id):
+                        continue
+                    later_changes = self._notebook_state.get_typed_changes(later_cell_id)
+                    if later_changes and my_read_events:
+                        self._conflict_resolver.get_violations(later_changes, my_read_events)
+
+                # Simulate backward mutation check (just iterate through prior cells)
+                for prior_cell_id in self._cell_order[:my_position]:
+                    if not self._notebook_state.has_record(prior_cell_id):
+                        continue
+                    if not self._notebook_state.is_clean(prior_cell_id):
+                        continue
+                    prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
+                    if prior_tracking is None:
+                        continue
+                    # Access the data structures to simulate the check work
+                    _ = prior_tracking.reads_before_writes
+                    _ = prior_tracking.column_reads_before_writes
+
+        result["check_ms"] = check_timer.duration()
+        result["total_overhead_ms"] = result["checkpoint_ms"] + result["diff_ms"] + result["check_ms"]
+
+        return result
+
     def reset(self) -> None:
         """Clear all state. Called on kernel restart."""
         self.seq_counter = 0
