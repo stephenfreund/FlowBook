@@ -2745,20 +2745,36 @@ class ReproducibilityEnforcer:
         result["diff_ms"] = diff_timer.duration()
 
         # 3. Full check using the cell's original R/W (timed)
-        # We simulate the check without actually updating state, using the cell's
-        # stored typed_changes from its previous execution as the "changes" to check
+        # We simulate the check by synthesizing typed_changes from the cell's
+        # original writes (not using stored typed_changes which may be empty)
         with timer(key="rerun:check", message=f"[Rerun] Check for {cell_id}") as check_timer:
             my_position = self._get_position(cell_id)
             if my_position >= 0:
-                # Get this cell's original typed_changes (what it wrote last time)
-                my_typed_changes = self._notebook_state.get_typed_changes(cell_id)
+                # Synthesize typed_changes from the cell's original writes
+                # This simulates worst-case where the cell makes the same writes
+                from flowbook.kernel.changes import ValueChanged, ColumnModified
+                my_typed_changes = []
+                for var in tracking.writes:
+                    my_typed_changes.append(ValueChanged(variable=var))
+                for var, cols in tracking.column_writes.items():
+                    for col in cols:
+                        my_typed_changes.append(ColumnModified(variable=var, column=col))
 
                 # Simulate forward contamination check
                 my_read_events = tracking.to_read_events()
                 for later_cell_id in self._cell_order[my_position + 1:]:
                     if not self._notebook_state.has_record(later_cell_id):
                         continue
-                    later_changes = self._notebook_state.get_typed_changes(later_cell_id)
+                    # Synthesize changes from later cell's writes
+                    later_tracking = self._notebook_state.get_tracking(later_cell_id)
+                    if later_tracking is None:
+                        continue
+                    later_changes = []
+                    for var in later_tracking.writes:
+                        later_changes.append(ValueChanged(variable=var))
+                    for var, cols in later_tracking.column_writes.items():
+                        for col in cols:
+                            later_changes.append(ColumnModified(variable=var, column=col))
                     if later_changes and my_read_events:
                         self._conflict_resolver.get_violations(later_changes, my_read_events)
 
