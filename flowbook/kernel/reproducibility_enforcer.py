@@ -2730,11 +2730,14 @@ class ReproducibilityEnforcer:
                 else:
                     all_accessed_columns[var] = set(cols)
 
-            # Do a full diff (no optimization - diff all vars)
+            # Get accessed variables (like normal execution does)
+            accessed_vars = tracking.reads_before_writes | tracking.writes
+
+            # Diff only accessed variables (like normal execution)
             current_diff = MemoryCheckpoint.diff(
                 pre_checkpoint,
                 namespace,
-                keys_to_include=None,  # Full diff
+                keys_to_include=accessed_vars if accessed_vars else None,
                 use_leq=False,
                 column_rbw=all_accessed_columns,
                 structural_reads={},
