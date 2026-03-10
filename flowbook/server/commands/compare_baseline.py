@@ -2711,7 +2711,6 @@ def measure_rerun_overhead(
                     cell_id=cell_id,
                     cell_index=idx,
                     checkpoint_ms=0.0,
-                    diff_ms=0.0,
                     check_ms=0.0,
                     total_overhead_ms=0.0,
                 ))
@@ -3018,7 +3017,6 @@ class CompareBaselineCommand(NotebookCommand):
                                 "cell_id": m.cell_id,
                                 "cell_index": m.cell_index,
                                 "checkpoint_ms": m.checkpoint_ms,
-                                "diff_ms": m.diff_ms,
                                 "check_ms": m.check_ms,
                                 "total_overhead_ms": m.total_overhead_ms,
                                 "checkpoint_by_var": m.checkpoint_by_var,
