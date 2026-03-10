@@ -2745,10 +2745,14 @@ class ReproducibilityEnforcer:
         result["diff_ms"] = diff_timer.duration()
 
         # 3. Full check using the cell's original R/W (timed)
-        # We simulate the check without actually updating state
+        # We simulate the check without actually updating state, using the cell's
+        # stored typed_changes from its previous execution as the "changes" to check
         with timer(key="rerun:check", message=f"[Rerun] Check for {cell_id}") as check_timer:
             my_position = self._get_position(cell_id)
             if my_position >= 0:
+                # Get this cell's original typed_changes (what it wrote last time)
+                my_typed_changes = self._notebook_state.get_typed_changes(cell_id)
+
                 # Simulate forward contamination check
                 my_read_events = tracking.to_read_events()
                 for later_cell_id in self._cell_order[my_position + 1:]:
@@ -2758,18 +2762,20 @@ class ReproducibilityEnforcer:
                     if later_changes and my_read_events:
                         self._conflict_resolver.get_violations(later_changes, my_read_events)
 
-                # Simulate backward mutation check (just iterate through prior cells)
-                for prior_cell_id in self._cell_order[:my_position]:
-                    if not self._notebook_state.has_record(prior_cell_id):
-                        continue
-                    if not self._notebook_state.is_clean(prior_cell_id):
-                        continue
-                    prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
-                    if prior_tracking is None:
-                        continue
-                    # Access the data structures to simulate the check work
-                    _ = prior_tracking.reads_before_writes
-                    _ = prior_tracking.column_reads_before_writes
+                # Simulate backward mutation check using cell's original writes
+                # This measures the actual conflict resolution work
+                if my_typed_changes:
+                    for prior_cell_id in self._cell_order[:my_position]:
+                        if not self._notebook_state.has_record(prior_cell_id):
+                            continue
+                        if not self._notebook_state.is_clean(prior_cell_id):
+                            continue
+                        prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
+                        if prior_tracking is None:
+                            continue
+                        prior_reads = prior_tracking.to_read_events()
+                        if prior_reads:
+                            self._conflict_resolver.get_violations(my_typed_changes, prior_reads)
 
         result["check_ms"] = check_timer.duration()
         result["total_overhead_ms"] = result["checkpoint_ms"] + result["diff_ms"] + result["check_ms"]
