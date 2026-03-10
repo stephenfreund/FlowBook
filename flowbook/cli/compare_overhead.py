@@ -47,7 +47,7 @@ from flowbook.cli.plot_extraction import (
     extract_baseline_cells,
     extract_gpu_overhead_from_timing,
 )
-from flowbook.cli.plot_rendering import render_combined_6panel
+from flowbook.cli.plot_rendering import render_combined_6panel, render_time_cdf
 
 # Base directory for cached remote files
 CACHE_BASE_DIR = "/tmp/flowbook_compare_overhead"
@@ -120,62 +120,23 @@ def render_rerun_overhead_cdf(
 ) -> None:
     """Render rerun overhead CDF panel.
 
-    Similar to the time CDF but with orange color for rerun data.
+    Uses the same style as Analysis Time Distribution but with orange color.
 
     Args:
         ax: Matplotlib axes
         data: RerunOverheadCDFData with timing values
         large_fonts: Use larger fonts
     """
-    import matplotlib.pyplot as plt
-    from matplotlib.ticker import FuncFormatter
-
-    # Font sizes
-    label_size = 22 if large_fonts else 14
-    title_size = 24 if large_fonts else 16
-    tick_size = 18 if large_fonts else 12
-    annotation_size = 18 if large_fonts else 12
-    legend_fontsize = 14 if large_fonts else 10
-
-    sorted_vals = data.total_sorted
-    percentiles = data.total_percentiles
-    color = "#E67E22"  # Orange
-
-    # Plot CDF
-    ax.step(sorted_vals, percentiles, where='post', linewidth=2.5, color=color, label='Rerun Overhead')
-
-    # Fill area under curve
-    ax.fill_between(sorted_vals, percentiles, step='post', alpha=0.25, color=color)
-
-    # Add median and p90 annotations
-    n = len(sorted_vals)
-    if n > 0:
-        median_idx = n // 2
-        p90_idx = int(n * 0.9)
-        median_val = sorted_vals[median_idx] if median_idx < n else sorted_vals[-1]
-        p90_val = sorted_vals[p90_idx] if p90_idx < n else sorted_vals[-1]
-
-        ax.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5, linewidth=1)
-        ax.axhline(y=0.9, color='gray', linestyle='--', alpha=0.5, linewidth=1)
-
-        ax.annotate(f'median: {median_val:.1f}ms',
-                    xy=(median_val, 0.5),
-                    xytext=(median_val * 1.2, 0.55),
-                    fontsize=annotation_size,
-                    color='gray')
-        ax.annotate(f'p90: {p90_val:.1f}ms',
-                    xy=(p90_val, 0.9),
-                    xytext=(p90_val * 0.8, 0.95),
-                    fontsize=annotation_size,
-                    color='gray')
-
-    ax.set_xlabel('Rerun Overhead (ms)', fontsize=label_size)
-    ax.set_ylabel('CDF', fontsize=label_size)
-    ax.set_title('Rerun Overhead Time Distribution', fontsize=title_size)
-    ax.set_ylim(0, 1.02)
-    ax.tick_params(axis='both', labelsize=tick_size)
-    ax.legend(fontsize=legend_fontsize)
-    ax.grid(True, alpha=0.3)
+    render_time_cdf(
+        ax,
+        sorted_vals=list(data.total_sorted),
+        percentiles=list(data.total_percentiles),
+        n=len(data.total_overhead_ms),
+        color="#E67E22",  # Orange
+        title="Rerun Overhead Time Distribution",
+        xlabel="Rerun Overhead (ms, log scale)",
+        large_fonts=large_fonts,
+    )
 
 
 def render_rerun_checkpoint_breakdown(
