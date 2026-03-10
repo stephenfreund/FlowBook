@@ -235,13 +235,18 @@ def setup_kernel(
                     # issue with race condition where the kernel is not ready yet
                     log("Pausing for 2 second...")
                     time.sleep(2)
+                    ready_retries = 0
+                    max_ready_retries = 3
                     while True:
                         try:
                             log("Waiting for kernel to be ready...")
                             kernel_client.wait_for_ready(timeout=30)
                             break
                         except Exception as e:
-                            log(f"Error waiting for kernel to be ready: {e}")
+                            ready_retries += 1
+                            log(f"Error waiting for kernel to be ready: {e} (attempt {ready_retries}/{max_ready_retries})")
+                            if ready_retries >= max_ready_retries:
+                                raise RuntimeError(f"Kernel failed to become ready after {max_ready_retries} attempts: {e}")
                             time.sleep(0.5)
 
                     assert isinstance(kernel_client, FlowbookKernelClient)
