@@ -1592,16 +1592,20 @@ class ReproducibilityEnforcer:
                 vars_covered_by_typed_changes.add(change.variable)
 
             if my_read_events:
-                violations = self._conflict_resolver.get_violations(later_changes, my_read_events)
-                if violations:
+                violations_result = self._conflict_resolver.get_violations(later_changes, my_read_events)
+                if violations_result:
                     conflicts = []
-                    for v in violations:
+                    for v in violations_result.violations:
                         var = v.change.variable
                         if hasattr(v.change, 'column') and v.change.column:
                             conflicts.append(f"{var}['{v.change.column}']")
                         else:
                             conflicts.append(var)
                     conflicts = sorted(set(conflicts))
+
+                    # Add truncation notice if needed
+                    if violations_result.truncated:
+                        conflicts.append(f"... and {violations_result.truncated_count} more")
 
                     reading_alpha = self._cell_id_to_alpha(cell_id)
                     writing_alpha = self._cell_id_to_alpha(later_cell_id)
@@ -1732,19 +1736,23 @@ class ReproducibilityEnforcer:
             if not prior_reads:
                 continue
 
-            violations = self._conflict_resolver.get_violations(typed_changes, prior_reads)
-            if not violations:
+            violations_result = self._conflict_resolver.get_violations(typed_changes, prior_reads)
+            if not violations_result:
                 continue
 
             # Build conflict list - always show column info when change was at column level
             conflicts = []
-            for v in violations:
+            for v in violations_result.violations:
                 var = v.change.variable
                 if hasattr(v.change, 'column') and v.change.column:
                     conflicts.append(f"{var}.{v.change.column}")
                 else:
                     conflicts.append(var)
             conflicts = sorted(set(conflicts))
+
+            # Add truncation notice if needed
+            if violations_result.truncated:
+                conflicts.append(f"... and {violations_result.truncated_count} more")
 
             if conflicts:
                 mutating_alpha = self._cell_id_to_alpha(cell_id)

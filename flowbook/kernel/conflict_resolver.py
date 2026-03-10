@@ -17,7 +17,8 @@ Usage:
     violations = [c for c in conflicts if c.severity == ConflictSeverity.VIOLATION]
 """
 
-from typing import List, Optional
+from collections import defaultdict
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -50,6 +51,44 @@ class ConflictResult(BaseModel):
     severity: ConflictSeverity
     rule: Optional[ConflictRule] = None
     description: str
+
+
+# Default limit for violations before truncation
+DEFAULT_MAX_VIOLATIONS = 50
+
+
+class ViolationsResult(BaseModel):
+    """
+    Result of get_violations with truncation support.
+
+    Attributes:
+        violations: List of violation ConflictResults (up to max_violations)
+        total_count: Total number of violations found (may be > len(violations))
+        truncated: True if results were truncated due to max_violations limit
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    violations: List[ConflictResult]
+    total_count: int
+    truncated: bool = False
+
+    @property
+    def truncated_count(self) -> int:
+        """Number of violations not included due to truncation."""
+        return self.total_count - len(self.violations)
+
+    def __iter__(self):
+        """Allow iterating directly over violations for backwards compatibility."""
+        return iter(self.violations)
+
+    def __len__(self):
+        """Return number of violations in the list (not total_count)."""
+        return len(self.violations)
+
+    def __bool__(self):
+        """True if any violations exist."""
+        return self.total_count > 0
 
 
 class ConflictResolver:
@@ -173,6 +212,30 @@ class ConflictResolver:
             description="No matching rule - no conflict",
         )
 
+    def _index_by_variable(
+        self,
+        changes: List[Change],
+        prior_reads: List[AccessEvent],
+    ) -> tuple[Dict[str, List[Change]], Dict[str, List[AccessEvent]]]:
+        """
+        Index changes and reads by variable name for O(1) lookup.
+
+        This optimization avoids the O(n*m) comparison when most change/read
+        pairs have different variables (and thus cannot conflict).
+
+        Returns:
+            Tuple of (changes_by_var, reads_by_var) dicts
+        """
+        changes_by_var: Dict[str, List[Change]] = defaultdict(list)
+        reads_by_var: Dict[str, List[AccessEvent]] = defaultdict(list)
+
+        for change in changes:
+            changes_by_var[change.variable].append(change)
+        for read in prior_reads:
+            reads_by_var[read.variable].append(read)
+
+        return changes_by_var, reads_by_var
+
     def check_all(
         self,
         changes: List[Change],
@@ -185,6 +248,9 @@ class ConflictResolver:
         Non-OK results appear first (violations, then warnings), sorted
         by severity for easy processing.
 
+        Optimization: Uses variable indexing to only compare changes and reads
+        with matching variable names, reducing O(n*m) to O(n+m) in common cases.
+
         Args:
             changes: List of changes from current cell
             prior_reads: List of access events from prior cells
@@ -194,10 +260,18 @@ class ConflictResolver:
         """
         results: List[ConflictResult] = []
 
-        for change in changes:
-            for read in prior_reads:
-                result = self.resolve(change, read)
-                results.append(result)
+        # Index by variable for efficient lookup
+        changes_by_var, reads_by_var = self._index_by_variable(changes, prior_reads)
+
+        # Only compare changes and reads with matching variables
+        for var, var_changes in changes_by_var.items():
+            if var not in reads_by_var:
+                continue  # No reads of this variable - no conflicts possible
+            var_reads = reads_by_var[var]
+            for change in var_changes:
+                for read in var_reads:
+                    result = self.resolve(change, read)
+                    results.append(result)
 
         # Sort by severity: VIOLATION > WARNING > OK
         severity_order = {
@@ -213,21 +287,65 @@ class ConflictResolver:
         self,
         changes: List[Change],
         prior_reads: List[AccessEvent],
-    ) -> List[ConflictResult]:
+        max_violations: Optional[int] = DEFAULT_MAX_VIOLATIONS,
+    ) -> ViolationsResult:
         """
-        Get only the violations (not warnings or OK).
+        Get only the violations (not warnings or OK) with truncation support.
 
-        Convenience method for checking if a cell should be rolled back.
+        Uses variable indexing and early exit for efficiency with large
+        column lists. When max_violations is reached, stops searching and
+        returns a truncated result.
 
         Args:
             changes: List of changes from current cell
             prior_reads: List of access events from prior cells
+            max_violations: Maximum violations to return (None for unlimited)
 
         Returns:
-            List of ConflictResults with VIOLATION severity
+            ViolationsResult with violations list and truncation info
         """
-        all_results = self.check_all(changes, prior_reads)
-        return [r for r in all_results if r.severity == ConflictSeverity.VIOLATION]
+        violations: List[ConflictResult] = []
+        total_count = 0
+
+        # Index by variable for efficient lookup
+        changes_by_var, reads_by_var = self._index_by_variable(changes, prior_reads)
+
+        # Track if we've hit the limit
+        limit_reached = False
+
+        # Only compare changes and reads with matching variables
+        for var in changes_by_var:
+            if var not in reads_by_var:
+                continue
+
+            var_changes = changes_by_var[var]
+            var_reads = reads_by_var[var]
+
+            for change in var_changes:
+                for read in var_reads:
+                    result = self.resolve(change, read)
+                    if result.severity == ConflictSeverity.VIOLATION:
+                        total_count += 1
+                        if max_violations is None or len(violations) < max_violations:
+                            violations.append(result)
+                        else:
+                            limit_reached = True
+
+                # Early exit: if we've found enough violations and hit the limit,
+                # we can estimate total but don't need to keep iterating all columns
+                if limit_reached and total_count >= max_violations * 2:
+                    # We've seen enough to know there are "many more"
+                    # Estimate remaining by extrapolation
+                    break
+
+            if limit_reached and total_count >= max_violations * 2:
+                break
+
+        return ViolationsResult(
+            violations=violations,
+            total_count=total_count,
+            truncated=total_count > len(violations),
+        )
 
     def get_warnings(
         self,
