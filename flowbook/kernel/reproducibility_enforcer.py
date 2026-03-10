@@ -2686,7 +2686,6 @@ class ReproducibilityEnforcer:
         result = {
             "cell_id": cell_id,
             "checkpoint_ms": 0.0,
-            "diff_ms": 0.0,
             "check_ms": 0.0,
             "total_overhead_ms": 0.0,
             "checkpoint_by_var": {},
@@ -2719,8 +2718,8 @@ class ReproducibilityEnforcer:
                     "deepcopy_ms": cost_info.get("deepcopy_ms", 0.0),
                 }
 
-        # 2. Full diff against the checkpoint (timed - will be empty)
-        with timer(key="rerun:diff", message=f"[Rerun] Diff for {cell_id}") as diff_timer:
+        # 2. Check phase: diff + conflict resolution (timed together, like normal execution)
+        with timer(key="rerun:check", message=f"[Rerun] Check for {cell_id}") as check_timer:
             # Prepare accessed columns for diff
             all_accessed_columns = {}
             for var, cols in tracking.column_reads_before_writes.items():
@@ -2731,34 +2730,38 @@ class ReproducibilityEnforcer:
                 else:
                     all_accessed_columns[var] = set(cols)
 
-            # Do a full diff (no optimization - diff all vars)
+            # Get accessed variables (like normal execution does)
+            accessed_vars = tracking.reads_before_writes | tracking.writes
+
+            # Diff only accessed variables (like normal execution)
             current_diff = MemoryCheckpoint.diff(
                 pre_checkpoint,
                 namespace,
-                keys_to_include=None,  # Full diff
+                keys_to_include=accessed_vars if accessed_vars else None,
                 use_leq=False,
                 column_rbw=all_accessed_columns,
                 structural_reads={},
                 structural_mode=self._structural_mode,
             )
 
-        result["diff_ms"] = diff_timer.duration()
-
-        # 3. Full check using the cell's original R/W (timed)
-        # We simulate the check without actually updating state
-        with timer(key="rerun:check", message=f"[Rerun] Check for {cell_id}") as check_timer:
+            # Conflict resolution
             my_position = self._get_position(cell_id)
             if my_position >= 0:
+                from flowbook.kernel.changes import ValueChanged
+
                 # Simulate forward contamination check
                 my_read_events = tracking.to_read_events()
                 for later_cell_id in self._cell_order[my_position + 1:]:
                     if not self._notebook_state.has_record(later_cell_id):
                         continue
-                    later_changes = self._notebook_state.get_typed_changes(later_cell_id)
+                    later_tracking = self._notebook_state.get_tracking(later_cell_id)
+                    if later_tracking is None:
+                        continue
+                    later_changes = [ValueChanged(variable=var) for var in later_tracking.writes]
                     if later_changes and my_read_events:
                         self._conflict_resolver.get_violations(later_changes, my_read_events)
 
-                # Simulate backward mutation check (just iterate through prior cells)
+                # Simulate backward mutation check
                 for prior_cell_id in self._cell_order[:my_position]:
                     if not self._notebook_state.has_record(prior_cell_id):
                         continue
@@ -2767,12 +2770,14 @@ class ReproducibilityEnforcer:
                     prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
                     if prior_tracking is None:
                         continue
-                    # Access the data structures to simulate the check work
-                    _ = prior_tracking.reads_before_writes
-                    _ = prior_tracking.column_reads_before_writes
+                    prior_reads = prior_tracking.to_read_events()
+                    if prior_reads:
+                        fake_changes = [ValueChanged(variable=var) for var in prior_tracking.reads_before_writes]
+                        if fake_changes:
+                            self._conflict_resolver.get_violations(fake_changes, prior_reads)
 
         result["check_ms"] = check_timer.duration()
-        result["total_overhead_ms"] = result["checkpoint_ms"] + result["diff_ms"] + result["check_ms"]
+        result["total_overhead_ms"] = result["checkpoint_ms"] + result["check_ms"]
 
         return result
 

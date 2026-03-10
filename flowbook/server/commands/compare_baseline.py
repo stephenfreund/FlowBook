@@ -291,7 +291,6 @@ class RerunOverheadMeasurement:
     cell_id: str
     cell_index: int
     checkpoint_ms: float
-    diff_ms: float
     check_ms: float
     total_overhead_ms: float
     checkpoint_by_var: Dict[str, float] = field(default_factory=dict)
@@ -2697,14 +2696,12 @@ def measure_rerun_overhead(
                     cell_id=overhead_data.get("cell_id", cell_id),
                     cell_index=idx,
                     checkpoint_ms=overhead_data.get("checkpoint_ms", 0.0),
-                    diff_ms=overhead_data.get("diff_ms", 0.0),
                     check_ms=overhead_data.get("check_ms", 0.0),
                     total_overhead_ms=overhead_data.get("total_overhead_ms", 0.0),
                     checkpoint_by_var=overhead_data.get("checkpoint_by_var", {}),
                     checkpoint_var_costs=overhead_data.get("checkpoint_var_costs", {}),
                 ))
                 log(f"    Checkpoint: {overhead_data.get('checkpoint_ms', 0):.1f}ms, "
-                    f"Diff: {overhead_data.get('diff_ms', 0):.1f}ms, "
                     f"Check: {overhead_data.get('check_ms', 0):.1f}ms, "
                     f"Total: {overhead_data.get('total_overhead_ms', 0):.1f}ms")
             else:
@@ -2714,7 +2711,6 @@ def measure_rerun_overhead(
                     cell_id=cell_id,
                     cell_index=idx,
                     checkpoint_ms=0.0,
-                    diff_ms=0.0,
                     check_ms=0.0,
                     total_overhead_ms=0.0,
                 ))
@@ -3021,7 +3017,6 @@ class CompareBaselineCommand(NotebookCommand):
                                 "cell_id": m.cell_id,
                                 "cell_index": m.cell_index,
                                 "checkpoint_ms": m.checkpoint_ms,
-                                "diff_ms": m.diff_ms,
                                 "check_ms": m.check_ms,
                                 "total_overhead_ms": m.total_overhead_ms,
                                 "checkpoint_by_var": m.checkpoint_by_var,
@@ -3120,13 +3115,11 @@ class CompareBaselineCommand(NotebookCommand):
                 if rerun_overhead and rerun_overhead.measurements:
                     total_measurements = len(rerun_overhead.measurements)
                     avg_checkpoint = sum(m.checkpoint_ms for m in rerun_overhead.measurements) / total_measurements
-                    avg_diff = sum(m.diff_ms for m in rerun_overhead.measurements) / total_measurements
                     avg_check = sum(m.check_ms for m in rerun_overhead.measurements) / total_measurements
                     avg_total = sum(m.total_overhead_ms for m in rerun_overhead.measurements) / total_measurements
 
                     log(f"RERUN OVERHEAD ({rerun_overhead.rerun_n} iterations x {len(rerun_overhead.quartile_indices)} quartile cells = {total_measurements} measurements):")
                     log(f"  Average checkpoint:   {avg_checkpoint:,.1f}ms")
-                    log(f"  Average diff:         {avg_diff:,.1f}ms")
                     log(f"  Average check:        {avg_check:,.1f}ms")
                     log(f"  Average total:        {avg_total:,.1f}ms")
                     log("")

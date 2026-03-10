@@ -21,16 +21,14 @@ class TestRerunOverheadDataclasses:
             cell_id="a",
             cell_index=0,
             checkpoint_ms=10.0,
-            diff_ms=5.0,
-            check_ms=2.0,
+            check_ms=7.0,
             total_overhead_ms=17.0,
         )
         assert m.iteration == 0
         assert m.cell_id == "a"
         assert m.cell_index == 0
         assert m.checkpoint_ms == 10.0
-        assert m.diff_ms == 5.0
-        assert m.check_ms == 2.0
+        assert m.check_ms == 7.0
         assert m.total_overhead_ms == 17.0
         assert m.checkpoint_by_var == {}
         assert m.checkpoint_var_costs == {}
@@ -49,11 +47,11 @@ class TestRerunOverheadDataclasses:
         """RerunOverheadResult stores measurements correctly."""
         m1 = RerunOverheadMeasurement(
             iteration=0, cell_id="a", cell_index=0,
-            checkpoint_ms=10.0, diff_ms=5.0, check_ms=2.0, total_overhead_ms=17.0,
+            checkpoint_ms=10.0, check_ms=7.0, total_overhead_ms=17.0,
         )
         m2 = RerunOverheadMeasurement(
             iteration=1, cell_id="a", cell_index=0,
-            checkpoint_ms=12.0, diff_ms=4.0, check_ms=3.0, total_overhead_ms=19.0,
+            checkpoint_ms=12.0, check_ms=7.0, total_overhead_ms=19.0,
         )
         r = RerunOverheadResult(
             rerun_n=2,
@@ -146,8 +144,7 @@ class TestMeasureRerunOverheadFunction:
                             'rerun_overhead': {
                                 'cell_id': 'test',
                                 'checkpoint_ms': 1.0,
-                                'diff_ms': 0.5,
-                                'check_ms': 0.2,
+                                'check_ms': 0.7,
                                 'total_overhead_ms': 1.7,
                                 'checkpoint_by_var': {},
                                 'checkpoint_var_costs': {},

@@ -60,7 +60,6 @@ class TestMeasureRerunOverhead:
         assert isinstance(result, dict)
         assert "cell_id" in result
         assert "checkpoint_ms" in result
-        assert "diff_ms" in result
         assert "check_ms" in result
         assert "total_overhead_ms" in result
         assert "checkpoint_by_var" in result
@@ -77,7 +76,6 @@ class TestMeasureRerunOverhead:
         # Should return zeros since cell has no execution record
         assert result["cell_id"] == "a"
         assert result["checkpoint_ms"] == 0.0
-        assert result["diff_ms"] == 0.0
         assert result["check_ms"] == 0.0
         assert result["total_overhead_ms"] == 0.0
 
@@ -98,12 +96,11 @@ class TestMeasureRerunOverhead:
 
         # All timing values should be non-negative
         assert result["checkpoint_ms"] >= 0.0
-        assert result["diff_ms"] >= 0.0
         assert result["check_ms"] >= 0.0
         assert result["total_overhead_ms"] >= 0.0
 
         # Total should be sum of components
-        expected_total = result["checkpoint_ms"] + result["diff_ms"] + result["check_ms"]
+        expected_total = result["checkpoint_ms"] + result["check_ms"]
         assert abs(result["total_overhead_ms"] - expected_total) < 0.001
 
     def test_measure_rerun_overhead_checkpoint_var_costs(self):
@@ -155,7 +152,6 @@ class TestMeasureRerunOverhead:
 
         assert result["cell_id"] == "b"
         assert result["checkpoint_ms"] >= 0.0
-        assert result["diff_ms"] >= 0.0
         assert result["check_ms"] >= 0.0
 
     def test_measure_rerun_overhead_does_not_modify_state(self):

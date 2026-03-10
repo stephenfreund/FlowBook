@@ -37,8 +37,7 @@ class TestExtractRerunOverheadData:
                             "cell_id": "a",
                             "cell_index": 0,
                             "checkpoint_ms": 10.0,
-                            "diff_ms": 5.0,
-                            "check_ms": 2.0,
+                            "check_ms": 7.0,
                             "total_overhead_ms": 17.0,
                         }
                     ],
@@ -50,8 +49,7 @@ class TestExtractRerunOverheadData:
         assert result is not None
         assert result.total_overhead_ms == [17.0]
         assert result.checkpoint_ms == [10.0]
-        assert result.diff_ms == [5.0]
-        assert result.check_ms == [2.0]
+        assert result.check_ms == [7.0]
 
     def test_extracts_multiple_measurements(self):
         """Extracts data from multiple measurements."""
@@ -61,10 +59,10 @@ class TestExtractRerunOverheadData:
                     "rerun_n": 2,
                     "quartile_indices": [0, 4],
                     "measurements": [
-                        {"checkpoint_ms": 10.0, "diff_ms": 5.0, "check_ms": 2.0, "total_overhead_ms": 17.0},
-                        {"checkpoint_ms": 12.0, "diff_ms": 6.0, "check_ms": 3.0, "total_overhead_ms": 21.0},
-                        {"checkpoint_ms": 8.0, "diff_ms": 4.0, "check_ms": 1.0, "total_overhead_ms": 13.0},
-                        {"checkpoint_ms": 15.0, "diff_ms": 7.0, "check_ms": 4.0, "total_overhead_ms": 26.0},
+                        {"checkpoint_ms": 10.0, "check_ms": 7.0, "total_overhead_ms": 17.0},
+                        {"checkpoint_ms": 12.0, "check_ms": 9.0, "total_overhead_ms": 21.0},
+                        {"checkpoint_ms": 8.0, "check_ms": 5.0, "total_overhead_ms": 13.0},
+                        {"checkpoint_ms": 15.0, "check_ms": 11.0, "total_overhead_ms": 26.0},
                     ],
                 }
             }
@@ -83,7 +81,7 @@ class TestExtractRerunOverheadData:
                     "rerun_n": 1,
                     "quartile_indices": [0],
                     "measurements": [
-                        {"checkpoint_ms": 10.0, "diff_ms": 5.0, "check_ms": 2.0, "total_overhead_ms": 17.0},
+                        {"checkpoint_ms": 10.0, "check_ms": 7.0, "total_overhead_ms": 17.0},
                     ],
                 }
             },
@@ -92,7 +90,7 @@ class TestExtractRerunOverheadData:
                     "rerun_n": 1,
                     "quartile_indices": [0],
                     "measurements": [
-                        {"checkpoint_ms": 20.0, "diff_ms": 10.0, "check_ms": 5.0, "total_overhead_ms": 35.0},
+                        {"checkpoint_ms": 20.0, "check_ms": 15.0, "total_overhead_ms": 35.0},
                     ],
                 }
             },
@@ -112,9 +110,9 @@ class TestExtractRerunOverheadData:
                     "rerun_n": 1,
                     "quartile_indices": [0, 1],
                     "measurements": [
-                        {"total_overhead_ms": 30.0, "checkpoint_ms": 0, "diff_ms": 0, "check_ms": 0},
-                        {"total_overhead_ms": 10.0, "checkpoint_ms": 0, "diff_ms": 0, "check_ms": 0},
-                        {"total_overhead_ms": 20.0, "checkpoint_ms": 0, "diff_ms": 0, "check_ms": 0},
+                        {"total_overhead_ms": 30.0, "checkpoint_ms": 0, "check_ms": 0},
+                        {"total_overhead_ms": 10.0, "checkpoint_ms": 0, "check_ms": 0},
+                        {"total_overhead_ms": 20.0, "checkpoint_ms": 0, "check_ms": 0},
                     ],
                 }
             }
@@ -134,7 +132,7 @@ class TestExtractRerunOverheadData:
                     "rerun_n": 1,
                     "quartile_indices": [0],
                     "measurements": [
-                        {"checkpoint_ms": 10.0, "diff_ms": 5.0, "check_ms": 2.0, "total_overhead_ms": 17.0},
+                        {"checkpoint_ms": 10.0, "check_ms": 7.0, "total_overhead_ms": 17.0},
                     ],
                 }
             },
@@ -156,12 +154,10 @@ class TestRerunOverheadCDFData:
             total_sorted=[10.0, 20.0],
             total_percentiles=[0.5, 1.0],
             checkpoint_ms=[5.0, 10.0],
-            diff_ms=[3.0, 6.0],
-            check_ms=[2.0, 4.0],
+            check_ms=[5.0, 10.0],
         )
         assert data.total_overhead_ms == [10.0, 20.0]
         assert data.total_sorted == [10.0, 20.0]
         assert data.total_percentiles == [0.5, 1.0]
         assert data.checkpoint_ms == [5.0, 10.0]
-        assert data.diff_ms == [3.0, 6.0]
-        assert data.check_ms == [2.0, 4.0]
+        assert data.check_ms == [5.0, 10.0]
