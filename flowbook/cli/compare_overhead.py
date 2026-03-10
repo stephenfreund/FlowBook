@@ -54,6 +54,190 @@ CACHE_BASE_DIR = "/tmp/flowbook_compare_overhead"
 
 
 # =============================================================================
+# Rerun Overhead Extraction and Plotting
+# =============================================================================
+
+
+@dataclass
+class RerunOverheadCDFData:
+    """Data for rerun overhead CDF plot."""
+    total_overhead_ms: List[float]
+    total_sorted: List[float]
+    total_percentiles: List[float]
+    checkpoint_ms: List[float]
+    diff_ms: List[float]
+    check_ms: List[float]
+
+
+def extract_rerun_overhead_data(raw_data_list: List[Dict]) -> Optional[RerunOverheadCDFData]:
+    """Extract rerun overhead data from raw comparison JSON data.
+
+    Args:
+        raw_data_list: List of raw JSON dicts from comparison files
+
+    Returns:
+        RerunOverheadCDFData or None if no rerun overhead data found
+    """
+    total_overhead_ms = []
+    checkpoint_ms = []
+    diff_ms = []
+    check_ms = []
+
+    for data in raw_data_list:
+        rerun = data.get("rerun_overhead")
+        if not rerun:
+            continue
+
+        measurements = rerun.get("measurements", [])
+        for m in measurements:
+            total_overhead_ms.append(m.get("total_overhead_ms", 0.0))
+            checkpoint_ms.append(m.get("checkpoint_ms", 0.0))
+            diff_ms.append(m.get("diff_ms", 0.0))
+            check_ms.append(m.get("check_ms", 0.0))
+
+    if not total_overhead_ms:
+        return None
+
+    # Sort for CDF
+    total_sorted = sorted(total_overhead_ms)
+    n = len(total_sorted)
+    total_percentiles = [(i + 1) / n for i in range(n)]
+
+    return RerunOverheadCDFData(
+        total_overhead_ms=total_overhead_ms,
+        total_sorted=total_sorted,
+        total_percentiles=total_percentiles,
+        checkpoint_ms=checkpoint_ms,
+        diff_ms=diff_ms,
+        check_ms=check_ms,
+    )
+
+
+def render_rerun_overhead_cdf(
+    ax,
+    data: RerunOverheadCDFData,
+    large_fonts: bool = True,
+) -> None:
+    """Render rerun overhead CDF panel.
+
+    Similar to the time CDF but with orange color for rerun data.
+
+    Args:
+        ax: Matplotlib axes
+        data: RerunOverheadCDFData with timing values
+        large_fonts: Use larger fonts
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
+
+    # Font sizes
+    label_size = 22 if large_fonts else 14
+    title_size = 24 if large_fonts else 16
+    tick_size = 18 if large_fonts else 12
+    annotation_size = 18 if large_fonts else 12
+    legend_fontsize = 14 if large_fonts else 10
+
+    sorted_vals = data.total_sorted
+    percentiles = data.total_percentiles
+    color = "#E67E22"  # Orange
+
+    # Plot CDF
+    ax.step(sorted_vals, percentiles, where='post', linewidth=2.5, color=color, label='Rerun Overhead')
+
+    # Fill area under curve
+    ax.fill_between(sorted_vals, percentiles, step='post', alpha=0.25, color=color)
+
+    # Add median and p90 annotations
+    n = len(sorted_vals)
+    if n > 0:
+        median_idx = n // 2
+        p90_idx = int(n * 0.9)
+        median_val = sorted_vals[median_idx] if median_idx < n else sorted_vals[-1]
+        p90_val = sorted_vals[p90_idx] if p90_idx < n else sorted_vals[-1]
+
+        ax.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5, linewidth=1)
+        ax.axhline(y=0.9, color='gray', linestyle='--', alpha=0.5, linewidth=1)
+
+        ax.annotate(f'median: {median_val:.1f}ms',
+                    xy=(median_val, 0.5),
+                    xytext=(median_val * 1.2, 0.55),
+                    fontsize=annotation_size,
+                    color='gray')
+        ax.annotate(f'p90: {p90_val:.1f}ms',
+                    xy=(p90_val, 0.9),
+                    xytext=(p90_val * 0.8, 0.95),
+                    fontsize=annotation_size,
+                    color='gray')
+
+    ax.set_xlabel('Rerun Overhead (ms)', fontsize=label_size)
+    ax.set_ylabel('CDF', fontsize=label_size)
+    ax.set_title('Rerun Overhead Time Distribution', fontsize=title_size)
+    ax.set_ylim(0, 1.02)
+    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.legend(fontsize=legend_fontsize)
+    ax.grid(True, alpha=0.3)
+
+
+def render_rerun_checkpoint_breakdown(
+    ax,
+    data: RerunOverheadCDFData,
+    notebook_name: str = "",
+    large_fonts: bool = True,
+) -> None:
+    """Render rerun checkpoint breakdown (plot 5 analog).
+
+    Shows timing breakdown of checkpoint/diff/check for rerun measurements.
+
+    Args:
+        ax: Matplotlib axes
+        data: RerunOverheadCDFData with timing values
+        notebook_name: Name for title
+        large_fonts: Use larger fonts
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Font sizes
+    label_size = 22 if large_fonts else 14
+    title_size = 24 if large_fonts else 16
+    tick_size = 18 if large_fonts else 12
+
+    n = len(data.total_overhead_ms)
+    if n == 0:
+        ax.text(0.5, 0.5, 'No rerun overhead data', ha='center', va='center',
+                transform=ax.transAxes, fontsize=label_size)
+        ax.set_title(f'Rerun Overhead Breakdown{" - " + notebook_name if notebook_name else ""}',
+                     fontsize=title_size)
+        return
+
+    # Calculate averages
+    avg_checkpoint = sum(data.checkpoint_ms) / n
+    avg_diff = sum(data.diff_ms) / n
+    avg_check = sum(data.check_ms) / n
+
+    categories = ['Checkpoint', 'Diff', 'Check']
+    values = [avg_checkpoint, avg_diff, avg_check]
+    colors = ['#3498DB', '#E74C3C', '#2ECC71']  # Blue, Red, Green
+
+    bars = ax.bar(categories, values, color=colors, edgecolor='black', linewidth=0.5)
+
+    # Add value labels on bars
+    for bar, val in zip(bars, values):
+        height = bar.get_height()
+        ax.annotate(f'{val:.1f}ms',
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, 3),
+                    textcoords="offset points",
+                    ha='center', va='bottom', fontsize=tick_size)
+
+    ax.set_ylabel('Time (ms)', fontsize=label_size)
+    ax.set_title(f'Rerun Overhead Breakdown{" - " + notebook_name if notebook_name else ""}',
+                 fontsize=title_size)
+    ax.tick_params(axis='both', labelsize=tick_size)
+    ax.grid(True, alpha=0.3, axis='y')
+
+
+# =============================================================================
 # Trial Grouping and Averaging
 # =============================================================================
 
@@ -3993,6 +4177,44 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
                         gpu_cdf_fig.tight_layout()
                         pdf.savefig(gpu_cdf_fig, dpi=150)
                         plt.close(gpu_cdf_fig)
+
+                # Rerun overhead plots (if any data exists)
+                rerun_cdf_data = extract_rerun_overhead_data(raw_data_list)
+                if rerun_cdf_data:
+                    import seaborn as sns
+                    sns.set_theme(style="whitegrid")
+
+                    # Rerun checkpoint breakdown page for each notebook
+                    for path, data in raw_data.items():
+                        rerun = data.get("rerun_overhead")
+                        if rerun and rerun.get("measurements"):
+                            notebook_name = Path(path).stem.replace("_comparison", "")
+                            # Extract per-notebook rerun data
+                            measurements = rerun.get("measurements", [])
+                            notebook_rerun = RerunOverheadCDFData(
+                                total_overhead_ms=[m.get("total_overhead_ms", 0) for m in measurements],
+                                total_sorted=sorted([m.get("total_overhead_ms", 0) for m in measurements]),
+                                total_percentiles=[],  # Not needed for breakdown
+                                checkpoint_ms=[m.get("checkpoint_ms", 0) for m in measurements],
+                                diff_ms=[m.get("diff_ms", 0) for m in measurements],
+                                check_ms=[m.get("check_ms", 0) for m in measurements],
+                            )
+                            breakdown_fig, breakdown_ax = plt.subplots(figsize=(8, 6))
+                            render_rerun_checkpoint_breakdown(
+                                breakdown_ax, notebook_rerun,
+                                notebook_name=notebook_name,
+                                large_fonts=args.large_fonts
+                            )
+                            breakdown_fig.tight_layout()
+                            pdf.savefig(breakdown_fig, dpi=150)
+                            plt.close(breakdown_fig)
+
+                    # Rerun overhead CDF page (combined across all notebooks)
+                    rerun_cdf_fig, rerun_cdf_ax = plt.subplots(figsize=(8, 6))
+                    render_rerun_overhead_cdf(rerun_cdf_ax, rerun_cdf_data, large_fonts=args.large_fonts)
+                    rerun_cdf_fig.tight_layout()
+                    pdf.savefig(rerun_cdf_fig, dpi=150)
+                    plt.close(rerun_cdf_fig)
 
         print(f"Combined plots saved to: {combined_path}")
 

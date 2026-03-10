@@ -21,7 +21,12 @@ from flowbook.kernel.changes import (
     RowsRemoved,
     ValueChanged,
 )
-from flowbook.kernel.conflict_resolver import ConflictResolver, ConflictResult
+from flowbook.kernel.conflict_resolver import (
+    ConflictResolver,
+    ConflictResult,
+    ViolationsResult,
+    DEFAULT_MAX_VIOLATIONS,
+)
 from flowbook.kernel.conflict_rules import (
     CONFLICT_RULES,
     ConflictRule,
@@ -588,3 +593,258 @@ class TestEdgeCases:
         )
         # With default rules this would be VIOLATION, but custom says OK
         assert result.severity == ConflictSeverity.OK
+
+
+# =============================================================================
+# Test Variable Indexing Optimization
+# =============================================================================
+
+
+class TestVariableIndexing:
+    """Tests for variable indexing optimization in check_all."""
+
+    def test_different_variables_no_conflict(self):
+        """Changes and reads with different variables produce no conflicts."""
+        resolver = ConflictResolver()
+
+        changes = [
+            ColumnModified(variable="df1", column="x"),
+            ColumnModified(variable="df2", column="y"),
+        ]
+        reads = [
+            ColumnRead(variable="df3", column="x"),
+            ColumnRead(variable="df4", column="y"),
+        ]
+
+        # With variable indexing, these should produce no results
+        # (since no variable names overlap)
+        results = resolver.check_all(changes, reads)
+        assert len(results) == 0
+
+    def test_only_matching_variables_checked(self):
+        """Only changes/reads with matching variables produce results."""
+        resolver = ConflictResolver()
+
+        changes = [
+            ColumnModified(variable="df", column="x"),
+            ColumnModified(variable="other", column="y"),
+        ]
+        reads = [
+            ColumnRead(variable="df", column="x"),  # Matches first change
+            ColumnRead(variable="unrelated", column="z"),  # No matching change
+        ]
+
+        results = resolver.check_all(changes, reads)
+        # Only df/x should match and produce a result
+        assert len(results) == 1
+        assert results[0].change.variable == "df"
+        assert results[0].severity == ConflictSeverity.VIOLATION
+
+    def test_many_columns_same_variable(self):
+        """Many columns on same variable are checked correctly."""
+        resolver = ConflictResolver()
+
+        # Create many column changes
+        changes = [
+            ColumnModified(variable="df", column=f"col_{i}")
+            for i in range(100)
+        ]
+        # Only read one column
+        reads = [ColumnRead(variable="df", column="col_50")]
+
+        violations = resolver.get_violations(changes, reads)
+        # Should find exactly one violation (col_50 modified and read)
+        assert len(violations) == 1
+        assert violations.violations[0].change.column == "col_50"
+
+
+# =============================================================================
+# Test ViolationsResult and Truncation
+# =============================================================================
+
+
+class TestViolationsResult:
+    """Tests for ViolationsResult class and truncation behavior."""
+
+    def test_violations_result_properties(self):
+        """ViolationsResult has correct properties."""
+        resolver = ConflictResolver()
+
+        changes = [ColumnModified(variable="df", column="x")]
+        reads = [ColumnRead(variable="df", column="x")]
+
+        result = resolver.get_violations(changes, reads)
+
+        assert isinstance(result, ViolationsResult)
+        assert len(result) == 1
+        assert result.total_count == 1
+        assert result.truncated is False
+        assert result.truncated_count == 0
+
+    def test_violations_result_iterable(self):
+        """ViolationsResult is iterable for backwards compatibility."""
+        resolver = ConflictResolver()
+
+        changes = [ColumnModified(variable="df", column="x")]
+        reads = [ColumnRead(variable="df", column="x")]
+
+        result = resolver.get_violations(changes, reads)
+
+        # Should be iterable
+        violations_list = list(result)
+        assert len(violations_list) == 1
+        assert violations_list[0].severity == ConflictSeverity.VIOLATION
+
+    def test_violations_result_bool(self):
+        """ViolationsResult is truthy when violations exist."""
+        resolver = ConflictResolver()
+
+        # With violation
+        changes = [ColumnModified(variable="df", column="x")]
+        reads = [ColumnRead(variable="df", column="x")]
+        result = resolver.get_violations(changes, reads)
+        assert bool(result) is True
+
+        # Without violation
+        changes = [ColumnModified(variable="df", column="x")]
+        reads = [ColumnRead(variable="df", column="y")]  # Different column
+        result = resolver.get_violations(changes, reads)
+        assert bool(result) is False
+
+    def test_truncation_with_max_violations(self):
+        """Results are truncated when exceeding max_violations."""
+        resolver = ConflictResolver()
+
+        # Create many violations
+        changes = [
+            ColumnModified(variable="df", column=f"col_{i}")
+            for i in range(100)
+        ]
+        reads = [
+            ColumnRead(variable="df", column=f"col_{i}")
+            for i in range(100)
+        ]
+
+        # Limit to 10 violations
+        result = resolver.get_violations(changes, reads, max_violations=10)
+
+        assert len(result.violations) == 10
+        assert result.total_count >= 10
+        assert result.truncated is True
+        assert result.truncated_count == result.total_count - 10
+
+    def test_no_truncation_under_limit(self):
+        """No truncation when under max_violations limit."""
+        resolver = ConflictResolver()
+
+        changes = [
+            ColumnModified(variable="df", column=f"col_{i}")
+            for i in range(5)
+        ]
+        reads = [
+            ColumnRead(variable="df", column=f"col_{i}")
+            for i in range(5)
+        ]
+
+        result = resolver.get_violations(changes, reads, max_violations=50)
+
+        assert len(result.violations) == 5
+        assert result.total_count == 5
+        assert result.truncated is False
+
+    def test_unlimited_violations(self):
+        """max_violations=None returns all violations."""
+        resolver = ConflictResolver()
+
+        changes = [
+            ColumnModified(variable="df", column=f"col_{i}")
+            for i in range(100)
+        ]
+        reads = [
+            ColumnRead(variable="df", column=f"col_{i}")
+            for i in range(100)
+        ]
+
+        result = resolver.get_violations(changes, reads, max_violations=None)
+
+        assert len(result.violations) == 100
+        assert result.total_count == 100
+        assert result.truncated is False
+
+    def test_default_max_violations(self):
+        """Default max_violations is applied."""
+        resolver = ConflictResolver()
+
+        # Create more violations than default limit
+        n = DEFAULT_MAX_VIOLATIONS + 20
+        changes = [
+            ColumnModified(variable="df", column=f"col_{i}")
+            for i in range(n)
+        ]
+        reads = [
+            ColumnRead(variable="df", column=f"col_{i}")
+            for i in range(n)
+        ]
+
+        result = resolver.get_violations(changes, reads)
+
+        assert len(result.violations) == DEFAULT_MAX_VIOLATIONS
+        assert result.truncated is True
+
+
+# =============================================================================
+# Test Massive Column List Performance
+# =============================================================================
+
+
+class TestMassiveColumnListPerformance:
+    """Tests for performance with large column lists (the original issue)."""
+
+    def test_many_columns_different_variables_fast(self):
+        """Many columns across different variables should be fast."""
+        resolver = ConflictResolver()
+
+        # 1000 changes across 100 different variables
+        changes = [
+            ColumnModified(variable=f"df_{i // 10}", column=f"col_{i}")
+            for i in range(1000)
+        ]
+        # Reads from only one variable
+        reads = [
+            ColumnRead(variable="df_0", column=f"col_{i}")
+            for i in range(10)
+        ]
+
+        # With variable indexing, this should only check 10*10=100 pairs
+        # instead of 1000*10=10000 pairs
+        result = resolver.get_violations(changes, reads)
+
+        # Should find violations for df_0 columns 0-9
+        assert len(result.violations) == 10
+
+    def test_feature_engineering_pattern(self):
+        """Simulates feature engineering creating many columns."""
+        resolver = ConflictResolver()
+
+        # Cell creates 180 new columns (like Body_Temp_Age_20..79)
+        changes = [
+            ColumnAdded(variable="train", column=f"Body_Temp_Age_{i}")
+            for i in range(20, 80)
+        ] + [
+            ColumnAdded(variable="train", column=f"Heart_Rate_Age_{i}")
+            for i in range(20, 80)
+        ] + [
+            ColumnAdded(variable="test", column=f"Body_Temp_Age_{i}")
+            for i in range(20, 80)
+        ]
+
+        # Prior cell read just the base columns
+        reads = [
+            ColumnRead(variable="train", column="Body_Temp"),
+            ColumnRead(variable="train", column="Heart_Rate"),
+            ColumnRead(variable="test", column="Body_Temp"),
+        ]
+
+        # ColumnAdded on different columns shouldn't conflict with ColumnRead
+        result = resolver.get_violations(changes, reads)
+        assert len(result.violations) == 0
