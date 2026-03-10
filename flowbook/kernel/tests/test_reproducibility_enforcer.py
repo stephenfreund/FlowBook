@@ -2925,12 +2925,12 @@ class TestStalenessMode:
 
     def test_set_staleness_mode_syntactic(self):
         """Can switch to syntactic mode."""
-        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
         assert self.sdc.staleness_mode == self.StalenessMode.SYNTACTIC
 
     def test_set_staleness_mode_semantic(self):
         """Can switch to semantic mode."""
-        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
         self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
         assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
 
@@ -2952,14 +2952,14 @@ class TestStalenessMode:
         assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
 
         # Switch to syntactic mode
-        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # Pre-checkpoint should be cleared
         assert f"{PRE_CHECKPOINT_PREFIX}a" not in self.checkpoints.saved
 
     def test_syntactic_mode_marks_stale_on_set_intersection(self):
         """Syntactic mode marks cells stale based on set intersection."""
-        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # A writes x
         self._save_pre_checkpoint("a", {})
@@ -3001,7 +3001,7 @@ class TestStalenessMode:
         value (B stale), then A re-writes x back to original (B still stale
         in syntactic mode because no convergence detection).
         """
-        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # A writes x=1
         self._save_pre_checkpoint("a", {})
@@ -3109,7 +3109,7 @@ class TestStalenessMode:
         This allows checkpoint size queries after a cell completes but before
         the next cell runs (important for benchmarking/compare_overhead).
         """
-        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # Execute cell A
         self._save_pre_checkpoint("a", {})
@@ -3173,7 +3173,7 @@ class TestStalenessMode:
         Note: Staleness is always computed, even when C triggers NoWriteAfterRead
         error (because C writes to x that A read).
         """
-        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # A reads x (clean cell that read x)
         self._save_pre_checkpoint("a", {"x": 1})
@@ -3295,7 +3295,7 @@ class TestStalenessMode:
         Note: Staleness is always computed, even when C triggers NoWriteAfterRead
         error (because C writes to x that A and B read).
         """
-        self.sdc.set_staleness_mode(self.StalenessMode.SYNTACTIC)
+        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # A reads x
         self._save_pre_checkpoint("a", {"x": 1})
@@ -3641,6 +3641,200 @@ class TestStalenessAlwaysComputed:
         if ENABLE_SKIPPED_UPSTREAM:
             # SKIPPED_UPSTREAM should be replaced by FORWARD_STALE
             assert ReasonType.SKIPPED_UPSTREAM not in reason_types
+
+
+class TestNoReadAndWriteColumnLevel:
+    """Tests for NoReadAndWrite predicate with column-level tracking.
+
+    The NoReadAndWrite predicate checks: Rᵢ ∩ Wᵢ = ∅ (cell should not read
+    and write the same location).
+
+    At column granularity, reading a variable binding (df) and writing to
+    its column (df['age']) are DIFFERENT locations. The violation should
+    only trigger when the SAME column is both read and written.
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        return namespace
+
+    def test_read_variable_write_column_no_violation(self):
+        """Reading df and writing df['age'] is NOT a NoReadAndWrite violation.
+
+        Pattern: df['age'] = 1
+        - Reads: df (the variable binding, to access the DataFrame object)
+        - Writes: df.age (the column)
+
+        These are different locations, so no violation.
+        """
+        import pandas as pd
+
+        # A writes df
+        df = pd.DataFrame({"age": [10, 20], "name": ["a", "b"]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B does: df['age'] = 1
+        # This reads df (variable) and writes df.age (column)
+        df_modified = df.copy()
+        df_modified["age"] = 1
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = self._make_namespace({"df": df_modified})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"},  # Read df to access the DataFrame
+                writes=set(),  # No variable-level writes
+                column_reads={},  # No column reads
+                column_writes={"df": {"age"}},  # Write to df.age
+            ),
+        )
+
+        # Should NOT have NoReadAndWrite error
+        no_rw_errors = [e for e in result.errors if e.error_type.value == "no_read_and_write"]
+        assert len(no_rw_errors) == 0, f"Unexpected NoReadAndWrite error: {no_rw_errors}"
+
+    def test_read_and_write_same_column_is_violation(self):
+        """Reading and writing the SAME column IS a NoReadAndWrite violation.
+
+        Pattern: df['age'] = df['age'] * 2
+        - Reads: df.age (the column)
+        - Writes: df.age (the same column)
+
+        This is a violation.
+        """
+        import pandas as pd
+
+        # A writes df
+        df = pd.DataFrame({"age": [10, 20], "name": ["a", "b"]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B does: df['age'] = df['age'] * 2
+        # This reads df.age and writes df.age
+        df_modified = df.copy()
+        df_modified["age"] = df_modified["age"] * 2
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = self._make_namespace({"df": df_modified})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"},  # Read df
+                writes=set(),  # No variable-level writes
+                column_reads={"df": {"age"}},  # Read df.age
+                column_writes={"df": {"age"}},  # Write df.age
+            ),
+        )
+
+        # SHOULD have NoReadAndWrite error for df.age
+        no_rw_errors = [e for e in result.errors if e.error_type.value == "no_read_and_write"]
+        assert len(no_rw_errors) == 1, f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
+        assert "df.age" in no_rw_errors[0].locations
+
+    def test_read_one_column_write_another_no_violation(self):
+        """Reading one column and writing another is NOT a violation.
+
+        Pattern: df['total'] = df['price'] * df['qty']
+        - Reads: df.price, df.qty
+        - Writes: df.total
+
+        Different columns, no violation.
+        """
+        import pandas as pd
+
+        # A writes df
+        df = pd.DataFrame({"price": [10, 20], "qty": [2, 3]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B does: df['total'] = df['price'] * df['qty']
+        df_modified = df.copy()
+        df_modified["total"] = df_modified["price"] * df_modified["qty"]
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = self._make_namespace({"df": df_modified})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"},  # Read df
+                writes=set(),  # No variable-level writes
+                column_reads={"df": {"price", "qty"}},  # Read df.price, df.qty
+                column_writes={"df": {"total"}},  # Write df.total
+            ),
+        )
+
+        # Should NOT have NoReadAndWrite error (different columns)
+        no_rw_errors = [e for e in result.errors if e.error_type.value == "no_read_and_write"]
+        assert len(no_rw_errors) == 0, f"Unexpected NoReadAndWrite error: {no_rw_errors}"
+
+    def test_variable_level_read_and_write_is_violation(self):
+        """Reading and writing the same variable is a violation (no column info).
+
+        Pattern: x = x + 1
+        - Reads: x
+        - Writes: x
+
+        This is a violation at the variable level.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B does: x = x + 1
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 2})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"x"},  # Read x
+                writes={"x"},  # Write x
+            ),
+        )
+
+        # SHOULD have NoReadAndWrite error
+        no_rw_errors = [e for e in result.errors if e.error_type.value == "no_read_and_write"]
+        assert len(no_rw_errors) == 1, f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
 
 
 class TestForwardStaleFormula:
@@ -4107,3 +4301,108 @@ class TestRollbackLastCheck:
 
         # C should have no forward violation (no "Read x from @D")
         assert result_c.forward_violation is None
+
+    def test_reexecute_same_cell_does_not_delete_new_checkpoint(self):
+        """
+        Re-executing the same cell twice in a row should not delete the new checkpoint.
+
+        Bug scenario (before fix):
+        1. Cell A executes, sets _pending_checkpoint_deletion = "_pre_a"
+        2. Cell A re-executes, creates new checkpoint "_pre_a" (same name)
+        3. check() starts, deletes pending checkpoint (which is the NEW one!)
+        4. Later restore attempt fails because checkpoint was deleted
+
+        The fix: check() skips deletion if pending checkpoint is for the current cell.
+        """
+        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
+
+        # Execute cell A first time
+        self._save_pre_checkpoint("a", {})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 1},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Verify pending deletion is set for cell A
+        assert self.sdc._pending_checkpoint_deletion == f"{PRE_CHECKPOINT_PREFIX}a"
+
+        # Re-execute cell A (same cell!) - creates new checkpoint with same name
+        self._save_pre_checkpoint("a", {"x": 1})
+        result = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 2},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Checkpoint should still exist (not deleted because it's for the current cell)
+        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
+
+        # Pending deletion should now be set for the new execution
+        assert self.sdc._pending_checkpoint_deletion == f"{PRE_CHECKPOINT_PREFIX}a"
+
+    def test_execute_different_cell_deletes_previous_checkpoint(self):
+        """
+        Executing a different cell should delete the pending checkpoint from previous cell.
+
+        This verifies the deferred deletion still works for different cells.
+        """
+        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
+
+        # Execute cell A
+        self._save_pre_checkpoint("a", {})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 1},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Verify A's checkpoint exists and is pending deletion
+        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
+        assert self.sdc._pending_checkpoint_deletion == f"{PRE_CHECKPOINT_PREFIX}a"
+
+        # Execute cell B (different cell)
+        self._save_pre_checkpoint("b", {"x": 1})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace={"x": 1, "y": 2},
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Cell A's checkpoint should now be deleted
+        assert f"{PRE_CHECKPOINT_PREFIX}a" not in self.checkpoints.saved
+
+        # Cell B's checkpoint should exist and be pending deletion
+        assert f"{PRE_CHECKPOINT_PREFIX}b" in self.checkpoints.saved
+        assert self.sdc._pending_checkpoint_deletion == f"{PRE_CHECKPOINT_PREFIX}b"
+
+    def test_rollback_clears_pending_checkpoint_deletion(self):
+        """
+        Rollback clears _pending_checkpoint_deletion.
+
+        When execution is rolled back, we should not delete the checkpoint
+        on the next execution (even of a different cell).
+        """
+        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
+
+        # Execute cell A
+        self._save_pre_checkpoint("a", {})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"x": 1},
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Verify pending deletion is set
+        assert self.sdc._pending_checkpoint_deletion == f"{PRE_CHECKPOINT_PREFIX}a"
+
+        # Rollback the check (simulating rejected execution)
+        self.sdc.rollback_last_check()
+
+        # Verify pending deletion is cleared
+        assert self.sdc._pending_checkpoint_deletion is None

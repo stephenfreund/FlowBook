@@ -1141,10 +1141,16 @@ class ReproducibilityEnforcer:
 
         # Process deferred checkpoint deletion from previous cell (syntactic mode)
         # This allows checkpoint size queries after a cell completes but before the next runs
+        # IMPORTANT: Skip deletion if the pending checkpoint is for the CURRENT cell.
+        # This happens when the same cell is executed twice in a row - the first execution
+        # sets pending deletion, and the second execution creates a new checkpoint with
+        # the same name. We must not delete the newly created checkpoint!
+        current_cell_checkpoint = f"{PRE_CHECKPOINT_PREFIX}{cell_id}"
         if self._pending_checkpoint_deletion is not None:
-            self.checkpoints.delete(self._pending_checkpoint_deletion)
-            from flowbook.kernel_support.deepcopy import clear_container_cache
-            clear_container_cache()
+            if self._pending_checkpoint_deletion != current_cell_checkpoint:
+                self.checkpoints.delete(self._pending_checkpoint_deletion)
+                from flowbook.kernel_support.deepcopy import clear_container_cache
+                clear_container_cache()
             self._pending_checkpoint_deletion = None
 
         self.seq_counter += 1
@@ -1891,13 +1897,14 @@ class ReproducibilityEnforcer:
                 # This is fine (e.g., read df['a'], write df['b']) - skip this variable
                 pass
             elif var_col_writes and not var_col_reads:
-                # Have column writes but no column reads
-                # Variable was read (in R_i) but only columns were written
-                # Check if variable-level read overlaps with column writes
-                if var in (tracking.reads_before_writes or set()):
-                    # Variable itself was read, then columns written - show columns
-                    for col in sorted(var_col_writes):
-                        locations.append(f"{var}.{col}")
+                # Have column writes but no column reads.
+                # Variable was read (in R_i) to access the object, but only columns were written.
+                # This is NOT a NoReadAndWrite violation because reading the variable binding
+                # (e.g., `df`) and writing to its column (e.g., `df['age']`) are semantically
+                # different locations. The formal predicate Rᵢ ∩ Wᵢ = ∅ requires the SAME
+                # location to be both read and written.
+                # Example: `df['age'] = 1` reads `df` (binding) and writes `df.age` (column).
+                pass
             elif var_col_reads and not var_col_writes:
                 # Have column reads but no column writes
                 # Check if variable-level write overlaps with column reads
@@ -2652,10 +2659,17 @@ class ReproducibilityEnforcer:
         - Per-cell state (reads, writes, status, tracking_data, etc.)
         - last_writer entries that pointed to the cell
         - column_last_writer entries that pointed to the cell
+        - Clears pending checkpoint deletion (since the cell was rejected,
+          we shouldn't delete its checkpoint on the next execution)
         """
         if self._pending_snapshot is not None:
             self._notebook_state.restore_cell_state(self._pending_snapshot)
             self._pending_snapshot = None
+        # Clear pending checkpoint deletion since the cell execution was rolled back.
+        # If we don't clear this, re-executing the same cell would delete the newly
+        # created checkpoint (same name) at the start of check(), causing a crash
+        # when trying to restore later.
+        self._pending_checkpoint_deletion = None
 
 
 def _extract_column_changes(
