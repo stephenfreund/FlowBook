@@ -312,14 +312,20 @@ export class ReproducibilityExecutionHookManager {
     }
   }
 
-  private _extractReproducibilityMetadata(
-    outputs: IOutput[]
-  ): IReproducibilityMetadata | null {
+  /**
+   * Extract reproducibility metadata from cell outputs.
+   * Returns the metadata and the index of the output containing it (for removal).
+   */
+  private _extractReproducibilityMetadata(outputs: IOutput[]): {
+    metadata: IReproducibilityMetadata | null;
+    outputIndex: number | null;
+  } {
     console.log(
       `ReproducibilityExecutionHook: Checking ${outputs.length} outputs for flowbook metadata`
     );
 
-    for (const output of outputs) {
+    for (let i = 0; i < outputs.length; i++) {
+      const output = outputs[i];
       console.log(
         `ReproducibilityExecutionHook: Output type = ${output.output_type}`
       );
@@ -343,12 +349,15 @@ export class ReproducibilityExecutionHookManager {
         'ReproducibilityExecutionHook: Found flowbook metadata!',
         metadata.flowbook
       );
-      return metadata.flowbook as IReproducibilityMetadata;
+      return {
+        metadata: metadata.flowbook as IReproducibilityMetadata,
+        outputIndex: i
+      };
     }
     console.log(
       'ReproducibilityExecutionHook: No flowbook metadata found in any output'
     );
-    return null;
+    return { metadata: null, outputIndex: null };
   }
 
   private _onCellExecuted(
@@ -386,7 +395,12 @@ export class ReproducibilityExecutionHookManager {
       // Let cellhighlighter handle the rendering
       const cellOrder = this._getCurrentCellOrder(panel);
       const stalenessManager = this._highlighter.getStalenessManager(panel);
-      this._highlighter.updateCell(cell, stalenessManager, cellOrder, panel.context.path);
+      this._highlighter.updateCell(
+        cell,
+        stalenessManager,
+        cellOrder,
+        panel.context.path
+      );
 
       console.log(
         `ReproducibilityExecutionHook: Handled predicate violation for cell ${cell.model.id}, accepted=${predicateViolation.accepted}`
@@ -399,14 +413,25 @@ export class ReproducibilityExecutionHookManager {
     }
 
     // Extract reproducibility metadata
-    const reproducibilityMetadata =
-      this._extractReproducibilityMetadata(outputs);
+    const {
+      metadata: reproducibilityMetadata,
+      outputIndex: metadataOutputIndex
+    } = this._extractReproducibilityMetadata(outputs);
     if (!reproducibilityMetadata) {
       // If we had a predicate violation but no metadata, we're done
       if (predicateViolation) {
         return;
       }
       return;
+    }
+
+    // Remove the metadata output from cell display (keep it clean for the user)
+    if (metadataOutputIndex !== null) {
+      const codeModel = cell.model as ICodeCellModel;
+      codeModel.outputs.remove(metadataOutputIndex);
+      console.log(
+        `ReproducibilityExecutionHook: Removed flowbook metadata output at index ${metadataOutputIndex}`
+      );
     }
 
     // Store metadata on cell
@@ -463,7 +488,12 @@ export class ReproducibilityExecutionHookManager {
 
         // Let cellhighlighter handle the rendering
         const stalenessManager = this._highlighter.getStalenessManager(panel);
-        this._highlighter.updateCell(writerCell, stalenessManager, cellOrder, panel.context.path);
+        this._highlighter.updateCell(
+          writerCell,
+          stalenessManager,
+          cellOrder,
+          panel.context.path
+        );
 
         console.log(
           `ReproducibilityExecutionHook: Stored writer_violation on cell ${wv.mutating_cell}`
@@ -473,7 +503,12 @@ export class ReproducibilityExecutionHookManager {
 
     // Let cellhighlighter handle all cell rendering
     const stalenessManager = this._highlighter.getStalenessManager(panel);
-    this._highlighter.updateCell(cell, stalenessManager, cellOrder, panel.context.path);
+    this._highlighter.updateCell(
+      cell,
+      stalenessManager,
+      cellOrder,
+      panel.context.path
+    );
 
     console.log(
       `ReproducibilityExecutionHook: Extracted metadata for cell ${cell.model.id}:`,
@@ -485,7 +520,9 @@ export class ReproducibilityExecutionHookManager {
    * Extract predicate violation from kernel outputs (new unified format).
    * Returns the violation if found, null otherwise.
    */
-  private _extractPredicateViolation(outputs: IOutput[]): IPredicateViolation | null {
+  private _extractPredicateViolation(
+    outputs: IOutput[]
+  ): IPredicateViolation | null {
     for (const output of outputs) {
       if (output.output_type !== 'display_data') {
         continue;
@@ -628,7 +665,12 @@ export class ReproducibilityExecutionHookManager {
    * Maps backend reason types to frontend types with human-readable messages.
    */
   private _backendReasonToFrontend(
-    backendReason: { type: string; loc?: string; cell_id?: string; expected_cell_id?: string },
+    backendReason: {
+      type: string;
+      loc?: string;
+      cell_id?: string;
+      expected_cell_id?: string;
+    },
     cellOrder: string[]
   ): IFrontendStalenessReason {
     const cellId = backendReason.cell_id;
@@ -906,5 +948,4 @@ export class ReproducibilityExecutionHookManager {
     }
     return null;
   }
-
 }

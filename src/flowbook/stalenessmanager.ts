@@ -122,7 +122,14 @@ export class StalenessManager {
       }
     }
 
-    console.log('StalenessManager: Added =', added, ', Removed =', removed, ', ReasonsChanged =', reasonsChanged);
+    console.log(
+      'StalenessManager: Added =',
+      added,
+      ', Removed =',
+      removed,
+      ', ReasonsChanged =',
+      reasonsChanged
+    );
     console.log(
       'StalenessManager: Reasons =',
       Object.fromEntries(this._stalenessReasons)

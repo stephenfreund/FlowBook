@@ -800,16 +800,19 @@
    FlowBook Reproducibility Styles
    ======================================== */
 
-/* Stale cell highlighting - only the editor box, not the full cell */
+/* Stale cell highlighting - subtle left border only */
 .jp-Cell.flowbook-cell-stale .jp-InputArea-editor {
-  background-color: rgb(255 193 7 / 15%);
-  border: 1px solid #ffc107;
+  border-left: 3px solid #ffc107;
 }
 
 /* Unexecuted cell highlighting - same as stale but no notice message */
 .jp-Cell.flowbook-cell-unexecuted .jp-InputArea-editor {
-  background-color: rgb(255 193 7 / 15%);
-  border: 1px solid #ffc107;
+  border-left: 3px solid #ffc107;
+}
+
+/* Error cell highlighting - red left border for violations */
+.jp-Cell.flowbook-cell-error .jp-InputArea-editor {
+  border-left: 3px solid #dc3545;
 }
 
 /* FlowBook Reproducibility Variable/Cell Lists */
@@ -941,13 +944,17 @@
   color: #856404;
 }
 
-/* Staleness notice output */
+/* Staleness notice output - compact with width limit */
 .flowbook-staleness-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: max(33%, 300px);
   background-color: #fff3cd;
   border: 1px solid #ffc107;
-  border-radius: 4px;
-  padding: 6px 10px;
-  font-size: 0.88em;
+  border-radius: 3px;
+  padding: 3px 8px;
+  font-size: 0.85em;
   color: #664d03;
 }
 
@@ -955,6 +962,16 @@
   background-color: rgb(255 193 7 / 18%);
   padding: 1px 4px;
   border-radius: 2px;
+}
+
+.flowbook-staleness-info-icon {
+  cursor: help;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.flowbook-staleness-info-icon:hover {
+  opacity: 1;
 }
 
 /* Violation notice output (matches staleness notice pattern) */
