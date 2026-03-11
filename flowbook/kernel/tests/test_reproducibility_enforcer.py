@@ -4406,3 +4406,289 @@ class TestRollbackLastCheck:
 
         # Verify pending deletion is cleared
         assert self.sdc._pending_checkpoint_deletion is None
+
+
+class TestColumnAliasExpansion:
+    """
+    Test that column reads/writes are properly expanded with aliases.
+
+    When x and y are aliases for the same DataFrame p, and code reads p['col'],
+    the column read set should include x['col'] and y['col'] too for proper
+    staleness detection.
+    """
+
+    def setup_method(self):
+        from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
+
+        self.checkpoints = MemoryCheckpoints(sanity_check=False, warn_classes=False)
+        self.sdc = ReproducibilityEnforcer(
+            self.checkpoints, structural_mode=StructuralTrackingMode.OFF
+        )
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        """Save a pre-checkpoint for a cell."""
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        """Return namespace dict for use with check()."""
+        return namespace
+
+    def test_forward_staleness_through_alias(self):
+        """
+        Cell A reads p['col']
+        Cell B creates alias: x = p
+        Cell C writes x['col']
+        Cell A should become stale.
+
+        This is the key test for the alias expansion feature.
+        """
+        import pandas as pd
+
+        p = pd.DataFrame({"col": [1, 2, 3]})
+
+        # Cell A: reads p['col']
+        self._save_pre_checkpoint("a", {"p": p})
+        ns_a = self._make_namespace({"p": p})
+        result_a = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"p"}, writes=set(), column_reads={"p": {"col"}}),
+        )
+        assert result_a.violation is None
+        # Don't check stale_cells here - b,c,d may be stale from first execution
+
+        # Cell B: creates alias x = p (same object)
+        x = p  # Same DataFrame object
+        self._save_pre_checkpoint("b", {"p": p, "x": x})
+        ns_b = self._make_namespace({"p": p, "x": x})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"p"}, writes={"x"}),
+        )
+        assert result_b.violation is None
+
+        # Cell C: writes x['col'] (modifying through alias)
+        p_modified = pd.DataFrame({"col": [999, 999, 999]})
+        self._save_pre_checkpoint("c", {"p": p, "x": x})
+        ns_c = self._make_namespace({"p": p_modified, "x": p_modified})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(writes={"x"}, column_writes={"x": {"col"}}),
+        )
+
+        # Cell A should be stale because p['col'] changed (via alias x)
+        assert "a" in result_c.stale_cells, (
+            f"Cell A should be stale after C writes x['col'] (x is alias for p). "
+            f"Got stale_cells={result_c.stale_cells}"
+        )
+
+    def test_no_false_positive_different_dataframes(self):
+        """
+        Cell A reads p['col']
+        Cell B has different DataFrame x (NOT alias)
+        Cell C writes x['col']
+        Cell A should NOT become stale (different objects).
+        """
+        import pandas as pd
+
+        p = pd.DataFrame({"col": [1, 2, 3]})
+        x = pd.DataFrame({"col": [4, 5, 6]})  # Different DataFrame object
+
+        # Cell A: reads p['col']
+        self._save_pre_checkpoint("a", {"p": p})
+        ns_a = self._make_namespace({"p": p})
+        result_a = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"p"}, writes=set(), column_reads={"p": {"col"}}),
+        )
+        assert result_a.violation is None
+
+        # Cell B: creates independent x
+        self._save_pre_checkpoint("b", {"p": p, "x": x})
+        ns_b = self._make_namespace({"p": p, "x": x})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(writes={"x"}),
+        )
+
+        # Cell C: writes x['col'] (different DataFrame from p)
+        x_modified = pd.DataFrame({"col": [999, 999, 999]})
+        self._save_pre_checkpoint("c", {"p": p, "x": x})
+        ns_c = self._make_namespace({"p": p, "x": x_modified})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(writes={"x"}, column_writes={"x": {"col"}}),
+        )
+
+        # Cell A should NOT be stale (x is different DataFrame from p)
+        assert "a" not in result_c.stale_cells, (
+            f"Cell A should NOT be stale when x is a different DataFrame from p. "
+            f"Got stale_cells={result_c.stale_cells}"
+        )
+
+    def test_multiple_aliases_forward_staleness(self):
+        """
+        Cell A reads p['col']
+        Cell B creates multiple aliases: x = p, y = p
+        Cell C writes through y['col']
+        Cell A should become stale.
+        """
+        import pandas as pd
+
+        p = pd.DataFrame({"col": [1, 2, 3]})
+
+        # Cell A: reads p['col']
+        self._save_pre_checkpoint("a", {"p": p})
+        ns_a = self._make_namespace({"p": p})
+        result_a = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"p"}, writes=set(), column_reads={"p": {"col"}}),
+        )
+        assert result_a.violation is None
+
+        # Cell B: creates multiple aliases
+        x = p
+        y = p  # Both are same object as p
+        self._save_pre_checkpoint("b", {"p": p, "x": x, "y": y})
+        ns_b = self._make_namespace({"p": p, "x": x, "y": y})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"p"}, writes={"x", "y"}),
+        )
+
+        # Cell C: writes through y (which is alias for p)
+        p_modified = pd.DataFrame({"col": [999, 999, 999]})
+        self._save_pre_checkpoint("c", {"p": p, "x": x, "y": y})
+        ns_c = self._make_namespace({"p": p_modified, "x": p_modified, "y": p_modified})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(writes={"y"}, column_writes={"y": {"col"}}),
+        )
+
+        # Cell A should be stale because p['col'] changed via y
+        assert "a" in result_c.stale_cells, (
+            f"Cell A should be stale after C writes y['col'] (y is alias for p). "
+            f"Got stale_cells={result_c.stale_cells}"
+        )
+
+    def test_column_reads_include_aliases_in_notebook_state(self):
+        """
+        When x and y are aliases for p, if Cell A reads p['col'],
+        then notebook_state.get_column_reads("a") should include
+        entries for x['col'] and y['col'] too, not just p['col'].
+
+        This is about the metadata being complete for display/debugging.
+        """
+        import pandas as pd
+
+        p = pd.DataFrame({"col": [1, 2, 3]})
+        x = p  # alias
+        y = p  # alias
+
+        # First create the aliases in the namespace
+        self._save_pre_checkpoint("b", {"p": p, "x": x, "y": y})
+        ns_b = self._make_namespace({"p": p, "x": x, "y": y})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"p", "x", "y"}),
+        )
+
+        # Cell A (after B) reads p['col']
+        self._save_pre_checkpoint("a", {"p": p, "x": x, "y": y})
+        ns_a = self._make_namespace({"p": p, "x": x, "y": y})
+        result_a = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"p"}, writes=set(), column_reads={"p": {"col"}}),
+        )
+
+        # Get the column reads stored in notebook state
+        column_reads = self.sdc._notebook_state.get_column_reads("a")
+
+        # With alias expansion, column_reads should include x and y too
+        # since they're aliases for p
+        assert "p" in column_reads, f"p should be in column_reads. Got: {column_reads}"
+        assert "col" in column_reads.get("p", set()), f"col should be in p's reads. Got: {column_reads}"
+
+        # THE KEY ASSERTION: aliases should also appear
+        assert "x" in column_reads, (
+            f"x (alias for p) should be in column_reads when p['col'] is read. "
+            f"Got: {column_reads}"
+        )
+        assert "y" in column_reads, (
+            f"y (alias for p) should be in column_reads when p['col'] is read. "
+            f"Got: {column_reads}"
+        )
+
+    def test_structural_reads_include_aliases_in_notebook_state(self):
+        """
+        When x and y are aliases for p, if Cell A reads p.shape,
+        then notebook_state.get_structural_reads("a") should include
+        entries for x.shape and y.shape too, not just p.shape.
+        """
+        import pandas as pd
+
+        p = pd.DataFrame({"col": [1, 2, 3]})
+        x = p  # alias
+        y = p  # alias
+
+        # First create the aliases in the namespace
+        self._save_pre_checkpoint("b", {"p": p, "x": x, "y": y})
+        ns_b = self._make_namespace({"p": p, "x": x, "y": y})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"p", "x", "y"}),
+        )
+
+        # Cell A (after B) reads p.shape (structural read)
+        self._save_pre_checkpoint("a", {"p": p, "x": x, "y": y})
+        ns_a = self._make_namespace({"p": p, "x": x, "y": y})
+        result_a = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(
+                reads={"p"}, writes=set(),
+                structural_reads={"p": {"shape", "columns"}}
+            ),
+        )
+
+        # Get the structural reads stored in notebook state
+        structural_reads = self.sdc._notebook_state.get_structural_reads("a")
+
+        # With alias expansion, structural_reads should include x and y too
+        assert "p" in structural_reads, f"p should be in structural_reads. Got: {structural_reads}"
+        assert "shape" in structural_reads.get("p", set()), f"shape should be in p's reads. Got: {structural_reads}"
+
+        # THE KEY ASSERTION: aliases should also appear
+        assert "x" in structural_reads, (
+            f"x (alias for p) should be in structural_reads when p.shape is read. "
+            f"Got: {structural_reads}"
+        )
+        assert "y" in structural_reads, (
+            f"y (alias for p) should be in structural_reads when p.shape is read. "
+            f"Got: {structural_reads}"
+        )

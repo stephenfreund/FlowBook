@@ -653,6 +653,58 @@ def _expand_with_deep_aliases(
     return pre_checkpoint.get_aliases_for_vars(accessed_vars, log_aliases=log_aliases)
 
 
+def _expand_var_set_dict_with_aliases(
+    var_set_dict: Dict[str, Set[str]],
+    pre_checkpoint,
+) -> Dict[str, Set[str]]:
+    """
+    Expand a var->set dict to include all aliases of each variable.
+
+    Used for column reads/writes and structural reads where we need to
+    record that accessing p['col'] or p.shape implicitly accesses
+    x['col'] or x.shape for any alias x of p.
+
+    Example:
+        If p and x are aliases for the same DataFrame, and
+        var_set_dict = {'p': {'col1'}}, returns {'p': {'col1'}, 'x': {'col1'}}.
+
+    Args:
+        var_set_dict: Dict mapping var names to sets of attributes/columns
+        pre_checkpoint: Pre-execution checkpoint for alias lookup
+
+    Returns:
+        Expanded dict including all aliases with their attributes/columns
+    """
+    if not var_set_dict or pre_checkpoint is None:
+        return var_set_dict
+
+    # Get all aliases for variables in the dict
+    vars_to_expand = set(var_set_dict.keys())
+    expanded_vars = pre_checkpoint.get_aliases_for_vars(vars_to_expand, log_aliases=False)
+
+    # Find new aliases (vars in expanded_vars but not in original)
+    new_aliases = expanded_vars - vars_to_expand
+
+    if not new_aliases:
+        return var_set_dict
+
+    # Build expanded dict - start with copy of original
+    result: Dict[str, Set[str]] = {k: set(v) for k, v in var_set_dict.items()}
+
+    # For each new alias, determine which original var it aliases
+    # and copy that var's attributes to the alias
+    for alias in new_aliases:
+        # Find which original vars this alias shares IDs with
+        alias_set = pre_checkpoint.get_aliases_for_vars({alias}, log_aliases=False)
+        for orig_var in vars_to_expand:
+            if orig_var in alias_set:
+                # alias is an alias of orig_var - copy attributes
+                result[alias] = set(var_set_dict[orig_var])
+                break
+
+    return result
+
+
 def _tracking_mode_to_structural_mode(mode: StructuralTrackingMode) -> StructuralMode:
     """Convert StructuralTrackingMode to StructuralMode for the new resolver."""
     if mode == StructuralTrackingMode.ENFORCE:
@@ -1158,6 +1210,36 @@ class ReproducibilityEnforcer:
         problems: List[Reason] = []
 
         # ================================================================
+        # Expand column and structural tracking with aliases early
+        # This ensures the expanded versions are used throughout.
+        # When x and y are aliases for p, reading p['col'] should also record
+        # x['col'] and y['col'] in the tracking data for proper staleness detection.
+        # ================================================================
+        expanded_column_reads = _expand_var_set_dict_with_aliases(
+            {k: set(v) for k, v in tracking.column_reads_before_writes.items()},
+            pre_checkpoint,
+        )
+        expanded_column_writes = _expand_var_set_dict_with_aliases(
+            {k: set(v) for k, v in tracking.column_writes.items()},
+            pre_checkpoint,
+        )
+        expanded_structural_reads = _expand_var_set_dict_with_aliases(
+            {k: set(v) for k, v in tracking.structural_reads.items()},
+            pre_checkpoint,
+        )
+
+        # Replace tracking with expanded version for use throughout
+        tracking = TrackingData(
+            reads_before_writes=tracking.reads_before_writes,
+            writes=tracking.writes,
+            column_reads_before_writes=expanded_column_reads,
+            column_writes=expanded_column_writes,
+            structural_reads=expanded_structural_reads,
+            file_reads_before_writes=tracking.file_reads_before_writes,
+            file_writes=tracking.file_writes,
+        )
+
+        # ================================================================
         # STEP 1: Compute r (reads) and w (writes) from tracking
         # Ref: FORMAL_DEVELOPMENT.md §3.1, line 169
         # ================================================================
@@ -1212,6 +1294,8 @@ class ReproducibilityEnforcer:
             structural_read_values = {}
             if namespace is not None and tracking.structural_reads:
                 structural_read_values = capture_structural_read_values(namespace, tracking.structural_reads)
+
+            # tracking is already alias-expanded at the start of check()
             self._notebook_state.record_execution(
                 cell_id,
                 tracking=tracking,
@@ -1309,6 +1393,7 @@ class ReproducibilityEnforcer:
         # Snapshot state before update (for potential rollback)
         self._pending_snapshot = self._notebook_state.snapshot_cell_state(cell_id)
 
+        # tracking is already alias-expanded at the start of check()
         self._notebook_state.record_execution(
             cell_id,
             tracking=tracking,
