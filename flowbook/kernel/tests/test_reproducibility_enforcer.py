@@ -5357,6 +5357,10 @@ class TestColumnAliasExpansion:
         assert result_b.violation is None
 
         # Cell C: writes x['col'] (modifying through alias)
+        # Since Cell A (earlier) read p['col'] and C writes x['col'] (alias for p),
+        # this triggers a NoWriteAfterRead violation. We use continue_on_violation=True
+        # to allow staleness computation even with the violation, since we're testing
+        # that alias expansion correctly identifies the staleness relationship.
         p_modified = pd.DataFrame({"col": [999, 999, 999]})
         self._save_pre_checkpoint("c", {"p": p, "x": x})
         ns_c = self._make_namespace({"p": p_modified, "x": p_modified})
@@ -5365,6 +5369,7 @@ class TestColumnAliasExpansion:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             namespace=ns_c,
             tracking=make_tracking(writes={"x"}, column_writes={"x": {"col"}}),
+            continue_on_violation=True,
         )
 
         # Cell A should be stale because p['col'] changed (via alias x)
@@ -5462,6 +5467,8 @@ class TestColumnAliasExpansion:
         )
 
         # Cell C: writes through y (which is alias for p)
+        # This is actually a backward mutation (C writes location that earlier A read),
+        # but we want to test staleness propagation, so continue_on_violation=True
         p_modified = pd.DataFrame({"col": [999, 999, 999]})
         self._save_pre_checkpoint("c", {"p": p, "x": x, "y": y})
         ns_c = self._make_namespace({"p": p_modified, "x": p_modified, "y": p_modified})
@@ -5470,6 +5477,7 @@ class TestColumnAliasExpansion:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             namespace=ns_c,
             tracking=make_tracking(writes={"y"}, column_writes={"y": {"col"}}),
+            continue_on_violation=True,
         )
 
         # Cell A should be stale because p['col'] changed via y
