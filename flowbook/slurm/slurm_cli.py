@@ -818,6 +818,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Suffix appended to the target name when missing (default: .ipynb; set to '' to disable)",
     )
     parser.add_argument(
+        "--suffix",
+        default="",
+        help="Suffix to add to notebook names before extension (e.g., -fixed → notebook-fixed.ipynb)",
+    )
+    parser.add_argument(
         "input_files",
         nargs="+",
         help="Input files: .txt files (one target per line) or .ipynb files (direct jobs)",
@@ -830,12 +835,30 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return args
 
 
-def load_work_items(work_file: Path, cli_env: Optional[str]) -> List[WorkItem]:
+def apply_suffix(notebook_path: Path, suffix: str) -> Path:
+    """Apply suffix to notebook path before the extension.
+
+    Args:
+        notebook_path: Original notebook path
+        suffix: Suffix to add (e.g., "-fixed")
+
+    Returns:
+        Path with suffix applied (e.g., notebook-fixed.ipynb)
+    """
+    if not suffix:
+        return notebook_path
+    return notebook_path.parent / f"{notebook_path.stem}{suffix}{notebook_path.suffix}"
+
+
+def load_work_items(
+    work_file: Path, cli_env: Optional[str], suffix: str = ""
+) -> List[WorkItem]:
     """Return work items from a .txt file, ignoring comments and blank lines.
 
     Args:
         work_file: Path to .txt file containing notebook paths (one per line)
         cli_env: Optional environment name from --env CLI flag
+        suffix: Suffix to add to notebook names (e.g., "-fixed")
 
     Returns:
         List of WorkItem objects with resolved environments
@@ -848,6 +871,7 @@ def load_work_items(work_file: Path, cli_env: Optional[str]) -> List[WorkItem]:
         if not line or line.startswith("#"):
             continue
         notebook_path = work_file.parent / line
+        notebook_path = apply_suffix(notebook_path, suffix)
         # Resolve environment for this notebook (source_file is the .txt file)
         work_item = resolve_environment(notebook_path, work_file, cli_env)
         items.append(work_item)
@@ -855,13 +879,14 @@ def load_work_items(work_file: Path, cli_env: Optional[str]) -> List[WorkItem]:
 
 
 def collect_work_items(
-    input_files: List[str], cli_env: Optional[str]
+    input_files: List[str], cli_env: Optional[str], suffix: str = ""
 ) -> List[WorkItem]:
     """Collect work items from multiple input files with resolved environments.
 
     Args:
         input_files: List of input file paths (.txt or .ipynb files)
         cli_env: Optional environment name from --env CLI flag
+        suffix: Suffix to add to notebook names (e.g., "-fixed")
 
     Returns:
         List of WorkItem objects with resolved environments
@@ -876,13 +901,14 @@ def collect_work_items(
         if not file_path.is_file():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        suffix = file_path.suffix.lower()
-        if suffix == ".txt":
+        file_suffix = file_path.suffix.lower()
+        if file_suffix == ".txt":
             # Load notebooks from text file with environment resolution
-            items.extend(load_work_items(file_path, cli_env))
-        elif suffix == ".ipynb":
+            items.extend(load_work_items(file_path, cli_env, suffix))
+        elif file_suffix == ".ipynb":
             # Direct notebook file (source_file is None for direct .ipynb)
-            work_item = resolve_environment(file_path, None, cli_env)
+            notebook_path = apply_suffix(file_path, suffix)
+            work_item = resolve_environment(notebook_path, None, cli_env)
             items.append(work_item)
         else:
             raise ValueError(
@@ -1195,7 +1221,7 @@ def submit_single_job(work_item: WorkItem, args: argparse.Namespace) -> Optional
 def main() -> None:
     """Script entry point."""
     args = parse_args(sys.argv[1:])
-    work_items = collect_work_items(args.input_files, args.env)
+    work_items = collect_work_items(args.input_files, args.env, args.suffix)
     if not work_items:
         print("[INFO] No valid work items found. Nothing to submit.")
         return
