@@ -400,7 +400,9 @@ class ReasonType(str, Enum):
     - FORWARD_STALE: ForwardStale(R,W,i,j) - cell j>i reads location that i wrote
     - WRITE_OVERLAP: ForwardStale write part - cell j>i writes to location that i wrote
     - BACKWARD_STALE: BackwardStale(W,W',i,j) - cell j<i was last writer of removed write
-    - NO_READ_BEFORE_WRITE: ¬NoReadBeforeWrite - reads location written by later cell
+    - NO_READ_BEFORE_WRITE: ¬NoReadBeforeWrite - reads location written by later cell (forward contamination)
+    - NO_READ_AND_WRITE: ¬NoReadAndWrite - cell reads and writes same location
+    - WRITE_BEFORE_READ: ¬WriteBeforeRead - reads user var not written by earlier cell
     - NO_WRITE_AFTER_READ: ¬NoWriteAfterRead - wrote location read by earlier fresh cell
     - READS_RESIDUAL_WRITE: ReadsResidualWrite - reads from deleted cell's writes
     """
@@ -410,7 +412,9 @@ class ReasonType(str, Enum):
     FORWARD_STALE = "forward_stale"  # was INPUT_CHANGED - cell reads location that changed
     WRITE_OVERLAP = "write_overlap"  # cell writes to same location as earlier cell (no convergence)
     BACKWARD_STALE = "backward_stale"  # was WRITE_CONFLICT
-    NO_READ_BEFORE_WRITE = "no_read_before_write"  # was READS_FROM_LATER
+    NO_READ_BEFORE_WRITE = "no_read_before_write"  # was READS_FROM_LATER - forward contamination
+    NO_READ_AND_WRITE = "no_read_and_write"  # cell reads and writes same location
+    WRITE_BEFORE_READ = "write_before_read"  # reads user var not written by earlier cell
     READS_RESIDUAL_WRITE = "reads_residual_write"  # was SOURCE_DELETED
     ORDER_CHANGED = "order_changed"
     SKIPPED_UPSTREAM = "skipped_upstream"  # Cell reads from wrong writer; re-run won't help

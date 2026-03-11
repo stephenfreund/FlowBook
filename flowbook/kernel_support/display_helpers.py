@@ -1,9 +1,10 @@
 """Display helpers for kernel output formatting."""
 
 import pprint
+import time
 from typing import Optional
 
-from IPython.display import Markdown, display
+from IPython.display import Markdown, display, clear_output
 
 from flowbook.kernel_support.checkpoint import Checkpoint
 
