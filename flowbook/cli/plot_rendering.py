@@ -543,6 +543,156 @@ def render_plot6(
         ax.legend(loc="upper right", fontsize=legend_size)
 
 
+def render_time_cdf(
+    ax,
+    sorted_vals: List[float],
+    percentiles: List[float],
+    n: int,
+    color: str = "steelblue",
+    title: str = "Analysis Time Distribution",
+    xlabel: str = "Analysis Time (ms, log scale)",
+    large_fonts: bool = True,
+) -> None:
+    """Render a time-based CDF panel with log scale x-axis.
+
+    This is a shared helper for both Analysis Time Distribution and
+    Rerun Overhead Time Distribution CDFs.
+
+    Args:
+        ax: Matplotlib axes
+        sorted_vals: Sorted time values in ms
+        percentiles: Corresponding CDF percentiles (0-1)
+        n: Number of data points (for display)
+        color: Line/fill color
+        title: Plot title
+        xlabel: X-axis label
+        large_fonts: Use larger fonts
+    """
+    from matplotlib.ticker import FuncFormatter
+
+    # Font sizes
+    label_size = 22 if large_fonts else 14
+    title_size = 24 if large_fonts else 16
+    tick_size = 18 if large_fonts else 12
+    annotation_size = 18 if large_fonts else 12
+    legend_fontsize = 14 if large_fonts else 10
+
+    if not sorted_vals:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title(title, fontsize=title_size)
+        return
+
+    sorted_arr = np.array(sorted_vals)
+    cdf_arr = np.array(percentiles)
+
+    # Compute percentile stats (P50, P95, P99 only - no P90)
+    stats = {
+        "P50": np.percentile(sorted_arr, 50),
+        "P95": np.percentile(sorted_arr, 95),
+        "P99": np.percentile(sorted_arr, 99),
+    }
+
+    # For log scale, filter positive values
+    pos_mask = sorted_arr > 0
+    if not np.any(pos_mask):
+        ax.text(0.5, 0.5, "No positive data", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title(title, fontsize=title_size)
+        return
+    plot_data = sorted_arr[pos_mask]
+    plot_cdf = cdf_arr[pos_mask]
+
+    # Plot CDF line and fill
+    ax.fill_between(
+        plot_data, 0, plot_cdf,
+        alpha=0.12, color=color, edgecolor="none"
+    )
+    ax.plot(plot_data, plot_cdf, color=color, linewidth=2.5)
+
+    # Disable standard gridlines, use only custom reference lines
+    ax.grid(False)
+
+    # Subtle spines
+    for spine in ax.spines.values():
+        spine.set_color("lightgray")
+        spine.set_linewidth(0.5)
+
+    # Percentile config (P50, P95, P99 only)
+    pct_config = [
+        ("P50", 0.50, (12, 8), "bottom"),
+        ("P95", 0.95, (12, -18), "top"),
+        ("P99", 0.99, (12, 8), "bottom"),
+    ]
+    max_val = np.max(plot_data)
+
+    # Faint reference lines at each point of interest
+    line_color = "gray"
+    line_alpha = 0.3
+    line_width = 0.6
+    for pname, y_val, _, _ in pct_config:
+        x_val = stats[pname]
+        ax.axhline(y=y_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+        ax.axvline(x=x_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+    # Max reference lines
+    ax.axhline(y=1.0, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+    ax.axvline(x=max_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+
+    # Percentile markers with leader line annotations
+    for pname, y_val, offset, va in pct_config:
+        x_val = stats[pname]
+        ax.scatter([x_val], [y_val], color=color, s=40, marker="o", zorder=5,
+                   edgecolors="white", linewidths=1.5)
+        ax.annotate(
+            pname, (x_val, y_val),
+            textcoords="offset points", xytext=offset,
+            fontsize=annotation_size, ha="left", va=va, fontweight="bold",
+            arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3)
+        )
+
+    # Max marker
+    ax.scatter([max_val], [1.0], color=color, s=40, marker="o", zorder=5,
+               edgecolors="white", linewidths=1.5)
+    ax.annotate(
+        "Max", (max_val, 1.0),
+        textcoords="offset points", xytext=(12, -18),
+        fontsize=annotation_size, ha="left", va="top", fontweight="bold",
+        arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3)
+    )
+
+    # Format function for milliseconds
+    def fmt_ms(v):
+        if v >= 1:
+            return f"{v:.1f}ms"
+        else:
+            return f"{v:.2f}ms"
+
+    # Legend box with values (right-aligned, monospace)
+    formatted = {p: fmt_ms(stats[p]) for p in ["P50", "P95", "P99"]}
+    formatted["Max"] = fmt_ms(max_val)
+    max_val_len = max(len(v) for v in formatted.values())
+    legend_lines = [f"{p:>3}  {formatted[p]:>{max_val_len}}" for p in ["P50", "P95", "P99", "Max"]]
+    legend_text = "\n".join(legend_lines)
+    props = dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray")
+    ax.text(0.98, 0.02, legend_text, transform=ax.transAxes, fontsize=legend_fontsize,
+            verticalalignment="bottom", horizontalalignment="right", bbox=props,
+            family="monospace")
+
+    # N count in top left
+    textstr = f"N={n:,}"
+    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
+            verticalalignment="top", horizontalalignment="left",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"))
+
+    # Axes config
+    ax.set_xlabel(xlabel, fontsize=label_size)
+    ax.set_ylabel("Cumulative Proportion", fontsize=label_size)
+    ax.set_title(title, fontsize=title_size)
+    ax.set_ylim(0, 1.05)
+    ax.tick_params(axis="both", labelsize=tick_size)
+    ax.set_xscale("log")
+    # Format with commas (e.g., "1,000" instead of "1000")
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
+
+
 def render_cdf_panel(
     ax,
     data: CDFData,
@@ -561,7 +711,6 @@ def render_cdf_panel(
         large_fonts: Use larger fonts
         show_legend: Whether to show legend
     """
-    import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
 
     # Font sizes
@@ -571,23 +720,28 @@ def render_cdf_panel(
     annotation_size = 18 if large_fonts else 12
     legend_fontsize = 14 if large_fonts else 10
 
-    # Metric-specific config
+    # For time metric, use the shared helper
     if metric == "time":
-        sorted_vals = list(data.time_sorted)
-        percentiles = list(data.time_percentiles)
-        title = "Analysis Time Distribution"
-        xlabel = "Analysis Time (ms, log scale)"
-        n = len(data.time_overhead_ms)
-        color = "steelblue"
-        use_log = True
-    elif metric == "memory":
+        render_time_cdf(
+            ax,
+            sorted_vals=list(data.time_sorted),
+            percentiles=list(data.time_percentiles),
+            n=len(data.time_overhead_ms),
+            color="steelblue",
+            title="Analysis Time Distribution",
+            xlabel="Analysis Time (ms, log scale)",
+            large_fonts=large_fonts,
+        )
+        return
+
+    # Metric-specific config for non-time metrics
+    if metric == "memory":
         sorted_vals = list(data.memory_sorted)
         percentiles = list(data.memory_percentiles)
         title = "Memory Overhead Distribution"
         xlabel = "Checkpoint / Base Memory Size"
         n = len(data.memory_ratios)
         color = "seagreen"
-        use_log = False
     elif metric == "peak":
         sorted_vals = list(data.peak_sorted)
         percentiles = list(data.peak_percentiles)
@@ -595,7 +749,6 @@ def render_cdf_panel(
         xlabel = "Peak Checkpoint / Base Memory Size"
         n = len(data.peak_memory_pct)
         color = "darkorange"
-        use_log = False
     elif metric == "gpu_memory":
         sorted_vals = list(data.gpu_memory_sorted)
         percentiles = list(data.gpu_memory_percentiles)
@@ -603,7 +756,6 @@ def render_cdf_panel(
         xlabel = "GPU Checkpoint / Base Memory Size"
         n = len(data.gpu_memory_ratios)
         color = "red"
-        use_log = False
     elif metric == "gpu_peak":
         sorted_vals = list(data.gpu_peak_sorted)
         percentiles = list(data.gpu_peak_percentiles)
@@ -611,7 +763,6 @@ def render_cdf_panel(
         xlabel = "Peak GPU Checkpoint / Base Memory Size"
         n = len(data.gpu_peak_memory_pct)
         color = "darkred"
-        use_log = False
     else:
         raise ValueError(f"Unknown metric: {metric}")
 
@@ -630,18 +781,8 @@ def render_cdf_panel(
         "P99": np.percentile(sorted_arr, 99),
     }
 
-    # For log scale, filter positive values
-    if use_log:
-        pos_mask = sorted_arr > 0
-        if not np.any(pos_mask):
-            ax.text(0.5, 0.5, "No positive data", ha="center", va="center", transform=ax.transAxes)
-            ax.set_title(title, fontsize=title_size)
-            return
-        plot_data = sorted_arr[pos_mask]
-        plot_cdf = cdf_arr[pos_mask]
-    else:
-        plot_data = sorted_arr
-        plot_cdf = cdf_arr
+    plot_data = sorted_arr
+    plot_cdf = cdf_arr
 
     # Plot CDF line and fill
     ax.fill_between(
@@ -701,14 +842,6 @@ def render_cdf_panel(
     )
 
     # Format functions
-    def fmt_ms(v):
-        # if v >= 1000:
-            # return f"{v/1000:.1f}s"
-        if v >= 1:
-            return f"{v:.1f}ms"
-        else:
-            return f"{v:.2f}ms"
-
     def fmt_ratio_pct(r):
         if r >= 1:
             return f"{r * 100:.0f}%"
@@ -734,9 +867,7 @@ def render_cdf_panel(
             return f"{v:.3f}%"
 
     # Select formatter based on metric
-    if metric == "time":
-        unit_fmt = fmt_ms
-    elif metric in ("memory", "gpu_memory"):
+    if metric in ("memory", "gpu_memory"):
         unit_fmt = fmt_ratio_pct
     elif metric in ("peak", "gpu_peak"):
         unit_fmt = fmt_pct
@@ -767,11 +898,7 @@ def render_cdf_panel(
     ax.set_ylim(0, 1.05)
     ax.tick_params(axis="both", labelsize=tick_size)
 
-    if metric == "time":
-        ax.set_xscale("log")
-        # Format with commas (e.g., "1,000" instead of "1000")
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
-    elif metric in ("memory", "gpu_memory"):
+    if metric in ("memory", "gpu_memory"):
         # Extend x-axis beyond 100% if data exceeds it
         x_max = max(1.05, max_val * 1.05)
         ax.set_xlim(-0.05, x_max)

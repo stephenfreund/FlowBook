@@ -1051,6 +1051,48 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         )
 
     @line_magic
+    def measure_rerun_overhead(self, line: str) -> None:
+        """
+        Measure the overhead of re-running a cell without executing code.
+
+        Used by compare-baseline's --rerun=N option to measure worst-case
+        overhead at quartile-boundary cells. Performs:
+        1. Take a full checkpoint (timed)
+        2. Full diff against the checkpoint (timed - will be empty)
+        3. Full check using the cell's original R/W (timed)
+
+        Returns timing data via display_data output with flowbook metadata.
+
+        Usage:
+            %measure_rerun_overhead <cell_id>
+        """
+        cell_id = line.strip()
+        if not cell_id:
+            self._display.display_icon_and_text(
+                "⚠️", "Usage: %measure_rerun_overhead <cell_id>"
+            )
+            return
+
+        # Measure the overhead
+        result = self._enforcer.measure_rerun_overhead(
+            cell_id=cell_id,
+            namespace=self.shell.user_ns,
+        )
+
+        # Send the result as flowbook metadata (same format as execution metadata)
+        from IPython.display import display
+
+        display(
+            {"text/plain": ""},
+            raw=True,
+            metadata={
+                "flowbook": {
+                    "rerun_overhead": result,
+                }
+            },
+        )
+
+    @line_magic
     def df_subset_checkpoints(self, line: str) -> None:
         """
         Control DataFrame subset optimization for checkpoints.
