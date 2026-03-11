@@ -2779,6 +2779,9 @@ class ReproducibilityEnforcer:
         result["check_ms"] = check_timer.duration()
         result["total_overhead_ms"] = result["checkpoint_ms"] + result["check_ms"]
 
+        # Clean up the temporary checkpoint to avoid memory accumulation
+        self.checkpoints.delete(checkpoint_name)
+
         return result
 
     def reset(self) -> None:
