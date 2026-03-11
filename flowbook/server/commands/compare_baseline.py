@@ -2667,13 +2667,17 @@ def measure_rerun_overhead(
             magic_code = f"%measure_rerun_overhead {cell_id}"
             msg_id = kernel_client.execute(magic_code, silent=False)
 
-            # Wait for result
+            # Wait for result - must get display_data before considering idle
             overhead_data = None
+            kernel_idle = False
             start_time = time.time()
             while time.time() - start_time < timeout:
                 try:
                     msg = kernel_client.get_iopub_msg(timeout=1.0)
                 except Exception:
+                    # If kernel is idle and we've waited, we're done
+                    if kernel_idle:
+                        break
                     continue
 
                 if msg['parent_header'].get('msg_id') != msg_id:
@@ -2688,7 +2692,8 @@ def measure_rerun_overhead(
                         break
                 elif msg_type == 'status':
                     if msg['content']['execution_state'] == 'idle':
-                        break
+                        kernel_idle = True
+                        # Don't break - wait for display_data or timeout
 
             if overhead_data:
                 result.measurements.append(RerunOverheadMeasurement(
