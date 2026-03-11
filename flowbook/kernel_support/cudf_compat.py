@@ -1243,9 +1243,36 @@ def _gpu_deep_copy(obj: Any) -> Any:
 
     ~3ms for a 4M×302 DataFrame (vs ~1.3s for GPU→CPU conversion).
     The result stays on GPU as a native cudf or proxy object.
+
+    For cudf.pandas proxies, we unwrap to the underlying object and copy
+    directly. This avoids a critical performance trap: when a proxy's slow
+    (pandas) side has been materialized (e.g., by .values, .to_numpy()),
+    proxy.copy(deep=True) dispatches to pandas deep copy (~3-4s for large
+    DataFrames) instead of cudf GPU copy (~3ms).
     """
-    # For proxy objects, .copy(deep=True) dispatches to the GPU path
-    # automatically via cudf.pandas proxy machinery.
+    # For cudf.pandas proxy objects, unwrap and copy the underlying object
+    # directly to avoid slow-path dispatch when the pandas side is active.
+    if is_cudf_proxy(obj):
+        wrapped = getattr(obj, '_fsproxy_wrapped', None)
+        if wrapped is not None:
+            # Check if the wrapped object is from the slow (pandas) side.
+            # Use type module check: pandas objects have __module__ starting
+            # with 'pandas', cudf objects start with 'cudf'.
+            wrapped_module = getattr(type(wrapped), '__module__', '') or ''
+            if not wrapped_module.startswith('pandas'):
+                # GPU (cudf) side is materialized — copy on GPU
+                try:
+                    return wrapped.copy(deep=True)
+                except Exception:
+                    pass
+            else:
+                # Slow (pandas) side is active. Use shallow CoW copy instead
+                # of deep copy. This is safe because:
+                # 1. pandas CoW ensures buffer isolation on mutation
+                # 2. Checkpoint values are never modified after creation
+                return _shallow_copy_for_checkpoint(wrapped)
+
+    # Native cudf objects or non-proxy path
     if hasattr(obj, 'copy'):
         try:
             return obj.copy(deep=True)

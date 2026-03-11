@@ -80,6 +80,142 @@ class TestGPUDeepCopy:
         assert _gpu_deep_copy(obj) == 42
 
 
+class TestGPUDeepCopyProxyFallback:
+    """Test that _gpu_deep_copy handles cudf.pandas proxy slow-path fallback efficiently.
+
+    When cudf.pandas proxies materialize their slow (pandas) side — e.g., after
+    calling .values or .to_numpy() — proxy.copy(deep=True) dispatches to a full
+    pandas deep copy, which is ~1000x slower than GPU copy for large DataFrames.
+
+    The fix: _gpu_deep_copy detects when _fsproxy_wrapped points to a pandas
+    object and uses a fast shallow CoW copy instead of proxy.copy(deep=True).
+    """
+
+    def _make_proxy_with_pandas_wrapped(self, df: pd.DataFrame):
+        """Create a mock cudf.pandas proxy whose _fsproxy_wrapped is a pandas DataFrame.
+
+        This simulates the state of a proxy after .values has been called,
+        which causes the slow (pandas) side to be materialized.
+        """
+        from unittest.mock import MagicMock
+        from flowbook.kernel_support import cudf_compat
+
+        proxy = MagicMock()
+        proxy._fsproxy_wrapped = df  # pandas side is materialized
+        proxy.copy = MagicMock(side_effect=lambda deep=False: df.copy(deep=deep))
+
+        # Make is_cudf_proxy return True for this mock
+        original_is_proxy = cudf_compat.is_cudf_proxy
+        cudf_compat.is_cudf_proxy = lambda obj: obj is proxy
+        self._cleanup = lambda: setattr(cudf_compat, 'is_cudf_proxy', original_is_proxy)
+        return proxy
+
+    def _make_proxy_with_cudf_wrapped(self):
+        """Create a mock cudf.pandas proxy whose _fsproxy_wrapped is a cudf (non-pandas) object."""
+        from unittest.mock import MagicMock
+        from flowbook.kernel_support import cudf_compat
+
+        # Simulate a native cudf DataFrame (not pandas)
+        cudf_df = MagicMock()
+        cudf_df.__module__ = 'cudf.core.dataframe'
+        type(cudf_df).__module__ = 'cudf.core.dataframe'
+        cudf_copy = MagicMock()
+        cudf_df.copy = MagicMock(return_value=cudf_copy)
+
+        proxy = MagicMock()
+        proxy._fsproxy_wrapped = cudf_df  # GPU side is materialized
+
+        original_is_proxy = cudf_compat.is_cudf_proxy
+        cudf_compat.is_cudf_proxy = lambda obj: obj is proxy
+        self._cleanup = lambda: setattr(cudf_compat, 'is_cudf_proxy', original_is_proxy)
+        return proxy, cudf_df, cudf_copy
+
+    def teardown_method(self):
+        if hasattr(self, '_cleanup'):
+            self._cleanup()
+
+    def test_proxy_with_pandas_wrapped_uses_shallow_copy(self):
+        """When proxy's _fsproxy_wrapped is pandas, should use shallow CoW copy (not deep)."""
+        df = pd.DataFrame({
+            'a': range(100_000),
+            'b': np.random.randn(100_000),
+            'c': ['x'] * 100_000,
+        })
+        proxy = self._make_proxy_with_pandas_wrapped(df)
+
+        result = _gpu_deep_copy(proxy)
+
+        # Should NOT have called proxy.copy (the slow path)
+        proxy.copy.assert_not_called()
+
+        # Result should be a shallow copy of the pandas DataFrame
+        assert isinstance(result, pd.DataFrame)
+        pd.testing.assert_frame_equal(result, df)
+        assert result is not df
+
+        # Shallow copy: underlying arrays should be shared (CoW)
+        assert np.shares_memory(result['a'].values, df['a'].values)
+
+    def test_proxy_with_pandas_wrapped_is_fast(self):
+        """Shallow CoW copy should be orders of magnitude faster than deep copy."""
+        import time
+
+        # Create a large DataFrame to amplify timing differences
+        n_rows = 500_000
+        df = pd.DataFrame({
+            f'col_{i}': np.random.randn(n_rows) for i in range(50)
+        })
+        proxy = self._make_proxy_with_pandas_wrapped(df)
+
+        # Time the optimized path (shallow CoW copy)
+        start = time.perf_counter()
+        for _ in range(10):
+            _gpu_deep_copy(proxy)
+        optimized_ms = (time.perf_counter() - start) * 1000
+
+        # Time a deep copy for comparison
+        start = time.perf_counter()
+        for _ in range(10):
+            df.copy(deep=True)
+        deep_copy_ms = (time.perf_counter() - start) * 1000
+
+        # Optimized path should be at least 5x faster than deep copy
+        assert optimized_ms < deep_copy_ms / 5, (
+            f"Optimized path ({optimized_ms:.1f}ms) should be >5x faster "
+            f"than deep copy ({deep_copy_ms:.1f}ms)"
+        )
+
+    def test_proxy_with_cudf_wrapped_copies_gpu_side(self):
+        """When proxy's _fsproxy_wrapped is cudf, should copy the GPU side directly."""
+        proxy, cudf_df, cudf_copy = self._make_proxy_with_cudf_wrapped()
+
+        result = _gpu_deep_copy(proxy)
+
+        # Should have called cudf_df.copy(deep=True), not proxy.copy
+        cudf_df.copy.assert_called_once_with(deep=True)
+        proxy.copy.assert_not_called()
+        assert result is cudf_copy
+
+    def test_proxy_without_fsproxy_wrapped_falls_through(self):
+        """Proxy without _fsproxy_wrapped should fall through to proxy.copy()."""
+        from unittest.mock import MagicMock
+        from flowbook.kernel_support import cudf_compat
+
+        proxy = MagicMock(spec=['copy'])  # No _fsproxy_wrapped
+        del proxy._fsproxy_wrapped  # Ensure attribute doesn't exist
+        copy_result = MagicMock()
+        proxy.copy = MagicMock(return_value=copy_result)
+
+        original_is_proxy = cudf_compat.is_cudf_proxy
+        cudf_compat.is_cudf_proxy = lambda obj: obj is proxy
+        try:
+            result = _gpu_deep_copy(proxy)
+            proxy.copy.assert_called_once_with(deep=True)
+            assert result is copy_result
+        finally:
+            cudf_compat.is_cudf_proxy = original_is_proxy
+
+
 class TestCuDFOriginTrackerGPUGuard:
     """Test that restore_value skips from_pandas when value is already cudf."""
 
