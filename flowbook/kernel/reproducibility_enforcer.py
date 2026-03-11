@@ -2008,18 +2008,30 @@ class ReproducibilityEnforcer:
                 for col in sorted(col_overlap):
                     locations.append(f"{var}.{col}")
             elif var_col_reads and var_col_writes:
-                # Have column detail but no overlap - different columns read vs written
-                # This is fine (e.g., read df['a'], write df['b']) - skip this variable
-                pass
+                # Have column detail but no overlap - different columns read vs written.
+                # Check if the variable binding itself was written (not just columns).
+                if var in (tracking.writes or set()):
+                    # Variable was read AND the binding was written (e.g., df = transform(df))
+                    # This is a NoReadAndWrite violation at the variable level, even though
+                    # different columns were read vs written internally.
+                    locations.append(var)
+                # Otherwise, just column operations with no variable reassignment - this is fine
+                # (e.g., reading df['a'] and writing df['b'] without reassigning df).
             elif var_col_writes and not var_col_reads:
                 # Have column writes but no column reads.
-                # Variable was read (in R_i) to access the object, but only columns were written.
+                # Check if the variable binding itself was written (not just columns).
+                if var in (tracking.writes or set()):
+                    # Variable was read AND the binding was written (e.g., a = feature_engineer(a))
+                    # This is a NoReadAndWrite violation at the variable level.
+                    # The column writes may be from internal function operations that got
+                    # attributed to this variable when the new object was assigned.
+                    locations.append(var)
+                # Otherwise, variable was read to access the object, but only columns were written.
                 # This is NOT a NoReadAndWrite violation because reading the variable binding
                 # (e.g., `df`) and writing to its column (e.g., `df['age']`) are semantically
                 # different locations. The formal predicate Rᵢ ∩ Wᵢ = ∅ requires the SAME
                 # location to be both read and written.
                 # Example: `df['age'] = 1` reads `df` (binding) and writes `df.age` (column).
-                pass
             elif var_col_reads and not var_col_writes:
                 # Have column reads but no column writes
                 # Check if variable-level write overlaps with column reads

@@ -4243,6 +4243,477 @@ class TestNoReadAndWriteColumnLevel:
         ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
 
 
+class TestNoReadAndWriteDataFrameReassignment:
+    """Tests for NoReadAndWrite predicate with DataFrame reassignment patterns.
+
+    This test class covers the bug fix for patterns like:
+        a = feature_engineer(a)
+
+    Where a variable is read (as argument), then reassigned (variable binding changes),
+    and the new object has column writes from internal function operations.
+
+    The key insight is that when both:
+    - Variable is in reads_before_writes (read as argument)
+    - Variable is in writes (binding changed via assignment)
+    - Variable is in column_writes (from internal function operations)
+
+    This IS a NoReadAndWrite violation at the variable level, even though
+    the column writes may be from internal function operations.
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(
+            f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
+        )
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        return namespace
+
+    def test_df_reassignment_via_function_is_violation(self):
+        """a = feature_engineer(a) IS a NoReadAndWrite violation.
+
+        Pattern: a = feature_engineer(a)
+        - Reads: a (the variable, passed as argument)
+        - Writes: a (the variable, reassigned to new DataFrame)
+        - Column writes: a.price (from internal function operations)
+
+        This is a NoReadAndWrite violation at the variable level because
+        the same variable binding is both read and written.
+        """
+        import pandas as pd
+
+        # A creates df 'a' and function
+        df = pd.DataFrame({"price": [1, 2, 3, 4]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"a": df, "feature_engineer": lambda x: x})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"a", "feature_engineer"}),
+        )
+
+        # B does: a = feature_engineer(a)
+        # This reads 'a', calls function, and reassigns 'a' to new DataFrame
+        df_new = df.copy()
+        df_new["price"] = df_new["price"] * 2
+        self._save_pre_checkpoint("b", {"a": df, "feature_engineer": lambda x: x})
+        ns_b = self._make_namespace({"a": df_new, "feature_engineer": lambda x: x})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"a", "feature_engineer"},  # Read a as argument
+                writes={"a"},  # Reassign a to new DataFrame
+                column_reads={"a": set()},  # No direct column reads
+                column_writes={"a": {"price"}},  # Column writes from internal function
+            ),
+        )
+
+        # SHOULD have NoReadAndWrite error for 'a'
+        no_rw_errors = [
+            e for e in result.errors if e.error_type.value == "no_read_and_write"
+        ]
+        assert (
+            len(no_rw_errors) == 1
+        ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
+        assert "a" in no_rw_errors[0].locations, (
+            f"Expected 'a' in violation locations, got {no_rw_errors[0].locations}"
+        )
+
+    def test_df_column_write_only_no_reassignment_no_violation(self):
+        """df['col'] = value is NOT a violation (no reassignment).
+
+        Pattern: df['price'] = 10
+        - Reads: df (to access the DataFrame object)
+        - Writes: df.price (column only, binding unchanged)
+
+        This is NOT a NoReadAndWrite violation because reading the binding
+        and writing to a column are different locations.
+        """
+        import pandas as pd
+
+        # A creates df
+        df = pd.DataFrame({"price": [1, 2, 3]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B does: df['price'] = 10
+        df_modified = df.copy()
+        df_modified["price"] = 10
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = self._make_namespace({"df": df_modified})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"},  # Read df to access it
+                writes=set(),  # No variable-level writes (binding unchanged)
+                column_reads={},  # No column reads
+                column_writes={"df": {"price"}},  # Write to df.price
+            ),
+        )
+
+        # Should NOT have NoReadAndWrite error
+        no_rw_errors = [
+            e for e in result.errors if e.error_type.value == "no_read_and_write"
+        ]
+        assert len(no_rw_errors) == 0, f"Unexpected error: {no_rw_errors}"
+
+    def test_df_copy_and_reassign_no_column_writes_is_violation(self):
+        """df = df.copy() IS a NoReadAndWrite violation (even without column writes).
+
+        Pattern: df = df.copy()
+        - Reads: df (the variable)
+        - Writes: df (the variable, reassigned)
+
+        This is a violation at the variable level.
+        """
+        import pandas as pd
+
+        # A creates df
+        df = pd.DataFrame({"x": [1, 2]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B does: df = df.copy()
+        df_new = df.copy()
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = self._make_namespace({"df": df_new})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"},  # Read df
+                writes={"df"},  # Write df (reassignment)
+                column_reads={},  # No column-level tracking
+                column_writes={},  # No column-level tracking
+            ),
+        )
+
+        # SHOULD have NoReadAndWrite error
+        no_rw_errors = [
+            e for e in result.errors if e.error_type.value == "no_read_and_write"
+        ]
+        assert (
+            len(no_rw_errors) == 1
+        ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
+
+    def test_df_filter_reassignment_is_violation(self):
+        """df = df[df['col'] > 0] IS a NoReadAndWrite violation.
+
+        Pattern: df = df[df['price'] > 0]
+        - Reads: df (the variable), df.price (the column)
+        - Writes: df (the variable, reassigned to filtered DataFrame)
+
+        This is a violation because the variable binding is both read and written.
+        """
+        import pandas as pd
+
+        # A creates df
+        df = pd.DataFrame({"price": [1, -1, 2, -2]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B does: df = df[df['price'] > 0]
+        df_filtered = df[df["price"] > 0]
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = self._make_namespace({"df": df_filtered})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"},  # Read df
+                writes={"df"},  # Write df (reassignment)
+                column_reads={"df": {"price"}},  # Read df.price for filter
+                column_writes={},  # No column writes
+            ),
+        )
+
+        # SHOULD have NoReadAndWrite error for df
+        no_rw_errors = [
+            e for e in result.errors if e.error_type.value == "no_read_and_write"
+        ]
+        assert (
+            len(no_rw_errors) == 1
+        ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
+        assert "df" in no_rw_errors[0].locations
+
+    def test_df_read_column_then_reassign_is_violation(self):
+        """Reading columns then reassigning the variable IS a NoReadAndWrite violation.
+
+        Pattern:
+            total = df['price'].sum()
+            df = some_other_df
+
+        Wait, this is different. Let's test:
+            df = df.drop(columns=['price'])
+
+        - Reads: df.price (implicitly read during drop)
+        - Writes: df (reassigned)
+
+        The variable is both read and written.
+        """
+        import pandas as pd
+
+        # A creates df
+        df = pd.DataFrame({"price": [1, 2], "name": ["a", "b"]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B does: df = df.drop(columns=['price'])
+        df_dropped = df.drop(columns=["price"])
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = self._make_namespace({"df": df_dropped})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"},  # Read df
+                writes={"df"},  # Write df (reassignment)
+                column_reads={},  # No explicit column reads tracked
+                column_writes={},  # No column writes
+            ),
+        )
+
+        # SHOULD have NoReadAndWrite error
+        no_rw_errors = [
+            e for e in result.errors if e.error_type.value == "no_read_and_write"
+        ]
+        assert (
+            len(no_rw_errors) == 1
+        ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
+
+    def test_different_df_names_no_violation(self):
+        """Reading one DataFrame and creating another is NOT a violation.
+
+        Pattern: result = process(input_df)
+        - Reads: input_df
+        - Writes: result
+
+        Different variables, no violation.
+        """
+        import pandas as pd
+
+        # A creates input_df
+        input_df = pd.DataFrame({"x": [1, 2, 3]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"input_df": input_df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"input_df"}),
+        )
+
+        # B does: result = process(input_df)
+        result_df = input_df.copy()
+        result_df["x"] = result_df["x"] * 2
+        self._save_pre_checkpoint("b", {"input_df": input_df})
+        ns_b = self._make_namespace({"input_df": input_df, "result": result_df})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"input_df"},  # Read input_df
+                writes={"result"},  # Write result (different variable)
+                column_reads={},
+                column_writes={"result": {"x"}},  # Column writes on result
+            ),
+        )
+
+        # Should NOT have NoReadAndWrite error (different variables)
+        no_rw_errors = [
+            e for e in result.errors if e.error_type.value == "no_read_and_write"
+        ]
+        assert len(no_rw_errors) == 0, f"Unexpected error: {no_rw_errors}"
+
+    def test_reassign_with_both_column_read_and_column_write_via_function(self):
+        """Function that reads and writes columns while reassigning IS a violation.
+
+        Pattern: df = transform(df) where transform reads df['a'] and writes df['b']
+        - Reads: df (variable), df.a (column)
+        - Writes: df (variable), df.b (column)
+
+        This is a violation because the variable is both read and written.
+        """
+        import pandas as pd
+
+        # A creates df
+        df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B does: df = transform(df) which internally reads df['a'], writes df['b']
+        df_new = df.copy()
+        df_new["b"] = df_new["a"] * 2  # Simulates internal function operation
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = self._make_namespace({"df": df_new})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"},  # Read df as argument
+                writes={"df"},  # Reassign df
+                column_reads={"df": {"a"}},  # Read df.a internally
+                column_writes={"df": {"b"}},  # Write df.b internally
+            ),
+        )
+
+        # SHOULD have NoReadAndWrite error for df
+        no_rw_errors = [
+            e for e in result.errors if e.error_type.value == "no_read_and_write"
+        ]
+        assert (
+            len(no_rw_errors) == 1
+        ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
+        assert "df" in no_rw_errors[0].locations
+
+    def test_inplace_column_update_same_column_is_violation(self):
+        """In-place update of same column IS a NoReadAndWrite violation.
+
+        Pattern: df['price'] = df['price'] * 2
+        - Reads: df.price
+        - Writes: df.price
+
+        Same column read and written - violation at column level.
+        """
+        import pandas as pd
+
+        # A creates df
+        df = pd.DataFrame({"price": [1, 2, 3]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B does: df['price'] = df['price'] * 2
+        df_modified = df.copy()
+        df_modified["price"] = df_modified["price"] * 2
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = self._make_namespace({"df": df_modified})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"},  # Read df
+                writes=set(),  # No variable-level write (binding unchanged)
+                column_reads={"df": {"price"}},  # Read df.price
+                column_writes={"df": {"price"}},  # Write df.price
+            ),
+        )
+
+        # SHOULD have NoReadAndWrite error for df.price
+        no_rw_errors = [
+            e for e in result.errors if e.error_type.value == "no_read_and_write"
+        ]
+        assert (
+            len(no_rw_errors) == 1
+        ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
+        assert "df.price" in no_rw_errors[0].locations
+
+    def test_empty_column_reads_with_column_writes_and_variable_write_is_violation(self):
+        """The specific bug case: empty column reads, column writes, AND variable write.
+
+        This is the exact pattern that triggered the bug:
+        - column_reads = {'a': set()}  (empty set - no columns read from 'a')
+        - column_writes = {'a': {'price'}}  (columns written)
+        - writes = {'a'}  (variable reassigned)
+
+        The bug was that this case fell through without detecting the violation.
+        """
+        import pandas as pd
+
+        # A creates df
+        df = pd.DataFrame({"price": [1, 2, 3, 4]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"a": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"a"}),
+        )
+
+        # B does: a = feature_engineer(a) with exact tracking from bug report
+        df_new = df.copy()
+        df_new["price"] = df_new["price"] * 2
+        self._save_pre_checkpoint("b", {"a": df})
+        ns_b = self._make_namespace({"a": df_new})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"a", "feature_engineer"},  # Read a and function
+                writes={"a"},  # Reassign a
+                column_reads={"a": set()},  # EMPTY set - this was the bug trigger
+                column_writes={"a": {"price"}},  # Column writes
+            ),
+        )
+
+        # SHOULD have NoReadAndWrite error for 'a'
+        no_rw_errors = [
+            e for e in result.errors if e.error_type.value == "no_read_and_write"
+        ]
+        assert (
+            len(no_rw_errors) == 1
+        ), f"Expected 1 NoReadAndWrite error for the bug case, got {len(no_rw_errors)}"
+        assert "a" in no_rw_errors[0].locations, (
+            f"Expected 'a' in locations, got {no_rw_errors[0].locations}"
+        )
+
+
 class TestForwardStaleFormula:
     """Tests for ForwardStale formula: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
 
