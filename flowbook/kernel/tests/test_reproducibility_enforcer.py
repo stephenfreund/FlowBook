@@ -7,7 +7,7 @@ from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 
 from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX, StalenessMode
-from flowbook.kernel.models import ReasonType
+from flowbook.kernel.models import ErrorType, ReasonType
 from flowbook.kernel.tests.conftest import make_tracking
 
 
@@ -669,13 +669,12 @@ class TestColumnAwareBackwardMutation:
 
 
 class TestBackwardMutationStaleness:
-    """Tests for backward mutation behavior (new semantics: never reject, mark stale).
+    """Tests for backward mutation staleness behavior.
 
-    In the new semantics:
-    - Backward mutations mark the cell as STALE (not CLEAN)
-    - Execution state is ALWAYS updated (no early return)
-    - Staleness is ALWAYS computed for downstream cells
-    - `continue_on_violation` parameter is obsolete (always continues)
+    Backward mutations mark the executing cell as STALE. Staleness propagation
+    to other cells depends on whether the error is accepted or rejected:
+    - continue_on_violation=False (default): cell is rejected, no staleness propagation
+    - continue_on_violation=True: cell is accepted, staleness propagates
     """
 
     def setup_method(self):
@@ -729,13 +728,54 @@ class TestBackwardMutationStaleness:
         reasons = self.sdc._notebook_state.get_reasons("b")
         assert any(r.type == ReasonType.NO_WRITE_AFTER_READ for r in reasons)
 
-    def test_backward_mutation_computes_forward_staleness(self):
-        """Backward mutation still triggers ForwardStale for downstream cells.
+    def test_backward_mutation_skips_staleness_when_rejected(self):
+        """Backward mutation with continue_on_violation=False skips staleness propagation.
 
-        Staleness is always computed, even when there are errors. This is because:
-        - Staleness tracking is orthogonal to error handling
-        - The execution record (R, W sets) is always updated
-        - Downstream cells need to know about changes
+        When a cell will be rejected (rolled back by the kernel), propagating
+        staleness to other cells is incorrect — the writes never persist, so
+        downstream cells should not be marked stale.
+        """
+        # Cell A reads x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell C reads x (would be affected by B's write if accepted)
+        self._save_pre_checkpoint("c", {"x": 1})
+        ns_c = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Cell B modifies x (backward mutation against A)
+        # With continue_on_violation=False (default), this will be rejected
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 999})
+        result = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Backward violation is detected
+        assert result.has_errors()
+        # C should NOT be marked stale (B will be rejected/rolled back)
+        assert self.sdc._notebook_state.is_clean("c")
+
+    def test_backward_mutation_propagates_staleness_when_accepted(self):
+        """Backward mutation with continue_on_violation=True does propagate staleness.
+
+        When errors are accepted, the cell's writes persist, so downstream
+        cells that read the same variables should be marked stale.
         """
         # Cell A reads x
         self._save_pre_checkpoint("a", {"x": 1})
@@ -757,8 +797,8 @@ class TestBackwardMutationStaleness:
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        # Cell B modifies x (backward mutation against A, forward stale for C)
-        # ForwardStale is computed even with backward mutation error
+        # Cell B modifies x (backward mutation against A)
+        # With continue_on_violation=True, this is accepted
         self._save_pre_checkpoint("b", {"x": 1})
         ns_b = self._make_namespace({"x": 999})
         result = self.sdc.check(
@@ -766,11 +806,12 @@ class TestBackwardMutationStaleness:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
+            continue_on_violation=True,
         )
 
-        # Backward violation is detected
-        assert result.violation is not None
-        # C is marked stale (ForwardStale)
+        # Backward violation is detected but accepted
+        assert result.has_errors()
+        # C IS marked stale (ForwardStale) because B's writes persist
         assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
 
     def test_backward_mutation_updates_execution_record(self):
@@ -803,13 +844,11 @@ class TestBackwardMutationStaleness:
         assert self.sdc._notebook_state.has_record("b")
         assert self.sdc._notebook_state.get_tracking("b").writes == {"x"}
 
-    def test_backward_mutation_chain_staleness(self):
-        """Test staleness propagation with backward mutation in chain.
+    def test_backward_mutation_chain_staleness_rejected(self):
+        """Backward mutation with continue_on_violation=False skips staleness propagation.
 
-        In new semantics:
-        - Backward mutations mark the mutating cell stale
-        - ForwardStale propagates to cells AFTER the executing cell
-        - BackwardStale propagates to cells BEFORE that read the written variable
+        When cell D will be rejected (rolled back), staleness should NOT
+        propagate to other cells since D's writes never persist.
         """
         # Cell A writes x
         self._save_pre_checkpoint("a", {})
@@ -842,6 +881,7 @@ class TestBackwardMutationStaleness:
         )
 
         # Cell D modifies x (backward mutation against B who reads x)
+        # Default continue_on_violation=False → D will be rejected
         self._save_pre_checkpoint("d", {"x": 1, "y": 2, "z": 3})
         ns_d = self._make_namespace({"x": 999, "y": 2, "z": 3})
         result = self.sdc.check(
@@ -853,15 +893,67 @@ class TestBackwardMutationStaleness:
 
         # Backward violation is detected
         assert result.violation is not None
-        # B reads x, so D modifying x is a backward mutation against B
         assert result.violation.affected_cell == "b"
-        # D itself is stale (new semantics: backward mutation marks the cell stale)
+        # D itself is stale (backward mutation marks the executing cell stale)
         assert not self.sdc._notebook_state.is_clean("d")
-        # A wrote x but didn't read it, so A is not affected by BackwardStale
-        assert "a" not in result.stale_cells
-        # B read x, so B IS marked stale via BackwardStale (D wrote x that B read)
+        # B should NOT be marked stale (D will be rejected/rolled back)
+        assert self.sdc._notebook_state.is_clean("b")
+        # C read y (not x), so C is not affected
+        assert self.sdc._notebook_state.is_clean("c")
+
+    def test_backward_mutation_chain_staleness_accepted(self):
+        """Backward mutation with continue_on_violation=True propagates staleness.
+
+        When D's execution is accepted, its writes persist, and B (which
+        read x) should be marked stale.
+        """
+        # Cell A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Cell B reads x, writes y
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Cell C reads y
+        self._save_pre_checkpoint("c", {"x": 1, "y": 2})
+        ns_c = self._make_namespace({"x": 1, "y": 2, "z": 3})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"y"}, writes={"z"}),
+        )
+
+        # Cell D modifies x with continue_on_violation=True → accepted
+        self._save_pre_checkpoint("d", {"x": 1, "y": 2, "z": 3})
+        ns_d = self._make_namespace({"x": 999, "y": 2, "z": 3})
+        result = self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace=ns_d,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+            continue_on_violation=True,
+        )
+
+        # Backward violation is detected but accepted
+        assert result.violation is not None
+        assert result.violation.affected_cell == "b"
+        # B IS marked stale (D's writes persist, B read x)
         assert "b" in result.stale_cells
-        # C read y (not x), so C is not affected by D's write to x
+        # C read y (not x), so C is not affected
         assert "c" not in result.stale_cells
 
 
@@ -3167,11 +3259,11 @@ class TestStalenessMode:
     def test_backward_staleness_syntactic_marks_earlier_cell_stale(self):
         """BackwardStale: when later cell writes to var read by earlier clean cell.
 
-        Scenario: A reads x, B is clean, then C writes x.
+        Scenario: A reads x, B is clean, then C writes x (accepted).
         After C runs, A should be marked stale (W_C ∩ R_A = {x} ≠ ∅).
 
-        Note: Staleness is always computed, even when C triggers NoWriteAfterRead
-        error (because C writes to x that A read).
+        Uses continue_on_violation=True because C triggers NoWriteAfterRead
+        error (C writes x that A read). When accepted, staleness propagates.
         """
         self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
@@ -3197,8 +3289,7 @@ class TestStalenessMode:
             tracking=make_tracking(reads=set(), writes={"z"}),
         )
 
-        # C writes x (should make A stale via BackwardStale)
-        # Staleness is computed even with NoWriteAfterRead error
+        # C writes x (should make A stale via BackwardStale, accepted)
         self._save_pre_checkpoint("c", {"x": 1, "y": 10, "z": 20})
         ns_c = self._make_namespace({"x": 999, "y": 10, "z": 20})
         result = self.sdc.check(
@@ -3206,6 +3297,7 @@ class TestStalenessMode:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             namespace=ns_c,
             tracking=make_tracking(reads=set(), writes={"x"}),
+            continue_on_violation=True,
         )
 
         # A should be stale (backward staleness: W_C ∩ R_A ≠ ∅)
@@ -3275,8 +3367,7 @@ class TestStalenessMode:
         )
         assert self.sdc._notebook_state.is_clean("a")
 
-        # C writes x to DIFFERENT value
-        # Staleness is computed even with NoWriteAfterRead error
+        # C writes x to DIFFERENT value (accepted)
         self._save_pre_checkpoint("c", {"x": 1, "y": 10})
         ns_c = self._make_namespace({"x": 999, "y": 10})
         result = self.sdc.check(
@@ -3284,6 +3375,7 @@ class TestStalenessMode:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             namespace=ns_c,
             tracking=make_tracking(reads=set(), writes={"x"}),
+            continue_on_violation=True,
         )
 
         # A should be stale - x actually changed from what A saw
@@ -3292,8 +3384,8 @@ class TestStalenessMode:
     def test_backward_staleness_only_affects_clean_cells(self):
         """BackwardStale should only mark clean cells as stale, not already-stale cells.
 
-        Note: Staleness is always computed, even when C triggers NoWriteAfterRead
-        error (because C writes to x that A and B read).
+        Uses continue_on_violation=True because C triggers NoWriteAfterRead
+        error (C writes to x that A and B read). When accepted, staleness propagates.
         """
         self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
@@ -3324,7 +3416,7 @@ class TestStalenessMode:
         assert self.sdc._notebook_state.is_clean("b")
 
         # C writes x - should only affect B (which is clean), not A (already stale)
-        # Staleness is computed even with NoWriteAfterRead error
+        # Accepted so staleness propagates
         self._save_pre_checkpoint("c", {"x": 1, "y": 10, "z": 20})
         ns_c = self._make_namespace({"x": 999, "y": 10, "z": 20})
         result = self.sdc.check(
@@ -3332,21 +3424,165 @@ class TestStalenessMode:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             namespace=ns_c,
             tracking=make_tracking(reads=set(), writes={"x"}),
+            continue_on_violation=True,
         )
 
         # B should now be stale
         assert "b" in result.stale_cells
 
 
-class TestStalenessAlwaysComputed:
-    """Tests verifying that staleness is always computed, regardless of errors.
+class TestClearStalenessOnError:
+    """Tests verifying that prior staleness reasons are cleared when repro errors occur.
 
-    The key invariant: Staleness tracking is orthogonal to error handling.
-    Even when a cell has predicate violations (NoReadAndWrite, NoWriteAfterRead, etc.),
-    staleness should still be computed because:
-    1. The execution record (R, W sets) is always updated
-    2. Downstream cells need to know about changes
-    3. Rollback (if any) happens at the kernel level, not in check()
+    When a cell has staleness warnings (e.g., FORWARD_STALE, CODE_CHANGED) and running
+    it produces a reproducibility error, the prior staleness reasons should be replaced
+    by the error-based reason. This prevents confusing UI state where both staleness
+    indicators and error indicators appear.
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        return namespace
+
+    def test_forward_stale_cleared_on_forward_contamination_error(self):
+        """FORWARD_STALE reason is cleared when NoReadBeforeWrite error occurs.
+
+        Scenario:
+        1. A writes x, B reads x (B is clean)
+        2. A is re-run, marking B as FORWARD_STALE
+        3. C writes x (after B in order)
+        4. B is re-run and triggers NoReadBeforeWrite (forward contamination)
+        5. B's staleness should only show the error reason, not FORWARD_STALE
+        """
+        # Step 1: A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 10})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # Step 2: A is re-run with different x value, marking B as FORWARD_STALE
+        self._save_pre_checkpoint("a", {"x": 1, "y": 10})
+        ns_a2 = self._make_namespace({"x": 999, "y": 10})
+        result_a = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert "b" in result_a.stale_cells
+        reasons_before = self.sdc._notebook_state.get_reasons("b")
+        assert any(r.type == ReasonType.FORWARD_STALE for r in reasons_before)
+
+        # Step 3: C writes x (creating forward contamination for B)
+        self._save_pre_checkpoint("c", {"x": 999, "y": 10})
+        ns_c = self._make_namespace({"x": 2000, "y": 10})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # Step 4: B is re-run and triggers NoReadBeforeWrite
+        self._save_pre_checkpoint("b", {"x": 2000, "y": 10})
+        ns_b2 = self._make_namespace({"x": 2000, "y": 20})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b2,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # Step 5: Verify B's staleness only shows error reason
+        assert len(result_b.errors) > 0
+        assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE
+
+        reasons_after = self.sdc._notebook_state.get_reasons("b")
+        # Should have error-based reason
+        assert any(r.type == ReasonType.NO_READ_BEFORE_WRITE for r in reasons_after)
+        # Should NOT have the old FORWARD_STALE reason
+        assert not any(r.type == ReasonType.FORWARD_STALE for r in reasons_after)
+
+    def test_code_changed_cleared_on_no_read_and_write_error(self):
+        """CODE_CHANGED reason is cleared when NoReadAndWrite error occurs.
+
+        Scenario:
+        1. A writes x, runs cleanly
+        2. A is edited (marked CODE_CHANGED)
+        3. A is re-run with code that reads and writes x (NoReadAndWrite error)
+        4. A's staleness should only show the error reason, not CODE_CHANGED
+        """
+        # Step 1: A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+        assert self.sdc._notebook_state.is_clean("a")
+
+        # Step 2: A is edited
+        self.sdc.mark_cell_edited("a")
+        reasons_before = self.sdc._notebook_state.get_reasons("a")
+        assert any(r.type == ReasonType.CODE_CHANGED for r in reasons_before)
+
+        # Step 3: A is re-run with code that reads and writes x
+        self._save_pre_checkpoint("a", {"x": 1})
+        ns_a2 = self._make_namespace({"x": 2})
+        result_a = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a2,
+            tracking=make_tracking(reads={"x"}, writes={"x"}),  # reads AND writes same var
+        )
+
+        # Step 4: Verify A's staleness only shows error reason
+        assert len(result_a.errors) > 0
+        assert result_a.errors[0].error_type == ErrorType.NO_READ_AND_WRITE
+
+        reasons_after = self.sdc._notebook_state.get_reasons("a")
+        # Should have error-based reason
+        assert any(r.type == ReasonType.NO_READ_AND_WRITE for r in reasons_after)
+        # Should NOT have the old CODE_CHANGED reason
+        assert not any(r.type == ReasonType.CODE_CHANGED for r in reasons_after)
+
+
+class TestStalenessAlwaysComputed:
+    """Tests verifying staleness is computed when errors are accepted.
+
+    When continue_on_violation=True, errors are accepted and the cell's writes
+    persist. Staleness should be propagated to other cells in this case.
+
+    When continue_on_violation=False (default), errors cause rejection and
+    rollback. Staleness is NOT propagated because the writes are undone.
+    See TestRollbackLastCheck for tests of the rejected case.
     """
 
     def setup_method(self):
@@ -3364,10 +3600,10 @@ class TestStalenessAlwaysComputed:
         return namespace
 
     def test_forward_stale_computed_with_no_read_and_write_error(self):
-        """ForwardStale is computed even when cell has NoReadAndWrite error.
+        """ForwardStale is computed when NoReadAndWrite error is accepted.
 
-        Scenario: B reads and writes x (NoReadAndWrite violation).
-        C should still be marked stale because B changed x that C reads.
+        Scenario: B reads and writes x (NoReadAndWrite violation, accepted).
+        C should be marked stale because B changed x that C reads.
         """
         # A writes x
         self._save_pre_checkpoint("a", {})
@@ -3390,7 +3626,7 @@ class TestStalenessAlwaysComputed:
         )
         assert self.sdc._notebook_state.is_clean("c")
 
-        # B reads and writes x (triggers NoReadAndWrite)
+        # B reads and writes x (triggers NoReadAndWrite, accepted)
         self._save_pre_checkpoint("b", {"x": 1, "y": 10})
         ns_b = self._make_namespace({"x": 999, "y": 10})
         result = self.sdc.check(
@@ -3398,6 +3634,7 @@ class TestStalenessAlwaysComputed:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes={"x"}),
+            continue_on_violation=True,
         )
 
         # B should have NoReadAndWrite error
@@ -3408,10 +3645,10 @@ class TestStalenessAlwaysComputed:
         assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
 
     def test_forward_stale_computed_with_no_write_after_read_error(self):
-        """ForwardStale is computed even when cell has NoWriteAfterRead error.
+        """ForwardStale is computed when NoWriteAfterRead error is accepted.
 
-        Scenario: A reads x, then B writes x (NoWriteAfterRead violation).
-        C should still be marked stale because B changed x that C reads.
+        Scenario: A reads x, then B writes x (NoWriteAfterRead violation, accepted).
+        C should be marked stale because B changed x that C reads.
         """
         # A reads x
         self._save_pre_checkpoint("a", {"x": 1})
@@ -3434,7 +3671,7 @@ class TestStalenessAlwaysComputed:
         )
         assert self.sdc._notebook_state.is_clean("c")
 
-        # B writes x (triggers NoWriteAfterRead against A)
+        # B writes x (triggers NoWriteAfterRead against A, accepted)
         self._save_pre_checkpoint("b", {"x": 1, "y": 10})
         ns_b = self._make_namespace({"x": 999, "y": 10})
         result = self.sdc.check(
@@ -3442,6 +3679,7 @@ class TestStalenessAlwaysComputed:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
             tracking=make_tracking(reads=set(), writes={"x"}),
+            continue_on_violation=True,
         )
 
         # B should have NoWriteAfterRead error
@@ -3452,10 +3690,10 @@ class TestStalenessAlwaysComputed:
         assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
 
     def test_backward_stale_computed_with_error(self):
-        """BackwardStale is computed even when cell has errors.
+        """BackwardStale is computed when error is accepted.
 
-        Scenario: A reads x, then C writes x.
-        A should be marked stale (BackwardStale) even though C has NoWriteAfterRead error.
+        Scenario: A reads x, then C writes x (accepted NoWriteAfterRead).
+        A should be marked stale (BackwardStale) because C's writes persist.
         """
         # A reads x
         self._save_pre_checkpoint("a", {"x": 1})
@@ -3468,7 +3706,7 @@ class TestStalenessAlwaysComputed:
         )
         assert self.sdc._notebook_state.is_clean("a")
 
-        # C writes x (triggers NoWriteAfterRead against A)
+        # C writes x (triggers NoWriteAfterRead against A, accepted)
         self._save_pre_checkpoint("c", {"x": 1, "y": 10})
         ns_c = self._make_namespace({"x": 999, "y": 10})
         result = self.sdc.check(
@@ -3476,6 +3714,7 @@ class TestStalenessAlwaysComputed:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             namespace=ns_c,
             tracking=make_tracking(reads=set(), writes={"x"}),
+            continue_on_violation=True,
         )
 
         # C should have NoWriteAfterRead error
@@ -3544,7 +3783,7 @@ class TestStalenessAlwaysComputed:
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
 
-        # B reads and writes x (triggers both NoReadAndWrite and NoWriteAfterRead)
+        # B reads and writes x (triggers both NoReadAndWrite and NoWriteAfterRead, accepted)
         self._save_pre_checkpoint("b", {"x": 1, "y": 10})
         ns_b = self._make_namespace({"x": 999, "y": 10})
         result = self.sdc.check(
@@ -3552,6 +3791,7 @@ class TestStalenessAlwaysComputed:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes={"x"}),
+            continue_on_violation=True,
         )
 
         # B should have errors
@@ -4406,3 +4646,89 @@ class TestRollbackLastCheck:
 
         # Verify pending deletion is cleared
         assert self.sdc._pending_checkpoint_deletion is None
+
+    def test_rollback_no_read_and_write_does_not_falsely_stale_earlier_cells(self):
+        """
+        When a cell gets NO_READ_AND_WRITE and is rolled back, earlier cells
+        that read the same variable should NOT be falsely marked stale.
+
+        Scenario:
+            Cell A: creates df, writes df['hour']
+            Cell B: reads df['hour'] (clean)
+            Cell C: reads AND writes df['hour'] → NO_READ_AND_WRITE, rolled back
+
+        After rollback:
+            - B should still be clean (not falsely marked stale)
+            - C's reads/writes should be cleared
+            - A later cell D writing df['hour'] should NOT conflict with C
+        """
+        import pandas as pd
+
+        df = pd.DataFrame({'hour': [1, 2, 3]})
+
+        # Cell A: Create df with hour column
+        self._save_pre_checkpoint("a", {})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace={"df": df},
+            tracking=make_tracking(writes={"df"}, column_writes={"df": {"hour"}}),
+        )
+
+        # Cell B: Reads df['hour'], computes avg
+        self._save_pre_checkpoint("b", {"df": df})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace={"df": df, "avg": 2.0},
+            tracking=make_tracking(
+                reads={"df"}, writes={"avg"},
+                column_reads={"df": {"hour"}},
+            ),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # Cell C: Reads AND writes df['hour'] → NO_READ_AND_WRITE
+        df_modified = pd.DataFrame({'hour': [10, 20, 30]})
+        self._save_pre_checkpoint("c", {"df": df, "avg": 2.0})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace={"df": df_modified, "avg": 2.0},
+            tracking=make_tracking(
+                reads={"df"}, writes={"df"},
+                column_reads={"df": {"hour"}},
+                column_writes={"df": {"hour"}},
+            ),
+        )
+
+        # C should have NO_READ_AND_WRITE error
+        assert result_c.has_errors()
+
+        # Simulate kernel rollback
+        self.sdc.rollback_last_check()
+
+        # B should still be clean — C was rolled back, so its writes never happened
+        assert self.sdc._notebook_state.is_clean("b"), \
+            "Cell B was falsely marked stale after rollback of C's NO_READ_AND_WRITE"
+
+        # C's tracking should be cleared (never executed)
+        assert self.sdc._notebook_state.tracking_data.get("c") is None
+
+        # Later cell D writes df['hour'] — should only conflict with B, not C
+        df_d = pd.DataFrame({'hour': [100, 200, 300]})
+        self._save_pre_checkpoint("d", {"df": df, "avg": 2.0})
+        result_d = self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace={"df": df_d, "avg": 2.0},
+            tracking=make_tracking(
+                writes={"df"},
+                column_writes={"df": {"hour"}},
+            ),
+        )
+
+        # D should have backward violation against B (which read df.hour), not C
+        if result_d.violation:
+            assert result_d.violation.affected_cell == "b"
+            assert "c" != result_d.violation.affected_cell

@@ -1442,7 +1442,7 @@ class TestForwardContaminationExecContaminated:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # Cell B reads x (forward dep on C) and writes y
+        # Cell B reads x (forward dep on C) and writes y (accepted)
         self._save_pre_checkpoint("b", {"x": 20, "y": 0})
         post_b = self._make_namespace({"x": 20, "y": 99})
         result_b = self.sdc.check(
@@ -1450,6 +1450,7 @@ class TestForwardContaminationExecContaminated:
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=post_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
+            continue_on_violation=True,
         )
 
         # B is contaminated

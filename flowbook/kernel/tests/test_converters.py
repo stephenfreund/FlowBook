@@ -467,12 +467,12 @@ class TestIntegration:
 
         # Resolve conflicts
         resolver = ConflictResolver()
-        violations = resolver.get_violations(changes, prior_reads)
+        violations_result = resolver.get_violations(changes, prior_reads)
 
         # Should have one violation: ColumnModified(df, price) vs ColumnRead(df, price)
-        assert len(violations) == 1
-        assert violations[0].change.variable == "df"
-        assert isinstance(violations[0].change, ColumnModified)
+        assert len(violations_result.violations) == 1
+        assert violations_result.violations[0].change.variable == "df"
+        assert isinstance(violations_result.violations[0].change, ColumnModified)
 
     def test_structural_change_warning(self):
         """

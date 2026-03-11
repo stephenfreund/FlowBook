@@ -60,12 +60,27 @@ CACHE_BASE_DIR = "/tmp/flowbook_compare_overhead"
 
 @dataclass
 class RerunOverheadCDFData:
-    """Data for rerun overhead CDF plot."""
+    """Data for rerun overhead CDF and breakdown plots.
+
+    Attributes:
+        total_overhead_ms: All overhead values (flat list for CDF)
+        total_sorted: Sorted overhead values for CDF
+        total_percentiles: Percentile values for CDF
+        checkpoint_ms: All checkpoint times (flat list)
+        check_ms: All check times (flat list)
+        cell_indices: Unique cell indices measured (for breakdown plot)
+        num_iterations: Number of iterations per cell
+        breakdown: Dict[cell_index][iteration] = (checkpoint_ms, check_ms)
+    """
     total_overhead_ms: List[float]
     total_sorted: List[float]
     total_percentiles: List[float]
     checkpoint_ms: List[float]
     check_ms: List[float]
+    # New fields for grouped bar chart breakdown
+    cell_indices: List[int] = None  # Unique cell indices (quartiles)
+    num_iterations: int = 0
+    breakdown: Dict[int, Dict[int, tuple]] = None  # breakdown[cell_idx][iter] = (ckpt, check)
 
 
 def extract_rerun_overhead_data(raw_data_list: List[Dict]) -> Optional[RerunOverheadCDFData]:
@@ -141,56 +156,101 @@ def render_rerun_checkpoint_breakdown(
     notebook_name: str = "",
     large_fonts: bool = True,
 ) -> None:
-    """Render rerun checkpoint breakdown (plot 5 analog).
+    """Render rerun checkpoint breakdown as grouped stacked bar chart.
 
-    Shows timing breakdown of checkpoint/diff/check for rerun measurements.
+    Shows timing breakdown per cell and per iteration, with State (checkpoint)
+    stacked below Check. X-axis groups bars by cell, with iterations side-by-side.
 
     Args:
         ax: Matplotlib axes
-        data: RerunOverheadCDFData with timing values
+        data: RerunOverheadCDFData with breakdown data
         notebook_name: Name for title
         large_fonts: Use larger fonts
     """
     import matplotlib.pyplot as plt
     import numpy as np
+    import seaborn as sns
 
     # Font sizes
     label_size = 22 if large_fonts else 14
     title_size = 24 if large_fonts else 16
     tick_size = 18 if large_fonts else 12
+    legend_size = 14 if large_fonts else 10
 
-    n = len(data.total_overhead_ms)
-    if n == 0:
+    # Check for valid breakdown data
+    if (data.breakdown is None or data.cell_indices is None or
+            not data.cell_indices or data.num_iterations == 0):
         ax.text(0.5, 0.5, 'No rerun overhead data', ha='center', va='center',
                 transform=ax.transAxes, fontsize=label_size)
         ax.set_title(f'Rerun Overhead Breakdown{" - " + notebook_name if notebook_name else ""}',
                      fontsize=title_size)
         return
 
-    # Calculate averages
-    avg_checkpoint = sum(data.checkpoint_ms) / n
-    avg_check = sum(data.check_ms) / n
+    cell_indices = data.cell_indices
+    num_iterations = data.num_iterations
+    breakdown = data.breakdown
 
-    categories = ['Checkpoint', 'Check']
-    values = [avg_checkpoint, avg_check]
-    colors = ['#3498DB', '#2ECC71']  # Blue, Green
+    # Colors for stacked components
+    colors = sns.color_palette("muted")
+    state_color = colors[0]  # Blue-ish
+    check_color = colors[2]  # Green-ish
 
-    bars = ax.bar(categories, values, color=colors, edgecolor='black', linewidth=0.5)
+    # Bar positioning
+    num_cells = len(cell_indices)
+    group_width = 0.8  # Width of each cell group
+    bar_width = group_width / num_iterations  # Width of each iteration bar
+    group_spacing = 1.0  # Space between cell groups
 
-    # Add value labels on bars
-    for bar, val in zip(bars, values):
-        height = bar.get_height()
-        ax.annotate(f'{val:.1f}ms',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom', fontsize=tick_size)
+    # X positions for cell groups
+    group_positions = np.arange(num_cells) * group_spacing
+
+    # Plot bars for each iteration
+    for iter_idx in range(num_iterations):
+        checkpoint_vals = []
+        check_vals = []
+
+        for cell_idx in cell_indices:
+            if cell_idx in breakdown and iter_idx in breakdown[cell_idx]:
+                ckpt, chk = breakdown[cell_idx][iter_idx]
+                checkpoint_vals.append(ckpt)
+                check_vals.append(chk)
+            else:
+                checkpoint_vals.append(0)
+                check_vals.append(0)
+
+        # Bar positions for this iteration within each group
+        bar_offset = (iter_idx - (num_iterations - 1) / 2) * bar_width
+        x_positions = group_positions + bar_offset
+
+        # Stacked bars: State (checkpoint) on bottom, Check on top
+        label_state = 'State' if iter_idx == 0 else None
+        label_check = 'Check' if iter_idx == 0 else None
+
+        ax.bar(x_positions, checkpoint_vals, bar_width * 0.9,
+               color=state_color, edgecolor='white', linewidth=0.5,
+               label=label_state, alpha=0.85)
+        ax.bar(x_positions, check_vals, bar_width * 0.9,
+               bottom=checkpoint_vals, color=check_color, edgecolor='white',
+               linewidth=0.5, label=label_check, alpha=0.85)
+
+    # X-axis labels: Cell numbers
+    ax.set_xticks(group_positions)
+    ax.set_xticklabels([f'Cell {idx + 1}' for idx in cell_indices], fontsize=tick_size)
+
+    # Add iteration labels below if multiple iterations
+    if num_iterations > 1:
+        # Add secondary x-axis info
+        ax.set_xlabel(f'Cell (each with {num_iterations} iterations)', fontsize=label_size)
+    else:
+        ax.set_xlabel('Cell', fontsize=label_size)
 
     ax.set_ylabel('Time (ms)', fontsize=label_size)
     ax.set_title(f'Rerun Overhead Breakdown{" - " + notebook_name if notebook_name else ""}',
                  fontsize=title_size)
     ax.tick_params(axis='both', labelsize=tick_size)
+    ax.legend(loc='upper left', fontsize=legend_size)
     ax.grid(True, alpha=0.3, axis='y')
+    ax.set_xlim(-0.5, num_cells * group_spacing - 0.5)
 
 
 # =============================================================================
@@ -4145,16 +4205,42 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
                         rerun = data.get("rerun_overhead")
                         if rerun and rerun.get("measurements"):
                             notebook_name = Path(path).stem.replace("_comparison", "")
-                            # Extract per-notebook rerun data
+                            # Extract per-notebook rerun data with breakdown
                             measurements = rerun.get("measurements", [])
+
+                            # Build breakdown dict: breakdown[cell_index][iteration] = (ckpt, check)
+                            breakdown: Dict[int, Dict[int, tuple]] = defaultdict(dict)
+                            cell_indices_set = set()
+                            iterations_set = set()
+
+                            for m in measurements:
+                                cell_idx = m.get("cell_index", 0)
+                                iteration = m.get("iteration", 0)
+                                ckpt = m.get("checkpoint_ms", 0)
+                                chk = m.get("check_ms", 0)
+
+                                breakdown[cell_idx][iteration] = (ckpt, chk)
+                                cell_indices_set.add(cell_idx)
+                                iterations_set.add(iteration)
+
+                            # Sort cell indices and determine iteration count
+                            cell_indices = sorted(cell_indices_set)
+                            num_iterations = len(iterations_set) if iterations_set else 0
+
                             notebook_rerun = RerunOverheadCDFData(
                                 total_overhead_ms=[m.get("total_overhead_ms", 0) for m in measurements],
                                 total_sorted=sorted([m.get("total_overhead_ms", 0) for m in measurements]),
                                 total_percentiles=[],  # Not needed for breakdown
                                 checkpoint_ms=[m.get("checkpoint_ms", 0) for m in measurements],
                                 check_ms=[m.get("check_ms", 0) for m in measurements],
+                                cell_indices=cell_indices,
+                                num_iterations=num_iterations,
+                                breakdown=dict(breakdown),
                             )
-                            breakdown_fig, breakdown_ax = plt.subplots(figsize=(8, 6))
+
+                            # Use wider figure for grouped bars
+                            fig_width = max(8, len(cell_indices) * 2)
+                            breakdown_fig, breakdown_ax = plt.subplots(figsize=(fig_width, 6))
                             render_rerun_checkpoint_breakdown(
                                 breakdown_ax, notebook_rerun,
                                 notebook_name=notebook_name,
