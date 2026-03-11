@@ -52,6 +52,9 @@ from flowbook.cli.plot_rendering import render_combined_6panel, render_time_cdf
 # Base directory for cached remote files
 CACHE_BASE_DIR = "/tmp/flowbook_compare_overhead"
 
+# IPython traceback prefix for detecting cell errors
+TRACEBACK_PREFIX = "\u001b[0;31m---------------------------------------------------------------------------\u001b[0m\n"
+
 
 # =============================================================================
 # Rerun Overhead Extraction and Plotting
@@ -812,6 +815,33 @@ def extract_warnings(data: Dict[str, Any]) -> List[str]:
             for w in cell_warnings:
                 warnings.append(f"{kernel_name} cell {cell.get('cell_id', '?')}: {w}")
     return warnings
+
+
+def has_baseline_errors(data: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    """Check if baseline run has any cell errors.
+
+    Errors are detected by checking if the error field starts with the
+    IPython traceback prefix (ANSI-colored separator line).
+
+    Returns:
+        Tuple of (has_errors, list_of_cell_ids_with_errors)
+    """
+    error_cells = []
+    baseline = data.get("kernels", {}).get("baseline", {})
+    timing = baseline.get("timing", {})
+
+    for cell in timing.get("cells", []):
+        error = cell.get("error")
+        if error and isinstance(error, str) and error.startswith(TRACEBACK_PREFIX):
+            error_cells.append(cell.get("cell_id", "unknown"))
+
+    # Also check rerun_cells if present
+    for cell in timing.get("rerun_cells", []):
+        error = cell.get("error")
+        if error and isinstance(error, str) and error.startswith(TRACEBACK_PREFIX):
+            error_cells.append(cell.get("cell_id", "unknown"))
+
+    return (len(error_cells) > 0, error_cells)
 
 
 def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
@@ -4035,15 +4065,20 @@ def plot_overhead_cdfs(
         return figures
 
 
-def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
+def process_v4(
+    file_data: Dict[str, Dict[str, Any]],
+    args,
+    excluded_for_errors: Optional[List[Tuple[str, List[str]]]] = None,
+) -> None:
     """Process v4.0 format files using new dataclass models and extraction functions.
 
     Args:
         file_data: Dict mapping file paths to loaded JSON dicts
         args: Parsed command line arguments
+        excluded_for_errors: List of (path, cell_ids) for notebooks excluded due to baseline errors
     """
-    import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_pdf import PdfPages
+    if excluded_for_errors is None:
+        excluded_for_errors = []
 
     # Convert to ComparisonResultV4 objects
     results: Dict[str, ComparisonResultV4] = {}
@@ -4052,215 +4087,231 @@ def process_v4(file_data: Dict[str, Dict[str, Any]], args) -> None:
         results[path] = ComparisonResultV4.from_dict(data)
         raw_data[path] = data
 
-    # Generate plots
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Only do plot work if --plot is specified
+    if args.plot:
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
 
-    combined_figures = []
-    peak_overhead_stats = []  # Collect (notebook_name, peak_flowbook_mb, peak_base_mb, peak_pct) for table
+        # Generate plots
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    for file_path, result in results.items():
-        notebook_name = Path(file_path).stem.replace("_comparison", "")
+        combined_figures = []
+        peak_overhead_stats = []  # Collect (notebook_name, peak_flowbook_mb, peak_base_mb, peak_pct) for table
 
-        # Detect v5 format and use appropriate extraction
-        data = raw_data[file_path]
-        version = data.get("version", "4.0")
+        for file_path, result in results.items():
+            notebook_name = Path(file_path).stem.replace("_comparison", "")
 
-        # Extract plot data
-        # Plot 1 and 5 are timing-only, version-independent
-        p1 = extract_plot1_data(result)
-        p5 = extract_plot5_data(result)
+            # Detect v5 format and use appropriate extraction
+            data = raw_data[file_path]
+            version = data.get("version", "4.0")
 
-        # Memory plots: use v5 extraction if available
-        # Extract baseline cells for cross-run comparison (Plot 3)
-        baseline_cells = extract_baseline_cells(data)
+            # Extract plot data
+            # Plot 1 and 5 are timing-only, version-independent
+            p1 = extract_plot1_data(result)
+            p5 = extract_plot5_data(result)
 
-        if version.startswith("5"):
-            # Native v5 format
-            v5_memory = extract_v5_memory_result(data)
-            if v5_memory and v5_memory.all_cells:
-                # Plot 2: try v5 extraction (uses checkpoint_var_timing)
-                p2 = extract_plot2_data_v5(v5_memory.all_cells, top_n=args.top_n)
-                if p2 is None:
-                    # Fall back to v4 extraction from timing data
+            # Memory plots: use v5 extraction if available
+            # Extract baseline cells for cross-run comparison (Plot 3)
+            baseline_cells = extract_baseline_cells(data)
+
+            if version.startswith("5"):
+                # Native v5 format
+                v5_memory = extract_v5_memory_result(data)
+                if v5_memory and v5_memory.all_cells:
+                    # Plot 2: try v5 extraction (uses checkpoint_var_timing)
+                    p2 = extract_plot2_data_v5(v5_memory.all_cells, top_n=args.top_n)
+                    if p2 is None:
+                        # Fall back to v4 extraction from timing data
+                        p2 = extract_plot2_data(result, top_n=args.top_n)
+                    gpu_from_timing = extract_gpu_overhead_from_timing(data)
+                    p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells, gpu_overhead_from_timing=gpu_from_timing)
+                    p4 = extract_plot4_data_v5(v5_memory.all_cells, top_n=args.top_n)
+                    p6 = extract_plot6_data_v5(v5_memory.all_cells)
+                else:
+                    # Fall back to v4 extraction
                     p2 = extract_plot2_data(result, top_n=args.top_n)
-                gpu_from_timing = extract_gpu_overhead_from_timing(data)
-                p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells, gpu_overhead_from_timing=gpu_from_timing)
-                p4 = extract_plot4_data_v5(v5_memory.all_cells, top_n=args.top_n)
-                p6 = extract_plot6_data_v5(v5_memory.all_cells)
+                    p3 = extract_plot3_data(result)
+                    p4 = extract_plot4_data(result, top_n=args.top_n)
+                    p6 = extract_plot6_data(result)
             else:
-                # Fall back to v4 extraction
-                p2 = extract_plot2_data(result, top_n=args.top_n)
-                p3 = extract_plot3_data(result)
-                p4 = extract_plot4_data(result, top_n=args.top_n)
-                p6 = extract_plot6_data(result)
-        else:
-            # v4 format - try v5 extraction first (handles conversion)
-            v5_memory = extract_v5_memory_result(data)
-            if v5_memory and v5_memory.all_cells:
-                p2 = extract_plot2_data_v5(v5_memory.all_cells, top_n=args.top_n)
-                if p2 is None:
+                # v4 format - try v5 extraction first (handles conversion)
+                v5_memory = extract_v5_memory_result(data)
+                if v5_memory and v5_memory.all_cells:
+                    p2 = extract_plot2_data_v5(v5_memory.all_cells, top_n=args.top_n)
+                    if p2 is None:
+                        p2 = extract_plot2_data(result, top_n=args.top_n)
+                    gpu_from_timing = extract_gpu_overhead_from_timing(data)
+                    p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells, gpu_overhead_from_timing=gpu_from_timing)
+                    p4 = extract_plot4_data_v5(v5_memory.all_cells, top_n=args.top_n)
+                    p6 = extract_plot6_data_v5(v5_memory.all_cells)
+                else:
+                    # Pure v4 extraction
                     p2 = extract_plot2_data(result, top_n=args.top_n)
-                gpu_from_timing = extract_gpu_overhead_from_timing(data)
-                p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells, gpu_overhead_from_timing=gpu_from_timing)
-                p4 = extract_plot4_data_v5(v5_memory.all_cells, top_n=args.top_n)
-                p6 = extract_plot6_data_v5(v5_memory.all_cells)
-            else:
-                # Pure v4 extraction
-                p2 = extract_plot2_data(result, top_n=args.top_n)
-                p3 = extract_plot3_data(result)
-                p4 = extract_plot4_data(result, top_n=args.top_n)
-                p6 = extract_plot6_data(result)
+                    p3 = extract_plot3_data(result)
+                    p4 = extract_plot4_data(result, top_n=args.top_n)
+                    p6 = extract_plot6_data(result)
 
-        # Collect peak overhead stats for table
-        if p3 is not None and p3.peak_base_mb > 0:
-            peak_overhead_stats.append((
-                notebook_name,
-                p3.peak_flowbook_mb,
-                p3.peak_base_mb,
-                p3.peak_overhead_pct,
-            ))
+            # Collect peak overhead stats for table
+            if p3 is not None and p3.peak_base_mb > 0:
+                peak_overhead_stats.append((
+                    notebook_name,
+                    p3.peak_flowbook_mb,
+                    p3.peak_base_mb,
+                    p3.peak_overhead_pct,
+                ))
 
-        # Create 6-panel figure
-        fig, axes_2d = plt.subplots(3, 2, figsize=(14, 18))
-        axes = [
-            axes_2d[0, 0], axes_2d[0, 1],
-            axes_2d[1, 0], axes_2d[1, 1],
-            axes_2d[2, 0], axes_2d[2, 1],
-        ]
+            # Create 6-panel figure
+            fig, axes_2d = plt.subplots(3, 2, figsize=(14, 18))
+            axes = [
+                axes_2d[0, 0], axes_2d[0, 1],
+                axes_2d[1, 0], axes_2d[1, 1],
+                axes_2d[2, 0], axes_2d[2, 1],
+            ]
 
-        try:
-            render_combined_6panel(
-                fig, axes, p1, p2, p3, p4, p5, p6,
-                large_fonts=args.large_fonts,
-                notebook_name=notebook_name,
-            )
-            combined_figures.append(fig)
-        except Exception as e:
-            print(f"Warning: Could not generate plot for {file_path}: {e}",
-                  file=sys.stderr)
-            plt.close(fig)
-
-    # Print peak memory overhead table
-    if peak_overhead_stats:
-        print("\nPeak Memory Overhead by Notebook:")
-        print("-" * 80)
-        print(f"{'Notebook':<40} {'FlowBook':>12} {'Base':>12} {'Overhead':>10}")
-        print(f"{'':<40} {'(MB)':>12} {'(MB)':>12} {'(%)':>10}")
-        print("-" * 80)
-        for name, fb_mb, base_mb, pct in sorted(peak_overhead_stats, key=lambda x: -x[3]):
-            # Truncate long names with ellipsis
-            display_name = name[:37] + "..." if len(name) > 40 else name
-            print(f"{display_name:<40} {fb_mb:>12.1f} {base_mb:>12.1f} {pct:>10.1f}")
-        print("-" * 80)
-        # Summary stats
-        pcts = [x[3] for x in peak_overhead_stats]
-        print(f"P50: {np.percentile(pcts, 50):.1f}%   P90: {np.percentile(pcts, 90):.1f}%")
-        print()
-
-    # Save to PDF
-    if combined_figures:
-        combined_path = output_dir / args.output
-        with PdfPages(str(combined_path)) as pdf:
-            for fig in combined_figures:
-                pdf.savefig(fig, dpi=150)
+            try:
+                render_combined_6panel(
+                    fig, axes, p1, p2, p3, p4, p5, p6,
+                    large_fonts=args.large_fonts,
+                    notebook_name=notebook_name,
+                )
+                combined_figures.append(fig)
+            except Exception as e:
+                print(f"Warning: Could not generate plot for {file_path}: {e}",
+                      file=sys.stderr)
                 plt.close(fig)
 
-            # Add CDF plot if we have multiple notebooks
-            if len(results) > 1:
-                # Pass raw data for v5 extraction
-                results_list = list(results.values())
-                raw_data_list = [raw_data[p] for p in results.keys()]
-                cdf_data = extract_cdf_data(results_list, raw_data_list)
-                if cdf_data:
-                    from flowbook.cli.plot_rendering import render_cdf_panel
-                    import seaborn as sns
-                    sns.set_theme(style="whitegrid")
+        # Print peak memory overhead table
+        if peak_overhead_stats:
+            print("\nPeak Memory Overhead by Notebook:")
+            print("-" * 80)
+            print(f"{'Notebook':<40} {'FlowBook':>12} {'Base':>12} {'Overhead':>10}")
+            print(f"{'':<40} {'(MB)':>12} {'(MB)':>12} {'(%)':>10}")
+            print("-" * 80)
+            for name, fb_mb, base_mb, pct in sorted(peak_overhead_stats, key=lambda x: -x[3]):
+                # Truncate long names with ellipsis
+                display_name = name[:37] + "..." if len(name) > 40 else name
+                print(f"{display_name:<40} {fb_mb:>12.1f} {base_mb:>12.1f} {pct:>10.1f}")
+            print("-" * 80)
+            # Summary stats
+            pcts = [x[3] for x in peak_overhead_stats]
+            print(f"P50: {np.percentile(pcts, 50):.1f}%   P90: {np.percentile(pcts, 90):.1f}%")
+            print()
 
-                    cdf_fig, cdf_axes = plt.subplots(1, 3, figsize=(15, 5))
-                    render_cdf_panel(cdf_axes[0], cdf_data, "time", large_fonts=args.large_fonts)
-                    render_cdf_panel(cdf_axes[1], cdf_data, "memory", large_fonts=args.large_fonts)
-                    render_cdf_panel(cdf_axes[2], cdf_data, "peak", large_fonts=args.large_fonts)
-                    cdf_fig.tight_layout()
-                    pdf.savefig(cdf_fig, dpi=150)
-                    plt.close(cdf_fig)
+        # Save to PDF
+        if combined_figures:
+            combined_path = output_dir / args.output
+            with PdfPages(str(combined_path)) as pdf:
+                for fig in combined_figures:
+                    pdf.savefig(fig, dpi=150)
+                    plt.close(fig)
 
-                    # GPU checkpoint CDF page (if any GPU data exists)
-                    if cdf_data.gpu_memory_ratios or cdf_data.gpu_peak_memory_pct:
-                        gpu_cdf_fig, gpu_cdf_axes = plt.subplots(1, 2, figsize=(12, 5))
-                        render_cdf_panel(gpu_cdf_axes[0], cdf_data, "gpu_memory", large_fonts=args.large_fonts)
-                        render_cdf_panel(gpu_cdf_axes[1], cdf_data, "gpu_peak", large_fonts=args.large_fonts)
-                        gpu_cdf_fig.tight_layout()
-                        pdf.savefig(gpu_cdf_fig, dpi=150)
-                        plt.close(gpu_cdf_fig)
+                # Add CDF plot if we have multiple notebooks
+                if len(results) > 1:
+                    # Pass raw data for v5 extraction
+                    results_list = list(results.values())
+                    raw_data_list = [raw_data[p] for p in results.keys()]
+                    cdf_data = extract_cdf_data(results_list, raw_data_list)
+                    if cdf_data:
+                        from flowbook.cli.plot_rendering import render_cdf_panel
+                        import seaborn as sns
+                        sns.set_theme(style="whitegrid")
 
-                # Rerun overhead plots (if any data exists)
-                rerun_cdf_data = extract_rerun_overhead_data(raw_data_list)
-                if rerun_cdf_data:
-                    import seaborn as sns
-                    sns.set_theme(style="whitegrid")
+                        cdf_fig, cdf_axes = plt.subplots(1, 3, figsize=(15, 5))
+                        render_cdf_panel(cdf_axes[0], cdf_data, "time", large_fonts=args.large_fonts)
+                        render_cdf_panel(cdf_axes[1], cdf_data, "memory", large_fonts=args.large_fonts)
+                        render_cdf_panel(cdf_axes[2], cdf_data, "peak", large_fonts=args.large_fonts)
+                        cdf_fig.tight_layout()
+                        pdf.savefig(cdf_fig, dpi=150)
+                        plt.close(cdf_fig)
 
-                    # Rerun checkpoint breakdown page for each notebook
-                    for path, data in raw_data.items():
-                        rerun = data.get("rerun_overhead")
-                        if rerun and rerun.get("measurements"):
-                            notebook_name = Path(path).stem.replace("_comparison", "")
-                            # Extract per-notebook rerun data with breakdown
-                            measurements = rerun.get("measurements", [])
+                        # GPU checkpoint CDF page (if any GPU data exists)
+                        if cdf_data.gpu_memory_ratios or cdf_data.gpu_peak_memory_pct:
+                            gpu_cdf_fig, gpu_cdf_axes = plt.subplots(1, 2, figsize=(12, 5))
+                            render_cdf_panel(gpu_cdf_axes[0], cdf_data, "gpu_memory", large_fonts=args.large_fonts)
+                            render_cdf_panel(gpu_cdf_axes[1], cdf_data, "gpu_peak", large_fonts=args.large_fonts)
+                            gpu_cdf_fig.tight_layout()
+                            pdf.savefig(gpu_cdf_fig, dpi=150)
+                            plt.close(gpu_cdf_fig)
 
-                            # Build breakdown dict: breakdown[cell_index][iteration] = (ckpt, check)
-                            breakdown: Dict[int, Dict[int, tuple]] = defaultdict(dict)
-                            cell_indices_set = set()
-                            iterations_set = set()
+                    # Rerun overhead plots (if any data exists)
+                    rerun_cdf_data = extract_rerun_overhead_data(raw_data_list)
+                    if rerun_cdf_data:
+                        import seaborn as sns
+                        sns.set_theme(style="whitegrid")
 
-                            for m in measurements:
-                                cell_idx = m.get("cell_index", 0)
-                                iteration = m.get("iteration", 0)
-                                ckpt = m.get("checkpoint_ms", 0)
-                                chk = m.get("check_ms", 0)
+                        # Rerun checkpoint breakdown page for each notebook
+                        for path, data in raw_data.items():
+                            rerun = data.get("rerun_overhead")
+                            if rerun and rerun.get("measurements"):
+                                notebook_name = Path(path).stem.replace("_comparison", "")
+                                # Extract per-notebook rerun data with breakdown
+                                measurements = rerun.get("measurements", [])
 
-                                breakdown[cell_idx][iteration] = (ckpt, chk)
-                                cell_indices_set.add(cell_idx)
-                                iterations_set.add(iteration)
+                                # Build breakdown dict: breakdown[cell_index][iteration] = (ckpt, check)
+                                breakdown: Dict[int, Dict[int, tuple]] = defaultdict(dict)
+                                cell_indices_set = set()
+                                iterations_set = set()
 
-                            # Sort cell indices and determine iteration count
-                            cell_indices = sorted(cell_indices_set)
-                            num_iterations = len(iterations_set) if iterations_set else 0
+                                for m in measurements:
+                                    cell_idx = m.get("cell_index", 0)
+                                    iteration = m.get("iteration", 0)
+                                    ckpt = m.get("checkpoint_ms", 0)
+                                    chk = m.get("check_ms", 0)
 
-                            notebook_rerun = RerunOverheadCDFData(
-                                total_overhead_ms=[m.get("total_overhead_ms", 0) for m in measurements],
-                                total_sorted=sorted([m.get("total_overhead_ms", 0) for m in measurements]),
-                                total_percentiles=[],  # Not needed for breakdown
-                                checkpoint_ms=[m.get("checkpoint_ms", 0) for m in measurements],
-                                check_ms=[m.get("check_ms", 0) for m in measurements],
-                                cell_indices=cell_indices,
-                                num_iterations=num_iterations,
-                                breakdown=dict(breakdown),
-                            )
+                                    breakdown[cell_idx][iteration] = (ckpt, chk)
+                                    cell_indices_set.add(cell_idx)
+                                    iterations_set.add(iteration)
 
-                            # Use wider figure for grouped bars
-                            fig_width = max(8, len(cell_indices) * 2)
-                            breakdown_fig, breakdown_ax = plt.subplots(figsize=(fig_width, 6))
-                            render_rerun_checkpoint_breakdown(
-                                breakdown_ax, notebook_rerun,
-                                notebook_name=notebook_name,
-                                large_fonts=args.large_fonts
-                            )
-                            breakdown_fig.tight_layout()
-                            pdf.savefig(breakdown_fig, dpi=150)
-                            plt.close(breakdown_fig)
+                                # Sort cell indices and determine iteration count
+                                cell_indices = sorted(cell_indices_set)
+                                num_iterations = len(iterations_set) if iterations_set else 0
 
-                    # Rerun overhead CDF page (combined across all notebooks)
-                    rerun_cdf_fig, rerun_cdf_ax = plt.subplots(figsize=(8, 6))
-                    render_rerun_overhead_cdf(rerun_cdf_ax, rerun_cdf_data, large_fonts=args.large_fonts)
-                    rerun_cdf_fig.tight_layout()
-                    pdf.savefig(rerun_cdf_fig, dpi=150)
-                    plt.close(rerun_cdf_fig)
+                                notebook_rerun = RerunOverheadCDFData(
+                                    total_overhead_ms=[m.get("total_overhead_ms", 0) for m in measurements],
+                                    total_sorted=sorted([m.get("total_overhead_ms", 0) for m in measurements]),
+                                    total_percentiles=[],  # Not needed for breakdown
+                                    checkpoint_ms=[m.get("checkpoint_ms", 0) for m in measurements],
+                                    check_ms=[m.get("check_ms", 0) for m in measurements],
+                                    cell_indices=cell_indices,
+                                    num_iterations=num_iterations,
+                                    breakdown=dict(breakdown),
+                                )
 
-        print(f"Combined plots saved to: {combined_path}")
+                                # Use wider figure for grouped bars
+                                fig_width = max(8, len(cell_indices) * 2)
+                                breakdown_fig, breakdown_ax = plt.subplots(figsize=(fig_width, 6))
+                                render_rerun_checkpoint_breakdown(
+                                    breakdown_ax, notebook_rerun,
+                                    notebook_name=notebook_name,
+                                    large_fonts=args.large_fonts
+                                )
+                                breakdown_fig.tight_layout()
+                                pdf.savefig(breakdown_fig, dpi=150)
+                                plt.close(breakdown_fig)
+
+                        # Rerun overhead CDF page (combined across all notebooks)
+                        rerun_cdf_fig, rerun_cdf_ax = plt.subplots(figsize=(8, 6))
+                        render_rerun_overhead_cdf(rerun_cdf_ax, rerun_cdf_data, large_fonts=args.large_fonts)
+                        rerun_cdf_fig.tight_layout()
+                        pdf.savefig(rerun_cdf_fig, dpi=150)
+                        plt.close(rerun_cdf_fig)
+
+            print(f"Combined plots saved to: {combined_path}")
 
     # Print summary table
     print_v5_summary(raw_data, results)
+
+    # Print excluded notebooks at the very end
+    print()
+    print(f"EXCLUDED {len(excluded_for_errors)} NOTEBOOK(S) WITH BASELINE ERRORS:")
+    print("-" * 60)
+    if excluded_for_errors:
+        for path, cell_ids in sorted(excluded_for_errors):
+            notebook_name = Path(path).stem.replace("_comparison", "")
+            print(f"  {notebook_name}: {len(cell_ids)} error(s) in cells {', '.join(cell_ids)}")
+    else:
+        print("  (none)")
 
 
 def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None:
@@ -4427,57 +4478,54 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
         print(f"  Max: {np.max(arr):.1f}%")
         print()
 
-    # Staleness and error statistics
+    # Staleness and error statistics (always print, even if no cells checked)
     total_checked = total_clean + total_stale + total_error
-    if total_checked > 0:
-        print("CHECKING RESULTS")
-        print("-" * 60)
-        print(f"  Clean cells:        {total_clean}")
-        print(f"  Stale cells:        {total_stale}")
-        print(f"  Error cells:        {total_error}")
-        if total_reason_counts:
-            print("  Staleness reasons:")
-            for rtype, count in sorted(total_reason_counts.items()):
-                print(f"    {rtype}: {count}")
-        if total_error_counts:
-            print("  Error types:")
-            for etype, count in sorted(total_error_counts.items()):
-                print(f"    {etype}: {count}")
-        print()
+    print("CHECKING RESULTS")
+    print("-" * 60)
+    print(f"  Clean cells:        {total_clean}")
+    print(f"  Stale cells:        {total_stale}")
+    print(f"  Error cells:        {total_error}")
+    if total_reason_counts:
+        print("  Staleness reasons:")
+        for rtype, count in sorted(total_reason_counts.items()):
+            print(f"    {rtype}: {count}")
+    if total_error_counts:
+        print("  Error types:")
+        for etype, count in sorted(total_error_counts.items()):
+            print(f"    {etype}: {count}")
+    print()
 
-    # Per-notebook error table (if any notebook has errors)
-    any_errors = any(s[3] > 0 for s in staleness_data)  # s[3] = error_cells
-    if any_errors:
-        # Collect all error types across all notebooks
-        all_error_types: set = set()
-        for s in staleness_data:
-            all_error_types.update(s[5].keys())  # s[5] = error_counts
-        error_types = sorted(all_error_types)
+    # Per-notebook error table (always print, even if no errors)
+    # Collect all error types across all notebooks
+    all_error_types: set = set()
+    for s in staleness_data:
+        all_error_types.update(s[5].keys())  # s[5] = error_counts
+    error_types = sorted(all_error_types)
 
-        print("PER-NOTEBOOK ERROR SUMMARY")
-        print("-" * 110)
+    print("PER-NOTEBOOK ERROR SUMMARY")
+    print("-" * 110)
 
-        # Build header with dynamic error type columns (wider for readability)
-        col_width = 22
-        header = f"{'Notebook':<35} {'Cells':>5} {'Errors':>6}"
+    # Build header with dynamic error type columns (wider for readability)
+    col_width = 22
+    header = f"{'Notebook':<35} {'Cells':>5} {'Errors':>6}"
+    for etype in error_types:
+        # Format error type names for column headers
+        short_name = etype.replace("no_", "").replace("_", " ")[:col_width]
+        header += f" {short_name:>{col_width}}"
+    print(header)
+    print("-" * (47 + (col_width + 1) * len(error_types)))
+
+    # Per-notebook rows (all notebooks, sorted by name)
+    for name, clean, stale, errors, reasons, err_counts in sorted(staleness_data, key=lambda x: x[0]):
+        display_name = name[:33] if len(name) > 33 else name
+        row = f"{display_name:<35} {clean + stale + errors:>5} {errors:>6}"
         for etype in error_types:
-            # Format error type names for column headers
-            short_name = etype.replace("no_", "").replace("_", " ")[:col_width]
-            header += f" {short_name:>{col_width}}"
-        print(header)
-        print("-" * (47 + (col_width + 1) * len(error_types)))
+            count = err_counts.get(etype, 0)
+            row += f" {count:>{col_width}}"
+        print(row)
 
-        # Per-notebook rows (all notebooks)
-        for name, clean, stale, errors, reasons, err_counts in staleness_data:
-            display_name = name[:33] if len(name) > 33 else name
-            row = f"{display_name:<35} {clean + stale + errors:>5} {errors:>6}"
-            for etype in error_types:
-                count = err_counts.get(etype, 0)
-                row += f" {count:>{col_width}}"
-            print(row)
-
-        print("-" * (47 + (col_width + 1) * len(error_types)))
-        print()
+    print("-" * (47 + (col_width + 1) * len(error_types)))
+    print()
 
     print("=" * 120)
 
@@ -4538,6 +4586,11 @@ def main():
         default="all_overhead.pdf",
         help="Output PDF filename for combined plots (default: all_overhead.pdf)",
     )
+    parser.add_argument(
+        "--include-errors",
+        action="store_true",
+        help="Include notebooks where baseline run has cell errors (excluded by default)",
+    )
 
     args = parser.parse_args()
 
@@ -4567,6 +4620,7 @@ def main():
     # Load all files, averaging trials when multiple exist for the same notebook
     stats_list: List[FileStats] = []
     file_data: Dict[str, Dict[str, Any]] = {}
+    excluded_for_errors: List[Tuple[str, List[str]]] = []
 
     for stem, trial_files in trial_groups.items():
         # Filter to existing files
@@ -4593,6 +4647,12 @@ def main():
                 # Single file
                 representative_path = existing_files[0]
                 data = load_comparison_json(representative_path)
+
+            # Check for baseline errors and exclude unless --include-errors
+            has_errors, error_cell_ids = has_baseline_errors(data)
+            if has_errors and not args.include_errors:
+                excluded_for_errors.append((representative_path, error_cell_ids))
+                continue
 
             stats = compute_file_stats(data, representative_path)
             stats_list.append(stats)
@@ -4622,87 +4682,7 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
-    process_v4(file_data, args)  # Handles both v4 and v5
-    return
-
-    # Sort
-    sort_key = {
-        "slowdown": lambda s: s.slowdown,
-        "memory": lambda s: s.memory_overhead_pct,
-        "runtime": lambda s: s.baseline_runtime_ms,
-        "name": lambda s: s.notebook_name,
-    }[args.sort_by]
-    stats_list.sort(key=sort_key, reverse=(args.sort_by != "name"))
-
-    # Compute aggregate
-    aggregate = compute_aggregate_stats(stats_list)
-
-    # Output statistics
-    if args.format == "table":
-        print(format_table(stats_list, aggregate))
-    elif args.format == "json":
-        print(format_json_output(stats_list, aggregate))
-    elif args.format == "csv":
-        print(format_csv(stats_list, aggregate))
-
-    # Generate plots if requested
-    if args.plot:
-        from matplotlib.backends.backend_pdf import PdfPages
-        import matplotlib.pyplot as plt
-
-        output_dir = Path(args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Collect all combined plots (time + memory + types side by side) into one PDF
-        combined_figures = []
-
-        for file_path, data in file_data.items():
-            # Combined plot with all 3 panels side by side
-            try:
-                fig = plot_combined_v2(
-                    data,
-                    output_path=None,
-                    large_fonts=args.large_fonts,
-                    top_n=args.top_n,
-                )
-                if fig is not None:
-                    combined_figures.append(fig)
-            except Exception as e:
-                print(
-                    f"Warning: Could not generate plot for {file_path}: {e}",
-                    file=sys.stderr,
-                )
-
-        # Save combined plots to a single PDF
-        if combined_figures:
-            combined_path = output_dir / args.output
-            with PdfPages(str(combined_path)) as pdf:
-                for fig in combined_figures:
-                    pdf.savefig(fig, dpi=150)
-                    plt.close(fig)
-
-                # Add histogram plots at the end if we have aggregate data
-                if (
-                    aggregate.all_total_overhead_per_cell
-                    or aggregate.all_memory_overhead_per_cell
-                ):
-                    hist_fig = plot_overhead_histograms(
-                        aggregate, output_path=None, large_fonts=args.large_fonts
-                    )
-                    if hist_fig is not None:
-                        pdf.savefig(hist_fig, dpi=150)
-                        plt.close(hist_fig)
-
-                    # Add CDF plots (returns list of figures)
-                    cdf_figs = plot_overhead_cdfs(
-                        aggregate, output_path=None, large_fonts=args.large_fonts
-                    )
-                    if cdf_figs is not None:
-                        for cdf_fig in cdf_figs:
-                            pdf.savefig(cdf_fig, dpi=150)
-                            plt.close(cdf_fig)
-
-            print(f"Combined overhead plots saved to: {combined_path}")
+    process_v4(file_data, args, excluded_for_errors)  # Handles both v4 and v5
 
 
 if __name__ == "__main__":
