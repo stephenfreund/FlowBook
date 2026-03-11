@@ -2828,8 +2828,9 @@ class CompareBaselineCommand(NotebookCommand):
         """
         cell_timeout = kwargs.get("timeout", 14400.0)  # 4 hours default
         skip_memory = kwargs.get("skip_memory", False)
-        do_baseline_memory = False# not kwargs.get("skip_baseline", False)
-        run_baseline_timing_flag = True# kwargs.get("baseline_timing", False)
+        skip_baseline = kwargs.get("skip_baseline", False)
+        do_baseline_memory = False  # Never run baseline memory
+        run_baseline_timing_flag = not skip_baseline
         rerun_n = kwargs.get("rerun", 0)
         num_trials = kwargs.get("trials", 1)
         start_trial = kwargs.get("start", 1)

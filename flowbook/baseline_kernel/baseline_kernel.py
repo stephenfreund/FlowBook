@@ -108,6 +108,16 @@ class MemoryMagics(Magics):
         else:
             return f"{size / (1024 * 1024 * 1024):.1f} GB"
 
+    @line_magic
+    def diagnostic(self, line: str) -> None:
+        """No-op magic for compatibility with FlowBook notebooks.
+
+        In FlowBook kernel, %diagnostic marks a cell as diagnostic-only
+        (no reproducibility tracking). In baseline kernel, this is a no-op
+        since there's no reproducibility tracking anyway.
+        """
+        pass
+
 
 
 class BaselineKernel(IPythonKernel):
