@@ -2734,10 +2734,11 @@ class ReproducibilityEnforcer:
             accessed_vars = tracking.reads_before_writes | tracking.writes
 
             # Diff only accessed variables (like normal execution)
+            # Note: pass empty set directly, not None (None means "diff everything")
             current_diff = MemoryCheckpoint.diff(
                 pre_checkpoint,
                 namespace,
-                keys_to_include=accessed_vars if accessed_vars else None,
+                keys_to_include=accessed_vars,
                 use_leq=False,
                 column_rbw=all_accessed_columns,
                 structural_reads={},
