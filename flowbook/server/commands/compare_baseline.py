@@ -2667,17 +2667,13 @@ def measure_rerun_overhead(
             magic_code = f"%measure_rerun_overhead {cell_id}"
             msg_id = kernel_client.execute(magic_code, silent=False)
 
-            # Wait for result - must get display_data before considering idle
+            # Wait for result - drain iopub until idle to prevent buffer buildup
             overhead_data = None
-            kernel_idle = False
             start_time = time.time()
             while time.time() - start_time < timeout:
                 try:
                     msg = kernel_client.get_iopub_msg(timeout=1.0)
                 except Exception:
-                    # If kernel is idle and we've waited, we're done
-                    if kernel_idle:
-                        break
                     continue
 
                 if msg['parent_header'].get('msg_id') != msg_id:
@@ -2689,11 +2685,10 @@ def measure_rerun_overhead(
                     flowbook_meta = metadata.get('flowbook', {})
                     if 'rerun_overhead' in flowbook_meta:
                         overhead_data = flowbook_meta['rerun_overhead']
-                        break
+                        # Don't break - continue draining until idle
                 elif msg_type == 'status':
                     if msg['content']['execution_state'] == 'idle':
-                        kernel_idle = True
-                        # Don't break - wait for display_data or timeout
+                        break  # Now we can exit - channel is drained
 
             if overhead_data:
                 result.measurements.append(RerunOverheadMeasurement(
