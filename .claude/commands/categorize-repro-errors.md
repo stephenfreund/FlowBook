@@ -44,8 +44,9 @@ Analyze reproducibility errors from a FlowBook error report or directly from a p
 
 - Cell indices in error reports are **CODE cell indices** (not including markdown cells)
 - Write results to `error_categories.tsv` as you go
-- TSV format: `NOTEBOOK_NAME<TAB>ERROR_NUMBER<TAB>CELL_ID<TAB>CATEGORY<TAB>VARIABLE`
+- TSV format: `NOTEBOOK_NAME<TAB>ERROR_NUMBER<TAB>CELL_ID<TAB>CATEGORY<TAB>VARIABLE<TAB>EXPLANATION`
 - The VARIABLE column should contain the primary variable involved in the error
+- The EXPLANATION column should contain the rationale for the categorization
 
 ## Fix Script Usage
 
@@ -190,6 +191,7 @@ First, determine which mode to use:
    - Read the notebook to understand context
    - Categorize each error according to the taxonomy
    - Identify the primary variable involved
+   - Produce a short, coherent explanation for the categorization
    - Output TSV lines
 
 ### Single Notebook Mode
