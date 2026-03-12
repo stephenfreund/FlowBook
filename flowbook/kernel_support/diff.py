@@ -728,6 +728,133 @@ def _fast_numeric_equal(a: np.ndarray, b: np.ndarray) -> bool:
     return True
 
 
+def _arrays_equal(
+    a: np.ndarray,
+    b: np.ndarray,
+    rtol: float = 0,
+    atol: float = 0,
+    equal_nan: bool = True
+) -> bool:
+    """
+    Fast array equality check with optional tolerance.
+
+    When rtol=0 and atol=0, uses fast path (byte comparison or array_equal).
+    Otherwise falls back to np.allclose.
+
+    Args:
+        a, b: Arrays to compare (must have same shape and compatible dtype)
+        rtol: Relative tolerance (0 = exact match)
+        atol: Absolute tolerance (0 = exact match)
+        equal_nan: If True, NaN == NaN
+
+    Returns:
+        True if arrays are equal within tolerance.
+    """
+    # Shape/dtype must match
+    if a.shape != b.shape:
+        return False
+    if a.dtype != b.dtype:
+        return False
+
+    # Empty arrays are equal
+    if a.size == 0:
+        return True
+
+    # === FAST PATH: rtol=0 and atol=0 ===
+    if rtol == 0 and atol == 0:
+        # Try byte-level comparison first (fastest)
+        # Only use for equal_nan=True since byte equality means NaN==NaN
+        if equal_nan:
+            try:
+                if a.flags.c_contiguous and b.flags.c_contiguous:
+                    return _fast_numeric_equal(a, b)
+            except (ValueError, TypeError):
+                pass
+            # Fall back to array_equal with NaN handling
+            return np.array_equal(a, b, equal_nan=True)
+        else:
+            # equal_nan=False: use standard array_equal
+            return np.array_equal(a, b)
+
+    # === TOLERANCE PATH: use allclose ===
+    return np.allclose(a, b, rtol=rtol, atol=atol, equal_nan=equal_nan)
+
+
+def _scalars_equal(
+    a: float,
+    b: float,
+    rtol: float = 0,
+    atol: float = 0
+) -> bool:
+    """
+    Fast scalar float equality check with optional tolerance.
+
+    Handles NaN == NaN as True.
+
+    Args:
+        a, b: Scalar floats to compare
+        rtol: Relative tolerance (0 = exact match)
+        atol: Absolute tolerance (0 = exact match)
+
+    Returns:
+        True if scalars are equal within tolerance.
+    """
+    # Handle NaN
+    a_nan = math.isnan(a) if isinstance(a, float) else np.isnan(a)
+    b_nan = math.isnan(b) if isinstance(b, float) else np.isnan(b)
+    if a_nan and b_nan:
+        return True
+    if a_nan or b_nan:
+        return False
+
+    # Fast path: exact equality
+    if rtol == 0 and atol == 0:
+        return a == b
+
+    # Tolerance path
+    if isinstance(a, float) and isinstance(b, float):
+        return math.isclose(a, b, rel_tol=rtol, abs_tol=atol)
+    return bool(np.isclose(a, b, rtol=rtol, atol=atol))
+
+
+def _array_diff_mask(
+    a: np.ndarray,
+    b: np.ndarray,
+    rtol: float = 0,
+    atol: float = 0
+) -> np.ndarray:
+    """
+    Return boolean mask where arrays differ.
+
+    Handles NaN == NaN as equal (not a difference).
+
+    Args:
+        a, b: Arrays to compare (same shape required)
+        rtol: Relative tolerance
+        atol: Absolute tolerance
+
+    Returns:
+        Boolean mask where True = elements differ.
+    """
+    nan_a = np.isnan(a)
+    nan_b = np.isnan(b)
+
+    # NaN position mismatch is a difference
+    nan_mismatch = nan_a != nan_b
+
+    # Both valid: check values
+    both_valid = ~nan_a & ~nan_b
+
+    if rtol == 0 and atol == 0:
+        # Exact comparison
+        value_mismatch = both_valid & (a != b)
+    else:
+        # Tolerance comparison
+        value_mismatch = both_valid & ~np.isclose(a, b, rtol=rtol, atol=atol)
+
+    return nan_mismatch | value_mismatch
+
+
 def _all_elements_are_floats(arr) -> bool:
     """
     Check if all elements in an object-dtype array/series are floats.
@@ -1645,15 +1772,24 @@ class Diff:
                 message=f"Float mismatch at {path}: {val_a} vs {val_b} (one is NaN)",
             )
 
-        # Check exact equality first
+        # Check exact equality first (fast path for rtol=atol=0)
         if val_a == val_b:
             return None  # Exactly equal
+
+        # If zero tolerance, no need to check further
+        if self.rtol == 0 and self.atol == 0:
+            return ValueComparison(
+                status="different",
+                value1=val_a,
+                value2=val_b,
+                message=f"Float mismatch at {path}: {val_a} vs {val_b}",
+            )
 
         # Check if close within tolerance
         is_close = (
             math.isclose(val_a, val_b, rel_tol=self.rtol, abs_tol=self.atol)
             if isinstance(val_a, float)
-            else np.isclose(val_a, val_b, rel_tol=self.rtol, abs_tol=self.atol)
+            else bool(np.isclose(val_a, val_b, rtol=self.rtol, atol=self.atol))
         )
         if is_close:
             # If report_close is False, treat close values as equal (no difference)
@@ -1779,7 +1915,7 @@ class Diff:
         if val_a.shape == val_b.shape and val_a.dtype == val_b.dtype:
             try:
                 if _is_floating_dtype(val_a.dtype) or np.issubdtype(val_a.dtype, np.complexfloating):
-                    if np.allclose(val_a, val_b, rtol=self.rtol, atol=self.atol, equal_nan=True):
+                    if _arrays_equal(val_a, val_b, self.rtol, self.atol, equal_nan=True):
                         return None  # Arrays are equal
                 else:
                     if np.array_equal(val_a, val_b):
@@ -1844,9 +1980,7 @@ class Diff:
                 val_a_cmp.dtype, np.complexfloating
             ):
                 # Fast vectorized check for floats
-                if np.allclose(
-                    val_a_cmp, val_b_cmp, rtol=self.rtol, atol=self.atol, equal_nan=True
-                ):
+                if _arrays_equal(val_a_cmp, val_b_cmp, self.rtol, self.atol, equal_nan=True):
                     return None  # Arrays are equal
             else:
                 # Fast vectorized check for other types
@@ -1870,11 +2004,8 @@ class Diff:
 
                 for i in range(len(flat_a)):
                     a_val, b_val = flat_a[i], flat_b[i]
-                    both_nan = np.isnan(a_val) and np.isnan(b_val)
 
-                    if not both_nan and not np.allclose(
-                        [a_val], [b_val], rtol=self.rtol, atol=self.atol, equal_nan=True
-                    ):
+                    if not _scalars_equal(a_val, b_val, self.rtol, self.atol):
                         idx = np.unravel_index(i, val_a.shape)
                         idx_tuple = tuple(int(x) for x in idx)
 
@@ -2013,19 +2144,14 @@ class Diff:
         # Fast path: check if series are equal using vectorized operations
         try:
             if pd.api.types.is_float_dtype(val_a_cmp.dtype):
-                # For floats, check NaN positions and values
-                mask_nan_a = pd.isna(val_a_cmp)
-                mask_nan_b = pd.isna(val_b_cmp)
-                if mask_nan_a.equals(mask_nan_b):
-                    non_nan_a = val_a_cmp[~mask_nan_a]
-                    non_nan_b = val_b_cmp[~mask_nan_b]
-                    if len(non_nan_a) == 0 or np.allclose(
-                        non_nan_a, non_nan_b, rtol=self.rtol, atol=self.atol
-                    ):
-                        # Values equal, return any structural diffs
-                        if children:
-                            return CompoundDiff(source_type="series", children=children, truncated=False)
-                        return None
+                # For floats, use _arrays_equal which handles NaN and has fast path
+                arr_a = val_a_cmp.to_numpy()
+                arr_b = val_b_cmp.to_numpy()
+                if _arrays_equal(arr_a, arr_b, self.rtol, self.atol, equal_nan=True):
+                    # Values equal, return any structural diffs
+                    if children:
+                        return CompoundDiff(source_type="series", children=children, truncated=False)
+                    return None
             else:
                 # For non-float types, use equals
                 if val_a_cmp.equals(val_b_cmp):
@@ -2049,21 +2175,13 @@ class Diff:
                 arr_b_orig = val_b.values
                 index = val_a_cmp.index
 
-                # Vectorized NaN detection
+                # Vectorized NaN detection (needed for error messages)
                 nan_a = np.isnan(arr_a)
                 nan_b = np.isnan(arr_b)
-
-                # Find all difference indices at once:
-                # 1. NaN position mismatches (one is NaN, other is not)
                 nan_mismatch = nan_a != nan_b
-                # 2. Value mismatches (both non-NaN but values differ beyond tolerance)
-                both_valid = ~nan_a & ~nan_b
-                value_mismatch = both_valid & ~np.isclose(
-                    arr_a, arr_b, rtol=self.rtol, atol=self.atol
-                )
 
-                # Combined: all differences
-                all_diffs = nan_mismatch | value_mismatch
+                # Find all differences using helper (handles NaN and tolerances)
+                all_diffs = _array_diff_mask(arr_a, arr_b, self.rtol, self.atol)
                 diff_indices = np.where(all_diffs)[0]
 
                 # Check if truncation needed
@@ -2125,12 +2243,8 @@ class Diff:
 
                                 # Check if both values are floats - apply tolerance
                                 if isinstance(v1, (float, np.floating)) and isinstance(v2, (float, np.floating)):
-                                    # Handle NaN equality
-                                    if math.isnan(v1) and math.isnan(v2):
-                                        continue  # Both NaN - consider equal
-                                    # Apply tolerance comparison
-                                    if math.isclose(v1, v2, rel_tol=self.rtol, abs_tol=self.atol):
-                                        continue  # Within tolerance - consider equal
+                                    if _scalars_equal(v1, v2, self.rtol, self.atol):
+                                        continue  # Equal (handles NaN and tolerance)
 
                                 children[f"[{repr(idx_label)}]"] = ValueComparison(
                                     status="different",
@@ -3162,7 +3276,7 @@ class Diff:
                             value2=f"shape {values_b.shape}",
                             message=f"SHAP values shape mismatch at {path}",
                         )
-                    elif not np.allclose(values_a, values_b, equal_nan=True):
+                    elif not _arrays_equal(values_a, values_b, rtol=1e-5, atol=1e-8, equal_nan=True):
                         children["values"] = ValueComparison(
                             status="different",
                             value1=f"<array {values_a.shape}>",
@@ -3175,7 +3289,7 @@ class Diff:
         base_b = getattr(val_b, 'base_values', None)
         if base_a is not None and base_b is not None and base_a is not base_b:
             if isinstance(base_a, np.ndarray) and isinstance(base_b, np.ndarray):
-                if not np.allclose(base_a, base_b, equal_nan=True):
+                if not _arrays_equal(base_a, base_b, rtol=1e-5, atol=1e-8, equal_nan=True):
                     children["base_values"] = ValueComparison(
                         status="different",
                         value1=f"<array>",
@@ -3290,7 +3404,7 @@ class Diff:
                         if arr_a is arr_b:
                             continue  # Same pointer
                         if isinstance(arr_a, np.ndarray) and isinstance(arr_b, np.ndarray):
-                            if not np.allclose(arr_a, arr_b, equal_nan=True):
+                            if not _arrays_equal(arr_a, arr_b, rtol=1e-5, atol=1e-8, equal_nan=True):
                                 children[f"encodings_[{i}]"] = ValueComparison(
                                     status="different",
                                     value1=f"<array>",
