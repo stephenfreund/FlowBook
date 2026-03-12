@@ -38,13 +38,13 @@ Analyze reproducibility errors from a FlowBook error report or directly from a p
 | **Sequential transformation chain** | Downstream depends on upstream transformation | Imputation then feature engineering | Deep-copy + alpha-rename |
 | **Diagnostic inspection before mutation** | Read-only cell captures pre-transformation state | `df.info()` before `df["col"] = ...` | Add `%diagnostic` magic |
 | **Visualization before mutation** | Plot accesses all columns before column added | `sns.heatmap(df.corr())` before new col | Add `%diagnostic` magic |
-| **Reusing variable for different purposes** | Variable reused for different purposes | `model` reused for different model | Alpha-rename downstream |
+| **Reusing variable for different purposes** | Variable reused for different purposes in disjoint regions of the code | `model` reused for different model | Alpha-rename downstream |
 
 ## Important Notes
 
 - Cell indices in error reports are **CODE cell indices** (not including markdown cells)
 - Write results to `error_categories.tsv` as you go
-- TSV format: `NOTEBOOK_NAME<TAB>ERROR_NUMBER<TAB>CELL_ID<TAB>CATEGORY<TAB>VARIABLE<TAB>EXPLANATION`
+- TSV format: `NOTEBOOK_NAME<TAB>ERROR_NUMBER<TAB>CELL_ID<TAB>CELL_CODE_INDEX<TAB>CATEGORY<TAB>VARIABLE<TAB>EXPLANATION`
 - The VARIABLE column should contain the primary variable involved in the error
 - The EXPLANATION column should contain the rationale for the categorization
 
