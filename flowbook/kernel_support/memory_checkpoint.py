@@ -921,13 +921,13 @@ from flowbook.kernel_support.df_subset_detector import (
 
 # Enable copy-on-write mode for better performance with DataFrame copies
 # (always enabled in pandas >= 3.0, but needs to be set for pandas 2.x)
-if hasattr(pd.options.mode, 'copy_on_write'):
+if hasattr(pd.options.mode, "copy_on_write"):
     pd.options.mode.copy_on_write = True
 
 # Enable string inference so read_csv() returns StringDtype instead of object dtype.
 # This avoids slow object->string conversion during checkpoint deepcopy.
 # (always enabled in pandas >= 3.0, but needs to be set for pandas 2.x)
-if hasattr(pd.options, 'future') and hasattr(pd.options.future, 'infer_string'):
+if hasattr(pd.options, "future") and hasattr(pd.options.future, "infer_string"):
     pd.options.future.infer_string = True
 
 # Environment variable to enable detailed checkpoint profiling
@@ -985,7 +985,7 @@ def _is_known_leaf_object(v: Any) -> bool:
 
     # Numeric ndarray that owns its data
     if isinstance(v, np.ndarray):
-        return v.dtype.kind != 'O' and v.base is None
+        return v.dtype.kind != "O" and v.base is None
 
     # Primitive container cached by deepcopy module
     if isinstance(v, list) and obj_id in _large_list_cache:
@@ -1091,7 +1091,9 @@ def _deep_copy_function(
 
         new_func.__defaults__ = new_defaults
         new_func.__kwdefaults__ = new_kwdefaults
-        new_func.__annotations__ = func.__annotations__.copy() if func.__annotations__ else {}
+        new_func.__annotations__ = (
+            func.__annotations__.copy() if func.__annotations__ else {}
+        )
         for k, v in func.__dict__.items():
             new_func.__dict__[k] = deepcopy(v, memo)
         new_func.__doc__ = func.__doc__
@@ -1141,7 +1143,9 @@ def _deep_copy_function(
         new_closure,
     )
     new_func.__kwdefaults__ = new_kwdefaults
-    new_func.__annotations__ = func.__annotations__.copy() if func.__annotations__ else {}
+    new_func.__annotations__ = (
+        func.__annotations__.copy() if func.__annotations__ else {}
+    )
     for k, v in func.__dict__.items():
         new_func.__dict__[k] = deepcopy(v, memo)
     new_func.__doc__ = func.__doc__
@@ -1247,11 +1251,18 @@ _SINGLETON_TYPES = (
 )
 
 # Environment variable to control deep alias logging
-_LOG_DEEP_ALIASES = os.environ.get("FLOWBOOK_LOG_DEEP_ALIASES", "").lower() in ("1", "true", "yes", "on")
+_LOG_DEEP_ALIASES = os.environ.get("FLOWBOOK_LOG_DEEP_ALIASES", "").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # Threshold for warning about slow object-dtype traversal.
 # If a container has more object-dtype elements than this, log a warning.
-_SLOW_OBJECT_DTYPE_THRESHOLD = int(os.environ.get("FLOWBOOK_SLOW_ALIAS_THRESHOLD", "1000"))
+_SLOW_OBJECT_DTYPE_THRESHOLD = int(
+    os.environ.get("FLOWBOOK_SLOW_ALIAS_THRESHOLD", "1000")
+)
 
 
 def _collect_reachable_ids_with_paths(
@@ -1324,26 +1335,36 @@ def _collect_reachable_ids_with_paths(
                 return
             for k, v in obj.items():
                 key_repr = repr(k) if not isinstance(k, str) else f"'{k}'"
-                _collect_reachable_ids_with_paths(v, f"{path}[{key_repr}]", visited, id_to_path)
+                _collect_reachable_ids_with_paths(
+                    v, f"{path}[{key_repr}]", visited, id_to_path
+                )
         elif isinstance(obj, (list, tuple)):
             # OPTIMIZATION: Skip large lists/tuples known to contain only primitives.
             if len(obj) >= _LARGE_LIST_THRESHOLD and is_primitive_container(obj):
                 return
             for i, item in enumerate(obj):
-                _collect_reachable_ids_with_paths(item, f"{path}[{i}]", visited, id_to_path)
+                _collect_reachable_ids_with_paths(
+                    item, f"{path}[{i}]", visited, id_to_path
+                )
         elif isinstance(obj, (set, frozenset)):
             # OPTIMIZATION: Skip large sets with only primitive elements.
-            if isinstance(obj, set) and len(obj) >= _LARGE_LIST_THRESHOLD and is_primitive_container(obj):
+            if (
+                isinstance(obj, set)
+                and len(obj) >= _LARGE_LIST_THRESHOLD
+                and is_primitive_container(obj)
+            ):
                 return
             for item in obj:
-                _collect_reachable_ids_with_paths(item, f"{path}<set>", visited, id_to_path)
+                _collect_reachable_ids_with_paths(
+                    item, f"{path}<set>", visited, id_to_path
+                )
         elif cudf_compat.is_cudf_object(obj):
             # cuDF objects live on GPU — their internal buffers can't alias with
             # other Python-level notebook variables. Just track the top-level ID.
             return
         elif isinstance(obj, pd.DataFrame):
             # Track internal block manager (persistent object)
-            if hasattr(obj, '_mgr'):
+            if hasattr(obj, "_mgr"):
                 mgr_id = id(obj._mgr)
                 visited.add(mgr_id)
                 if mgr_id not in id_to_path:
@@ -1381,7 +1402,9 @@ def _collect_reachable_ids_with_paths(
                     kind = infer_dtype(obj, skipna=True)
                     if kind not in _IMMUTABLE_INFERRED_KINDS:
                         for i, item in enumerate(obj):
-                            _collect_reachable_ids_with_paths(item, f"{path}[{i}]", visited, id_to_path)
+                            _collect_reachable_ids_with_paths(
+                                item, f"{path}[{i}]", visited, id_to_path
+                            )
             except Exception:
                 pass
         elif isinstance(obj, np.ndarray):
@@ -1392,17 +1415,23 @@ def _collect_reachable_ids_with_paths(
                 visited.add(base_id)
                 if base_id not in id_to_path:
                     id_to_path[base_id] = f"{path}.base"
-                _collect_reachable_ids_with_paths(obj.base, f"{path}.base", visited, id_to_path)
+                _collect_reachable_ids_with_paths(
+                    obj.base, f"{path}.base", visited, id_to_path
+                )
             if obj.dtype == object:
                 try:
                     for i, item in enumerate(obj.flat):
-                        _collect_reachable_ids_with_paths(item, f"{path}[{i}]", visited, id_to_path)
+                        _collect_reachable_ids_with_paths(
+                            item, f"{path}[{i}]", visited, id_to_path
+                        )
                 except Exception:
                     pass
-        elif hasattr(obj, '__dict__'):
+        elif hasattr(obj, "__dict__"):
             for attr, v in obj.__dict__.items():
-                _collect_reachable_ids_with_paths(v, f"{path}.{attr}", visited, id_to_path)
-        elif hasattr(obj, '__slots__'):
+                _collect_reachable_ids_with_paths(
+                    v, f"{path}.{attr}", visited, id_to_path
+                )
+        elif hasattr(obj, "__slots__"):
             for slot in obj.__slots__:
                 if hasattr(obj, slot):
                     _collect_reachable_ids_with_paths(
@@ -1476,7 +1505,11 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
                 _collect_reachable_ids(item, visited)
         elif isinstance(obj, (set, frozenset)):
             # OPTIMIZATION: Skip large sets with only primitive elements.
-            if isinstance(obj, set) and len(obj) >= _LARGE_LIST_THRESHOLD and is_primitive_container(obj):
+            if (
+                isinstance(obj, set)
+                and len(obj) >= _LARGE_LIST_THRESHOLD
+                and is_primitive_container(obj)
+            ):
                 return
             for item in obj:
                 _collect_reachable_ids(item, visited)
@@ -1489,7 +1522,7 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
             return
         elif isinstance(obj, pd.DataFrame):
             # Track internal block manager (persistent object)
-            if hasattr(obj, '_mgr'):
+            if hasattr(obj, "_mgr"):
                 visited.add(id(obj._mgr))
             # NOTE: We do NOT track df[col].values because .values creates a
             # TEMPORARY array whose id() can be reused by the memory allocator.
@@ -1535,11 +1568,11 @@ def _collect_reachable_ids(obj: Any, visited: Set[int]) -> None:
                         _collect_reachable_ids(item, visited)
                 except Exception:
                     pass
-        elif hasattr(obj, '__dict__'):
+        elif hasattr(obj, "__dict__"):
             # User-defined objects
             for v in obj.__dict__.values():
                 _collect_reachable_ids(v, visited)
-        elif hasattr(obj, '__slots__'):
+        elif hasattr(obj, "__slots__"):
             # Slots-based objects
             for slot in obj.__slots__:
                 if hasattr(obj, slot):
@@ -1582,9 +1615,9 @@ class MemoryCheckpoint:
         self,
         name: str,
         user_ns: dict[str, Any],
-        cudf_origins: Optional['cudf_compat.CuDFOriginTracker'] = None,
+        cudf_origins: Optional["cudf_compat.CuDFOriginTracker"] = None,
         original_ids: Optional[Dict[str, int]] = None,
-        df_subset_relations: Optional[List['SubsetRelation']] = None,
+        df_subset_relations: Optional[List["SubsetRelation"]] = None,
     ):
         """
         Create a new checkpoint.
@@ -1610,11 +1643,12 @@ class MemoryCheckpoint:
 
         # cuDF origin tracking (for restore)
         from flowbook.kernel_support import cudf_compat
+
         self._cudf_origins = cudf_origins or cudf_compat.CuDFOriginTracker()
 
         # DataFrame subset relations for optimized storage
         # See df_subset_detector.py for details
-        self._df_subset_relations: List['SubsetRelation'] = df_subset_relations or []
+        self._df_subset_relations: List["SubsetRelation"] = df_subset_relations or []
 
         # Deep alias detection index (built lazily on first query)
         self._reachable_ids: Dict[str, Set[int]] = {}
@@ -1641,7 +1675,10 @@ class MemoryCheckpoint:
         """
         from collections import defaultdict
 
-        with timer(key="alias:build_index", message=f"Building alias index for checkpoint '{self.name}'"):
+        with timer(
+            key="alias:build_index",
+            message=f"Building alias index for checkpoint '{self.name}'",
+        ):
             self._reachable_ids = {}
             self._id_to_vars = defaultdict(set)
             self._id_to_paths = defaultdict(dict)
@@ -1661,7 +1698,9 @@ class MemoryCheckpoint:
                     if track_paths:
                         # Full path tracking for detailed alias logging
                         id_to_path: Dict[int, str] = {}
-                        _collect_reachable_ids_with_paths(var_value, var_name, visited, id_to_path)
+                        _collect_reachable_ids_with_paths(
+                            var_value, var_name, visited, id_to_path
+                        )
                         # Store paths
                         for obj_id, path in id_to_path.items():
                             self._id_to_paths[obj_id][var_name] = path
@@ -1674,8 +1713,13 @@ class MemoryCheckpoint:
                     total_ids_collected += len(visited)
 
                     # Track slow variables for warning
-                    if len(visited) > _SLOW_OBJECT_DTYPE_THRESHOLD or var_collect_time > 0.005:
-                        slow_vars.append((var_name, len(visited), var_collect_time * 1000))
+                    if (
+                        len(visited) > _SLOW_OBJECT_DTYPE_THRESHOLD
+                        or var_collect_time > 0.005
+                    ):
+                        slow_vars.append(
+                            (var_name, len(visited), var_collect_time * 1000)
+                        )
 
             # Log warnings for slow variables
             for var_name, num_ids, time_ms in slow_vars:
@@ -1684,8 +1728,11 @@ class MemoryCheckpoint:
                 cause = ""
                 if isinstance(var_value, pd.DataFrame):
                     # Use iloc to avoid issues with MultiIndex columns
-                    obj_cols = [var_value.columns[i] for i in range(len(var_value.columns))
-                                if var_value.iloc[:, i].dtype == object]
+                    obj_cols = [
+                        var_value.columns[i]
+                        for i in range(len(var_value.columns))
+                        if var_value.iloc[:, i].dtype == object
+                    ]
                     if obj_cols:
                         total_obj_elements = sum(len(var_value) for _ in obj_cols)
                         cause = f" (DataFrame with {len(obj_cols)} object-dtype columns, {total_obj_elements} elements)"
@@ -1693,7 +1740,9 @@ class MemoryCheckpoint:
                     cause = f" (Series with {len(var_value)} object-dtype elements)"
                 elif isinstance(var_value, np.ndarray) and var_value.dtype == object:
                     cause = f" (ndarray with {var_value.size} object-dtype elements)"
-                log(f"[alias-index] WARNING: slow var '{var_name}' (type={type(var_value).__name__}): {num_ids} IDs in {time_ms:.1f}ms{cause}")
+                log(
+                    f"[alias-index] WARNING: slow var '{var_name}' (type={type(var_value).__name__}): {num_ids} IDs in {time_ms:.1f}ms{cause}"
+                )
 
             # Phase 2: Build reverse index in one pass
             # This is O(total_ids) but we batch the set.add calls per variable
@@ -1709,7 +1758,9 @@ class MemoryCheckpoint:
             # Log summary
             num_vars = len(self.user_ns)
             num_unique_ids = len(self._id_to_vars)
-            log(f"[alias-index] {num_vars} vars, {total_ids_collected} total IDs, {num_unique_ids} unique IDs")
+            log(
+                f"[alias-index] {num_vars} vars, {total_ids_collected} total IDs, {num_unique_ids} unique IDs"
+            )
 
             self._alias_index_built = True
 
@@ -1751,12 +1802,17 @@ class MemoryCheckpoint:
         # Step 2: Find all vars containing any of these IDs
         all_relevant_vars: Set[str] = set()
         # Track which IDs caused each alias for logging
-        alias_reasons: Dict[str, List[tuple]] = {}  # alias_var -> [(accessed_var, path1, path2)]
+        alias_reasons: Dict[str, List[tuple]] = (
+            {}
+        )  # alias_var -> [(accessed_var, path1, path2)]
 
         for obj_id in all_reachable_ids:
             vars_with_id = self._id_to_vars.get(obj_id, set())
             for alias_var in vars_with_id:
-                if alias_var not in accessed_vars and alias_var not in all_relevant_vars:
+                if (
+                    alias_var not in accessed_vars
+                    and alias_var not in all_relevant_vars
+                ):
                     # This is a newly discovered alias
                     if log_aliases or _LOG_DEEP_ALIASES:
                         # Find which accessed var shares this ID
@@ -1768,7 +1824,9 @@ class MemoryCheckpoint:
                                 alias_path = paths.get(alias_var, alias_var)
                                 if alias_var not in alias_reasons:
                                     alias_reasons[alias_var] = []
-                                alias_reasons[alias_var].append((accessed_var, acc_path, alias_path))
+                                alias_reasons[alias_var].append(
+                                    (accessed_var, acc_path, alias_path)
+                                )
                                 break
                 all_relevant_vars.add(alias_var)
 
@@ -1819,7 +1877,10 @@ class MemoryCheckpoint:
             MemoryCheckpointDiffResult: Structured diff tree with only differences
         """
         with timer(key="checkpoint_diff:setup", message="[diff] Setup"):
-            from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
+            from flowbook.kernel_support.structural_tracking import (
+                StructuralTrackingMode,
+            )
+
             if structural_mode is None:
                 structural_mode = StructuralTrackingMode.OFF
 
@@ -1827,8 +1888,8 @@ class MemoryCheckpoint:
             differ = Diff(
                 strict=False,
                 report_close=False,
-                atol=1e-5,
-                rtol=1e-5,
+                atol=0,
+                rtol=0,
                 use_leq=use_leq,
                 column_rbw=column_rbw,
                 structural_reads=structural_reads or {},
@@ -1915,8 +1976,13 @@ class MemoryCheckpoints:
         self._var_memory_costs_by_checkpoint: dict[str, dict[str, dict]] = {}
 
         # Ensure copy-on-write is enabled for performance (pandas 2.x only)
-        if hasattr(pd.options.mode, 'copy_on_write') and not pd.options.mode.copy_on_write:
-            log("WARNING: pandas copy_on_write was disabled - re-enabling for checkpoint performance")
+        if (
+            hasattr(pd.options.mode, "copy_on_write")
+            and not pd.options.mode.copy_on_write
+        ):
+            log(
+                "WARNING: pandas copy_on_write was disabled - re-enabling for checkpoint performance"
+            )
             pd.options.mode.copy_on_write = True
 
     def set_df_subset_optimization(self, enabled: bool) -> None:
@@ -1930,7 +1996,9 @@ class MemoryCheckpoints:
             enabled: True to enable, False to disable
         """
         self.optimize_df_subsets = enabled
-        log(f"DataFrame subset checkpoint optimization: {'enabled' if enabled else 'disabled'}")
+        log(
+            f"DataFrame subset checkpoint optimization: {'enabled' if enabled else 'disabled'}"
+        )
 
     def get_df_subset_optimization_status(self) -> dict:
         """
@@ -1940,11 +2008,11 @@ class MemoryCheckpoints:
             Dictionary with current settings including enabled state and thresholds.
         """
         return {
-            'enabled': self.optimize_df_subsets,
-            'min_rows': self._df_subset_detector.min_rows,
-            'min_savings_bytes': self._df_subset_detector.min_savings_bytes,
-            'max_dataframes': self._df_subset_detector.max_dataframes,
-            'timeout_ms': self._df_subset_detector.timeout_ms,
+            "enabled": self.optimize_df_subsets,
+            "min_rows": self._df_subset_detector.min_rows,
+            "min_savings_bytes": self._df_subset_detector.min_savings_bytes,
+            "max_dataframes": self._df_subset_detector.max_dataframes,
+            "timeout_ms": self._df_subset_detector.timeout_ms,
         }
 
     def _estimate_size(self, variables: dict[str, Any]) -> int:
@@ -2034,18 +2102,20 @@ class MemoryCheckpoints:
 
                 # Store both memory and timing costs per variable
                 var_memory_costs[k] = {
-                    'bytes': obj_size,
-                    'type': type(v).__name__,
-                    'module': type(v).__module__,
-                    'deepcopy_ms': duration_ms,  # Per-variable checkpoint timing
-                    'sizeof_ms': sizeof_ms,  # Per-variable sizeof timing
+                    "bytes": obj_size,
+                    "type": type(v).__name__,
+                    "module": type(v).__module__,
+                    "deepcopy_ms": duration_ms,  # Per-variable checkpoint timing
+                    "sizeof_ms": sizeof_ms,  # Per-variable sizeof timing
                 }
 
                 if _PROFILE_CHECKPOINT:
                     # Record timing keyed by type name (in milliseconds)
                     type_module = type(v).__module__
                     type_name = type(v).__name__
-                    output.add_timing(f"deepcopy:{type_module}.{type_name}", duration_ms)
+                    output.add_timing(
+                        f"deepcopy:{type_module}.{type_name}", duration_ms
+                    )
 
                 if duration_ms > 10 or _PROFILE_CHECKPOINT:  # 10ms threshold
                     log(f"Deep copying variable {k} took {duration_ms:.1f} ms")
@@ -2055,18 +2125,27 @@ class MemoryCheckpoints:
                 # Add helpful hints based on the type
                 if isinstance(v, types.GeneratorType):
                     error_msg += "\n  Hint: Generators cannot be checkpointed (they maintain execution state)"
-                elif hasattr(type(v), '__module__') and type(v).__module__.startswith('matplotlib'):
-                    error_msg += "\n  Hint: Matplotlib objects are excluded from checkpoints"
+                elif hasattr(type(v), "__module__") and type(v).__module__.startswith(
+                    "matplotlib"
+                ):
+                    error_msg += (
+                        "\n  Hint: Matplotlib objects are excluded from checkpoints"
+                    )
                 elif isinstance(v, types.ModuleType):
                     error_msg += "\n  Hint: Modules cannot be checkpointed"
-                elif hasattr(v, '__iter__') and not isinstance(v, (str, bytes, list, tuple, dict, set, frozenset)):
+                elif hasattr(v, "__iter__") and not isinstance(
+                    v, (str, bytes, list, tuple, dict, set, frozenset)
+                ):
                     error_msg += "\n  Hint: Iterator objects may not be checkpointable"
-                elif 'thread' in str(type(v)).lower() or 'lock' in str(type(v)).lower():
+                elif "thread" in str(type(v)).lower() or "lock" in str(type(v)).lower():
                     error_msg += "\n  Hint: Thread/lock objects cannot be pickled"
 
                 # add traceback to error message
                 import traceback
-                error_msg += "\n  Traceback:\n" + "".join(traceback.format_tb(e.__traceback__))
+
+                error_msg += "\n  Traceback:\n" + "".join(
+                    traceback.format_tb(e.__traceback__)
+                )
 
                 log(error_msg)
                 # Track variables that failed to copy
@@ -2097,11 +2176,11 @@ class MemoryCheckpoints:
             return False
 
         # Exclude built-in types
-        if v.__module__ in ('builtins', '__builtin__'):
+        if v.__module__ in ("builtins", "__builtin__"):
             return False
 
         # Exclude common library classes
-        if v.__module__.startswith(('pandas', 'numpy', 'matplotlib', 'sklearn')):
+        if v.__module__.startswith(("pandas", "numpy", "matplotlib", "sklearn")):
             return False
 
         # It's a user-defined class
@@ -2206,16 +2285,26 @@ class MemoryCheckpoints:
             estimated_mb = estimated_bytes / (1024 * 1024)
 
             if estimated_mb > max_size_mb:
-                log(f"WARNING: MemoryCheckpoint '{name}' estimated at {estimated_mb:.1f} MB (threshold: {max_size_mb} MB)")
-                log(f"         Large checkpoints may consume significant memory and time")
+                log(
+                    f"WARNING: MemoryCheckpoint '{name}' estimated at {estimated_mb:.1f} MB (threshold: {max_size_mb} MB)"
+                )
+                log(
+                    f"         Large checkpoints may consume significant memory and time"
+                )
 
         # Warn about user-defined classes if enabled (reuses filtered values)
         if self.warn_classes:
             for var_name, var_value in checkpointable_values.items():
                 if self._is_user_defined_class(var_value):
-                    log(f"WARNING: Variable '{var_name}' is a user-defined class ({var_value.__name__})")
-                    log(f"         Class variables (mutable class attributes) will NOT be properly restored")
-                    log(f"         Only instance attributes will be checkpointed. See documentation section 8.4")
+                    log(
+                        f"WARNING: Variable '{var_name}' is a user-defined class ({var_value.__name__})"
+                    )
+                    log(
+                        f"         Class variables (mutable class attributes) will NOT be properly restored"
+                    )
+                    log(
+                        f"         Only instance attributes will be checkpointed. See documentation section 8.4"
+                    )
 
         with timer(key="checkpoint:deep_copy", message="Deep copying user namespace"):
             saved = {}
@@ -2228,6 +2317,7 @@ class MemoryCheckpoints:
             # Record cudf origins before deep copy (cudf objects become pandas)
             with timer(key="checkpoint:cudf_origins", message="Recording cudf origins"):
                 from flowbook.kernel_support import cudf_compat
+
                 cudf_origins = cudf_compat.CuDFOriginTracker()
                 for k, v in checkpointable_values.items():
                     cudf_origins.record(k, v)
@@ -2238,18 +2328,29 @@ class MemoryCheckpoints:
             # Detect DataFrame subset relationships if enabled
             child_vars: Set[str] = set()
             if self.optimize_df_subsets:
-                with timer(key="checkpoint:df_subset_detect", message="Detecting DataFrame subsets"):
-                    subset_result = self._df_subset_detector.detect(checkpointable_values)
+                with timer(
+                    key="checkpoint:df_subset_detect",
+                    message="Detecting DataFrame subsets",
+                ):
+                    subset_result = self._df_subset_detector.detect(
+                        checkpointable_values
+                    )
                     child_vars = subset_result.child_vars
                     df_subset_relations = subset_result.relations
 
                     if subset_result.total_estimated_savings_bytes > 0:
-                        savings_mb = subset_result.total_estimated_savings_bytes / (1024 * 1024)
-                        log(f"DataFrame subset optimization: {len(df_subset_relations)} relations, "
-                            f"~{savings_mb:.1f} MB savings, {subset_result.detection_time_ms:.1f} ms")
+                        savings_mb = subset_result.total_estimated_savings_bytes / (
+                            1024 * 1024
+                        )
+                        log(
+                            f"DataFrame subset optimization: {len(df_subset_relations)} relations, "
+                            f"~{savings_mb:.1f} MB savings, {subset_result.detection_time_ms:.1f} ms"
+                        )
 
             # Separate variables: copy non-subset vars, store subset vars as relations
-            vars_to_copy = {k: v for k, v in checkpointable_values.items() if k not in child_vars}
+            vars_to_copy = {
+                k: v for k, v in checkpointable_values.items() if k not in child_vars
+            }
 
             # Use helper to deep copy non-subset variables
             with timer(key="checkpoint:deepcopy", message="Deep copying variables"):
@@ -2261,7 +2362,9 @@ class MemoryCheckpoints:
 
             # Store memory costs keyed by checkpoint name (if Scalene tracking was enabled)
             if self._last_var_memory_costs:
-                self._var_memory_costs_by_checkpoint[name] = self._last_var_memory_costs.copy()
+                self._var_memory_costs_by_checkpoint[name] = (
+                    self._last_var_memory_costs.copy()
+                )
 
             # Track successfully copied variables
             with timer(key="checkpoint:type_models", message="Generating type models"):
@@ -2270,18 +2373,24 @@ class MemoryCheckpoints:
 
                 # Also track child variables (stored as relations, not full copies)
                 for relation in df_subset_relations:
-                    saved[relation.child_var] = get_type_model(checkpointable_values[relation.child_var])
+                    saved[relation.child_var] = get_type_model(
+                        checkpointable_values[relation.child_var]
+                    )
 
                 # Track variables that failed to copy
                 for k in failed:
                     removed[k] = get_type_model(checkpointable_values[k])
 
-            self.saved[name] = MemoryCheckpoint(name, cp, cudf_origins, original_ids, df_subset_relations)
+            self.saved[name] = MemoryCheckpoint(
+                name, cp, cudf_origins, original_ids, df_subset_relations
+            )
 
         if self.sanity_check:
             with timer(key="checkpoint:sanity_check", message="Running sanity check"):
-                original = {k: v for k, v in checkpointable_values.items() if k in saved}
-                differ = Diff(strict=False, report_close=False, atol=1e-5, rtol=1e-5)
+                original = {
+                    k: v for k, v in checkpointable_values.items() if k in saved
+                }
+                differ = Diff(strict=False, report_close=False, atol=0, rtol=0)
                 diff_result = differ.diff(original, cp)
                 if diff_result.differences:
                     raise ValueError(f"Sanity check failed: {diff_result.differences}")
@@ -2334,7 +2443,9 @@ class MemoryCheckpoints:
         prior_cp = self.saved.get(prior_checkpoint_name)
         if prior_cp is None:
             # Fallback to regular save if prior checkpoint doesn't exist
-            log(f"Prior checkpoint '{prior_checkpoint_name}' not found, using regular save")
+            log(
+                f"Prior checkpoint '{prior_checkpoint_name}' not found, using regular save"
+            )
             return self.save(name, user_ns, max_size_mb)
 
         # Filter variables ONCE and reuse
@@ -2371,17 +2482,23 @@ class MemoryCheckpoints:
         total_vars = len(checkpointable_values)
         reused_count = len(reusable_vars)
         if reused_count > 0:
-            log(f"Incremental checkpoint: reusing {reused_count}/{total_vars} variables")
+            log(
+                f"Incremental checkpoint: reusing {reused_count}/{total_vars} variables"
+            )
 
         # Size warning (only for variables that need copying)
         if max_size_mb is not None and must_copy_vars:
             estimated_bytes = self._estimate_size(must_copy_vars)
             estimated_mb = estimated_bytes / (1024 * 1024)
             if estimated_mb > max_size_mb:
-                log(f"WARNING: Incremental checkpoint '{name}' copying ~{estimated_mb:.1f} MB")
+                log(
+                    f"WARNING: Incremental checkpoint '{name}' copying ~{estimated_mb:.1f} MB"
+                )
 
         # Deep copy only the variables that need it
-        with timer(key="checkpoint:deep_copy", message="Deep copying modified variables"):
+        with timer(
+            key="checkpoint:deep_copy", message="Deep copying modified variables"
+        ):
             saved = {}
             removed = {}
 
@@ -2391,6 +2508,7 @@ class MemoryCheckpoints:
             # Record cudf origins before deep copy
             with timer(key="checkpoint:cudf_origins", message="Recording cudf origins"):
                 from flowbook.kernel_support import cudf_compat
+
                 cudf_origins = cudf_compat.CuDFOriginTracker()
                 for k, v in checkpointable_values.items():
                     cudf_origins.record(k, v)
@@ -2405,7 +2523,9 @@ class MemoryCheckpoints:
 
             # Store memory costs if available
             if self._last_var_memory_costs:
-                self._var_memory_costs_by_checkpoint[name] = self._last_var_memory_costs.copy()
+                self._var_memory_costs_by_checkpoint[name] = (
+                    self._last_var_memory_costs.copy()
+                )
 
             # Track type models
             with timer(key="checkpoint:type_models", message="Generating type models"):
@@ -2418,8 +2538,10 @@ class MemoryCheckpoints:
 
         if self.sanity_check:
             with timer(key="checkpoint:sanity_check", message="Running sanity check"):
-                original = {k: v for k, v in checkpointable_values.items() if k in saved}
-                differ = Diff(strict=False, report_close=False, atol=1e-5, rtol=1e-5)
+                original = {
+                    k: v for k, v in checkpointable_values.items() if k in saved
+                }
+                differ = Diff(strict=False, report_close=False, atol=0, rtol=0)
                 diff_result = differ.diff(original, cp)
                 if diff_result.differences:
                     raise ValueError(f"Sanity check failed: {diff_result.differences}")
@@ -2552,7 +2674,9 @@ class MemoryCheckpoints:
 
         # Reconstruct DataFrame subsets from relations
         if cp._df_subset_relations:
-            with timer(key="restore:df_subsets", message="Reconstructing DataFrame subsets"):
+            with timer(
+                key="restore:df_subsets", message="Reconstructing DataFrame subsets"
+            ):
                 # Sort relations to restore parents before children (handles chains)
                 sorted_relations = topological_sort_relations(cp._df_subset_relations)
 
@@ -2560,15 +2684,19 @@ class MemoryCheckpoints:
                     try:
                         parent_df = user_ns.get(relation.parent_var)
                         if parent_df is None:
-                            log(f"WARNING: Parent '{relation.parent_var}' not found for "
-                                f"subset '{relation.child_var}'")
+                            log(
+                                f"WARNING: Parent '{relation.parent_var}' not found for "
+                                f"subset '{relation.child_var}'"
+                            )
                             continue
 
                         child_df = reconstruct_from_subset(parent_df, relation)
                         user_ns[relation.child_var] = child_df
 
                     except Exception as e:
-                        log(f"WARNING: Failed to reconstruct subset '{relation.child_var}': {e}")
+                        log(
+                            f"WARNING: Failed to reconstruct subset '{relation.child_var}': {e}"
+                        )
 
     def type_models(self, user_ns: dict[str, Any]) -> dict[str, TypeModel]:
         """
@@ -2659,30 +2787,30 @@ class MemoryCheckpoints:
         # Add pre-checkpoint costs
         for var_name, cost_info in pre_costs.items():
             combined[var_name] = {
-                'bytes': cost_info.get('bytes', 0),
-                'type': cost_info.get('type', 'unknown'),
-                'module': cost_info.get('module', 'unknown'),
-                'pre_bytes': cost_info.get('bytes', 0),
-                'post_bytes': 0,
-                'deepcopy_ms': cost_info.get('deepcopy_ms', 0),
+                "bytes": cost_info.get("bytes", 0),
+                "type": cost_info.get("type", "unknown"),
+                "module": cost_info.get("module", "unknown"),
+                "pre_bytes": cost_info.get("bytes", 0),
+                "post_bytes": 0,
+                "deepcopy_ms": cost_info.get("deepcopy_ms", 0),
             }
 
         # Add post-checkpoint costs
         for var_name, cost_info in post_costs.items():
-            post_bytes = cost_info.get('bytes', 0)
-            post_deepcopy_ms = cost_info.get('deepcopy_ms', 0)
+            post_bytes = cost_info.get("bytes", 0)
+            post_deepcopy_ms = cost_info.get("deepcopy_ms", 0)
             if var_name in combined:
-                combined[var_name]['bytes'] += post_bytes
-                combined[var_name]['post_bytes'] = post_bytes
-                combined[var_name]['deepcopy_ms'] += post_deepcopy_ms
+                combined[var_name]["bytes"] += post_bytes
+                combined[var_name]["post_bytes"] = post_bytes
+                combined[var_name]["deepcopy_ms"] += post_deepcopy_ms
             else:
                 combined[var_name] = {
-                    'bytes': post_bytes,
-                    'type': cost_info.get('type', 'unknown'),
-                    'module': cost_info.get('module', 'unknown'),
-                    'pre_bytes': 0,
-                    'post_bytes': post_bytes,
-                    'deepcopy_ms': post_deepcopy_ms,
+                    "bytes": post_bytes,
+                    "type": cost_info.get("type", "unknown"),
+                    "module": cost_info.get("module", "unknown"),
+                    "pre_bytes": 0,
+                    "post_bytes": post_bytes,
+                    "deepcopy_ms": post_deepcopy_ms,
                 }
 
         return combined
@@ -2714,7 +2842,7 @@ class MemoryCheckpoints:
         # Single pass through cached costs - just sum the bytes values
         for costs in self._var_memory_costs_by_checkpoint.values():
             for cost_info in costs.values():
-                checkpoints_bytes += cost_info.get('bytes', 0)
+                checkpoints_bytes += cost_info.get("bytes", 0)
                 num_vars += 1
 
         # Estimate tracking metadata: ~200 bytes per variable entry (conservative)
@@ -2724,14 +2852,14 @@ class MemoryCheckpoints:
         other_bytes = len(self.saved) * 1024
 
         return {
-            'checkpoints_bytes': checkpoints_bytes,
-            'tracking_metadata_bytes': tracking_metadata_bytes,
-            'other_bytes': other_bytes,
+            "checkpoints_bytes": checkpoints_bytes,
+            "tracking_metadata_bytes": tracking_metadata_bytes,
+            "other_bytes": other_bytes,
         }
 
     def get_checkpoint_size(
         self, name: str, exclude_cached: bool = False
-    ) -> 'CheckpointSize':
+    ) -> "CheckpointSize":
         """
         Get detailed size breakdown for a checkpoint using HeapSizer.
 
@@ -2757,7 +2885,7 @@ class MemoryCheckpoints:
         sizer = HeapSizer()
         return sizer.sizeof_checkpoint(ckpt, exclude_cached=exclude_cached)
 
-    def get_total_checkpoint_size(self) -> 'AllCheckpointsSize':
+    def get_total_checkpoint_size(self) -> "AllCheckpointsSize":
         """
         Get total size of ALL checkpoints together, accounting for sharing.
 
@@ -2782,7 +2910,9 @@ class MemoryCheckpoints:
         # objects in the deepcopy cache, since those ARE part of checkpoint storage
         return sizer.sizeof_all_checkpoints(self.saved, exclude_cached=False)
 
-    def get_cumulative_checkpoint_size_at_cell(self, cell_id: str) -> 'AllCheckpointsSize':
+    def get_cumulative_checkpoint_size_at_cell(
+        self, cell_id: str
+    ) -> "AllCheckpointsSize":
         """
         Get cumulative checkpoint size including all checkpoints up to and including
         the given cell.
@@ -2816,7 +2946,9 @@ class MemoryCheckpoints:
         sizer = HeapSizer()
         # Use exclude_cached=False to measure full checkpoint size including
         # objects in the deepcopy cache, since those ARE part of checkpoint storage
-        return sizer.sizeof_all_checkpoints(checkpoints_to_include, exclude_cached=False)
+        return sizer.sizeof_all_checkpoints(
+            checkpoints_to_include, exclude_cached=False
+        )
 
     def get_overhead_beyond_namespace(
         self,
@@ -2858,10 +2990,10 @@ class MemoryCheckpoints:
 
         if not checkpoints:
             return {
-                'total_mb': 0.0,
-                'by_checkpoint': {},
-                'by_variable': {},
-                'cumulative': {},
+                "total_mb": 0.0,
+                "by_checkpoint": {},
+                "by_variable": {},
+                "cumulative": {},
             }
 
         sizer = HeapSizer()
@@ -2869,11 +3001,13 @@ class MemoryCheckpoints:
 
         # Convert dataclass to dict for easy serialization
         return {
-            'total_mb': result.total_mb,
-            'by_checkpoint': dict(result.by_checkpoint),
-            'by_variable': dict(result.by_variable),
-            'cumulative': dict(result.cumulative),
-            'by_checkpoint_by_var': {k: dict(v) for k, v in result.by_checkpoint_by_var.items()},
+            "total_mb": result.total_mb,
+            "by_checkpoint": dict(result.by_checkpoint),
+            "by_variable": dict(result.by_variable),
+            "cumulative": dict(result.cumulative),
+            "by_checkpoint_by_var": {
+                k: dict(v) for k, v in result.by_checkpoint_by_var.items()
+            },
         }
 
     def get_overhead_beyond_user_namespace(
@@ -2896,9 +3030,11 @@ class MemoryCheckpoints:
             Dict with total_mb, by_checkpoint, by_variable, cumulative
         """
         import types
+
         filtered = {
-            k: v for k, v in globals_dict.items()
-            if not k.startswith('_')
+            k: v
+            for k, v in globals_dict.items()
+            if not k.startswith("_")
             and not isinstance(v, types.ModuleType)
             and not isinstance(v, (types.FunctionType, types.BuiltinFunctionType, type))
         }
@@ -2939,10 +3075,10 @@ class MemoryCheckpoints:
 
         if not checkpoints:
             return {
-                'total_mb': 0.0,
-                'by_checkpoint': {},
-                'by_variable': {},
-                'by_checkpoint_by_var': {},
+                "total_mb": 0.0,
+                "by_checkpoint": {},
+                "by_variable": {},
+                "by_checkpoint_by_var": {},
             }
 
         sizer = HeapSizer()
@@ -2950,10 +3086,12 @@ class MemoryCheckpoints:
 
         # Convert dataclass to dict for easy serialization
         return {
-            'total_mb': result.total_mb,
-            'by_checkpoint': dict(result.by_checkpoint),
-            'by_variable': dict(result.by_variable),
-            'by_checkpoint_by_var': {k: dict(v) for k, v in result.by_checkpoint_by_var.items()},
+            "total_mb": result.total_mb,
+            "by_checkpoint": dict(result.by_checkpoint),
+            "by_variable": dict(result.by_variable),
+            "by_checkpoint_by_var": {
+                k: dict(v) for k, v in result.by_checkpoint_by_var.items()
+            },
         }
 
     def get_pre_post_checkpoint_sizes_at_cell(self, cell_id: str) -> dict:
@@ -3002,13 +3140,21 @@ class MemoryCheckpoints:
 
         # Measure all checkpoints together (true total with all sharing)
         all_checkpoints = {**pre_checkpoints, **post_checkpoints}
-        total_size = sizer.sizeof_all_checkpoints(all_checkpoints, exclude_cached=False) if all_checkpoints else None
+        total_size = (
+            sizer.sizeof_all_checkpoints(all_checkpoints, exclude_cached=False)
+            if all_checkpoints
+            else None
+        )
         total_bytes = total_size.total_bytes if total_size else 0
 
         sizer.reset()
 
         # Measure only pre checkpoints (pre-only scenario with sharing within pre)
-        pre_size = sizer.sizeof_all_checkpoints(pre_checkpoints, exclude_cached=False) if pre_checkpoints else None
+        pre_size = (
+            sizer.sizeof_all_checkpoints(pre_checkpoints, exclude_cached=False)
+            if pre_checkpoints
+            else None
+        )
         pre_only_bytes = pre_size.total_bytes if pre_size else 0
 
         # Post savings = total - pre_only (actual memory saved by removing post)
@@ -3041,38 +3187,39 @@ class MemoryCheckpoints:
 
         sizer = HeapSizer()
         sizes: dict[str, int] = {
-            'checkpoints_total': 0,
-            'deepcopy_cache_total': 0,
-            'alias_index_total': 0,
-            'var_costs_cache': 0,
+            "checkpoints_total": 0,
+            "deepcopy_cache_total": 0,
+            "alias_index_total": 0,
+            "var_costs_cache": 0,
         }
 
         # Measure deepcopy cache separately (shared across checkpoints)
         try:
             from flowbook.kernel_support.deepcopy import get_cached_objects_size
-            sizes['deepcopy_cache_total'] = get_cached_objects_size()
+
+            sizes["deepcopy_cache_total"] = get_cached_objects_size()
         except ImportError:
             pass
 
         # Measure checkpoint contents
         for name, ckpt in self.saved.items():
-            sizes['checkpoints_total'] += sizer.sizeof(ckpt.user_ns)
+            sizes["checkpoints_total"] += sizer.sizeof(ckpt.user_ns)
 
             # Measure alias index if built
             if ckpt._alias_index_built:
-                sizes['alias_index_total'] += sys.getsizeof(ckpt._reachable_ids)
-                sizes['alias_index_total'] += sys.getsizeof(ckpt._id_to_vars)
-                sizes['alias_index_total'] += sys.getsizeof(ckpt._id_to_paths)
+                sizes["alias_index_total"] += sys.getsizeof(ckpt._reachable_ids)
+                sizes["alias_index_total"] += sys.getsizeof(ckpt._id_to_vars)
+                sizes["alias_index_total"] += sys.getsizeof(ckpt._id_to_paths)
                 # Add set sizes
                 for var_ids in ckpt._reachable_ids.values():
-                    sizes['alias_index_total'] += sys.getsizeof(var_ids)
+                    sizes["alias_index_total"] += sys.getsizeof(var_ids)
                 for var_set in ckpt._id_to_vars.values():
-                    sizes['alias_index_total'] += sys.getsizeof(var_set)
+                    sizes["alias_index_total"] += sys.getsizeof(var_set)
 
             sizer.reset()  # Reset for next checkpoint
 
         # Measure var costs cache
-        sizes['var_costs_cache'] = sizer.sizeof(self._var_memory_costs_by_checkpoint)
+        sizes["var_costs_cache"] = sizer.sizeof(self._var_memory_costs_by_checkpoint)
 
         return sizes
 
@@ -3097,6 +3244,7 @@ class MemoryCheckpoints:
             # and avoid stale references
             if not self.saved:
                 from flowbook.kernel_support.deepcopy import clear_list_cache
+
                 clear_list_cache()
 
     def list(self) -> list[str]:
@@ -3118,6 +3266,7 @@ class MemoryCheckpoints:
         self.saved.clear()
         # Clear list cache to free memory held by cached list copies
         from flowbook.kernel_support.deepcopy import clear_list_cache
+
         clear_list_cache()
 
     def get(self, name: str) -> MemoryCheckpoint:
@@ -3175,9 +3324,9 @@ class MemoryCheckpoints:
         # Filter namespace (exclude private, modules, functions, types)
         filtered = {}
         for k, v in globals_dict.items():
-            if k.startswith('_'):
+            if k.startswith("_"):
                 continue
-            if k in ('In', 'Out', 'get_ipython'):
+            if k in ("In", "Out", "get_ipython"):
                 continue
             if isinstance(v, types.ModuleType):
                 continue
@@ -3185,8 +3334,8 @@ class MemoryCheckpoints:
                 continue
             # Exclude IPython internal objects
             try:
-                mod = getattr(type(v), '__module__', '') or ''
-                if mod.startswith(('IPython', 'ipykernel', 'zmq')):
+                mod = getattr(type(v), "__module__", "") or ""
+                if mod.startswith(("IPython", "ipykernel", "zmq")):
                     continue
             except Exception:
                 pass
@@ -3211,11 +3360,17 @@ class MemoryCheckpoints:
             checkpoint_var_types = {}
             for ckpt_name, ckpt_vars in overhead.by_checkpoint_by_var.items():
                 for var_name, mb in ckpt_vars.items():
-                    checkpoint_vars[var_name] = checkpoint_vars.get(var_name, 0) + int(mb * 1024 * 1024)
+                    checkpoint_vars[var_name] = checkpoint_vars.get(var_name, 0) + int(
+                        mb * 1024 * 1024
+                    )
                     # Get type from the checkpoint's user_ns
                     if var_name not in checkpoint_var_types:
                         for name, ckpt in checkpoints:
-                            if name == ckpt_name and hasattr(ckpt, 'user_ns') and var_name in ckpt.user_ns:
+                            if (
+                                name == ckpt_name
+                                and hasattr(ckpt, "user_ns")
+                                and var_name in ckpt.user_ns
+                            ):
                                 val = ckpt.user_ns[var_name]
                                 checkpoint_var_types[var_name] = type(val).__name__
                                 break
@@ -3226,24 +3381,27 @@ class MemoryCheckpoints:
 
         # Get GPU memory using the proper API (pynvml-based, per-process)
         from flowbook.util.gpu_memory import get_gpu_memory_mb
+
         gpu_mb = get_gpu_memory_mb()
         gpu_bytes = int(gpu_mb * 1024 * 1024)
 
         # GPU checkpoint overhead (separate from CPU checkpoint overhead)
         gpu_checkpoint_bytes = 0
         gpu_checkpoint_vars = {}
-        if checkpoints and hasattr(overhead, 'gpu_total_mb'):
+        if checkpoints and hasattr(overhead, "gpu_total_mb"):
             gpu_checkpoint_bytes = int(overhead.gpu_total_mb * 1024 * 1024)
             for ckpt_name, ckpt_vars in overhead.gpu_by_checkpoint_by_var.items():
                 for var_name, mb in ckpt_vars.items():
-                    gpu_checkpoint_vars[var_name] = gpu_checkpoint_vars.get(var_name, 0) + int(mb * 1024 * 1024)
+                    gpu_checkpoint_vars[var_name] = gpu_checkpoint_vars.get(
+                        var_name, 0
+                    ) + int(mb * 1024 * 1024)
 
         return {
-            'user_ns_bytes': ns_result.total_bytes,
-            'gpu_bytes': gpu_bytes,
-            'checkpoint_bytes': total_checkpoint_bytes,
-            'checkpoint_vars': checkpoint_vars,
-            'checkpoint_var_types': checkpoint_var_types,
-            'gpu_checkpoint_bytes': gpu_checkpoint_bytes,
-            'gpu_checkpoint_vars': gpu_checkpoint_vars,
+            "user_ns_bytes": ns_result.total_bytes,
+            "gpu_bytes": gpu_bytes,
+            "checkpoint_bytes": total_checkpoint_bytes,
+            "checkpoint_vars": checkpoint_vars,
+            "checkpoint_var_types": checkpoint_var_types,
+            "gpu_checkpoint_bytes": gpu_checkpoint_bytes,
+            "gpu_checkpoint_vars": gpu_checkpoint_vars,
         }
