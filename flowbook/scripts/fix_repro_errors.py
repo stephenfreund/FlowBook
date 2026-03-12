@@ -153,6 +153,76 @@ def get_cell_id(cell: dict) -> str:
     return cell.get("id") or cell.get("metadata", {}).get("id", "unknown")
 
 
+def split_cell_magic(source: str) -> tuple[str, str]:
+    """
+    Split cell source into cell magic prefix and remaining code.
+
+    Cell magics (%%time, %%timeit, %%capture, etc.) MUST be the first line(s)
+    of a cell. This function separates them so we can insert code after them.
+
+    Returns:
+        Tuple of (magic_prefix, remaining_code) where magic_prefix includes
+        any cell magic lines and remaining_code is everything after.
+    """
+    lines = source.splitlines(keepends=True)
+    if not lines:
+        return "", source
+
+    magic_lines = []
+    rest_start = 0
+
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        # Cell magics start with %% (must be at start of cell)
+        if stripped.startswith("%%"):
+            magic_lines.append(line)
+            rest_start = i + 1
+            # Cell magics can span multiple lines if they have arguments
+            # but typically it's just one line, so we stop after first %%
+            break
+        # Skip blank lines and comments at the start (before magic)
+        elif stripped == "" or stripped.startswith("#"):
+            # Only skip if we haven't found a magic yet and might still find one
+            if i == len(magic_lines):
+                magic_lines.append(line)
+                rest_start = i + 1
+            else:
+                break
+        else:
+            # Non-magic, non-blank line - stop looking
+            break
+
+    # If we collected leading blanks/comments but no magic, reset
+    if magic_lines and not any(
+        ln.lstrip().startswith("%%") for ln in magic_lines
+    ):
+        return "", source
+
+    magic_prefix = "".join(magic_lines)
+    remaining = "".join(lines[rest_start:])
+    return magic_prefix, remaining
+
+
+def prepend_to_cell_source(source: str, prefix: str) -> str:
+    """
+    Prepend code/comments to cell source, preserving cell magics.
+
+    Cell magics (%%time, etc.) must remain at the very top of the cell.
+    This function inserts the prefix after any cell magics.
+
+    Args:
+        source: Original cell source
+        prefix: Code/comments to prepend
+
+    Returns:
+        New source with prefix inserted after any cell magics
+    """
+    magic_prefix, remaining = split_cell_magic(source)
+    if magic_prefix:
+        return magic_prefix + prefix + remaining
+    return prefix + source
+
+
 class VariableRenamer(ast.NodeTransformer):
     """AST transformer that renames a variable throughout the code."""
 
@@ -285,10 +355,11 @@ def add_deepcopy_and_rename(
 """
 
     # Rename variable in this cell
-    new_source, _ = rename_variable_in_code(source, actual_var, new_name)
+    renamed_source, _ = rename_variable_in_code(source, actual_var, new_name)
 
-    # Set new source with copy and comment
-    set_cell_source(target_cell, fix_comment + copy_line + new_source)
+    # Set new source with copy and comment, preserving cell magics (%%time, etc.)
+    new_source = prepend_to_cell_source(renamed_source, fix_comment + copy_line)
+    set_cell_source(target_cell, new_source)
 
     # Rename in all downstream cells
     for i in range(cell_idx + 1, len(cells)):
@@ -327,12 +398,12 @@ def split_diagnostic_cell(
     target_cell = cells[cell_idx]
     source = get_cell_source(target_cell)
 
-    # Add %diagnostic magic and comment
+    # Add %diagnostic magic and comment, preserving cell magics (%%time, etc.)
     fix_comment = f"""{FLOWBOOK_FIX_MARKER} Original error: Diagnostic inspection before mutation
 {FLOWBOOK_FIX_MARKER} Fix: Added %diagnostic to skip reproducibility tracking for this inspection cell
 """
 
-    new_source = fix_comment + "%diagnostic\n" + source
+    new_source = prepend_to_cell_source(source, fix_comment + "%diagnostic\n")
     set_cell_source(target_cell, new_source)
 
 
@@ -383,9 +454,10 @@ def alpha_rename_reused_variable(
 {FLOWBOOK_FIX_MARKER} Fix: Renamed to '{new_name}' to distinguish from earlier use
 """
 
-    # Rename in this cell and all downstream
-    new_source, _ = rename_variable_in_code(source, actual_var, new_name)
-    set_cell_source(target_cell, fix_comment + new_source)
+    # Rename in this cell and all downstream, preserving cell magics (%%time, etc.)
+    renamed_source, _ = rename_variable_in_code(source, actual_var, new_name)
+    new_source = prepend_to_cell_source(renamed_source, fix_comment)
+    set_cell_source(target_cell, new_source)
 
     # Rename in all downstream cells
     for i in range(cell_idx + 1, len(cells)):
