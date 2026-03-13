@@ -13,7 +13,7 @@ Provides shared functionality:
 
 import os
 import warnings
-from typing import Optional
+from typing import Optional, Set, Tuple
 
 from pandas.errors import ChainedAssignmentError
 
@@ -185,13 +185,18 @@ class BaseFlowbookKernel(IPythonKernel):
             for line in lines
         )
 
-    def _take_checkpoint(self, checkpoint_name: str) -> Checkpoint:
+    def _take_checkpoint(self, checkpoint_name: str) -> Tuple[Checkpoint, Set[str]]:
         """
         Take a snapshot of the namespace (and optionally files).
 
         Uses Checkpoints.save() to deep copy the namespace and
         snapshot written files.
-        Returns the Checkpoint object.
+
+        Returns:
+            Tuple of (Checkpoint, set of uncopyable variable names).
+            The caller decides how to handle uncopyable variables:
+            - Old behavior: remove from user_ns
+            - New behavior (FLOWBOOK_UNCOPYABLE_AS_WRITE=1): add to writes
         """
         from flowbook.util.output import timer
 
@@ -209,23 +214,22 @@ class BaseFlowbookKernel(IPythonKernel):
             max_size_mb=None,
         )
 
+        uncopyable_vars: Set[str] = set()
         for k, v in removed.items():
             from flowbook.util.output import log
             message = f"The object {k} (type {v}) cannot be checkpointed"
             log(message)
             self._display.display_icon_and_text("\u26a0\ufe0f", message)
-            # Remove variables that couldn't be checkpointed from the namespace
-            if k in self.shell.user_ns:
-                del self.shell.user_ns[k]
+            uncopyable_vars.add(k)
 
-        return total
+        return total, uncopyable_vars
 
     def _take_checkpoint_incremental(
         self,
         checkpoint_name: str,
         accessed_vars: set,
         prior_checkpoint_name: str,
-    ) -> Checkpoint:
+    ) -> Tuple[Checkpoint, Set[str]]:
         """
         Take an incremental snapshot optimized for untouched variables.
 
@@ -238,7 +242,8 @@ class BaseFlowbookKernel(IPythonKernel):
             prior_checkpoint_name: Name of checkpoint to potentially reuse from
 
         Returns:
-            The Checkpoint object
+            Tuple of (Checkpoint, set of uncopyable variable names).
+            The caller decides how to handle uncopyable variables.
         """
         from flowbook.util.output import timer
 
@@ -258,15 +263,15 @@ class BaseFlowbookKernel(IPythonKernel):
             max_size_mb=None,
         )
 
+        uncopyable_vars: Set[str] = set()
         for k, v in removed.items():
             from flowbook.util.output import log
             message = f"The object {k} (type {v}) cannot be checkpointed"
             log(message)
             self._display.display_icon_and_text("\u26a0\ufe0f", message)
-            if k in self.shell.user_ns:
-                del self.shell.user_ns[k]
+            uncopyable_vars.add(k)
 
-        return total
+        return total, uncopyable_vars
 
     def _restore_checkpoint(self, checkpoint_name: str) -> None:
         """Restore memory + file checkpoint."""

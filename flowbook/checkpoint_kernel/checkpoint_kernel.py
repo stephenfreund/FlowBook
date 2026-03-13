@@ -80,7 +80,11 @@ class CheckpointKernel(BaseFlowbookKernel):
 
             # Measure checkpoint time
             commit_start = time.perf_counter()
-            self._take_checkpoint(f"post_{self._cell_id}")
+            _, uncopyable = self._take_checkpoint(f"post_{self._cell_id}")
+            # Checkpoint kernel uses old behavior: remove uncopyable vars
+            for k in uncopyable:
+                if k in self.shell.user_ns:
+                    del self.shell.user_ns[k]
             commit_end = time.perf_counter()
             commit_time_s = commit_end - commit_start
 

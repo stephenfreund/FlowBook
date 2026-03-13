@@ -860,11 +860,16 @@ class TestNonCheckpointableVariableRemoval:
 
 
 class TestBaseKernelCheckpointRemoval:
-    """Tests for base kernel removing non-checkpointable variables from namespace."""
+    """Tests for base kernel handling non-checkpointable variables.
 
-    def test_take_checkpoint_removes_non_checkpointable(self):
-        """_take_checkpoint should remove non-checkpointable vars from namespace."""
-        from unittest.mock import MagicMock, patch
+    _take_checkpoint now returns (checkpoint, uncopyable_vars) and does NOT
+    remove variables from namespace - the caller decides what to do based on
+    the FLOWBOOK_UNCOPYABLE_AS_WRITE environment variable.
+    """
+
+    def test_take_checkpoint_returns_uncopyable_vars(self):
+        """_take_checkpoint should return uncopyable vars, not remove them."""
+        from unittest.mock import MagicMock
         import tempfile
 
         # Create mock shell with user_ns
@@ -890,13 +895,17 @@ class TestBaseKernelCheckpointRemoval:
 
         # Call _take_checkpoint directly using the bound method pattern
         _take_checkpoint = BaseFlowbookKernel._take_checkpoint.__get__(mock_kernel)
-        _take_checkpoint("test_checkpoint")
+        checkpoint, uncopyable_vars = _take_checkpoint("test_checkpoint")
 
-        # x should still be in namespace
+        # x should still be in namespace (not removed by _take_checkpoint)
         assert "x" in mock_shell.user_ns
 
-        # f should have been removed from namespace
-        assert "f" not in mock_shell.user_ns
+        # f should ALSO still be in namespace (_take_checkpoint no longer removes)
+        assert "f" in mock_shell.user_ns
+
+        # uncopyable_vars should contain 'f'
+        assert "f" in uncopyable_vars
+        assert "x" not in uncopyable_vars
 
         # Warning should have been displayed
         mock_kernel._display.display_icon_and_text.assert_called()
@@ -930,7 +939,7 @@ class TestBaseKernelCheckpointRemoval:
 
         from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
         _take_checkpoint = BaseFlowbookKernel._take_checkpoint.__get__(mock_kernel)
-        _take_checkpoint("test_checkpoint")
+        checkpoint, uncopyable_vars = _take_checkpoint("test_checkpoint")
 
         # All checkpointable vars should still be in namespace
         assert "x" in mock_shell.user_ns
@@ -938,8 +947,49 @@ class TestBaseKernelCheckpointRemoval:
         assert "z" in mock_shell.user_ns
         assert "df" in mock_shell.user_ns
 
+        # No uncopyable vars
+        assert len(uncopyable_vars) == 0
+
         # No warnings should have been displayed (no removed vars)
         mock_kernel._display.display_icon_and_text.assert_not_called()
+
+    def test_caller_can_remove_uncopyable_vars(self):
+        """Caller can remove uncopyable vars from namespace (old behavior)."""
+        from unittest.mock import MagicMock
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile(mode='w', delete=False)
+
+        mock_shell = MagicMock()
+        mock_shell.user_ns = {"x": 1, "f": tmp}
+
+        mock_kernel = MagicMock()
+        mock_kernel.shell = mock_shell
+        mock_kernel._display = MagicMock()
+        mock_kernel._vfs = MagicMock()
+        mock_kernel._vfs.enabled = False
+        mock_kernel._vfs.tracking_only = False
+
+        from flowbook.kernel_support.checkpoint import Checkpoints
+        mock_kernel._checkpoints = Checkpoints()
+
+        from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
+        _take_checkpoint = BaseFlowbookKernel._take_checkpoint.__get__(mock_kernel)
+        checkpoint, uncopyable_vars = _take_checkpoint("test_checkpoint")
+
+        # Simulate old behavior: caller removes uncopyable vars
+        for k in uncopyable_vars:
+            if k in mock_shell.user_ns:
+                del mock_shell.user_ns[k]
+
+        # Now f should be removed
+        assert "f" not in mock_shell.user_ns
+        assert "x" in mock_shell.user_ns
+
+        # Cleanup
+        tmp.close()
+        import os
+        os.unlink(tmp.name)
 
 
 if __name__ == "__main__":

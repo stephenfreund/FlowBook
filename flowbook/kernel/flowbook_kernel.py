@@ -415,6 +415,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
     _verbose = False
     _max_passes = 2  # Max timeout handler passes
 
+    # Environment variable to control handling of uncopyable variables.
+    # When False (default): uncopyable variables are removed from user_ns
+    # When True: uncopyable variables are added to W (writes) as a conservative
+    #            treatment that preserves analysis soundness
+    _uncopyable_as_write = os.environ.get("FLOWBOOK_UNCOPYABLE_AS_WRITE", "").lower() in ("1", "true", "yes")
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         assert self.shell is not None
@@ -1186,7 +1192,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             self._patch_run_code(tracking_dict)
 
             # Save initial state checkpoint (σ_0) for EXEC-RESTORE on the first cell
-            self._take_checkpoint("_initial_state")
+            # For initial state, uncopyable vars are handled by old behavior (removed)
+            # since there's no tracking context yet
+            _, initial_uncopyable = self._take_checkpoint("_initial_state")
+            for k in initial_uncopyable:
+                if k in self.shell.user_ns:
+                    del self.shell.user_ns[k]
 
     def _patch_run_code(self, tracking_dict: TrackingDict) -> None:
         """
@@ -1290,9 +1301,19 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 with timer(
                     key="kernel:checkpoint", message="Pre-execution checkpoint"
                 ) as pre_timer:
-                    pre_checkpoint = self._take_checkpoint(
+                    pre_checkpoint, uncopyable_vars = self._take_checkpoint(
                         f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
                     )
+
+                # Handle uncopyable variables based on configuration
+                if uncopyable_vars:
+                    if not self._uncopyable_as_write:
+                        # Old behavior: remove uncopyable vars from namespace
+                        for k in uncopyable_vars:
+                            if k in self.shell.user_ns:
+                                del self.shell.user_ns[k]
+                    # If _uncopyable_as_write is True, we add them to tracking.writes
+                    # after execution (see below where tracking data is processed)
 
                 # Reset tracking for this execution
                 if isinstance(user_ns, TrackingDict):
@@ -1372,6 +1393,13 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 if result.get("status") == "error":
                     self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
                     return result
+
+                # Add uncopyable variables to writes if configured (conservative soundness)
+                # This treats variables that couldn't be deep-copied as if they were written,
+                # ensuring they participate in conflict detection.
+                if tracking and uncopyable_vars and self._uncopyable_as_write:
+                    tracking.writes = tracking.writes | uncopyable_vars
+                    log(f"[Uncopyable] Added {uncopyable_vars} to writes for soundness")
 
                 # Run Reproducibility check if we have tracking data and cell_id
                 # NOTE: We diff pre_checkpoint against the live namespace (user_ns)
