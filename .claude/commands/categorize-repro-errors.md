@@ -39,6 +39,20 @@ Analyze reproducibility errors from a FlowBook error report or directly from a p
 | **Diagnostic inspection before mutation** | Read-only cell captures pre-transformation state | `df.info()` before `df["col"] = ...` | Add `%diagnostic` magic |
 | **Visualization before mutation** | Plot accesses all columns before column added | `sns.heatmap(df.corr())` before new col | Add `%diagnostic` magic |
 | **Reusing variable for different purposes** | Variable reused for different purposes in disjoint regions of the code | `model` reused for different model | Alpha-rename downstream |
+| **Unrecoverable in-place mutation** | Cell mutates object without rebinding | `model.fit()`, `df.drop(inplace=True)` | See sub-types below |
+
+### Unrecoverable Mutation Sub-types
+
+When the predicate is `"unrecoverable_mutation"`, identify the sub-type from the cell source:
+
+| Sub-type | Detection Pattern | Fix Type | Example |
+|----------|-------------------|----------|---------|
+| **ML model mutation** | `.fit()`, `.fit_transform()`, `.predict()` on model/scaler | `model-copy` | `model.fit(X, y)` |
+| **DataFrame inplace** | `inplace=True` argument | `inplace-to-copy` | `df.drop(col, inplace=True)` |
+| **Structural assignment** | `.columns = ...`, `.index = ...` | `struct-copy` | `df.columns = ['a', 'b']` |
+| **Container mutation** | `.append()`, `[i] = ...` on list/dict/array | `inplace-reassign` | `arr[5] = 99` |
+
+**Why these are unrecoverable:** Re-executing the cell cannot restore the full value of the variable. For example, `model.fit()` only trains the model — it cannot "un-train" changes from a deleted cell. Similarly, `arr[5] = 99` sets one element but cannot restore what a deleted cell wrote to `arr[3]`.
 
 ## Important Notes
 
@@ -61,12 +75,23 @@ python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type diagnost
 
 # For variable reuse:
 python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type variable-reuse --variable VAR
+
+# For ML model mutation (unrecoverable):
+python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type model-copy --variable VAR
+
+# For DataFrame inplace=True (unrecoverable):
+python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type inplace-to-copy --variable VAR
+
+# For structural assignment (unrecoverable):
+python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type struct-copy --variable VAR
 ```
 
 The script creates `<notebook>-fixed.ipynb` with:
 - Comments marked `# [FLOWBOOK FIX]` explaining the original error and fix
 - Deep copies with `_flow_XXXX` suffix for renamed variables
 - `%diagnostic` magic for inspection cells (tells kernel to skip reproducibility checks)
+- For `model-copy`: Uses `safe_model_copy()` which handles sklearn, PyTorch, XGBoost, etc.
+- For `inplace-to-copy`: Converts `df.method(inplace=True)` to `df = df.method()`
 
 ## Extracting Errors from Notebook
 
@@ -251,6 +276,9 @@ Total errors categorized: 116
   - Diagnostic inspection before mutation: 17
   - Visualization before mutation: 2
   - Reusing variable for different purposes: 5
+  - Unrecoverable mutation (ML model): 12
+  - Unrecoverable mutation (inplace): 8
+  - Unrecoverable mutation (structural): 3
 
 Fixed notebooks saved to:
   - .../backpack-pred-baseline-ensemble-eda-fixed.ipynb

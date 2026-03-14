@@ -6227,3 +6227,163 @@ class TestUnrecoverableMutation:
         error_types = [e.error_type for e in result_b.errors]
         assert ErrorType.UNRECOVERABLE_MUTATION not in error_types, \
             f"Rebound df should not trigger unrecoverable mutation, got errors: {result_b.errors}"
+
+
+class TestRerunEmptiedCell:
+    """Test that re-running a cell whose code was removed propagates staleness correctly.
+
+    Scenario:
+        A: x = 0
+        B: x = 1
+        C: x = 2
+        D: print(x)  (reads x)
+
+    Execute A→B→C→D. Then comment out C's code and rerun C (now empty).
+    - D should become stale: it read x from C, but C no longer writes x.
+    - B should become stale: B is the last writer of x before C, and C's
+      removal of x exposes B's value — its provenance role changed.
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(
+            f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
+        )
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        return namespace
+
+    def test_rerun_emptied_cell_makes_reader_stale(self):
+        """D should become stale when C stops writing x."""
+        # A: x = 0
+        self._save_pre_checkpoint("a", {})
+        ns = self._make_namespace({"x": 0})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B: x = 1
+        self._save_pre_checkpoint("b", {"x": 0})
+        ns = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # C: x = 2
+        self._save_pre_checkpoint("c", {"x": 1})
+        ns = self._make_namespace({"x": 2})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # D: print(x) — reads x
+        self._save_pre_checkpoint("d", {"x": 2})
+        ns = self._make_namespace({"x": 2})
+        result_d = self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace=ns,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+        assert result_d.violation is None
+        assert "d" not in result_d.stale_cells, "D should be clean after initial run"
+
+        # All cells should be clean now
+        assert self.sdc._notebook_state.is_clean("a")
+        assert self.sdc._notebook_state.is_clean("b")
+        assert self.sdc._notebook_state.is_clean("c")
+        assert self.sdc._notebook_state.is_clean("d")
+
+        # Now comment out C and rerun it (empty: no reads, no writes)
+        # Namespace still has x=2 (empty code doesn't change it)
+        self._save_pre_checkpoint("c", {"x": 2})
+        ns = self._make_namespace({"x": 2})
+        result_c_empty = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns,
+            tracking=make_tracking(reads=set(), writes=set()),
+        )
+
+        # D should be stale: C used to write x (D's input), but no longer does
+        stale = result_c_empty.stale_cells
+        assert "d" in stale, (
+            f"D should be stale after C stops writing x. "
+            f"stale_cells={stale}, "
+            f"W_old_c={{'x'}}, W_new_c=set(), "
+            f"D reads x"
+        )
+
+    def test_rerun_emptied_cell_makes_last_writer_stale(self):
+        """B should become stale when C stops writing x (B is now last writer)."""
+        # Same setup: A→B→C→D
+        self._save_pre_checkpoint("a", {})
+        ns = self._make_namespace({"x": 0})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        self._save_pre_checkpoint("b", {"x": 0})
+        ns = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        self._save_pre_checkpoint("c", {"x": 1})
+        ns = self._make_namespace({"x": 2})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        self._save_pre_checkpoint("d", {"x": 2})
+        ns = self._make_namespace({"x": 2})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace=ns,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        # Rerun C with empty code
+        self._save_pre_checkpoint("c", {"x": 2})
+        ns = self._make_namespace({"x": 2})
+        result_c_empty = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns,
+            tracking=make_tracking(reads=set(), writes=set()),
+        )
+
+        # B should be stale: C used to write x, B also writes x and is now
+        # the last writer before D. This is the BackwardStale case:
+        # C removed x from its writes, and B was the last writer of x before C.
+        stale = result_c_empty.stale_cells
+        assert "b" in stale, (
+            f"B should be stale after C stops writing x (B is now last writer). "
+            f"stale_cells={stale}"
+        )

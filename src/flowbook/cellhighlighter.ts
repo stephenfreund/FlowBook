@@ -566,8 +566,23 @@ export class ReproducibilityCellHighlighter {
       }
     }
 
-    // Skip staleness notice if violation is present (it's more specific)
+    // Remove staleness notice if violation is present (it's more specific)
     if (hasViolationMetadata || hasViolationNotice) {
+      // Remove any existing staleness notice that may have been added by an
+      // earlier update cycle (e.g., before the violation metadata was set)
+      const allOutputs: IOutput[] = [];
+      let removed = false;
+      for (let i = 0; i < outputs.length; i++) {
+        const out = outputs.get(i).toJSON() as IOutput;
+        if ((out as any).metadata?.flowbook_staleness_notice) {
+          removed = true;
+        } else {
+          allOutputs.push(out);
+        }
+      }
+      if (removed) {
+        outputs.fromJSON(allOutputs);
+      }
       return;
     }
 
@@ -661,8 +676,8 @@ export class ReproducibilityCellHighlighter {
    * Handles both legacy IViolationInfo and new IPredicateViolation formats.
    *
    * For IPredicateViolation:
-   * - accepted=true: yellow info box (violation accepted, cell stays CLEAN)
-   * - accepted=false: red error box (violation rejected, execution rolled back)
+   * Both accepted=true (continue mode) and accepted=false (rejected) are
+   * shown as red error boxes. A violation is a violation regardless.
    */
   private _updateViolationOutput(cell: Cell, cellOrder: string[]): void {
     if (cell.model.type !== 'code') {
@@ -731,12 +746,10 @@ export class ReproducibilityCellHighlighter {
 
       const plainMessage = message.replace(/<code>([^<]+)<\/code>/g, '`$1`');
 
-      // Style based on whether violation was accepted
-      const isAccepted = violation.accepted;
-      const icon = isAccepted ? '\u26a0\ufe0f' : '\u274c';
-      const cssClass = isAccepted
-        ? 'flowbook-staleness-notice'
-        : 'flowbook-error-notice';
+      // Violations are always shown as errors (red), regardless of whether
+      // execution continued (accepted=true) or was rolled back (accepted=false).
+      const icon = '\u274c';
+      const cssClass = 'flowbook-error-notice';
 
       const plainText = `${icon} ${plainMessage}`;
       const noticeOutput: IOutput = {
@@ -747,7 +760,7 @@ export class ReproducibilityCellHighlighter {
         },
         metadata: {
           flowbook_violation_notice: true,
-          flowbook_predicate_accepted: isAccepted
+          flowbook_predicate_accepted: violation.accepted
         }
       };
 
@@ -756,14 +769,10 @@ export class ReproducibilityCellHighlighter {
         return; // Already up to date
       }
 
-      // Add error class to cell if violation was rejected
-      if (!isAccepted) {
-        cell.node.classList.add('flowbook-cell-error');
-      } else {
-        cell.node.classList.remove('flowbook-cell-error');
-      }
+      // Add error class to cell for violations
+      cell.node.classList.add('flowbook-cell-error');
 
-      // Build new output array
+      // Build new output array (also remove staleness notices — violation is more specific)
       const allOutputs: IOutput[] = [noticeOutput];
       for (let i = 0; i < outputs.length; i++) {
         const out = outputs.get(i).toJSON() as IOutput;
@@ -771,6 +780,8 @@ export class ReproducibilityCellHighlighter {
           (out as any).metadata?.flowbook_violation_notice === true;
         const isErrorNotice =
           (out as any).metadata?.flowbook_error_notice === true;
+        const isStalenessNotice =
+          (out as any).metadata?.flowbook_staleness_notice === true;
         const isKernelError =
           out.output_type === 'error' &&
           ((out as any).ename === 'ReproducibilityError' ||
@@ -783,6 +794,7 @@ export class ReproducibilityCellHighlighter {
         if (
           !isViolationNotice &&
           !isErrorNotice &&
+          !isStalenessNotice &&
           !isKernelError &&
           !isKernelPredicateViolation
         ) {

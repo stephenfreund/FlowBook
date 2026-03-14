@@ -9,15 +9,20 @@ Usage:
     python fix_repro_errors.py NOTEBOOK CELL_ID --fix-type TYPE [--variable VAR]
 
 Fix types:
-    inplace-reassign   - Deep-copy variable and alpha-rename downstream
-    sequential-chain   - Same as inplace-reassign
-    diagnostic-split   - Add %diagnostic magic to inspection code
+    inplace-reassign    - Deep-copy variable and alpha-rename downstream
+    sequential-chain    - Same as inplace-reassign
+    diagnostic-split    - Add %diagnostic magic to inspection code
     visualization-split - Same as diagnostic-split
-    variable-reuse     - Alpha-rename reused variable downstream
+    variable-reuse      - Alpha-rename reused variable downstream
+    model-copy          - Copy ML model before mutation (fit/predict)
+    inplace-to-copy     - Convert df.method(inplace=True) to df = df.method()
+    struct-copy         - Insert df.copy() before structural assignment
 
 Examples:
     python fix_repro_errors.py nb.ipynb abcd --fix-type inplace-reassign --variable train
     python fix_repro_errors.py nb.ipynb efgh --fix-type diagnostic-split
+    python fix_repro_errors.py nb.ipynb ijkl --fix-type model-copy --variable model
+    python fix_repro_errors.py nb.ipynb mnop --fix-type inplace-to-copy --variable df
 """
 
 import argparse
@@ -471,6 +476,255 @@ def alpha_rename_reused_variable(
                 set_cell_source(cell, new_cell_source)
 
 
+def add_model_copy_and_rename(
+    notebook: dict,
+    cell_idx: int,
+    variable: str,
+    new_suffix: str,
+) -> None:
+    """
+    Copy an ML model before mutation and rename downstream uses.
+
+    This fix handles unrecoverable mutations from ML model operations:
+    - model.fit(X, y)
+    - scaler.fit_transform(X)
+    - model.predict(X) when it modifies internal state
+
+    Uses safe_model_copy() which:
+    - Uses sklearn.clone() for unfitted sklearn estimators (fast)
+    - Uses copy.deepcopy() for fitted models (correct for all frameworks)
+    - Handles PyTorch, XGBoost, LightGBM, CatBoost correctly
+
+    Args:
+        notebook: The notebook dict
+        cell_idx: Index of the cell with the mutation
+        variable: The model variable name
+        new_suffix: Suffix to add to create new name
+    """
+    cells = notebook.get("cells", [])
+    if cell_idx >= len(cells):
+        return
+
+    target_cell = cells[cell_idx]
+    source = get_cell_source(target_cell)
+
+    # Find the actual variable name (might be renamed from previous fix)
+    actual_var = find_actual_variable_name(source, variable)
+
+    # Determine the base name for the new variable
+    if "_flow_" in actual_var:
+        base_name = actual_var.split("_flow_")[0]
+    else:
+        base_name = variable
+
+    new_name = f"{base_name}_flow_{new_suffix}"
+
+    # Use safe_model_copy for correct handling of all ML frameworks
+    copy_code = f"""from flowbook.util.model_copy import safe_model_copy
+{new_name} = safe_model_copy({actual_var})  {FLOWBOOK_FIX_MARKER} Copy model before mutation
+"""
+
+    # Add comment explaining the fix
+    if actual_var != variable:
+        fix_comment = f"""{FLOWBOOK_FIX_MARKER} Original error: Unrecoverable mutation of '{variable}' (now '{actual_var}')
+{FLOWBOOK_FIX_MARKER} Fix: Created model copy '{new_name}' and renamed downstream uses
+"""
+    else:
+        fix_comment = f"""{FLOWBOOK_FIX_MARKER} Original error: Unrecoverable mutation of '{variable}' (e.g., .fit() modifies internal state)
+{FLOWBOOK_FIX_MARKER} Fix: Created model copy '{new_name}' and renamed downstream uses
+"""
+
+    # Rename variable in this cell
+    renamed_source, _ = rename_variable_in_code(source, actual_var, new_name)
+
+    # Set new source with copy and comment
+    new_source = prepend_to_cell_source(renamed_source, fix_comment + copy_code)
+    set_cell_source(target_cell, new_source)
+
+    # Rename in all downstream cells
+    for i in range(cell_idx + 1, len(cells)):
+        cell = cells[i]
+        if cell.get("cell_type") == "code":
+            cell_source = get_cell_source(cell)
+            new_cell_source, renamed = rename_variable_in_code(
+                cell_source, actual_var, new_name
+            )
+            if renamed:
+                set_cell_source(cell, new_cell_source)
+
+
+class InplaceRemover(ast.NodeTransformer):
+    """AST transformer that removes inplace=True from method calls on a variable."""
+
+    def __init__(self, target_var: str):
+        self.target_var = target_var
+        self.modified = False
+        self.method_calls_fixed = []
+
+    def visit_Expr(self, node):
+        """Convert df.method(inplace=True) to df = df.method()."""
+        if isinstance(node.value, ast.Call):
+            call = node.value
+            # Check if it's a method call on our target variable
+            if isinstance(call.func, ast.Attribute):
+                # Get the object being called on
+                if isinstance(call.func.value, ast.Name):
+                    if call.func.value.id == self.target_var:
+                        # Check for inplace=True in keyword arguments
+                        new_keywords = []
+                        had_inplace = False
+                        for kw in call.keywords:
+                            if kw.arg == "inplace":
+                                # Check if it's True
+                                if isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                                    had_inplace = True
+                                    continue  # Skip this keyword
+                            new_keywords.append(kw)
+
+                        if had_inplace:
+                            # Remove inplace from keywords
+                            call.keywords = new_keywords
+                            # Convert to assignment: df = df.method(...)
+                            # Create proper AST nodes with all required attributes
+                            target = ast.Name(id=self.target_var, ctx=ast.Store())
+                            assign = ast.Assign(
+                                targets=[target],
+                                value=call,
+                            )
+                            # Copy location info from original node
+                            ast.copy_location(assign, node)
+                            ast.copy_location(target, node)
+                            # Fix missing attributes for ast.unparse
+                            ast.fix_missing_locations(assign)
+                            self.modified = True
+                            self.method_calls_fixed.append(call.func.attr)
+                            return assign
+
+        return node
+
+
+def convert_inplace_to_assignment(
+    notebook: dict,
+    cell_idx: int,
+    variable: str,
+) -> None:
+    """
+    Convert df.method(inplace=True) to df = df.method().
+
+    This fix handles unrecoverable mutations from pandas inplace operations:
+    - df.drop(columns=['x'], inplace=True) -> df = df.drop(columns=['x'])
+    - df.fillna(0, inplace=True) -> df = df.fillna(0)
+    - df.reset_index(inplace=True) -> df = df.reset_index()
+
+    Args:
+        notebook: The notebook dict
+        cell_idx: Index of the cell with the inplace operation
+        variable: The DataFrame variable name
+    """
+    cells = notebook.get("cells", [])
+    if cell_idx >= len(cells):
+        return
+
+    target_cell = cells[cell_idx]
+    source = get_cell_source(target_cell)
+
+    # Find the actual variable name (might be renamed from previous fix)
+    actual_var = find_actual_variable_name(source, variable)
+
+    # Try AST transformation
+    try:
+        tree = ast.parse(source)
+        remover = InplaceRemover(actual_var)
+        new_tree = remover.visit(tree)
+
+        if remover.modified:
+            methods_fixed = ", ".join(remover.method_calls_fixed)
+            fix_comment = f"""{FLOWBOOK_FIX_MARKER} Original error: Unrecoverable mutation via inplace=True
+{FLOWBOOK_FIX_MARKER} Fix: Converted {actual_var}.{methods_fixed}(inplace=True) to assignment
+"""
+            new_source = prepend_to_cell_source(ast.unparse(new_tree), fix_comment)
+            set_cell_source(target_cell, new_source)
+            return
+    except SyntaxError:
+        pass
+
+    # Fallback: regex-based replacement
+    # Pattern: variable.method(..., inplace=True, ...) or variable.method(..., inplace = True, ...)
+    pattern = rf"(\b{re.escape(actual_var)}\.(\w+)\([^)]*),\s*inplace\s*=\s*True([^)]*)\)"
+    replacement = rf"{actual_var} = \1\3)"
+
+    new_source, count = re.subn(pattern, replacement, source)
+    if count > 0:
+        fix_comment = f"""{FLOWBOOK_FIX_MARKER} Original error: Unrecoverable mutation via inplace=True
+{FLOWBOOK_FIX_MARKER} Fix: Converted inplace=True to assignment
+"""
+        new_source = prepend_to_cell_source(new_source, fix_comment)
+        set_cell_source(target_cell, new_source)
+
+
+def add_copy_before_structural_assign(
+    notebook: dict,
+    cell_idx: int,
+    variable: str,
+    new_suffix: str,
+) -> None:
+    """
+    Insert df.copy() before structural attribute assignment.
+
+    This fix handles unrecoverable mutations from structural assignments:
+    - df.columns = ['a', 'b', 'c']
+    - df.index = new_index
+
+    Args:
+        notebook: The notebook dict
+        cell_idx: Index of the cell with structural assignment
+        variable: The DataFrame variable name
+        new_suffix: Suffix for the new variable name
+    """
+    cells = notebook.get("cells", [])
+    if cell_idx >= len(cells):
+        return
+
+    target_cell = cells[cell_idx]
+    source = get_cell_source(target_cell)
+
+    # Find the actual variable name (might be renamed from previous fix)
+    actual_var = find_actual_variable_name(source, variable)
+
+    # Determine the base name for the new variable
+    if "_flow_" in actual_var:
+        base_name = actual_var.split("_flow_")[0]
+    else:
+        base_name = variable
+
+    new_name = f"{base_name}_flow_{new_suffix}"
+
+    # Create copy before structural assignment
+    copy_code = f"{new_name} = {actual_var}.copy()  {FLOWBOOK_FIX_MARKER} Copy before structural mutation\n"
+
+    fix_comment = f"""{FLOWBOOK_FIX_MARKER} Original error: Unrecoverable structural mutation of '{actual_var}'
+{FLOWBOOK_FIX_MARKER} Fix: Created copy '{new_name}' and renamed downstream uses
+"""
+
+    # Rename variable in this cell
+    renamed_source, _ = rename_variable_in_code(source, actual_var, new_name)
+
+    # Set new source with copy and comment
+    new_source = prepend_to_cell_source(renamed_source, fix_comment + copy_code)
+    set_cell_source(target_cell, new_source)
+
+    # Rename in all downstream cells
+    for i in range(cell_idx + 1, len(cells)):
+        cell = cells[i]
+        if cell.get("cell_type") == "code":
+            cell_source = get_cell_source(cell)
+            new_cell_source, renamed = rename_variable_in_code(
+                cell_source, actual_var, new_name
+            )
+            if renamed:
+                set_cell_source(cell, new_cell_source)
+
+
 def apply_fix(
     notebook_path: Path,
     cell_id: str,
@@ -521,6 +775,21 @@ def apply_fix(
             raise ValueError(f"--variable required for {fix_type}")
         alpha_rename_reused_variable(notebook, cell_idx, variable, suffix)
 
+    elif fix_type == "model-copy":
+        if not variable:
+            raise ValueError(f"--variable required for {fix_type}")
+        add_model_copy_and_rename(notebook, cell_idx, variable, suffix)
+
+    elif fix_type == "inplace-to-copy":
+        if not variable:
+            raise ValueError(f"--variable required for {fix_type}")
+        convert_inplace_to_assignment(notebook, cell_idx, variable)
+
+    elif fix_type == "struct-copy":
+        if not variable:
+            raise ValueError(f"--variable required for {fix_type}")
+        add_copy_before_structural_assign(notebook, cell_idx, variable, suffix)
+
     else:
         raise ValueError(f"Unknown fix type: {fix_type}")
 
@@ -545,12 +814,15 @@ def main():
             "diagnostic-split",
             "visualization-split",
             "variable-reuse",
+            "model-copy",
+            "inplace-to-copy",
+            "struct-copy",
         ],
         help="Type of fix to apply",
     )
     parser.add_argument(
         "--variable",
-        help="Variable name (required for inplace-reassign, sequential-chain, variable-reuse)",
+        help="Variable name (required for most fix types except diagnostic-split)",
     )
     parser.add_argument(
         "--init",

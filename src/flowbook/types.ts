@@ -172,8 +172,9 @@ export type PredicateType =
  * - NO_WRITE_AFTER_READ: Backward mutation
  *
  * The `accepted` field indicates how the violation was handled:
- * - accepted=false: Rejected - execution rolled back, shown as error (red)
- * - accepted=true: Accepted (continue_after_violation) - cell stays CLEAN, shown as info (yellow)
+ * - accepted=false: Rejected - execution rolled back
+ * - accepted=true: Accepted (continue_after_violation) - execution continues
+ * Both are shown as errors (red) in the UI.
  */
 export interface IPredicateViolation {
   predicate: PredicateType;

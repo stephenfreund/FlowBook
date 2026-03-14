@@ -1660,9 +1660,13 @@ class ReproducibilityEnforcer:
             # BackwardStale: mark cells j < i as stale if W_i ∩ R_j ≠ ∅
             # This handles the case where a later cell writes to a variable
             # that an earlier (clean) cell had read.
+            # Also handles removed writes: if cell i used to write y but no longer
+            # does, the last writer of y before i should be marked stale (its
+            # value is now "exposed" to downstream cells).
             with timer(key="check:BackwardStale", message=f"[Inst-Run] BackwardStale computation for {cell_id}"):
                 backward_stale = self._compute_backward_staleness(
-                    namespace, W_i_vars, recoverable_column_changed, cell_id, my_position
+                    namespace, W_i_vars, recoverable_column_changed, cell_id, my_position,
+                    old_writes=W_i_old, current_writes=W_i_current,
                 )
             if backward_stale:
                 log(f"[Inst-Run] {cell_id}: BackwardStale marked {len(backward_stale)} cells")
@@ -2599,25 +2603,33 @@ class ReproducibilityEnforcer:
         column_changed: Dict[str, List[str]],
         just_executed: str,
         my_position: int,
+        old_writes: Optional[Set[str]] = None,
+        current_writes: Optional[Set[str]] = None,
     ) -> List[str]:
         """
         Compute BackwardStale for all cells j < i.
 
         When cell i writes to a variable that earlier cell j read, j becomes stale.
+        Also handles removed writes: when cell i used to write y but no longer does,
+        the last writer of y before i (j) should be marked stale — its value is
+        now "exposed" to downstream cells.
+
         Dispatches to syntactic or semantic implementation based on staleness_mode.
 
-        Formal ref: FORMAL_DEVELOPMENT.md §10.1, §10.2
+        Formal ref: FORMAL_DEVELOPMENT.md §10.1, §10.2, §3.3
 
         Returns:
             List of cell IDs that were marked stale
         """
         if self._staleness_mode == StalenessMode.SYNTACTIC:
             return self._compute_backward_staleness_syntactic(
-                changed_vars, column_changed, just_executed, my_position
+                changed_vars, column_changed, just_executed, my_position,
+                old_writes=old_writes, current_writes=current_writes,
             )
         else:
             return self._compute_backward_staleness_semantic(
-                current_namespace, changed_vars, column_changed, just_executed, my_position
+                current_namespace, changed_vars, column_changed, just_executed, my_position,
+                old_writes=old_writes, current_writes=current_writes,
             )
 
     def _compute_backward_staleness_syntactic(
@@ -2626,6 +2638,8 @@ class ReproducibilityEnforcer:
         column_changed: Dict[str, List[str]],
         just_executed: str,
         my_position: int,
+        old_writes: Optional[Set[str]] = None,
+        current_writes: Optional[Set[str]] = None,
     ) -> List[str]:
         """
         Syntactic BackwardStale: W_i ∩ R_j ≠ ∅ for j < i.
@@ -2634,7 +2648,12 @@ class ReproducibilityEnforcer:
         if they read variables that i wrote to. Also checks column-level overlap
         for DataFrame column changes.
 
-        Formal ref: FORMAL_DEVELOPMENT.md §10.1
+        Also handles removed writes: BackwardStale(W, W', i, j) ≝
+        j < i ∧ j = LastWriter(W, i, y) for some y ∈ Wᵢ \\ W'ᵢ.
+        When cell i drops a write to y, the last writer of y before i
+        should be marked stale — its value is now "exposed".
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.1, §3.3
         """
         newly_stale: List[str] = []
 
@@ -2669,6 +2688,23 @@ class ReproducibilityEnforcer:
                         )
                 newly_stale.append(prior_cell_id)
 
+        # Removed writes backward staleness:
+        # BackwardStale(W, W', i, j) ≝ j < i ∧ j = LastWriter(W, i, y) for y in W_old - W_new
+        # When cell i drops a write to y, the previous writer of y becomes stale
+        # because its value is now "exposed" to downstream cells.
+        if old_writes is not None and current_writes is not None:
+            removed_writes = old_writes - current_writes
+            if removed_writes:
+                for y in removed_writes:
+                    last_j = self._notebook_state.last_writer_for(y, just_executed)
+                    if last_j is not None and self._notebook_state.is_clean(last_j):
+                        self._notebook_state.add_reason(
+                            last_j,
+                            Reason(ReasonType.BACKWARD_STALE, loc=y, cell_id=just_executed)
+                        )
+                        if last_j not in newly_stale:
+                            newly_stale.append(last_j)
+
         return newly_stale
 
     def _compute_backward_staleness_semantic(
@@ -2678,6 +2714,8 @@ class ReproducibilityEnforcer:
         column_changed: Dict[str, List[str]],
         just_executed: str,
         my_position: int,
+        old_writes: Optional[Set[str]] = None,
+        current_writes: Optional[Set[str]] = None,
     ) -> List[str]:
         """
         Semantic BackwardStale: W_i ∩ R_j ≠ ∅ AND diff(pre_checkpoint[j], namespace, R_j) ≠ ∅.
@@ -2685,7 +2723,10 @@ class ReproducibilityEnforcer:
         Uses checkpoint diff comparison for precise staleness detection.
         Only marks cells stale if their input values actually changed.
 
-        Formal ref: FORMAL_DEVELOPMENT.md §10.2
+        Also handles removed writes (same as syntactic version):
+        BackwardStale(W, W', i, j) for y in W_old - W_new.
+
+        Formal ref: FORMAL_DEVELOPMENT.md §10.2, §3.3
         """
         newly_stale: List[str] = []
 
@@ -2732,6 +2773,20 @@ class ReproducibilityEnforcer:
                         Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
                     )
                 newly_stale.append(prior_cell_id)
+
+        # Removed writes backward staleness (same logic as syntactic version)
+        if old_writes is not None and current_writes is not None:
+            removed_writes = old_writes - current_writes
+            if removed_writes:
+                for y in removed_writes:
+                    last_j = self._notebook_state.last_writer_for(y, just_executed)
+                    if last_j is not None and self._notebook_state.is_clean(last_j):
+                        self._notebook_state.add_reason(
+                            last_j,
+                            Reason(ReasonType.BACKWARD_STALE, loc=y, cell_id=just_executed)
+                        )
+                        if last_j not in newly_stale:
+                            newly_stale.append(last_j)
 
         return newly_stale
 
