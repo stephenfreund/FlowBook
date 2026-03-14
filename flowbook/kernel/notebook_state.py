@@ -130,7 +130,7 @@ class NotebookState:
         Reasons are sorted by priority so the most specific reason comes first:
         1. FORWARD_STALE (tells you which variable changed)
         2. CODE_CHANGED (cell was edited)
-        3. BACKWARD_STALE, NO_READ_BEFORE_WRITE, READS_RESIDUAL_WRITE
+        3. BACKWARD_STALE, NO_READ_BEFORE_WRITE
         4. ORDER_CHANGED (least specific)
         5. NEVER_EXECUTED
         """
@@ -141,9 +141,8 @@ class NotebookState:
             ReasonType.CODE_CHANGED: 2,
             ReasonType.BACKWARD_STALE: 3,
             ReasonType.NO_READ_BEFORE_WRITE: 4,
-            ReasonType.READS_RESIDUAL_WRITE: 5,
-            ReasonType.ORDER_CHANGED: 6,
-            ReasonType.NEVER_EXECUTED: 7,
+            ReasonType.ORDER_CHANGED: 5,
+            ReasonType.NEVER_EXECUTED: 6,
         }
 
         result: Dict[str, List[Dict[str, Any]]] = {}
@@ -496,10 +495,13 @@ class NotebookState:
 
     def handle_delete(self, deleted_cell: str) -> None:
         """
-        DELETE transition:
-        1. Keep L(x) pointing to deleted cell (for orphan detection)
-        2. Mark cells that read orphaned locations as Stale(SourceDeleted)
+        DELETE transition — [Inst-Delete]:
+        1. Compute ForwardStale and BackwardStale using same predicates as [Inst-Run]
+        2. Keep L(x) pointing to deleted cell (for orphan detection)
         3. Remove deleted cell from status/reads/writes/cell_order
+
+        ForwardStale: j > i, Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+        BackwardStale: j < i, j = LastWriter(W, i, y) for y ∈ Wᵢ
 
         Note: We intentionally keep last_writer pointing to the deleted cell
         so that forward dependency checks can detect "orphaned values" -
@@ -507,22 +509,41 @@ class NotebookState:
         """
         deleted_writes = self.writes.get(deleted_cell, set())
 
-        # Note: Do NOT clear last_writer - keep it for orphan detection
-        # The forward dependency check detects deleted cells by checking
-        # if the writer is still in cell_order.
+        if deleted_writes and deleted_cell in self.cell_order:
+            my_position = self.cell_order.index(deleted_cell)
 
-        # Mark orphan readers (cells that read what the deleted cell wrote)
-        # Since we keep last_writer pointing to deleted cell, check directly
-        for cell_id in self.cell_order:
-            if cell_id == deleted_cell:
-                continue
+            # ForwardStale: j > i, Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+            for cell_id in self.cell_order[my_position + 1:]:
+                cell_reads = self.reads.get(cell_id, set())
+                cell_writes = self.writes.get(cell_id, set())
+                read_overlap = deleted_writes & cell_reads
+                write_overlap = deleted_writes & cell_writes
 
-            cell_reads = self.reads.get(cell_id, set())
-            for loc in cell_reads & deleted_writes:
-                # The location was written by deleted_cell, mark reader as orphan
-                self.add_reason(cell_id, Reason(
-                    ReasonType.READS_RESIDUAL_WRITE, loc=loc
-                ))
+                for loc in read_overlap:
+                    self.add_reason(cell_id, Reason(
+                        ReasonType.FORWARD_STALE, loc=loc, cell_id=deleted_cell
+                    ))
+                for loc in write_overlap - read_overlap:
+                    self.add_reason(cell_id, Reason(
+                        ReasonType.WRITE_OVERLAP, loc=loc, cell_id=deleted_cell
+                    ))
+
+            # BackwardStale: j < i, j = LastWriter(W, i, y) for y ∈ Wᵢ
+            # Snapshot clean state — formal rule checks original Tⱼ
+            originally_clean = {
+                cell_id for cell_id in self.cell_order[:my_position]
+                if self.is_clean(cell_id)
+            }
+            for y in deleted_writes:
+                last_j = None
+                for cell_id in self.cell_order[:my_position]:
+                    cell_w = self.writes.get(cell_id, set())
+                    if y in cell_w:
+                        last_j = cell_id
+                if last_j is not None and last_j in originally_clean:
+                    self.add_reason(last_j, Reason(
+                        ReasonType.BACKWARD_STALE, loc=y, cell_id=deleted_cell
+                    ))
 
         # Remove deleted cell from state
         self.status.pop(deleted_cell, None)

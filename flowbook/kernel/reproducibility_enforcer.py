@@ -501,26 +501,6 @@ def _backward_stale(
     return False
 
 
-def _reads_residual_write(
-    R_j: Set[str],
-    w: Set[str],
-) -> bool:
-    """
-    ReadsResidualWrite(R', w, j) ≝ R'ⱼ ∩ w ≠ ∅
-
-    Cell j becomes stale if it reads from deleted cell's writes.
-
-    Formal ref: main.tex §Staleness predicates, FORMAL_DEVELOPMENT.md §3.3
-
-    Args:
-        R_j: Read set of cell j (in the shifted state after deletion)
-        w: Write set of the deleted cell (captured before deletion)
-
-    Returns:
-        True if cell j reads any location written by the deleted cell
-    """
-    return bool(R_j & w)
-
 
 def _write_before_read(
     R_i: Set[str],
@@ -888,15 +868,13 @@ class ReproducibilityEnforcer:
     ) -> tuple:
         """Handle DELETE transitions — Inst-Delete rule.
 
-        Formal ref: ReadsResidualWrite(R', w, j) in main.tex §Staleness predicates,
-                    FORMAL_DEVELOPMENT.md §3.3, §3.5 [Inst-Delete]
+        Formal ref: FORMAL_DEVELOPMENT.md §3.3, §3.5 [Inst-Delete]
 
-        The formal predicate is: R'ⱼ ∩ w ≠ ∅
-        Where w = Wᵢ (the deleted cell's writes) captured before deletion.
+        Deleting cell i is modeled as W''=W[i:={}], R''=R[i:={}], then:
+        - ForwardStale(R, W, W'', i, j): j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+        - BackwardStale(W, W'', i, j):   j < i ∧ j = LastWriter(W, i, y) for y ∈ Wᵢ
 
-        For each deleted cell i with an execution record:
-        - Capture w = Wᵢ (the deleted cell's writes)
-        - For each remaining cell j: if ReadsResidualWrite(R', w, j), mark j stale
+        Reuses the same staleness predicates as [Inst-Run].
 
         Args:
             deleted_cells: List of deleted cell IDs (cell i being deleted)
@@ -910,6 +888,7 @@ class ReproducibilityEnforcer:
         with timer(key="order:Inst-Delete", message=f"[Inst-Delete] Handling {len(deleted_cells)} deletions"):
             newly_stale: List[str] = []
             warnings: List[str] = []
+            deleted_set = set(deleted_cells)
 
             for deleted_id in deleted_cells:
                 deleted_tracking = self._notebook_state.get_tracking(deleted_id)
@@ -921,41 +900,86 @@ class ReproducibilityEnforcer:
                 if not deleted_writes:
                     continue  # Deleted cell didn't write anything
 
-                # Track cells marked stale by this deletion for logging
-                cells_marked = 0
+                my_position = old_order.index(deleted_id)
+                fwd_marked = 0
+                bwd_marked = 0
 
-                # Find cells that read what the deleted cell wrote
-                for cell_id in self._cell_order:
-                    if cell_id == deleted_id:
+                # ForwardStale: j > i, Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+                for cell_id in old_order[my_position + 1:]:
+                    if cell_id in deleted_set:
                         continue
                     if not self._notebook_state.is_clean(cell_id):
-                        continue  # Already stale
+                        continue
 
                     other_tracking = self._notebook_state.get_tracking(cell_id)
                     if other_tracking is None:
                         continue
-                    other_reads = other_tracking.reads_before_writes
-                    overlap = deleted_writes & other_reads
 
-                    if overlap:
-                        newly_stale.append(cell_id)
-                        cells_marked += 1
-                        # Track reason: READS_RESIDUAL_WRITE for each orphaned variable
-                        for var in overlap:
+                    other_reads = other_tracking.reads_before_writes or set()
+                    other_writes = other_tracking.writes or set()
+                    read_overlap = deleted_writes & other_reads
+                    write_overlap = deleted_writes & other_writes
+
+                    if read_overlap or write_overlap:
+                        if cell_id not in newly_stale:
+                            newly_stale.append(cell_id)
+                        fwd_marked += 1
+                        for var in read_overlap:
                             self._notebook_state.add_reason(
                                 cell_id,
-                                Reason(ReasonType.READS_RESIDUAL_WRITE, loc=var)
+                                Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=deleted_id)
+                            )
+                        for var in write_overlap - read_overlap:
+                            self._notebook_state.add_reason(
+                                cell_id,
+                                Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=deleted_id)
                             )
                         alpha_deleted = self._cell_id_to_alpha(deleted_id)
                         alpha_other = self._cell_id_to_alpha(cell_id)
+                        overlap = read_overlap | write_overlap
                         warning = (
                             f"Cell @{alpha_other} marked stale: "
                             f"deleted cell @{alpha_deleted} wrote {sorted(overlap)}"
                         )
                         warnings.append(warning)
-                        log(f"[DELETE] {warning}")
+                        log(f"[DELETE-FWD] {warning}")
 
-                log(f"[Inst-Delete] Cell {deleted_id}: ReadsResidualWrite marked {cells_marked} cells stale")
+                # BackwardStale: j < i, j = LastWriter(W, i, y) for y ∈ Wᵢ
+                # Snapshot clean state before marking — the formal rule checks
+                # against the original Tⱼ, not the updated T''ⱼ.
+                originally_clean = {
+                    cell_id for cell_id in old_order[:my_position]
+                    if cell_id not in deleted_set
+                    and self._notebook_state.is_clean(cell_id)
+                }
+                for y in deleted_writes:
+                    # Find last writer of y among cells before i
+                    last_j = None
+                    for cell_id in old_order[:my_position]:
+                        if cell_id in deleted_set:
+                            continue
+                        cell_writes = self._notebook_state.writes.get(cell_id, set())
+                        if y in cell_writes:
+                            last_j = cell_id  # Keep scanning; last one wins
+
+                    if last_j is not None and last_j in originally_clean:
+                        if last_j not in newly_stale:
+                            newly_stale.append(last_j)
+                        bwd_marked += 1
+                        self._notebook_state.add_reason(
+                            last_j,
+                            Reason(ReasonType.BACKWARD_STALE, loc=y, cell_id=deleted_id)
+                        )
+                        alpha_deleted = self._cell_id_to_alpha(deleted_id)
+                        alpha_last = self._cell_id_to_alpha(last_j)
+                        warning = (
+                            f"Cell @{alpha_last} marked stale (backward): "
+                            f"was last writer of '{y}' before deleted cell @{alpha_deleted}"
+                        )
+                        warnings.append(warning)
+                        log(f"[DELETE-BWD] {warning}")
+
+                log(f"[Inst-Delete] Cell {deleted_id}: ForwardStale marked {fwd_marked}, BackwardStale marked {bwd_marked} cells stale")
 
             return (newly_stale, warnings)
 

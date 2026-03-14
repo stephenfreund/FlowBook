@@ -24,7 +24,6 @@ from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel.reproducibility_enforcer import (
     _forward_stale,
     _backward_stale,
-    _reads_residual_write,
     _write_before_read,
     _no_read_before_write,
     _no_write_after_read,
@@ -407,30 +406,6 @@ class TestBackwardStale:
             return 7  # After i=5
 
         assert _backward_stale({}, W_new_i, W_old_i, last_writer, i=5, j=7) is False
-
-
-class TestReadsResidualWrite:
-    """Tests for ReadsResidualWrite(R', w, j) ≝ R'ⱼ ∩ w ≠ ∅"""
-
-    def test_cell_reads_deleted_write(self):
-        """Cell that reads from deleted cell's writes becomes stale."""
-        R_j = {"x", "y"}
-        w = {"x", "z"}  # Deleted cell wrote x and z
-        assert _reads_residual_write(R_j, w) is True
-
-    def test_no_overlap(self):
-        """No overlap means no staleness."""
-        R_j = {"a", "b"}
-        w = {"x", "y"}
-        assert _reads_residual_write(R_j, w) is False
-
-    def test_empty_reads(self):
-        """Cell with no reads is not affected."""
-        assert _reads_residual_write(set(), {"x"}) is False
-
-    def test_empty_deleted_writes(self):
-        """Deleted cell with no writes doesn't affect anyone."""
-        assert _reads_residual_write({"x"}, set()) is False
 
 
 # =============================================================================

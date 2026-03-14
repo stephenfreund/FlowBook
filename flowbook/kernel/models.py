@@ -404,7 +404,6 @@ class ReasonType(str, Enum):
     - NO_READ_AND_WRITE: ¬NoReadAndWrite - cell reads and writes same location
     - WRITE_BEFORE_READ: ¬WriteBeforeRead - reads user var not written by earlier cell
     - NO_WRITE_AFTER_READ: ¬NoWriteAfterRead - wrote location read by earlier fresh cell
-    - READS_RESIDUAL_WRITE: ReadsResidualWrite - reads from deleted cell's writes
     """
 
     NEVER_EXECUTED = "never_executed"
@@ -415,7 +414,6 @@ class ReasonType(str, Enum):
     NO_READ_BEFORE_WRITE = "no_read_before_write"  # was READS_FROM_LATER - forward contamination
     NO_READ_AND_WRITE = "no_read_and_write"  # cell reads and writes same location
     WRITE_BEFORE_READ = "write_before_read"  # reads user var not written by earlier cell
-    READS_RESIDUAL_WRITE = "reads_residual_write"  # was SOURCE_DELETED
     ORDER_CHANGED = "order_changed"
     SKIPPED_UPSTREAM = "skipped_upstream"  # Cell reads from wrong writer; re-run won't help
     NO_WRITE_AFTER_READ = "no_write_after_read"  # was BACKWARD_MUTATION - cell wrote to location read by earlier cell

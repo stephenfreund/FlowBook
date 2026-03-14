@@ -186,12 +186,10 @@ These predicates determine when cells become stale:
 ```
 ForwardStale(R, W, W', i, j)       ≝  j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
 BackwardStale(W, W', i, j)     ≝  j < i ∧ j = LastWriter(W, i, y) for some y ∈ Wᵢ \ W'ᵢ
-ReadsResidualWrite(R, W, i, j) ≝  Rⱼ ∩ Wᵢ ≠ ∅
 ```
 
 - **ForwardStale**: Cell j (after i) becomes stale if i wrote to a location that j reads or writes.
 - **BackwardStale**: Cell j (before i) becomes stale if it was the last writer of a location that i no longer writes.
-- **ReadsResidualWrite**: Cell j becomes stale if it reads from deleted cell i's writes.
 
 ### 3.4 Instrumented Transition Rules
 
@@ -238,16 +236,22 @@ Since Wᵢ = ∅, inserting cannot invalidate any existing cell.
 ```
 S →^{Delete(i)} S'
 w = Wᵢ
-T' = T_{1..i-1}, T_{i+1..n}
+R'' = R[i:={}]
+W'' = W[i:={}]
+T''ⱼ = STALE           if ForwardStale(R, W, W'', i, j)
+     = STALE           if BackwardStale(W, W'', i, j)
+     = Tⱼ              otherwise
 R' = R_{1..i-1}, R_{i+1..n}
 W' = W_{1..i-1}, W_{i+1..n}
-T''ⱼ = STALE    if ReadsResidualWrite(R', w, j)
-     = T'ⱼ      otherwise
+T' = T''_{1..i-1}, T''_{i+1..n}
 ─────────────────────────────────────────────────
-S · (T, R, W) ⇒^{Delete(i)} S' · (T'', R', W')
+S · (T, R, W) ⇒^{Delete(i)} S' · (T', R', W')
 ```
 
-Deleting cell i invalidates any cell j that reads a residual write of i.
+Deleting cell i is modeled as clearing its reads and writes (W''=W[i:={}], R''=R[i:={}]),
+then applying the same ForwardStale and BackwardStale predicates used in [Inst-Run].
+Since W''ᵢ = {}, ForwardStale simplifies to Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅ for j > i,
+and BackwardStale checks all y ∈ Wᵢ (since Wᵢ \ {} = Wᵢ).
 
 **[Inst-Move-Down]** (s < d)
 ```
@@ -264,7 +268,7 @@ S · I ⇒^{Move(s, d)} S' · I'
 ```
 
 Move is the composition of delete and insert. The delete may mark cells stale
-via ReadsResidualWrite, and the insert adds a stale cell at the destination.
+via ForwardStale and BackwardStale, and the insert adds a stale cell at the destination.
 Batch operations follow the same decompositions as in the standard semantics.
 
 ---
@@ -313,7 +317,7 @@ Therefore P(n) holds, i.e., C ⇓ O, σₙ. ∎
 
 The Edit case is trivial (it only marks cells stale). Insert adds a STALE cell,
 imposing no well-formedness obligation. Delete may mark cells stale via
-ReadsResidualWrite. Move composes delete and insert.
+ForwardStale and BackwardStale. Move composes delete and insert.
 
 For Run(i), we show that the new state S' is well-formed by case analysis on j:
 
@@ -361,9 +365,8 @@ Validity predicates are implemented inline within `check()`, following the [Inst
 
 | main.tex | FORMAL_DEVELOPMENT.md | Code |
 |----------|----------------------|------|
-| ForwardStale(R, W, i, j) | §3.3 | `_compute_forward_staleness()` in `check()` |
-| BackwardStale(W, W', i, j) | §3.3 | Computed via `NotebookState.last_writer` in `check()` |
-| ReadsResidualWrite(R, w, j) | §3.3 | `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
+| ForwardStale(R, W, i, j) | §3.3 | `_compute_forward_staleness()` in `check()`, `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
+| BackwardStale(W, W', i, j) | §3.3 | Computed via `NotebookState.last_writer` in `check()`, `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
 | LastWriter(W, i, y) | §1.4.2 | `NotebookState.last_writer[loc]` in `kernel/notebook_state.py` |
 | Overwritten(W, i) | §1.4.1 | Computed on-demand in staleness checks |
 

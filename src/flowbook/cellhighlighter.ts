@@ -523,10 +523,6 @@ export class ReproducibilityCellHighlighter {
           return `Reads \`${loc}\` from later cell ${causingRef} (forward contamination)`;
         }
         return 'Reads from a later cell';
-      case 'reads_residual_write':
-        return loc
-          ? `Source of \`${loc}\` was deleted`
-          : 'Source cell was deleted';
       case 'order_changed':
         return 'Cell order changed';
       case 'no_write_after_read':

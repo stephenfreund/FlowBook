@@ -795,13 +795,6 @@ export class ReproducibilityExecutionHookManager {
           causing_cell: cellId,
           message: 'Reads from a later cell'
         };
-      case 'reads_residual_write':
-        return {
-          type: 'unknown',
-          message: loc
-            ? `Source of \`${loc}\` was deleted`
-            : 'Source cell was deleted'
-        };
       case 'order_changed':
         return {
           type: 'unknown',

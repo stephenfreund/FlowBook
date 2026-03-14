@@ -50,7 +50,7 @@ spec:
     reasons: |
       Map of cell_id -> list of reason objects:
         - type: never_executed | code_changed | forward_stale |
-                write_conflict | no_read_before_write | reads_residual_write |
+                write_conflict | no_read_before_write |
                 order_changed | skipped_upstream
         - loc: variable/location involved (optional)
         - cell_id: cell that caused staleness (optional)
@@ -951,10 +951,10 @@ tests:
 # =============================================================================
 
   # -------------------------------------------------------------------------
-  # DELETE: Delete cell with readers - READS_RESIDUAL_WRITE (EXPLICIT)
+  # DELETE: Delete cell with readers - ForwardStale (EXPLICIT)
   # -------------------------------------------------------------------------
   - name: "delete_cell_with_readers_explicit"
-    description: "Deleting a cell marks cells that read its writes as READS_RESIDUAL_WRITE"
+    description: "Deleting a cell marks downstream readers stale via ForwardStale"
     cell_order: ["a", "b", "c"]
     operations:
       - type: RUN
@@ -983,8 +983,9 @@ tests:
         c: stale
       reasons:
         c:
-          - type: reads_residual_write
+          - type: forward_stale
             loc: "x"
+            cell_id: "b"
       cell_order: ["a", "c"]
 
   # -------------------------------------------------------------------------
@@ -1048,10 +1049,10 @@ tests:
 # =============================================================================
 
   # -------------------------------------------------------------------------
-  # DELETE: Delete cell with readers - READS_RESIDUAL_WRITE (CODE)
+  # DELETE: Delete cell with readers - ForwardStale (CODE)
   # -------------------------------------------------------------------------
   - name: "delete_cell_with_readers_code"
-    description: "Deleting a cell marks cells that read its writes as READS_RESIDUAL_WRITE (code-based)"
+    description: "Deleting a cell marks downstream readers stale via ForwardStale (code-based)"
     cell_order: ["a", "b", "c"]
     cells:
       a: "pass"
@@ -1081,8 +1082,9 @@ tests:
         c: stale
       reasons:
         c:
-          - type: reads_residual_write
+          - type: forward_stale
             loc: "x"
+            cell_id: "b"
       cell_order: ["a", "c"]
 
   # -------------------------------------------------------------------------
