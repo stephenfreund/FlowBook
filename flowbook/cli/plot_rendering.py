@@ -654,6 +654,7 @@ def render_time_cdf(
     title: str = "Analysis Time Distribution",
     xlabel: str = "Analysis Time (ms, log scale)",
     large_fonts: bool = True,
+    show_sample_size: bool = True,
 ) -> None:
     """Render a time-based CDF panel with log scale x-axis.
 
@@ -853,19 +854,20 @@ def render_time_cdf(
     )
 
     # N count in top left
-    textstr = f"N={n:,}"
-    ax.text(
-        0.02,
-        0.98,
-        textstr,
-        transform=ax.transAxes,
-        fontsize=tick_size,
-        verticalalignment="top",
-        horizontalalignment="left",
-        bbox=dict(
-            boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
-        ),
-    )
+    if show_sample_size:
+        textstr = f"N={n:,}"
+        ax.text(
+            0.02,
+            0.98,
+            textstr,
+            transform=ax.transAxes,
+            fontsize=tick_size,
+            verticalalignment="top",
+            horizontalalignment="left",
+            bbox=dict(
+                boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
+            ),
+        )
 
     # Axes config
     ax.set_xlabel(xlabel, fontsize=label_size)
@@ -878,7 +880,9 @@ def render_time_cdf(
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
 
 
-def render_overhead_pct_cdf(ax, data: CDFData, large_fonts: bool = True) -> None:
+def render_overhead_pct_cdf(
+    ax, data: CDFData, large_fonts: bool = True, show_sample_size: bool = True
+) -> None:
     """Render CDF for per-cell overhead percentage distribution.
 
     Overhead percentage = (state + check) / base * 100
@@ -887,6 +891,7 @@ def render_overhead_pct_cdf(ax, data: CDFData, large_fonts: bool = True) -> None
         ax: Matplotlib axes
         data: CDFData with overhead_pct_* fields
         large_fonts: Use larger fonts
+        show_sample_size: Whether to show N= annotation
     """
     from matplotlib.ticker import FuncFormatter
 
@@ -991,10 +996,11 @@ def render_overhead_pct_cdf(ax, data: CDFData, large_fonts: bool = True) -> None
             family="monospace")
 
     # N count in top left
-    textstr = f"N={n:,}"
-    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
-            verticalalignment="top", horizontalalignment="left",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"))
+    if show_sample_size:
+        textstr = f"N={n:,}"
+        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
+                verticalalignment="top", horizontalalignment="left",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"))
 
     # Axes config
     ax.set_xlabel("Overhead Percentage", fontsize=label_size)
@@ -1008,13 +1014,16 @@ def render_overhead_pct_cdf(ax, data: CDFData, large_fonts: bool = True) -> None
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:.0f}%"))
 
 
-def render_base_runtime_cdf(ax, data: CDFData, large_fonts: bool = True) -> None:
+def render_base_runtime_cdf(
+    ax, data: CDFData, large_fonts: bool = True, show_sample_size: bool = True
+) -> None:
     """Render CDF for base runtime (code execution time) distribution.
 
     Args:
         ax: Matplotlib axes
         data: CDFData with base_runtime_* fields
         large_fonts: Use larger fonts
+        show_sample_size: Whether to show N= annotation
     """
     render_time_cdf(
         ax,
@@ -1025,6 +1034,7 @@ def render_base_runtime_cdf(ax, data: CDFData, large_fonts: bool = True) -> None
         title="Base Runtime Distribution",
         xlabel="Code Execution Time (ms, log scale)",
         large_fonts=large_fonts,
+        show_sample_size=show_sample_size,
     )
 
 
@@ -1037,6 +1047,7 @@ def render_cdf_panel(
     show_legend: bool = True,
     color_override: str = None,
     title_override: str = None,
+    show_sample_size: bool = True,
 ) -> None:
     """Render a single CDF panel for aggregate data.
 
@@ -1049,6 +1060,7 @@ def render_cdf_panel(
         show_legend: Whether to show legend
         color_override: Optional color to use instead of the default for this metric
         title_override: Optional title to use instead of the default for this metric
+        show_sample_size: Whether to show N= annotation
     """
     from matplotlib.ticker import FuncFormatter
 
@@ -1076,6 +1088,7 @@ def render_cdf_panel(
             title=title_override or "Analysis Time Distribution",
             xlabel="Analysis Time (ms, log scale)",
             large_fonts=large_fonts,
+            show_sample_size=show_sample_size,
         )
         return
 
@@ -1298,19 +1311,20 @@ def render_cdf_panel(
     )
 
     # N count in top left
-    textstr = f"N={n:,}"
-    ax.text(
-        0.02,
-        0.98,
-        textstr,
-        transform=ax.transAxes,
-        fontsize=tick_size,
-        verticalalignment="top",
-        horizontalalignment="left",
-        bbox=dict(
-            boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
-        ),
-    )
+    if show_sample_size:
+        textstr = f"N={n:,}"
+        ax.text(
+            0.02,
+            0.98,
+            textstr,
+            transform=ax.transAxes,
+            fontsize=tick_size,
+            verticalalignment="top",
+            horizontalalignment="left",
+            bbox=dict(
+                boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
+            ),
+        )
 
     # Axes config
     ax.set_xlabel(xlabel, fontsize=label_size)

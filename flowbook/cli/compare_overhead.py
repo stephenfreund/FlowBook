@@ -136,6 +136,7 @@ def render_rerun_overhead_cdf(
     ax,
     data: RerunOverheadCDFData,
     large_fonts: bool = True,
+    show_sample_size: bool = True,
 ) -> None:
     """Render rerun overhead CDF panel.
 
@@ -145,6 +146,7 @@ def render_rerun_overhead_cdf(
         ax: Matplotlib axes
         data: RerunOverheadCDFData with timing values
         large_fonts: Use larger fonts
+        show_sample_size: Whether to show N= annotation
     """
     render_time_cdf(
         ax,
@@ -155,6 +157,7 @@ def render_rerun_overhead_cdf(
         title="Rerun Overhead Time Distribution",
         xlabel="Rerun Overhead (ms, log scale)",
         large_fonts=large_fonts,
+        show_sample_size=show_sample_size,
     )
 
 
@@ -3670,6 +3673,7 @@ def plot_overhead_cdfs(
     aggregate: "AggregateStats",
     output_path: Optional[str] = None,
     large_fonts: bool = True,
+    show_sample_size: bool = True,
 ) -> Optional[List[Any]]:
     """
     Create CDF plots for per-cell overhead distributions.
@@ -3911,20 +3915,21 @@ def plot_overhead_cdfs(
             formatter.set_scientific(False)
             ax.xaxis.set_major_formatter(formatter)
 
-            textstr = f"N={len(total_data):,}"
-            props = dict(
-                boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
-            )
-            ax.text(
-                0.02,
-                0.98,
-                textstr,
-                transform=ax.transAxes,
-                fontsize=tick_size,
-                verticalalignment="top",
-                horizontalalignment="left",
-                bbox=props,
-            )
+            if show_sample_size:
+                textstr = f"N={len(total_data):,}"
+                props = dict(
+                    boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
+                )
+                ax.text(
+                    0.02,
+                    0.98,
+                    textstr,
+                    transform=ax.transAxes,
+                    fontsize=tick_size,
+                    verticalalignment="top",
+                    horizontalalignment="left",
+                    bbox=props,
+                )
     else:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
         ax.set_title("Time Overhead Distribution", fontsize=title_size)
@@ -3995,20 +4000,21 @@ def plot_overhead_cdfs(
             ax.set_xticks([0, 0.25, 0.5, 0.75, 1])
             ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
 
-            textstr = f"N={len(memory_data_ratio):,}"
-            props = dict(
-                boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
-            )
-            ax.text(
-                0.02,
-                0.98,
-                textstr,
-                transform=ax.transAxes,
-                fontsize=tick_size,
-                verticalalignment="top",
-                horizontalalignment="left",
-                bbox=props,
-            )
+            if show_sample_size:
+                textstr = f"N={len(memory_data_ratio):,}"
+                props = dict(
+                    boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
+                )
+                ax.text(
+                    0.02,
+                    0.98,
+                    textstr,
+                    transform=ax.transAxes,
+                    fontsize=tick_size,
+                    verticalalignment="top",
+                    horizontalalignment="left",
+                    bbox=props,
+                )
     else:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
         ax.set_title("Memory Overhead Distribution", fontsize=title_size)
@@ -4076,20 +4082,21 @@ def plot_overhead_cdfs(
         ax2.set_xticks([0, 25, 50, 75, 100])
         ax2.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
 
-        textstr = f"N={len(peak_data):,}"
-        props = dict(
-            boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
-        )
-        ax2.text(
-            0.02,
-            0.98,
-            textstr,
-            transform=ax2.transAxes,
-            fontsize=tick_size,
-            verticalalignment="top",
-            horizontalalignment="left",
-            bbox=props,
-        )
+        if show_sample_size:
+            textstr = f"N={len(peak_data):,}"
+            props = dict(
+                boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
+            )
+            ax2.text(
+                0.02,
+                0.98,
+                textstr,
+                transform=ax2.transAxes,
+                fontsize=tick_size,
+                verticalalignment="top",
+                horizontalalignment="left",
+                bbox=props,
+            )
 
         ax2.tick_params(axis="both", labelsize=tick_size)
         # Subtle spines
@@ -4126,6 +4133,9 @@ def process_v4(
     """
     if excluded_for_errors is None:
         excluded_for_errors = []
+
+    # Compute show_sample_size from args
+    show_sample_size = not getattr(args, "no_sample_size", False)
 
     # Convert to ComparisonResultV4 objects
     results: Dict[str, ComparisonResultV4] = {}
@@ -4297,16 +4307,19 @@ def process_v4(
 
                         cdf_fig, cdf_axes = plt.subplots(1, 3, figsize=(15, 5))
                         render_cdf_panel(
-                            cdf_axes[0], cdf_data, "time", large_fonts=args.large_fonts
+                            cdf_axes[0], cdf_data, "time", large_fonts=args.large_fonts,
+                            show_sample_size=show_sample_size
                         )
                         render_cdf_panel(
                             cdf_axes[1],
                             cdf_data,
                             "memory",
                             large_fonts=args.large_fonts,
+                            show_sample_size=show_sample_size,
                         )
                         render_cdf_panel(
-                            cdf_axes[2], cdf_data, "peak", large_fonts=args.large_fonts
+                            cdf_axes[2], cdf_data, "peak", large_fonts=args.large_fonts,
+                            show_sample_size=show_sample_size
                         )
                         cdf_fig.tight_layout()
                         pdf.savefig(cdf_fig, dpi=150)
@@ -4322,12 +4335,14 @@ def process_v4(
                                 cdf_data,
                                 "gpu_memory",
                                 large_fonts=args.large_fonts,
+                                show_sample_size=show_sample_size,
                             )
                             render_cdf_panel(
                                 gpu_cdf_axes[1],
                                 cdf_data,
                                 "gpu_peak",
                                 large_fonts=args.large_fonts,
+                                show_sample_size=show_sample_size,
                             )
                             gpu_cdf_fig.tight_layout()
                             pdf.savefig(gpu_cdf_fig, dpi=150)
@@ -4336,7 +4351,7 @@ def process_v4(
                         # Per-cell overhead percentage CDF page
                         if cdf_data.overhead_pct:
                             overhead_fig, overhead_ax = plt.subplots(figsize=(8, 6))
-                            render_overhead_pct_cdf(overhead_ax, cdf_data, large_fonts=args.large_fonts)
+                            render_overhead_pct_cdf(overhead_ax, cdf_data, large_fonts=args.large_fonts, show_sample_size=show_sample_size)
                             overhead_fig.tight_layout()
                             pdf.savefig(overhead_fig, dpi=150)
                             plt.close(overhead_fig)
@@ -4344,7 +4359,7 @@ def process_v4(
                         # Base runtime CDF page
                         if cdf_data.base_runtime_ms:
                             base_fig, base_ax = plt.subplots(figsize=(8, 6))
-                            render_base_runtime_cdf(base_ax, cdf_data, large_fonts=args.large_fonts)
+                            render_base_runtime_cdf(base_ax, cdf_data, large_fonts=args.large_fonts, show_sample_size=show_sample_size)
                             base_fig.tight_layout()
                             pdf.savefig(base_fig, dpi=150)
                             plt.close(base_fig)
@@ -4430,7 +4445,8 @@ def process_v4(
                         # Rerun overhead CDF page (combined across all notebooks)
                         rerun_cdf_fig, rerun_cdf_ax = plt.subplots(figsize=(8, 6))
                         render_rerun_overhead_cdf(
-                            rerun_cdf_ax, rerun_cdf_data, large_fonts=args.large_fonts
+                            rerun_cdf_ax, rerun_cdf_data, large_fonts=args.large_fonts,
+                            show_sample_size=show_sample_size
                         )
                         rerun_cdf_fig.tight_layout()
                         pdf.savefig(rerun_cdf_fig, dpi=150)
@@ -4450,6 +4466,7 @@ def process_v4(
                                 title="Per-Cell Analysis Time \nDistribution",
                                 xlabel="Analysis Time (ms, log scale)",
                                 large_fonts=args.large_fonts,
+                                show_sample_size=show_sample_size,
                             )
                             render_time_cdf(
                                 time_cdf_axes[1],
@@ -4460,6 +4477,7 @@ def process_v4(
                                 title="Per-Rerun-Cell Analysis Time \nDistribution",
                                 xlabel="Rerun Overhead (ms, log scale)",
                                 large_fonts=args.large_fonts,
+                                show_sample_size=show_sample_size,
                             )
                             time_cdf_fig.tight_layout()
                             pdf.savefig(time_cdf_fig, dpi=150)
@@ -4478,6 +4496,7 @@ def process_v4(
                             color_override="orange",
                             title_override="Per-Cell Memory Overhead\nDistribution",
                             large_fonts=args.large_fonts,
+                            show_sample_size=show_sample_size,
                         )
                         render_cdf_panel(
                             mem_cdf_axes[1],
@@ -4486,6 +4505,7 @@ def process_v4(
                             color_override="red",
                             title_override="Per-Notebook Peak Memory Overhead\nDistribution",
                             large_fonts=args.large_fonts,
+                            show_sample_size=show_sample_size,
                         )
                         mem_cdf_fig.tight_layout()
                         pdf.savefig(mem_cdf_fig, dpi=150)
@@ -4497,8 +4517,9 @@ def process_v4(
     # Print summary table
     print_v5_summary(raw_data, results)
 
-    # Print excluded notebooks at the very end
+    # Print summary counts at the very end
     print()
+    print(f"PROCESSED {len(results)} NOTEBOOK(S) WITHOUT ERRORS")
     print(f"EXCLUDED {len(excluded_for_errors)} NOTEBOOK(S) WITH BASELINE ERRORS:")
     print("-" * 60)
     if excluded_for_errors:
@@ -4509,6 +4530,18 @@ def process_v4(
             )
     else:
         print("  (none)")
+
+    # Print source directories
+    source_dirs = sorted(set(str(Path(p).parent) for p in raw_data.keys()))
+    print()
+    print("SOURCE DIRECTORIES:")
+    print("-" * 60)
+    for d in source_dirs:
+        print(f"  {d}")
+    # Also show cache directory if it exists
+    if os.path.exists(CACHE_BASE_DIR) and os.listdir(CACHE_BASE_DIR):
+        print()
+        print(f"CACHE DIRECTORY: {CACHE_BASE_DIR}")
 
 
 def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None:
@@ -4826,6 +4859,11 @@ def main():
         "--include-errors",
         action="store_true",
         help="Include notebooks where baseline run has cell errors (excluded by default)",
+    )
+    parser.add_argument(
+        "--no-sample-size",
+        action="store_true",
+        help="Hide N=... sample size annotations from CDF plots",
     )
 
     args = parser.parse_args()
