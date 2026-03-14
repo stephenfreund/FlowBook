@@ -77,26 +77,42 @@ def render_plot1(
 
     # Blue line with markers showing code time (baseline-like reference)
     ax.plot(
-        cells, code_cumsum,
-        color=colors[0], linewidth=2, marker="o", markersize=4,
-        label="Code (no baseline)"
+        cells,
+        code_cumsum,
+        color=colors[0],
+        linewidth=2,
+        marker="o",
+        markersize=4,
+        label="Code (no baseline)",
     )
 
     # Stacked areas: code (bottom) + state + check + other (top)
-    ax.fill_between(cells, 0, code_cumsum, alpha=0.3, color=colors[1], label="FlowBook Code")
     ax.fill_between(
-        cells, code_cumsum, code_cumsum + state_cumsum,
-        alpha=0.4, color=colors[2], label="State"
+        cells, 0, code_cumsum, alpha=0.3, color=colors[1], label="FlowBook Code"
     )
     ax.fill_between(
-        cells, code_cumsum + state_cumsum, code_cumsum + state_cumsum + check_cumsum,
-        alpha=0.4, color=colors[3], label="Check"
+        cells,
+        code_cumsum,
+        code_cumsum + state_cumsum,
+        alpha=0.4,
+        color=colors[2],
+        label="State",
+    )
+    ax.fill_between(
+        cells,
+        code_cumsum + state_cumsum,
+        code_cumsum + state_cumsum + check_cumsum,
+        alpha=0.4,
+        color=colors[3],
+        label="Check",
     )
     ax.fill_between(
         cells,
         code_cumsum + state_cumsum + check_cumsum,
         code_cumsum + state_cumsum + check_cumsum + other_cumsum,
-        alpha=0.4, color=colors[4], label="Other"
+        alpha=0.4,
+        color=colors[4],
+        label="Other",
     )
 
     ax.set_xlabel("Cell Number", fontsize=label_size)
@@ -116,7 +132,10 @@ def render_plot1(
     if data.initial_count < len(cells):
         ax.axvline(
             x=data.initial_count + 0.5,
-            color="red", linestyle="--", linewidth=2, label="Rerun Start"
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label="Rerun Start",
         )
 
     if show_legend:
@@ -124,13 +143,25 @@ def render_plot1(
 
     # Summary text
     total_code = code_cumsum[-1] if len(code_cumsum) > 0 else 0
-    total_overhead = (state_cumsum[-1] + check_cumsum[-1] + other_cumsum[-1]) if len(state_cumsum) > 0 else 0
+    total_overhead = (
+        (state_cumsum[-1] + check_cumsum[-1] + other_cumsum[-1])
+        if len(state_cumsum) > 0
+        else 0
+    )
     total = total_code + total_overhead
 
     textstr = f"Code: {total_code:.2f}s\nTotal: {total:.2f}s"
     props = dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray")
-    ax.text(0.02, 0.70, textstr, transform=ax.transAxes, fontsize=legend_size,
-            verticalalignment="top", horizontalalignment="left", bbox=props)
+    ax.text(
+        0.02,
+        0.70,
+        textstr,
+        transform=ax.transAxes,
+        fontsize=legend_size,
+        verticalalignment="top",
+        horizontalalignment="left",
+        bbox=props,
+    )
 
     # Overhead percentage (vs code time)
     if total_code > 0:
@@ -138,8 +169,12 @@ def render_plot1(
         ax.annotate(
             f"{overhead_pct:.1f}% overhead (vs code)",
             xy=(cells[-1], total),
-            xytext=(5, 0), textcoords="offset points",
-            fontsize=legend_size, va="center", ha="left", color=colors[1]
+            xytext=(5, 0),
+            textcoords="offset points",
+            fontsize=legend_size,
+            va="center",
+            ha="left",
+            color=colors[1],
         )
 
 
@@ -179,7 +214,7 @@ def render_plot2(
 
     for i, var in enumerate(data.vars_ordered):
         var_data = np.array(data.var_series[var])
-        var_type = data.var_types.get(var, "") if hasattr(data, 'var_types') else ""
+        var_type = data.var_types.get(var, "") if hasattr(data, "var_types") else ""
         if var == "other":
             label = f"other ({len(data.vars_ordered)} vars)"
         elif var_type:
@@ -187,8 +222,12 @@ def render_plot2(
         else:
             label = var
         ax.fill_between(
-            cells, cumulative, cumulative + var_data,
-            alpha=0.7, color=colors[i % len(colors)], label=label
+            cells,
+            cumulative,
+            cumulative + var_data,
+            alpha=0.7,
+            color=colors[i % len(colors)],
+            label=label,
         )
         cumulative = cumulative + var_data
 
@@ -205,10 +244,7 @@ def render_plot2(
 
     # Rerun separator
     if data.initial_count < len(cells):
-        ax.axvline(
-            x=data.initial_count + 0.5,
-            color="red", linestyle="--", linewidth=2
-        )
+        ax.axvline(x=data.initial_count + 0.5, color="red", linestyle="--", linewidth=2)
 
     if show_legend:
         ax.legend(loc="upper left", fontsize=legend_size, ncol=2)
@@ -258,7 +294,11 @@ def render_plot3(
     layer2 = user_ns + gpu
     layer3 = user_ns + gpu + overhead
 
-    gpu_ckpt = np.array(data.gpu_checkpoint_mb) if data.gpu_checkpoint_mb else np.zeros_like(cells, dtype=float)
+    gpu_ckpt = (
+        np.array(data.gpu_checkpoint_mb)
+        if data.gpu_checkpoint_mb
+        else np.zeros_like(cells, dtype=float)
+    )
     has_gpu_ckpt = np.any(gpu_ckpt > 0)
     layer4 = layer3 + gpu_ckpt
 
@@ -269,16 +309,34 @@ def render_plot3(
     gpu_ckpt_color = "red"
 
     ax.fill_between(cells, 0, layer1, alpha=0.3, color=ns_color, label="User Namespace")
-    ax.fill_between(cells, layer1, layer2, alpha=0.3, color=gpu_color, label="GPU Memory")
-    ax.fill_between(cells, layer2, layer3, alpha=0.3, color=overhead_color, label="FlowBook Overhead")
+    ax.fill_between(
+        cells, layer1, layer2, alpha=0.3, color=gpu_color, label="GPU Memory"
+    )
+    ax.fill_between(
+        cells,
+        layer2,
+        layer3,
+        alpha=0.3,
+        color=overhead_color,
+        label="FlowBook Overhead",
+    )
     if has_gpu_ckpt:
-        ax.fill_between(cells, layer3, layer4, alpha=0.3, color=gpu_ckpt_color, label="GPU Checkpoint")
+        ax.fill_between(
+            cells,
+            layer3,
+            layer4,
+            alpha=0.3,
+            color=gpu_ckpt_color,
+            label="GPU Checkpoint",
+        )
 
     ax.plot(cells, layer1, color=ns_color, linewidth=1.5, marker="o", markersize=3)
     ax.plot(cells, layer2, color=gpu_color, linewidth=1.5, marker="o", markersize=3)
     ax.plot(cells, layer3, color=overhead_color, linewidth=2, marker="o", markersize=4)
     if has_gpu_ckpt:
-        ax.plot(cells, layer4, color=gpu_ckpt_color, linewidth=2, marker="o", markersize=4)
+        ax.plot(
+            cells, layer4, color=gpu_ckpt_color, linewidth=2, marker="o", markersize=4
+        )
 
     ax.set_xlabel("Cell Number", fontsize=label_size)
     ax.set_ylabel("Memory (MB)", fontsize=label_size)
@@ -298,7 +356,10 @@ def render_plot3(
     if data.initial_count < len(cells):
         ax.axvline(
             x=data.initial_count + 0.5,
-            color="red", linestyle="--", linewidth=2, label="Rerun Start"
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label="Rerun Start",
         )
 
     if show_legend:
@@ -309,18 +370,26 @@ def render_plot3(
         ax.annotate(
             f"Peak: {data.peak_overhead_pct:.1f}% ({data.peak_flowbook_mb:.1f} / {data.peak_base_mb:.1f} MB)",
             xy=(data.peak_cell + 1, layer3[data.peak_cell]),
-            xytext=(5, 5), textcoords="offset points",
-            fontsize=legend_size, va="bottom", ha="left",
-            color=overhead_color, fontweight="bold"
+            xytext=(5, 5),
+            textcoords="offset points",
+            fontsize=legend_size,
+            va="bottom",
+            ha="left",
+            color=overhead_color,
+            fontweight="bold",
         )
     elif data.peak_overhead_mb > 0:
         # Fallback for older data without peak_flowbook_mb/peak_base_mb
         ax.annotate(
             f"Peak: {data.peak_overhead_pct:.1f}%",
             xy=(data.peak_cell + 1, layer3[data.peak_cell]),
-            xytext=(5, 5), textcoords="offset points",
-            fontsize=legend_size, va="bottom", ha="left",
-            color=overhead_color, fontweight="bold"
+            xytext=(5, 5),
+            textcoords="offset points",
+            fontsize=legend_size,
+            va="bottom",
+            ha="left",
+            color=overhead_color,
+            fontweight="bold",
         )
 
 
@@ -365,12 +434,16 @@ def render_plot4(
     cumulative = np.zeros(len(cells))
 
     # Namespace (gray)
-    ax.fill_between(cells, cumulative, namespace, alpha=0.3, color="gray", label="Namespace")
+    ax.fill_between(
+        cells, cumulative, namespace, alpha=0.3, color="gray", label="Namespace"
+    )
     cumulative = namespace.copy()
 
     # GPU (orange)
     if np.any(gpu > 0):
-        ax.fill_between(cells, cumulative, cumulative + gpu, alpha=0.4, color="orange", label="GPU")
+        ax.fill_between(
+            cells, cumulative, cumulative + gpu, alpha=0.4, color="orange", label="GPU"
+        )
         cumulative = cumulative + gpu
 
     # Per-variable checkpoints
@@ -382,8 +455,12 @@ def render_plot4(
             label = f"other ({len(data.vars_ordered)} vars)"
 
         ax.fill_between(
-            cells, cumulative, cumulative + var_data,
-            alpha=0.7, color=var_colors[i % len(var_colors)], label=label
+            cells,
+            cumulative,
+            cumulative + var_data,
+            alpha=0.7,
+            color=var_colors[i % len(var_colors)],
+            label=label,
         )
         cumulative = cumulative + var_data
 
@@ -400,10 +477,7 @@ def render_plot4(
 
     # Rerun separator
     if data.initial_count < len(cells):
-        ax.axvline(
-            x=data.initial_count + 0.5,
-            color="red", linestyle="--", linewidth=2
-        )
+        ax.axvline(x=data.initial_count + 0.5, color="red", linestyle="--", linewidth=2)
 
     if show_legend:
         ax.legend(loc="upper left", fontsize=legend_size, ncol=2)
@@ -451,7 +525,15 @@ def render_plot5(
     width = 0.8
     ax.bar(cells, state, width, label="State", color=colors[2], alpha=0.7)
     ax.bar(cells, check, width, bottom=state, label="Check", color=colors[3], alpha=0.7)
-    ax.bar(cells, other, width, bottom=state + check, label="Other", color=colors[4], alpha=0.7)
+    ax.bar(
+        cells,
+        other,
+        width,
+        bottom=state + check,
+        label="Other",
+        color=colors[4],
+        alpha=0.7,
+    )
 
     ax.set_xlabel("Cell Number", fontsize=label_size)
     ax.set_ylabel("Overhead Time (seconds)", fontsize=label_size)
@@ -468,7 +550,10 @@ def render_plot5(
     if data.initial_count < len(cells):
         ax.axvline(
             x=data.initial_count + 0.5,
-            color="red", linestyle="--", linewidth=2, label="Rerun Start"
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label="Rerun Start",
         )
 
     if show_legend:
@@ -514,8 +599,22 @@ def render_plot6(
     if has_gpu:
         # Grouped bars: CPU and GPU side by side
         bar_width = 0.35
-        ax.bar(cells - bar_width/2, ratios, width=bar_width, alpha=0.7, color="#66c2a5", label="CPU Checkpoint")
-        ax.bar(cells + bar_width/2, gpu_ratios, width=bar_width, alpha=0.7, color="red", label="GPU Checkpoint")
+        ax.bar(
+            cells - bar_width / 2,
+            ratios,
+            width=bar_width,
+            alpha=0.7,
+            color="#66c2a5",
+            label="CPU Checkpoint",
+        )
+        ax.bar(
+            cells + bar_width / 2,
+            gpu_ratios,
+            width=bar_width,
+            alpha=0.7,
+            color="red",
+            label="GPU Checkpoint",
+        )
     else:
         # Single bar (no GPU data)
         bar_width = 0.6
@@ -536,7 +635,10 @@ def render_plot6(
     if data.initial_count < len(cells):
         ax.axvline(
             x=data.initial_count + 0.5,
-            color="red", linestyle="--", linewidth=2, label="Rerun Start"
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label="Rerun Start",
         )
 
     if show_legend and (has_gpu or data.initial_count < len(cells)):
@@ -571,11 +673,17 @@ def render_time_cdf(
     from matplotlib.ticker import FuncFormatter
 
     # Font sizes
-    label_size = 22 if large_fonts else 14
-    title_size = 24 if large_fonts else 16
-    tick_size = 18 if large_fonts else 12
-    annotation_size = 18 if large_fonts else 12
-    legend_fontsize = 14 if large_fonts else 10
+    # label_size = 22 if large_fonts else 14
+    # title_size = 24 if large_fonts else 16
+    # tick_size = 18 if large_fonts else 12
+    # annotation_size = 18 if large_fonts else 12
+    # legend_fontsize = 14 if large_fonts else 10
+
+    label_size = 18 if large_fonts else 14
+    title_size = 20 if large_fonts else 16
+    tick_size = 14 if large_fonts else 12
+    annotation_size = 14 if large_fonts else 12
+    legend_fontsize = 12 if large_fonts else 10
 
     if not sorted_vals:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
@@ -595,17 +703,21 @@ def render_time_cdf(
     # For log scale, filter positive values
     pos_mask = sorted_arr > 0
     if not np.any(pos_mask):
-        ax.text(0.5, 0.5, "No positive data", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5,
+            0.5,
+            "No positive data",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
         ax.set_title(title, fontsize=title_size)
         return
     plot_data = sorted_arr[pos_mask]
     plot_cdf = cdf_arr[pos_mask]
 
     # Plot CDF line and fill
-    ax.fill_between(
-        plot_data, 0, plot_cdf,
-        alpha=0.12, color=color, edgecolor="none"
-    )
+    ax.fill_between(plot_data, 0, plot_cdf, alpha=0.12, color=color, edgecolor="none")
     ax.plot(plot_data, plot_cdf, color=color, linewidth=2.5)
 
     # Disable standard gridlines, use only custom reference lines
@@ -630,32 +742,86 @@ def render_time_cdf(
     line_width = 0.6
     for pname, y_val, _, _ in pct_config:
         x_val = stats[pname]
-        ax.axhline(y=y_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
-        ax.axvline(x=x_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+        ax.axhline(
+            y=y_val,
+            color=line_color,
+            linestyle="--",
+            linewidth=line_width,
+            alpha=line_alpha,
+            zorder=1,
+        )
+        ax.axvline(
+            x=x_val,
+            color=line_color,
+            linestyle="--",
+            linewidth=line_width,
+            alpha=line_alpha,
+            zorder=1,
+        )
     # Max reference lines
-    ax.axhline(y=1.0, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
-    ax.axvline(x=max_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+    ax.axhline(
+        y=1.0,
+        color=line_color,
+        linestyle="--",
+        linewidth=line_width,
+        alpha=line_alpha,
+        zorder=1,
+    )
+    ax.axvline(
+        x=max_val,
+        color=line_color,
+        linestyle="--",
+        linewidth=line_width,
+        alpha=line_alpha,
+        zorder=1,
+    )
 
     # Percentile markers with leader line annotations
     for pname, y_val, offset, va in pct_config:
         x_val = stats[pname]
-        ax.scatter([x_val], [y_val], color=color, s=40, marker="o", zorder=5,
-                   edgecolors="white", linewidths=1.5)
+        ax.scatter(
+            [x_val],
+            [y_val],
+            color=color,
+            s=40,
+            marker="o",
+            zorder=5,
+            edgecolors="white",
+            linewidths=1.5,
+        )
         ax.annotate(
-            pname, (x_val, y_val),
-            textcoords="offset points", xytext=offset,
-            fontsize=annotation_size, ha="left", va=va, fontweight="bold",
-            arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3)
+            pname,
+            (x_val, y_val),
+            textcoords="offset points",
+            xytext=offset,
+            fontsize=annotation_size,
+            ha="left",
+            va=va,
+            fontweight="bold",
+            arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3),
         )
 
     # Max marker
-    ax.scatter([max_val], [1.0], color=color, s=40, marker="o", zorder=5,
-               edgecolors="white", linewidths=1.5)
+    ax.scatter(
+        [max_val],
+        [1.0],
+        color=color,
+        s=40,
+        marker="o",
+        zorder=5,
+        edgecolors="white",
+        linewidths=1.5,
+    )
     ax.annotate(
-        "Max", (max_val, 1.0),
-        textcoords="offset points", xytext=(12, -18),
-        fontsize=annotation_size, ha="left", va="top", fontweight="bold",
-        arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3)
+        "Max",
+        (max_val, 1.0),
+        textcoords="offset points",
+        xytext=(12, -18),
+        fontsize=annotation_size,
+        ha="left",
+        va="top",
+        fontweight="bold",
+        arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3),
     )
 
     # Format function for milliseconds
@@ -669,18 +835,37 @@ def render_time_cdf(
     formatted = {p: fmt_ms(stats[p]) for p in ["P50", "P95", "P99"]}
     formatted["Max"] = fmt_ms(max_val)
     max_val_len = max(len(v) for v in formatted.values())
-    legend_lines = [f"{p:>3}  {formatted[p]:>{max_val_len}}" for p in ["P50", "P95", "P99", "Max"]]
+    legend_lines = [
+        f"{p:>3}  {formatted[p]:>{max_val_len}}" for p in ["P50", "P95", "P99", "Max"]
+    ]
     legend_text = "\n".join(legend_lines)
     props = dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray")
-    ax.text(0.98, 0.02, legend_text, transform=ax.transAxes, fontsize=legend_fontsize,
-            verticalalignment="bottom", horizontalalignment="right", bbox=props,
-            family="monospace")
+    ax.text(
+        0.98,
+        0.02,
+        legend_text,
+        transform=ax.transAxes,
+        fontsize=legend_fontsize,
+        verticalalignment="bottom",
+        horizontalalignment="right",
+        bbox=props,
+        family="monospace",
+    )
 
     # N count in top left
     textstr = f"N={n:,}"
-    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
-            verticalalignment="top", horizontalalignment="left",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"))
+    ax.text(
+        0.02,
+        0.98,
+        textstr,
+        transform=ax.transAxes,
+        fontsize=tick_size,
+        verticalalignment="top",
+        horizontalalignment="left",
+        bbox=dict(
+            boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
+        ),
+    )
 
     # Axes config
     ax.set_xlabel(xlabel, fontsize=label_size)
@@ -850,6 +1035,8 @@ def render_cdf_panel(
     colors=None,
     large_fonts: bool = True,
     show_legend: bool = True,
+    color_override: str = None,
+    title_override: str = None,
 ) -> None:
     """Render a single CDF panel for aggregate data.
 
@@ -860,15 +1047,23 @@ def render_cdf_panel(
         colors: Color palette (ignored, uses fixed colors per metric)
         large_fonts: Use larger fonts
         show_legend: Whether to show legend
+        color_override: Optional color to use instead of the default for this metric
+        title_override: Optional title to use instead of the default for this metric
     """
     from matplotlib.ticker import FuncFormatter
 
     # Font sizes
-    label_size = 22 if large_fonts else 14
-    title_size = 24 if large_fonts else 16
-    tick_size = 18 if large_fonts else 12
-    annotation_size = 18 if large_fonts else 12
-    legend_fontsize = 14 if large_fonts else 10
+    # label_size = 22 if large_fonts else 14
+    # title_size = 24 if large_fonts else 16
+    # tick_size = 18 if large_fonts else 12
+    # annotation_size = 18 if large_fonts else 12
+    # legend_fontsize = 14 if large_fonts else 10
+
+    label_size = 18 if large_fonts else 14
+    title_size = 20 if large_fonts else 16
+    tick_size = 14 if large_fonts else 12
+    annotation_size = 14 if large_fonts else 12
+    legend_fontsize = 12 if large_fonts else 10
 
     # For time metric, use the shared helper
     if metric == "time":
@@ -877,8 +1072,8 @@ def render_cdf_panel(
             sorted_vals=list(data.time_sorted),
             percentiles=list(data.time_percentiles),
             n=len(data.time_overhead_ms),
-            color="steelblue",
-            title="Analysis Time Distribution",
+            color=color_override or "steelblue",
+            title=title_override or "Analysis Time Distribution",
             xlabel="Analysis Time (ms, log scale)",
             large_fonts=large_fonts,
         )
@@ -916,6 +1111,12 @@ def render_cdf_panel(
     else:
         raise ValueError(f"Unknown metric: {metric}")
 
+    # Apply overrides if provided
+    if color_override:
+        color = color_override
+    if title_override:
+        title = title_override
+
     if not sorted_vals:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
         ax.set_title(title, fontsize=title_size)
@@ -935,10 +1136,7 @@ def render_cdf_panel(
     plot_cdf = cdf_arr
 
     # Plot CDF line and fill
-    ax.fill_between(
-        plot_data, 0, plot_cdf,
-        alpha=0.12, color=color, edgecolor="none"
-    )
+    ax.fill_between(plot_data, 0, plot_cdf, alpha=0.12, color=color, edgecolor="none")
     ax.plot(plot_data, plot_cdf, color=color, linewidth=2.5)
 
     # Disable standard gridlines, use only custom reference lines
@@ -963,32 +1161,86 @@ def render_cdf_panel(
     line_width = 0.6
     for pname, y_val, _, _ in pct_config:
         x_val = stats[pname]
-        ax.axhline(y=y_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
-        ax.axvline(x=x_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+        ax.axhline(
+            y=y_val,
+            color=line_color,
+            linestyle="--",
+            linewidth=line_width,
+            alpha=line_alpha,
+            zorder=1,
+        )
+        ax.axvline(
+            x=x_val,
+            color=line_color,
+            linestyle="--",
+            linewidth=line_width,
+            alpha=line_alpha,
+            zorder=1,
+        )
     # Max reference lines
-    ax.axhline(y=1.0, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
-    ax.axvline(x=max_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+    ax.axhline(
+        y=1.0,
+        color=line_color,
+        linestyle="--",
+        linewidth=line_width,
+        alpha=line_alpha,
+        zorder=1,
+    )
+    ax.axvline(
+        x=max_val,
+        color=line_color,
+        linestyle="--",
+        linewidth=line_width,
+        alpha=line_alpha,
+        zorder=1,
+    )
 
     # Percentile markers with leader line annotations
     for pname, y_val, offset, va in pct_config:
         x_val = stats[pname]
-        ax.scatter([x_val], [y_val], color=color, s=40, marker="o", zorder=5,
-                   edgecolors="white", linewidths=1.5)
+        ax.scatter(
+            [x_val],
+            [y_val],
+            color=color,
+            s=40,
+            marker="o",
+            zorder=5,
+            edgecolors="white",
+            linewidths=1.5,
+        )
         ax.annotate(
-            pname, (x_val, y_val),
-            textcoords="offset points", xytext=offset,
-            fontsize=annotation_size, ha="left", va=va, fontweight="bold",
-            arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3)
+            pname,
+            (x_val, y_val),
+            textcoords="offset points",
+            xytext=offset,
+            fontsize=annotation_size,
+            ha="left",
+            va=va,
+            fontweight="bold",
+            arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3),
         )
 
     # Max marker
-    ax.scatter([max_val], [1.0], color=color, s=40, marker="o", zorder=5,
-               edgecolors="white", linewidths=1.5)
+    ax.scatter(
+        [max_val],
+        [1.0],
+        color=color,
+        s=40,
+        marker="o",
+        zorder=5,
+        edgecolors="white",
+        linewidths=1.5,
+    )
     ax.annotate(
-        "Max", (max_val, 1.0),
-        textcoords="offset points", xytext=(12, -18),
-        fontsize=annotation_size, ha="left", va="top", fontweight="bold",
-        arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3)
+        "Max",
+        (max_val, 1.0),
+        textcoords="offset points",
+        xytext=(12, -18),
+        fontsize=annotation_size,
+        ha="left",
+        va="top",
+        fontweight="bold",
+        arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3),
     )
 
     # Format functions
@@ -1028,18 +1280,37 @@ def render_cdf_panel(
     formatted = {p: unit_fmt(stats[p]) for p in ["P50", "P95", "P99"]}
     formatted["Max"] = unit_fmt(max_val)
     max_val_len = max(len(v) for v in formatted.values())
-    legend_lines = [f"{p:>3}  {formatted[p]:>{max_val_len}}" for p in ["P50", "P95", "P99", "Max"]]
+    legend_lines = [
+        f"{p:>3}  {formatted[p]:>{max_val_len}}" for p in ["P50", "P95", "P99", "Max"]
+    ]
     legend_text = "\n".join(legend_lines)
     props = dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray")
-    ax.text(0.98, 0.02, legend_text, transform=ax.transAxes, fontsize=legend_fontsize,
-            verticalalignment="bottom", horizontalalignment="right", bbox=props,
-            family="monospace")
+    ax.text(
+        0.98,
+        0.02,
+        legend_text,
+        transform=ax.transAxes,
+        fontsize=legend_fontsize,
+        verticalalignment="bottom",
+        horizontalalignment="right",
+        bbox=props,
+        family="monospace",
+    )
 
     # N count in top left
     textstr = f"N={n:,}"
-    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
-            verticalalignment="top", horizontalalignment="left",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"))
+    ax.text(
+        0.02,
+        0.98,
+        textstr,
+        transform=ax.transAxes,
+        fontsize=tick_size,
+        verticalalignment="top",
+        horizontalalignment="left",
+        bbox=dict(
+            boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
+        ),
+    )
 
     # Axes config
     ax.set_xlabel(xlabel, fontsize=label_size)
@@ -1110,48 +1381,95 @@ def render_combined_6panel(
 
     # Add notebook name as figure suptitle
     if notebook_name:
-        fig.suptitle(notebook_name, fontsize=22 if large_fonts else 16, fontweight='bold', y=0.995)
+        fig.suptitle(
+            notebook_name,
+            fontsize=22 if large_fonts else 16,
+            fontweight="bold",
+            y=0.995,
+        )
 
     # Panel 1: Timing
     if p1 is not None:
         render_plot1(axes[0], p1, large_fonts=large_fonts)
     else:
-        axes[0].text(0.5, 0.5, "No timing data", ha="center", va="center", transform=axes[0].transAxes)
+        axes[0].text(
+            0.5,
+            0.5,
+            "No timing data",
+            ha="center",
+            va="center",
+            transform=axes[0].transAxes,
+        )
         axes[0].set_title("Execution Time", fontsize=title_size)
 
     # Panel 2: Checkpoint Time by Variable
     if p2 is not None:
         render_plot2(axes[1], p2, large_fonts=large_fonts)
     else:
-        axes[1].text(0.5, 0.5, "No checkpoint timing data", ha="center", va="center", transform=axes[1].transAxes)
+        axes[1].text(
+            0.5,
+            0.5,
+            "No checkpoint timing data",
+            ha="center",
+            va="center",
+            transform=axes[1].transAxes,
+        )
         axes[1].set_title("Checkpoint Time by Variable", fontsize=title_size)
 
     # Panel 3: Memory Overhead
     if p3 is not None:
         render_plot3(axes[2], p3, large_fonts=large_fonts)
     else:
-        axes[2].text(0.5, 0.5, "No memory data", ha="center", va="center", transform=axes[2].transAxes)
+        axes[2].text(
+            0.5,
+            0.5,
+            "No memory data",
+            ha="center",
+            va="center",
+            transform=axes[2].transAxes,
+        )
         axes[2].set_title("Memory Overhead", fontsize=title_size)
 
     # Panel 4: Checkpoint Memory by Variable
     if p4 is not None:
         render_plot4(axes[3], p4, large_fonts=large_fonts)
     else:
-        axes[3].text(0.5, 0.5, "No checkpoint memory data", ha="center", va="center", transform=axes[3].transAxes)
+        axes[3].text(
+            0.5,
+            0.5,
+            "No checkpoint memory data",
+            ha="center",
+            va="center",
+            transform=axes[3].transAxes,
+        )
         axes[3].set_title("Checkpoint Memory by Variable", fontsize=title_size)
 
     # Panel 5: Overhead per Cell
     if p5 is not None:
         render_plot5(axes[4], p5, large_fonts=large_fonts)
     else:
-        axes[4].text(0.5, 0.5, "No overhead timing data", ha="center", va="center", transform=axes[4].transAxes)
+        axes[4].text(
+            0.5,
+            0.5,
+            "No overhead timing data",
+            ha="center",
+            va="center",
+            transform=axes[4].transAxes,
+        )
         axes[4].set_title("Overhead Time per Cell", fontsize=title_size)
 
     # Panel 6: Checkpoint Ratio CDF
     if p6 is not None:
         render_plot6(axes[5], p6, large_fonts=large_fonts)
     else:
-        axes[5].text(0.5, 0.5, "No ratio data", ha="center", va="center", transform=axes[5].transAxes)
+        axes[5].text(
+            0.5,
+            0.5,
+            "No ratio data",
+            ha="center",
+            va="center",
+            transform=axes[5].transAxes,
+        )
         axes[5].set_title("Checkpoint Overhead Ratio", fontsize=title_size)
 
     # Adjust layout to make room for suptitle

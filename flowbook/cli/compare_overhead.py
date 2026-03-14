@@ -75,6 +75,7 @@ class RerunOverheadCDFData:
         num_iterations: Number of iterations per cell
         breakdown: Dict[cell_index][iteration] = (checkpoint_ms, check_ms)
     """
+
     total_overhead_ms: List[float]
     total_sorted: List[float]
     total_percentiles: List[float]
@@ -83,10 +84,14 @@ class RerunOverheadCDFData:
     # New fields for grouped bar chart breakdown
     cell_indices: List[int] = None  # Unique cell indices (quartiles)
     num_iterations: int = 0
-    breakdown: Dict[int, Dict[int, tuple]] = None  # breakdown[cell_idx][iter] = (ckpt, check)
+    breakdown: Dict[int, Dict[int, tuple]] = (
+        None  # breakdown[cell_idx][iter] = (ckpt, check)
+    )
 
 
-def extract_rerun_overhead_data(raw_data_list: List[Dict]) -> Optional[RerunOverheadCDFData]:
+def extract_rerun_overhead_data(
+    raw_data_list: List[Dict],
+) -> Optional[RerunOverheadCDFData]:
     """Extract rerun overhead data from raw comparison JSON data.
 
     Args:
@@ -175,18 +180,31 @@ def render_rerun_checkpoint_breakdown(
     import seaborn as sns
 
     # Font sizes
-    label_size = 22 if large_fonts else 14
-    title_size = 24 if large_fonts else 16
-    tick_size = 18 if large_fonts else 12
-    legend_size = 14 if large_fonts else 10
+    label_size = 16 if large_fonts else 14
+    title_size = 18 if large_fonts else 16
+    tick_size = 14 if large_fonts else 12
+    legend_size = 12 if large_fonts else 10
 
     # Check for valid breakdown data
-    if (data.breakdown is None or data.cell_indices is None or
-            not data.cell_indices or data.num_iterations == 0):
-        ax.text(0.5, 0.5, 'No rerun overhead data', ha='center', va='center',
-                transform=ax.transAxes, fontsize=label_size)
-        ax.set_title(f'Rerun Overhead Breakdown{" - " + notebook_name if notebook_name else ""}',
-                     fontsize=title_size)
+    if (
+        data.breakdown is None
+        or data.cell_indices is None
+        or not data.cell_indices
+        or data.num_iterations == 0
+    ):
+        ax.text(
+            0.5,
+            0.5,
+            "No rerun overhead data",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=label_size,
+        )
+        ax.set_title(
+            f'Rerun Overhead Breakdown{" - " + notebook_name if notebook_name else ""}',
+            fontsize=title_size,
+        )
         return
 
     cell_indices = data.cell_indices
@@ -226,33 +244,52 @@ def render_rerun_checkpoint_breakdown(
         x_positions = group_positions + bar_offset
 
         # Stacked bars: State (checkpoint) on bottom, Check on top
-        label_state = 'State' if iter_idx == 0 else None
-        label_check = 'Check' if iter_idx == 0 else None
+        label_state = "State" if iter_idx == 0 else None
+        label_check = "Check" if iter_idx == 0 else None
 
-        ax.bar(x_positions, checkpoint_vals, bar_width * 0.9,
-               color=state_color, edgecolor='white', linewidth=0.5,
-               label=label_state, alpha=0.85)
-        ax.bar(x_positions, check_vals, bar_width * 0.9,
-               bottom=checkpoint_vals, color=check_color, edgecolor='white',
-               linewidth=0.5, label=label_check, alpha=0.85)
+        ax.bar(
+            x_positions,
+            checkpoint_vals,
+            bar_width * 0.9,
+            color=state_color,
+            edgecolor="white",
+            linewidth=0.5,
+            label=label_state,
+            alpha=0.85,
+        )
+        ax.bar(
+            x_positions,
+            check_vals,
+            bar_width * 0.9,
+            bottom=checkpoint_vals,
+            color=check_color,
+            edgecolor="white",
+            linewidth=0.5,
+            label=label_check,
+            alpha=0.85,
+        )
 
     # X-axis labels: Cell numbers
     ax.set_xticks(group_positions)
-    ax.set_xticklabels([f'Cell {idx + 1}' for idx in cell_indices], fontsize=tick_size)
+    ax.set_xticklabels([f"Cell {idx + 1}" for idx in cell_indices], fontsize=tick_size)
 
     # Add iteration labels below if multiple iterations
     if num_iterations > 1:
         # Add secondary x-axis info
-        ax.set_xlabel(f'Cell (each with {num_iterations} iterations)', fontsize=label_size)
+        ax.set_xlabel(
+            f"Cell (each with {num_iterations} iterations)", fontsize=label_size
+        )
     else:
-        ax.set_xlabel('Cell', fontsize=label_size)
+        ax.set_xlabel("Cell", fontsize=label_size)
 
-    ax.set_ylabel('Time (ms)', fontsize=label_size)
-    ax.set_title(f'Rerun Overhead Breakdown{" - " + notebook_name if notebook_name else ""}',
-                 fontsize=title_size)
-    ax.tick_params(axis='both', labelsize=tick_size)
-    ax.legend(loc='upper left', fontsize=legend_size)
-    ax.grid(True, alpha=0.3, axis='y')
+    ax.set_ylabel("Time (ms)", fontsize=label_size)
+    ax.set_title(
+        f'Rerun Overhead Breakdown{" - " + notebook_name if notebook_name else ""}',
+        fontsize=title_size,
+    )
+    ax.tick_params(axis="both", labelsize=tick_size)
+    ax.legend(loc="upper left", fontsize=legend_size)
+    ax.grid(True, alpha=0.3, axis="y")
     ax.set_xlim(-0.5, num_cells * group_spacing - 0.5)
 
 
@@ -674,7 +711,9 @@ class FileStats:
     # Per-cell data for aggregate statistics
     per_cell_checkpoint_overhead_ms: List[float] = field(default_factory=list)
     per_cell_total_overhead_ms: List[float] = field(default_factory=list)
-    per_cell_memory_overhead_mb: List[float] = field(default_factory=list)  # Actually ratio
+    per_cell_memory_overhead_mb: List[float] = field(
+        default_factory=list
+    )  # Actually ratio
     per_cell_checkpoint_mb: List[float] = field(default_factory=list)  # Raw MB values
     # Checking results (staleness summary)
     checking_clean_cells: int = 0
@@ -1063,6 +1102,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
     # Per-cell memory overhead as ratio of checkpoint_delta / (prev_namespace + prev_gpu)
     # This gives a proportion: 0 = no overhead, 1 = checkpoint equals base memory size
     from flowbook.cli.plot_extraction import MIN_BASE_MB
+
     min_meaningful_base_mb = MIN_BASE_MB  # 0.1 MB threshold
 
     # Detect v5 format
@@ -1075,7 +1115,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
         for i, cell in enumerate(flowbook_mem_cells):
             # Compute checkpoint delta (new checkpoint data at this cell)
             curr_ckpt = cell.get("checkpoint_mb", 0)
-            prev_ckpt = flowbook_mem_cells[i - 1].get("checkpoint_mb", 0) if i > 0 else 0
+            prev_ckpt = (
+                flowbook_mem_cells[i - 1].get("checkpoint_mb", 0) if i > 0 else 0
+            )
             delta_mb = max(0, curr_ckpt - prev_ckpt)
 
             # Get base (prev cell's namespace + gpu)
@@ -1103,11 +1145,12 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
                 for c in flowbook_mem_cells
             )
             max_base_total = max(
-                c.get("user_ns_mb", 0) + c.get("gpu_mb", 0)
-                for c in flowbook_mem_cells
+                c.get("user_ns_mb", 0) + c.get("gpu_mb", 0) for c in flowbook_mem_cells
             )
             if max_base_total >= min_meaningful_base_mb:
-                peak_memory_overhead_pct = (max_flowbook_total / max_base_total - 1) * 100
+                peak_memory_overhead_pct = (
+                    max_flowbook_total / max_base_total - 1
+                ) * 100
             else:
                 peak_memory_overhead_pct = 0.0
         else:
@@ -1127,7 +1170,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
                 return sum(cumulative_by_type.values()) / (1024 * 1024)
             var_costs = c.get("checkpoint_var_costs") or {}
             if var_costs:
-                return sum(v.get("bytes", 0) for v in var_costs.values()) / (1024 * 1024)
+                return sum(v.get("bytes", 0) for v in var_costs.values()) / (
+                    1024 * 1024
+                )
             return 0
 
         cumulative_totals = [get_cumulative_total(c) for c in flowbook_mem_cells]
@@ -1158,7 +1203,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
                     if i == 0:
                         delta_mb = cumulative_totals[0]
                     else:
-                        delta_mb = max(0, cumulative_totals[i] - cumulative_totals[i - 1])
+                        delta_mb = max(
+                            0, cumulative_totals[i] - cumulative_totals[i - 1]
+                        )
                 else:
                     delta_mb = cumulative_totals[i]
 
@@ -1532,9 +1579,7 @@ def format_table(stats_list: List[FileStats], aggregate: AggregateStats) -> str:
         # Per-file rows (all files)
         for s in stats_list:
             name = (
-                s.notebook_name[:28]
-                if len(s.notebook_name) > 28
-                else s.notebook_name
+                s.notebook_name[:28] if len(s.notebook_name) > 28 else s.notebook_name
             )
             row = f"{name:<30} {s.num_cells:>5} {s.checking_error_cells:>6}"
             for etype in error_types:
@@ -3064,7 +3109,9 @@ def plot_combined_v2(
         # In syntactic mode, there's only one checkpoint, so use raw values
         staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
         if staleness_mode == "semantic":
-            checkpoint_cumulative_mb = np.maximum.accumulate(checkpoint_cumulative_mb_raw)
+            checkpoint_cumulative_mb = np.maximum.accumulate(
+                checkpoint_cumulative_mb_raw
+            )
         else:
             checkpoint_cumulative_mb = checkpoint_cumulative_mb_raw
         gpu_mb = np.array(
@@ -4097,7 +4144,9 @@ def process_v4(
         output_dir.mkdir(parents=True, exist_ok=True)
 
         combined_figures = []
-        peak_overhead_stats = []  # Collect (notebook_name, peak_flowbook_mb, peak_base_mb, peak_pct) for table
+        peak_overhead_stats = (
+            []
+        )  # Collect (notebook_name, peak_flowbook_mb, peak_base_mb, peak_pct) for table
 
         for file_path, result in results.items():
             notebook_name = Path(file_path).stem.replace("_comparison", "")
@@ -4125,7 +4174,11 @@ def process_v4(
                         # Fall back to v4 extraction from timing data
                         p2 = extract_plot2_data(result, top_n=args.top_n)
                     gpu_from_timing = extract_gpu_overhead_from_timing(data)
-                    p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells, gpu_overhead_from_timing=gpu_from_timing)
+                    p3 = extract_plot3_data_v5(
+                        v5_memory.all_cells,
+                        baseline_cells,
+                        gpu_overhead_from_timing=gpu_from_timing,
+                    )
                     p4 = extract_plot4_data_v5(v5_memory.all_cells, top_n=args.top_n)
                     p6 = extract_plot6_data_v5(v5_memory.all_cells)
                 else:
@@ -4142,7 +4195,11 @@ def process_v4(
                     if p2 is None:
                         p2 = extract_plot2_data(result, top_n=args.top_n)
                     gpu_from_timing = extract_gpu_overhead_from_timing(data)
-                    p3 = extract_plot3_data_v5(v5_memory.all_cells, baseline_cells, gpu_overhead_from_timing=gpu_from_timing)
+                    p3 = extract_plot3_data_v5(
+                        v5_memory.all_cells,
+                        baseline_cells,
+                        gpu_overhead_from_timing=gpu_from_timing,
+                    )
                     p4 = extract_plot4_data_v5(v5_memory.all_cells, top_n=args.top_n)
                     p6 = extract_plot6_data_v5(v5_memory.all_cells)
                 else:
@@ -4154,31 +4211,45 @@ def process_v4(
 
             # Collect peak overhead stats for table
             if p3 is not None and p3.peak_base_mb > 0:
-                peak_overhead_stats.append((
-                    notebook_name,
-                    p3.peak_flowbook_mb,
-                    p3.peak_base_mb,
-                    p3.peak_overhead_pct,
-                ))
+                peak_overhead_stats.append(
+                    (
+                        notebook_name,
+                        p3.peak_flowbook_mb,
+                        p3.peak_base_mb,
+                        p3.peak_overhead_pct,
+                    )
+                )
 
             # Create 6-panel figure
             fig, axes_2d = plt.subplots(3, 2, figsize=(14, 18))
             axes = [
-                axes_2d[0, 0], axes_2d[0, 1],
-                axes_2d[1, 0], axes_2d[1, 1],
-                axes_2d[2, 0], axes_2d[2, 1],
+                axes_2d[0, 0],
+                axes_2d[0, 1],
+                axes_2d[1, 0],
+                axes_2d[1, 1],
+                axes_2d[2, 0],
+                axes_2d[2, 1],
             ]
 
             try:
                 render_combined_6panel(
-                    fig, axes, p1, p2, p3, p4, p5, p6,
+                    fig,
+                    axes,
+                    p1,
+                    p2,
+                    p3,
+                    p4,
+                    p5,
+                    p6,
                     large_fonts=args.large_fonts,
                     notebook_name=notebook_name,
                 )
                 combined_figures.append(fig)
             except Exception as e:
-                print(f"Warning: Could not generate plot for {file_path}: {e}",
-                      file=sys.stderr)
+                print(
+                    f"Warning: Could not generate plot for {file_path}: {e}",
+                    file=sys.stderr,
+                )
                 plt.close(fig)
 
         # Print peak memory overhead table
@@ -4188,14 +4259,20 @@ def process_v4(
             print(f"{'Notebook':<40} {'FlowBook':>12} {'Base':>12} {'Overhead':>10}")
             print(f"{'':<40} {'(MB)':>12} {'(MB)':>12} {'(%)':>10}")
             print("-" * 80)
-            for name, fb_mb, base_mb, pct in sorted(peak_overhead_stats, key=lambda x: -x[3]):
+            for name, fb_mb, base_mb, pct in sorted(
+                peak_overhead_stats, key=lambda x: -x[3]
+            ):
                 # Truncate long names with ellipsis
                 display_name = name[:37] + "..." if len(name) > 40 else name
-                print(f"{display_name:<40} {fb_mb:>12.1f} {base_mb:>12.1f} {pct:>10.1f}")
+                print(
+                    f"{display_name:<40} {fb_mb:>12.1f} {base_mb:>12.1f} {pct:>10.1f}"
+                )
             print("-" * 80)
             # Summary stats
             pcts = [x[3] for x in peak_overhead_stats]
-            print(f"P50: {np.percentile(pcts, 50):.1f}%   P90: {np.percentile(pcts, 90):.1f}%")
+            print(
+                f"P50: {np.percentile(pcts, 50):.1f}%   P90: {np.percentile(pcts, 90):.1f}%"
+            )
             print()
 
         # Save to PDF
@@ -4215,21 +4292,43 @@ def process_v4(
                     if cdf_data:
                         from flowbook.cli.plot_rendering import render_cdf_panel
                         import seaborn as sns
+
                         sns.set_theme(style="whitegrid")
 
                         cdf_fig, cdf_axes = plt.subplots(1, 3, figsize=(15, 5))
-                        render_cdf_panel(cdf_axes[0], cdf_data, "time", large_fonts=args.large_fonts)
-                        render_cdf_panel(cdf_axes[1], cdf_data, "memory", large_fonts=args.large_fonts)
-                        render_cdf_panel(cdf_axes[2], cdf_data, "peak", large_fonts=args.large_fonts)
+                        render_cdf_panel(
+                            cdf_axes[0], cdf_data, "time", large_fonts=args.large_fonts
+                        )
+                        render_cdf_panel(
+                            cdf_axes[1],
+                            cdf_data,
+                            "memory",
+                            large_fonts=args.large_fonts,
+                        )
+                        render_cdf_panel(
+                            cdf_axes[2], cdf_data, "peak", large_fonts=args.large_fonts
+                        )
                         cdf_fig.tight_layout()
                         pdf.savefig(cdf_fig, dpi=150)
                         plt.close(cdf_fig)
 
                         # GPU checkpoint CDF page (if any GPU data exists)
                         if cdf_data.gpu_memory_ratios or cdf_data.gpu_peak_memory_pct:
-                            gpu_cdf_fig, gpu_cdf_axes = plt.subplots(1, 2, figsize=(12, 5))
-                            render_cdf_panel(gpu_cdf_axes[0], cdf_data, "gpu_memory", large_fonts=args.large_fonts)
-                            render_cdf_panel(gpu_cdf_axes[1], cdf_data, "gpu_peak", large_fonts=args.large_fonts)
+                            gpu_cdf_fig, gpu_cdf_axes = plt.subplots(
+                                1, 2, figsize=(12, 5)
+                            )
+                            render_cdf_panel(
+                                gpu_cdf_axes[0],
+                                cdf_data,
+                                "gpu_memory",
+                                large_fonts=args.large_fonts,
+                            )
+                            render_cdf_panel(
+                                gpu_cdf_axes[1],
+                                cdf_data,
+                                "gpu_peak",
+                                large_fonts=args.large_fonts,
+                            )
                             gpu_cdf_fig.tight_layout()
                             pdf.savefig(gpu_cdf_fig, dpi=150)
                             plt.close(gpu_cdf_fig)
@@ -4254,18 +4353,23 @@ def process_v4(
                     rerun_cdf_data = extract_rerun_overhead_data(raw_data_list)
                     if rerun_cdf_data:
                         import seaborn as sns
+
                         sns.set_theme(style="whitegrid")
 
                         # Rerun checkpoint breakdown page for each notebook
                         for path, data in raw_data.items():
                             rerun = data.get("rerun_overhead")
                             if rerun and rerun.get("measurements"):
-                                notebook_name = Path(path).stem.replace("_comparison", "")
+                                notebook_name = Path(path).stem.replace(
+                                    "_comparison", ""
+                                )
                                 # Extract per-notebook rerun data with breakdown
                                 measurements = rerun.get("measurements", [])
 
                                 # Build breakdown dict: breakdown[cell_index][iteration] = (ckpt, check)
-                                breakdown: Dict[int, Dict[int, tuple]] = defaultdict(dict)
+                                breakdown: Dict[int, Dict[int, tuple]] = defaultdict(
+                                    dict
+                                )
                                 cell_indices_set = set()
                                 iterations_set = set()
 
@@ -4281,14 +4385,28 @@ def process_v4(
 
                                 # Sort cell indices and determine iteration count
                                 cell_indices = sorted(cell_indices_set)
-                                num_iterations = len(iterations_set) if iterations_set else 0
+                                num_iterations = (
+                                    len(iterations_set) if iterations_set else 0
+                                )
 
                                 notebook_rerun = RerunOverheadCDFData(
-                                    total_overhead_ms=[m.get("total_overhead_ms", 0) for m in measurements],
-                                    total_sorted=sorted([m.get("total_overhead_ms", 0) for m in measurements]),
+                                    total_overhead_ms=[
+                                        m.get("total_overhead_ms", 0)
+                                        for m in measurements
+                                    ],
+                                    total_sorted=sorted(
+                                        [
+                                            m.get("total_overhead_ms", 0)
+                                            for m in measurements
+                                        ]
+                                    ),
                                     total_percentiles=[],  # Not needed for breakdown
-                                    checkpoint_ms=[m.get("checkpoint_ms", 0) for m in measurements],
-                                    check_ms=[m.get("check_ms", 0) for m in measurements],
+                                    checkpoint_ms=[
+                                        m.get("checkpoint_ms", 0) for m in measurements
+                                    ],
+                                    check_ms=[
+                                        m.get("check_ms", 0) for m in measurements
+                                    ],
                                     cell_indices=cell_indices,
                                     num_iterations=num_iterations,
                                     breakdown=dict(breakdown),
@@ -4296,11 +4414,14 @@ def process_v4(
 
                                 # Use wider figure for grouped bars
                                 fig_width = max(8, len(cell_indices) * 2)
-                                breakdown_fig, breakdown_ax = plt.subplots(figsize=(fig_width, 6))
+                                breakdown_fig, breakdown_ax = plt.subplots(
+                                    figsize=(fig_width, 6)
+                                )
                                 render_rerun_checkpoint_breakdown(
-                                    breakdown_ax, notebook_rerun,
+                                    breakdown_ax,
+                                    notebook_rerun,
                                     notebook_name=notebook_name,
-                                    large_fonts=args.large_fonts
+                                    large_fonts=args.large_fonts,
                                 )
                                 breakdown_fig.tight_layout()
                                 pdf.savefig(breakdown_fig, dpi=150)
@@ -4308,10 +4429,68 @@ def process_v4(
 
                         # Rerun overhead CDF page (combined across all notebooks)
                         rerun_cdf_fig, rerun_cdf_ax = plt.subplots(figsize=(8, 6))
-                        render_rerun_overhead_cdf(rerun_cdf_ax, rerun_cdf_data, large_fonts=args.large_fonts)
+                        render_rerun_overhead_cdf(
+                            rerun_cdf_ax, rerun_cdf_data, large_fonts=args.large_fonts
+                        )
                         rerun_cdf_fig.tight_layout()
                         pdf.savefig(rerun_cdf_fig, dpi=150)
                         plt.close(rerun_cdf_fig)
+
+                        # Time CDFs side-by-side page (analysis + rerun)
+                        if cdf_data:
+                            time_cdf_fig, time_cdf_axes = plt.subplots(
+                                1, 2, figsize=(12, 5), sharey=True
+                            )
+                            render_time_cdf(
+                                time_cdf_axes[0],
+                                sorted_vals=list(cdf_data.time_sorted),
+                                percentiles=list(cdf_data.time_percentiles),
+                                n=len(cdf_data.time_overhead_ms),
+                                color="blue",
+                                title="Per-Cell Analysis Time \nDistribution",
+                                xlabel="Analysis Time (ms, log scale)",
+                                large_fonts=args.large_fonts,
+                            )
+                            render_time_cdf(
+                                time_cdf_axes[1],
+                                sorted_vals=list(rerun_cdf_data.total_sorted),
+                                percentiles=list(rerun_cdf_data.total_percentiles),
+                                n=len(rerun_cdf_data.total_overhead_ms),
+                                color="green",
+                                title="Per-Rerun-Cell Analysis Time \nDistribution",
+                                xlabel="Rerun Overhead (ms, log scale)",
+                                large_fonts=args.large_fonts,
+                            )
+                            time_cdf_fig.tight_layout()
+                            pdf.savefig(time_cdf_fig, dpi=150)
+                            time_cdf_fig.savefig("time.pdf", dpi=150)
+                            plt.close(time_cdf_fig)
+
+                    # Memory CDFs side-by-side page (per-cell + per-notebook)
+                    if cdf_data:
+                        mem_cdf_fig, mem_cdf_axes = plt.subplots(
+                            1, 2, figsize=(12, 5), sharey=True
+                        )
+                        render_cdf_panel(
+                            mem_cdf_axes[0],
+                            cdf_data,
+                            "memory",
+                            color_override="orange",
+                            title_override="Per-Cell Memory Overhead\nDistribution",
+                            large_fonts=args.large_fonts,
+                        )
+                        render_cdf_panel(
+                            mem_cdf_axes[1],
+                            cdf_data,
+                            "peak",
+                            color_override="red",
+                            title_override="Per-Notebook Peak Memory Overhead\nDistribution",
+                            large_fonts=args.large_fonts,
+                        )
+                        mem_cdf_fig.tight_layout()
+                        pdf.savefig(mem_cdf_fig, dpi=150)
+                        mem_cdf_fig.savefig("mem.pdf", dpi=150)
+                        plt.close(mem_cdf_fig)
 
             print(f"Combined plots saved to: {combined_path}")
 
@@ -4325,7 +4504,9 @@ def process_v4(
     if excluded_for_errors:
         for path, cell_ids in sorted(excluded_for_errors):
             notebook_name = Path(path).stem.replace("_comparison", "")
-            print(f"  {notebook_name}: {len(cell_ids)} error(s) in cells {', '.join(cell_ids)}")
+            print(
+                f"  {notebook_name}: {len(cell_ids)} error(s) in cells {', '.join(cell_ids)}"
+            )
     else:
         print("  (none)")
 
@@ -4459,7 +4640,14 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
                 total_error_counts[e] = total_error_counts.get(e, 0) + c
 
         staleness_data.append(
-            (notebook_name, clean_cells, stale_cells, error_cells, reason_counts, error_counts)
+            (
+                notebook_name,
+                clean_cells,
+                stale_cells,
+                error_cells,
+                reason_counts,
+                error_counts,
+            )
         )
 
         # Format ratio
@@ -4562,7 +4750,9 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
     print("-" * (47 + (col_width + 1) * len(error_types)))
 
     # Per-notebook rows (all notebooks, sorted by name)
-    for name, clean, stale, errors, reasons, err_counts in sorted(staleness_data, key=lambda x: x[0]):
+    for name, clean, stale, errors, reasons, err_counts in sorted(
+        staleness_data, key=lambda x: x[0]
+    ):
         display_name = name[:33] if len(name) > 33 else name
         row = f"{display_name:<35} {clean + stale + errors:>5} {errors:>6}"
         for etype in error_types:
@@ -4723,9 +4913,11 @@ def main():
     has_supported_format = all(is_v4_or_v5_format(d) for d in file_data.values())
 
     if not has_supported_format:
-        print("Error: Only v4.0 or v5.0 format is supported. "
-              "Re-run notebooks with current compare-baseline to produce v4/v5 output.",
-              file=sys.stderr)
+        print(
+            "Error: Only v4.0 or v5.0 format is supported. "
+            "Re-run notebooks with current compare-baseline to produce v4/v5 output.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     process_v4(file_data, args, excluded_for_errors)  # Handles both v4 and v5
