@@ -350,6 +350,10 @@ _cudf_tracker: Optional['ColumnAccessTracker'] = None
 # Mapping from cudf GroupBy id -> source DataFrame id
 _cudf_groupby_to_df: Dict[int, int] = {}
 
+# Storage for cudf.pandas proxy patches (separate from native cudf patches)
+_cudf_pandas_proxy_patches_installed: bool = False
+_cudf_pandas_original_methods: Dict[str, Any] = {}
+
 
 def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
     """
@@ -362,6 +366,10 @@ def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
         tracker: The ColumnAccessTracker instance to record reads/writes to
     """
     global _cudf_patches_installed, _cudf_tracker, _cudf_groupby_to_df
+
+    # Always try to install proxy tracking first (works even if native cudf unavailable)
+    # This is needed for cudf.pandas mode where proxies intercept __setitem__/__getitem__
+    install_cudf_pandas_proxy_tracking(tracker)
 
     if not has_cudf():
         return
@@ -503,11 +511,93 @@ def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
     _cudf_patches_installed = True
 
 
+def install_cudf_pandas_proxy_tracking(tracker: 'ColumnAccessTracker') -> None:
+    """
+    Install column tracking patches on cudf.pandas proxy objects.
+
+    This is needed because cudf.pandas wraps DataFrames in _FastSlowProxy,
+    which intercepts __setitem__/__getitem__ before they reach pandas/cudf.
+    Without this, column writes like `df['col'] = value` are not tracked
+    when using cudf.pandas mode.
+    """
+    global _cudf_pandas_proxy_patches_installed, _cudf_pandas_original_methods, _cudf_tracker
+
+    _init_cudf_pandas_detection()
+    if not _HAS_CUDF_PANDAS or _cudf_pandas_proxy_type is None:
+        return
+
+    if _cudf_pandas_proxy_patches_installed:
+        return
+
+    _cudf_tracker = tracker
+
+    # Patch _FastSlowProxy.__setitem__
+    if hasattr(_cudf_pandas_proxy_type, '__setitem__'):
+        _cudf_pandas_original_methods['__setitem__'] = _cudf_pandas_proxy_type.__setitem__
+        original_setitem = _cudf_pandas_original_methods['__setitem__']
+
+        def tracked_proxy_setitem(proxy_self, key, value):
+            # Only track if this is a DataFrame proxy
+            if _cudf_tracker is not None and _is_proxy_dataframe(proxy_self):
+                if isinstance(key, str):
+                    _cudf_tracker.record_write(id(proxy_self), [key])
+                elif isinstance(key, list):
+                    str_keys = [k for k in key if isinstance(k, str)]
+                    if str_keys:
+                        _cudf_tracker.record_write(id(proxy_self), str_keys)
+            return original_setitem(proxy_self, key, value)
+
+        _cudf_pandas_proxy_type.__setitem__ = tracked_proxy_setitem
+
+    # Patch _FastSlowProxy.__getitem__
+    if hasattr(_cudf_pandas_proxy_type, '__getitem__'):
+        _cudf_pandas_original_methods['__getitem__'] = _cudf_pandas_proxy_type.__getitem__
+        original_getitem = _cudf_pandas_original_methods['__getitem__']
+
+        def tracked_proxy_getitem(proxy_self, key):
+            # Only track if this is a DataFrame proxy
+            if _cudf_tracker is not None and _is_proxy_dataframe(proxy_self):
+                if isinstance(key, str):
+                    _cudf_tracker.record_read(id(proxy_self), [key])
+                elif isinstance(key, list):
+                    str_keys = [k for k in key if isinstance(k, str)]
+                    if str_keys:
+                        _cudf_tracker.record_read(id(proxy_self), str_keys)
+            return original_getitem(proxy_self, key)
+
+        _cudf_pandas_proxy_type.__getitem__ = tracked_proxy_getitem
+
+    _cudf_pandas_proxy_patches_installed = True
+
+
+def uninstall_cudf_pandas_proxy_tracking() -> None:
+    """Restore original cudf.pandas proxy methods."""
+    global _cudf_pandas_proxy_patches_installed
+
+    if not _cudf_pandas_proxy_patches_installed:
+        return
+
+    _init_cudf_pandas_detection()
+    if _cudf_pandas_proxy_type is None:
+        return
+
+    if '__setitem__' in _cudf_pandas_original_methods:
+        _cudf_pandas_proxy_type.__setitem__ = _cudf_pandas_original_methods['__setitem__']
+    if '__getitem__' in _cudf_pandas_original_methods:
+        _cudf_pandas_proxy_type.__getitem__ = _cudf_pandas_original_methods['__getitem__']
+
+    _cudf_pandas_original_methods.clear()
+    _cudf_pandas_proxy_patches_installed = False
+
+
 def uninstall_cudf_tracking() -> None:
     """
     Restore original cudf DataFrame methods.
     """
     global _cudf_patches_installed, _cudf_tracker, _cudf_groupby_to_df
+
+    # Always try to uninstall proxy tracking (works even if native cudf unavailable)
+    uninstall_cudf_pandas_proxy_tracking()
 
     if not has_cudf():
         return
