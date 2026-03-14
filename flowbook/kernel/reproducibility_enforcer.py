@@ -1331,18 +1331,25 @@ class ReproducibilityEnforcer:
             if value_level_changed_vars else set()
         )
 
-        # Column-level: recoverable iff column is in tracking.column_writes
+        # Column-level: recoverable iff variable was rebound OR column is in tracking.column_writes.
+        # If the variable was rebound (e.g., df = df.merge(...)), ALL column changes are
+        # recoverable — re-executing recreates the entire DataFrame including all columns.
+        # Column-level tracking only matters for in-place column mutations (df['col'] = val).
         tracked_col_writes = tracking.column_writes or {}
         recoverable_column_changed: Dict[str, List[str]] = {}
         unrecoverable_column_changed: Dict[str, List[str]] = {}
         for var, cols in column_changed.items():
-            tw = set(tracked_col_writes.get(var, []))
-            rec = [c for c in cols if c in tw]
-            unrec = [c for c in cols if c not in tw]
-            if rec:
-                recoverable_column_changed[var] = rec
-            if unrec:
-                unrecoverable_column_changed[var] = unrec
+            if var in current_writes_set:
+                # Variable rebound — all columns recoverable
+                recoverable_column_changed[var] = cols
+            else:
+                tw = set(tracked_col_writes.get(var, []))
+                rec = [c for c in cols if c in tw]
+                unrec = [c for c in cols if c not in tw]
+                if rec:
+                    recoverable_column_changed[var] = rec
+                if unrec:
+                    unrecoverable_column_changed[var] = unrec
 
         # Variables that changed at column level only (not value level)
         # are recoverable if ALL their changed columns are in column_writes

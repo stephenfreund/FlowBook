@@ -6189,3 +6189,41 @@ class TestUnrecoverableMutation:
         # B should NOT be stale — mutation is unrecoverable, doesn't propagate
         assert self.sdc._notebook_state.is_clean("b"), \
             f"B should stay clean but got: {self.sdc._notebook_state.get_status('b')}"
+
+    def test_rebound_df_with_new_columns_is_recoverable(self):
+        """df = df.merge(...) adds new columns but df is rebound — no error.
+
+        When a variable is rebound (df = ...), ALL column changes are recoverable
+        because re-executing recreates the entire DataFrame. Column-level tracking
+        only matters for in-place mutations (df['col'] = val without rebinding).
+        """
+        import pandas as pd
+
+        # A: df = DataFrame
+        df_orig = pd.DataFrame({"store": [1, 2], "price": [10, 20]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df_orig.copy()})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B: df = df.merge(store_df) — rebound, adds store_factor column
+        store_df = pd.DataFrame({"store": [1, 2], "store_factor": [0.9, 1.1]})
+        df_merged = df_orig.merge(store_df, on="store")
+        self._save_pre_checkpoint("b", {"df": df_orig.copy()})
+        ns_b = self._make_namespace({"df": df_merged})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            # df IS in writes (rebound), store_factor NOT in column_writes
+            tracking=make_tracking(reads={"df"}, writes={"df"}),
+        )
+
+        # Should NOT have UNRECOVERABLE_MUTATION (df was rebound)
+        error_types = [e.error_type for e in result_b.errors]
+        assert ErrorType.UNRECOVERABLE_MUTATION not in error_types, \
+            f"Rebound df should not trigger unrecoverable mutation, got errors: {result_b.errors}"
