@@ -177,7 +177,10 @@ NoReadAndWrite(R, W, i)    ≝  Rᵢ ∩ Wᵢ = ∅
 WriteBeforeRead(R, W, i)   ≝  Rᵢ ⊆ W_{1..i-1}
 NoReadBeforeWrite(R, W, i) ≝  Rᵢ ∩ W_{i+1..n} = ∅
 NoWriteAfterRead(R, W, i)  ≝  Wᵢ ∩ R_{1..i-1} = ∅
+RecoverableMutation(W, i)  ≝  diff(preᵢ, Σ) ⊆ Wᵢ ∪ ColWᵢ
 ```
+
+- **RecoverableMutation**: All mutations detected by the diff must be recoverable — either the variable was rebound (in Wᵢ) or the column was tracked (in ColWᵢ). In-place mutations not in either set are unrecoverable errors.
 
 ### 3.3 Staleness Predicates
 
@@ -188,7 +191,7 @@ ForwardStale(R, W, W', i, j)       ≝  j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪
 BackwardStale(W, W', i, j)     ≝  j < i ∧ j = LastWriter(W, i, y) for some y ∈ Wᵢ \ W'ᵢ
 ```
 
-- **ForwardStale**: Cell j (after i) becomes stale if i wrote to a location that j reads or writes.
+- **ForwardStale**: Cell j (after i) becomes stale if i wrote to a location that j reads or writes. Note: only **recoverable** writes (rebound variables and tracked column writes) participate in staleness propagation. In-place mutations that are not recoverable do not propagate staleness.
 - **BackwardStale**: Cell j (before i) becomes stale if it was the last writer of a location that i no longer writes.
 
 ### 3.4 Instrumented Transition Rules
@@ -360,6 +363,7 @@ Validity predicates are implemented inline within `check()`, following the [Inst
 | WriteBeforeRead(R, W, i) | §3.2 | Not strictly enforced (would reject reading undefined variables) |
 | NoReadBeforeWrite(R, W, i) | §3.2 | `_check_forward_contamination()` in `check()` |
 | NoWriteAfterRead(R, W, i) | §3.2 | `_check_backward_mutation_new()` in `check()` |
+| RecoverableMutation(W, i) | §3.2 | `_check_unrecoverable_mutation()` in `check()` |
 
 ### 7.3 Staleness Predicates
 
@@ -390,6 +394,7 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 | `W' = W[i := w]` | STEP 3: `record_execution()` call |
 | NoReadBeforeWrite check | STEP 2: `_check_forward_contamination()` |
 | NoWriteAfterRead check | STEP 2: `_check_backward_mutation_new()` |
+| RecoverableMutation check | STEP 2: `_check_unrecoverable_mutation()` |
 | `T'ᵢ = CLEAN` | STEP 4: `set_clean(cell_id)` |
 | ForwardStale loop | STEP 5: `_compute_forward_staleness()` |
 | BackwardStale loop | STEP 5: LastWriter tracking via `NotebookState.last_writer` |

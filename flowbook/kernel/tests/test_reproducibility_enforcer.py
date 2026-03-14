@@ -5685,3 +5685,507 @@ class TestColumnAliasExpansion:
         if result_d.violation:
             assert result_d.violation.affected_cell == "b"
             assert "c" != result_d.violation.affected_cell
+
+
+class TestUnrecoverableMutation:
+    """Tests for unrecoverable mutation detection and write set restriction."""
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c", "d"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(
+            f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
+        )
+
+    def _make_namespace(self, namespace: dict) -> dict:
+        return namespace
+
+    # =========================================================================
+    # Tests that should produce UNRECOVERABLE_MUTATION errors
+    # =========================================================================
+
+    def test_inplace_list_mutation_is_error(self):
+        """Cell does x[0] = 99 — x not in tracking.writes → UNRECOVERABLE_MUTATION."""
+        # A writes x (a list)
+        x = [1, 2, 3]
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": x})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": [1, 2, 3]})
+        ns_b = self._make_namespace({"x": [1, 2, 3], "y": 6})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+
+        # C mutates x in place: x[0] = 99
+        x_mutated = [99, 2, 3]
+        self._save_pre_checkpoint("c", {"x": [1, 2, 3], "y": 6})
+        ns_c = self._make_namespace({"x": x_mutated, "y": 6})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes=set()),  # reads x, does NOT rebind
+        )
+
+        # Should have UNRECOVERABLE_MUTATION error
+        error_types = [e.error_type for e in result_c.errors]
+        assert ErrorType.UNRECOVERABLE_MUTATION in error_types
+        unrec_error = [e for e in result_c.errors if e.error_type == ErrorType.UNRECOVERABLE_MUTATION][0]
+        assert "x" in unrec_error.locations
+
+    def test_inplace_dict_mutation_is_error(self):
+        """Cell does d['key'] = val — d not in tracking.writes → error."""
+        d = {"a": 1}
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"d": d})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"d"}),
+        )
+
+        # B mutates d in place
+        self._save_pre_checkpoint("b", {"d": {"a": 1}})
+        ns_b = self._make_namespace({"d": {"a": 1, "key": "val"}})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"d"}, writes=set()),  # reads d, does NOT rebind
+        )
+
+        error_types = [e.error_type for e in result_b.errors]
+        assert ErrorType.UNRECOVERABLE_MUTATION in error_types
+
+    def test_inplace_mutation_accepted_with_continue(self):
+        """With continue_on_violation=True, error is reported but cell stays clean."""
+        x = [1, 2, 3]
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": x})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B mutates x in place, but with continue_on_violation
+        self._save_pre_checkpoint("b", {"x": [1, 2, 3]})
+        ns_b = self._make_namespace({"x": [99, 2, 3]})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+            continue_on_violation=True,
+        )
+
+        # Error still reported
+        error_types = [e.error_type for e in result_b.errors]
+        assert ErrorType.UNRECOVERABLE_MUTATION in error_types
+        # But cell stays clean (accepted)
+        assert self.sdc._notebook_state.is_clean("b")
+
+    def test_inplace_mutation_rejected_by_default(self):
+        """Without continue_on_violation, cell is marked stale."""
+        x = [1, 2, 3]
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": x})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B mutates x in place (default: continue_on_violation=False)
+        self._save_pre_checkpoint("b", {"x": [1, 2, 3]})
+        ns_b = self._make_namespace({"x": [99, 2, 3]})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+        )
+
+        assert not self.sdc._notebook_state.is_clean("b")
+        # Should have UNRECOVERABLE_MUTATION reason
+        reasons = self.sdc._notebook_state.get_reasons("b")
+        reason_types = {r.type for r in reasons}
+        assert ReasonType.UNRECOVERABLE_MUTATION in reason_types
+
+    # =========================================================================
+    # Tests that should NOT produce errors
+    # =========================================================================
+
+    def test_rebinding_is_recoverable(self):
+        """Cell does x = [1,2,3] — x IS in tracking.writes → no error."""
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": [1, 2, 3]})
+        result_a = self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        error_types = [e.error_type for e in result_a.errors]
+        assert ErrorType.UNRECOVERABLE_MUTATION not in error_types
+
+    def test_column_write_is_recoverable(self):
+        """Cell does df['col'] = val — col IS in tracking.column_writes → no error."""
+        import pandas as pd
+        df = pd.DataFrame({"price": [10, 20]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B adds a new column (tracked in column_writes)
+        df_with_col = pd.DataFrame({"price": [10, 20], "discount": [1, 2]})
+        self._save_pre_checkpoint("b", {"df": pd.DataFrame({"price": [10, 20]})})
+        ns_b = self._make_namespace({"df": df_with_col})
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_writes={"df": {"discount"}},
+            ),
+        )
+
+        # Should NOT have unrecoverable error (column write is tracked)
+        error_types = [e.error_type for e in result_b.errors]
+        assert ErrorType.UNRECOVERABLE_MUTATION not in error_types
+
+    # =========================================================================
+    # Staleness propagation tests
+    # =========================================================================
+
+    def test_inplace_mutation_does_not_propagate_staleness(self):
+        """In-place mutation should NOT make downstream cells stale (even when accepted)."""
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": [1, 2, 3]})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": [1, 2, 3]})
+        ns_b = self._make_namespace({"x": [1, 2, 3], "y": 6})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # C does x[0] = 99 (accepted via continue_on_violation)
+        self._save_pre_checkpoint("c", {"x": [1, 2, 3], "y": 6})
+        ns_c = self._make_namespace({"x": [99, 2, 3], "y": 6})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+            continue_on_violation=True,
+        )
+
+        # B should NOT be stale — x mutation is unrecoverable, doesn't propagate
+        assert self.sdc._notebook_state.is_clean("b"), \
+            f"B should stay clean but got: {self.sdc._notebook_state.get_status('b')}"
+
+    def test_recoverable_write_propagates_staleness(self):
+        """Rebinding x=2 should make cells reading x stale."""
+        # A writes x=1
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": 1})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": 1})
+        ns_b = self._make_namespace({"x": 1, "y": 2})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # C rebinds x=2 (x IS in writes, continue_on_violation since C writes after B reads)
+        self._save_pre_checkpoint("c", {"x": 1, "y": 2})
+        ns_c = self._make_namespace({"x": 2, "y": 2})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+            continue_on_violation=True,
+        )
+
+        # B IS stale (x was rebound by C, which is recoverable)
+        assert not self.sdc._notebook_state.is_clean("b")
+
+    def test_inplace_mutation_not_last_writer(self):
+        """In-place mutation should NOT make the cell the last_writer of the variable."""
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": [1, 2, 3]})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # C mutates x in place (accepted)
+        self._save_pre_checkpoint("c", {"x": [1, 2, 3]})
+        ns_c = self._make_namespace({"x": [99, 2, 3]})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+            continue_on_violation=True,
+        )
+
+        # A should still be the last_writer of x, not C
+        assert self.sdc._notebook_state.last_writer.get("x") == "a", \
+            f"Expected 'a' as last_writer of x, got {self.sdc._notebook_state.last_writer.get('x')}"
+
+    def test_mixed_recoverable_unrecoverable(self):
+        """Cell does y=1; x[0]=2 (writes={y}). Error for x, y propagates normally."""
+        # A writes x, reads y
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": [1, 2, 3]})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads y
+        self._save_pre_checkpoint("b", {"x": [1, 2, 3]})
+        ns_b = self._make_namespace({"x": [1, 2, 3], "y": 0})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads=set(), writes={"y"}),
+        )
+
+        # D reads y
+        self._save_pre_checkpoint("d", {"x": [1, 2, 3], "y": 0})
+        ns_d = self._make_namespace({"x": [1, 2, 3], "y": 0, "z": 0})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace=ns_d,
+            tracking=make_tracking(reads={"y"}, writes={"z"}),
+        )
+        assert self.sdc._notebook_state.is_clean("d")
+
+        # C does y=1 (recoverable) AND x[0]=99 (unrecoverable)
+        self._save_pre_checkpoint("c", {"x": [1, 2, 3], "y": 0, "z": 0})
+        ns_c = self._make_namespace({"x": [99, 2, 3], "y": 1, "z": 0})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+            continue_on_violation=True,
+        )
+
+        # Should have UNRECOVERABLE_MUTATION error for x
+        error_types = [e.error_type for e in result_c.errors]
+        assert ErrorType.UNRECOVERABLE_MUTATION in error_types
+        unrec_error = [e for e in result_c.errors if e.error_type == ErrorType.UNRECOVERABLE_MUTATION][0]
+        assert "x" in unrec_error.locations
+
+        # D (which reads y) should be stale (y was rebound, recoverable propagation)
+        assert not self.sdc._notebook_state.is_clean("d"), \
+            f"D should be stale due to y change, but got: {self.sdc._notebook_state.get_status('d')}"
+
+    def test_delete_mutating_cell_no_staleness(self):
+        """Deleting a cell that only mutated in-place should not propagate staleness.
+
+        D mutates x[5]=3 (accepted). D deleted. Cells reading x should NOT be
+        marked stale from D since D was never last_writer.
+        """
+        # A writes x
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"x": [1, 2, 3, 4, 5, 6]})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"x"}),
+        )
+
+        # B reads x
+        self._save_pre_checkpoint("b", {"x": [1, 2, 3, 4, 5, 6]})
+        ns_b = self._make_namespace({"x": [1, 2, 3, 4, 5, 6], "y": 21})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"x"}, writes={"y"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # D mutates x in place (accepted)
+        self._save_pre_checkpoint("d", {"x": [1, 2, 3, 4, 5, 6], "y": 21})
+        ns_d = self._make_namespace({"x": [1, 2, 3, 4, 5, 99], "y": 21})
+        self.sdc.check(
+            cell_id="d",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}d"],
+            namespace=ns_d,
+            tracking=make_tracking(reads={"x"}, writes=set()),
+            continue_on_violation=True,
+        )
+
+        # D is NOT last_writer of x (A is)
+        assert self.sdc._notebook_state.last_writer.get("x") == "a"
+
+        # Delete D
+        self.sdc.set_cell_order(["a", "b", "c"])
+
+        # B should still be clean — D was never last_writer of x
+        assert self.sdc._notebook_state.is_clean("b"), \
+            f"B should stay clean after D deletion, got: {self.sdc._notebook_state.get_status('b')}"
+
+    def test_recoverable_column_write_propagates_staleness(self):
+        """Column write (df['col']=val) without rebinding df should propagate staleness.
+
+        This is a recoverable mutation (column is tracked in column_writes),
+        so it SHOULD make cells reading df stale, even though df is not rebound.
+        """
+        import pandas as pd
+
+        # A: df = DataFrame
+        df_orig = pd.DataFrame({"price": [10, 20]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df_orig.copy()})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B: reads df (var-level read)
+        self._save_pre_checkpoint("b", {"df": df_orig.copy()})
+        ns_b = self._make_namespace({"df": df_orig.copy(), "total": 30})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"df"}, writes={"total"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # C: df['price'] = df['price'] * 2 (recoverable column write, NO rebinding)
+        df_mod = df_orig.copy()
+        df_mod["price"] = df_mod["price"] * 2
+        self._save_pre_checkpoint("c", {"df": df_orig.copy(), "total": 30})
+        ns_c = self._make_namespace({"df": df_mod, "total": 30})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_writes={"df": {"price"}},
+            ),
+            continue_on_violation=True,
+        )
+
+        # No UNRECOVERABLE_MUTATION error (column write is tracked)
+        error_types = [e.error_type for e in result_c.errors]
+        assert ErrorType.UNRECOVERABLE_MUTATION not in error_types
+
+        # B IS stale — df's price column changed (recoverable propagation)
+        assert not self.sdc._notebook_state.is_clean("b"), \
+            f"B should be stale from df column change, got: {self.sdc._notebook_state.get_status('b')}"
+
+    def test_unrecoverable_column_mutation_does_not_propagate(self):
+        """df.values[0,0]=99 (not in column_writes) should NOT propagate staleness."""
+        import pandas as pd
+
+        # A: df = DataFrame
+        df_orig = pd.DataFrame({"price": [10, 20]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = self._make_namespace({"df": df_orig.copy()})
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B: reads df
+        self._save_pre_checkpoint("b", {"df": df_orig.copy()})
+        ns_b = self._make_namespace({"df": df_orig.copy(), "total": 30})
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(reads={"df"}, writes={"total"}),
+        )
+        assert self.sdc._notebook_state.is_clean("b")
+
+        # C: modifies df element directly (bypasses column tracking — unrecoverable)
+        df_mut = df_orig.copy()
+        df_mut.iloc[0, 0] = 999
+        self._save_pre_checkpoint("c", {"df": df_orig.copy(), "total": 30})
+        ns_c = self._make_namespace({"df": df_mut, "total": 30})
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(reads={"df"}, writes=set()),
+            continue_on_violation=True,
+        )
+
+        # Should have UNRECOVERABLE_MUTATION error
+        error_types = [e.error_type for e in result_c.errors]
+        assert ErrorType.UNRECOVERABLE_MUTATION in error_types
+
+        # B should NOT be stale — mutation is unrecoverable, doesn't propagate
+        assert self.sdc._notebook_state.is_clean("b"), \
+            f"B should stay clean but got: {self.sdc._notebook_state.get_status('b')}"

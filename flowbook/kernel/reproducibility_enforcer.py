@@ -1306,9 +1306,69 @@ class ReproducibilityEnforcer:
         # This prevents false SKIPPED_UPSTREAM when a cell only mutates columns.
         value_level_changed_vars = _get_value_level_changed_vars(typed_changes)
 
+        # Classify changed vars as recoverable vs unrecoverable.
+        # Recoverable: var was rebound (in tracking.writes) → can be restored by re-execution.
+        # Unrecoverable: diff-detected change NOT in tracking.writes → in-place mutation.
+        #
+        # We only flag a variable as unrecoverable if it was VALUE-LEVEL changed
+        # (not just column-level), not rebound, AND existed before execution.
+        # Variables that are NEW (added to namespace by this cell) are creations,
+        # not mutations — they should be in tracking.writes but if they aren't,
+        # they are not "unrecoverable mutations" of existing state.
+        current_writes_set = tracking.writes or set()
+        recoverable_changed_vars = set(changed_vars) & current_writes_set
+
+        # Determine which diff-detected variables are truly new (didn't exist before)
+        from flowbook.kernel_support.types import ValueComparison
+        _new_vars = set()
+        if current_diff.differences:
+            for var_name, diff_node in current_diff.differences.items():
+                if isinstance(diff_node, ValueComparison) and diff_node.value1 is None:
+                    _new_vars.add(var_name)
+
+        unrecoverable_changed_vars = (
+            (value_level_changed_vars - current_writes_set - _new_vars)
+            if value_level_changed_vars else set()
+        )
+
+        # Column-level: recoverable iff column is in tracking.column_writes
+        tracked_col_writes = tracking.column_writes or {}
+        recoverable_column_changed: Dict[str, List[str]] = {}
+        unrecoverable_column_changed: Dict[str, List[str]] = {}
+        for var, cols in column_changed.items():
+            tw = set(tracked_col_writes.get(var, []))
+            rec = [c for c in cols if c in tw]
+            unrec = [c for c in cols if c not in tw]
+            if rec:
+                recoverable_column_changed[var] = rec
+            if unrec:
+                unrecoverable_column_changed[var] = unrec
+
+        # Variables that changed at column level only (not value level)
+        # are recoverable if ALL their changed columns are in column_writes
+        for var in list(unrecoverable_changed_vars):
+            if var in column_changed and var not in value_level_changed_vars:
+                # Only column-level changes for this var — check if all columns recoverable
+                if var not in unrecoverable_column_changed:
+                    unrecoverable_changed_vars.discard(var)
+                    recoverable_changed_vars.add(var)
+
+        # Catch untracked column-level mutations: variables in changed_vars that are
+        # NOT rebound, NOT in value_level_changed_vars, and NOT in column_changed.
+        # These are DataFrame mutations (e.g., df.iloc[0,0]=999) with no column tracking
+        # — the diff detects a column-level change but _extract_column_changes skips
+        # them because the variable has no column tracking. They are unrecoverable.
+        for var in set(changed_vars) - current_writes_set - _new_vars:
+            if var not in value_level_changed_vars and var not in column_changed:
+                if var not in unrecoverable_changed_vars:
+                    unrecoverable_changed_vars.add(var)
+
         # Convert LocSet to Set[str] for backward compatibility with NotebookState
         R_i_vars = tracking.reads_before_writes  # Use tracking directly
-        W_i_vars = set(changed_vars)  # Variables that changed (for staleness computation)
+        # W_i_vars: recoverable changes that should propagate staleness.
+        # Includes rebound variables AND variables with recoverable column changes
+        # (e.g., df['col'] = val where col is in column_writes but df is not rebound).
+        W_i_vars = recoverable_changed_vars | set(recoverable_column_changed.keys())
 
         # Extract structural warnings from diff
         structural_warnings = list(current_diff.warnings) if current_diff.warnings else []
@@ -1390,6 +1450,17 @@ class ReproducibilityEnforcer:
             ))
         log(f"[Inst-Run] {cell_id}: NoWriteAfterRead={'fail' if backward_violation else 'pass'}")
 
+        # RecoverableMutation: diff(pre_i, ns) ⊆ W_i ∪ ColW_i
+        # In-place mutations without rebinding are unrecoverable errors.
+        unrecoverable_error = self._check_unrecoverable_mutation(
+            cell_id, unrecoverable_changed_vars, unrecoverable_column_changed
+        )
+        if unrecoverable_error:
+            errors.append(unrecoverable_error)
+            log(f"[Inst-Run] {cell_id}: RecoverableMutation=fail ({unrecoverable_error.locations})")
+        else:
+            log(f"[Inst-Run] {cell_id}: RecoverableMutation=pass")
+
         # NoReadBeforeWrite(R', W', i) ≝ Rᵢ ∩ W_{i+1..n} = ∅
         # Ref: FORMAL_DEVELOPMENT.md §3.2, line 178
         # (Forward contamination check)
@@ -1418,11 +1489,14 @@ class ReproducibilityEnforcer:
         self._pending_snapshot = self._notebook_state.snapshot_cell_state(cell_id)
 
         # tracking is already alias-expanded at the start of check()
+        # Pass only recoverable changes for last_writer updates in record_execution.
+        # Unrecoverable mutations must not become last_writer of any variable.
+        recoverable_value_level_for_record = value_level_changed_vars & current_writes_set if value_level_changed_vars else None
         self._notebook_state.record_execution(
             cell_id,
             tracking=tracking,
-            changed_vars=value_level_changed_vars if value_level_changed_vars else None,
-            column_changed={k: set(v) for k, v in column_changed.items()} if column_changed else None,
+            changed_vars=recoverable_value_level_for_record if recoverable_value_level_for_record else None,
+            column_changed={k: set(v) for k, v in recoverable_column_changed.items()} if recoverable_column_changed else None,
             execution_seq=self.seq_counter,
             structural_reads_values=structural_read_values,
             typed_changes=typed_changes,
@@ -1460,6 +1534,12 @@ class ReproducibilityEnforcer:
                 for var in backward_violation.variables:
                     self._notebook_state.add_reason(
                         cell_id, Reason(ReasonType.NO_WRITE_AFTER_READ, loc=var, cell_id=backward_violation.affected_cell)
+                    )
+            if unrecoverable_error is not None:
+                # UnrecoverableMutation failed - cell mutated state without rebinding
+                for loc in unrecoverable_error.locations:
+                    self._notebook_state.add_reason(
+                        cell_id, Reason(ReasonType.UNRECOVERABLE_MUTATION, loc=loc)
                     )
 
         # Build writer_violation for UI purposes if forward contamination detected
@@ -1501,8 +1581,9 @@ class ReproducibilityEnforcer:
         has_any_errors = len(errors) > 0
 
         # Separate errors into backward-only (can be accepted) and forward/other (always stale)
-        backward_only_errors = [e for e in errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ]
-        other_errors = [e for e in errors if e.error_type != ErrorType.NO_WRITE_AFTER_READ]
+        _acceptable_error_types = {ErrorType.NO_WRITE_AFTER_READ, ErrorType.UNRECOVERABLE_MUTATION}
+        backward_only_errors = [e for e in errors if e.error_type in _acceptable_error_types]
+        other_errors = [e for e in errors if e.error_type not in _acceptable_error_types]
 
         # Backward-only errors can be accepted; other errors always cause staleness
         has_staleness_causing_errors = len(other_errors) > 0 or (len(backward_only_errors) > 0 and not continue_on_violation)
@@ -1563,7 +1644,7 @@ class ReproducibilityEnforcer:
         if not will_be_rejected:
             with timer(key="check:ForwardStale", message=f"[Inst-Run] ForwardStale computation for {cell_id}"):
                 stale, staleness_warnings = self._compute_forward_staleness(
-                    namespace, W_i_old, W_i_current, W_i_vars, column_changed, cell_id, my_position,
+                    namespace, W_i_old, W_i_current, W_i_vars, recoverable_column_changed, cell_id, my_position,
                     changed_file_paths=_changed_file_paths,
                 )
             log(f"[Inst-Run] {cell_id}: ForwardStale marked {len(stale)} cells")
@@ -1574,7 +1655,7 @@ class ReproducibilityEnforcer:
             # that an earlier (clean) cell had read.
             with timer(key="check:BackwardStale", message=f"[Inst-Run] BackwardStale computation for {cell_id}"):
                 backward_stale = self._compute_backward_staleness(
-                    namespace, W_i_vars, column_changed, cell_id, my_position
+                    namespace, W_i_vars, recoverable_column_changed, cell_id, my_position
                 )
             if backward_stale:
                 log(f"[Inst-Run] {cell_id}: BackwardStale marked {len(backward_stale)} cells")
@@ -1582,14 +1663,16 @@ class ReproducibilityEnforcer:
         else:
             log(f"[Inst-Run] {cell_id}: Skipping staleness propagation (cell will be rejected)")
 
-        # Update last_writer (L) for value-level changed variables only.
+        # Update last_writer (L) for recoverable value-level changed variables only.
+        # Unrecoverable mutations (in-place without rebinding) must NOT become last_writer
+        # because the cell cannot restore the full value on re-execution.
         # Column-only changes update column_last_writer below, not last_writer.
-        # This prevents false SKIPPED_UPSTREAM when a cell only mutates columns.
-        if value_level_changed_vars:
-            for loc in value_level_changed_vars:
+        recoverable_value_level = value_level_changed_vars & current_writes_set
+        if recoverable_value_level:
+            for loc in recoverable_value_level:
                 self._notebook_state.last_writer[loc] = cell_id
-        if column_changed:
-            for var, cols in column_changed.items():
+        if recoverable_column_changed:
+            for var, cols in recoverable_column_changed.items():
                 if var not in self._notebook_state.column_last_writer:
                     self._notebook_state.column_last_writer[var] = {}
                 for col in cols:
@@ -2077,6 +2160,41 @@ class ReproducibilityEnforcer:
                 message=message,
             )
         return None
+
+    def _check_unrecoverable_mutation(
+        self,
+        cell_id: str,
+        unrecoverable_changed_vars: Set[str],
+        unrecoverable_column_changed: Dict[str, List[str]],
+    ) -> Optional[ReproducibilityError]:
+        """
+        Check that all mutations are recoverable (rebound or column-tracked).
+
+        In-place mutations (diff-detected changes NOT in tracking.writes) cannot
+        be restored by re-executing the cell. These are errors — the cell mutated
+        state it doesn't own.
+
+        Formal ref: RecoverableMutation(R', W', i)
+        """
+        locations: List[str] = []
+        for var in sorted(unrecoverable_changed_vars):
+            locations.append(var)
+        for var, cols in sorted(unrecoverable_column_changed.items()):
+            for col in sorted(cols):
+                locations.append(f"{var}.{col}")
+        if not locations:
+            return None
+        cell_alpha = self._cell_id_to_alpha(cell_id)
+        vars_str = ", ".join(locations)
+        return ReproducibilityError(
+            error_type=ErrorType.UNRECOVERABLE_MUTATION,
+            cell_id=cell_id,
+            locations=locations,
+            message=(
+                f"Cell {cell_alpha} mutated {vars_str} in place without rebinding. "
+                f"Re-executing this cell cannot restore these values."
+            ),
+        )
 
     def _check_skipped_writers(self, cell_id: str) -> List[Tuple[str, Optional[str], str]]:
         """

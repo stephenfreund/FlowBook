@@ -417,6 +417,7 @@ class ReasonType(str, Enum):
     ORDER_CHANGED = "order_changed"
     SKIPPED_UPSTREAM = "skipped_upstream"  # Cell reads from wrong writer; re-run won't help
     NO_WRITE_AFTER_READ = "no_write_after_read"  # was BACKWARD_MUTATION - cell wrote to location read by earlier cell
+    UNRECOVERABLE_MUTATION = "unrecoverable_mutation"  # in-place mutation without rebinding
 
 
 # =============================================================================
@@ -445,6 +446,7 @@ class ErrorType(str, Enum):
     WRITE_BEFORE_READ = "write_before_read"
     NO_READ_BEFORE_WRITE = "no_read_before_write"  # forward contamination
     NO_WRITE_AFTER_READ = "no_write_after_read"    # backward mutation
+    UNRECOVERABLE_MUTATION = "unrecoverable_mutation"  # in-place mutation without rebinding
 
 
 @dataclass
