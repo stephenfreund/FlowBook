@@ -693,6 +693,156 @@ def render_time_cdf(
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
 
 
+def render_overhead_pct_cdf(ax, data: CDFData, large_fonts: bool = True) -> None:
+    """Render CDF for per-cell overhead percentage distribution.
+
+    Overhead percentage = (state + check) / base * 100
+
+    Args:
+        ax: Matplotlib axes
+        data: CDFData with overhead_pct_* fields
+        large_fonts: Use larger fonts
+    """
+    from matplotlib.ticker import FuncFormatter
+
+    label_size = 22 if large_fonts else 14
+    title_size = 24 if large_fonts else 16
+    tick_size = 18 if large_fonts else 12
+    annotation_size = 18 if large_fonts else 12
+    legend_fontsize = 14 if large_fonts else 10
+
+    sorted_vals = data.overhead_pct_sorted
+    percentiles = data.overhead_pct_percentiles
+    n = len(data.overhead_pct)
+    color = "darkgreen"
+
+    if not sorted_vals:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Per-Cell Overhead Distribution", fontsize=title_size)
+        return
+
+    import numpy as np
+    sorted_arr = np.array(sorted_vals)
+    cdf_arr = np.array(percentiles)
+
+    # Compute percentile stats
+    stats = {
+        "P50": np.percentile(sorted_arr, 50),
+        "P95": np.percentile(sorted_arr, 95),
+        "P99": np.percentile(sorted_arr, 99),
+    }
+    max_val = np.max(sorted_arr)
+
+    # Plot CDF line and fill
+    ax.fill_between(sorted_arr, 0, cdf_arr, alpha=0.12, color=color, edgecolor="none")
+    ax.plot(sorted_arr, cdf_arr, color=color, linewidth=2.5)
+
+    # Disable standard gridlines
+    ax.grid(False)
+
+    # Subtle spines
+    for spine in ax.spines.values():
+        spine.set_color("lightgray")
+        spine.set_linewidth(0.5)
+
+    # Percentile config
+    pct_config = [
+        ("P50", 0.50, (12, 8), "bottom"),
+        ("P95", 0.95, (12, -18), "top"),
+        ("P99", 0.99, (12, 8), "bottom"),
+    ]
+
+    # Faint reference lines
+    line_color = "gray"
+    line_alpha = 0.3
+    line_width = 0.6
+    for pname, y_val, _, _ in pct_config:
+        x_val = stats[pname]
+        ax.axhline(y=y_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+        ax.axvline(x=x_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+    ax.axhline(y=1.0, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+    ax.axvline(x=max_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+
+    # Percentile markers
+    for pname, y_val, offset, va in pct_config:
+        x_val = stats[pname]
+        ax.scatter([x_val], [y_val], color=color, s=40, marker="o", zorder=5,
+                   edgecolors="white", linewidths=1.5)
+        ax.annotate(
+            pname, (x_val, y_val),
+            textcoords="offset points", xytext=offset,
+            fontsize=annotation_size, ha="left", va=va, fontweight="bold",
+            arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3)
+        )
+
+    # Max marker
+    ax.scatter([max_val], [1.0], color=color, s=40, marker="o", zorder=5,
+               edgecolors="white", linewidths=1.5)
+    ax.annotate(
+        "Max", (max_val, 1.0),
+        textcoords="offset points", xytext=(12, -18),
+        fontsize=annotation_size, ha="left", va="top", fontweight="bold",
+        arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3)
+    )
+
+    # Format percentage
+    def fmt_pct(v):
+        if v >= 10:
+            return f"{v:.1f}%"
+        elif v >= 1:
+            return f"{v:.2f}%"
+        else:
+            return f"{v:.3f}%"
+
+    # Legend box with values
+    formatted = {p: fmt_pct(stats[p]) for p in ["P50", "P95", "P99"]}
+    formatted["Max"] = fmt_pct(max_val)
+    max_val_len = max(len(v) for v in formatted.values())
+    legend_lines = [f"{p:>3}  {formatted[p]:>{max_val_len}}" for p in ["P50", "P95", "P99", "Max"]]
+    legend_text = "\n".join(legend_lines)
+    props = dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray")
+    ax.text(0.98, 0.02, legend_text, transform=ax.transAxes, fontsize=legend_fontsize,
+            verticalalignment="bottom", horizontalalignment="right", bbox=props,
+            family="monospace")
+
+    # N count in top left
+    textstr = f"N={n:,}"
+    ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
+            verticalalignment="top", horizontalalignment="left",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"))
+
+    # Axes config
+    ax.set_xlabel("Overhead Percentage", fontsize=label_size)
+    ax.set_ylabel("Cumulative Proportion", fontsize=label_size)
+    ax.set_title("Per-Cell Overhead Distribution", fontsize=title_size)
+    ax.set_ylim(0, 1.05)
+    ax.set_xlim(left=0)
+    ax.tick_params(axis="both", labelsize=tick_size)
+
+    # Format x-axis as percentage
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:.0f}%"))
+
+
+def render_base_runtime_cdf(ax, data: CDFData, large_fonts: bool = True) -> None:
+    """Render CDF for base runtime (code execution time) distribution.
+
+    Args:
+        ax: Matplotlib axes
+        data: CDFData with base_runtime_* fields
+        large_fonts: Use larger fonts
+    """
+    render_time_cdf(
+        ax,
+        sorted_vals=list(data.base_runtime_sorted),
+        percentiles=list(data.base_runtime_percentiles),
+        n=len(data.base_runtime_ms),
+        color="darkgreen",
+        title="Base Runtime Distribution",
+        xlabel="Code Execution Time (ms, log scale)",
+        large_fonts=large_fonts,
+    )
+
+
 def render_cdf_panel(
     ax,
     data: CDFData,

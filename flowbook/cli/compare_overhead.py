@@ -47,7 +47,7 @@ from flowbook.cli.plot_extraction import (
     extract_baseline_cells,
     extract_gpu_overhead_from_timing,
 )
-from flowbook.cli.plot_rendering import render_combined_6panel, render_time_cdf
+from flowbook.cli.plot_rendering import render_combined_6panel, render_time_cdf, render_overhead_pct_cdf, render_base_runtime_cdf
 
 # Base directory for cached remote files
 CACHE_BASE_DIR = "/tmp/flowbook_compare_overhead"
@@ -4234,6 +4234,22 @@ def process_v4(
                             pdf.savefig(gpu_cdf_fig, dpi=150)
                             plt.close(gpu_cdf_fig)
 
+                        # Per-cell overhead percentage CDF page
+                        if cdf_data.overhead_pct:
+                            overhead_fig, overhead_ax = plt.subplots(figsize=(8, 6))
+                            render_overhead_pct_cdf(overhead_ax, cdf_data, large_fonts=args.large_fonts)
+                            overhead_fig.tight_layout()
+                            pdf.savefig(overhead_fig, dpi=150)
+                            plt.close(overhead_fig)
+
+                        # Base runtime CDF page
+                        if cdf_data.base_runtime_ms:
+                            base_fig, base_ax = plt.subplots(figsize=(8, 6))
+                            render_base_runtime_cdf(base_ax, cdf_data, large_fonts=args.large_fonts)
+                            base_fig.tight_layout()
+                            pdf.savefig(base_fig, dpi=150)
+                            plt.close(base_fig)
+
                     # Rerun overhead plots (if any data exists)
                     rerun_cdf_data = extract_rerun_overhead_data(raw_data_list)
                     if rerun_cdf_data:
@@ -4344,6 +4360,8 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
     all_overhead_ms = []
     all_memory_ratios = []
     all_peak_pcts = []
+    all_overhead_pct = []  # Per-cell overhead: (state + check) / (base + 150) * 100
+    all_base_runtime_ms = []  # Per-cell base runtime (code execution time)
 
     # Staleness data per notebook
     staleness_data = []  # (name, clean, stale, error, reason_counts, error_counts)
@@ -4412,6 +4430,16 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
                 check_ms += c_ms
                 all_overhead_ms.append(s_ms + c_ms)
 
+                # Collect per-cell overhead percentage: (state + check) / (base + 150) * 100
+                # Add 150ms to base to reflect Jupyter frontend overhead
+                code_ms = cell.get("code_duration_ms")
+                if code_ms is None:
+                    code_ms = cell.get("run_ms", 0) or cell.get("cell_runtime_ms", 0) or 0
+                if code_ms > 0:
+                    overhead_pct = (s_ms + c_ms) / (code_ms + 150) * 100
+                    all_overhead_pct.append(overhead_pct)
+                    all_base_runtime_ms.append(code_ms)
+
             # Get checking summary (staleness data)
             totals = fb_timing.get("totals", {})
             checking = totals.get("checking_summary", {})
@@ -4454,6 +4482,24 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
     if all_overhead_ms:
         arr = np.array(all_overhead_ms)
         print("Per-Cell Time Overhead (state + check):")
+        print(f"  P50: {np.percentile(arr, 50):.1f}ms")
+        print(f"  P95: {np.percentile(arr, 95):.1f}ms")
+        print(f"  P99: {np.percentile(arr, 99):.1f}ms")
+        print(f"  Max: {np.max(arr):.1f}ms")
+        print()
+
+    if all_overhead_pct:
+        arr = np.array(all_overhead_pct)
+        print("Per-Cell Overhead ((state + check) / (base + 150ms)):")
+        print(f"  P50: {np.percentile(arr, 50):.2f}%")
+        print(f"  P95: {np.percentile(arr, 95):.2f}%")
+        print(f"  P99: {np.percentile(arr, 99):.2f}%")
+        print(f"  Max: {np.max(arr):.2f}%")
+        print()
+
+    if all_base_runtime_ms:
+        arr = np.array(all_base_runtime_ms)
+        print("Per-Cell Base Runtime (code execution):")
         print(f"  P50: {np.percentile(arr, 50):.1f}ms")
         print(f"  P95: {np.percentile(arr, 95):.1f}ms")
         print(f"  P99: {np.percentile(arr, 99):.1f}ms")

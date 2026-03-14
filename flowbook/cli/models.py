@@ -651,6 +651,16 @@ class CDFData:
     gpu_peak_sorted: List[float] = field(default_factory=list)
     gpu_peak_percentiles: List[float] = field(default_factory=list)
 
+    # Per-cell overhead percentage CDF: (state + check) / (base + 150) * 100
+    overhead_pct: List[float] = field(default_factory=list)
+    overhead_pct_sorted: List[float] = field(default_factory=list)
+    overhead_pct_percentiles: List[float] = field(default_factory=list)
+
+    # Base runtime CDF (code execution time per cell, in ms)
+    base_runtime_ms: List[float] = field(default_factory=list)
+    base_runtime_sorted: List[float] = field(default_factory=list)
+    base_runtime_percentiles: List[float] = field(default_factory=list)
+
 
 # ============ Comparison Result Model ============
 

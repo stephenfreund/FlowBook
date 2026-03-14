@@ -614,7 +614,42 @@ def extract_cdf_data(
             if peak_gpu_base > 0:
                 gpu_peak_memory_pct.append((peak_gpu_total / peak_gpu_base - 1) * 100)
 
-    if not time_overhead_ms and not memory_ratios:
+    # Per-cell overhead percentage: (state + check) / base * 100
+    overhead_pct = []
+    for result in results:
+        timing = result.timing
+        if timing:
+            fb_timing = timing.get("kernels", {}).get("flowbook", {}).get("timing", {})
+            for cell in fb_timing.get("cells", []):
+                # Get timing values
+                state_ms = cell.get("state_ms", 0) or cell.get("state_duration_ms", 0) or 0
+                check_ms = cell.get("check_ms", 0) or cell.get("check_duration_ms", 0) or 0
+
+                # Get base (code execution time)
+                code_ms = cell.get("code_duration_ms")
+                if code_ms is None:
+                    code_ms = cell.get("run_ms", 0) or cell.get("cell_runtime_ms", 0) or 0
+
+                # Compute overhead percentage: (state + check) / (base + 150) * 100
+                # Add 150ms to base to reflect Jupyter frontend overhead
+                if code_ms > 0:
+                    pct = (state_ms + check_ms) / (code_ms + 150) * 100
+                    overhead_pct.append(pct)
+
+    # Base runtime CDF (code execution time per cell)
+    base_runtime_ms = []
+    for result in results:
+        timing = result.timing
+        if timing:
+            fb_timing = timing.get("kernels", {}).get("flowbook", {}).get("timing", {})
+            for cell in fb_timing.get("cells", []):
+                code_ms = cell.get("code_duration_ms")
+                if code_ms is None:
+                    code_ms = cell.get("run_ms", 0) or cell.get("cell_runtime_ms", 0) or 0
+                if code_ms > 0:
+                    base_runtime_ms.append(code_ms)
+
+    if not time_overhead_ms and not memory_ratios and not overhead_pct and not base_runtime_ms:
         return None
 
     def build_cdf(values: List[float]):
@@ -630,8 +665,10 @@ def extract_cdf_data(
     peak_sorted, peak_pct = build_cdf(peak_memory_pct)
     gpu_memory_sorted, gpu_memory_pct = build_cdf(gpu_memory_ratios)
     gpu_peak_sorted, gpu_peak_pct = build_cdf(gpu_peak_memory_pct)
+    overhead_pct_sorted, overhead_pct_pct = build_cdf(overhead_pct)
+    base_runtime_sorted, base_runtime_pct = build_cdf(base_runtime_ms)
 
-    log(f"CDF: {len(time_overhead_ms)} time samples, {len(memory_ratios)} memory ratios, {len(peak_memory_pct)} notebooks")
+    log(f"CDF: {len(time_overhead_ms)} time samples, {len(memory_ratios)} memory ratios, {len(overhead_pct)} overhead pct, {len(base_runtime_ms)} base runtimes")
 
     return CDFData(
         time_overhead_ms=time_overhead_ms,
@@ -649,6 +686,12 @@ def extract_cdf_data(
         gpu_peak_memory_pct=gpu_peak_memory_pct,
         gpu_peak_sorted=gpu_peak_sorted,
         gpu_peak_percentiles=gpu_peak_pct,
+        overhead_pct=overhead_pct,
+        overhead_pct_sorted=overhead_pct_sorted,
+        overhead_pct_percentiles=overhead_pct_pct,
+        base_runtime_ms=base_runtime_ms,
+        base_runtime_sorted=base_runtime_sorted,
+        base_runtime_percentiles=base_runtime_pct,
     )
 
 
