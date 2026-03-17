@@ -1428,11 +1428,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             # ROLLBACK: Restore enforcer analysis state
                             self._enforcer.rollback_last_check()
 
-                            # Send violation to frontend (rejected)
-                            first_error = sdc_result.errors[0]
-                            self._send_predicate_violation(first_error, accepted=False)
+                            # Send ALL violations to frontend (rejected)
+                            for err in sdc_result.errors:
+                                self._send_predicate_violation(err, accepted=False)
 
-                            # Return error status
+                            # Return error status (use first error for exception message)
+                            first_error = sdc_result.errors[0]
                             return {
                                 "status": "error",
                                 "ename": "ReproducibilityError",

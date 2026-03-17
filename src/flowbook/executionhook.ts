@@ -386,11 +386,13 @@ export class ReproducibilityExecutionHookManager {
       outputs.push(codeModel.outputs.get(i).toJSON() as IOutput);
     }
 
-    // Check for predicate violation from kernel (new unified format)
-    const predicateViolation = this._extractPredicateViolation(outputs);
-    if (predicateViolation) {
-      // Store predicate violation in cell metadata
-      cell.model.setMetadata('flowbook_violation', predicateViolation);
+    // Check for predicate violations from kernel (new unified format)
+    const predicateViolations = this._extractPredicateViolations(outputs);
+    if (predicateViolations.length > 0) {
+      // Store all predicate violations in cell metadata (array)
+      cell.model.setMetadata('flowbook_violations', predicateViolations);
+      // Also store first one in singular key for backward compatibility
+      cell.model.setMetadata('flowbook_violation', predicateViolations[0]);
 
       // Let cellhighlighter handle the rendering
       const cellOrder = this._getCurrentCellOrder(panel);
@@ -403,11 +405,11 @@ export class ReproducibilityExecutionHookManager {
       );
 
       console.log(
-        `ReproducibilityExecutionHook: Handled predicate violation for cell ${cell.model.id}, accepted=${predicateViolation.accepted}`
+        `ReproducibilityExecutionHook: Handled ${predicateViolations.length} predicate violation(s) for cell ${cell.model.id}, accepted=${predicateViolations[0].accepted}`
       );
 
       // If rejected (not accepted), no further processing needed
-      if (!predicateViolation.accepted) {
+      if (!predicateViolations[0].accepted) {
         return;
       }
     }
@@ -418,8 +420,8 @@ export class ReproducibilityExecutionHookManager {
       outputIndex: metadataOutputIndex
     } = this._extractReproducibilityMetadata(outputs);
     if (!reproducibilityMetadata) {
-      // If we had a predicate violation but no metadata, we're done
-      if (predicateViolation) {
+      // If we had predicate violations but no metadata, we're done
+      if (predicateViolations.length > 0) {
         return;
       }
       return;
@@ -442,7 +444,8 @@ export class ReproducibilityExecutionHookManager {
 
     // Store or clear violation metadata on the executing cell (legacy format)
     const cellOrder = this._getCurrentCellOrder(panel);
-    if (reproducibilityMetadata.violation && !predicateViolation) {
+    const hasPredicateViolations = predicateViolations.length > 0;
+    if (reproducibilityMetadata.violation && !hasPredicateViolations) {
       const v = reproducibilityMetadata.violation;
       const mutIdx = cellOrder.indexOf(v.mutating_cell);
       const affIdx = cellOrder.indexOf(v.affected_cell);
@@ -458,7 +461,7 @@ export class ReproducibilityExecutionHookManager {
         changes_detail: (v as any).changes_detail
       };
       cell.model.setMetadata('flowbook_violation', violationInfo);
-    } else if (!predicateViolation) {
+    } else if (!hasPredicateViolations) {
       cell.model.deleteMetadata('flowbook_violation');
     }
 
@@ -517,12 +520,13 @@ export class ReproducibilityExecutionHookManager {
   }
 
   /**
-   * Extract predicate violation from kernel outputs (new unified format).
-   * Returns the violation if found, null otherwise.
+   * Extract all predicate violations from kernel outputs (new unified format).
+   * Returns array of violations (may be empty).
    */
-  private _extractPredicateViolation(
+  private _extractPredicateViolations(
     outputs: IOutput[]
-  ): IPredicateViolation | null {
+  ): IPredicateViolation[] {
+    const violations: IPredicateViolation[] = [];
     for (const output of outputs) {
       if (output.output_type !== 'display_data') {
         continue;
@@ -530,7 +534,7 @@ export class ReproducibilityExecutionHookManager {
       const metadata = (output as any).metadata;
       if (metadata?.predicate_violation) {
         const pv = metadata.predicate_violation;
-        return {
+        violations.push({
           predicate: pv.predicate,
           cell_id: pv.cell_id,
           locations: pv.locations || [],
@@ -538,10 +542,10 @@ export class ReproducibilityExecutionHookManager {
           accepted: pv.accepted,
           causer_cell: pv.causer_cell,
           detail: pv.detail
-        };
+        });
       }
     }
-    return null;
+    return violations;
   }
 
   /**

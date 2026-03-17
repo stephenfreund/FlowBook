@@ -255,6 +255,7 @@ export class ReproducibilityCellHighlighter {
       cell.model.deleteMetadata('flowbook');
       cell.model.deleteMetadata('flowbook_staleness');
       cell.model.deleteMetadata('flowbook_violation');
+      cell.model.deleteMetadata('flowbook_violations');
 
       // Remove flowbook notice outputs (staleness and violation notices)
       const codeModel = cell.model as ICodeCellModel;
@@ -626,8 +627,8 @@ export class ReproducibilityCellHighlighter {
         ? `\u26a0\ufe0f ${label}: ${message}`
         : `\u26a0\ufe0f ${message}`;
 
-      const infoIcon =
-        '<span class="flowbook-staleness-info-icon" title="This cell may produce different results than shown">ⓘ</span>';
+      const infoIcon = '';
+//        '<span class="flowbook-staleness-info-icon" title="This cell may produce different results than shown">ⓘ</span>';
       const stalenessOutput: IOutput = {
         output_type: 'display_data',
         data: {
@@ -674,6 +675,7 @@ export class ReproducibilityCellHighlighter {
   /**
    * Add or remove the violation notice display_data output.
    * Handles both legacy IViolationInfo and new IPredicateViolation formats.
+   * Supports multiple predicate violations (shown in a single error box).
    *
    * For IPredicateViolation:
    * Both accepted=true (continue mode) and accepted=false (rejected) are
@@ -686,8 +688,11 @@ export class ReproducibilityCellHighlighter {
     const codeModel = cell.model as ICodeCellModel;
     const outputs = codeModel.outputs;
 
-    // Get violation metadata from cell (can be IViolationInfo or IPredicateViolation)
-    const violation = cell.model.getMetadata('flowbook_violation') as
+    // Get violation metadata from cell - check for array first (new), then single (legacy)
+    const violations = cell.model.getMetadata('flowbook_violations') as
+      | IPredicateViolation[]
+      | undefined;
+    const singleViolation = cell.model.getMetadata('flowbook_violation') as
       | IViolationInfo
       | IPredicateViolation
       | undefined;
@@ -704,18 +709,162 @@ export class ReproducibilityCellHighlighter {
       }
     }
 
-    // Handle new predicate violation format
-    if (isPredicateViolation(violation)) {
-      const locs = violation.locations.map(l => '`' + l + '`').join(', ');
+    // Handle new predicate violation format (array of violations)
+    if (violations && violations.length > 0) {
+      const icon = '\u274c';
+      const cssClass = 'flowbook-error-notice';
+
+      // Group violations by (predicate, locations) to merge common ones
+      // e.g., "Wrote x read by @A" + "Wrote x read by @B" => "Wrote x read by @A, @B"
+      const grouped = new Map<
+        string,
+        { predicate: string; locs: string[]; causers: string[] }
+      >();
+
+      for (const violation of violations) {
+        // Get causer cell reference
+        let causerRef: string | null = null;
+        if (
+          violation.causer_cell &&
+          typeof violation.causer_cell === 'string'
+        ) {
+          const rawCauser = violation.causer_cell.startsWith('@')
+            ? violation.causer_cell.slice(1)
+            : violation.causer_cell;
+          const causerIdx = cellOrder.indexOf(rawCauser);
+          causerRef =
+            causerIdx >= 0 ? indexToAlpha(causerIdx) : 'a deleted cell';
+        }
+
+        // Create grouping key from predicate and sorted locations
+        const locsKey = [...violation.locations].sort().join(',');
+        const groupKey = `${violation.predicate}:${locsKey}`;
+
+        if (!grouped.has(groupKey)) {
+          grouped.set(groupKey, {
+            predicate: violation.predicate,
+            locs: violation.locations,
+            causers: []
+          });
+        }
+
+        // Add causer if present and not already in list
+        if (causerRef && !grouped.get(groupKey)!.causers.includes(causerRef)) {
+          grouped.get(groupKey)!.causers.push(causerRef);
+        }
+      }
+
+      // Build messages from grouped violations
+      const htmlMessages: string[] = [];
+      const plainMessages: string[] = [];
+
+      for (const group of grouped.values()) {
+        const locs = group.locs.map(l => '`' + l + '`').join(', ');
+        const htmlLocs = locs.replace(/`([^`]+)`/g, '<code>$1</code>');
+        const causersStr = group.causers.join(', ');
+
+        // Build message based on predicate type
+        let message: string;
+        switch (group.predicate) {
+          case 'no_write_after_read':
+            message = causersStr
+              ? `Wrote ${htmlLocs} read by ${causersStr}`
+              : `Wrote ${htmlLocs} read by earlier cell`;
+            break;
+          case 'no_read_before_write':
+            message = causersStr
+              ? `Read ${htmlLocs} from ${causersStr}`
+              : `Read ${htmlLocs} from later cell`;
+            break;
+          case 'no_read_and_write':
+            message = `Cannot be read and write to ${htmlLocs}`;
+            break;
+          case 'write_before_read':
+            message = `${htmlLocs} not defined by earlier cells`;
+            break;
+          default:
+            message = `Violation on ${htmlLocs}`;
+        }
+
+        htmlMessages.push(message);
+        plainMessages.push(message.replace(/<code>([^<]+)<\/code>/g, '`$1`'));
+      }
+
+      // Combine all violations into a single notice
+      const combinedHtml = htmlMessages
+        .map(m => `<div>${icon} ${m}</div>`)
+        .join('');
+      const plainText = plainMessages.map(m => `${icon} ${m}`).join('\n');
+
+      const noticeOutput: IOutput = {
+        output_type: 'display_data',
+        data: {
+          'text/html': `<div class="${cssClass}">${combinedHtml}</div>`,
+          'text/plain': plainText
+        },
+        metadata: {
+          flowbook_violation_notice: true,
+          flowbook_predicate_accepted: violations[0].accepted,
+          flowbook_violation_count: violations.length
+        }
+      };
+
+      // Check if message matches current notice
+      if (hasViolationNotice && existingPlainText === plainText) {
+        return; // Already up to date
+      }
+
+      // Add error class to cell for violations
+      cell.node.classList.add('flowbook-cell-error');
+
+      // Build new output array (also remove staleness notices — violation is more specific)
+      const allOutputs: IOutput[] = [noticeOutput];
+      for (let i = 0; i < outputs.length; i++) {
+        const out = outputs.get(i).toJSON() as IOutput;
+        const isViolationNotice =
+          (out as any).metadata?.flowbook_violation_notice === true;
+        const isErrorNotice =
+          (out as any).metadata?.flowbook_error_notice === true;
+        const isStalenessNotice =
+          (out as any).metadata?.flowbook_staleness_notice === true;
+        const isKernelError =
+          out.output_type === 'error' &&
+          ((out as any).ename === 'ReproducibilityError' ||
+            (out as any).ename === 'ReproducibilityViolation');
+        // Filter kernel's predicate violation display_data (empty text/plain)
+        const isKernelPredicateViolation =
+          out.output_type === 'display_data' &&
+          (out as any).metadata?.predicate_violation;
+
+        if (
+          !isViolationNotice &&
+          !isErrorNotice &&
+          !isStalenessNotice &&
+          !isKernelError &&
+          !isKernelPredicateViolation
+        ) {
+          allOutputs.push(out);
+        }
+      }
+      outputs.fromJSON(allOutputs);
+      return;
+    }
+
+    // Handle single predicate violation (backward compat or legacy format)
+    if (isPredicateViolation(singleViolation)) {
+      const locs = singleViolation.locations.map(l => '`' + l + '`').join(', ');
       const htmlLocs = locs.replace(/`([^`]+)`/g, '<code>$1</code>');
 
       // Get causer cell reference (strip any existing @ prefix)
       // If cell was deleted, show "a deleted cell" instead of raw ID
       let causerRef: string | null = null;
-      if (violation.causer_cell && typeof violation.causer_cell === 'string') {
-        const rawCauser = violation.causer_cell.startsWith('@')
-          ? violation.causer_cell.slice(1)
-          : violation.causer_cell;
+      if (
+        singleViolation.causer_cell &&
+        typeof singleViolation.causer_cell === 'string'
+      ) {
+        const rawCauser = singleViolation.causer_cell.startsWith('@')
+          ? singleViolation.causer_cell.slice(1)
+          : singleViolation.causer_cell;
         const causerIdx = cellOrder.indexOf(rawCauser);
         causerRef = causerIdx >= 0 ? indexToAlpha(causerIdx) : 'a deleted cell';
       }
@@ -723,7 +872,7 @@ export class ReproducibilityCellHighlighter {
       // Build message based on predicate type
       // Note: indexToAlpha already returns with @ prefix, causerRef is either "@A" or "a deleted cell"
       let message: string;
-      switch (violation.predicate) {
+      switch (singleViolation.predicate) {
         case 'no_write_after_read':
           message = causerRef
             ? `Wrote ${htmlLocs} read by ${causerRef}`
@@ -741,7 +890,7 @@ export class ReproducibilityCellHighlighter {
           message = `${htmlLocs} not defined by earlier cells`;
           break;
         default:
-          message = violation.message;
+          message = singleViolation.message;
       }
 
       const plainMessage = message.replace(/<code>([^<]+)<\/code>/g, '`$1`');
@@ -760,7 +909,7 @@ export class ReproducibilityCellHighlighter {
         },
         metadata: {
           flowbook_violation_notice: true,
-          flowbook_predicate_accepted: violation.accepted
+          flowbook_predicate_accepted: singleViolation.accepted
         }
       };
 
@@ -806,24 +955,30 @@ export class ReproducibilityCellHighlighter {
     }
 
     // Handle legacy IViolationInfo format
-    if (violation && 'mutating_cell' in violation && violation.mutating_cell) {
+    const legacyViolation = singleViolation as IViolationInfo | undefined;
+    if (
+      legacyViolation &&
+      'mutating_cell' in legacyViolation &&
+      legacyViolation.mutating_cell
+    ) {
       // Compute message with current @A references
       // Note: indexToAlpha already returns with @ prefix
       // Use "a deleted cell" for cells that no longer exist
-      const mutIdx = cellOrder.indexOf(violation.mutating_cell);
-      const affIdx = cellOrder.indexOf(violation.affected_cell);
+      const mutIdx = cellOrder.indexOf(legacyViolation.mutating_cell);
+      const affIdx = cellOrder.indexOf(legacyViolation.affected_cell);
       const mutRef = mutIdx >= 0 ? indexToAlpha(mutIdx) : 'a deleted cell';
       const affRef = affIdx >= 0 ? indexToAlpha(affIdx) : 'a deleted cell';
-      const vars = violation.variables.map(v => '`' + v + '`').join(', ');
+      const vars = legacyViolation.variables.map(v => '`' + v + '`').join(', ');
 
       // Different message format based on violation type
       // If mutating cell is no longer in notebook, treat as deleted cell dependency
       const mutatingCellDeleted =
-        mutIdx < 0 && violation.mutating_cell !== '<deleted>';
+        mutIdx < 0 && legacyViolation.mutating_cell !== '<deleted>';
       const isForwardContamination =
-        violation.type === 'forward_dependency' && !mutatingCellDeleted;
+        legacyViolation.type === 'forward_dependency' && !mutatingCellDeleted;
       const isDeletedCellDependency =
-        violation.type === 'deleted_cell_dependency' || mutatingCellDeleted;
+        legacyViolation.type === 'deleted_cell_dependency' ||
+        mutatingCellDeleted;
       const isContaminationLike =
         isForwardContamination || isDeletedCellDependency;
       let plainText: string;
@@ -873,11 +1028,11 @@ export class ReproducibilityCellHighlighter {
         plainParts.push(`\u274c Not Reproducible: ${headerMsg}`);
 
         // What the earlier cell reads (structural_reads_detail)
-        if (violation.structural_reads_detail) {
+        if (legacyViolation.structural_reads_detail) {
           const readsHtml: string[] = [];
           const readsPlain: string[] = [];
           for (const [varName, attrs] of Object.entries(
-            violation.structural_reads_detail
+            legacyViolation.structural_reads_detail
           )) {
             for (const [attr, value] of Object.entries(attrs)) {
               readsHtml.push(
@@ -896,11 +1051,14 @@ export class ReproducibilityCellHighlighter {
         }
 
         // What this cell changed (changes_detail)
-        if (violation.changes_detail && violation.changes_detail.length > 0) {
-          const changesHtml = violation.changes_detail
+        if (
+          legacyViolation.changes_detail &&
+          legacyViolation.changes_detail.length > 0
+        ) {
+          const changesHtml = legacyViolation.changes_detail
             .map(c => `<li>${this._escapeHtml(c)}</li>`)
             .join('');
-          const changesPlain = violation.changes_detail.map(
+          const changesPlain = legacyViolation.changes_detail.map(
             c => `  \u2022 ${c}`
           );
           htmlParts.push(
