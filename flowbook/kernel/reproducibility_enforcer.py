@@ -3574,6 +3574,12 @@ def format_structural_violation(
     lines.append("Fix: Move the modification before the read, or avoid reading "
                  "structural attributes that will change.")
 
+    # Add column assignment hints for modified columns
+    for var in variables:
+        if "." in var:
+            df_name, col_name = var.rsplit(".", 1)
+            lines.append(f'  Use {df_name}["{col_name}"] = ... for full-column assignment')
+
     return "\n".join(lines)
 
 

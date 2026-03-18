@@ -462,11 +462,46 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         """
         Set the notebook cell order for Reproducibility enforcement.
 
+        If cells become stale due to order changes (e.g., deletion),
+        sends updated staleness metadata to the frontend.
+
         Usage:
             %notebook_structure cell1 cell2 cell3 ...
         """
         cell_order = line.split()
-        self._enforcer.set_cell_order(cell_order)
+        result = self._enforcer.set_cell_order(cell_order)
+
+        # If cells became stale due to order changes, send metadata to frontend
+        from flowbook.util.output import log
+        log(f"[notebook_structure] result.newly_stale={result.newly_stale}")
+        if result.newly_stale:
+            try:
+                log(f"[notebook_structure] Sending metadata to frontend...")
+                state = self._enforcer._notebook_state
+                stale_cells = state.get_stale_cells()
+                staleness_reasons = state.get_all_reasons()
+                log(f"[notebook_structure] stale_cells={stale_cells}")
+                metadata = ReproducibilityMetadata(
+                    cell_id="",  # No specific cell (order change)
+                    execution_seq=self._enforcer.seq_counter,
+                    reads=[],
+                    writes=[],
+                    changed_variables=[],
+                    stale_cells=stale_cells,
+                    violation=None,
+                    cell_order=self._enforcer.cell_order,
+                    staleness_reasons=staleness_reasons,
+                )
+                self._display.display_icon_and_text(
+                    "📋",
+                    f"Order updated: {len(result.newly_stale)} cell(s) stale",
+                    metadata=metadata.to_display_metadata(),
+                )
+                log(f"[notebook_structure] display_icon_and_text completed")
+            except Exception as e:
+                log(f"[notebook_structure] ERROR: {e}")
+                import traceback
+                log(f"[notebook_structure] Traceback: {traceback.format_exc()}")
 
     @line_magic
     def flowbook_sync(self, line: str) -> None:
@@ -1523,15 +1558,49 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         """
         Process %notebook_structure magic if present at start of code.
         Removes the magic line and updates cell order.
+        If cells become stale due to order change (e.g., cell deletion),
+        emits metadata to notify the frontend.
         Returns remaining code.
         """
+        from flowbook.util.output import log
+
         lines = code.split("\n")
         if lines and lines[0].strip().startswith("%notebook_structure"):
             # Extract cell order from magic line
             magic_line = lines[0].strip()
             parts = magic_line.split()[1:]  # Skip the magic name
             if parts:
-                self._enforcer.set_cell_order(parts)
+                result = self._enforcer.set_cell_order(parts)
+
+                # If cells became stale (e.g., due to cell deletion), notify frontend
+                if result.newly_stale:
+                    log(f"[_process_structure_magic] newly_stale={result.newly_stale}")
+                    try:
+                        state = self._enforcer._notebook_state
+                        stale_cells = state.get_stale_cells()
+                        staleness_reasons = state.get_all_reasons()
+                        metadata = ReproducibilityMetadata(
+                            cell_id="",  # No specific cell (order change)
+                            execution_seq=self._enforcer.seq_counter,
+                            reads=[],
+                            writes=[],
+                            changed_variables=[],
+                            stale_cells=stale_cells,
+                            violation=None,
+                            cell_order=self._enforcer.cell_order,
+                            staleness_reasons=staleness_reasons,
+                        )
+                        self._display.display_icon_and_text(
+                            "📋",
+                            f"Order updated: {len(result.newly_stale)} cell(s) stale",
+                            metadata=metadata.to_display_metadata(),
+                        )
+                        log(f"[_process_structure_magic] metadata sent")
+                    except Exception as e:
+                        log(f"[_process_structure_magic] ERROR: {e}")
+                        import traceback
+                        log(f"[_process_structure_magic] Traceback: {traceback.format_exc()}")
+
             return "\n".join(lines[1:])
         return code
 

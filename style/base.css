@@ -962,6 +962,7 @@
   background-color: rgb(255 193 7 / 18%);
   padding: 1px 4px;
   border-radius: 2px;
+  margin-right: -2px; /* Tighten spacing before punctuation */
 }
 
 .flowbook-staleness-info-icon {
@@ -988,6 +989,7 @@
   background-color: rgb(220 53 69 / 15%);
   padding: 1px 4px;
   border-radius: 2px;
+  margin-right: -2px; /* Tighten spacing before punctuation */
 }
 
 /* Error notice output (rejected violations) */
@@ -1004,6 +1006,7 @@
   background-color: rgb(220 53 69 / 15%);
   padding: 1px 4px;
   border-radius: 2px;
+  margin-right: -2px; /* Tighten spacing before punctuation */
 }
 
 /* Contamination notice - DEPRECATED, now uses flowbook-violation-notice */

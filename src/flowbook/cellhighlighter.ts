@@ -381,15 +381,16 @@ export class ReproducibilityCellHighlighter {
    */
   private _formatStalenessMessage(
     reason: IStalenessReason,
-    cellOrder: string[]
+    cellOrder: string[],
+    currentCellId: string
   ): string {
     // Handle frontend reasons with full context
     if (isFrontendReason(reason)) {
-      return this._formatFrontendReason(reason, cellOrder);
+      return this._formatFrontendReason(reason, cellOrder, currentCellId);
     }
 
     // Handle backend reasons (from kernel staleness_reasons)
-    return this._formatBackendReason(reason, cellOrder);
+    return this._formatBackendReason(reason, cellOrder, currentCellId);
   }
 
   /**
@@ -397,7 +398,8 @@ export class ReproducibilityCellHighlighter {
    */
   private _formatFrontendReason(
     reason: IFrontendStalenessReason,
-    cellOrder: string[]
+    cellOrder: string[],
+    currentCellId: string
   ): string {
     if (reason.type === 'source_edited') {
       return 'Source code was edited';
@@ -408,9 +410,18 @@ export class ReproducibilityCellHighlighter {
     }
 
     const causingIdx = cellOrder.indexOf(reason.causing_cell);
+    const currentIdx = cellOrder.indexOf(currentCellId);
     // Note: indexToAlpha already returns with @ prefix
-    const causingRef =
-      causingIdx >= 0 ? indexToAlpha(causingIdx) : 'a deleted cell';
+    // For deleted cells, don't include direction (it's meaningless)
+    const isDeleted = causingIdx < 0;
+    const causingRef = isDeleted ? 'a deleted cell' : indexToAlpha(causingIdx);
+    // Determine relative position: "above" if causing cell is before current cell
+    const direction =
+      !isDeleted && currentIdx >= 0 && causingIdx < currentIdx
+        ? ' above'
+        : !isDeleted
+          ? ' below'
+          : '';
 
     // Build variable parts
     const parts: string[] = [];
@@ -430,16 +441,16 @@ export class ReproducibilityCellHighlighter {
     // WriterCheck: this cell writes to variables the causing cell reads
     // Running this cell would trigger BackConflict
     if (reason.type === 'writer_conflict' && parts.length > 0) {
-      return `Writes ${parts.join(', ')}, which was read by ${causingRef}`;
+      return `Writes ${parts.join(', ')} already read by ${causingRef}${direction}`;
     }
 
     // StaleFwd: the causing cell modified variables this cell reads
     if (parts.length > 0) {
-      return `${parts.join(', ')} modified by ${causingRef}`;
+      return `${parts.join(', ')} modified by ${causingRef}${direction}`;
     }
 
     if (reason.type === 'unknown') {
-      return `Dependencies changed by ${causingRef}`;
+      return `Dependencies modified by ${causingRef}`;
     }
 
     return reason.message;
@@ -450,7 +461,8 @@ export class ReproducibilityCellHighlighter {
    */
   private _formatBackendReason(
     reason: IStalenessReason,
-    cellOrder: string[]
+    cellOrder: string[],
+    currentCellId: string
   ): string {
     // Backend reasons have cell_id instead of causing_cell
     const cellId = 'cell_id' in reason ? reason.cell_id : undefined;
@@ -458,12 +470,21 @@ export class ReproducibilityCellHighlighter {
       'expected_cell_id' in reason ? reason.expected_cell_id : undefined;
     const loc = 'loc' in reason ? reason.loc : undefined;
 
+    const currentIdx = cellOrder.indexOf(currentCellId);
+
     // Note: indexToAlpha already returns with @ prefix
+    // For deleted cells, don't include direction (it's meaningless)
     let causingRef = '';
+    let causingDirection = '';
+    let causingIsDeleted = false;
     if (cellId) {
       const causingIdx = cellOrder.indexOf(cellId);
-      causingRef =
-        causingIdx >= 0 ? indexToAlpha(causingIdx) : 'a deleted cell';
+      causingIsDeleted = causingIdx < 0;
+      causingRef = causingIsDeleted ? 'a deleted cell' : indexToAlpha(causingIdx);
+      // Determine relative position (only if cell still exists)
+      if (!causingIsDeleted && currentIdx >= 0) {
+        causingDirection = causingIdx < currentIdx ? ' above' : ' below';
+      }
     }
 
     let expectedRef = '';
@@ -486,19 +507,19 @@ export class ReproducibilityCellHighlighter {
       case 'forward_stale':
         // ForwardStale: show "x modified by @F"
         if (loc && causingRef) {
-          return `\`${loc}\` was modified by ${causingRef}`;
+          return `\`${loc}\` modified by ${causingRef}${causingDirection}`;
         }
         return causingRef
-          ? `Input modified by ${causingRef}`
+          ? `Input modified by ${causingRef}${causingDirection}`
           : 'Input was modified';
       case 'write_overlap':
         // Write overlap: both cells write to same location
         if (loc && causingRef) {
-          return `Write overlap: \`${loc}\` also written by ${causingRef}`;
+          return `\`${loc}\` also written by ${causingRef}`;
         }
         return causingRef
-          ? `Write overlap with ${causingRef}`
-          : 'Write overlap detected';
+          ? `Writes conflict with ${causingRef}`
+          : 'Write conflict detected';
       case 'skipped_upstream':
         // Re-running won't help - need to run the expected cell first
         // If expected cell was deleted, say so clearly
@@ -515,25 +536,25 @@ export class ReproducibilityCellHighlighter {
           : 'Upstream cell was skipped';
       case 'backward_stale':
         if (loc && causingRef) {
-          return `Write conflict on \`${loc}\` with ${causingRef}`;
+          return `\`${loc}\` write conflict with ${causingRef}`;
         }
         return 'Write conflict detected';
       case 'no_read_before_write':
-        // NoReadBeforeWrite failed - reads from later cell (forward contamination)
+        // NoReadBeforeWrite failed - reads from another cell (forward contamination)
         if (loc && causingRef) {
-          return `Reads \`${loc}\` from later cell ${causingRef} (forward contamination)`;
+          return `Reads \`${loc}\` written by ${causingRef} ${causingDirection}`;
         }
-        return 'Reads from a later cell';
+        return 'Reads value written by another cell';
       case 'order_changed':
         return 'Cell order changed';
       case 'no_write_after_read':
-        // NoWriteAfterRead failed - wrote to location read by earlier cell (backward mutation)
+        // NoWriteAfterRead failed - writes to location read by another cell (backward mutation)
         if (loc && causingRef) {
-          return `Wrote \`${loc}\` read by earlier cell ${causingRef} (backward mutation)`;
+          return `Writes \`${loc}\` already read by ${causingRef} ${causingDirection}`;
         }
         return causingRef
-          ? `Wrote to variable read by ${causingRef}`
-          : 'Backward mutation detected';
+          ? `Writes variable already read by ${causingRef} ${causingDirection}`
+          : 'Writes variable already read by another cell';
       default:
         return 'Cell is stale';
     }
@@ -615,7 +636,11 @@ export class ReproducibilityCellHighlighter {
         return;
       }
 
-      const message = this._formatStalenessMessage(reason, cellOrder);
+      const message = this._formatStalenessMessage(
+        reason,
+        cellOrder,
+        cell.model.id
+      );
 
       // Escape HTML in the message but preserve backtick-wrapped code
       const htmlMessage = message.replace(/`([^`]+)`/g, '<code>$1</code>');
@@ -715,7 +740,7 @@ export class ReproducibilityCellHighlighter {
       const cssClass = 'flowbook-error-notice';
 
       // Group violations by (predicate, locations) to merge common ones
-      // e.g., "Wrote x read by @A" + "Wrote x read by @B" => "Wrote x read by @A, @B"
+      // e.g., "Writes x read by @A" + "Writes x read by @B" => "Writes x read by @A, @B"
       const grouped = new Map<
         string,
         { predicate: string; locs: string[]; causers: string[] }
@@ -766,21 +791,33 @@ export class ReproducibilityCellHighlighter {
         // Build message based on predicate type
         let message: string;
         switch (group.predicate) {
-          case 'no_write_after_read':
+          case 'no_write_after_read': {
             message = causersStr
-              ? `Wrote ${htmlLocs} read by ${causersStr}`
-              : `Wrote ${htmlLocs} read by earlier cell`;
+              ? `Writes ${htmlLocs} already read by ${causersStr}`
+              : `Writes ${htmlLocs} already read by cell above`;
+            // Add column assignment hints for DataFrame mutations
+            for (const loc of group.locs) {
+              if (loc.includes('.')) {
+                // Location has column info: "df.x" -> df["x"]
+                const [dfName, colName] = loc.split('.');
+                message += `<br>Use <code>${dfName}["${colName}"]</code> = ... for full-column assignment`;
+              } else {
+                // No column info, just variable name - add generic hint
+                message += `<br>Use <code>${loc}["column"]</code> = ... for full-column assignment`;
+              }
+            }
             break;
+          }
           case 'no_read_before_write':
             message = causersStr
-              ? `Read ${htmlLocs} from ${causersStr}`
-              : `Read ${htmlLocs} from later cell`;
+              ? `Reads ${htmlLocs} written by ${causersStr} below`
+              : `Reads ${htmlLocs} written by cell below`;
             break;
           case 'no_read_and_write':
-            message = `Cannot be read and write to ${htmlLocs}`;
+            message = `Reads and writes ${htmlLocs}`;
             break;
           case 'write_before_read':
-            message = `${htmlLocs} not defined by earlier cells`;
+            message = `${htmlLocs} not defined by any cell above`;
             break;
           default:
             message = `Violation on ${htmlLocs}`;
@@ -873,21 +910,31 @@ export class ReproducibilityCellHighlighter {
       // Note: indexToAlpha already returns with @ prefix, causerRef is either "@A" or "a deleted cell"
       let message: string;
       switch (singleViolation.predicate) {
-        case 'no_write_after_read':
+        case 'no_write_after_read': {
           message = causerRef
-            ? `Wrote ${htmlLocs} read by ${causerRef}`
-            : `Wrote ${htmlLocs} read by earlier cell`;
+            ? `Writes ${htmlLocs} already read by ${causerRef}`
+            : `Writes ${htmlLocs} already read by cell above`;
+          // Add column assignment hints for DataFrame mutations
+          for (const loc of singleViolation.locations) {
+            if (loc.includes('.')) {
+              const [dfName, colName] = loc.split('.');
+              message += `<br>Use <code>${dfName}["${colName}"]</code> = ... for full-column assignment`;
+            } else {
+              message += `<br>Use <code>${loc}["column"]</code> = ... for full-column assignment`;
+            }
+          }
           break;
+        }
         case 'no_read_before_write':
           message = causerRef
-            ? `Read ${htmlLocs} from ${causerRef}`
-            : `Read ${htmlLocs} from later cell`;
+            ? `Reads ${htmlLocs} written by ${causerRef} below`
+            : `Reads ${htmlLocs} written by cell below`;
           break;
         case 'no_read_and_write':
-          message = `Read and wrote ${htmlLocs} in same cell`;
+          message = `Reads and writes ${htmlLocs}`;
           break;
         case 'write_before_read':
-          message = `${htmlLocs} not defined by earlier cells`;
+          message = `${htmlLocs} not defined by any cell above`;
           break;
         default:
           message = singleViolation.message;
@@ -1000,7 +1047,7 @@ export class ReproducibilityCellHighlighter {
           }
         };
       } else if (isForwardContamination) {
-        // Forward contamination: reading cell read from later writing cell
+        // Forward contamination: reading cell read from writing cell below
         const htmlVars = vars.replace(/`([^`]+)`/g, '<code>$1</code>');
         plainText = `\u274c Forward Contamination: ${vars} written by downstream cell ${mutRef}. Re-run upstream cells to restore reproducible values.`;
         noticeOutput = {
@@ -1020,14 +1067,14 @@ export class ReproducibilityCellHighlighter {
         const plainParts: string[] = [];
 
         // Header line
-        const headerMsg = `Cell ${mutRef} modified ${vars} which Cell ${affRef} (earlier) reads.`;
+        const headerMsg = `Cell ${mutRef} modified ${vars} which Cell ${affRef} (above) reads.`;
         const headerHtml = headerMsg.replace(/`([^`]+)`/g, '<code>$1</code>');
         htmlParts.push(
           `<div class="flowbook-violation-header">\u274c <b>Not Reproducible</b>: ${headerHtml}</div>`
         );
         plainParts.push(`\u274c Not Reproducible: ${headerMsg}`);
 
-        // What the earlier cell reads (structural_reads_detail)
+        // What the cell above reads (structural_reads_detail)
         if (legacyViolation.structural_reads_detail) {
           const readsHtml: string[] = [];
           const readsPlain: string[] = [];
@@ -1209,7 +1256,11 @@ export class ReproducibilityCellHighlighter {
       return;
     }
 
-    const newMessage = this._formatStalenessMessage(staleness, cellOrder);
+    const newMessage = this._formatStalenessMessage(
+      staleness,
+      cellOrder,
+      cell.model.id
+    );
     if (newMessage !== staleness.message) {
       cell.model.setMetadata('flowbook_staleness', {
         ...staleness,

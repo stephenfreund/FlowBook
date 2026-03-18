@@ -99,12 +99,52 @@ export class ReproducibilityExecutionHookManager {
       this._attachCellEditListener(notebook.widgets[i]);
     }
 
-    // Watch for newly inserted cells
-    notebook.model?.cells.changed.connect(() => {
+    // Watch for cell changes (insert/delete) to update kernel and attach listeners
+    notebook.model?.cells.changed.connect((_sender, change) => {
+      // Attach edit listeners to any new cells
       for (let i = 0; i < notebook.widgets.length; i++) {
         this._attachCellEditListener(notebook.widgets[i]);
       }
+
+      // If cells were added or removed, notify the kernel about the new cell order
+      // This ensures staleness is updated immediately (e.g., when a cell is deleted,
+      // cells that read from it should be marked stale)
+      if (change.type === 'add' || change.type === 'remove') {
+        this._sendNotebookStructure(panel);
+      }
     });
+  }
+
+  /**
+   * Send %notebook_structure magic to kernel with current cell order.
+   * Called when cells are added/removed to update staleness immediately.
+   */
+  private _sendNotebookStructure(panel: NotebookPanel): void {
+    const notebook = panel.content;
+
+    // Build cell order array (only code cells)
+    const cellOrder: string[] = [];
+    for (let i = 0; i < notebook.widgets.length; i++) {
+      const c = notebook.widgets[i];
+      if (c.model.type === 'code') {
+        cellOrder.push(c.model.id);
+      }
+    }
+
+    // Send %notebook_structure magic to kernel
+    // Note: silent=false is required for display_data messages to be sent via IOPub
+    const session = panel.sessionContext.session;
+    if (session && session.kernel && cellOrder.length > 0) {
+      const magicCommand = `%notebook_structure ${cellOrder.join(' ')}`;
+      session.kernel.requestExecute({
+        code: magicCommand,
+        silent: false,
+        store_history: false
+      });
+      console.log(
+        `ReproducibilityExecutionHook: Sent notebook_structure on cell change with ${cellOrder.length} cells`
+      );
+    }
   }
 
   /**
@@ -226,6 +266,15 @@ export class ReproducibilityExecutionHookManager {
     _sender: Kernel.IKernelConnection,
     msg: KernelMessage.IIOPubMessage
   ): void {
+    // Log all display_data messages for debugging
+    if (msg.header.msg_type === 'display_data') {
+      const content = (msg as KernelMessage.IDisplayDataMsg).content;
+      console.log(
+        'ReproducibilityExecutionHook: IOPub display_data received, has flowbook metadata:',
+        !!content.metadata?.flowbook
+      );
+    }
+
     if (msg.header.msg_type !== 'display_data') {
       return;
     }
