@@ -795,15 +795,12 @@ export class ReproducibilityCellHighlighter {
             message = causersStr
               ? `Writes ${htmlLocs} already read by ${causersStr}`
               : `Writes ${htmlLocs} already read by cell above`;
-            // Add column assignment hints for DataFrame mutations
+            // Add column assignment hints for DataFrame column mutations only
             for (const loc of group.locs) {
               if (loc.includes('.')) {
                 // Location has column info: "df.x" -> df["x"]
                 const [dfName, colName] = loc.split('.');
                 message += `<br>Use <code>${dfName}["${colName}"]</code> = ... for full-column assignment`;
-              } else {
-                // No column info, just variable name - add generic hint
-                message += `<br>Use <code>${loc}["column"]</code> = ... for full-column assignment`;
               }
             }
             break;
@@ -914,13 +911,11 @@ export class ReproducibilityCellHighlighter {
           message = causerRef
             ? `Writes ${htmlLocs} already read by ${causerRef}`
             : `Writes ${htmlLocs} already read by cell above`;
-          // Add column assignment hints for DataFrame mutations
+          // Add column assignment hints for DataFrame column mutations only
           for (const loc of singleViolation.locations) {
             if (loc.includes('.')) {
               const [dfName, colName] = loc.split('.');
               message += `<br>Use <code>${dfName}["${colName}"]</code> = ... for full-column assignment`;
-            } else {
-              message += `<br>Use <code>${loc}["column"]</code> = ... for full-column assignment`;
             }
           }
           break;
