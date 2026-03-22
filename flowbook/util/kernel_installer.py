@@ -67,7 +67,6 @@ def install_kernel(kernel_name: str, spec_source_dir: Path):
                 str(temp_kernelspec),
                 kernel_name=kernel_name,
                 user=True,
-                replace=True,
             )
 
             # Clean up temporary directory

@@ -32,7 +32,6 @@ class TestInstallKernel:
             "/fake/package/kernelspec",
             kernel_name="my_kernel",
             user=True,
-            replace=True,
         )
 
         # Verify kernel.json was read and written

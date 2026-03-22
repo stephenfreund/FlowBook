@@ -383,19 +383,15 @@ class NotebookState:
 
     def handle_edit(self, cell_id: str) -> None:
         """
-        EDIT transition: T_i := Stale({CodeChanged})
+        EDIT transition [Inst-Edit]: T' = T[i := stale], R and W unchanged.
 
-        Editing replaces any prior reasons with just CodeChanged.
-        Also clears R/W sets and tracking data since the cell's behavior may change.
+        Per the formal semantics, editing a cell only changes its status to stale.
+        R and W are preserved so that:
+        - ForwardStale on rerun can compute W_i \\ W'_i (removed writes)
+        - BackwardStale on rerun can detect when a cell stops writing a variable
+        - Other cells' staleness propagation still sees the old R/W
         """
         self.set_stale(cell_id, {Reason(ReasonType.CODE_CHANGED)})
-        # Clear per-cell state since the code has changed
-        self.reads.pop(cell_id, None)
-        self.writes.pop(cell_id, None)
-        self.tracking_data.pop(cell_id, None)
-        self.typed_changes.pop(cell_id, None)
-        self.structural_reads_values.pop(cell_id, None)
-        self.execution_seq.pop(cell_id, None)
 
     def handle_delete(self, deleted_cell: str) -> None:
         """

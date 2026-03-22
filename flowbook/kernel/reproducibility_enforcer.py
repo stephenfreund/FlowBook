@@ -2324,12 +2324,11 @@ class ReproducibilityEnforcer:
         return self._notebook_state.get_stale_cells()
 
     def mark_cell_edited(self, cell_id: str) -> List[str]:
-        """[EDIT] Mark edited cell stale (§2.3).
+        """[Inst-Edit] Mark edited cell stale.
 
-        With provenance tracking (§1.8.5), no special handling is needed on edit.
-        Provenance persists until another cell writes to those locations, so
-        forward contamination is automatically detected when earlier cells read
-        values whose provenance points to later cells.
+        Per the formal semantics: T' = T[i := stale], R and W unchanged.
+        R and W are preserved so that rerunning the cell can compute
+        removed writes (W_i \\ W'_i) for BackwardStale propagation.
 
         Returns current stale cells list.
         """

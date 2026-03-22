@@ -921,7 +921,7 @@ from flowbook.kernel_support.df_subset_detector import (
 
 # Enable copy-on-write mode for better performance with DataFrame copies
 # (always enabled in pandas >= 3.0, but needs to be set for pandas 2.x)
-if hasattr(pd.options.mode, "copy_on_write"):
+if pd.__version__ < "3" and hasattr(pd.options.mode, "copy_on_write"):
     pd.options.mode.copy_on_write = True
 
 # Enable string inference so read_csv() returns StringDtype instead of object dtype.
@@ -1975,15 +1975,14 @@ class MemoryCheckpoints:
         # This allows tracking pre and post checkpoint costs separately
         self._var_memory_costs_by_checkpoint: dict[str, dict[str, dict]] = {}
 
-        # Ensure copy-on-write is enabled for performance (pandas 2.x only)
-        if (
-            hasattr(pd.options.mode, "copy_on_write")
-            and not pd.options.mode.copy_on_write
-        ):
-            log(
-                "WARNING: pandas copy_on_write was disabled - re-enabling for checkpoint performance"
-            )
-            pd.options.mode.copy_on_write = True
+        # Ensure copy-on-write is enabled for performance (pandas 2.x only;
+        # always on in pandas >= 3.0 and accessing the option triggers a warning)
+        if pd.__version__ < "3" and hasattr(pd.options.mode, "copy_on_write"):
+            if not pd.options.mode.copy_on_write:
+                log(
+                    "WARNING: pandas copy_on_write was disabled - re-enabling for checkpoint performance"
+                )
+                pd.options.mode.copy_on_write = True
 
     def set_df_subset_optimization(self, enabled: bool) -> None:
         """
