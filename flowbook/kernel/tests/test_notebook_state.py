@@ -13,6 +13,7 @@ These tests verify the formal model transitions:
 import pytest
 from flowbook.kernel.models import CellStatus, Reason, ReasonType
 from flowbook.kernel.notebook_state import NotebookState
+from flowbook.kernel.locations import ReadLoc, WriteLoc, ReadLocSet, WriteLocSet
 from flowbook.kernel_support.models import TrackingData
 
 
@@ -22,6 +23,16 @@ def make_tracking(reads: set = None, writes: set = None) -> TrackingData:
         reads_before_writes=reads or set(),
         writes=writes or set(),
     )
+
+
+def _rset(var_names: set) -> ReadLocSet:
+    """Convert a set of variable names to a ReadLocSet of Var locs."""
+    return frozenset(ReadLoc.var(v) for v in var_names)
+
+
+def _wset(var_names: set) -> WriteLocSet:
+    """Convert a set of variable names to a WriteLocSet of Var locs."""
+    return frozenset(WriteLoc.var(v) for v in var_names)
 
 
 # =============================================================================
@@ -215,15 +226,15 @@ class TestLastWriter:
         """LastWriter finds the only writer."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.writes["A"] = {"x"}
+        state.writes["A"] = _wset({"x"})
         assert state.last_writer_for("x", "C") == "A"
 
     def test_last_writer_multiple_writers(self):
         """LastWriter finds the latest writer before cell."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C", "D"]
-        state.writes["A"] = {"x"}
-        state.writes["B"] = {"x"}
+        state.writes["A"] = _wset({"x"})
+        state.writes["B"] = _wset({"x"})
         assert state.last_writer_for("x", "D") == "B"
         assert state.last_writer_for("x", "C") == "B"
         assert state.last_writer_for("x", "B") == "A"
@@ -232,14 +243,14 @@ class TestLastWriter:
         """LastWriter ignores writers after the target cell."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.writes["C"] = {"x"}
+        state.writes["C"] = _wset({"x"})
         assert state.last_writer_for("x", "B") is None
 
     def test_last_writer_cell_not_in_order(self):
         """LastWriter returns None if target cell not in order."""
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.writes["A"] = {"x"}
+        state.writes["A"] = _wset({"x"})
         assert state.last_writer_for("x", "C") is None
 
 
@@ -257,13 +268,13 @@ class TestRecordExecution:
         """Recording execution updates reads."""
         state = NotebookState()
         state.record_execution("A", make_tracking(reads={"x", "y"}, writes={"z"}))
-        assert state.reads["A"] == {"x", "y"}
+        assert state.reads["A"] == _rset({"x", "y"})
 
     def test_record_execution_updates_writes(self):
         """Recording execution updates writes."""
         state = NotebookState()
         state.record_execution("A", make_tracking(reads={"x"}, writes={"y", "z"}))
-        assert state.writes["A"] == {"y", "z"}
+        assert state.writes["A"] == _wset({"y", "z"})
 
     def test_record_execution_stores_tracking_data(self):
         """Recording execution stores tracking data."""
@@ -285,10 +296,10 @@ class TestStalenessPropagation:
         """Writing variable propagates staleness to later reader."""
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.reads["B"] = {"x"}
+        state.reads["B"] = _rset({"x"})
         state.status["B"] = CellStatus.clean()
 
-        state.propagate_staleness("A", {"x"})
+        state.propagate_staleness("A", _wset({"x"}))
 
         assert not state.is_clean("B")
         reasons = state.get_reasons("B")
@@ -298,10 +309,10 @@ class TestStalenessPropagation:
         """Writing variable propagates staleness to later writer of same var."""
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.writes["B"] = {"x"}
+        state.writes["B"] = _wset({"x"})
         state.status["B"] = CellStatus.clean()
 
-        state.propagate_staleness("A", {"x"})
+        state.propagate_staleness("A", _wset({"x"}))
 
         assert not state.is_clean("B")
         reasons = state.get_reasons("B")
@@ -311,10 +322,10 @@ class TestStalenessPropagation:
         """Propagation skips cells that are already stale."""
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.reads["B"] = {"x"}
+        state.reads["B"] = _rset({"x"})
         state.status["B"] = CellStatus.stale({Reason(ReasonType.CODE_CHANGED)})
 
-        state.propagate_staleness("A", {"x"})
+        state.propagate_staleness("A", _wset({"x"}))
 
         # Should still just have CODE_CHANGED, not FORWARD_STALE
         reasons = state.get_reasons("B")
@@ -325,12 +336,12 @@ class TestStalenessPropagation:
         """Propagation affects multiple later cells."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.reads["B"] = {"x"}
-        state.reads["C"] = {"x"}
+        state.reads["B"] = _rset({"x"})
+        state.reads["C"] = _rset({"x"})
         state.status["B"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
 
-        state.propagate_staleness("A", {"x"})
+        state.propagate_staleness("A", _wset({"x"}))
 
         assert not state.is_clean("B")
         assert not state.is_clean("C")
@@ -339,12 +350,12 @@ class TestStalenessPropagation:
         """Propagation only affects cells after the writer."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.reads["A"] = {"x"}  # Earlier cell reads x
-        state.reads["C"] = {"x"}  # Later cell reads x
+        state.reads["A"] = _rset({"x"})  # Earlier cell reads x
+        state.reads["C"] = _rset({"x"})  # Later cell reads x
         state.status["A"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
 
-        state.propagate_staleness("B", {"x"})
+        state.propagate_staleness("B", _wset({"x"}))
 
         assert state.is_clean("A")  # Not affected (before B)
         assert not state.is_clean("C")  # Affected (after B)
@@ -353,11 +364,11 @@ class TestStalenessPropagation:
         """No propagation when written vars don't overlap with reads/writes."""
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.reads["B"] = {"y"}
-        state.writes["B"] = {"z"}
+        state.reads["B"] = _rset({"y"})
+        state.writes["B"] = _wset({"z"})
         state.status["B"] = CellStatus.clean()
 
-        state.propagate_staleness("A", {"x"})
+        state.propagate_staleness("A", _wset({"x"}))
 
         assert state.is_clean("B")
 
@@ -427,8 +438,8 @@ class TestDeleteTransition:
         """DELETE removes cell's reads and writes."""
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.reads["B"] = {"x"}
-        state.writes["B"] = {"y"}
+        state.reads["B"] = _rset({"x"})
+        state.writes["B"] = _wset({"y"})
 
         state.handle_delete("B")
 
@@ -439,8 +450,8 @@ class TestDeleteTransition:
         """DELETE marks cells that read from deleted cell as stale."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.writes["B"] = {"x"}
-        state.reads["C"] = {"x"}
+        state.writes["B"] = _wset({"x"})
+        state.reads["C"] = _rset({"x"})
         state.status["C"] = CellStatus.clean()
 
         state.handle_delete("B")
@@ -502,20 +513,20 @@ class TestInsertTransition:
 
         state.handle_insert("B", 1)
 
-        assert state.reads["B"] == set()
-        assert state.writes["B"] == set()
+        assert state.reads["B"] == frozenset()
+        assert state.writes["B"] == frozenset()
 
     def test_insert_marks_affected_cells(self):
         """INSERT marks affected cells if their dependencies change."""
         state = NotebookState()
         state.cell_order = ["A", "C"]
-        state.writes["A"] = {"x"}
-        state.reads["C"] = {"x"}
+        state.writes["A"] = _wset({"x"})
+        state.reads["C"] = _rset({"x"})
         state.status["C"] = CellStatus.clean()
 
         # Insert B which also writes x
         state.handle_insert("B", 1)
-        state.writes["B"] = {"x"}
+        state.writes["B"] = _wset({"x"})
 
         # B hasn't executed yet, so this case is edge-case.
         # The insert itself just adds the cell with NeverExecuted status.
@@ -560,8 +571,8 @@ class TestMoveTransition:
         """MOVE repositions cell in order."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.writes["A"] = {"x"}
-        state.reads["B"] = {"x"}
+        state.writes["A"] = _wset({"x"})
+        state.reads["B"] = _rset({"x"})
         state.status["A"] = CellStatus.clean()
         state.status["B"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
@@ -615,8 +626,8 @@ class TestSetCellOrder:
         """set_cell_order returns list of newly stale cells."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.writes["B"] = {"x"}
-        state.reads["C"] = {"x"}
+        state.writes["B"] = _wset({"x"})
+        state.reads["C"] = _rset({"x"})
         state.status["A"] = CellStatus.clean()
         state.status["B"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
@@ -652,8 +663,8 @@ class TestClear:
         state = NotebookState()
         state.cell_order = ["A", "B"]
         state.status["A"] = CellStatus.clean()
-        state.reads["A"] = {"x"}
-        state.writes["A"] = {"y"}
+        state.reads["A"] = _rset({"x"})
+        state.writes["A"] = _wset({"y"})
 
         state.clear()
 
@@ -757,12 +768,12 @@ class TestIntegration:
         # Execute A: writes x
         state.record_execution("A", make_tracking(writes={"x"}))
         state.set_clean("A")
-        state.propagate_staleness("A", {"x"})
+        state.propagate_staleness("A", _wset({"x"}))
 
         # Execute B: reads x, writes y
         state.record_execution("B", make_tracking(reads={"x"}, writes={"y"}))
         state.set_clean("B")
-        state.propagate_staleness("B", {"y"})
+        state.propagate_staleness("B", _wset({"y"}))
 
         # Execute C: reads y
         state.record_execution("C", make_tracking(reads={"y"}))
@@ -794,7 +805,7 @@ class TestIntegration:
         # Re-execute A
         state.record_execution("A", make_tracking(writes={"x"}))
         state.set_clean("A")
-        state.propagate_staleness("A", {"x"})
+        state.propagate_staleness("A", _wset({"x"}))
 
         # Now B is stale
         assert not state.is_clean("B")
@@ -833,14 +844,14 @@ class TestIntegration:
         # A writes x, propagates to C
         state.record_execution("A", make_tracking(writes={"x"}))
         state.set_clean("A")
-        state.propagate_staleness("A", {"x"})
+        state.propagate_staleness("A", _wset({"x"}))
 
         assert not state.is_clean("C")
         assert len(state.get_reasons("C")) == 1
 
         # B writes y, propagates to C (C already stale, but we can test add_reason)
         state.status["C"] = CellStatus.clean()  # Reset for test
-        state.propagate_staleness("A", {"x"})
+        state.propagate_staleness("A", _wset({"x"}))
         # Manually add another reason
         state.add_reason("C", Reason(ReasonType.FORWARD_STALE, loc="y", cell_id="B"))
 

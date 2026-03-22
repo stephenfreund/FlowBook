@@ -14,6 +14,7 @@ from flowbook.kernel.reproducibility_enforcer import (
     PRE_CHECKPOINT_PREFIX,
 )
 from flowbook.kernel.models import ErrorType, ReasonType
+from flowbook.kernel.locations import writelocset_var_names
 from flowbook.kernel.tests.conftest import make_tracking
 
 
@@ -3616,7 +3617,7 @@ class TestStalenessAlwaysComputed:
         assert result.has_errors()
 
         # writes should still be updated
-        assert "x" in self.sdc._notebook_state.writes.get("b", set())
+        assert "x" in writelocset_var_names(self.sdc._notebook_state.writes.get("b", frozenset()))
 
     def test_multiple_errors_still_compute_staleness(self):
         """Staleness is computed even when cell has multiple errors.
@@ -4505,7 +4506,7 @@ class TestForwardStaleFormula:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
         # Record that A wrote x
-        assert self.sdc._notebook_state.writes.get("a") == {"x"}
+        assert writelocset_var_names(self.sdc._notebook_state.writes.get("a", frozenset())) == {"x"}
 
         # B reads x
         self._save_pre_checkpoint("b", {"x": 1})
@@ -4706,7 +4707,7 @@ class TestRollbackLastCheck:
             namespace={"x": 999},
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert "x" in self.sdc._notebook_state.writes.get("d", set())
+        assert "x" in writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset()))
 
         # Rollback D's check
         self.sdc.rollback_last_check()
@@ -4724,7 +4725,7 @@ class TestRollbackLastCheck:
             namespace={"x": 1},
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert self.sdc._notebook_state.writes.get("d") == {"x"}
+        assert writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset())) == {"x"}
 
         # Cell D writes y (different variable) - simulating rejected execution
         self._save_pre_checkpoint("d", {"x": 1})
@@ -4734,13 +4735,13 @@ class TestRollbackLastCheck:
             namespace={"x": 1, "y": 2},
             tracking=make_tracking(reads=set(), writes={"y"}),
         )
-        assert self.sdc._notebook_state.writes.get("d") == {"y"}
+        assert writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset())) == {"y"}
 
         # Rollback
         self.sdc.rollback_last_check()
 
         # Writes should be restored to {"x"}
-        assert self.sdc._notebook_state.writes.get("d") == {"x"}
+        assert writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset())) == {"x"}
 
     def test_rollback_restores_status(self):
         """Rollback restores cell status to previous value."""
@@ -4777,12 +4778,12 @@ class TestRollbackLastCheck:
         self.sdc.rollback_last_check()
 
         # A's writes should be restored
-        assert "x" in self.sdc._notebook_state.writes.get("a", set())
+        assert "x" in writelocset_var_names(self.sdc._notebook_state.writes.get("a", frozenset()))
 
     def test_rollback_for_never_executed_cell(self):
         """Rollback works correctly for a cell that hadn't executed before."""
         # Cell D never executed before (set_cell_order initializes empty sets)
-        assert self.sdc._notebook_state.writes.get("d") == set()
+        assert self.sdc._notebook_state.writes.get("d", frozenset()) == frozenset()
         assert self.sdc._notebook_state.last_writer_for("x", "d") is None
         assert self.sdc._notebook_state.tracking_data.get("d") is None
 
@@ -4794,15 +4795,15 @@ class TestRollbackLastCheck:
             namespace={"x": 1},
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert self.sdc._notebook_state.writes.get("d") == {"x"}
-        assert "x" in self.sdc._notebook_state.writes.get("d", set())
+        assert writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset())) == {"x"}
+        assert "x" in writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset()))
         assert self.sdc._notebook_state.tracking_data.get("d") is not None
 
         # Rollback
         self.sdc.rollback_last_check()
 
         # Should be back to never-executed state
-        assert self.sdc._notebook_state.writes.get("d") == set()
+        assert self.sdc._notebook_state.writes.get("d", frozenset()) == frozenset()
         assert self.sdc._notebook_state.last_writer_for("x", "d") is None
         assert self.sdc._notebook_state.tracking_data.get("d") is None
 
@@ -4858,13 +4859,13 @@ class TestRollbackLastCheck:
         assert result_d.has_errors()
 
         # After check, D has x in writes
-        assert "x" in self.sdc._notebook_state.writes.get("d", set())
+        assert "x" in writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset()))
 
         # Kernel rolls back D's execution
         self.sdc.rollback_last_check()
 
         # Now D's writes should be restored (no x), B is last writer of x
-        assert "x" not in self.sdc._notebook_state.writes.get("d", set())
+        assert "x" not in writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset()))
 
         # User edits D to write w instead of x, and re-runs D
         self._save_pre_checkpoint("d", {"x": 11, "y": 11})

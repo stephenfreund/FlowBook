@@ -864,8 +864,8 @@ class ReproducibilityEnforcer:
                     for cell_id in old_order[:my_position]:
                         if cell_id in deleted_set:
                             continue
-                        cell_writes = self._notebook_state.writes.get(cell_id, set())
-                        if y in cell_writes:
+                        cell_writes = self._notebook_state.writes.get(cell_id, frozenset())
+                        if any(w.var_name() == y for w in cell_writes):
                             last_j = cell_id  # Keep scanning; last one wins
 
                     if last_j is not None and last_j in originally_clean:
@@ -1174,7 +1174,7 @@ class ReproducibilityEnforcer:
         # Ref: FORMAL_DEVELOPMENT.md §3.1, line 169
         # ================================================================
         R_i_locs = tracking_to_read_locs(tracking)  # r as LocSet
-        W_i_old = self._notebook_state.writes.get(cell_id, set())  # Old W_i (strings)
+        W_i_old = self._writes_var_names(cell_id)  # Old W_i as variable names (Set[str])
 
         # Compute diff to get actual changes
         with timer(key="check:compute_diff", message=f"[Inst-Run] Computing diff for {cell_id}"):
@@ -1538,6 +1538,18 @@ class ReproducibilityEnforcer:
         except ValueError:
             return -1
 
+    def _writes_var_names(self, cell_id: str) -> Set[str]:
+        """Extract variable names from a cell's WriteLocSet."""
+        from flowbook.kernel.locations import writelocset_var_names
+        writes = self._notebook_state.writes.get(cell_id, frozenset())
+        return writelocset_var_names(writes)
+
+    def _reads_var_names(self, cell_id: str) -> Set[str]:
+        """Extract variable names from a cell's ReadLocSet."""
+        from flowbook.kernel.locations import readlocset_var_names
+        reads = self._notebook_state.reads.get(cell_id, frozenset())
+        return readlocset_var_names(reads)
+
     def _compute_diff_and_changes(
         self,
         pre_checkpoint,
@@ -1662,8 +1674,8 @@ class ReproducibilityEnforcer:
 
             # Check if any later cell writes this variable
             for later_cell_id in self._cell_order[my_position + 1:]:
-                later_writes = self._notebook_state.writes.get(later_cell_id, set())
-                if read_var in later_writes:
+                later_writes_vars = self._writes_var_names(later_cell_id)
+                if read_var in later_writes_vars:
                     syntactic_conflicts.append(read_var)
                     if writer_cell_for_message is None:
                         writer_cell_for_message = later_cell_id
@@ -2170,7 +2182,7 @@ class ReproducibilityEnforcer:
             if not self._notebook_state.has_record(prior_cell_id):
                 continue  # Never executed
 
-            prior_reads = self._notebook_state.reads.get(prior_cell_id, set())
+            prior_reads = self._reads_var_names(prior_cell_id)
 
             # Use column-aware overlap check for backward staleness.
             # This handles BOTH regular variables AND DataFrames:
@@ -2236,7 +2248,7 @@ class ReproducibilityEnforcer:
         Returns:
             True if the cell might be affected by the changes
         """
-        reads = self._notebook_state.reads.get(cell_id, set())
+        reads = self._reads_var_names(cell_id)
         # Include both value-level changes AND column-level changes in overlap check
         all_changed = changed_vars | set(column_changed.keys())
         var_overlap = reads & all_changed

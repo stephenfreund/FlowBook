@@ -25,6 +25,7 @@ import pandas as pd
 
 from flowbook.kernel.tests.conftest import make_tracking, ReproducibilityTestHelper
 from flowbook.kernel.models import ErrorType, ReasonType
+from flowbook.kernel.locations import ReadLoc, WriteLoc, writelocset_var_names, readlocset_var_names
 
 
 # =============================================================================
@@ -1711,9 +1712,9 @@ class TestWellFormedness:
         assert state.is_clean("b")
 
         # Verify R and W are correctly recorded
-        assert "x" in state.writes.get("a", set())
-        assert "x" in state.reads.get("b", set())
-        assert "y" in state.writes.get("b", set())
+        assert "x" in writelocset_var_names(state.writes.get("a", frozenset()))
+        assert "x" in readlocset_var_names(state.reads.get("b", frozenset()))
+        assert "y" in writelocset_var_names(state.writes.get("b", frozenset()))
 
     def test_well_formedness_preserved_after_edit(self):
         """After edit, edited cell is stale → well-formedness trivially holds for it."""
@@ -1801,4 +1802,4 @@ class TestInternalCellReadsWrites:
 
         # B reads nothing from A, so R_B = ∅
         state = self.helper.sdc._notebook_state
-        assert state.reads.get("b", set()) == set()
+        assert state.reads.get("b", frozenset()) == frozenset()

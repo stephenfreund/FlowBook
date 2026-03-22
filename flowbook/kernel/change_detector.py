@@ -43,6 +43,7 @@ from flowbook.kernel.changes import (
     RowsRemoved,
     ValueChanged,
 )
+from flowbook.kernel.locations import WriteLoc, WriteLocSet
 
 
 def detect_changes(diff: MemoryCheckpointDiffResult) -> List[Change]:
@@ -454,6 +455,36 @@ def _analyze_column_change(variable: str, column: str, node: Any) -> Optional[Ch
         return ColumnModified(variable=variable, column=column)
 
     return None
+
+
+def changes_to_write_locs(changes: List[Change]) -> WriteLocSet:
+    """Convert typed Change objects to WriteLocSet."""
+    locs = set()
+    for change in changes:
+        if isinstance(change, ValueChanged):
+            locs.add(WriteLoc.var(change.variable))
+        elif isinstance(change, ColumnModified):
+            locs.add(WriteLoc.col(change.variable, change.column))
+        elif isinstance(change, ColumnAdded):
+            locs.add(WriteLoc.col_add(change.variable, change.column))
+        elif isinstance(change, ColumnRemoved):
+            locs.add(WriteLoc.col_del(change.variable, change.column))
+        elif isinstance(change, RowsAdded):
+            locs.add(WriteLoc.rows(change.variable))
+        elif isinstance(change, RowsRemoved):
+            locs.add(WriteLoc.rows(change.variable))
+        elif isinstance(change, IndexChanged):
+            locs.add(WriteLoc.attr_changed(change.variable, "index"))
+        elif isinstance(change, DtypeChanged):
+            locs.add(WriteLoc.col(change.variable, change.column))
+            locs.add(WriteLoc.attr_changed(change.variable, "dtypes"))
+    return frozenset(locs)
+
+
+def detect_write_locs(diff: MemoryCheckpointDiffResult) -> WriteLocSet:
+    """Convert diff result to WriteLocSet."""
+    changes = detect_changes(diff)
+    return changes_to_write_locs(changes)
 
 
 def get_changed_variables(diff: MemoryCheckpointDiffResult) -> set:

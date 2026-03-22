@@ -742,8 +742,8 @@ class CellStateSnapshot:
     """
 
     cell_id: str
-    reads: Optional[Set[str]]
-    writes: Optional[Set[str]]
+    reads: Optional[Any]  # ReadLocSet (FrozenSet[ReadLoc]) or None
+    writes: Optional[Any]  # WriteLocSet (FrozenSet[WriteLoc]) or None
     status: Optional["CellStatus"]
     tracking_data: Optional[TrackingData]
     execution_seq: Optional[int]

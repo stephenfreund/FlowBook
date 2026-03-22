@@ -22,9 +22,15 @@ And additional per-cell metadata:
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Dict, FrozenSet, List, Optional, Set, TYPE_CHECKING
 
 from flowbook.kernel.models import CellStateSnapshot, CellStatus, Reason, ReasonType
+from flowbook.kernel.locations import (
+    ReadLoc, ReadLocSet, WriteLoc, WriteLocSet,
+    has_conflict, wlocs_conflict_rlocs, output_set,
+    writelocset_var_names, readlocset_var_names,
+    tracking_to_readlocset, tracking_to_writelocset,
+)
 from flowbook.kernel_support.models import TrackingData
 
 if TYPE_CHECKING:
@@ -58,8 +64,8 @@ class NotebookState:
 
     # Formal model state (T, R, W)
     status: Dict[str, CellStatus] = field(default_factory=dict)
-    reads: Dict[str, Set[str]] = field(default_factory=dict)
-    writes: Dict[str, Set[str]] = field(default_factory=dict)
+    reads: Dict[str, ReadLocSet] = field(default_factory=dict)
+    writes: Dict[str, WriteLocSet] = field(default_factory=dict)
     cell_order: List[str] = field(default_factory=list)
 
     # Per-cell tracking data
@@ -155,12 +161,15 @@ class NotebookState:
     # Derived Functions (from formal model)
     # =========================================================================
 
-    def last_writer_for(self, loc: str, before_cell: str) -> Optional[str]:
+    def last_writer_for(self, var_name: str, before_cell: str) -> Optional[str]:
         """
         LastWriter(W, i, x) = max { j < i | x ∈ W_j }, or None
 
-        Find which cell before `before_cell` should have written `loc`
+        Find which cell before `before_cell` should have written `var_name`
         based on document order and recorded writes.
+
+        Operates at variable level: checks if any WriteLoc in a cell's writes
+        has a matching var_name().
         """
         if before_cell not in self.cell_order:
             return None
@@ -170,7 +179,7 @@ class NotebookState:
         result_pos = -1
 
         for cell_id, cell_writes in self.writes.items():
-            if loc in cell_writes and cell_id in self.cell_order:
+            if any(w.var_name() == var_name for w in cell_writes) and cell_id in self.cell_order:
                 pos = self.cell_order.index(cell_id)
                 if pos < before_pos and pos > result_pos:
                     result = cell_id
@@ -206,9 +215,9 @@ class NotebookState:
         # Store the TrackingData object directly
         self.tracking_data[cell_id] = tracking
 
-        # Core R, W tracking (derived from TrackingData)
-        self.reads[cell_id] = tracking.get_rbw_vars()
-        self.writes[cell_id] = tracking.get_written_variables()
+        # Core R, W tracking (derived from TrackingData) — typed LocSets
+        self.reads[cell_id] = tracking_to_readlocset(tracking)
+        self.writes[cell_id] = tracking_to_writelocset(tracking)
 
         # Additional per-cell metadata (not in TrackingData)
         if execution_seq is not None:
@@ -349,13 +358,13 @@ class NotebookState:
         """Check if a cell has been executed (has tracking data)."""
         return cell_id in self.tracking_data
 
-    def propagate_staleness(self, writer_cell: str, written_locs: Set[str]) -> None:
+    def propagate_staleness(self, writer_cell: str, written_locs: WriteLocSet) -> None:
         """
         Propagate staleness to later cells.
 
         For j in {i+1, ..., n}:
-            for x ∈ W' ∩ R_j: AddReason(j, InputChanged(x, i))
-            for x ∈ W' ∩ W_j: AddReason(j, WriteConflict(x, i))
+            for w ∈ W' ⊗ R_j: AddReason(j, InputChanged(w, i))
+            for w ∈ W' ⊗ output*(W_j): AddReason(j, WriteConflict(w, i))
         """
         if writer_cell not in self.cell_order:
             return
@@ -366,19 +375,22 @@ class NotebookState:
             if not self.is_clean(later_cell):
                 continue  # Already stale, skip
 
-            later_reads = self.reads.get(later_cell, set())
-            later_writes = self.writes.get(later_cell, set())
+            later_reads = self.reads.get(later_cell, frozenset())
+            later_writes = self.writes.get(later_cell, frozenset())
 
-            # ForwardStale: written ∩ reads
-            for loc in written_locs & later_reads:
+            # ForwardStale: W' ⊗ R_j
+            conflicting_writes = wlocs_conflict_rlocs(written_locs, later_reads)
+            for w in conflicting_writes:
                 self.add_reason(later_cell, Reason(
-                    ReasonType.FORWARD_STALE, loc=loc, cell_id=writer_cell
+                    ReasonType.FORWARD_STALE, loc=w.display_name(), cell_id=writer_cell
                 ))
 
-            # BackwardStale: written ∩ writes
-            for loc in written_locs & later_writes:
+            # BackwardStale: W' ⊗ output*(W_j)
+            later_output = output_set(later_writes)
+            write_conflicting = wlocs_conflict_rlocs(written_locs, later_output)
+            for w in write_conflicting - conflicting_writes:
                 self.add_reason(later_cell, Reason(
-                    ReasonType.BACKWARD_STALE, loc=loc, cell_id=writer_cell
+                    ReasonType.BACKWARD_STALE, loc=w.display_name(), cell_id=writer_cell
                 ))
 
     def handle_edit(self, cell_id: str) -> None:
@@ -400,32 +412,32 @@ class NotebookState:
         2. Keep L(x) pointing to deleted cell (for orphan detection)
         3. Remove deleted cell from status/reads/writes/cell_order
 
-        ForwardStale: j > i, Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+        ForwardStale: j > i, Wᵢ ⊗ Rⱼ ≠ ∅ or Wᵢ ⊗ output*(Wⱼ) ≠ ∅
         BackwardStale: j < i, j = LastWriter(W, i, y) for y ∈ Wᵢ
 
         Note: We intentionally keep last_writer pointing to the deleted cell
         so that forward dependency checks can detect "orphaned values" -
         values that came from a cell that no longer exists.
         """
-        deleted_writes = self.writes.get(deleted_cell, set())
+        deleted_writes = self.writes.get(deleted_cell, frozenset())
 
         if deleted_writes and deleted_cell in self.cell_order:
             my_position = self.cell_order.index(deleted_cell)
 
-            # ForwardStale: j > i, Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+            # ForwardStale: j > i, Wᵢ ⊗ (Rⱼ ∪ output*(Wⱼ)) ≠ ∅
             for cell_id in self.cell_order[my_position + 1:]:
-                cell_reads = self.reads.get(cell_id, set())
-                cell_writes = self.writes.get(cell_id, set())
-                read_overlap = deleted_writes & cell_reads
-                write_overlap = deleted_writes & cell_writes
+                cell_reads = self.reads.get(cell_id, frozenset())
+                cell_writes = self.writes.get(cell_id, frozenset())
+                read_conflicting = wlocs_conflict_rlocs(deleted_writes, cell_reads)
+                write_conflicting = wlocs_conflict_rlocs(deleted_writes, output_set(cell_writes))
 
-                for loc in read_overlap:
+                for w in read_conflicting:
                     self.add_reason(cell_id, Reason(
-                        ReasonType.FORWARD_STALE, loc=loc, cell_id=deleted_cell
+                        ReasonType.FORWARD_STALE, loc=w.display_name(), cell_id=deleted_cell
                     ))
-                for loc in write_overlap - read_overlap:
+                for w in write_conflicting - read_conflicting:
                     self.add_reason(cell_id, Reason(
-                        ReasonType.WRITE_OVERLAP, loc=loc, cell_id=deleted_cell
+                        ReasonType.WRITE_OVERLAP, loc=w.display_name(), cell_id=deleted_cell
                     ))
 
             # BackwardStale: j < i, j = LastWriter(W, i, y) for y ∈ Wᵢ
@@ -434,15 +446,16 @@ class NotebookState:
                 cell_id for cell_id in self.cell_order[:my_position]
                 if self.is_clean(cell_id)
             }
-            for y in deleted_writes:
+            for w in deleted_writes:
+                var_name = w.var_name()
                 last_j = None
                 for cell_id in self.cell_order[:my_position]:
-                    cell_w = self.writes.get(cell_id, set())
-                    if y in cell_w:
+                    cell_w = self.writes.get(cell_id, frozenset())
+                    if any(ww.var_name() == var_name for ww in cell_w):
                         last_j = cell_id
                 if last_j is not None and last_j in originally_clean:
                     self.add_reason(last_j, Reason(
-                        ReasonType.BACKWARD_STALE, loc=y, cell_id=deleted_cell
+                        ReasonType.BACKWARD_STALE, loc=w.display_name(), cell_id=deleted_cell
                     ))
 
         # Remove deleted cell from state
@@ -471,8 +484,8 @@ class NotebookState:
 
         self.cell_order.insert(position, cell_id)
         self.status[cell_id] = CellStatus.never_executed()
-        self.reads[cell_id] = set()
-        self.writes[cell_id] = set()
+        self.reads[cell_id] = frozenset()
+        self.writes[cell_id] = frozenset()
 
         # Cells after insertion point may be affected by order change
         # but without provenance tracking we cannot check Runnable here.
@@ -532,8 +545,8 @@ class NotebookState:
             # Don't use handle_insert as it modifies cell_order
             # Just initialize the new cell's state
             self.status[inserted] = CellStatus.never_executed()
-            self.reads[inserted] = set()
-            self.writes[inserted] = set()
+            self.reads[inserted] = frozenset()
+            self.writes[inserted] = frozenset()
 
         # Check if order actually changed (not just same cells in same positions)
         old_order = self.cell_order
@@ -571,8 +584,8 @@ class NotebookState:
         return {
             "cell_order": self.cell_order,
             "status": {k: v.to_dict() for k, v in self.status.items()},
-            "reads": {k: sorted(v) for k, v in self.reads.items()},
-            "writes": {k: sorted(v) for k, v in self.writes.items()},
+            "reads": {k: sorted(str(loc) for loc in v) for k, v in self.reads.items()},
+            "writes": {k: sorted(str(loc) for loc in v) for k, v in self.writes.items()},
         }
 
     def __str__(self) -> str:

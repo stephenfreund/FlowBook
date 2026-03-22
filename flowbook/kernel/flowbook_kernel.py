@@ -550,13 +550,13 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         ]
 
         for cell_id in executed_cells:
-            reads = state.reads.get(cell_id, set())
-            writes = state.writes.get(cell_id, set())
+            reads = state.reads.get(cell_id, frozenset())
+            writes = state.writes.get(cell_id, frozenset())
             seq = state.execution_seq.get(cell_id, 0)
             reasons = state.get_reasons(cell_id)
             status = "clean" if state.is_clean(cell_id) else f"stale({[r.type.value for r in reasons]})"
             status_lines.append(
-                f"  {cell_id}: reads={sorted(reads)}, writes={sorted(writes)}, "
+                f"  {cell_id}: reads={sorted(str(r) for r in reads)}, writes={sorted(str(w) for w in writes)}, "
                 f"seq={seq}, status={status}"
             )
 

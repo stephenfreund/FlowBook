@@ -71,8 +71,8 @@ class LitmusTestRunner:
                 reasons[cell_id] = [r.to_dict() for r in cell_status.reasons]
 
         snapshot = StateSnapshot(
-            reads={k: set(v) for k, v in state.reads.items()},
-            writes={k: set(v) for k, v in state.writes.items()},
+            reads={k: {loc.var_name() for loc in v} for k, v in state.reads.items()},
+            writes={k: {loc.var_name() for loc in v} for k, v in state.writes.items()},
             status=status,
             reasons=reasons,
             cell_order=list(state.cell_order),
