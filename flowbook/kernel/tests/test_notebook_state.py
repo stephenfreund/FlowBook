@@ -183,7 +183,6 @@ class TestNotebookStateInit:
         assert len(state.status) == 0
         assert len(state.reads) == 0
         assert len(state.writes) == 0
-        assert len(state.last_writer) == 0
 
     def test_get_status_creates_never_executed(self):
         """Getting status for unknown cell creates NeverExecuted."""
@@ -244,112 +243,6 @@ class TestLastWriter:
         assert state.last_writer_for("x", "C") is None
 
 
-# =============================================================================
-# Runnable Tests
-# =============================================================================
-
-
-class TestRunnable:
-    """Tests for Runnable check."""
-
-    def test_runnable_no_reads(self):
-        """Cell with no reads is always runnable."""
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-        state.reads["B"] = set()
-        assert state.is_runnable("B")
-
-    def test_runnable_reads_from_earlier(self):
-        """Cell reading from earlier cell is runnable."""
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-        state.writes["A"] = {"x"}
-        state.reads["B"] = {"x"}
-        state.last_writer["x"] = "A"
-        assert state.is_runnable("B")
-
-    def test_not_runnable_reads_from_later(self):
-        """Cell reading from later cell is not runnable."""
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-        state.writes["B"] = {"x"}
-        state.reads["A"] = {"x"}
-        state.last_writer["x"] = "B"  # B wrote x, but B is after A
-        assert not state.is_runnable("A")
-
-    def test_runnable_reads_from_init(self):
-        """Cell reading from init (no writer) is runnable if no expected writer."""
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-        state.reads["B"] = {"x"}
-        # No cell wrote x, so L(x) = None and LastWriter(x, B) = None
-        # Both are None, so runnable
-        assert state.is_runnable("B")
-
-    def test_not_runnable_wrong_writer(self):
-        """Cell is not runnable if actual writer differs from expected."""
-        state = NotebookState()
-        state.cell_order = ["A", "B", "C"]
-        state.writes["A"] = {"x"}
-        state.writes["B"] = {"x"}
-        state.reads["C"] = {"x"}
-        state.last_writer["x"] = "A"  # A wrote x, but B should have
-        assert not state.is_runnable("C")
-
-
-# =============================================================================
-# Contamination Detection Tests
-# =============================================================================
-
-
-class TestContaminationDetection:
-    """Tests for contamination (reads from later) detection."""
-
-    def test_no_contamination_empty_reads(self):
-        """No contamination when cell reads nothing."""
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-        reasons = state.get_contamination_reasons("A", set())
-        assert len(reasons) == 0
-
-    def test_no_contamination_reads_from_earlier(self):
-        """No contamination when reading from earlier cell."""
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-        state.last_writer["x"] = "A"
-        reasons = state.get_contamination_reasons("B", {"x"})
-        assert len(reasons) == 0
-
-    def test_contamination_reads_from_later(self):
-        """Contamination when reading from later cell."""
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-        state.last_writer["x"] = "B"
-        reasons = state.get_contamination_reasons("A", {"x"})
-        assert len(reasons) == 1
-        r = list(reasons)[0]
-        assert r.type == ReasonType.NO_READ_BEFORE_WRITE
-        assert r.loc == "x"
-        assert r.cell_id == "B"
-
-    def test_contamination_multiple_locations(self):
-        """Contamination detected for multiple locations."""
-        state = NotebookState()
-        state.cell_order = ["A", "B", "C"]
-        state.last_writer["x"] = "B"
-        state.last_writer["y"] = "C"
-        reasons = state.get_contamination_reasons("A", {"x", "y"})
-        assert len(reasons) == 2
-        locs = {r.loc for r in reasons}
-        assert locs == {"x", "y"}
-
-    def test_contamination_cell_not_in_order(self):
-        """No contamination if cell not in order."""
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-        state.last_writer["x"] = "B"
-        reasons = state.get_contamination_reasons("X", {"x"})
-        assert len(reasons) == 0
 
 
 # =============================================================================
@@ -372,29 +265,12 @@ class TestRecordExecution:
         state.record_execution("A", make_tracking(reads={"x"}, writes={"y", "z"}))
         assert state.writes["A"] == {"y", "z"}
 
-    def test_record_execution_updates_last_writer(self):
-        """Recording execution updates last_writer map for changed variables."""
+    def test_record_execution_stores_tracking_data(self):
+        """Recording execution stores tracking data."""
         state = NotebookState()
-        # last_writer is updated only for variables that CHANGED (via changed_vars)
-        state.record_execution("A", make_tracking(writes={"x", "y"}), changed_vars={"x", "y"})
-        assert state.last_writer["x"] == "A"
-        assert state.last_writer["y"] == "A"
-
-    def test_record_execution_overwrites_last_writer(self):
-        """Later execution overwrites earlier last_writer only if value changed."""
-        state = NotebookState()
-        state.record_execution("A", make_tracking(writes={"x"}), changed_vars={"x"})
-        state.record_execution("B", make_tracking(writes={"x"}), changed_vars={"x"})
-        assert state.last_writer["x"] == "B"
-
-    def test_record_execution_preserves_last_writer_when_unchanged(self):
-        """last_writer is NOT updated if variable is written but value unchanged."""
-        state = NotebookState()
-        state.record_execution("A", make_tracking(writes={"x"}), changed_vars={"x"})
-        # B writes x but value is the same (changed_vars is None or doesn't include x)
-        state.record_execution("B", make_tracking(writes={"x"}), changed_vars=None)
-        # A should still be the last writer
-        assert state.last_writer["x"] == "A"
+        tracking = make_tracking(reads={"x"}, writes={"y"})
+        state.record_execution("A", tracking)
+        assert state.tracking_data["A"] is tracking
 
 
 # =============================================================================
@@ -559,33 +435,12 @@ class TestDeleteTransition:
         assert "B" not in state.reads
         assert "B" not in state.writes
 
-    def test_delete_keeps_last_writer_for_orphan_detection(self):
-        """DELETE keeps last_writer pointing to deleted cell for orphan detection.
-
-        This allows forward dependency checks to detect values that came from
-        a cell that no longer exists (orphaned values).
-        """
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-        state.writes["B"] = {"x", "y"}
-        state.last_writer["x"] = "B"
-        state.last_writer["y"] = "B"
-        state.last_writer["z"] = "A"
-
-        state.handle_delete("B")
-
-        # last_writer KEPT for orphan detection (writer not in cell_order)
-        assert state.last_writer["x"] == "B"
-        assert state.last_writer["y"] == "B"
-        assert state.last_writer["z"] == "A"  # Unchanged
-
-    def test_delete_marks_orphan_readers(self):
+    def test_delete_marks_downstream_readers_stale(self):
         """DELETE marks cells that read from deleted cell as stale."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
         state.writes["B"] = {"x"}
         state.reads["C"] = {"x"}
-        state.last_writer["x"] = "B"
         state.status["C"] = CellStatus.clean()
 
         state.handle_delete("B")
@@ -651,23 +506,19 @@ class TestInsertTransition:
         assert state.writes["B"] == set()
 
     def test_insert_marks_affected_cells(self):
-        """INSERT marks affected cells if their Runnable changes."""
+        """INSERT marks affected cells if their dependencies change."""
         state = NotebookState()
         state.cell_order = ["A", "C"]
         state.writes["A"] = {"x"}
         state.reads["C"] = {"x"}
-        state.last_writer["x"] = "A"
         state.status["C"] = CellStatus.clean()
 
         # Insert B which also writes x
         state.handle_insert("B", 1)
         state.writes["B"] = {"x"}
-        state.last_writer["x"] = "B"
 
-        # Now C's Runnable fails: L(x)=B, LastWriter(x,C)=B, but C was clean
-        # Actually need to re-check after insertion...
-        # The handle_insert checks Runnable after inserting.
-        # In this test, B hasn't executed yet, so this case is edge-case.
+        # B hasn't executed yet, so this case is edge-case.
+        # The insert itself just adds the cell with NeverExecuted status.
 
 
 # =============================================================================
@@ -706,12 +557,11 @@ class TestMoveTransition:
         assert state.cell_order == ["A", "B", "C"]
 
     def test_move_marks_affected_cells(self):
-        """MOVE marks affected cells if their Runnable changes."""
+        """MOVE repositions cell in order."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
         state.writes["A"] = {"x"}
         state.reads["B"] = {"x"}
-        state.last_writer["x"] = "A"
         state.status["A"] = CellStatus.clean()
         state.status["B"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
@@ -719,11 +569,7 @@ class TestMoveTransition:
         # Move A to end - now B reads x but A is after B
         state.handle_move("A", 2)
         # After move: ["B", "C", "A"]
-        # B reads x, L(x)=A, but LastWriter(x, B) = None (A is after B now)
-        # So B is not runnable
-
-        # The move should mark B as stale
-        # Note: depends on whether handle_move checks this
+        assert state.cell_order == ["B", "C", "A"]
 
 
 # =============================================================================
@@ -771,12 +617,11 @@ class TestSetCellOrder:
         state.cell_order = ["A", "B", "C"]
         state.writes["B"] = {"x"}
         state.reads["C"] = {"x"}
-        state.last_writer["x"] = "B"
         state.status["A"] = CellStatus.clean()
         state.status["B"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
 
-        # Delete B - C becomes orphan
+        # Delete B - C reads x from deleted B -> ForwardStale
         newly_stale = state.set_cell_order(["A", "C"])
 
         assert "C" in newly_stale
@@ -809,7 +654,6 @@ class TestClear:
         state.status["A"] = CellStatus.clean()
         state.reads["A"] = {"x"}
         state.writes["A"] = {"y"}
-        state.last_writer["x"] = "A"
 
         state.clear()
 
@@ -817,7 +661,6 @@ class TestClear:
         assert len(state.status) == 0
         assert len(state.reads) == 0
         assert len(state.writes) == 0
-        assert len(state.last_writer) == 0
 
 
 # =============================================================================
@@ -957,30 +800,15 @@ class TestIntegration:
         assert not state.is_clean("B")
         assert state.is_clean("C")  # B hasn't run yet, C not affected
 
-    def test_out_of_order_creates_contamination(self):
-        """Out-of-order execution creates contamination."""
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-
-        # Execute B first: writes x (and x changes, so B is the last_writer)
-        state.record_execution("B", make_tracking(writes={"x"}), changed_vars={"x"})
-        state.set_clean("B")
-
-        # Now A tries to read x - contamination (A is before B but B wrote x)
-        reasons = state.get_contamination_reasons("A", {"x"})
-        assert len(reasons) == 1
-        assert reasons.pop().type == ReasonType.NO_READ_BEFORE_WRITE
-
     def test_delete_cascade(self):
-        """Deleting a cell cascades orphan staleness."""
+        """Deleting a cell cascades staleness to downstream readers."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
 
         # A writes x, B reads x and writes y, C reads y
-        # Must pass changed_vars so last_writer is updated for orphan detection
-        state.record_execution("A", make_tracking(writes={"x"}), changed_vars={"x"})
+        state.record_execution("A", make_tracking(writes={"x"}))
         state.set_clean("A")
-        state.record_execution("B", make_tracking(reads={"x"}, writes={"y"}), changed_vars={"y"})
+        state.record_execution("B", make_tracking(reads={"x"}, writes={"y"}))
         state.set_clean("B")
         state.record_execution("C", make_tracking(reads={"y"}))
         state.set_clean("C")
@@ -988,7 +816,7 @@ class TestIntegration:
         # Delete B
         state.handle_delete("B")
 
-        # C is now orphaned (read y from deleted B)
+        # C reads y from deleted B -> ForwardStale
         assert not state.is_clean("C")
         reasons = state.get_reasons("C")
         assert any(r.type == ReasonType.FORWARD_STALE for r in reasons)

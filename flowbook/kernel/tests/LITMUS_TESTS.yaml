@@ -51,16 +51,14 @@ spec:
       Map of cell_id -> list of reason objects:
         - type: never_executed | code_changed | forward_stale |
                 write_conflict | no_read_before_write |
-                order_changed | skipped_upstream
+                order_changed
         - loc: variable/location involved (optional)
         - cell_id: cell that caused staleness (optional)
-        - expected_cell_id: for skipped_upstream (optional)
     stale_cells: "List of stale cell IDs in document order"
     newly_stale: "Cells marked stale by last structural operation"
     last_writer: "Map of location -> writer cell_id"
     cell_order: "Expected cell order after operations"
     violation: "Backward mutation {mutating_cell, affected_cell, variables, type}"
-    forward_violation: "Forward dependency violation (same structure)"
 
 # =============================================================================
 # RUN OPERATIONS - EXPLICIT FORM
@@ -285,7 +283,7 @@ tests:
   # The SKIPPED_UPSTREAM pattern: F→G→H in order, then re-run F (skipping G)
   # H was reading from G, but now x comes from F. H gets SKIPPED_UPSTREAM.
   - name: "run_skipped_upstream_explicit"
-    description: "Re-running earlier cell skipping intermediate marks reader as SKIPPED_UPSTREAM"
+    description: "Re-running earlier cell skipping intermediate marks reader as FORWARD_STALE"
     cell_order: ["f", "g", "h"]
     operations:
       # Initial execution in order: F→G→H
@@ -320,10 +318,9 @@ tests:
         h: stale
       reasons:
         h:
-          - type: skipped_upstream
+          - type: forward_stale
             loc: "x"
             cell_id: "f"
-            expected_cell_id: "g"
 
 # =============================================================================
 # RUN OPERATIONS - CODE FORM
@@ -555,9 +552,9 @@ tests:
   # -------------------------------------------------------------------------
   # RUN: Skipped upstream writer - SKIPPED_UPSTREAM (CODE)
   # -------------------------------------------------------------------------
-  # The SKIPPED_UPSTREAM pattern: F→G→H in order, then re-run F (skipping G)
+  # The skipped upstream pattern: F→G→H in order, then re-run F (skipping G)
   - name: "run_skipped_upstream_code"
-    description: "Re-running earlier cell skipping intermediate marks reader as SKIPPED_UPSTREAM (code-based)"
+    description: "Re-running earlier cell skipping intermediate marks reader as FORWARD_STALE (code-based)"
     cell_order: ["f", "g", "h"]
     cells:
       f: "x = 1"
@@ -592,10 +589,9 @@ tests:
         h: stale
       reasons:
         h:
-          - type: skipped_upstream
+          - type: forward_stale
             loc: "x"
             cell_id: "f"
-            expected_cell_id: "g"
 
 # =============================================================================
 # EDIT OPERATIONS - EXPLICIT FORM
@@ -1537,7 +1533,7 @@ tests:
   # Test case: a and b both write x, c reads x
   # Run order: a->c->b->c->a
   - name: "run_multi_writer_reader_code"
-    description: "Multiple writers with reader shows forward_stale and skipped_upstream (code-based)"
+    description: "Multiple writers with reader shows forward_stale (code-based)"
     cell_order: ["a", "b", "c"]
     cells:
       a: "x = 1"
@@ -1568,7 +1564,7 @@ tests:
         pre_namespace: {"x": 2}
         post_namespace: {"x": 2, "y": 2}
         code: "y = x"
-      # Run a: writes x=1, c reads from b but now x comes from a (skipped_upstream)
+      # Run a: writes x=1, c reads from b but now x comes from a (forward_stale)
       - type: RUN
         cell: "a"
         pre_namespace: {"x": 2, "y": 2}
@@ -1585,7 +1581,6 @@ tests:
             loc: "x"
             cell_id: "a"
         c:
-          - type: skipped_upstream
+          - type: forward_stale
             loc: "x"
             cell_id: "a"
-            expected_cell_id: "b"

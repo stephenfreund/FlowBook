@@ -14,7 +14,7 @@ import { ReproducibilityMetadataPanel } from './metadatapanel';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { CellIndexManager } from '../cellindex';
-import { IReproducibilityMetadata } from './types';
+import { IPredicateViolation } from './types';
 import { FlowbookToolbarExtension } from './toolbar';
 
 /**
@@ -22,7 +22,7 @@ import { FlowbookToolbarExtension } from './toolbar';
  *
  * The command is registered once, but its isEnabled check gates on:
  * 1. Current kernel is flowbook_kernel
- * 2. Active cell has cell_is_contaminated === true
+ * 2. Active cell has a no_read_before_write predicate violation in flowbook_violations
  *
  * The context menu item is defined declaratively in schema/plugin.json.
  */
@@ -49,10 +49,13 @@ function registerExecRestoreCommand(
         if (!activeCell || activeCell.model.type !== 'code') {
           return false;
         }
-        const meta = activeCell.model.getMetadata('flowbook') as
-          | IReproducibilityMetadata
+        const violations = activeCell.model.getMetadata('flowbook_violations') as
+          | IPredicateViolation[]
           | undefined;
-        return meta?.cell_is_contaminated === true;
+        return (
+          violations !== undefined &&
+          violations.some(v => v.predicate === 'no_read_before_write')
+        );
       } catch (e) {
         console.error('FlowBook exec-restore isEnabled error:', e);
         return false;

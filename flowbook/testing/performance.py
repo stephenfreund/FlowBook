@@ -432,7 +432,7 @@ def run_performance_test(
                 writes=list(tracking.writes),
                 changed_variables=sdc_result.changed_variables,
                 stale_cells=sdc_result.stale_cells,
-                has_violation=sdc_result.violation is not None,
+                has_violation=sdc_result.has_errors(),
             )
             results.append(clean_result)
 
@@ -508,7 +508,7 @@ def run_performance_test(
                 writes=list(tracking.writes),
                 changed_variables=sdc_result.changed_variables,
                 stale_cells=sdc_result.stale_cells,
-                has_violation=sdc_result.violation is not None,
+                has_violation=sdc_result.has_errors(),
             )
             results.append(modified_result)
 

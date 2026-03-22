@@ -18,7 +18,7 @@ from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 
 from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer
-from flowbook.kernel.models import ReproducibilityViolation
+from flowbook.kernel.models import ErrorType
 
 
 class TestReproducibilityEnforcerBaseline:
@@ -54,7 +54,7 @@ class TestReproducibilityEnforcerBaseline:
         )
 
         result_a = enforcer.check('cell_a', checkpoints.saved['_pre_cell_a'], ns_a, tracking_a)
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B modifies 'y' (not read by cell A)
         ns_b_pre = {'x': 10, 'y': 20}
@@ -67,7 +67,7 @@ class TestReproducibilityEnforcerBaseline:
         )
 
         result_b = enforcer.check('cell_b', checkpoints.saved['_pre_cell_b'], ns_b_post, tracking_b)
-        assert result_b.violation is None
+        assert not any(e.error_type == ErrorType.NO_WRITE_AFTER_READ for e in result_b.errors)
 
     def test_backward_mutation_detected(self):
         """Backward mutation detected when later cell modifies what earlier cell reads."""
@@ -85,7 +85,7 @@ class TestReproducibilityEnforcerBaseline:
         )
 
         result_a = enforcer.check('cell_a', checkpoints.saved['_pre_cell_a'], ns_a, tracking_a)
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B modifies 'x' (read by cell A)
         ns_b_pre = {'x': 10}
@@ -98,8 +98,8 @@ class TestReproducibilityEnforcerBaseline:
         )
 
         result_b = enforcer.check('cell_b', checkpoints.saved['_pre_cell_b'], ns_b_post, tracking_b)
-        assert result_b.violation is not None
-        assert 'x' in result_b.violation.variables
+        assert result_b.has_errors()
+        assert 'x' in result_b.errors[0].locations
 
 
 class TestSDCStructuralReadsModeOff:
@@ -128,7 +128,7 @@ class TestSDCStructuralReadsModeOff:
         result_a = enforcer.check(
             'cell_a', pre_a, ns_a, tracking_a,
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B adds column (would be violation with structural tracking)
         df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
@@ -146,7 +146,7 @@ class TestSDCStructuralReadsModeOff:
         )
 
         # OFF mode: no violation for structural changes
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
 
 class TestSDCStructuralReadsModeWarn:
@@ -174,7 +174,7 @@ class TestSDCStructuralReadsModeWarn:
 
         result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B adds column
         df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
@@ -190,7 +190,7 @@ class TestSDCStructuralReadsModeWarn:
         )
 
         # WARN mode: no violation but should have warnings
-        assert result_b.violation is None
+        assert not result_b.has_errors()
         assert hasattr(result_b, 'structural_warnings')
         assert len(result_b.structural_warnings) > 0
 
@@ -219,7 +219,7 @@ class TestSDCStructuralReadsModeEnforce:
 
         result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B adds column 'c'
         df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
@@ -235,8 +235,8 @@ class TestSDCStructuralReadsModeEnforce:
         )
 
         # ENFORCE mode: should be violation
-        assert result_b.violation is not None
-        assert 'df' in str(result_b.violation.variables)
+        assert result_b.has_errors()
+        assert 'df' in str(result_b.errors[0].locations)
 
     def test_enforce_shape_read_blocks_row_addition(self):
         """ENFORCE mode: adding row is backward mutation when shape was read."""
@@ -259,7 +259,7 @@ class TestSDCStructuralReadsModeEnforce:
 
         result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B adds row
         df_b = pd.DataFrame({'a': [1, 2, 3]})
@@ -274,7 +274,7 @@ class TestSDCStructuralReadsModeEnforce:
         )
 
         # ENFORCE mode: should be violation
-        assert result_b.violation is not None
+        assert result_b.has_errors()
 
     def test_enforce_len_read_blocks_row_addition(self):
         """ENFORCE mode: adding row is backward mutation when len() was called."""
@@ -297,7 +297,7 @@ class TestSDCStructuralReadsModeEnforce:
 
         result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B adds row
         df_b = pd.DataFrame({'a': [1, 2, 3]})
@@ -311,7 +311,7 @@ class TestSDCStructuralReadsModeEnforce:
         result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
-        assert result_b.violation is not None
+        assert result_b.has_errors()
 
     def test_enforce_iter_read_blocks_column_addition(self):
         """ENFORCE mode: adding column is backward mutation when `for col in df` was used."""
@@ -334,7 +334,7 @@ class TestSDCStructuralReadsModeEnforce:
 
         result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B adds column
         df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
@@ -349,7 +349,7 @@ class TestSDCStructuralReadsModeEnforce:
         result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
-        assert result_b.violation is not None
+        assert result_b.has_errors()
 
     def test_enforce_describe_read_blocks_column_addition(self):
         """ENFORCE mode: adding column is backward mutation when describe() was called."""
@@ -372,7 +372,7 @@ class TestSDCStructuralReadsModeEnforce:
 
         result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B adds column
         df_b = pd.DataFrame({'a': [1, 2], 'b': [3, 4], 'c': [5, 6]})
@@ -387,7 +387,7 @@ class TestSDCStructuralReadsModeEnforce:
         result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
-        assert result_b.violation is not None
+        assert result_b.has_errors()
 
 
 class TestSDCStructuralStaleness:
@@ -414,7 +414,7 @@ class TestSDCStructuralStaleness:
 
         result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B: reads df.columns
         ns_b = ns_a.copy()
@@ -430,7 +430,7 @@ class TestSDCStructuralStaleness:
         result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
             continue_on_violation=True,
         )
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
         # Cell C: adds column (later cell, so no backward mutation to B)
         df_c = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
@@ -524,7 +524,7 @@ class TestSDCStructuralNoFalsePositives:
 
         result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B modifies values but not structure
         df_b = pd.DataFrame({'a': [999], 'b': [888]})
@@ -632,7 +632,7 @@ class TestSDCStructuralMultipleVariables:
         )
 
         # Should NOT be violation (df1.columns was read, but df2 was modified)
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
 
 class TestSDCStructuralSeriesTracking:
@@ -671,7 +671,7 @@ class TestSDCStructuralSeriesTracking:
         result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
-        assert result_b.violation is not None
+        assert result_b.has_errors()
 
     def test_series_dtype_read_blocks_dtype_change(self):
         """Changing dtype is violation when s.dtype was read."""
@@ -706,7 +706,7 @@ class TestSDCStructuralSeriesTracking:
         result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
-        assert result_b.violation is not None
+        assert result_b.has_errors()
 
 
 class TestSDCMagicCommand:
@@ -770,4 +770,4 @@ class TestSDCStructuralNestedPaths:
         result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
         )
 
-        assert result_b.violation is not None
+        assert result_b.has_errors()

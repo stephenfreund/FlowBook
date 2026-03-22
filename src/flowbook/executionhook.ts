@@ -17,7 +17,6 @@ import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import {
   IReproducibilityMetadata,
   IFrontendStalenessReason,
-  IViolationInfo,
   IPredicateViolation
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
@@ -491,66 +490,10 @@ export class ReproducibilityExecutionHookManager {
     // Process staleness reasons and update manager
     this._processMetadataUpdate(panel, reproducibilityMetadata);
 
-    // Store or clear violation metadata on the executing cell (legacy format)
+    // Clear legacy violation metadata if no predicate violations
     const cellOrder = this._getCurrentCellOrder(panel);
-    const hasPredicateViolations = predicateViolations.length > 0;
-    if (reproducibilityMetadata.violation && !hasPredicateViolations) {
-      const v = reproducibilityMetadata.violation;
-      const mutIdx = cellOrder.indexOf(v.mutating_cell);
-      const affIdx = cellOrder.indexOf(v.affected_cell);
-      const mutRef = mutIdx >= 0 ? indexToAlpha(mutIdx) : v.mutating_cell;
-      const affRef = affIdx >= 0 ? indexToAlpha(affIdx) : v.affected_cell;
-      const violationInfo: IViolationInfo = {
-        type: v.violation_type || 'backward_mutation',
-        mutating_cell: v.mutating_cell,
-        affected_cell: v.affected_cell,
-        variables: v.variables,
-        message: `Cell ${mutRef} modified ${v.variables.map(vv => '`' + vv + '`').join(', ')} read by ${affRef}`,
-        structural_reads_detail: (v as any).structural_reads_detail,
-        changes_detail: (v as any).changes_detail
-      };
-      cell.model.setMetadata('flowbook_violation', violationInfo);
-    } else if (!hasPredicateViolations) {
+    if (predicateViolations.length === 0) {
       cell.model.deleteMetadata('flowbook_violation');
-    }
-
-    // If there's a writer_violation, store it on the writer cell (legacy format)
-    if (reproducibilityMetadata.writer_violation) {
-      const wv = reproducibilityMetadata.writer_violation;
-      const writerCell = this._findCell(panel, wv.mutating_cell);
-      if (writerCell) {
-        // Build IViolationInfo - same structure as for normal violations
-        const mutIdx = cellOrder.indexOf(wv.mutating_cell);
-        const affIdx = cellOrder.indexOf(wv.affected_cell);
-        const mutRef = mutIdx >= 0 ? indexToAlpha(mutIdx) : wv.mutating_cell;
-        const affRef = affIdx >= 0 ? indexToAlpha(affIdx) : wv.affected_cell;
-
-        const writerViolationInfo: IViolationInfo = {
-          type: wv.violation_type || 'backward_mutation',
-          mutating_cell: wv.mutating_cell,
-          affected_cell: wv.affected_cell,
-          variables: wv.variables,
-          message: `Cell ${mutRef} modified ${wv.variables.map(v => '`' + v + '`').join(', ')} read by ${affRef}`,
-          structural_reads_detail: (wv as any).structural_reads_detail,
-          changes_detail: (wv as any).changes_detail
-        };
-
-        // Store in metadata
-        writerCell.model.setMetadata('flowbook_violation', writerViolationInfo);
-
-        // Let cellhighlighter handle the rendering
-        const stalenessManager = this._highlighter.getStalenessManager(panel);
-        this._highlighter.updateCell(
-          writerCell,
-          stalenessManager,
-          cellOrder,
-          panel.context.path
-        );
-
-        console.log(
-          `ReproducibilityExecutionHook: Stored writer_violation on cell ${wv.mutating_cell}`
-        );
-      }
     }
 
     // Let cellhighlighter handle all cell rendering
@@ -722,29 +665,16 @@ export class ReproducibilityExecutionHookManager {
       type: string;
       loc?: string;
       cell_id?: string;
-      expected_cell_id?: string;
     },
     cellOrder: string[]
   ): IFrontendStalenessReason {
     const cellId = backendReason.cell_id;
-    const expectedCellId = backendReason.expected_cell_id;
     const loc = backendReason.loc;
 
     let causingRef = '';
     if (cellId) {
       const causingIdx = cellOrder.indexOf(cellId);
       causingRef = causingIdx >= 0 ? indexToAlpha(causingIdx) : cellId;
-    }
-
-    let expectedRef = '';
-    let expectedCellDeleted = false;
-    if (expectedCellId) {
-      const expectedIdx = cellOrder.indexOf(expectedCellId);
-      if (expectedIdx >= 0) {
-        expectedRef = indexToAlpha(expectedIdx);
-      } else {
-        expectedCellDeleted = true;
-      }
     }
 
     switch (backendReason.type) {
@@ -791,34 +721,6 @@ export class ReproducibilityExecutionHookManager {
           message: causingRef
             ? `Write overlap with ${causingRef}`
             : 'Write overlap detected'
-        };
-      case 'skipped_upstream':
-        // Re-running won't help - need to run the expected cell first
-        // If expected cell was deleted, say so clearly
-        if (expectedCellDeleted) {
-          return {
-            type: 'variable_modified',
-            causing_cell: cellId,
-            variables: loc ? [loc] : undefined,
-            message: loc
-              ? `\`${loc}\` is from a deleted cell`
-              : 'Source cell was deleted'
-          };
-        }
-        if (loc && expectedRef) {
-          return {
-            type: 'variable_modified',
-            causing_cell: cellId,
-            variables: [loc],
-            message: `Run ${expectedRef} first (\`${loc}\` is from wrong source)`
-          };
-        }
-        return {
-          type: 'variable_modified',
-          causing_cell: cellId,
-          message: expectedRef
-            ? `Run ${expectedRef} first`
-            : 'Upstream cell was skipped'
         };
       case 'backward_stale':
         if (loc && causingRef) {

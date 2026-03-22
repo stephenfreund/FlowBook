@@ -1411,27 +1411,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                 self._send_predicate_violation(err, accepted=True)
                             log(f"[Inst-Run] Cell {self._cell_id}: {len(sdc_result.errors)} violations accepted, cell stays CLEAN")
 
-                    # Handle violations (backward mutation and/or forward dependency)
-                    # Violations are informational - cell is marked STALE but execution continues
-                    has_backward = sdc_result and sdc_result.violation
-                    has_forward = sdc_result and sdc_result.forward_violation
-
-                    # Log violations as warnings (informational, not blocking)
-                    if has_backward:
-                        # Handle truncation issues
-                        if sdc_result.violation.truncation_details:
-                            error(
-                                f"Reproducibility truncation: {sdc_result.violation.message}"
-                            )
-                            self._send_truncation_details(
-                                sdc_result.violation.truncation_details
-                            )
-                        # Log the backward mutation (cell is already marked stale by enforcer)
-                        log(f"[Inst-Run] Cell {self._cell_id}: backward mutation detected, marked stale")
-
-                    if has_forward:
-                        # Log the forward contamination (cell is already marked stale by enforcer)
-                        log(f"[Inst-Run] Cell {self._cell_id}: forward contamination detected, marked stale")
+                    # Log any truncation details from errors
+                    if sdc_result and sdc_result.errors:
+                        for err in sdc_result.errors:
+                            if err.detail and err.detail.get("truncation_details"):
+                                error(f"Reproducibility truncation: {err.message}")
+                                self._send_truncation_details(err.detail["truncation_details"])
 
                     # Display results (no longer skip on violations since we don't reject)
                     skip_display = False
@@ -1766,15 +1751,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             writes=tracking_json["writes"],  # Variable writes only
             changed_variables=sdc_result.changed_variables if sdc_result else [],
             stale_cells=sdc_result.stale_cells if sdc_result else [],
-            violation=(
-                sdc_result.violation.to_dict()
-                if (sdc_result and sdc_result.violation)
-                else (
-                    sdc_result.forward_violation.to_dict()
-                    if (sdc_result and sdc_result.forward_violation)
-                    else None
-                )
-            ),
             cell_order=self._enforcer.cell_order,
             column_reads=tracking_json["column_reads"],
             column_writes=tracking_json["column_writes"],
@@ -1787,12 +1763,8 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             code_duration_ms=code_duration_ms,
             state_duration_ms=state_duration_ms,
             check_duration_ms=check_duration_ms,
-            writer_violation=(
-                sdc_result.writer_violation.to_dict()
-                if (sdc_result and sdc_result.writer_violation)
-                else None
-            ),
             staleness_reasons=sdc_result.staleness_reasons if sdc_result else {},
+            errors=[e.to_dict() for e in sdc_result.errors] if sdc_result else [],
         )
 
         # Log and display structural warnings
@@ -1856,7 +1828,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             stale_refs.append(cell_id)  # Fallback to ID if not in order
                 parts.append(f"Stale: {','.join(stale_refs)}")
 
-        icon = "✓" if not (sdc_result and sdc_result.violation) else "✗"
+        icon = "✓" if not (sdc_result and sdc_result.has_errors()) else "✗"
 
         self._display.display_icon_and_text(
             icon,

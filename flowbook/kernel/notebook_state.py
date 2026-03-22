@@ -2,14 +2,13 @@
 Notebook state for reproducibility tracking.
 
 This module implements the core state model for tracking notebook reproducibility:
-    S = ⟨C, O, Σ, T, R, W, L⟩
+    S = ⟨C, O, Σ, T, R, W⟩
 
 Where:
     C, O, Σ: Managed elsewhere (notebook content, outputs, kernel namespace)
     T: Cell → Status (managed here)
     R: Cell → P(Loc) - reads per cell (managed here)
     W: Cell → P(Loc) - writes per cell (managed here)
-    L: Loc → Cell - last writer map (managed here)
 
 This module also stores per-cell TrackingData for:
     - Column-level reads/writes for DataFrames
@@ -40,16 +39,14 @@ class NotebookState:
     This class maintains the state needed to track cell staleness and detect
     reproducibility issues. It implements the formal model transitions:
     - EDIT: Mark cell stale with CodeChanged reason
-    - EXEC: Record reads/writes, update last_writer, propagate staleness
+    - EXEC: Record reads/writes, propagate staleness
     - INSERT/DELETE/MOVE: Handle structural changes
 
     Attributes:
-        # Formal model state (T, R, W, L)
+        # Formal model state (T, R, W)
         status: Map from cell ID to CellStatus (T in formal model)
         reads: Map from cell ID to set of locations read (R in formal model)
         writes: Map from cell ID to set of locations written (W in formal model)
-        last_writer: Map from location to cell that last wrote it (L in formal model)
-        column_last_writer: Map from (var, col) to cell that last wrote it
         cell_order: List of cell IDs in document order
 
         # Per-cell tracking data
@@ -59,12 +56,10 @@ class NotebookState:
         typed_changes: Cached typed Change objects for fast forward dependency checks
     """
 
-    # Formal model state (T, R, W, L)
+    # Formal model state (T, R, W)
     status: Dict[str, CellStatus] = field(default_factory=dict)
     reads: Dict[str, Set[str]] = field(default_factory=dict)
     writes: Dict[str, Set[str]] = field(default_factory=dict)
-    last_writer: Dict[str, str] = field(default_factory=dict)
-    column_last_writer: Dict[str, Dict[str, str]] = field(default_factory=dict)  # var -> col -> cell_id
     cell_order: List[str] = field(default_factory=list)
 
     # Per-cell tracking data
@@ -136,7 +131,6 @@ class NotebookState:
         """
         # Priority order: lower = higher priority (shown first)
         priority = {
-            ReasonType.SKIPPED_UPSTREAM: 0,  # Most actionable: run the expected cell first
             ReasonType.FORWARD_STALE: 1,
             ReasonType.CODE_CHANGED: 2,
             ReasonType.BACKWARD_STALE: 3,
@@ -184,47 +178,6 @@ class NotebookState:
 
         return result
 
-    def is_runnable(self, cell_id: str) -> bool:
-        """
-        Runnable(L, W, R, i) ≡ ∀x ∈ Rᵢ. L(x) = lastWriter(W, i, x)
-
-        A cell is runnable iff every location it reads has the expected provenance:
-        the actual last writer equals the expected last writer based on document order.
-        """
-        cell_reads = self.reads.get(cell_id, set())
-        for loc in cell_reads:
-            actual = self.last_writer.get(loc)
-            expected = self.last_writer_for(loc, cell_id)
-            if actual != expected:
-                return False
-        return True
-
-    def get_contamination_reasons(self, cell_id: str, new_reads: Set[str]) -> Set[Reason]:
-        """
-        Check if cell reads from later cells (contamination).
-
-        Returns set of ReadsFromLater reasons for each location where
-        the actual writer is positioned after this cell in document order.
-        """
-        if cell_id not in self.cell_order:
-            return set()
-
-        cell_pos = self.cell_order.index(cell_id)
-        reasons: Set[Reason] = set()
-
-        for loc in new_reads:
-            writer = self.last_writer.get(loc)
-            if writer and writer in self.cell_order:
-                writer_pos = self.cell_order.index(writer)
-                if writer_pos > cell_pos:
-                    reasons.add(Reason(
-                        ReasonType.NO_READ_BEFORE_WRITE,
-                        loc=loc,
-                        cell_id=writer
-                    ))
-
-        return reasons
-
     # =========================================================================
     # Transitions
     # =========================================================================
@@ -233,14 +186,12 @@ class NotebookState:
         self,
         cell_id: str,
         tracking: TrackingData,
-        changed_vars: Optional[Set[str]] = None,
-        column_changed: Optional[Dict[str, Set[str]]] = None,
         execution_seq: Optional[int] = None,
         structural_reads_values: Optional[Dict[str, Dict[str, str]]] = None,
         typed_changes: Optional[List["Change"]] = None,
     ) -> None:
         """
-        Record cell execution: update R, W, L, column_last_writer, and tracking data.
+        Record cell execution: update R, W, and tracking data.
 
         Called after successful execution (not on rollback).
         This corresponds to the "commit" phase of EXEC.
@@ -248,8 +199,6 @@ class NotebookState:
         Args:
             cell_id: The cell that executed
             tracking: TrackingData from cell execution (contains reads, writes, columns, etc.)
-            changed_vars: Variables that actually CHANGED (from diff, for L tracking)
-            column_changed: Columns that changed {var: {col1, col2, ...}}
             execution_seq: Execution sequence number
             structural_reads_values: Captured structural values for error messages
             typed_changes: Cached typed changes for fast forward dependency checks
@@ -259,29 +208,7 @@ class NotebookState:
 
         # Core R, W tracking (derived from TrackingData)
         self.reads[cell_id] = tracking.get_rbw_vars()
-        new_writes = tracking.get_written_variables()
-        self.writes[cell_id] = new_writes
-
-        # Clear stale last_writer entries: if this cell was the last writer
-        # for a variable it NO LONGER writes, clear that entry.
-        # This handles the case where a cell is edited to write different variables.
-        for loc in list(self.last_writer.keys()):
-            if self.last_writer[loc] == cell_id and loc not in new_writes:
-                del self.last_writer[loc]
-
-        # Update L: only for variables that CHANGED (diff-based, not all writes)
-        # This prevents false forward contamination when a cell writes but doesn't change
-        if changed_vars:
-            for loc in changed_vars:
-                self.last_writer[loc] = cell_id
-
-        # Update column-level provenance (only for changed columns)
-        if column_changed:
-            for var, cols in column_changed.items():
-                if var not in self.column_last_writer:
-                    self.column_last_writer[var] = {}
-                for col in cols:
-                    self.column_last_writer[var][col] = cell_id
+        self.writes[cell_id] = tracking.get_written_variables()
 
         # Additional per-cell metadata (not in TrackingData)
         if execution_seq is not None:
@@ -304,14 +231,6 @@ class NotebookState:
         Returns:
             CellStateSnapshot containing all state that will be modified
         """
-        # Capture full last_writer dict (will be replaced on restore)
-        last_writer_entries = dict(self.last_writer)
-
-        # Capture full column_last_writer dict (deep copy)
-        column_entries: Dict[str, Dict[str, str]] = {}
-        for var, cols in self.column_last_writer.items():
-            column_entries[var] = dict(cols)
-
         return CellStateSnapshot(
             cell_id=cell_id,
             reads=self.reads.get(cell_id),
@@ -321,8 +240,6 @@ class NotebookState:
             execution_seq=self.execution_seq.get(cell_id),
             structural_reads_values=self.structural_reads_values.get(cell_id),
             typed_changes=self.typed_changes.get(cell_id),
-            last_writer_entries=last_writer_entries,
-            column_last_writer_entries=column_entries,
         )
 
     def restore_cell_state(self, snapshot: CellStateSnapshot) -> None:
@@ -372,19 +289,6 @@ class NotebookState:
             self.typed_changes.pop(cell_id, None)
         else:
             self.typed_changes[cell_id] = snapshot.typed_changes
-
-        # Restore last_writer to pre-execution state
-        self.last_writer.clear()
-        self.last_writer.update(snapshot.last_writer_entries)
-
-        # Restore column_last_writer to pre-execution state
-        self.column_last_writer.clear()
-        for var, cols in snapshot.column_last_writer_entries.items():
-            self.column_last_writer[var] = dict(cols)
-
-    def get_column_writer(self, var: str, col: str) -> Optional[str]:
-        """Get the cell_id that last wrote column col of var, or None."""
-        return self.column_last_writer.get(var, {}).get(col)
 
     # =========================================================================
     # Per-Cell Tracking Data Access
@@ -574,10 +478,8 @@ class NotebookState:
         self.reads[cell_id] = set()
         self.writes[cell_id] = set()
 
-        # Check Runnable for cells after insertion point
-        for later_cell in self.cell_order[position + 1:]:
-            if self.is_clean(later_cell) and not self.is_runnable(later_cell):
-                self.add_reason(later_cell, Reason(ReasonType.ORDER_CHANGED))
+        # Cells after insertion point may be affected by order change
+        # but without provenance tracking we cannot check Runnable here.
 
     def handle_move(self, cell_id: str, new_position: int) -> None:
         """
@@ -604,13 +506,8 @@ class NotebookState:
         # Insert at new position
         self.cell_order.insert(new_position, cell_id)
 
-        # Check Runnable for affected range
-        lo = min(old_position, new_position)
-        hi = max(old_position, new_position) + 1
-
-        for affected_cell in self.cell_order[lo:hi]:
-            if self.is_clean(affected_cell) and not self.is_runnable(affected_cell):
-                self.add_reason(affected_cell, Reason(ReasonType.ORDER_CHANGED))
+        # Cells in affected range may be affected by order change
+        # but without provenance tracking we cannot check Runnable here.
 
     def set_cell_order(self, new_order: List[str]) -> List[str]:
         """
@@ -649,12 +546,8 @@ class NotebookState:
         # Update order
         self.cell_order = list(new_order)
 
-        # Check Runnable for all cells - but only add ORDER_CHANGED if order actually changed
-        # This prevents spurious ORDER_CHANGED when cells are just stale due to value changes
-        if order_changed:
-            for cell_id in self.cell_order:
-                if self.is_clean(cell_id) and not self.is_runnable(cell_id):
-                    self.add_reason(cell_id, Reason(ReasonType.ORDER_CHANGED))
+        # Note: without provenance tracking, we cannot check Runnable here.
+        # ORDER_CHANGED detection now relies on structural changes only.
 
         # Return newly stale cells
         currently_stale = set(self.get_stale_cells())
@@ -666,8 +559,6 @@ class NotebookState:
         self.status.clear()
         self.reads.clear()
         self.writes.clear()
-        self.last_writer.clear()
-        self.column_last_writer.clear()
         self.cell_order.clear()
         # Per-cell tracking data
         self.tracking_data.clear()
@@ -686,7 +577,6 @@ class NotebookState:
             "status": {k: v.to_dict() for k, v in self.status.items()},
             "reads": {k: sorted(v) for k, v in self.reads.items()},
             "writes": {k: sorted(v) for k, v in self.writes.items()},
-            "last_writer": dict(self.last_writer),
         }
 
     def __str__(self) -> str:
@@ -696,5 +586,4 @@ class NotebookState:
         for cell_id in self.cell_order:
             status = self.get_status(cell_id)
             lines.append(f"    {cell_id}: {status}")
-        lines.append(f"  last_writer: {self.last_writer}")
         return "\n".join(lines)

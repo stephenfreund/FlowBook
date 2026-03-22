@@ -218,12 +218,12 @@ plt.ioff()
                 "writes": list(tracking.writes),
                 "changed": sdc_result.changed_variables,
                 "stale": sdc_result.stale_cells,
-                "violation": sdc_result.violation is not None,
+                "violation": sdc_result.has_errors(),
                 "error": error,
             },
         )
 
-        status = "ERROR" if error else ("VIOLATION" if sdc_result.violation else "OK")
+        status = "ERROR" if error else ("VIOLATION" if sdc_result.has_errors() else "OK")
         log(f"[{status}] {cell.cell_id}: {total_time:.2f}ms")
 
         return record

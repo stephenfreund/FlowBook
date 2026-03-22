@@ -81,7 +81,6 @@ const ReproducibilityMetadataDisplay: React.FC<
     );
   }
 
-  const hasViolation = metadata.violation !== null;
   const hasStale = metadata.stale_cells.length > 0;
 
   return (
@@ -346,62 +345,6 @@ const ReproducibilityMetadataDisplay: React.FC<
           </>
         )}
 
-      {/* Violation */}
-      {hasViolation && metadata.violation && (
-        <>
-          <div className="flowbook-metadata-divider" />
-          <div
-            className={`flowbook-metadata-section ${
-              metadata.violation.violation_type === 'forward_dependency'
-                ? 'flowbook-forward-dep-section'
-                : 'flowbook-violation-section'
-            }`}
-          >
-            <div
-              className={
-                metadata.violation.violation_type === 'forward_dependency'
-                  ? 'flowbook-forward-dep-header'
-                  : 'flowbook-violation-header'
-              }
-            >
-              {metadata.violation.violation_type === 'forward_dependency'
-                ? 'Forward Dependency'
-                : 'Reproducibility Violation'}
-            </div>
-            <div className="flowbook-violation-content">
-              <p>{metadata.violation.message}</p>
-              <div className="flowbook-violation-details">
-                <strong>
-                  {metadata.violation.violation_type === 'forward_dependency'
-                    ? 'Writing Cell:'
-                    : 'Mutating Cell:'}
-                </strong>{' '}
-                <code>
-                  {cellIdToReference(
-                    metadata.violation.mutating_cell,
-                    currentCellOrder
-                  )}
-                </code>
-                <br />
-                <strong>
-                  {metadata.violation.violation_type === 'forward_dependency'
-                    ? 'Reading Cell:'
-                    : 'Affected Cell:'}
-                </strong>{' '}
-                <code>
-                  {cellIdToReference(
-                    metadata.violation.affected_cell,
-                    currentCellOrder
-                  )}
-                </code>
-                <br />
-                <strong>Variables:</strong>{' '}
-                {metadata.violation.variables.join(', ')}
-              </div>
-            </div>
-          </div>
-        </>
-      )}
     </div>
   );
 };

@@ -67,7 +67,7 @@ class TestAliasingAndReferenceSharing:
             reads={"y"},
             writes={"result"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # POST-STATE: x and y still aliases, but list is mutated
         shared_post = [1, 2, 3, 4]  # Mutated
@@ -85,7 +85,7 @@ class TestAliasingAndReferenceSharing:
 
         # Deep alias expansion: writing x should expand to include y
         # Since y changed and cell A read y → backward conflict or A stale
-        assert result_b.violation is not None or "a" in result_b.stale_cells
+        assert result_b.has_errors() or "a" in result_b.stale_cells
 
     def test_nested_sharing_dict_values(self, sdc_helper_with_order):
         """
@@ -113,7 +113,7 @@ class TestAliasingAndReferenceSharing:
             reads={"a"},
             writes={"result"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # POST-STATE: inner object has changed value
         inner_post = {"value": 999}
@@ -134,7 +134,7 @@ class TestAliasingAndReferenceSharing:
 
         # Deep alias expansion: a and b share inner, so a also changed
         # Cell A read a → backward conflict or A stale
-        assert result_b.violation is not None or "a" in result_b.stale_cells
+        assert result_b.has_errors() or "a" in result_b.stale_cells
 
     def test_dataframe_column_sharing(self, sdc_helper_with_order):
         """
@@ -160,7 +160,7 @@ class TestAliasingAndReferenceSharing:
             writes={"mean"},
             column_reads={"df1": {"col"}},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # For cell B: PRE-checkpoint has df1 and df2 as ALIASES (same object)
         # This simulates: df2 = df1 (creating alias before B runs)
@@ -184,7 +184,7 @@ class TestAliasingAndReferenceSharing:
         # Since df1 and df2 are aliases in pre-checkpoint, expanding df2
         # should include df1. Since df1 changed and A read df1 → conflict
         has_conflict = (
-            result_b.violation is not None or
+            result_b.has_errors() or
             "a" in result_b.stale_cells
         )
         assert has_conflict, "Aliased DataFrame modification should be detected"
@@ -250,7 +250,7 @@ class TestRBWOverApproximation:
             reads={"x"},
             writes={"sum"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B: in-place numpy op that "writes then reads" x
         # The trace might show x in RBW even though B wrote to it first
@@ -269,7 +269,7 @@ class TestRBWOverApproximation:
 
         # Cell B modifies x, which A read → backward conflict or A becomes stale
         # The over-approximation of B reading x is safe (doesn't miss conflicts)
-        assert result_b.violation is not None or "a" in result_b.stale_cells
+        assert result_b.has_errors() or "a" in result_b.stale_cells
 
     def test_over_approximation_causes_conservative_staleness(self, sdc_helper_with_order):
         """
@@ -291,7 +291,7 @@ class TestRBWOverApproximation:
             reads=set(),
             writes={"x"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B: over-approximate by including x in reads
         # (simulates untraced write before read scenario)
@@ -302,7 +302,7 @@ class TestRBWOverApproximation:
             reads={"x"},  # Over-approximation
             writes={"y"},
         )
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
         # Re-run Cell A with different output
         result_a2 = helper.execute_cell(
@@ -352,7 +352,7 @@ class TestReferenceTracking:
             reads={"arr"},  # Reference read covers internal numpy reads
             writes={"total"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B modifies arr
         arr_modified = np.array([10, 20, 30, 40, 50])
@@ -365,7 +365,7 @@ class TestReferenceTracking:
         )
 
         # Cell A should be stale (reference tracking covered numpy's internal reads)
-        assert result_b.violation is not None or "a" in result_b.stale_cells
+        assert result_b.has_errors() or "a" in result_b.stale_cells
 
     def test_nested_object_reference_covers_deep_reads(self, sdc_helper_with_order):
         """
@@ -397,7 +397,7 @@ class TestReferenceTracking:
             reads={"container"},  # Reference read covers nested
             writes={"sum"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B modifies deeply nested value
         container_modified = deepcopy(container)
@@ -412,7 +412,7 @@ class TestReferenceTracking:
         )
 
         # Cell A should be stale (reference tracking)
-        assert result_b.violation is not None or "a" in result_b.stale_cells
+        assert result_b.has_errors() or "a" in result_b.stale_cells
 
     def test_pandas_dataframe_reference_covers_column_reads(self, sdc_helper_with_order):
         """
@@ -438,7 +438,7 @@ class TestReferenceTracking:
             writes={"mean_a"},
             column_reads={"df": {"a"}},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B modifies column 'a'
         df_modified = df.copy()
@@ -454,7 +454,7 @@ class TestReferenceTracking:
         )
 
         # Cell A should be stale
-        assert result_b.violation is not None or "a" in result_b.stale_cells
+        assert result_b.has_errors() or "a" in result_b.stale_cells
 
 
 # =============================================================================
@@ -487,7 +487,7 @@ class TestCheckpointDerivedDelta:
             reads={"x"},
             writes={"result"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B: reads x (to pass to C extension), which mutates x internally
         # Trace shows x in reads (reference read), but NOT in writes
@@ -501,7 +501,7 @@ class TestCheckpointDerivedDelta:
 
         # Checkpoint diff should detect x changed (even without writes={"x"})
         # This triggers backward conflict since A read x
-        assert result_b.violation is not None or "a" in result_b.stale_cells
+        assert result_b.has_errors() or "a" in result_b.stale_cells
 
     def test_trace_ws_not_used_for_conflict_detection(self, sdc_helper_with_order):
         """
@@ -520,7 +520,7 @@ class TestCheckpointDerivedDelta:
             reads={"y"},
             writes={"doubled"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B: reads y, but mutation happens through untraced path
         result_b = helper.execute_cell(
@@ -533,7 +533,7 @@ class TestCheckpointDerivedDelta:
 
         # Checkpoint-based Δ should catch the change to y
         checkpoint_detected_change = (
-            result_b.violation is not None or
+            result_b.has_errors() or
             "a" in result_b.stale_cells
         )
         assert checkpoint_detected_change, (
@@ -578,7 +578,7 @@ class TestSoundnessEdgeCases:
             reads={"a"},
             writes={"val"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B modifies via 'c' (direct reference to inner)
         modified = deepcopy(namespace)
@@ -596,7 +596,7 @@ class TestSoundnessEdgeCases:
         )
 
         # Should detect conflict/staleness on 'a'
-        assert result_b.violation is not None or "a" in result_b.stale_cells
+        assert result_b.has_errors() or "a" in result_b.stale_cells
 
     def test_no_false_negatives_with_simple_mutation(self, sdc_helper_with_order):
         """
@@ -614,7 +614,7 @@ class TestSoundnessEdgeCases:
             reads={"x"},
             writes={"y"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B modifies x (obvious backward mutation)
         result_b = helper.execute_cell(
@@ -626,5 +626,5 @@ class TestSoundnessEdgeCases:
         )
 
         # Must detect this - no false negatives
-        detected = result_b.violation is not None or "a" in result_b.stale_cells
+        detected = result_b.has_errors() or "a" in result_b.stale_cells
         assert detected, "Simple backward mutation must always be detected"

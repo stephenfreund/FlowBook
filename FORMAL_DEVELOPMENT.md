@@ -370,8 +370,8 @@ Validity predicates are implemented inline within `check()`, following the [Inst
 | main.tex | FORMAL_DEVELOPMENT.md | Code |
 |----------|----------------------|------|
 | ForwardStale(R, W, i, j) | §3.3 | `_compute_forward_staleness()` in `check()`, `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
-| BackwardStale(W, W', i, j) | §3.3 | Computed via `NotebookState.last_writer` in `check()`, `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
-| LastWriter(W, i, y) | §1.4.2 | `NotebookState.last_writer[loc]` in `kernel/notebook_state.py` |
+| BackwardStale(W, W', i, j) | §3.3 | Computed via `NotebookState.last_writer_for()` in `_compute_backward_staleness()`, `handle_delete()` in `kernel/notebook_state.py` |
+| LastWriter(W, i, y) | §1.4.2 | `NotebookState.last_writer_for(loc, cell_id)` in `kernel/notebook_state.py` — pure computation over W |
 | Overwritten(W, i) | §1.4.1 | Computed on-demand in staleness checks |
 
 ### 7.4 Transition Rules
@@ -397,7 +397,7 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 | RecoverableMutation check | STEP 2: `_check_unrecoverable_mutation()` |
 | `T'ᵢ = CLEAN` | STEP 4: `set_clean(cell_id)` |
 | ForwardStale loop | STEP 5: `_compute_forward_staleness()` |
-| BackwardStale loop | STEP 5: LastWriter tracking via `NotebookState.last_writer` |
+| BackwardStale loop | STEP 5: LastWriter computed via `NotebookState.last_writer_for()` |
 
 ### 7.5 Invariant and Checks
 
@@ -597,7 +597,7 @@ x's value (from some prior state) hasn't changed.
 
 - Computes `read_overlap = W_i_union & cell_reads`
 - Computes `write_overlap = W_i_union & cell_writes`
-- Read overlaps → `FORWARD_STALE` or `SKIPPED_UPSTREAM`
+- Read overlaps → `FORWARD_STALE`
 - Write-only overlaps → `WRITE_OVERLAP`
 
 ### 11.5 Implementation Map

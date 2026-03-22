@@ -541,19 +541,6 @@ class TestDeleteNotebookState:
         assert state.is_clean("B")
         assert state.is_clean("C")
 
-    def test_handle_delete_preserves_last_writer(self):
-        """Deleting a cell keeps last_writer entries for orphan detection."""
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-        state.writes["A"] = {"x"}
-        state.last_writer["x"] = "A"
-        state.status["B"] = CellStatus.clean()
-
-        state.handle_delete("A")
-
-        # last_writer intentionally NOT cleared for orphan detection
-        assert state.last_writer.get("x") == "A"
-
     def test_handle_delete_multiple_readers(self):
         """Multiple downstream readers all get marked stale."""
         state = NotebookState()

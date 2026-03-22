@@ -71,7 +71,7 @@ class TestConflictLoopSkipOptimization:
             reads={"x"},
             writes={"result_a"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B writes y (different from x) - no conflict possible
         result_b = self.helper.execute_cell(
@@ -81,7 +81,7 @@ class TestConflictLoopSkipOptimization:
             reads=set(),
             writes={"y"},
         )
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
     def test_skip_when_no_prior_cells(self):
         """Optimization should handle case when there are no prior cells."""
@@ -93,7 +93,7 @@ class TestConflictLoopSkipOptimization:
             reads=set(),
             writes={"x"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
     def test_skip_when_prior_cells_have_no_reads(self):
         """Optimization should skip when prior cells didn't read anything."""
@@ -105,7 +105,7 @@ class TestConflictLoopSkipOptimization:
             reads=set(),
             writes={"x"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B modifies x - but A didn't read it, so no conflict
         result_b = self.helper.execute_cell(
@@ -115,7 +115,7 @@ class TestConflictLoopSkipOptimization:
             reads=set(),
             writes={"x"},
         )
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
     def test_detect_conflict_when_overlap_exists(self):
         """Optimization should NOT skip when there's variable overlap."""
@@ -127,7 +127,7 @@ class TestConflictLoopSkipOptimization:
             reads={"x"},
             writes={"y"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B modifies x (which A read) - should detect conflict
         result_b = self.helper.execute_cell(
@@ -137,9 +137,9 @@ class TestConflictLoopSkipOptimization:
             reads=set(),
             writes={"x"},
         )
-        assert result_b.violation is not None
-        assert result_b.violation.mutating_cell == "b"
-        assert result_b.violation.affected_cell == "a"
+        assert result_b.has_errors()
+        assert result_b.errors[0].cell_id == "b"
+        assert result_b.errors[0].causer_cell == "a"
 
     def test_multiple_prior_cells_no_overlap(self):
         """Optimization with multiple prior cells, none overlapping."""
@@ -169,7 +169,7 @@ class TestConflictLoopSkipOptimization:
             reads=set(),
             writes={"z"},
         )
-        assert result_c.violation is None
+        assert not result_c.has_errors()
 
     def test_multiple_prior_cells_with_overlap(self):
         """Optimization with multiple prior cells, one overlapping."""
@@ -199,8 +199,8 @@ class TestConflictLoopSkipOptimization:
             reads=set(),
             writes={"x"},
         )
-        assert result_c.violation is not None
-        assert result_c.violation.affected_cell == "a"
+        assert result_c.has_errors()
+        assert result_c.errors[0].causer_cell == "a"
 
     def test_optimization_preserves_typed_changes(self):
         """Optimization should still return typed_changes for forward dep caching."""
@@ -212,7 +212,7 @@ class TestConflictLoopSkipOptimization:
             reads=set(),
             writes={"x"},
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
         # The record should have typed_changes cached
         assert self.helper.sdc._notebook_state.has_record("a")
         # typed_changes should contain the creation of x
@@ -279,7 +279,7 @@ class TestConflictLoopSkipWithDataFrames:
         # Note: Conflict loop skip is at variable level, so it won't skip here
         # because "df" overlaps. But the conflict resolver handles column-level.
         # This test verifies the full path works correctly.
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
     def test_detect_conflict_same_column(self):
         """Detect conflict when writing same column as read."""
@@ -306,7 +306,7 @@ class TestConflictLoopSkipWithDataFrames:
             writes={"df"},
             column_writes={"df": {"x"}},
         )
-        assert result_b.violation is not None
+        assert result_b.has_errors()
 
 
 class TestOptimizationConsistency:
@@ -348,7 +348,7 @@ class TestOptimizationConsistency:
     def test_no_violation_case_consistent(self):
         """No-violation case produces consistent results."""
         result = self._run_scenario_with_flag(True)
-        assert result.violation is None
+        assert not result.has_errors()
 
     def test_violation_detection_not_affected(self):
         """Violations are still detected correctly with optimization."""
@@ -373,8 +373,8 @@ class TestOptimizationConsistency:
             writes={"x"},
         )
 
-        assert result_b.violation is not None
-        assert "x" in result_b.violation.variables
+        assert result_b.has_errors()
+        assert "x" in result_b.errors[0].locations
 
 
 class TestEdgeCases:
@@ -394,7 +394,7 @@ class TestEdgeCases:
             reads=set(),
             writes=set(),
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
     def test_many_prior_cells_no_overlap(self):
         """Performance case: many prior cells but no overlap."""
@@ -420,10 +420,14 @@ class TestEdgeCases:
             reads=set(),
             writes={"new_var"},
         )
-        assert result_e.violation is None
+        assert not result_e.has_errors()
 
     def test_cell_reads_and_writes_same_variable(self):
-        """Cell that reads and writes the same variable."""
+        """Cell that reads and writes the same variable.
+
+        A reads and writes x, which triggers NoReadAndWrite, but no backward mutation.
+        """
+        from flowbook.kernel.models import ErrorType
         # Cell A reads x and writes x (transforms it)
         result_a = self.helper.execute_cell(
             "a",
@@ -432,7 +436,8 @@ class TestEdgeCases:
             reads={"x"},
             writes={"x"},
         )
-        assert result_a.violation is None
+        # NoReadAndWrite fires (reads and writes x), but no backward mutation
+        assert not any(e.error_type == ErrorType.NO_WRITE_AFTER_READ for e in result_a.errors)
 
         # Cell B also reads x - but this is fine, A's transformation is visible
         result_b = self.helper.execute_cell(
@@ -442,7 +447,7 @@ class TestEdgeCases:
             reads={"x"},
             writes={"y"},
         )
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
     def test_overlapping_variable_names_partial_match(self):
         """Variables with similar names don't cause false positives."""
@@ -463,7 +468,7 @@ class TestEdgeCases:
             reads=set(),
             writes={"data_copy"},
         )
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
         # Cell C writes "data" (exact match - should conflict)
         result_c = self.helper.execute_cell(
@@ -473,5 +478,5 @@ class TestEdgeCases:
             reads=set(),
             writes={"data"},
         )
-        assert result_c.violation is not None
-        assert result_c.violation.affected_cell == "a"
+        assert result_c.has_errors()
+        assert result_c.errors[0].causer_cell == "a"

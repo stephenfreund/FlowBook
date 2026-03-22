@@ -131,7 +131,7 @@ def sdc_helper():
                 "a", pre_namespace={}, post_namespace={"x": 1},
                 writes={"x"}
             )
-            assert result.violation is None
+            assert not result.has_errors()
     """
     return ReproducibilityTestHelper()
 

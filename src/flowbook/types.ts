@@ -2,17 +2,6 @@
  * Type definitions for FlowBook kernel extension (reproducibility)
  */
 
-export interface IReproducibilityViolation {
-  mutating_cell: string;
-  affected_cell: string;
-  variables: string[];
-  message: string;
-  violation_type?:
-    | 'backward_mutation'
-    | 'forward_dependency'
-    | 'deleted_cell_dependency';
-}
-
 export interface IReproducibilityMetadata {
   cell_id: string;
   execution_seq: number;
@@ -20,7 +9,6 @@ export interface IReproducibilityMetadata {
   writes: string[];
   changed_variables: string[];
   stale_cells: string[];
-  violation: IReproducibilityViolation | null;
   cell_order: string[];
   column_reads?: { [key: string]: string[] };
   column_writes?: { [key: string]: string[] };
@@ -35,18 +23,12 @@ export interface IReproducibilityMetadata {
   code_duration_ms?: number; // Time for _ipython_do_execute (user code)
   state_duration_ms?: number;
   check_duration_ms?: number;
-  // Writer violation: backward_mutation violation to store on writer cell (for forward contamination)
-  writer_violation?: IReproducibilityViolation;
   // Staleness reasons per cell: { cell_id: [reason, ...] }
   staleness_reasons?: { [cell_id: string]: IBackendStalenessReason[] };
-  // Whether this cell is contaminated (reads from later cell)
-  cell_is_contaminated?: boolean;
   // Proposed fix for violations
   proposed_fix?: IProposedFix;
   // Unified predicate violation (new format)
   predicate_violation?: IPredicateViolation;
-  // Legacy: Reproducibility errors (kept for backward compatibility)
-  errors?: IReproducibilityError[];
 }
 
 export interface IReproducibilityCellState {
@@ -75,7 +57,6 @@ export type BackendReasonType =
   | 'backward_stale' // Another cell wrote to a variable this cell also writes (was write_conflict)
   | 'no_read_before_write' // Cell reads a value written by a later cell (was reads_from_later)
   | 'order_changed' // Cell order changed affecting data flow
-  | 'skipped_upstream' // Cell reads from wrong writer; re-running won't help, run expected cell first
   | 'no_write_after_read'; // Cell wrote to location read by earlier cell (was backward_mutation)
 
 /**
@@ -101,7 +82,6 @@ export interface IBackendStalenessReason {
   type: BackendReasonType;
   loc?: string; // Variable or location involved (e.g., "x", "df")
   cell_id?: string; // Cell that caused the staleness (actual ID, not @position)
-  expected_cell_id?: string; // For skipped writer: cell that should have provided the value
 }
 
 /**
@@ -125,17 +105,6 @@ export interface IFrontendStalenessReason {
 export type IStalenessReason =
   | IBackendStalenessReason
   | IFrontendStalenessReason;
-
-export interface IViolationInfo {
-  type: string; // "backward_mutation" | "forward_dependency" | "truncation"
-  mutating_cell: string; // actual cell ID
-  affected_cell: string; // actual cell ID
-  variables: string[];
-  message: string; // human-readable (@A notation)
-  // Detailed diagnostic info for enhanced messages
-  structural_reads_detail?: { [key: string]: { [key: string]: string } }; // var -> {attr -> value_repr}
-  changes_detail?: string[]; // ["Column 'y' added", "Shape: (5,4) → (5,5)"]
-}
 
 export interface IProposedFixEntry {
   cell_ids: string[];
@@ -189,21 +158,3 @@ export interface IPredicateViolation {
   };
 }
 
-// Legacy type alias for backward compatibility
-export type ReproducibilityErrorType = PredicateType;
-
-/**
- * Legacy interface for backward compatibility.
- * @deprecated Use IPredicateViolation instead
- */
-export interface IReproducibilityError {
-  error_type: ReproducibilityErrorType;
-  cell_id: string;
-  locations: string[];
-  message: string;
-  causer_cell?: string;
-  detail?: {
-    structural_reads_detail?: { [key: string]: { [key: string]: string } };
-    changes_detail?: string[];
-  };
-}
