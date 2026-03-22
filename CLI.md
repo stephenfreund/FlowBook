@@ -53,8 +53,6 @@ flowbook compare-baseline notebook.ipynb --trials 3
 # With cell timeout and rerun passes
 flowbook compare-baseline notebook.ipynb --timeout 120 --rerun-k 2
 
-# Syntactic staleness mode (lower memory, less precise)
-flowbook compare-baseline notebook.ipynb --staleness-mode syntactic
 ```
 
 #### Options
@@ -68,7 +66,7 @@ flowbook compare-baseline notebook.ipynb --staleness-mode syntactic
 | `--rerun-k K` | 0 | Number of extra top-to-bottom rerun passes after initial execution |
 | `--trials N` | 1 | Number of independent trials (saved as `notebook-1.json`, `notebook-2.json`, ...) |
 | `--start N` | 1 | Starting trial number |
-| `--staleness-mode` | semantic | `syntactic` (set intersection) or `semantic` (checkpoint diff) |
+
 
 #### Output JSON (v3.0)
 
@@ -296,19 +294,6 @@ flowbook_timers flowbook-times.json --histplot "state_total_ms" --histplot "chec
 
 # Correlate state vs check time
 flowbook_timers flowbook-times.json --scatterplot "state_total_ms%check_total_ms"
-```
-
-### Comparing semantic vs syntactic staleness modes
-
-```bash
-flowbook compare-baseline notebook.ipynb --staleness-mode semantic --trials 3
-mv notebook_comparison.json results/semantic/
-
-flowbook compare-baseline notebook.ipynb --staleness-mode syntactic --trials 3
-mv notebook_comparison.json results/syntactic/
-
-flowbook_compare_overhead results/semantic/ --plot --output semantic.pdf
-flowbook_compare_overhead results/syntactic/ --plot --output syntactic.pdf
 ```
 
 ### Interactive development

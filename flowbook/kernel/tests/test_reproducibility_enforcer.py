@@ -12,7 +12,6 @@ from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 from flowbook.kernel.reproducibility_enforcer import (
     ReproducibilityEnforcer,
     PRE_CHECKPOINT_PREFIX,
-    StalenessMode,
 )
 from flowbook.kernel.models import ErrorType, ReasonType
 from flowbook.kernel.tests.conftest import make_tracking
@@ -123,51 +122,6 @@ class TestReproducibilityEnforcer:
 
         # B should be stale
         assert "b" in result.stale_cells
-
-    def test_no_staleness_if_value_unchanged(self):
-        """Semantic check: no staleness if value didn't actually change.
-
-        Requires semantic staleness mode for convergence detection.
-        """
-        # Use semantic mode for this test (convergence requires it)
-        sdc = ReproducibilityEnforcer(
-            self.checkpoints, staleness_mode=StalenessMode.SEMANTIC
-        )
-        sdc.set_cell_order(["a", "b", "c", "d"])
-
-        # A writes x=1
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"x": 1})
-        sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # B reads x
-        self._save_pre_checkpoint("b", {"x": 1})
-        ns_b = self._make_namespace({"x": 1, "y": 2})
-        sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
-        )
-
-        # Re-run A with same value x=1
-        # Note: pre-checkpoint for A now reflects current state
-        self._save_pre_checkpoint("a", {"x": 1, "y": 2})
-        ns_a2 = self._make_namespace({"x": 1, "y": 2})
-        result = sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a2,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # B should NOT be stale (x didn't change)
-        assert "b" not in result.stale_cells
 
     def test_cell_order_update_affects_violation_check(self):
         """Cell order can be updated, affecting position-based checks.
@@ -3126,13 +3080,10 @@ class TestSkippedUpstream:
             ), f"SKIPPED_UPSTREAM should be gone after running G, got {reasons_after_g}"
 
 
-class TestStalenessMode:
-    """Tests for syntactic vs semantic staleness computation modes."""
+class TestStaleness:
+    """Tests for staleness computation."""
 
     def setup_method(self):
-        from flowbook.kernel_support.structural_tracking import StalenessMode
-
-        self.StalenessMode = StalenessMode
         self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
@@ -3150,48 +3101,8 @@ class TestStalenessMode:
         """Return namespace dict for use with check()."""
         return namespace
 
-    def test_default_mode_is_syntactic(self):
-        """Default staleness mode should be SYNTACTIC."""
-        assert self.sdc.staleness_mode == self.StalenessMode.SYNTACTIC
-
-    def test_set_staleness_mode_syntactic(self):
-        """Can switch to syntactic mode."""
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SYNTACTIC
-
-    def test_set_staleness_mode_semantic(self):
-        """Can switch to semantic mode."""
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
-
-    def test_syntactic_mode_clears_checkpoints_on_switch(self):
-        """Switching from semantic to syntactic should clear pre-checkpoints."""
-        # Start in semantic mode
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        # Execute a cell in semantic mode
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"x": 1})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # Verify pre-checkpoint exists
-        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
-
-        # Switch to syntactic mode
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
-        # Pre-checkpoint should be cleared
-        assert f"{PRE_CHECKPOINT_PREFIX}a" not in self.checkpoints.saved
-
-    def test_syntactic_mode_marks_stale_on_set_intersection(self):
-        """Syntactic mode marks cells stale based on set intersection."""
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
+    def test_marks_stale_on_set_intersection(self):
+        """Marks cells stale based on set intersection of writes and reads."""
         # A writes x
         self._save_pre_checkpoint("a", {})
         ns_a = self._make_namespace({"x": 1})
@@ -3225,15 +3136,13 @@ class TestStalenessMode:
         # B should be stale (syntactic: W_A ∩ R_B ≠ ∅)
         assert "b" in result.stale_cells
 
-    def test_syntactic_mode_no_convergence(self):
-        """Syntactic mode doesn't detect convergence - staleness is monotonic.
+    def test_no_convergence(self):
+        """Staleness is monotonic - no convergence detection.
 
         Scenario: A writes x, B reads x, then A re-writes x with different
         value (B stale), then A re-writes x back to original (B still stale
-        in syntactic mode because no convergence detection).
+        because no convergence detection).
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
         # A writes x=1
         self._save_pre_checkpoint("a", {})
         ns_a = self._make_namespace({"x": 1})
@@ -3275,73 +3184,15 @@ class TestStalenessMode:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # In syntactic mode, B should STILL be stale (no convergence detection)
-        # because syntactic mode is monotonic
+        # B should STILL be stale (no convergence detection, staleness is monotonic)
         assert "b" in result_a3.stale_cells
 
-    def test_semantic_mode_detects_convergence(self):
-        """Semantic mode detects convergence and clears staleness.
-
-        Scenario: A writes x, B reads x, then A re-writes x with different
-        value (B stale), then A re-writes x back to original (B becomes clean
-        in semantic mode due to convergence detection).
-        """
-        # Use semantic mode for convergence detection
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
-
-        # A writes x=1
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"x": 1})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # B reads x (captures pre-checkpoint with x=1)
-        self._save_pre_checkpoint("b", {"x": 1})
-        ns_b = self._make_namespace({"x": 1, "y": 2})
-        self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
-        )
-
-        # Re-run A with different value x=2 (makes B stale via ForwardStale)
-        self._save_pre_checkpoint("a", {"x": 1, "y": 2})
-        ns_a2 = self._make_namespace({"x": 2, "y": 2})
-        result_a2 = self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a2,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-        assert "b" in result_a2.stale_cells
-
-        # Re-run A with original value x=1 (back to original - convergence!)
-        self._save_pre_checkpoint("a", {"x": 2, "y": 2})
-        ns_a3 = self._make_namespace({"x": 1, "y": 2})
-        result_a3 = self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a3,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # In semantic mode, B should NOT be stale anymore (converged)
-        assert "b" not in result_a3.stale_cells
-
-    def test_syntactic_mode_defers_checkpoint_deletion(self):
-        """Syntactic mode defers checkpoint deletion until next cell executes.
+    def test_defers_checkpoint_deletion(self):
+        """Defers checkpoint deletion until next cell executes.
 
         This allows checkpoint size queries after a cell completes but before
         the next cell runs (important for benchmarking/compare_overhead).
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
         # Execute cell A
         self._save_pre_checkpoint("a", {})
         ns_a = self._make_namespace({"x": 1})
@@ -3373,29 +3224,11 @@ class TestStalenessMode:
         assert f"{PRE_CHECKPOINT_PREFIX}b" in self.checkpoints.saved
         assert self.sdc._pending_checkpoint_deletion == f"{PRE_CHECKPOINT_PREFIX}b"
 
-    def test_semantic_mode_keeps_checkpoint(self):
-        """Semantic mode keeps pre-checkpoint for convergence detection."""
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
-
-        # Execute cell A
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"x": 1})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # In semantic mode, pre-checkpoint should be kept
-        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
-
     # =======================================================================
     # Backward Staleness Tests
     # =======================================================================
 
-    def test_backward_staleness_syntactic_marks_earlier_cell_stale(self):
+    def test_backward_staleness_marks_earlier_cell_stale(self):
         """BackwardStale: when later cell writes to var read by earlier clean cell.
 
         Scenario: A reads x, B is clean, then C writes x (accepted).
@@ -3404,8 +3237,6 @@ class TestStalenessMode:
         Uses continue_on_violation=True because C triggers NoWriteAfterRead
         error (C writes x that A read). When accepted, staleness propagates.
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
         # A reads x (clean cell that read x)
         self._save_pre_checkpoint("a", {"x": 1})
         ns_a = self._make_namespace({"x": 1, "y": 10})
@@ -3442,92 +3273,12 @@ class TestStalenessMode:
         # A should be stale (backward staleness: W_C ∩ R_A ≠ ∅)
         assert "a" in result.stale_cells
 
-    def test_backward_staleness_semantic_checks_diff(self):
-        """Semantic BackwardStale uses diff comparison for precision.
-
-        If cell C writes x but the value converges to what A originally saw,
-        A should NOT be marked stale in semantic mode.
-        """
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
-
-        # A reads x=1
-        self._save_pre_checkpoint("a", {"x": 1})
-        ns_a = self._make_namespace({"x": 1, "y": 10})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
-        )
-        assert self.sdc._notebook_state.is_clean("a")
-
-        # B does something unrelated
-        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
-        ns_b = self._make_namespace({"x": 1, "y": 10, "z": 20})
-        self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(reads=set(), writes={"z"}),
-        )
-
-        # C writes x to SAME value as A saw (x=1 -> x=1, no actual change)
-        # In semantic mode, A should NOT be stale because diff is empty
-        self._save_pre_checkpoint("c", {"x": 1, "y": 10, "z": 20})
-        ns_c = self._make_namespace({"x": 1, "y": 10, "z": 20})
-        result = self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            namespace=ns_c,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # A should NOT be stale - no actual change to x
-        assert "a" not in result.stale_cells
-
-    def test_backward_staleness_semantic_marks_stale_on_real_change(self):
-        """Semantic BackwardStale marks stale when values actually differ.
-
-        Note: Staleness is always computed, even when C triggers NoWriteAfterRead
-        error (because C writes to x that A read).
-        """
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
-
-        # A reads x=1
-        self._save_pre_checkpoint("a", {"x": 1})
-        ns_a = self._make_namespace({"x": 1, "y": 10})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
-        )
-        assert self.sdc._notebook_state.is_clean("a")
-
-        # C writes x to DIFFERENT value (accepted)
-        self._save_pre_checkpoint("c", {"x": 1, "y": 10})
-        ns_c = self._make_namespace({"x": 999, "y": 10})
-        result = self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            namespace=ns_c,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=True,
-        )
-
-        # A should be stale - x actually changed from what A saw
-        assert "a" in result.stale_cells
-
     def test_backward_staleness_only_affects_clean_cells(self):
         """BackwardStale should only mark clean cells as stale, not already-stale cells.
 
         Uses continue_on_violation=True because C triggers NoWriteAfterRead
         error (C writes to x that A and B read). When accepted, staleness propagates.
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
         # A reads x
         self._save_pre_checkpoint("a", {"x": 1})
         ns_a = self._make_namespace({"x": 1, "y": 10})
@@ -5195,7 +4946,6 @@ class TestRollbackLastCheck:
 
         The fix: check() skips deletion if pending checkpoint is for the current cell.
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # Execute cell A first time
         self._save_pre_checkpoint("a", {})
@@ -5230,7 +4980,6 @@ class TestRollbackLastCheck:
 
         This verifies the deferred deletion still works for different cells.
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # Execute cell A
         self._save_pre_checkpoint("a", {})
@@ -5268,7 +5017,6 @@ class TestRollbackLastCheck:
         When execution is rolled back, we should not delete the checkpoint
         on the next execution (even of a different cell).
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # Execute cell A
         self._save_pre_checkpoint("a", {})

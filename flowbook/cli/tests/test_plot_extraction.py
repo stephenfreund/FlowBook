@@ -386,8 +386,8 @@ class TestSyntacticVsSemanticExtraction:
         # Cell 1: delta=0 (50-50), base=100 -> ratio=0
         assert p6.ratios == [0.0, 0.0]
 
-    def test_semantic_checkpoints_accumulate(self):
-        """Semantic mode: checkpoints accumulate, overhead grows."""
+    def test_checkpoints_accumulate(self):
+        """Checkpoints accumulate, overhead grows."""
         # Cell 0: 1 checkpoint, Cell 1: 2 checkpoints
         flowbook = FlowBookMemoryResult(cells=[
             make_flowbook_cell("a", 0, 100, 50, {"_pre_a": {"df": 50}}),
@@ -397,7 +397,7 @@ class TestSyntacticVsSemanticExtraction:
             }),
         ])
         result = ComparisonResult(
-            metadata=ComparisonMetadata("semantic", 2, 300),
+            metadata=ComparisonMetadata(2, 300),
             flowbook=flowbook,
         )
 
@@ -410,24 +410,25 @@ class TestSyntacticVsSemanticExtraction:
         # Cell 1: delta=100-50=50, base=100 -> ratio=0.5
         assert p6.ratios == [0.0, 0.5]
 
-    def test_semantic_larger_than_syntactic(self):
-        """Semantic mode shows larger overhead than syntactic for same notebook."""
-        # Same 2-cell notebook
-        syntactic = FlowBookMemoryResult(cells=[
+    def test_more_checkpoints_larger_overhead(self):
+        """More accumulated checkpoints produce larger overhead."""
+        # Single checkpoint per cell (discarded after use)
+        fewer = FlowBookMemoryResult(cells=[
             make_flowbook_cell("a", 0, 100, 50, {"_pre_a": {"df": 50}}),
             make_flowbook_cell("b", 1, 100, 50, {"_pre_b": {"df": 50}}),
         ])
 
-        semantic = FlowBookMemoryResult(cells=[
+        # Accumulated checkpoints
+        more = FlowBookMemoryResult(cells=[
             make_flowbook_cell("a", 0, 100, 50, {"_pre_a": {"df": 50}}),
             make_flowbook_cell("b", 1, 100, 100, {"_pre_a": {"df": 50}, "_pre_b": {"df": 50}}),
         ])
 
-        syn_result = ComparisonResult(flowbook=syntactic)
-        sem_result = ComparisonResult(flowbook=semantic)
+        fewer_result = ComparisonResult(flowbook=fewer)
+        more_result = ComparisonResult(flowbook=more)
 
-        syn_p3 = extract_plot3_data(syn_result)
-        sem_p3 = extract_plot3_data(sem_result)
+        fewer_p3 = extract_plot3_data(fewer_result)
+        more_p3 = extract_plot3_data(more_result)
 
-        # Semantic final overhead > syntactic
-        assert sem_p3.overhead_mb[-1] > syn_p3.overhead_mb[-1]
+        # More checkpoints = larger final overhead
+        assert more_p3.overhead_mb[-1] > fewer_p3.overhead_mb[-1]

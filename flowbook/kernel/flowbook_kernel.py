@@ -218,9 +218,6 @@ Mode selection commands:
     warn    - Track and warn, but don't block (default)
     enforce - Track and block violations
 
-%staleness_mode [syntactic|semantic] - Set staleness computation mode
-    syntactic - Use set intersection (monotonic, lower memory)
-    semantic  - Use checkpoint diff (precise, detects convergence, default)
 
 ================================================================================
 ASSUMPTIONS AND LIMITATIONS
@@ -807,75 +804,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             self._display.display_icon_and_text("\u2705", "GPU checkpoint mode disabled")
         else:
             self._display.display_icon_and_text("\u274C", "Usage: %cudf_gpu_checkpoint [on|off]")
-
-    @line_magic
-    def staleness_mode(self, line: str) -> None:
-        """
-        Set staleness computation mode.
-
-        Staleness computation can use two different approaches:
-
-        SYNTACTIC mode:
-        - Uses checkpoint once to compute W_i (what actually changed)
-        - All staleness checks use pure set intersection: W_i ∩ R_j ≠ ∅
-        - Staleness is monotonic (once stale, stays stale until re-executed)
-        - Lower memory (discards pre-checkpoints after computing W_i)
-        - More conservative (may over-approximate staleness)
-
-        SEMANTIC mode (default):
-        - Uses checkpoint diff comparison for staleness detection
-        - Staleness is non-monotonic (can be cleared when values converge)
-        - Higher memory (stores pre-checkpoints per cell)
-        - Precise (detects convergence when values return to original)
-
-        Usage:
-            %staleness_mode              - Show current mode
-            %staleness_mode syntactic    - Use set intersection (monotonic, lower memory)
-            %staleness_mode semantic     - Use checkpoint diff (precise, detects convergence)
-
-        Note: Switching from semantic to syntactic clears all stored pre-checkpoints.
-        """
-        from flowbook.kernel_support.structural_tracking import StalenessMode
-
-        # Suspend tracking during magic execution to avoid recording infrastructure reads
-        tracking = self._tracking
-        if tracking is not None and hasattr(tracking, "suspended"):
-            ctx = tracking.suspended()
-        else:
-            from contextlib import nullcontext
-            ctx = nullcontext()
-
-        with ctx:
-            mode_str = line.strip().lower()
-
-            if not mode_str:
-                # Show current mode
-                current_mode = self._enforcer.staleness_mode.value
-                self._display.display_icon_and_text(
-                    "🔍", f"Staleness mode: {current_mode}"
-                )
-                return
-
-            try:
-                mode = StalenessMode(mode_str)
-            except ValueError:
-                self._display.display_icon_and_text(
-                    "❌", f"Invalid mode: {mode_str}. Use 'syntactic' or 'semantic'"
-                )
-                return
-
-            old_mode = self._enforcer.staleness_mode
-            self._enforcer.set_staleness_mode(mode)
-
-            # Notify user if checkpoints were cleared
-            if old_mode == StalenessMode.SEMANTIC and mode == StalenessMode.SYNTACTIC:
-                self._display.display_icon_and_text(
-                    "✅", f"Staleness mode set to: {mode.value} (pre-checkpoints cleared)"
-                )
-            else:
-                self._display.display_icon_and_text(
-                    "✅", f"Staleness mode set to: {mode.value}"
-                )
 
     # =========================================================================
     # Memory introspection magic (using HeapSizer)

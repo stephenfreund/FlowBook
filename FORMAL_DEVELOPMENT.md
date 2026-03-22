@@ -503,12 +503,10 @@ The implementation uses a rule-based conflict resolver for column-level precisio
 
 ---
 
-## 10. Staleness Computation Modes
+## 10. Staleness Computation
 
-The implementation supports two staleness computation modes that differ in
-precision and memory usage.
-
-### 10.1 Syntactic Mode
+Staleness is computed using checkpoint-based diffs and pure set operations on
+read and write sets.
 
 Uses checkpoint once to compute accurate W_i (what actually changed),
 then evaluates all predicates using pure set operations on R and W.
@@ -536,71 +534,11 @@ ForwardStale(R, W, W', i, j) ≝  j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ)
 - Sound but conservative (may over-approximate staleness)
 - Memory: O(cells × |variable names|)
 
-### 10.2 Semantic Mode
-
-Uses checkpoint to compute R and W, then stores pre-checkpoints
-for semantic value comparison.
-
-**Checkpoint usage**: Store permanently for each executed cell.
-
-**Stored state**:
-```
-R[i], W[i] : Set[Loc]           — for quick filtering
-pre_checkpoint[i] : Σ → Value   — namespace state when cell i executed
-```
-
-**Predicates** (with semantic override):
-```
-ForwardStale_semantic(i, j) ≝
-    j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅ ∧ diff(pre_checkpoint[j], Σ, Rⱼ) ≠ ∅
-```
-
-**Convergence rule**:
-```
-Converged(j) ≝ diff(pre_checkpoint[j], Σ, Rⱼ) = ∅
-```
-If `Converged(j)` and cell j was stale, mark j clean.
-
-**Properties**:
-- Staleness is non-monotonic (can be cleared when values converge)
-- Precise (only marks stale when values actually differ)
-- Memory: O(cells × |variable values|)
-
-### 10.3 Comparison
-
-| Property | Syntactic | Semantic |
-|----------|-----------|----------|
-| Checkpoint retention | Discard after computing W | Keep permanently |
-| Staleness check | (W_i ∪ W'_i) ∩ (R_j ∪ W_j) ≠ ∅ | diff(pre_checkpoint[j], Σ, R_j) ≠ ∅ |
-| Un-staleness | Never | When diff becomes empty |
-| Memory | O(cells × names) | O(cells × values) |
-| Precision | Conservative | Exact |
-
-### 10.4 Example: Diverge-Then-Converge
-
-```
-Cell A: reads x (pre_checkpoint_A[x] = 1)
-Cell B: writes x = 2
-Cell C: writes x = 1
-```
-
-| After | Syntactic | Semantic |
-|-------|-----------|----------|
-| B runs | A stale (W_B ∩ R_A = {x}) | A stale (Σ[x]=2 ≠ pre_A[x]=1) |
-| C runs | A still stale | A clean (Σ[x]=1 = pre_A[x]=1) |
-
-### 10.5 Implementation Map
+### 10.1 Implementation Map
 
 | Concept | Code Location |
 |---------|---------------|
-| StalenessMode enum | `flowbook/kernel_support/structural_tracking.py` |
-| Mode property | `ReproducibilityEnforcer.staleness_mode` |
-| Mode setter | `ReproducibilityEnforcer.set_staleness_mode()` |
 | Syntactic forward stale | `_compute_forward_staleness_syntactic()` |
-| Semantic forward stale | `_compute_forward_staleness_semantic()` |
-| Convergence detection | `_check_convergence()` |
-| Pre-checkpoint cleanup | `_clear_all_pre_checkpoints()` |
-| Magic command | `%staleness_mode` in `flowbook_kernel.py` |
 
 ## 11. WRITE_OVERLAP: Why Write Overlaps Need Special Handling
 
@@ -617,29 +555,20 @@ This formula has two distinct overlap cases that require different handling:
 **Read Overlap**: `(Wᵢ ∪ W'ᵢ) ∩ Rⱼ ≠ ∅`
 - Cell j *reads* a location that cell i wrote
 - The value may or may not have changed
-- In semantic mode: can be cleared by convergence if `diff(pre_j, Σ, Rⱼ) = ∅`
 - Reason type: `FORWARD_STALE`
 
 **Write Overlap**: `(Wᵢ ∪ W'ᵢ) ∩ Wⱼ ≠ ∅`
 - Cell j *writes* to a location that cell i also writes
 - Both cells modify the same location
-- Cannot be cleared by convergence (see §11.2)
 - Reason type: `WRITE_OVERLAP`
 
-### 11.2 Why Write Overlap Cannot Converge
+### 11.2 Why Write Overlap Needs Special Handling
 
-Convergence clearing (`Converged(j)`) checks whether a cell's *inputs* have returned
-to their expected values. For write overlap:
-
-1. **No read dependency to check**: If the overlap is write-only (j doesn't read the location),
-   there's no input to diff against. The convergence predicate `diff(pre_j, Σ, Rⱼ) = ∅`
-   may trivially pass even though the execution order matters.
-
-2. **Write order determines final state**: The final value of a location depends on which
+1. **Write order determines final state**: The final value of a location depends on which
    cell writes last. If cells i and j both write to x, re-running j may produce a different
    final state than re-running i then j.
 
-3. **Data flow changed**: Even if the values are identical, the provenance (which cell
+2. **Data flow changed**: Even if the values are identical, the provenance (which cell
    "owns" the location) has changed, which may affect downstream analysis.
 
 ### 11.3 Removed Writes: Dependency Removal
@@ -653,7 +582,7 @@ A special case occurs when cell i *used to* write a location but no longer does:
 If cell j reads x, and cell i previously provided x but now doesn't write it:
 - The dependency relationship j→i for x is broken
 - Cell j's source for x has changed (now comes from elsewhere)
-- This is marked as `WRITE_OVERLAP` because convergence won't fix it
+- This is marked as `WRITE_OVERLAP`
 
 **Example**:
 ```
@@ -664,26 +593,16 @@ Cell A (v2): y = 2      # W_A = {y}, no longer writes x
 After A runs v2, B should be stale: its source of x has changed even though
 x's value (from some prior state) hasn't changed.
 
-### 11.4 Implementation in Syntactic vs Semantic Modes
+### 11.4 Implementation
 
-**Syntactic Mode**:
 - Computes `read_overlap = W_i_union & cell_reads`
 - Computes `write_overlap = W_i_union & cell_writes`
 - Read overlaps → `FORWARD_STALE` or `SKIPPED_UPSTREAM`
 - Write-only overlaps → `WRITE_OVERLAP`
-
-**Semantic Mode**:
-- First checks for removed writes: `(W'_i - W_i) & cell_reads`
-- Removed writes overlap → `WRITE_OVERLAP` (no convergence check)
-- Write-only overlap → `WRITE_OVERLAP` (no convergence check)
-- Read overlap with changed vars → semantic diff check → `FORWARD_STALE` if diff non-empty
 
 ### 11.5 Implementation Map
 
 | Concept | Code Location |
 |---------|---------------|
 | WRITE_OVERLAP enum | `ReasonType.WRITE_OVERLAP` in `models.py` |
-| Write overlap detection (syntactic) | `_compute_forward_staleness_syntactic()` line ~1946 |
-| Write overlap detection (semantic) | `_compute_forward_staleness_semantic()` line ~2020 |
-| Removed writes detection | `_compute_forward_staleness_semantic()` line ~2032 |
-| Convergence excludes WRITE_OVERLAP | `_check_convergence()` line ~2124 (only clears FORWARD_STALE) |
+| Write overlap detection | `_compute_forward_staleness_syntactic()` |
