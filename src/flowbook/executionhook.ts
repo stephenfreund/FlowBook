@@ -460,6 +460,12 @@ export class ReproducibilityExecutionHookManager {
       if (!predicateViolations[0].accepted) {
         return;
       }
+    } else {
+      // Clear any previous violation metadata from earlier rejected executions.
+      // This ensures that re-running a cell after fixing the cause of a violation
+      // (e.g., commenting out the offending downstream cell) clears the error display.
+      cell.model.deleteMetadata('flowbook_violations');
+      cell.model.deleteMetadata('flowbook_violation');
     }
 
     // Extract reproducibility metadata
@@ -490,11 +496,7 @@ export class ReproducibilityExecutionHookManager {
     // Process staleness reasons and update manager
     this._processMetadataUpdate(panel, reproducibilityMetadata);
 
-    // Clear legacy violation metadata if no predicate violations
     const cellOrder = this._getCurrentCellOrder(panel);
-    if (predicateViolations.length === 0) {
-      cell.model.deleteMetadata('flowbook_violation');
-    }
 
     // Let cellhighlighter handle all cell rendering
     const stalenessManager = this._highlighter.getStalenessManager(panel);

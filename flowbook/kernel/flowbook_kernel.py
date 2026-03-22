@@ -503,7 +503,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             writes=[],
             changed_variables=[],
             stale_cells=state.get_stale_cells(),
-            violation=None,
             cell_order=self._enforcer.cell_order,
             staleness_reasons=state.get_all_reasons(),
         )
@@ -629,7 +628,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 writes=[],
                 changed_variables=[],
                 stale_cells=stale_cells,
-                violation=None,
                 cell_order=self._enforcer.cell_order,
                 staleness_reasons=staleness_reasons,
             )
