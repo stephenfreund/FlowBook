@@ -7,8 +7,6 @@ from flowbook.kernel_support.memory_checkpoint import (
     MemoryCheckpoints,
 )
 from flowbook.kernel_support.models import TrackingData
-from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
-
 from flowbook.kernel.reproducibility_enforcer import (
     ReproducibilityEnforcer,
     PRE_CHECKPOINT_PREFIX,
@@ -1087,253 +1085,16 @@ class TestTruncationDetection:
         assert "Variable: obj2" in formatted_diff
 
 
-class TestStructuralTrackingOff:
-    """Tests for structural tracking OFF mode with backward mutation detection."""
-
-    def setup_method(self):
-        self.checkpoints = MemoryCheckpoints(
-            sanity_check=False,
-            warn_classes=False,
-        )
-        # Create enforcer with structural tracking OFF
-        self.sdc = ReproducibilityEnforcer(
-            self.checkpoints,
-            structural_mode=StructuralTrackingMode.OFF,
-        )
-        self.sdc.set_cell_order(["a", "b", "c", "d"])
-
-    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
-        """Save a pre-checkpoint for a cell."""
-        self.checkpoints.save(
-            f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
-        )
-
-    def _make_namespace(self, namespace: dict) -> dict:
-        """Return namespace dict for use with check()."""
-        return namespace
-
-    def test_structural_only_read_no_violation_when_off(self):
-        """
-        With structural tracking OFF, a cell that only reads structural attrs
-        (like df.shape) should NOT conflict with a cell that adds columns.
-
-        This tests Bug4.ipynb scenario:
-        - Cell D: raw_data.shape (structural read only, no column reads)
-        - Cell E: raw_data['x'] = 3 (column write)
-
-        With structural tracking OFF, this should NOT be a violation.
-        """
-        import pandas as pd
-
-        # Create a DataFrame
-        df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
-
-        # Cell A: Creates the DataFrame
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"raw_data": df})
-        result_a = self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"raw_data"}),
-        )
-        assert not result_a.has_errors()
-
-        # Cell B: Reads raw_data.shape (structural read only, no column reads)
-        # This cell reads the variable but only accesses structural attributes
-        self._save_pre_checkpoint("b", {"raw_data": df})
-        ns_b = self._make_namespace({"raw_data": df})
-        result_b = self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(
-                reads={"raw_data"},  # Variable read
-                writes=set(),
-                column_reads=None,  # NO column reads (only .shape)
-                structural_reads={"raw_data": {"shape"}},  # Structural read
-            ),
-        )
-        assert not result_b.has_errors()
-
-        # Cell C: Adds a new column raw_data['x'] = 3
-        # With structural tracking OFF, this should NOT conflict with cell B
-        df_modified = df.copy()
-        df_modified["x"] = 3
-        self._save_pre_checkpoint("c", {"raw_data": df})
-        ns_c = self._make_namespace({"raw_data": df_modified})
-        result_c = self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            namespace=ns_c,
-            tracking=make_tracking(
-                reads={"raw_data"},  # Reads raw_data to modify it
-                writes={"raw_data"},
-                column_reads=None,
-                column_writes={"raw_data": {"x"}},  # Writes column 'x'
-            ),
-        )
-        # NO violation - structural tracking is OFF and prior cell only did structural read
-        assert not any(e.error_type == ErrorType.NO_WRITE_AFTER_READ for e in result_c.errors)
-
-    def test_whole_variable_read_still_causes_violation_when_off(self):
-        """
-        Even with structural tracking OFF, a cell that reads the whole variable
-        (not just structural attrs) should still conflict with column modifications.
-
-        This ensures we're not too permissive.
-        """
-        import pandas as pd
-
-        df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
-
-        # Cell A: Creates the DataFrame
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"raw_data": df})
-        result_a = self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"raw_data"}),
-        )
-
-        # Cell B: Reads raw_data (whole variable, e.g., print(raw_data))
-        # This is NOT a structural-only read
-        self._save_pre_checkpoint("b", {"raw_data": df})
-        ns_b = self._make_namespace({"raw_data": df})
-        result_b = self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(
-                reads={"raw_data"},
-                writes=set(),
-                column_reads=None,  # No column tracking
-                structural_reads=None,  # NOT a structural read - whole variable read
-            ),
-        )
-
-        # Cell C: Adds a new column
-        df_modified = df.copy()
-        df_modified["x"] = 3
-        self._save_pre_checkpoint("c", {"raw_data": df})
-        ns_c = self._make_namespace({"raw_data": df_modified})
-        result_c = self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            namespace=ns_c,
-            tracking=make_tracking(
-                reads={"raw_data"},
-                writes={"raw_data"},
-                column_reads=None,
-                column_writes={"raw_data": {"x"}},
-            ),
-        )
-        # SHOULD cause violation - prior cell read whole variable (not just structural)
-        # Now shows column-level detail: raw_data.x instead of just raw_data
-        assert result_c.has_errors()
-        backward_err = next(e for e in result_c.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
-        assert "raw_data.x" in backward_err.locations
-
-
-class TestStructuralTrackingWarn:
-    """Tests for structural tracking WARN mode with backward mutation detection."""
-
-    def setup_method(self):
-        self.checkpoints = MemoryCheckpoints(
-            sanity_check=False,
-            warn_classes=False,
-        )
-        # Create enforcer with structural tracking WARN
-        self.sdc = ReproducibilityEnforcer(
-            self.checkpoints,
-            structural_mode=StructuralTrackingMode.WARN,
-        )
-        self.sdc.set_cell_order(["a", "b", "c", "d"])
-
-    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
-        """Save a pre-checkpoint for a cell."""
-        self.checkpoints.save(
-            f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
-        )
-
-    def _make_namespace(self, namespace: dict) -> dict:
-        """Return namespace dict for use with check()."""
-        return namespace
-
-    def test_structural_only_read_no_violation_in_warn_mode(self):
-        """
-        With structural tracking WARN, a cell that only reads structural attrs
-        (like df.shape) should NOT cause a backward mutation violation.
-
-        Instead, structural warnings should be generated (tested separately).
-        This tests the Bug4.ipynb scenario with WARN mode.
-        """
-        import pandas as pd
-
-        df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
-
-        # Cell A: Creates the DataFrame
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"raw_data": df})
-        result_a = self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"raw_data"}),
-        )
-        assert not result_a.has_errors()
-
-        # Cell B: Reads raw_data.shape (structural read only)
-        self._save_pre_checkpoint("b", {"raw_data": df})
-        ns_b = self._make_namespace({"raw_data": df})
-        result_b = self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(
-                reads={"raw_data"},
-                writes=set(),
-                column_reads=None,
-                structural_reads={"raw_data": {"shape"}},
-            ),
-        )
-        assert not result_b.has_errors()
-
-        # Cell C: Adds a new column raw_data['x'] = 3
-        # With WARN mode, this should NOT cause a backward mutation violation
-        df_modified = df.copy()
-        df_modified["x"] = 3
-        self._save_pre_checkpoint("c", {"raw_data": df})
-        ns_c = self._make_namespace({"raw_data": df_modified})
-        result_c = self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            namespace=ns_c,
-            tracking=make_tracking(
-                reads={"raw_data"},
-                writes={"raw_data"},
-                column_reads=None,
-                column_writes={"raw_data": {"x"}},
-            ),
-        )
-        # NO violation - structural tracking is WARN and prior cell only did structural read
-        # (warnings are handled separately by diff, not as backward mutation violations)
-        assert not any(e.error_type == ErrorType.NO_WRITE_AFTER_READ for e in result_c.errors)
-
-
 class TestStructuralTrackingEnforce:
-    """Tests for structural tracking ENFORCE mode - structural reads ARE protected."""
+    """Tests for structural tracking - structural reads ARE always protected."""
 
     def setup_method(self):
         self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
-        # Create enforcer with structural tracking ENFORCE
         self.sdc = ReproducibilityEnforcer(
             self.checkpoints,
-            structural_mode=StructuralTrackingMode.ENFORCE,
         )
         self.sdc.set_cell_order(["a", "b", "c", "d"])
 
@@ -2411,10 +2172,9 @@ class TestDeepAliasIntegration:
         )
         from flowbook.kernel_support.models import TrackingData
         from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer
-        from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 
         checkpoints = MemoryCheckpoints()
-        enforcer = ReproducibilityEnforcer(checkpoints, StructuralTrackingMode.OFF)
+        enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(["cell_A", "cell_B"])
 
         # Initial state: a and c share internal reference
@@ -5006,11 +4766,9 @@ class TestColumnAliasExpansion:
     """
 
     def setup_method(self):
-        from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
-
         self.checkpoints = MemoryCheckpoints(sanity_check=False, warn_classes=False)
         self.sdc = ReproducibilityEnforcer(
-            self.checkpoints, structural_mode=StructuralTrackingMode.OFF
+            self.checkpoints,
         )
         self.sdc.set_cell_order(["a", "b", "c", "d"])
 

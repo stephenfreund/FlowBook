@@ -237,7 +237,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from flowbook.kernel_support.checkpoint import Checkpoint, CheckpointDiffResult
 from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint, MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
-from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 from flowbook.kernel_support.types import MemoryCheckpointDiffResult, DiffNode, ValueComparison, CompoundDiff
 from flowbook.util.cell_index import index_to_alpha
 
@@ -259,7 +258,15 @@ from flowbook.kernel.access_events import StructuralRead, VariableRead
 from flowbook.kernel.conflict_resolver import ConflictResolver
 from flowbook.kernel.conflict_rules import StructuralMode
 from flowbook.kernel.change_detector import detect_changes
+from flowbook.kernel.locations import (
+    WriteLoc, WriteLocSet, ReadLocSet,
+    has_conflict, wlocs_conflict_rlocs,
+)
 from flowbook.util.output import output, timer
+
+# Structural tracking is always ENFORCE — import once for passing to diff functions
+from flowbook.kernel_support.structural_tracking import StructuralTrackingMode as _StructuralTrackingMode
+_STRUCTURAL_ENFORCE = _StructuralTrackingMode.ENFORCE
 
 # Checkpoint naming constants
 PRE_CHECKPOINT_PREFIX = "_pre_"
@@ -623,14 +630,56 @@ def _expand_var_set_dict_with_aliases(
     return result
 
 
-def _tracking_mode_to_structural_mode(mode: StructuralTrackingMode) -> StructuralMode:
-    """Convert StructuralTrackingMode to StructuralMode for the new resolver."""
-    if mode == StructuralTrackingMode.ENFORCE:
-        return StructuralMode.ENFORCE
-    elif mode == StructuralTrackingMode.WARN:
-        return StructuralMode.WARN
-    else:
-        return StructuralMode.OFF
+def _precise_readlocset(read_locs: ReadLocSet, tracking: TrackingData) -> ReadLocSet:
+    """Refine a ReadLocSet by replacing Var(x) with column-level reads when available.
+
+    When a cell has column_reads_before_writes for variable x, the Var(x) read
+    is overly broad (conflicts with ANY write to x). Replace it with the precise
+    Col(x, c) reads so that column-independent writes don't cause false staleness.
+
+    The Var(x) read is kept only when:
+    - The cell has no column-level reads for x (conservative)
+    """
+    from flowbook.kernel.locations import ReadLoc, ReadLocType
+
+    col_read_vars = set(tracking.column_reads_before_writes.keys()) if tracking.column_reads_before_writes else set()
+    if not col_read_vars:
+        return read_locs  # No refinement needed
+
+    result: Set[ReadLoc] = set()
+    for loc in read_locs:
+        if loc.type == ReadLocType.VAR and loc.name in col_read_vars:
+            # Replace Var(x) with Col(x, c) for each column read
+            # The column reads are already in the ReadLocSet from tracking_to_readlocset
+            # so we just drop the Var(x)
+            continue
+        result.add(loc)
+    return frozenset(result)
+
+
+def _changes_to_writelocset(
+    changed_vars: Set[str],
+    column_changed: Dict[str, List[str]],
+) -> WriteLocSet:
+    """Convert diff-based changes to a WriteLocSet for staleness checks.
+
+    For variables with column-level change info, emits Col write locs.
+    For variables without column info, emits Var write locs (conservative).
+    """
+    locs: Set[WriteLoc] = set()
+    for var in changed_vars:
+        if var in column_changed:
+            for col in column_changed[var]:
+                locs.add(WriteLoc.col(var, col))
+        else:
+            locs.add(WriteLoc.var(var))
+    # Also include column changes for vars not in changed_vars
+    # (column_changed may have vars that only changed at column level)
+    for var, cols in column_changed.items():
+        if var not in changed_vars:
+            for col in cols:
+                locs.add(WriteLoc.col(var, col))
+    return frozenset(locs)
 
 
 class ReproducibilityEnforcer:
@@ -640,44 +689,28 @@ class ReproducibilityEnforcer:
     Tracks cell executions and their read/write sets.
     On each execution, checks for backward mutations and computes staleness.
 
-    Supports structural tracking mode for detecting structural changes
-    (like df.columns, df.shape) when those attributes were read.
+    Structural attribute conflicts (df.columns, df.shape, etc.) are always enforced.
     """
 
     def __init__(
         self,
         checkpoints: MemoryCheckpoints,
-        structural_mode: StructuralTrackingMode = StructuralTrackingMode.ENFORCE,
     ):
         self.checkpoints = checkpoints
         self.seq_counter: int = 0
         self._cell_order: List[str] = []
-        self._structural_mode = structural_mode
         # NotebookState is the single source of truth for formal model state:
         # T (status), R (reads), W (writes), and per-cell TrackingData
         self._notebook_state = NotebookState()
-        # Declarative conflict resolver
+        # Declarative conflict resolver (always ENFORCE structural mode)
         self._conflict_resolver = ConflictResolver(
-            structural_mode=_tracking_mode_to_structural_mode(structural_mode)
+            structural_mode=StructuralMode.ENFORCE
         )
         # Deferred checkpoint deletion for syntactic mode - keeps last checkpoint
         # until next cell executes, allowing size queries between executions
         self._pending_checkpoint_deletion: Optional[str] = None
         # Snapshot for rollback if execution is rejected
         self._pending_snapshot: Optional[CellStateSnapshot] = None
-
-    @property
-    def structural_mode(self) -> StructuralTrackingMode:
-        """Get the current structural tracking mode."""
-        return self._structural_mode
-
-    def set_structural_mode(self, mode: StructuralTrackingMode) -> None:
-        """Set the structural tracking mode."""
-        self._structural_mode = mode
-        # Update the conflict resolver's mode too
-        self._conflict_resolver = ConflictResolver(
-            structural_mode=_tracking_mode_to_structural_mode(mode)
-        )
 
     @property
     def cell_order(self) -> List[str]:
@@ -1544,12 +1577,6 @@ class ReproducibilityEnforcer:
         writes = self._notebook_state.writes.get(cell_id, frozenset())
         return writelocset_var_names(writes)
 
-    def _reads_var_names(self, cell_id: str) -> Set[str]:
-        """Extract variable names from a cell's ReadLocSet."""
-        from flowbook.kernel.locations import readlocset_var_names
-        reads = self._notebook_state.reads.get(cell_id, frozenset())
-        return readlocset_var_names(reads)
-
     def _compute_diff_and_changes(
         self,
         pre_checkpoint,
@@ -1587,7 +1614,7 @@ class ReproducibilityEnforcer:
                 use_leq=False,
                 column_rbw=all_accessed_columns,
                 structural_reads={},
-                structural_mode=self._structural_mode,
+                structural_mode=_STRUCTURAL_ENFORCE,
             )
             current_diff = total_diff.memory
         else:
@@ -1598,7 +1625,7 @@ class ReproducibilityEnforcer:
                 use_leq=False,
                 column_rbw=all_accessed_columns,
                 structural_reads={},
-                structural_mode=self._structural_mode,
+                structural_mode=_STRUCTURAL_ENFORCE,
             )
 
         # Convert to typed changes
@@ -2064,6 +2091,9 @@ class ReproducibilityEnforcer:
         # Include changed_vars to catch in-place mutations that TrackingDict misses
         W_i_union = old_writes | current_writes | changed_vars
 
+        # Convert changes to WriteLocSet for ⊗-based conflict detection
+        change_wlocs = _changes_to_writelocset(W_i_union, column_changed)
+
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:
             cell_tracking = self._notebook_state.get_tracking(cell_id)
@@ -2083,38 +2113,32 @@ class ReproducibilityEnforcer:
                         )
                     continue
 
-            # Syntactic check: (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
-            cell_reads = cell_tracking.reads_before_writes or set()
+            # Use ⊗ operator for column-aware overlap check.
+            # change_wlocs captures what actually changed at the right granularity:
+            # - Var(x) for whole-variable changes
+            # - Col(df, c) for column-level changes
+            # Use precise read set: Var(x) is refined to Col(x, c) reads when
+            # column info is available, so column-independent writes don't conflict.
+            cell_read_locs = self._notebook_state.reads.get(cell_id, frozenset())
+            cell_read_locs = _precise_readlocset(cell_read_locs, cell_tracking)
+            conflicting_wlocs = wlocs_conflict_rlocs(change_wlocs, cell_read_locs)
+
+            # Also check write-write overlap (WRITE_OVERLAP - no convergence)
             cell_writes = cell_tracking.writes or set()
-            write_overlap = W_i_union & cell_writes  # Overlap with writes
+            write_overlap = W_i_union & cell_writes
 
-            # Use column-aware overlap check for read staleness.
-            # _has_relevant_overlap_by_id handles BOTH regular variables AND DataFrames:
-            # - Regular vars (no column info): returns True conservatively
-            # - DataFrames with column tracking: returns True only if columns overlap
-            # Example: Cell B reads df['eruptions'], Cell C writes df['cluster']
-            #   → columns don't overlap, so B should NOT be stale
-            has_relevant_read_overlap = self._has_relevant_overlap_by_id(cell_id, W_i_union, column_changed)
-
-            if has_relevant_read_overlap or write_overlap:
-                # Determine which variables caused staleness by checking each one
-                cell_column_reads = self._notebook_state.get_column_reads(cell_id)
-                stale_vars: set = set()
-                for var in W_i_union & cell_reads:
-                    changed_cols = set(column_changed.get(var, []))
-                    read_cols = cell_column_reads.get(var, None)
-                    # Include var if no column info (conservative) or columns overlap
-                    if not changed_cols or read_cols is None or (changed_cols & read_cols):
-                        stale_vars.add(var)
-
-                # Handle read overlaps (always FORWARD_STALE)
-                for var in stale_vars:
+            if conflicting_wlocs or write_overlap:
+                # Build staleness reasons from conflicting WriteLocs
+                stale_var_names: set = set()
+                for wloc in conflicting_wlocs:
                     self._notebook_state.add_reason(
                         cell_id,
-                        Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
+                        Reason(ReasonType.FORWARD_STALE, loc=wloc.display_name(), cell_id=just_executed)
                     )
+                    stale_var_names.add(wloc.var_name())
+
                 # Then handle write-only overlaps (WRITE_OVERLAP - no convergence)
-                for var in write_overlap - stale_vars:
+                for var in write_overlap - stale_var_names:
                     self._notebook_state.add_reason(
                         cell_id,
                         Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
@@ -2175,6 +2199,9 @@ class ReproducibilityEnforcer:
         """
         newly_stale: List[str] = []
 
+        # Convert changes to WriteLocSet for ⊗-based conflict detection
+        change_wlocs = _changes_to_writelocset(changed_vars, column_changed)
+
         for prior_cell_id in self._cell_order[:my_position]:
             if not self._notebook_state.is_clean(prior_cell_id):
                 continue  # Already stale
@@ -2182,28 +2209,22 @@ class ReproducibilityEnforcer:
             if not self._notebook_state.has_record(prior_cell_id):
                 continue  # Never executed
 
-            prior_reads = self._reads_var_names(prior_cell_id)
+            # Use ⊗ operator: check if changes conflict with prior cell's reads.
+            # Use precise read set: when column info is available, Var(x) is
+            # refined to Col(x, c) reads so column-independent writes don't conflict.
+            prior_read_locs = self._notebook_state.reads.get(prior_cell_id, frozenset())
+            prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
+            if prior_tracking is not None:
+                prior_read_locs = _precise_readlocset(prior_read_locs, prior_tracking)
+            conflicting_wlocs = wlocs_conflict_rlocs(change_wlocs, prior_read_locs)
 
-            # Use column-aware overlap check for backward staleness.
-            # This handles BOTH regular variables AND DataFrames:
-            # - Regular vars: no column info → returns True (conservative)
-            # - DataFrames: only returns True if columns actually overlap
-            has_relevant_overlap = self._has_relevant_overlap_by_id(
-                prior_cell_id, changed_vars, column_changed
-            )
-
-            if has_relevant_overlap:
-                # Determine which variables caused staleness (column-aware)
-                prior_column_reads = self._notebook_state.get_column_reads(prior_cell_id)
-                for var in changed_vars & prior_reads:
-                    changed_cols = set(column_changed.get(var, []))
-                    read_cols = prior_column_reads.get(var, None)
-                    # Include var if no column info (conservative) or columns overlap
-                    if not changed_cols or read_cols is None or (changed_cols & read_cols):
-                        self._notebook_state.add_reason(
-                            prior_cell_id,
-                            Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=just_executed)
-                        )
+            if conflicting_wlocs:
+                # Build staleness reasons from conflicting WriteLocs
+                for wloc in conflicting_wlocs:
+                    self._notebook_state.add_reason(
+                        prior_cell_id,
+                        Reason(ReasonType.FORWARD_STALE, loc=wloc.display_name(), cell_id=just_executed)
+                    )
                 newly_stale.append(prior_cell_id)
 
         # Removed writes backward staleness:
@@ -2224,61 +2245,6 @@ class ReproducibilityEnforcer:
                             newly_stale.append(last_j)
 
         return newly_stale
-
-    def _has_relevant_overlap_by_id(
-        self,
-        cell_id: str,
-        changed_vars: Set[str],
-        column_changed: Dict[str, List[str]],
-    ) -> bool:
-        """
-        Check if cell's reads overlap with changes at variable, column, or structural level.
-
-        Returns True if:
-        - Cell reads a variable that changed AND either:
-          - No column-level info available (conservative: assume overlap)
-          - Column-level info shows actual column overlap
-          - Cell has structural reads for this variable (structural changes possible)
-
-        Args:
-            cell_id: The cell to check
-            changed_vars: Variables that changed in current execution (value-level)
-            column_changed: Dict mapping var names to changed column names
-
-        Returns:
-            True if the cell might be affected by the changes
-        """
-        reads = self._reads_var_names(cell_id)
-        # Include both value-level changes AND column-level changes in overlap check
-        all_changed = changed_vars | set(column_changed.keys())
-        var_overlap = reads & all_changed
-
-        if not var_overlap:
-            return False  # No variable-level overlap at all
-
-        cell_column_reads = self._notebook_state.get_column_reads(cell_id)
-        cell_structural_reads = self._notebook_state.get_structural_reads(cell_id)
-
-        # Check column-level overlap for each overlapping variable
-        for var in var_overlap:
-            changed_cols = set(column_changed.get(var, []))
-            read_cols = cell_column_reads.get(var, None)
-
-            if not changed_cols or read_cols is None:
-                # No column info on one or both sides - conservative: assume overlap
-                return True
-
-            if changed_cols & read_cols:
-                # Actual column overlap found
-                return True
-
-            # Check if cell has structural reads for this variable
-            # If columns were added/changed and cell read structure, it might be affected
-            if var in cell_structural_reads and changed_cols:
-                return True
-
-        # All overlapping vars have column info and no column overlap
-        return False
 
     def get_stale_cells(self) -> List[str]:
         """
@@ -2323,7 +2289,7 @@ class ReproducibilityEnforcer:
                 use_leq=True,
                 column_rbw=cell_tracking.column_reads_before_writes,
                 structural_reads=cell_tracking.structural_reads,
-                structural_mode=self._structural_mode,
+                structural_mode=_STRUCTURAL_ENFORCE,
             )
 
             if diff_result.differences:
@@ -2508,7 +2474,7 @@ class ReproducibilityEnforcer:
                 use_leq=False,
                 column_rbw=all_accessed_columns,
                 structural_reads={},
-                structural_mode=self._structural_mode,
+                structural_mode=_STRUCTURAL_ENFORCE,
             )
 
             # Conflict resolution

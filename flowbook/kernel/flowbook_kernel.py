@@ -121,19 +121,9 @@ STRUCTURE-USING vs STRUCTURE-REVEALING:
 Example: df['x'] = 3 internally checks df.columns, but this is NOT recorded
 as a structural read because the primary purpose is mutation, not inspection.
 
-STRUCTURAL TRACKING MODES:
+STRUCTURAL TRACKING:
 
-%structural_tracking off     - Don't track structural attributes
-%structural_tracking warn    - Track and warn, but don't block (DEFAULT)
-%structural_tracking enforce - Track and block violations
-
-WARN mode example:
-    Cell A: cols = df.columns.tolist()  # structural_reads = {df: {columns}}
-    Cell B: df['new_col'] = 1           # adds column
-    → WARNING: "Cell @B modified 'df' which Cell @A previously read."
-    → Shows what was read (df.columns → ['a', 'b']) and what changed
-
-ENFORCE mode example:
+Structural attribute conflicts are always enforced:
     Cell A: n = len(df)                 # structural_reads = {df: {len}}
     Cell B: df.loc[len(df)] = [1, 2]    # adds row
     → VIOLATION: "Cell @B modified 'df' which Cell @A (earlier) reads."
@@ -211,13 +201,6 @@ Boolean toggle commands (no arg = enable, ? = show status):
 %continue_after_violation            - Enable continuing after violations
 %continue_after_violation off        - Stop on violation (default behavior)
 %continue_after_violation ?          - Show current setting
-
-Mode selection commands:
-%structural_tracking [off|warn|enforce] - Set structural tracking mode
-    off     - Don't track structural attributes
-    warn    - Track and warn, but don't block (default)
-    enforce - Track and block violations
-
 
 ================================================================================
 ASSUMPTIONS AND LIMITATIONS
@@ -703,64 +686,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             "❌",
             "EXEC-RESTORE is deprecated. Run upstream cells in document order to fix forward contamination."
         )
-
-    @line_magic
-    def structural_tracking(self, line: str) -> None:
-        """
-        Set structural tracking mode for DataFrame/Series attribute monitoring.
-
-        Structural tracking detects when code accesses attributes that reveal
-        DataFrame/Series structure (like df.columns, df.shape, len(df)).
-        When structural tracking is enabled and these attributes are read,
-        subsequent changes to the structure (adding columns, changing row count)
-        are either warned about or treated as Reproducibility violations.
-
-        Usage:
-            %structural_tracking           - Show current mode
-            %structural_tracking off       - Disable structural tracking
-            %structural_tracking warn      - Track and warn only (default)
-            %structural_tracking enforce   - Track and treat changes as violations
-        """
-        from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
-
-        # Suspend tracking during magic execution to avoid recording infrastructure reads
-        tracking = self._tracking
-        if tracking is not None and hasattr(tracking, "suspended"):
-            ctx = tracking.suspended()
-        else:
-            from contextlib import nullcontext
-
-            ctx = nullcontext()
-
-        with ctx:
-            mode_str = line.strip().lower()
-
-            if not mode_str:
-                # Show current mode
-                current_mode = self._enforcer.structural_mode.value
-                self._display.display_icon_and_text(
-                    "🔍", f"Structural tracking mode: {current_mode}"
-                )
-                return
-
-            try:
-                mode = StructuralTrackingMode(mode_str)
-            except ValueError:
-                self._display.display_icon_and_text(
-                    "❌", f"Invalid mode: {mode_str}. Use 'off', 'warn', or 'enforce'"
-                )
-                return
-
-            # Update Reproducibility enforcer
-            self._enforcer.set_structural_mode(mode)
-
-            # Update TrackingDict if it exists
-            if tracking is not None:
-                tracking.set_structural_tracking_mode(mode_str)
-
-            self._display.display_icon_and_text(
-                "✅", f"Structural tracking mode set to: {mode.value}"
-            )
 
     @line_magic
     def cudf_gpu_checkpoint(self, line: str) -> None:

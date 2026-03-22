@@ -5,8 +5,7 @@ These tests verify that the ReproducibilityEnforcer correctly handles structural
 detecting backward mutations and staleness when structural attributes like
 df.columns, df.shape, len(df), etc. were accessed.
 
-Note: Many tests are marked skip until sdc_enforcer.py is updated to support
-structural_reads and structural_mode parameters.
+Structural attribute conflicts are always enforced (no OFF/WARN modes).
 """
 
 import pytest
@@ -15,7 +14,6 @@ import numpy as np
 
 from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint, MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
-from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 
 from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer
 from flowbook.kernel.models import ErrorType
@@ -102,99 +100,6 @@ class TestReproducibilityEnforcerBaseline:
         assert 'x' in result_b.errors[0].locations
 
 
-class TestSDCStructuralReadsModeOff:
-    """Tests for reproducibility with structural_mode=OFF."""
-
-    @pytest.mark.skip(reason="Test design issue: OFF mode only affects structural change detection, not backward mutation detection")
-    def test_off_mode_ignores_structural_reads(self):
-        """OFF mode ignores structural reads in backward mutation check."""
-        checkpoints = MemoryCheckpoints()
-        enforcer = ReproducibilityEnforcer(checkpoints)
-        enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.OFF)
-
-        # Cell A reads df.columns
-        df = pd.DataFrame({'a': [1], 'b': [2]})
-        ns_a = {'df': df}
-        pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        checkpoints.save('_pre_cell_a', ns_a)
-
-        tracking_a = TrackingData(
-            reads_before_writes={'df'},
-            writes=set(),
-            structural_reads={'df': {'columns'}},
-        )
-
-        result_a = enforcer.check(
-            'cell_a', pre_a, ns_a, tracking_a,
-        )
-        assert not result_a.has_errors()
-
-        # Cell B adds column (would be violation with structural tracking)
-        df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
-        ns_b_post = {'df': df_b}
-        pre_b = MemoryCheckpoint('pre_b', ns_a, {})
-
-        tracking_b = TrackingData(
-            reads_before_writes={'df'},
-            writes={'df'},
-            column_writes={'df': {'c'}},
-        )
-
-        result_b = enforcer.check(
-            'cell_b', pre_b, ns_b_post, tracking_b,
-        )
-
-        # OFF mode: no violation for structural changes
-        assert not result_b.has_errors()
-
-
-class TestSDCStructuralReadsModeWarn:
-    """Tests for reproducibility with structural_mode=WARN."""
-
-    @pytest.mark.skip(reason="Test design issue: WARN mode affects structural warnings, not backward mutation detection")
-    def test_warn_mode_no_violation_but_warning(self):
-        """WARN mode produces warnings but no violation for structural issues."""
-        checkpoints = MemoryCheckpoints()
-        enforcer = ReproducibilityEnforcer(checkpoints)
-        enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.WARN)
-
-        # Cell A reads df.columns
-        df = pd.DataFrame({'a': [1], 'b': [2]})
-        ns_a = {'df': df}
-        pre_a = MemoryCheckpoint('pre_a', ns_a, {})
-        checkpoints.save('_pre_cell_a', ns_a)
-
-        tracking_a = TrackingData(
-            reads_before_writes={'df'},
-            writes=set(),
-            structural_reads={'df': {'columns'}},
-        )
-
-        result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
-        )
-        assert not result_a.has_errors()
-
-        # Cell B adds column
-        df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
-        ns_b_post = {'df': df_b}
-        pre_b = MemoryCheckpoint('pre_b', ns_a, {})
-        tracking_b = TrackingData(
-            reads_before_writes={'df'},
-            writes={'df'},
-            column_writes={'df': {'c'}},
-        )
-
-        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
-        )
-
-        # WARN mode: no violation but should have warnings
-        assert not result_b.has_errors()
-        assert hasattr(result_b, 'structural_warnings')
-        assert len(result_b.structural_warnings) > 0
-
-
 class TestSDCStructuralReadsModeEnforce:
     """Tests for reproducibility with structural_mode=ENFORCE."""
 
@@ -203,7 +108,7 @@ class TestSDCStructuralReadsModeEnforce:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A reads df.columns
         df = pd.DataFrame({'a': [1], 'b': [2]})
@@ -243,7 +148,7 @@ class TestSDCStructuralReadsModeEnforce:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A reads df.shape
         df = pd.DataFrame({'a': [1, 2]})
@@ -281,7 +186,7 @@ class TestSDCStructuralReadsModeEnforce:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A calls len(df)
         df = pd.DataFrame({'a': [1, 2]})
@@ -318,7 +223,7 @@ class TestSDCStructuralReadsModeEnforce:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A iterates over df
         df = pd.DataFrame({'a': [1], 'b': [2]})
@@ -356,7 +261,7 @@ class TestSDCStructuralReadsModeEnforce:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A calls df.describe()
         df = pd.DataFrame({'a': [1, 2], 'b': [3, 4]})
@@ -399,7 +304,7 @@ class TestSDCStructuralStaleness:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b', 'cell_c'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A: creates df
         df = pd.DataFrame({'a': [1], 'b': [2]})
@@ -454,7 +359,7 @@ class TestSDCStructuralStaleness:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b', 'cell_c'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A: creates df
         df = pd.DataFrame({'a': [1, 2]})
@@ -508,7 +413,7 @@ class TestSDCStructuralNoFalsePositives:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A reads df.columns
         df = pd.DataFrame({'a': [1], 'b': [2]})
@@ -548,7 +453,7 @@ class TestSDCStructuralNoFalsePositives:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b', 'cell_c'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A: creates df
         df = pd.DataFrame({'a': [1], 'b': [2]})
@@ -601,7 +506,7 @@ class TestSDCStructuralMultipleVariables:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A reads df1.columns but not df2.columns
         df1 = pd.DataFrame({'a': [1]})
@@ -643,7 +548,7 @@ class TestSDCStructuralSeriesTracking:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A reads s.index
         s = pd.Series([1, 2, 3])
@@ -678,7 +583,7 @@ class TestSDCStructuralSeriesTracking:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A reads s.dtype
         s = pd.Series([1, 2, 3])
@@ -741,7 +646,7 @@ class TestSDCStructuralNestedPaths:
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b'])
-        enforcer.set_structural_mode(StructuralTrackingMode.ENFORCE)
+
 
         # Cell A reads data['train'].columns
         df = pd.DataFrame({'a': [1]})

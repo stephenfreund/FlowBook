@@ -197,7 +197,6 @@ def get_loc_variables(locs: LocSet) -> Set[str]:
 def check_loc_conflicts(
     W_i: LocSet,
     R_before_i: LocSet,
-    structural_mode: "StructuralTrackingMode",
 ) -> Tuple[LocSet, List[str]]:
     """
     Check for conflicts between writes and reads.
@@ -210,21 +209,15 @@ def check_loc_conflicts(
     - Loc.column("df", "price") does NOT conflict with Loc.column("df", "quantity")
     - Loc.var("x") conflicts with any Loc involving x
 
-    Structural mode handling:
-    - OFF: structural conflicts ignored
-    - WARN: structural conflicts return warnings, not violations
-    - ENFORCE: structural conflicts are violations
+    Structural attribute conflicts are always enforced.
 
     Args:
         W_i: Write set of cell i (locations that changed)
         R_before_i: Union of read sets of clean cells before i
-        structural_mode: How to handle structural attribute conflicts
 
     Returns:
         Tuple of (violation_locs, warning_messages)
     """
-    from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
-
     violations: Set[Loc] = set()
     warnings: List[str] = []
 
@@ -232,17 +225,6 @@ def check_loc_conflicts(
         for read_loc in R_before_i:
             conflict = _locs_conflict(write_loc, read_loc)
             if conflict:
-                # Check if this is a structural conflict
-                if read_loc.type == LocType.STRUCTURAL:
-                    if structural_mode == StructuralTrackingMode.OFF:
-                        continue  # Ignore
-                    elif structural_mode == StructuralTrackingMode.WARN:
-                        warnings.append(
-                            f"Structural conflict: {write_loc} affects {read_loc}"
-                        )
-                        continue  # Warning, not violation
-                    # ENFORCE: fall through to add as violation
-
                 violations.add(write_loc)
 
     return frozenset(violations), warnings

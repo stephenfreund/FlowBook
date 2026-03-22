@@ -4,8 +4,6 @@ import pytest
 
 from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
-from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
-
 from flowbook.kernel.reproducibility_enforcer import (
     ReproducibilityEnforcer,
     PRE_CHECKPOINT_PREFIX,
