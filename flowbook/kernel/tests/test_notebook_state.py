@@ -856,3 +856,274 @@ class TestIntegration:
         state.add_reason("C", Reason(ReasonType.FORWARD_STALE, loc="y", cell_id="B"))
 
         assert len(state.get_reasons("C")) == 2
+
+
+# =============================================================================
+# Snapshot/Restore with LocSet Types
+# =============================================================================
+
+
+class TestSnapshotRestoreLocSet:
+    """Test snapshot_cell_state and restore_cell_state with LocSet types."""
+
+    def setup_method(self):
+        self.state = NotebookState()
+        self.state.cell_order = ["a", "b"]
+
+    def test_snapshot_preserves_readlocset(self):
+        """Snapshot captures ReadLocSet, restore brings it back."""
+        self.state.reads["a"] = frozenset({ReadLoc.var("x"), ReadLoc.col("df", "price")})
+        self.state.writes["a"] = frozenset({WriteLoc.var("x")})
+        self.state.status["a"] = CellStatus.clean()
+
+        snapshot = self.state.snapshot_cell_state("a")
+
+        # Modify state
+        self.state.reads["a"] = frozenset({ReadLoc.var("y")})
+        self.state.writes["a"] = frozenset({WriteLoc.var("y")})
+
+        # Restore
+        self.state.restore_cell_state(snapshot)
+        assert ReadLoc.var("x") in self.state.reads["a"]
+        assert ReadLoc.col("df", "price") in self.state.reads["a"]
+        assert WriteLoc.var("x") in self.state.writes["a"]
+
+    def test_snapshot_restore_empty_locset(self):
+        """Snapshot handles cells with empty LocSets."""
+        self.state.reads["a"] = frozenset()
+        self.state.writes["a"] = frozenset()
+        self.state.status["a"] = CellStatus.clean()
+
+        snapshot = self.state.snapshot_cell_state("a")
+        self.state.reads["a"] = frozenset({ReadLoc.var("x")})
+        self.state.restore_cell_state(snapshot)
+        assert self.state.reads["a"] == frozenset()
+
+    def test_snapshot_restore_none_reads(self):
+        """Snapshot handles cells that were never executed (no reads/writes)."""
+        # Cell "b" has no reads/writes in state
+        snapshot = self.state.snapshot_cell_state("b")
+        assert snapshot.reads is None
+        assert snapshot.writes is None
+
+        # Set some data, then restore
+        self.state.reads["b"] = frozenset({ReadLoc.var("x")})
+        self.state.restore_cell_state(snapshot)
+        assert "b" not in self.state.reads
+
+
+# =============================================================================
+# Handle Edit Preserves R/W
+# =============================================================================
+
+
+class TestHandleEditPreservesRW:
+    """Test that handle_edit preserves R/W per [Inst-Edit] formal semantics."""
+
+    def setup_method(self):
+        self.state = NotebookState()
+        self.state.cell_order = ["a", "b"]
+
+    def test_edit_preserves_reads(self):
+        """After edit, reads are preserved (not cleared)."""
+        td = TrackingData(reads_before_writes={"x"}, writes={"y"},
+                          column_reads_before_writes={}, column_writes={})
+        self.state.record_execution("a", td)
+        original_reads = self.state.reads["a"]
+        assert len(original_reads) > 0
+
+        self.state.handle_edit("a")
+        assert not self.state.is_clean("a")  # stale
+        assert self.state.reads["a"] == original_reads  # R preserved
+
+    def test_edit_preserves_writes(self):
+        """After edit, writes are preserved for BackwardStale on rerun."""
+        td = TrackingData(reads_before_writes=set(), writes={"z"},
+                          column_reads_before_writes={}, column_writes={})
+        self.state.record_execution("a", td)
+        original_writes = self.state.writes["a"]
+        assert len(original_writes) > 0
+
+        self.state.handle_edit("a")
+        assert self.state.writes["a"] == original_writes  # W preserved
+
+
+# =============================================================================
+# Handle Delete with LocSet Column-Level Conflict Detection
+# =============================================================================
+
+
+class TestHandleDeleteLocSet:
+    """Test handle_delete uses cross for column-level conflict detection."""
+
+    def setup_method(self):
+        self.state = NotebookState()
+        self.state.cell_order = ["a", "b", "c"]
+
+    def test_delete_column_writer_stales_column_reader(self):
+        """Delete cell that wrote Col(df, price) -> cell reading Col(df, price) is stale."""
+        # A writes df["price"]
+        self.state.reads["a"] = frozenset()
+        self.state.writes["a"] = frozenset({WriteLoc.col("df", "price")})
+        self.state.status["a"] = CellStatus.clean()
+        # B reads df["price"]
+        self.state.reads["b"] = frozenset({ReadLoc.col("df", "price")})
+        self.state.writes["b"] = frozenset()
+        self.state.status["b"] = CellStatus.clean()
+
+        self.state.handle_delete("a")
+        assert not self.state.is_clean("b")
+
+    def test_delete_column_writer_doesnt_stale_different_column_reader(self):
+        """Delete cell that wrote Col(df, price) -> cell reading Col(df, qty) stays clean."""
+        self.state.reads["a"] = frozenset()
+        self.state.writes["a"] = frozenset({WriteLoc.col("df", "price")})
+        self.state.status["a"] = CellStatus.clean()
+        self.state.reads["b"] = frozenset({ReadLoc.col("df", "qty")})
+        self.state.writes["b"] = frozenset()
+        self.state.status["b"] = CellStatus.clean()
+
+        self.state.handle_delete("a")
+        assert self.state.is_clean("b")  # different column, no conflict
+
+    def test_delete_var_writer_stales_column_reader(self):
+        """Delete cell that wrote Var(df) -> cell reading Col(df, price) is stale."""
+        self.state.reads["a"] = frozenset()
+        self.state.writes["a"] = frozenset({WriteLoc.var("df")})
+        self.state.status["a"] = CellStatus.clean()
+        self.state.reads["b"] = frozenset({ReadLoc.col("df", "price")})
+        self.state.writes["b"] = frozenset()
+        self.state.status["b"] = CellStatus.clean()
+
+        self.state.handle_delete("a")
+        assert not self.state.is_clean("b")  # Var(df) conflicts with Col(df, price)
+
+    def test_delete_backward_stale_last_writer(self):
+        """Delete cell C that wrote x -> cell A (LastWriter of x before C) is backward-stale."""
+        self.state.reads["a"] = frozenset()
+        self.state.writes["a"] = frozenset({WriteLoc.var("x")})
+        self.state.status["a"] = CellStatus.clean()
+        self.state.reads["b"] = frozenset()
+        self.state.writes["b"] = frozenset()
+        self.state.status["b"] = CellStatus.clean()
+        self.state.reads["c"] = frozenset()
+        self.state.writes["c"] = frozenset({WriteLoc.var("x")})
+        self.state.status["c"] = CellStatus.clean()
+
+        self.state.handle_delete("c")
+        assert not self.state.is_clean("a")  # A is LastWriter of x before C
+
+
+# =============================================================================
+# Propagate Staleness with Column-Level Precision
+# =============================================================================
+
+
+class TestPropagateStalenessColumnLevel:
+    """Test propagate_staleness with column-level precision."""
+
+    def setup_method(self):
+        self.state = NotebookState()
+        self.state.cell_order = ["a", "b", "c"]
+
+    def test_col_write_stales_same_col_reader(self):
+        """Writing Col(df, price) stales cell reading Col(df, price)."""
+        self.state.reads["a"] = frozenset()
+        self.state.writes["a"] = frozenset()
+        self.state.status["a"] = CellStatus.clean()
+        self.state.reads["b"] = frozenset({ReadLoc.col("df", "price")})
+        self.state.writes["b"] = frozenset()
+        self.state.status["b"] = CellStatus.clean()
+
+        self.state.propagate_staleness("a", frozenset({WriteLoc.col("df", "price")}))
+        assert not self.state.is_clean("b")
+
+    def test_col_write_doesnt_stale_different_col_reader(self):
+        """Writing Col(df, price) does NOT stale cell reading Col(df, qty)."""
+        self.state.reads["a"] = frozenset()
+        self.state.writes["a"] = frozenset()
+        self.state.status["a"] = CellStatus.clean()
+        self.state.reads["b"] = frozenset({ReadLoc.col("df", "qty")})
+        self.state.writes["b"] = frozenset()
+        self.state.status["b"] = CellStatus.clean()
+
+        self.state.propagate_staleness("a", frozenset({WriteLoc.col("df", "price")}))
+        assert self.state.is_clean("b")  # different column
+
+    def test_var_write_stales_col_reader(self):
+        """Writing Var(df) stales cell reading Col(df, anything)."""
+        self.state.reads["a"] = frozenset()
+        self.state.writes["a"] = frozenset()
+        self.state.status["a"] = CellStatus.clean()
+        self.state.reads["b"] = frozenset({ReadLoc.col("df", "qty")})
+        self.state.writes["b"] = frozenset()
+        self.state.status["b"] = CellStatus.clean()
+
+        self.state.propagate_staleness("a", frozenset({WriteLoc.var("df")}))
+        assert not self.state.is_clean("b")  # Var(df) conflicts with any df read
+
+
+# =============================================================================
+# LastWriter with LocSet Types
+# =============================================================================
+
+
+class TestLastWriterForLocSet:
+    """Test last_writer_for with variable-level matching from WriteLocSet."""
+
+    def setup_method(self):
+        self.state = NotebookState()
+        self.state.cell_order = ["a", "b", "c"]
+
+    def test_var_write_found(self):
+        """Cell with Var(x) write is found as last writer of 'x'."""
+        self.state.writes["a"] = frozenset({WriteLoc.var("x")})
+        assert self.state.last_writer_for("x", "c") == "a"
+
+    def test_col_write_found_by_var_name(self):
+        """Cell with Col(df, price) write is found as last writer of 'df'."""
+        self.state.writes["a"] = frozenset({WriteLoc.col("df", "price")})
+        assert self.state.last_writer_for("df", "c") == "a"
+
+    def test_col_add_found_by_var_name(self):
+        """Cell with ColAdd(df, new) write is found as last writer of 'df'."""
+        self.state.writes["b"] = frozenset({WriteLoc.col_add("df", "new")})
+        assert self.state.last_writer_for("df", "c") == "b"
+
+
+# =============================================================================
+# Per-Cell Tracking Data Accessor Methods
+# =============================================================================
+
+
+class TestAccessorMethods:
+    """Test per-cell tracking data accessor methods."""
+
+    def setup_method(self):
+        self.state = NotebookState()
+        self.state.cell_order = ["a"]
+
+    def test_get_column_reads(self):
+        td = TrackingData(reads_before_writes={"df"}, writes=set(),
+                          column_reads_before_writes={"df": {"price", "qty"}},
+                          column_writes={})
+        self.state.record_execution("a", td)
+        cols = self.state.get_column_reads("a")
+        assert cols == {"df": {"price", "qty"}}
+
+    def test_get_file_reads(self):
+        td = TrackingData(reads_before_writes=set(), writes=set(),
+                          column_reads_before_writes={}, column_writes={},
+                          file_reads_before_writes={"data.csv"}, file_writes=set())
+        self.state.record_execution("a", td)
+        assert self.state.get_file_reads("a") == {"data.csv"}
+
+    def test_has_record(self):
+        assert not self.state.has_record("a")
+        td = TrackingData(reads_before_writes=set(), writes={"x"},
+                          column_reads_before_writes={}, column_writes={})
+        self.state.record_execution("a", td)
+        assert self.state.has_record("a")
+
+    def test_get_tracking_returns_none_for_unexecuted(self):
+        assert self.state.get_tracking("a") is None
