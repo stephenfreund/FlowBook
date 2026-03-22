@@ -255,7 +255,7 @@ from flowbook.kernel.notebook_state import NotebookState
 
 from flowbook.kernel.change_detector import detect_changes, changes_to_write_locs
 from flowbook.kernel.locations import (
-    WriteLoc, WriteLocSet, ReadLocSet,
+    WriteLoc, WriteLocType, WriteLocSet, ReadLocSet,
     has_conflict, wlocs_conflict_rlocs,
     tracking_to_readlocset,
 )
@@ -1505,6 +1505,7 @@ class ReproducibilityEnforcer:
                 stale, staleness_warnings = self._compute_forward_staleness(
                     namespace, W_i_old, W_i_current, W_i_vars, recoverable_column_changed, cell_id, my_position,
                     changed_file_paths=_changed_file_paths,
+                    typed_changes=typed_changes,
                 )
             log(f"[Inst-Run] {cell_id}: ForwardStale marked {len(stale)} cells")
             structural_warnings.extend(staleness_warnings)
@@ -1964,6 +1965,7 @@ class ReproducibilityEnforcer:
         just_executed: str,
         my_position: int,
         changed_file_paths: Optional[Set[str]] = None,
+        typed_changes: Optional[List] = None,
     ) -> Tuple[List[str], List[str]]:
         """
         Compute ForwardStale for all cells j > i.
@@ -1973,7 +1975,8 @@ class ReproducibilityEnforcer:
         FORMAL_DEVELOPMENT.md §10 (Staleness Computation)
         """
         return self._compute_forward_staleness_syntactic(
-            old_writes, current_writes, changed_vars, column_changed, just_executed, my_position, changed_file_paths
+            old_writes, current_writes, changed_vars, column_changed, just_executed, my_position,
+            changed_file_paths, typed_changes=typed_changes,
         )
 
     def _compute_forward_staleness_syntactic(
@@ -1985,30 +1988,46 @@ class ReproducibilityEnforcer:
         just_executed: str,
         my_position: int,
         changed_file_paths: Optional[Set[str]] = None,
+        typed_changes: Optional[List] = None,
     ) -> Tuple[List[str], List[str]]:
         """
-        Syntactic ForwardStale: (Wᵢ ∪ W'ᵢ ∪ ΔV) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅ for j > i.
+        Syntactic ForwardStale: (Wᵢ ∪ W'ᵢ ∪ ΔV) ⊗ (Rⱼ ∪ Wⱼ) ≠ ∅ for j > i.
 
-        Cell j becomes stale if cell i's old writes, new writes, OR diff-detected
-        changes overlap with what cell j reads or writes.
+        Cell j becomes stale if cell i's writes conflict with what cell j reads
+        or writes, using the ⊗ relation for column-level precision.
 
-        Uses pure set intersection on R/W sets. Does not use checkpoints for
-        staleness comparison. Staleness is monotonic (once stale, stays stale
-        until re-executed).
-
-        Note: changed_vars (from diff) is essential for detecting in-place mutations
-        like df['col'] = ... which may not appear in TrackingDict's writes set.
+        Uses typed Change objects (when available) for precise WriteLoc types:
+        ColAdd vs Col vs ColDel matters because ColAdd conflicts with Attr reads
+        (shape, columns) while Col does not.
 
         Formal ref: FORMAL_DEVELOPMENT.md §3.3, §10.1
         """
         all_warnings: List[str] = []
 
         # Wᵢ ∪ W'ᵢ ∪ ΔV: all locations cell i has written (old, new, or diff-detected)
-        # Include changed_vars to catch in-place mutations that TrackingDict misses
         W_i_union = old_writes | current_writes | changed_vars
 
-        # Convert changes to WriteLocSet for ⊗-based conflict detection
+        # Build WriteLocSet for ⊗-based staleness checks.
+        # Base: use tracking-based column info (column_changed) for column-level precision.
+        # Augment: add ColAdd/ColDel from typed changes (diff-based) when available,
+        # because these affect structural attributes (shape, columns) that Col does not.
         change_wlocs = _changes_to_writelocset(W_i_union, column_changed)
+
+        if typed_changes:
+            # Add structural-affecting WriteLocs from the diff (ColAdd, ColDel, Rows, AttrChanged)
+            # that _changes_to_writelocset misses (it only produces Var and Col).
+            from flowbook.kernel.changes import ColumnAdded, ColumnRemoved, RowsAdded, RowsRemoved, IndexChanged, DtypeChanged
+            for change in typed_changes:
+                if isinstance(change, ColumnAdded):
+                    change_wlocs = change_wlocs | frozenset({WriteLoc.col_add(change.variable, change.column)})
+                elif isinstance(change, ColumnRemoved):
+                    change_wlocs = change_wlocs | frozenset({WriteLoc.col_del(change.variable, change.column)})
+                elif isinstance(change, (RowsAdded, RowsRemoved)):
+                    change_wlocs = change_wlocs | frozenset({WriteLoc.rows(change.variable)})
+                elif isinstance(change, IndexChanged):
+                    change_wlocs = change_wlocs | frozenset({WriteLoc.attr_changed(change.variable, "index")})
+                elif isinstance(change, DtypeChanged):
+                    change_wlocs = change_wlocs | frozenset({WriteLoc.attr_changed(change.variable, "dtypes")})
 
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:

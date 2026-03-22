@@ -610,6 +610,99 @@ class TestCommentOnlyCellClearsRW:
         assert state.reads["a"] == frozenset()
         assert state.writes["a"] == frozenset()
 
+
+# =============================================================================
+# ColAdd vs Col on first vs subsequent runs
+# =============================================================================
+
+
+class TestColAddVsColStaleness:
+    """
+    When a cell adds a column on first run, it produces ColAdd in the diff.
+    On subsequent runs (column already exists), it produces Col (modify).
+    ColAdd conflicts with attribute reads (shape, columns); Col does not.
+    """
+
+    def setup_method(self):
+        self.helper = ReproducibilityTestHelper()
+        self.helper.set_cell_order(["a", "b", "c"])
+
+    def test_col_add_stales_shape_reader(self):
+        """Adding a new column stales cells reading df.shape."""
+        df = pd.DataFrame({"x": [1, 2, 3]})
+        self.helper.execute_cell("a", {}, {"df": df.copy()}, writes={"df"}, column_writes={"df": {"x"}})
+        df_y = df.copy(); df_y["y"] = [10, 20, 30]
+        self.helper.execute_cell("b", {"df": df.copy()}, {"df": df_y},
+            reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y"}},
+            continue_on_violation=True)
+        self.helper.execute_cell("c", {"df": df_y}, {"df": df_y},
+            reads={"df"}, structural_reads={"df": {"shape", "columns"}})
+
+        state = self.helper.sdc._notebook_state
+
+        # Edit B, rerun to add NEW column z
+        state.handle_edit("b")
+        df_yz = df.copy(); df_yz["y"] = [10, 20, 30]; df_yz["z"] = [7, 8, 9]
+        result = self.helper.execute_cell("b", {"df": df_y}, {"df": df_yz},
+            reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y", "z"}},
+            continue_on_violation=True)
+
+        # C reads shape/columns → stale because z was added (ColAdd ⊗ Attr = true)
+        assert "c" in result.stale_cells, \
+            "C should be stale: ColAdd(df, z) conflicts with Attr(df, shape)"
+
+    def test_col_modify_doesnt_stale_shape_reader(self):
+        """Modifying an existing column does NOT stale cells reading df.shape."""
+        df = pd.DataFrame({"x": [1, 2, 3]})
+        self.helper.execute_cell("a", {}, {"df": df.copy()}, writes={"df"}, column_writes={"df": {"x"}})
+        df_y = df.copy(); df_y["y"] = [10, 20, 30]
+        self.helper.execute_cell("b", {"df": df.copy()}, {"df": df_y},
+            reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y"}},
+            continue_on_violation=True)
+        self.helper.execute_cell("c", {"df": df_y}, {"df": df_y},
+            reads={"df"}, structural_reads={"df": {"shape", "columns"}})
+
+        state = self.helper.sdc._notebook_state
+
+        # Edit B, rerun — column y exists, just modify values
+        state.handle_edit("b")
+        df_y2 = df.copy(); df_y2["y"] = [100, 200, 300]
+        result = self.helper.execute_cell("b", {"df": df_y}, {"df": df_y2},
+            reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y"}},
+            continue_on_violation=True)
+
+        # C reads shape/columns → NOT stale (Col modify ⊗ Attr = false)
+        assert "c" not in result.stale_cells, \
+            "C should NOT be stale: Col(df, y) modify does not conflict with Attr(df, shape)"
+
+    def test_first_run_add_then_second_run_modify(self):
+        """On first run B adds column → C stale. On second run B modifies → C NOT stale."""
+        df = pd.DataFrame({"x": [1, 2, 3]})
+        self.helper.execute_cell("a", {}, {"df": df.copy()}, writes={"df"}, column_writes={"df": {"x"}})
+
+        # B first run: adds y (pre doesn't have y)
+        df_y = df.copy(); df_y["y"] = [10, 20, 30]
+        self.helper.execute_cell("b", {"df": df.copy()}, {"df": df_y},
+            reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y"}},
+            continue_on_violation=True)
+
+        # C reads shape
+        self.helper.execute_cell("c", {"df": df_y}, {"df": df_y},
+            reads={"df"}, structural_reads={"df": {"shape"}})
+
+        state = self.helper.sdc._notebook_state
+
+        # Edit B, second run: y exists in pre, just modify
+        state.handle_edit("b")
+        df_y2 = df.copy(); df_y2["y"] = [100, 200, 300]
+        result = self.helper.execute_cell("b", {"df": df_y}, {"df": df_y2},
+            reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y"}},
+            continue_on_violation=True)
+
+        # C NOT stale: column y already existed, just values changed
+        assert "c" not in result.stale_cells, \
+            "On second run, column modify should NOT stale shape reader"
+
         # B should be stale: it read x which A no longer writes
         assert not state.is_clean("b"), "B should be stale after A's writes cleared"
 
