@@ -396,8 +396,8 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 | NoWriteAfterRead check | STEP 2: `_check_backward_mutation_new()` |
 | RecoverableMutation check | STEP 2: `_check_unrecoverable_mutation()` |
 | `T'ᵢ = CLEAN` | STEP 4: `set_clean(cell_id)` |
-| ForwardStale loop | STEP 5: `_compute_forward_staleness()` |
-| BackwardStale loop | STEP 5: LastWriter computed via `NotebookState.last_writer_for()` |
+| ForwardStale loop | STEP 5: `_compute_forward_staleness()` using `wlocs_conflict_rlocs()` |
+| BackwardStale loop | STEP 5: LastWriter via `NotebookState.last_writer_for()` (variable level) |
 
 ### 7.5 Invariant and Checks
 
@@ -419,52 +419,80 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 
 ---
 
-## 8. Extensions Beyond Core Formalism
+## 8. Typed Read/Write Locations and the ⊗ Conflict Relation
 
-The implementation extends the core formalism with:
+The implementation uses typed read and write locations with a conflict relation
+⊗ that provides column-level granularity for all predicates and staleness checks.
 
-### 8.1 Location Types (Loc)
+### 8.1 Read Locations
 
-Locations are represented as typed tuples for fine-grained conflict detection:
+Read locations describe what a cell accessed:
 ```
-ℓ ∈ Loc ::= Var(x) | Col(df, c) | File(path) | Structural(df, attr)
-```
-
-**Code:** `Loc` dataclass in `kernel/models.py` with constructors:
-- `Loc.var(name)` — variable location
-- `Loc.column(var, column)` — column location
-- `Loc.file(path)` — file location
-- `Loc.structural(var, attr)` — structural attribute location
-
-### 8.2 Column-Level Tracking
-
-Column-level locations allow `df['price']` changes to not conflict with cells reading only `df['quantity']`.
-
-**Code:** `TrackingData.column_reads`, `column_writes` in `kernel_support/models.py`
-
-Loc-based predicates in `kernel/models.py`:
-- `check_loc_conflicts(W_i, R_before_i, mode)` — implements NoWriteAfterRead with column-level precision
-- `diff_to_write_locs(diff, tracking)` — converts diff result to LocSet
-- `tracking_to_read_locs(tracking)` — converts TrackingData to LocSet
-- `get_loc_variables(locs)` — extracts variable names from LocSet
-
-### 8.3 File I/O Tracking
-
-File reads/writes are tracked as locations:
-```
-ℓ ∈ Loc ::= ... | File(path)
+r ∈ ReadLoc ::= Var(x) | Col(d, c) | Attr(d, a) | File(p)
 ```
 
-**Code:** `TrackingData.file_reads_before_writes`, `file_writes`
+| Constructor | Meaning | Example |
+|---|---|---|
+| Var(x) | Whole variable x | df, config |
+| Col(d, c) | Column c of DataFrame d | df["price"] |
+| Attr(d, a) | Attribute a of DataFrame d | df.shape, df.columns |
+| File(p) | File at path p | data.csv |
 
-### 8.4 Structural Attributes
+**Code:** `ReadLoc` in `kernel/locations.py`, `tracking_to_readlocset()` converts TrackingData
 
-DataFrame structural attributes (shape, columns, dtypes) can be tracked:
+### 8.2 Write Locations
+
+Write locations describe what changed and *how*:
 ```
-ℓ ∈ Loc ::= ... | Structural(df, attr)
+w ∈ WriteLoc ::= Var(x) | Col(d, c) | ColAdd(d, c) | ColDel(d, c)
+               | Rows(d) | AttrChanged(d, a) | File(p)
 ```
 
-**Code:** `structural_reads` in `TrackingData`, `StructuralMode` in `kernel/conflict_rules.py`
+| Constructor | Meaning | Example |
+|---|---|---|
+| Var(x) | Variable completely replaced | x = 42 |
+| Col(d, c) | Column values modified | df["price"] = [1,2,3] |
+| ColAdd(d, c) | New column added | df["new"] = [4,5,6] |
+| ColDel(d, c) | Column removed | df.drop("old") |
+| Rows(d) | Rows added/removed | df.append(...) |
+| AttrChanged(d, a) | Attribute changed | df.reset_index() |
+| File(p) | File written | df.to_csv("out.csv") |
+
+**Code:** `WriteLoc` in `kernel/locations.py`, `changes_to_write_locs()` converts Change objects
+
+### 8.3 The ⊗ Conflict Relation
+
+`w ⊗ r` means "writing w invalidates reading r". Key rules:
+
+| Write | Read | Conflicts? |
+|---|---|---|
+| Col(d, c) | Col(d, c') | Only if c = c' (column-level precision) |
+| Col(d, c) | Attr(d, a) | **No** (modifying values ≠ structural change) |
+| ColAdd(d, c) | Col(d, c') | **No** (adding column ≠ changing existing columns) |
+| ColAdd(d, c) | Attr(d, a) | Yes if a ∈ COL_ATTRS (adding changes structure) |
+| Rows(d) | Col(d, c) | **Yes** (row change affects all column data) |
+| AttrChanged(d, a) | Col(d, c) | **No** (attr change ≠ data change) |
+
+Attribute conflicts are always enforced (no OFF/WARN mode).
+
+**Code:** `write_conflicts_read()` in `kernel/locations.py`
+
+Set-level operations:
+- `wlocs_conflict_rlocs(W, R)` — return writes in W that conflict with some read in R
+- `has_conflict(W, R)` — boolean W ⊗ R ≠ ∅
+- `output_set(W)` — convert writes to reads for write-write overlap
+
+### 8.4 The output Function
+
+For ForwardStale's write-write overlap, `output : WriteLoc → ReadLoc` maps a write
+to the read that would observe its value:
+```
+output(ColAdd(d, c)) = Col(d, c)    — key: different ColAdds have different outputs
+output(Rows(d))      = Var(d)
+output(AttrChanged(d, a)) = Attr(d, a)
+```
+
+**Code:** `WriteLoc.output()` method in `kernel/locations.py`
 
 ### 8.5 Staleness Reasons
 
@@ -495,11 +523,13 @@ memory checkpoints that snapshot variable states.
 
 **Code:** `MemoryCheckpoint` in `kernel_support/memory_checkpoint.py`
 
-### 9.3 Conflict Resolution Hierarchy
+### 9.3 Conflict Resolution
 
-The implementation uses a rule-based conflict resolver for column-level precision:
+The implementation uses typed write locations (`WriteLoc`) with a conflict relation
+(`⊗`) for column-level precision. The `ConflictResolver` with its `CONFLICT_RULES`
+table is used for fine-grained backward mutation checks with typed `Change` objects.
 
-**Code:** `CONFLICT_RULES` in `kernel/conflict_rules.py`, `ConflictResolver` in `kernel/conflict_resolver.py`
+**Code:** `write_conflicts_read()` in `kernel/locations.py`, `ConflictResolver` in `kernel/conflict_resolver.py`
 
 ---
 
@@ -515,19 +545,26 @@ then evaluates all predicates using pure set operations on R and W.
 
 **Stored state**:
 ```
-R[i] : Set[Loc]    — variables read before write
-W[i] : Set[Loc]    — variables that actually changed
+R[i] : ReadLocSet     — locations read before write (Var, Col, Attr, File)
+W[i] : WriteLocSet    — locations that actually changed (Var, Col, ColAdd, ColDel, Rows, AttrChanged, File)
 ```
 
-**Predicates**:
+**Predicates** (using ⊗ conflict relation for column-level precision):
 ```
-NoReadAndWrite(R, W, i)    ≝  Rᵢ ∩ Wᵢ = ∅
-WriteBeforeRead(R, W, i)   ≝  Rᵢ ⊆ W_{1..i-1}
-NoReadBeforeWrite(R, W, i) ≝  Rᵢ ∩ W_{i+1..n} = ∅
-NoWriteAfterRead(R, W, i)  ≝  Wᵢ ∩ R_{1..i-1} = ∅  (clean cells only)
+NoReadAndWrite(R, W, i)    ≝  Wᵢ ⊗ Rᵢ = ∅
+WriteBeforeRead(R, W, i)   ≝  ∀ r ∈ Rᵢ . r ∈ ambient ∨ ∃ j < i . Wⱼ ⊗ {r} ≠ ∅
+NoReadBeforeWrite(R, W, i) ≝  W_{i+1..n} ⊗ Rᵢ = ∅
+NoWriteAfterRead(R, W, i)  ≝  Wᵢ ⊗ R_{1..i-1} = ∅  (clean cells only)
 
-ForwardStale(R, W, W', i, j) ≝  j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+ForwardStale(R, W, W', i, j) ≝  j > i ∧ (
+    (Wᵢ ∪ W'ᵢ) ⊗ Rⱼ ≠ ∅                   — write-read conflict
+    ∨ (Wᵢ ∪ W'ᵢ) ⊗ output*(Wⱼ) ≠ ∅        — write-write overlap
+)
 ```
+
+Note: The paper uses `∩` (set intersection) because R and W share a single Loc type.
+The implementation uses `⊗` because ReadLoc and WriteLoc are different types.
+The `output*` function converts WriteLoc → ReadLoc for write-write overlap checks.
 
 **Properties**:
 - Staleness is monotonic (once stale, always stale until re-executed)
