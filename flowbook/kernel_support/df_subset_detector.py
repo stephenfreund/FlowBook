@@ -304,10 +304,10 @@ class DataFrameSubsetDetector:
                     # - Floating point: use equal_nan=True to handle NaN correctly
                     # - Object/string: use pandas isna + element comparison
                     # - Other (int, bool, etc.): basic array_equal works
-                    if np.issubdtype(child_arr.dtype, np.floating):
+                    if isinstance(child_arr.dtype, np.dtype) and np.issubdtype(child_arr.dtype, np.floating):
                         if not np.array_equal(child_arr, parent_subset, equal_nan=True):
                             return _cache_none()
-                    elif child_arr.dtype == object or child_arr.dtype.kind in ('U', 'S'):
+                    elif child_arr.dtype == object or (hasattr(child_arr.dtype, 'kind') and child_arr.dtype.kind in ('U', 'S')) or pd.api.types.is_string_dtype(child_arr.dtype):
                         # For object/string dtypes, handle NaN specially
                         # Use pandas isna which handles None, NaN, NaT correctly
                         child_na = pd.isna(child_arr)
