@@ -525,11 +525,12 @@ memory checkpoints that snapshot variable states.
 
 ### 9.3 Conflict Resolution
 
-The implementation uses typed write locations (`WriteLoc`) with a conflict relation
-(`⊗`) for column-level precision. The `ConflictResolver` with its `CONFLICT_RULES`
-table is used for fine-grained backward mutation checks with typed `Change` objects.
+The implementation uses typed read/write locations (`ReadLoc`/`WriteLoc`) with a conflict
+relation (`⊗`) for column-level precision. All conflict detection uses
+`wlocs_conflict_rlocs(W, R)` which computes the set of writes in W that conflict
+with some read in R, using `write_conflicts_read()` as the per-element check.
 
-**Code:** `write_conflicts_read()` in `kernel/locations.py`, `ConflictResolver` in `kernel/conflict_resolver.py`
+**Code:** `write_conflicts_read()`, `wlocs_conflict_rlocs()` in `kernel/locations.py`
 
 ---
 

@@ -63,10 +63,10 @@ NotebookState: Single source of truth for formal model S = ⟨C, O, Σ, T, R, W�
     - reads/writes: R, W (Cell → P(Loc)) - per-cell reads and writes
     - tracking_data: Per-cell TrackingData for conflict detection
 
-ConflictResolver: Declarative conflict rule evaluation
-    - Evaluates access events against change events
-    - Applies rules in precedence order
-    - Returns conflict/no-conflict decision with explanation
+LocSet operations (wlocs_conflict_rlocs): Column-aware conflict detection
+    - Uses typed ReadLoc/WriteLoc with ⊗ operator
+    - Column-level precision for DataFrame operations
+    - Structural attribute awareness for shape/columns changes
 
 ================================================================================
 ALGORITHM OVERVIEW
@@ -253,14 +253,11 @@ from flowbook.kernel.models import (
 )
 from flowbook.kernel.notebook_state import NotebookState
 
-# Conflict resolution imports
-from flowbook.kernel.access_events import StructuralRead, VariableRead
-from flowbook.kernel.conflict_resolver import ConflictResolver
-from flowbook.kernel.conflict_rules import StructuralMode
-from flowbook.kernel.change_detector import detect_changes
+from flowbook.kernel.change_detector import detect_changes, changes_to_write_locs
 from flowbook.kernel.locations import (
     WriteLoc, WriteLocSet, ReadLocSet,
     has_conflict, wlocs_conflict_rlocs,
+    tracking_to_readlocset,
 )
 from flowbook.util.output import output, timer
 
@@ -314,8 +311,8 @@ OPT_ACCESSED_VARS_ONLY = _env_flag("FLOWBOOK_OPT_ACCESSED_VARS_ONLY", default=Tr
 #   Structural(df, a) - Structural attribute
 #
 # The predicates below work with Set[str] for backward compatibility.
-# For full Loc-based predicates, see flowbook.kernel.models:
-#   tracking_to_read_locs(), tracking_to_write_locs(), locs_intersect()
+# For full LocSet-based checks, see flowbook.kernel.locations:
+#   tracking_to_readlocset(), wlocs_conflict_rlocs()
 # ============================================================================
 
 
@@ -702,10 +699,6 @@ class ReproducibilityEnforcer:
         # NotebookState is the single source of truth for formal model state:
         # T (status), R (reads), W (writes), and per-cell TrackingData
         self._notebook_state = NotebookState()
-        # Declarative conflict resolver (always ENFORCE structural mode)
-        self._conflict_resolver = ConflictResolver(
-            structural_mode=StructuralMode.ENFORCE
-        )
         # Deferred checkpoint deletion for syntactic mode - keeps last checkpoint
         # until next cell executes, allowing size queries between executions
         self._pending_checkpoint_deletion: Optional[str] = None
@@ -1148,10 +1141,6 @@ class ReproducibilityEnforcer:
         Returns:
             ReproducibilityResult with violation info, stale cells, and changed variables
         """
-        from flowbook.kernel.models import (
-            tracking_to_read_locs, diff_to_write_locs, check_loc_conflicts,
-            get_var_locs, get_loc_variables,
-        )
         from flowbook.util.output import log
 
         # Process deferred checkpoint deletion from previous cell (syntactic mode)
@@ -1206,7 +1195,6 @@ class ReproducibilityEnforcer:
         # STEP 1: Compute r (reads) and w (writes) from tracking
         # Ref: FORMAL_DEVELOPMENT.md §3.1, line 169
         # ================================================================
-        R_i_locs = tracking_to_read_locs(tracking)  # r as LocSet
         W_i_old = self._writes_var_names(cell_id)  # Old W_i as variable names (Set[str])
 
         # Compute diff to get actual changes
@@ -1234,8 +1222,6 @@ class ReproducibilityEnforcer:
                 )],
             )
 
-        # W_i from diff (what actually changed)
-        W_i_locs = diff_to_write_locs(current_diff, tracking)  # w as LocSet
         changed_vars = list(current_diff.differences.keys()) if current_diff.differences else []
         column_changed = _extract_column_changes(current_diff, tracking)
 
@@ -1645,102 +1631,42 @@ class ReproducibilityEnforcer:
         Formal ref: NoReadBeforeWrite(R, W, i) ≝ Rᵢ ∩ W_{i+1..n} = ∅
         FORMAL_DEVELOPMENT.md §3.2, line 178
 
-        Uses typed changes from conflict resolver when available, and falls
-        back to syntactic Rᵢ ∩ W_{i+1..n} check for uncovered variables.
+        Uses LocSet ⊗ operator for column-aware conflict detection.
+        Prefers diff-based WriteLocSet (from typed_changes) when available
+        for column-level precision, falls back to tracking-based writes.
         """
-        my_read_events = tracking.to_read_events()
-        vars_covered_by_typed_changes: Set[str] = set()
+        R_i = tracking_to_readlocset(tracking)
+        if not R_i:
+            return None
 
-        # Check later cells that already executed (typed changes check)
         for later_cell_id in self._cell_order[my_position + 1:]:
             if not self._notebook_state.has_record(later_cell_id):
                 continue
 
+            # Prefer diff-based writes for column-level precision
             later_changes = self._notebook_state.get_typed_changes(later_cell_id)
-            if not later_changes:
+            if later_changes:
+                W_later = changes_to_write_locs(later_changes)
+            else:
+                W_later = self._notebook_state.writes.get(later_cell_id, frozenset())
+
+            if not W_later:
                 continue
 
-            for change in later_changes:
-                vars_covered_by_typed_changes.add(change.variable)
+            conflicting = wlocs_conflict_rlocs(W_later, R_i)
+            if conflicting:
+                conflicts = sorted(w.display_name() for w in conflicting)
+                reading_alpha = self._cell_id_to_alpha(cell_id)
+                writing_alpha = self._cell_id_to_alpha(later_cell_id)
+                message = format_forward_dependency_message(reading_alpha, writing_alpha, conflicts)
 
-            if my_read_events:
-                violations_result = self._conflict_resolver.get_violations(later_changes, my_read_events)
-                if violations_result:
-                    conflicts = []
-                    for v in violations_result.violations:
-                        var = v.change.variable
-                        if hasattr(v.change, 'column') and v.change.column:
-                            conflicts.append(f"{var}['{v.change.column}']")
-                        else:
-                            conflicts.append(var)
-                    conflicts = sorted(set(conflicts))
-
-                    if violations_result.truncated:
-                        conflicts.append(f"... and {violations_result.truncated_count} more")
-
-                    reading_alpha = self._cell_id_to_alpha(cell_id)
-                    writing_alpha = self._cell_id_to_alpha(later_cell_id)
-                    message = format_forward_dependency_message(reading_alpha, writing_alpha, conflicts)
-
-                    return ReproducibilityError(
-                        error_type=ErrorType.NO_READ_BEFORE_WRITE,
-                        cell_id=cell_id,
-                        locations=conflicts,
-                        message=message,
-                        causer_cell=later_cell_id,
-                    )
-
-        # Syntactic check for uncovered variables: Rᵢ ∩ W_{i+1..n}
-        # Scan the writes of later cells in document order
-        syntactic_conflicts: List[str] = []
-        writer_cell_for_message: Optional[str] = None
-
-        for read_var in (tracking.reads_before_writes or set()):
-            if read_var in vars_covered_by_typed_changes:
-                continue
-
-            # Check if any later cell writes this variable
-            for later_cell_id in self._cell_order[my_position + 1:]:
-                later_writes_vars = self._writes_var_names(later_cell_id)
-                if read_var in later_writes_vars:
-                    syntactic_conflicts.append(read_var)
-                    if writer_cell_for_message is None:
-                        writer_cell_for_message = later_cell_id
-                    break  # Found a writer, no need to check more
-
-        if syntactic_conflicts:
-            reading_alpha = self._cell_id_to_alpha(cell_id)
-            conflict_names = sorted(set(syntactic_conflicts))
-            writing_alpha = self._cell_id_to_alpha(writer_cell_for_message)
-            message = format_forward_dependency_message(reading_alpha, writing_alpha, conflict_names)
-
-            return ReproducibilityError(
-                error_type=ErrorType.NO_READ_BEFORE_WRITE,
-                cell_id=cell_id,
-                locations=conflict_names,
-                message=message,
-                causer_cell=writer_cell_for_message,
-            )
-
-        # File forward dependency check
-        if tracking.file_reads_before_writes:
-            for later_cell_id in self._cell_order[my_position + 1:]:
-                later_tracking = self._notebook_state.get_tracking(later_cell_id)
-                if later_tracking is None:
-                    continue
-                file_overlap = tracking.file_reads_before_writes & later_tracking.file_writes
-                if file_overlap:
-                    reading_alpha = self._cell_id_to_alpha(cell_id)
-                    writing_alpha = self._cell_id_to_alpha(later_cell_id)
-                    conflict_names = sorted(os.path.basename(p) for p in file_overlap)
-                    message = format_forward_dependency_message(reading_alpha, writing_alpha, conflict_names)
-                    return ReproducibilityError(
-                        error_type=ErrorType.NO_READ_BEFORE_WRITE,
-                        cell_id=cell_id,
-                        locations=conflict_names,
-                        message=message,
-                        causer_cell=later_cell_id,
-                    )
+                return ReproducibilityError(
+                    error_type=ErrorType.NO_READ_BEFORE_WRITE,
+                    cell_id=cell_id,
+                    locations=conflicts,
+                    message=message,
+                    causer_cell=later_cell_id,
+                )
 
         return None
 
@@ -1763,6 +1689,10 @@ class ReproducibilityEnforcer:
         if not typed_changes:
             return None
 
+        W_i_diff = changes_to_write_locs(typed_changes)
+        if not W_i_diff:
+            return None
+
         # Optimization: skip if no variable-level overlap
         if OPT_CONFLICT_LOOP_SKIP:
             changed_var_names = {c.variable for c in typed_changes}
@@ -1776,57 +1706,43 @@ class ReproducibilityEnforcer:
 
         # Check each prior CLEAN cell
         for prior_cell_id in self._cell_order[:my_position]:
-            prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
-            if prior_tracking is None:
+            if not self._notebook_state.has_record(prior_cell_id):
                 continue
             if not self._notebook_state.is_clean(prior_cell_id):
                 continue
 
-            prior_reads = prior_tracking.to_read_events()
-            if not prior_reads:
+            R_prior = self._notebook_state.reads.get(prior_cell_id, frozenset())
+            if not R_prior:
                 continue
 
-            violations_result = self._conflict_resolver.get_violations(typed_changes, prior_reads)
-            if not violations_result:
+            conflicting = wlocs_conflict_rlocs(W_i_diff, R_prior)
+            if not conflicting:
                 continue
 
-            # Build conflict list - always show column info when change was at column level
-            conflicts = []
-            for v in violations_result.violations:
-                var = v.change.variable
-                if hasattr(v.change, 'column') and v.change.column:
-                    conflicts.append(f"{var}.{v.change.column}")
-                else:
-                    conflicts.append(var)
-            conflicts = sorted(set(conflicts))
+            conflicts = sorted(w.display_name() for w in conflicting)
 
-            # Add truncation notice if needed
-            if violations_result.truncated:
-                conflicts.append(f"... and {violations_result.truncated_count} more")
+            mutating_alpha = self._cell_id_to_alpha(cell_id)
+            affected_alpha = self._cell_id_to_alpha(prior_cell_id)
+            prior_structural_values = self._notebook_state.get_structural_reads_values(prior_cell_id)
+            changes = _extract_change_descriptions(current_diff, modified_columns)
+            message = format_structural_violation(
+                mutating_alpha, affected_alpha, conflicts, prior_structural_values, changes
+            )
 
-            if conflicts:
-                mutating_alpha = self._cell_id_to_alpha(cell_id)
-                affected_alpha = self._cell_id_to_alpha(prior_cell_id)
-                prior_structural_values = self._notebook_state.get_structural_reads_values(prior_cell_id)
-                changes = _extract_change_descriptions(current_diff, modified_columns)
-                message = format_structural_violation(
-                    mutating_alpha, affected_alpha, conflicts, prior_structural_values, changes
-                )
+            detail = {}
+            if prior_structural_values:
+                detail["structural_reads_detail"] = prior_structural_values
+            if changes:
+                detail["changes_detail"] = changes
 
-                detail = {}
-                if prior_structural_values:
-                    detail["structural_reads_detail"] = prior_structural_values
-                if changes:
-                    detail["changes_detail"] = changes
-
-                return ReproducibilityError(
-                    error_type=ErrorType.NO_WRITE_AFTER_READ,
-                    cell_id=cell_id,
-                    locations=conflicts,
-                    message=message,
-                    causer_cell=prior_cell_id,
-                    detail=detail if detail else None,
-                )
+            return ReproducibilityError(
+                error_type=ErrorType.NO_WRITE_AFTER_READ,
+                cell_id=cell_id,
+                locations=conflicts,
+                message=message,
+                causer_cell=prior_cell_id,
+                detail=detail if detail else None,
+            )
 
         return None
 
@@ -2477,22 +2393,18 @@ class ReproducibilityEnforcer:
                 structural_mode=_STRUCTURAL_ENFORCE,
             )
 
-            # Conflict resolution
+            # Conflict resolution (simulated for timing measurement)
             my_position = self._get_position(cell_id)
             if my_position >= 0:
-                from flowbook.kernel.changes import ValueChanged
+                R_i = tracking_to_readlocset(tracking)
 
                 # Simulate forward contamination check
-                my_read_events = tracking.to_read_events()
                 for later_cell_id in self._cell_order[my_position + 1:]:
                     if not self._notebook_state.has_record(later_cell_id):
                         continue
-                    later_tracking = self._notebook_state.get_tracking(later_cell_id)
-                    if later_tracking is None:
-                        continue
-                    later_changes = [ValueChanged(variable=var) for var in later_tracking.writes]
-                    if later_changes and my_read_events:
-                        self._conflict_resolver.get_violations(later_changes, my_read_events)
+                    W_later = self._notebook_state.writes.get(later_cell_id, frozenset())
+                    if W_later and R_i:
+                        wlocs_conflict_rlocs(W_later, R_i)
 
                 # Simulate backward mutation check
                 for prior_cell_id in self._cell_order[:my_position]:
@@ -2500,14 +2412,10 @@ class ReproducibilityEnforcer:
                         continue
                     if not self._notebook_state.is_clean(prior_cell_id):
                         continue
-                    prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
-                    if prior_tracking is None:
-                        continue
-                    prior_reads = prior_tracking.to_read_events()
-                    if prior_reads:
-                        fake_changes = [ValueChanged(variable=var) for var in prior_tracking.reads_before_writes]
-                        if fake_changes:
-                            self._conflict_resolver.get_violations(fake_changes, prior_reads)
+                    R_prior = self._notebook_state.reads.get(prior_cell_id, frozenset())
+                    W_i = self._notebook_state.writes.get(cell_id, frozenset())
+                    if R_prior and W_i:
+                        wlocs_conflict_rlocs(W_i, R_prior)
 
         result["check_ms"] = check_timer.duration()
         result["total_overhead_ms"] = result["checkpoint_ms"] + result["check_ms"]

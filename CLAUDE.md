@@ -169,9 +169,8 @@ The primary kernel with always-on reproducibility enforcement:
 - `models.py` - `ReproducibilityMetadata`, `ReproducibilityViolation`, `ReproducibilityResult`, `ReproducibilityExecutionRecord` data classes
 - `changes.py` - Typed records of what changed between checkpoints (`ValueChanged`, `ColumnAdded`, etc.)
 - `access_events.py` - Typed records of variable/column/structural access during cell execution
-- `change_detector.py` - Converts `MemoryCheckpointDiffResult` to typed `Change` list
-- `conflict_resolver.py` - Matches `Change`s against `AccessEvent`s using declarative rules
-- `conflict_rules.py` - Declarative specification of reproducibility conflict detection
+- `change_detector.py` - Converts `MemoryCheckpointDiffResult` to typed `Change` list and `WriteLocSet`
+- `locations.py` - Typed `ReadLoc`/`WriteLoc` with `write_conflicts_read()` (⊗) and set operations
 
 **Formal Transition Rules** (from `FORMAL_DEVELOPMENT.md`):
 
@@ -369,7 +368,7 @@ This normalization happens transparently at entry points:
 - Kernel spec: `flowbook/kernel/kernelspec/`
 - Main kernel class: `flowbook/kernel/flowbook_kernel.py`
 - Reproducibility logic: `flowbook/kernel/reproducibility_enforcer.py`
-- Conflict detection pipeline: `access_events.py` → `change_detector.py` → `conflict_rules.py` → `conflict_resolver.py`
+- Conflict detection pipeline: `change_detector.py` → `locations.py` (ReadLoc/WriteLoc with ⊗)
 - Formal specification: `FORMAL_DEVELOPMENT.md`
 
 **Experimental Kernel** (AI commands, profiling):

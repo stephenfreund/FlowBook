@@ -276,10 +276,8 @@ WriteLocSet = FrozenSet[WriteLoc]
 # =============================================================================
 # w ⊗ r: does writing w invalidate reading r?
 #
-# This is the SINGLE conflict check that replaces:
-# - _locs_conflict() in models.py
-# - ConflictResolver + CONFLICT_RULES table
-# - _has_relevant_overlap_by_id() in enforcer
+# This is the SINGLE conflict check for all reproducibility analysis.
+# Supersedes the old ConflictResolver + CONFLICT_RULES table.
 #
 # The "how" is encoded in the WriteLoc type constructor.
 # The matrix has 7 write types × 4 read types = 28 cells.
@@ -470,23 +468,34 @@ def tracking_to_readlocset(tracking: TrackingData) -> ReadLocSet:
     Convert TrackingData reads to ReadLocSet.
 
     This creates the unified read set Rᵢ from runtime tracking data:
-    - Variable reads → Var(x)
+    - Variable reads → Var(x) (only for variables WITHOUT column/structural detail)
     - Column reads → Col(d, c)
     - Structural reads → Attr(d, a)
     - File reads → File(p)
+
+    Variables that have column-level or structural-level read detail are NOT
+    included as Var(x) reads, since the finer-grained locs already capture
+    their read footprint. This matches the semantics of TrackingData.to_read_events().
     """
     locs: Set[ReadLoc] = set()
 
-    for var in (tracking.reads_before_writes or set()):
-        locs.add(ReadLoc.var(var))
+    # Track variables with finer-grained read info
+    vars_with_detail: Set[str] = set()
 
     for var, cols in (tracking.column_reads_before_writes or {}).items():
+        vars_with_detail.add(var)
         for col in cols:
             locs.add(ReadLoc.col(var, col))
 
     for var, attrs in (tracking.structural_reads or {}).items():
+        vars_with_detail.add(var)
         for attr in attrs:
             locs.add(ReadLoc.attr(var, attr))
+
+    # Only emit Var(x) for variables without column/structural detail
+    for var in (tracking.reads_before_writes or set()):
+        if var not in vars_with_detail:
+            locs.add(ReadLoc.var(var))
 
     for path in (tracking.file_reads_before_writes or set()):
         locs.add(ReadLoc.file(path))

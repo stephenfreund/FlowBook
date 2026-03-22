@@ -430,7 +430,7 @@ class TestColumnAwareBackwardMutation:
         )
         assert backward_err.cell_id == "b"
         assert backward_err.causer_cell == "a"
-        assert "df.price" in backward_err.locations
+        assert "df['price']" in backward_err.locations
 
     def test_conflict_prior_no_column_info_conservative(self):
         """Cell A reads df (no column info), Cell B modifies df.price - violation (conservative)."""
@@ -474,7 +474,7 @@ class TestColumnAwareBackwardMutation:
         assert result_b.has_errors()
         backward_err = next(e for e in result_b.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
         assert backward_err.causer_cell == "a"
-        assert "df.price" in backward_err.locations
+        assert "df['price']" in backward_err.locations
 
     def test_conflict_current_no_column_info_conservative(self):
         """Cell A reads df.price, Cell B modifies df (no column info) - violation (conservative)."""
@@ -565,7 +565,7 @@ class TestColumnAwareBackwardMutation:
         assert backward_err.causer_cell == "a"
         assert "config" in backward_err.locations
         # df.price should NOT be in violations (different column)
-        assert "df.price" not in backward_err.locations
+        assert "df['price']" not in backward_err.locations
 
     def test_multiple_column_conflicts(self):
         """Multiple columns conflict: df.price and df.quantity both modified."""
@@ -609,8 +609,8 @@ class TestColumnAwareBackwardMutation:
         assert result_b.has_errors()
         backward_err = next(e for e in result_b.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
         assert backward_err.causer_cell == "a"
-        assert "df.price" in backward_err.locations
-        assert "df.quantity" in backward_err.locations
+        assert "df['price']" in backward_err.locations
+        assert "df['quantity']" in backward_err.locations
 
     def test_no_conflict_when_no_overlap_multiple_vars(self):
         """Multiple DataFrames with no column overlap - no violation."""
@@ -1167,7 +1167,7 @@ class TestStructuralTrackingEnforce:
         # Now shows column-level detail: raw_data.x instead of just raw_data
         assert result_c.has_errors()
         backward_err = next(e for e in result_c.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
-        assert "raw_data.x" in backward_err.locations
+        assert any("raw_data" in loc and "x" in loc for loc in backward_err.locations)
 
     def test_structural_violation_with_column_reads_and_new_column(self):
         """
@@ -1233,7 +1233,7 @@ class TestStructuralTrackingEnforce:
         # Now shows column-level detail: df.x instead of just df
         assert result_c.has_errors()
         backward_err = next(e for e in result_c.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
-        assert "df.x" in backward_err.locations
+        assert any("df" in loc and "x" in loc for loc in backward_err.locations)
 
 
 # =============================================================================

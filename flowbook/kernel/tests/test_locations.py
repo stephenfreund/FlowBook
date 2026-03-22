@@ -594,8 +594,9 @@ class TestTrackingConversion:
             file_writes=set(),
         )
         result = tracking_to_readlocset(td)
+        # "df" has column/structural detail, so no Var(df) — only Col and Attr locs.
+        # "config" has no detail, so it gets Var(config).
         expected = frozenset({
-            ReadLoc.var("df"),
             ReadLoc.var("config"),
             ReadLoc.col("df", "price"),
             ReadLoc.col("df", "qty"),
