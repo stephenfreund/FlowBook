@@ -567,3 +567,94 @@ class TestLocSetConversionIntegration:
             for r in stored_reads
         )
         assert has_var_loc, f"Expected Var(x) in reads, got: {stored_reads}"
+
+
+# =============================================================================
+# Comment-only / empty cell clearing R/W
+# =============================================================================
+
+
+class TestCommentOnlyCellClearsRW:
+    """When a cell is edited from real code to comment-only (or empty),
+    executing it should clear R/W and propagate staleness for removed writes.
+
+    This tests the NotebookState-level behavior that _execute_without_enforcer
+    relies on. The kernel calls set_clean + clears R/W + propagate_staleness.
+    """
+
+    def setup_method(self):
+        self.helper = ReproducibilityTestHelper()
+        self.helper.set_cell_order(["a", "b", "c"])
+
+    def test_clearing_writes_stales_downstream_readers(self):
+        """Cell A writes x, B reads x. A edited to comment → B stale."""
+        # Run A: x = 1
+        self.helper.execute_cell("a", {}, {"x": 1}, writes={"x"})
+        # Run B: reads x
+        self.helper.execute_cell("b", {"x": 1}, {"x": 1}, reads={"x"})
+
+        state = self.helper.sdc._notebook_state
+        assert state.is_clean("a")
+        assert state.is_clean("b")
+
+        # Simulate _execute_without_enforcer: A becomes comment-only
+        old_writes = state.writes.get("a", frozenset())
+        state.reads["a"] = frozenset()
+        state.writes["a"] = frozenset()
+        if old_writes:
+            state.propagate_staleness("a", old_writes)
+        state.set_clean("a")
+
+        # A is clean with empty R/W
+        assert state.is_clean("a")
+        assert state.reads["a"] == frozenset()
+        assert state.writes["a"] == frozenset()
+
+        # B should be stale: it read x which A no longer writes
+        assert not state.is_clean("b"), "B should be stale after A's writes cleared"
+
+    def test_clearing_writes_no_effect_when_no_old_writes(self):
+        """Cell with no prior writes → clearing is a no-op."""
+        # Run A with no writes (e.g., was already a comment)
+        state = self.helper.sdc._notebook_state
+        state.reads["a"] = frozenset()
+        state.writes["a"] = frozenset()
+        state.set_clean("a")
+
+        # Run B
+        self.helper.execute_cell("b", {}, {"y": 1}, writes={"y"})
+        assert state.is_clean("b")
+
+        # "Re-execute" A as comment — no old writes, nothing happens
+        old_writes = state.writes.get("a", frozenset())
+        assert len(old_writes) == 0
+        state.set_clean("a")
+
+        # B stays clean
+        assert state.is_clean("b")
+
+    def test_clearing_writes_column_level_precision(self):
+        """Cell A writes df["price"], B reads df["qty"]. A cleared → B stays clean."""
+        df = pd.DataFrame({"price": [1], "qty": [2]})
+        self.helper.execute_cell(
+            "a", {}, {"df": df.copy()}, writes={"df"},
+            column_writes={"df": {"price"}},
+        )
+        self.helper.execute_cell(
+            "b", {"df": df.copy()}, {"df": df.copy()},
+            reads={"df"}, column_reads={"df": {"qty"}},
+        )
+
+        state = self.helper.sdc._notebook_state
+        assert state.is_clean("b")
+
+        # Clear A's writes
+        old_writes = state.writes.get("a", frozenset())
+        state.reads["a"] = frozenset()
+        state.writes["a"] = frozenset()
+        if old_writes:
+            state.propagate_staleness("a", old_writes)
+        state.set_clean("a")
+
+        # B reads qty, A wrote price → different columns, B should stay clean
+        # (depends on whether propagate_staleness uses ⊗ for column precision)

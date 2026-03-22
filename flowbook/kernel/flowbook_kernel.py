@@ -1560,7 +1560,13 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         allow_stdin: bool,
         cell_meta: Optional[dict],
     ) -> dict:
-        """Execute without Reproducibility tracking (for magics, empty code)."""
+        """Execute without Reproducibility tracking (for magics, empty code, comment-only cells).
+
+        This cell has no reads or writes in the formal model: R_i = ∅, W_i = ∅.
+        If the cell previously had writes (e.g., user edited `x = 1` to `# x = 1`),
+        we must propagate staleness for the removed writes so downstream cells
+        that depended on the old writes become stale.
+        """
         result = await self._ipython_do_execute(
             code,
             silent,
@@ -1571,13 +1577,28 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             cell_id=self._cell_id,
         )
 
-        # Mark this cell as clean - it was executed (even if it has no code effect)
-        # This clears staleness from source edits or other reasons
         if self._cell_id:
-            self._enforcer._notebook_state.set_clean(self._cell_id)
+            state = self._enforcer._notebook_state
+
+            # Capture old writes BEFORE clearing — needed for ForwardStale propagation
+            old_writes = state.writes.get(self._cell_id, frozenset())
+
+            # Clear R/W: this cell has no reads or writes now
+            state.reads[self._cell_id] = frozenset()
+            state.writes[self._cell_id] = frozenset()
+            state.tracking_data.pop(self._cell_id, None)
+            state.typed_changes.pop(self._cell_id, None)
+
+            # Propagate ForwardStale for removed writes:
+            # If the cell previously wrote x and now doesn't, cells reading x
+            # or writing x must become stale.
+            if old_writes:
+                state.propagate_staleness(self._cell_id, old_writes)
+
+            # Mark clean AFTER propagation (so this cell isn't self-staled)
+            state.set_clean(self._cell_id)
 
         # Send empty metadata to clear any stale metadata from previous executions
-        # This ensures the frontend shows empty reads/writes for magic-only cells
         if not silent and self._cell_id:
             empty_metadata = ReproducibilityMetadata(
                 cell_id=self._cell_id,
@@ -1586,11 +1607,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 writes=[],
                 changed_variables=[],
                 stale_cells=self._enforcer.get_stale_cells(),
-                violation=None,
                 cell_order=self._enforcer.cell_order,
                 staleness_reasons=self._enforcer._notebook_state.get_all_reasons(),
             )
-            # Use display_icon_and_text with metadata to send to frontend
             self._display.display_icon_and_text(
                 "✓",
                 "Magic cell",
