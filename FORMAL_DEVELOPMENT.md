@@ -481,7 +481,7 @@ Key rules:
 | Var(x) | Col(d, c) | **Yes** if x = d (replacing df invalidates column reads) |
 | Col(d, c) | Var(x) | **No** (column write doesn't change binding) |
 | Col(d, c) | Col(d, c') | Only if c = c' (column-level precision) |
-| Col(d, c) | Attr(d, a) | **No** (modifying values ≠ structural change) |
+| Col(d, c) | Attr(d, a) | Yes if a ∈ COL_VALUE_ATTRS (values, T, describe depend on column data) |
 | ColAdd(d, c) | Var(x) | **No** (column add doesn't change binding) |
 | ColAdd(d, c) | Col(d, c') | **No** (adding column ≠ changing existing columns) |
 | ColAdd(d, c) | Attr(d, a) | Yes if a ∈ COL_ATTRS (adding changes structure) |

@@ -50,6 +50,15 @@ COL_ATTRS: FrozenSet[str] = frozenset({
     "size",      # rows * cols
 })
 
+# Attributes that depend on column DATA values (not just structure).
+# Col(d, c) writes invalidate these because modifying column values
+# changes the data these attributes expose.
+COL_VALUE_ATTRS: FrozenSet[str] = frozenset({
+    "values",    # df.values — 2D array of all column data
+    "T",         # df.T — transpose exposes all column data
+    "describe",  # df.describe() — statistics computed from column values
+})
+
 # Attributes that reveal row structure
 ROW_ATTRS: FrozenSet[str] = frozenset({
     "index",     # Row labels
@@ -265,7 +274,10 @@ class WriteLoc:
         if self.type == WriteLocType.VAR:
             return frozenset({ReadLoc.var(self.name)})
         elif self.type == WriteLocType.COL:
-            return frozenset({ReadLoc.col(self.qualifier, self.name)})
+            return frozenset(
+                {ReadLoc.col(self.qualifier, self.name)}
+                | {ReadLoc.attr(self.qualifier, a) for a in COL_VALUE_ATTRS}
+            )
         elif self.type == WriteLocType.COL_ADD:
             # ColAdd conflicts with Attr(d, a) for a ∈ COL_ATTRS
             return frozenset(
@@ -423,11 +435,14 @@ def write_conflicts_read(w: WriteLoc, r: ReadLoc) -> bool:
         return False  # Var vs File: no conflict
 
     # --- Col(d, c) writes: column values modified ---
-    # Invalidates: same-column reads on same DataFrame
-    # Does NOT invalidate: Var reads (binding unchanged), attribute reads (values ≠ structure)
+    # Invalidates: same-column reads on same DataFrame,
+    #              value-dependent attrs (values, T, describe) on same DataFrame
+    # Does NOT invalidate: Var reads (binding unchanged), structural attrs (shape, columns)
     elif w.type == WriteLocType.COL:
         if r.type == ReadLocType.COLUMN:
             return _same_dataframe(w.qualifier, r.qualifier) and w.name == r.name
+        if r.type == ReadLocType.ATTR:
+            return _same_dataframe(w.qualifier, r.qualifier) and r.name in COL_VALUE_ATTRS
         return False
 
     # --- ColAdd(d, c) writes: new column added ---
@@ -518,6 +533,81 @@ def output_set(writes: WriteLocSet) -> ReadLocSet:
     for w in writes:
         result.update(w.output())
     return frozenset(result)
+
+
+# =============================================================================
+# Typed Formal Predicates
+# =============================================================================
+# These are the typed (column-aware) versions of the formal predicates from
+# FORMAL_DEVELOPMENT.md §3.2-3.3. Each takes ReadLocSet/WriteLocSet and uses
+# the ▷ relation for column-level precision.
+#
+# The four VALIDITY predicates (must all hold for execution to be accepted):
+#   no_read_and_write, write_before_read, no_read_before_write, no_write_after_read
+#
+# The two STALENESS predicates (used after acceptance to propagate staleness):
+#   forward_stale_reads, forward_stale_writes
+
+
+def no_read_and_write(R_i: ReadLocSet, W_i: WriteLocSet) -> WriteLocSet:
+    """
+    NoReadAndWrite(R, W, i) — Rᵢ ∩ Wᵢ = ∅
+
+    Returns the WriteLocs that conflict with reads in the same cell.
+    Empty means predicate holds.
+
+    Formal ref: FORMAL_DEVELOPMENT.md §3.2
+    """
+    return wlocs_conflict_rlocs(W_i, R_i)
+
+
+def no_read_before_write(R_i: ReadLocSet, W_after: WriteLocSet) -> WriteLocSet:
+    """
+    NoReadBeforeWrite(R, W, i) — Rᵢ ∩ W_{i+1..n} = ∅
+
+    Returns the WriteLocs from later cells that conflict with cell i's reads.
+    Empty means predicate holds (no forward contamination).
+
+    Formal ref: FORMAL_DEVELOPMENT.md §3.2
+    """
+    return wlocs_conflict_rlocs(W_after, R_i)
+
+
+def no_write_after_read(W_i: WriteLocSet, R_before: ReadLocSet) -> WriteLocSet:
+    """
+    NoWriteAfterRead(R, W, i) — Wᵢ ∩ R_{1..i-1} = ∅
+
+    Returns the WriteLocs from cell i that conflict with earlier cells' reads.
+    Empty means predicate holds (no backward mutation).
+
+    Formal ref: FORMAL_DEVELOPMENT.md §3.2
+    """
+    return wlocs_conflict_rlocs(W_i, R_before)
+
+
+def forward_stale_reads(W_i: WriteLocSet, R_j: ReadLocSet) -> WriteLocSet:
+    """
+    ForwardStale read overlap: W'ᵢ ▷ Rⱼ
+
+    Returns the WriteLocs from cell i that invalidate cell j's reads.
+    Non-empty means cell j should become stale.
+
+    Formal ref: FORMAL_DEVELOPMENT.md §3.3
+    """
+    return wlocs_conflict_rlocs(W_i, R_j)
+
+
+def forward_stale_writes(W_i: WriteLocSet, W_j: WriteLocSet) -> WriteLocSet:
+    """
+    ForwardStale write overlap: W'ᵢ ▷ output*(Wⱼ)
+
+    Returns the WriteLocs from cell i that overlap with cell j's write effects.
+    Non-empty means cell j should become stale (write-write overlap).
+    Uses output() to convert j's writes to the reads they produce.
+
+    Formal ref: FORMAL_DEVELOPMENT.md §3.3, CONFLICT_RELATION.md §Write-Write Conflict
+    """
+    return wlocs_conflict_rlocs(W_i, output_set(W_j))
 
 
 # =============================================================================

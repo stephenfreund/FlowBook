@@ -214,6 +214,16 @@ const COL_ATTRS = new Set([
 ]);
 
 /**
+ * Attributes that depend on column DATA values (not just structure).
+ * Col(d, c) writes invalidate these.
+ */
+const COL_VALUE_ATTRS = new Set([
+  'values',   // df.values — 2D array of all column data
+  'T',        // df.T — transpose exposes all column data
+  'describe'  // df.describe() — statistics computed from column values
+]);
+
+/**
  * Attributes that reveal row structure.
  */
 const ROW_ATTRS = new Set([
@@ -296,8 +306,14 @@ export function writeConflictsRead(w: IWriteLoc, r: IReadLoc): boolean {
       return _varTargetsRef(w.name, r);
 
     case 'col':
-      // Col(d,c) only conflicts with Col(d,c) — same dataframe AND same column
-      return r.type === 'col' && _sameDataframe(w, r) && w.name === r.name;
+      // Col(d,c) conflicts with Col(d,c) AND Attr(d, a) for a ∈ COL_VALUE_ATTRS
+      if (r.type === 'col') {
+        return _sameDataframe(w, r) && w.name === r.name;
+      }
+      if (r.type === 'attr') {
+        return _sameDataframe(w, r) && COL_VALUE_ATTRS.has(r.name);
+      }
+      return false;
 
     case 'col_add':
       // ColAdd(d,c) only conflicts with Attr reads on COL_ATTRS
@@ -429,7 +445,10 @@ export function writeLocOutputs(w: IWriteLoc): IReadLoc[] {
     case 'var':
       return [{ type: 'var', name: w.name }];
     case 'col':
-      return [{ type: 'col', name: w.name, qualifier: w.qualifier }];
+      return [
+        { type: 'col', name: w.name, qualifier: w.qualifier },
+        ...[...COL_VALUE_ATTRS].map(a => ({ type: 'attr' as const, name: a, qualifier: w.qualifier }))
+      ];
     case 'col_add':
       // ColAdd conflicts with Attr(d, a) for a ∈ COL_ATTRS
       return [...COL_ATTRS].map(a => ({ type: 'attr' as const, name: a, qualifier: w.qualifier }));

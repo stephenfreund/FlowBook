@@ -102,6 +102,7 @@ Two sets define which DataFrame attributes are sensitive to which kind of struct
 | Group        | Members                                                                    | Meaning                       |
 |-------------|----------------------------------------------------------------------------|-------------------------------|
 | `COL_ATTRS` | `columns`, `keys`, `dtypes`, `axes`, `T`, `values`, `iter`, `describe`, `shape`, `size` | Attributes that reveal column structure |
+| `COL_VALUE_ATTRS` | `values`, `T`, `describe`                                           | Attributes that depend on column data values |
 | `ROW_ATTRS` | `index`, `axes`, `values`, `T`, `shape`, `size`, `len`, `empty`            | Attributes that reveal row structure    |
 
 `shape`, `size`, `axes`, `values`, and `T` appear in both — they expose both dimensions. For example, `axes = [index, columns]` is affected by both row and column structural changes.
@@ -110,27 +111,27 @@ Two sets define which DataFrame attributes are sensitive to which kind of struct
 
 > **`True`** means the write invalidates the read (the cell that did the read is now stale).
 
-| Write `w` ↓  \  Read `r` → | **Var(x')**         | **Col(d', c')**            | **Attr(d', a')**                | **File(p')**         |
-|-----------------------------|---------------------|----------------------------|---------------------------------|----------------------|
-| **Var(x)**                  | `x = x'`            | `x = d'`                   | `x = d'`                        | —                    |
-| **Col(d, c)**               | —                   | `d = d'` AND `c = c'`      | —                               | —                    |
-| **ColAdd(d, c)**            | —                   | —                          | `d = d'` AND `a' ∈ COL_ATTRS`  | —                    |
-| **ColDel(d, c)**            | —                   | `d = d'` AND `c = c'`      | `d = d'` AND `a' ∈ COL_ATTRS`  | —                    |
-| **Rows(d)**                 | —                   | `d = d'` (all columns)     | `d = d'` AND `a' ∈ ROW_ATTRS`  | —                    |
-| **Attr(d, a)**              | —                   | —                          | `d = d'` AND `a = a'`          | —                    |
-| **File(p)**                 | —                   | —                          | —                               | `p = p'`             |
+| Write `w` ↓  \  Read `r` → | **Var(x')**         | **Col(d', c')**                  | **Attr(d', a')**                       | **File(p')**         |
+|-----------------------------|---------------------|----------------------------------|-----------------------------------------|----------------------|
+| **Var(x)**                  | `x = x'`            | `x = name(d')`                   | `x = name(d')`                          | —                    |
+| **Col(d, c)**               | —                   | `d ≡ d'` AND `c = c'`            | `d ≡ d'` AND `a' ∈ COL_VALUE_ATTRS`    | —                    |
+| **ColAdd(d, c)**            | —                   | —                                | `d ≡ d'` AND `a' ∈ COL_ATTRS`          | —                    |
+| **ColDel(d, c)**            | —                   | `d ≡ d'` AND `c = c'`            | `d ≡ d'` AND `a' ∈ COL_ATTRS`          | —                    |
+| **Rows(d)**                 | —                   | `d ≡ d'` (all columns)           | `d ≡ d'` AND `a' ∈ ROW_ATTRS`          | —                    |
+| **Attr(d, a)**              | —                   | —                                | `d ≡ d'` AND `a = a'`                  | —                    |
+| **File(p)**                 | —                   | —                                | —                                       | `p = p'`             |
 
 (**—** = never conflicts)
 
-The `=` comparison has different semantics depending on the domain:
-- **`d = d'`**: Compares `LocRef.loc_id` values (stable object identity via `StableIdMap`)
-- **`x = d'`**: Compares variable name `x` against `LocRef.var_name` (Var rebinding bridge)
-- **`x = x'`, `c = c'`, `a = a'`, `p = p'`**: String equality
+**Comparison operators:**
+- **`d ≡ d'`** (identity): Compares `LocRef.loc_id` values — same DataFrame object via `StableIdMap`
+- **`name(d')`**: Extracts the variable name from an address (`LocRef.var_name`) — used for the `Var(x) ▷ Col/Attr` bridge, where variable rebinding invalidates reads through that name
+- **`=`** (equality): String comparison for names, columns, attributes, and paths
 
 Key observations:
 
 - **`Var(x)` is the nuclear option.** Replacing a variable conflicts with *every* read type on that variable — column reads, attribute reads, everything. The entire binding changed.
-- **`Col(d, c)` is maximally precise.** Modifying column values only invalidates reads of that *exact* column. It does not touch attributes or other columns. This is what enables *column independence*: cell A reads `df["qty"]`, cell B writes `df["price"]` → no conflict.
+- **`Col(d, c)` is maximally precise.** Modifying column values invalidates reads of that *exact* column, plus value-dependent attributes (`values`, `T`, `describe`) that expose the raw data. It does not touch structural attributes or other columns. This is what enables *column independence*: cell A reads `df["qty"]`, cell B writes `df["price"]` → no conflict (unless A also reads `df.values`).
 - **`ColAdd(d, c)` does not invalidate existing column reads.** The old columns' data is untouched. It only invalidates structural attributes like `columns` and `shape` that would now reflect the extra column.
 - **`ColDel(d, c)` is stricter than `ColAdd`.** It invalidates reads of the deleted column (it no longer exists) *plus* the same structural attributes.
 - **`Rows(d)` is column-wide.** Every column's data changed (more or fewer values), so all column reads conflict. Row-structural attributes (`index`, `shape`, `len`, `empty`) and shared attributes (`axes`, `values`, `T`) are also affected — but `df.columns` and `df.dtypes` are unchanged by adding a row.
@@ -148,7 +149,7 @@ There is no separate write-write conflict function. Instead, the system converts
 | WriteLoc            | `output()` → ReadLoc set |
 |--------------------|--------------------------|
 | `Var(x)`           | `{ Var(x) }`             |
-| `Col(d, c)`        | `{ Col(d, c) }`          |
+| `Col(d, c)`        | `{ Col(d, c) } ∪ { Attr(d, a) \| a ∈ COL_VALUE_ATTRS }` |
 | `ColAdd(d, c)`     | `{ Attr(d, a) \| a ∈ COL_ATTRS }` |
 | `ColDel(d, c)`     | `{ Col(d, c) } ∪ { Attr(d, a) \| a ∈ COL_ATTRS }` |
 | `Rows(d)`          | `{ Attr(d, a) \| a ∈ ROW_ATTRS }` |
@@ -159,7 +160,7 @@ This lifts to sets: `output*(W) = ⋃ { output(w) | w ∈ W }`.
 
 **Key insight:** Structural writes (`ColAdd`, `ColDel`, `Rows`) expand to multiple output reads because they affect shared structural attributes. For example, `output(Rows(d))` = `{Attr(d, a) | a ∈ ROW_ATTRS}` rather than `Var(d)`, because row changes affect shape, index, etc. — not the variable binding itself.
 
-**Note on Rows and columns:** `Rows(d) ▷ Col(d, *)` in ▷, but `output(Rows(d))` does not include column reads because we cannot enumerate column names at the loc level. Write-write overlap between `Rows(d)` and `Col(d, c)` is detected in the other direction: `Rows(d) ▷ output(Col(d, c)) = Rows(d) ▷ Col(d, c) = True`.
+**Note on Rows and columns:** `Rows(d) ▷ Col(d, *)` in ▷, but `output(Rows(d))` does not include column reads because we cannot enumerate column names at the loc level. Write-write overlap between `Rows(d)` and `Col(d, c)` is detected via `Rows(d) ▷ output(Col(d, c))`: since `output(Col(d, c))` contains `Col(d, c)` and `Rows(d) ▷ Col(d, c) = True`, overlap is always detected. The reverse direction (`Col(d,c) ▷ output(Rows(d))`) also works because `output(Rows(d))` contains `Attr(d, values)` and `Attr(d, T)`, both in `COL_VALUE_ATTRS`. Note: the current implementation uses variable-name-level write-write overlap (more conservative than the typed `output()` approach), so this is doubly covered.
 
 ### Forward Staleness Check
 
@@ -177,7 +178,7 @@ Composing `output()` with ▷ yields the effective write-write table. An entry i
 | Cell `i` wrote ↓  \  Cell `j` wrote → | **Var(x)** | **Col(d, c)** | **ColAdd(d, c)** | **ColDel(d, c)** | **Rows(d)** | **Attr(d, a)** | **File(p)** |
 |---------------------------------------|------------|---------------|------------------|------------------|-------------|----------------------|-------------|
 | **Var(x)**                            | same `x`   | `x == d`      | `x == d`, `a ∈ COL_ATTRS` | `x == d`  | `x == d`, `a ∈ ROW_ATTRS` | `x == d`             | —           |
-| **Col(d, c)**                         | —          | same `d,c`    | —                | same `d,c`       | same `d`    | —                    | —           |
+| **Col(d, c)**                         | —          | same `d,c` or `a ∈ COL_VALUE_ATTRS` | `a ∈ COL_VALUE_ATTRS` | same `d,c` or `a ∈ COL_VALUE_ATTRS` | same `d`, `a ∈ ROW_ATTRS ∩ COL_VALUE_ATTRS` | `a ∈ COL_VALUE_ATTRS` | —           |
 | **ColAdd(d, c)**                      | —          | —             | same `d`, `a ∈ COL_ATTRS` | —         | —           | `a ∈ COL_ATTRS`      | —           |
 | **ColDel(d, c)**                      | —          | same `d,c`    | same `d`, `a ∈ COL_ATTRS` | same `d,c` or `a ∈ COL_ATTRS` | —  | `a ∈ COL_ATTRS`      | —           |
 | **Rows(d)**                           | —          | same `d`      | same `d`, `a ∈ COL_ATTRS` | same `d`  | same `d`    | `a ∈ ROW_ATTRS`      | —           |

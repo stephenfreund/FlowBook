@@ -258,7 +258,7 @@ from flowbook.kernel.notebook_state import NotebookState
 from flowbook.kernel.change_detector import detect_changes, changes_to_write_locs
 from flowbook.kernel.locations import (
     WriteLoc, WriteLocType, WriteLocSet, ReadLocSet,
-    has_conflict, wlocs_conflict_rlocs,
+    has_conflict, wlocs_conflict_rlocs, output_set,
     tracking_to_readlocset, tracking_to_writelocset,
     readlocset_to_list, writelocset_to_list,
 )
@@ -2077,11 +2077,13 @@ class ReproducibilityEnforcer:
             cell_read_locs = _precise_readlocset(cell_read_locs, cell_tracking)
             conflicting_wlocs = wlocs_conflict_rlocs(change_wlocs, cell_read_locs)
 
-            # Also check write-write overlap (WRITE_OVERLAP - no convergence)
-            cell_writes = cell_tracking.writes or set()
-            write_overlap = W_i_union & cell_writes
+            # Write-write overlap: W'_i ▷ output*(W_j) — typed column-level check.
+            # Uses stored WriteLocSet (includes diff-derived ColAdd/ColDel/Rows/Attr)
+            # and output_set() to convert j's writes to the reads they produce.
+            cell_write_locs = self._notebook_state.writes.get(cell_id, frozenset())
+            write_conflicting = wlocs_conflict_rlocs(change_wlocs, output_set(cell_write_locs))
 
-            if conflicting_wlocs or write_overlap:
+            if conflicting_wlocs or write_conflicting:
                 # Build staleness reasons from conflicting WriteLocs
                 stale_var_names: set = set()
                 for wloc in conflicting_wlocs:
@@ -2092,11 +2094,12 @@ class ReproducibilityEnforcer:
                     stale_var_names.add(wloc.var_name())
 
                 # Then handle write-only overlaps (WRITE_OVERLAP - no convergence)
-                for var in write_overlap - stale_var_names:
-                    self._notebook_state.add_reason(
-                        cell_id,
-                        Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
-                    )
+                for wloc in write_conflicting:
+                    if wloc.var_name() not in stale_var_names:
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.WRITE_OVERLAP, loc=wloc.display_name(), cell_id=just_executed)
+                        )
 
         return self._notebook_state.get_stale_cells(), all_warnings
 
