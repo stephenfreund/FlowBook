@@ -160,7 +160,7 @@ This lifts to sets: `output*(W) = ⋃ { output(w) | w ∈ W }`.
 
 **Key insight:** Structural writes (`ColAdd`, `ColDel`, `Rows`) expand to multiple output reads because they affect shared structural attributes. For example, `output(Rows(d))` = `{Attr(d, a) | a ∈ ROW_ATTRS}` rather than `Var(d)`, because row changes affect shape, index, etc. — not the variable binding itself.
 
-**Note on Rows and columns:** `Rows(d) ▷ Col(d, *)` in ▷, but `output(Rows(d))` does not include column reads because we cannot enumerate column names at the loc level. Write-write overlap between `Rows(d)` and `Col(d, c)` is detected via `Rows(d) ▷ output(Col(d, c))`: since `output(Col(d, c))` contains `Col(d, c)` and `Rows(d) ▷ Col(d, c) = True`, overlap is always detected. The reverse direction (`Col(d,c) ▷ output(Rows(d))`) also works because `output(Rows(d))` contains `Attr(d, values)` and `Attr(d, T)`, both in `COL_VALUE_ATTRS`. Note: the current implementation uses variable-name-level write-write overlap (more conservative than the typed `output()` approach), so this is doubly covered.
+**Note on Rows and columns:** `Rows(d) ▷ Col(d, *)` in ▷, but `output(Rows(d))` does not include column reads because we cannot enumerate column names at the loc level. Write-write overlap between `Rows(d)` and `Col(d, c)` is detected via `Rows(d) ▷ output(Col(d, c))`: since `output(Col(d, c))` contains `Col(d, c)` and `Rows(d) ▷ Col(d, c) = True`, overlap is always detected. The reverse direction (`Col(d,c) ▷ output(Rows(d))`) also works because `output(Rows(d))` contains `Attr(d, values)` and `Attr(d, T)`, both in `COL_VALUE_ATTRS`.
 
 ### Forward Staleness Check
 
@@ -190,7 +190,7 @@ Composing `output()` with ▷ yields the effective write-write table. An entry i
 Notable changes from the corrected `output()`:
 - **`ColAdd` now detects overlap** with other `ColAdd`, `ColDel`, and `Attr` writes on the same DataFrame, because `output(ColAdd)` projects to `COL_ATTRS` attributes.
 - **`Rows` detects overlap** with other `Rows` writes and with `Attr` writes on `ROW_ATTRS`, because `output(Rows)` projects to `ROW_ATTRS` attributes (not `Var(d)`).
-- **`Col` vs `Rows`** overlap is asymmetric: `Rows(d) ▷ output(Col(d,c)) = True` (Rows conflicts with Col reads), but `Col(d,c) ▷ output(Rows(d)) = False` (Col doesn't conflict with Attr reads). The direct `▷` check on `Rⱼ` catches the Col→Rows direction if cell j reads any columns.
+- **`Col` vs `Rows`** overlap is detected in both directions: `Rows(d) ▷ output(Col(d,c)) = True` (Rows conflicts with Col reads), and `Col(d,c) ▷ output(Rows(d)) = True` because `output(Rows(d))` contains `Attr(d, values)` and `Attr(d, T)`, both in `COL_VALUE_ATTRS`.
 
 
 ## Stable Object Identity via StableIdMap

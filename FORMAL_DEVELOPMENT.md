@@ -191,7 +191,7 @@ ForwardStale(R, W, W', i, j)       ≝  j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪
 BackwardStale(W, W', i, j)     ≝  j < i ∧ j = LastWriter(W, i, y) for some y ∈ Wᵢ \ W'ᵢ
 ```
 
-- **ForwardStale**: Cell j (after i) becomes stale if i wrote to a location that j reads or writes. Note: only **recoverable** writes (rebound variables and tracked column writes) participate in staleness propagation. In-place mutations that are not recoverable do not propagate staleness.
+- **ForwardStale**: Cell j (after i) becomes stale if i wrote to a location that j reads or writes. Note: only **recoverable** writes (rebound variables and tracked column writes) participate in staleness propagation. In-place mutations that are not recoverable do not propagate staleness. **Typed implementation:** Since ReadLoc ≠ WriteLoc, the implementation decomposes the `∩` into two ▷ checks: `(Wᵢ ∪ W'ᵢ) ▷ Rⱼ ≠ ∅` (read overlap) and `(Wᵢ ∪ W'ᵢ) ▷ output*(Wⱼ) ≠ ∅` (write-write overlap). See §10 for details.
 - **BackwardStale**: Cell j (before i) becomes stale if it was the last writer of a location that i no longer writes.
 
 ### 3.4 Instrumented Transition Rules
@@ -359,7 +359,7 @@ Validity predicates are implemented inline within `check()`, following the [Inst
 
 | main.tex | FORMAL_DEVELOPMENT.md | Code |
 |----------|----------------------|------|
-| NoReadAndWrite(R, W, i) | §3.2 | Implicit in `TrackingData.reads_before_writes` (excludes written-after locations) |
+| NoReadAndWrite(R, W, i) | §3.2 | `_check_no_read_and_write()` using typed `wlocs_conflict_rlocs()` |
 | WriteBeforeRead(R, W, i) | §3.2 | Not strictly enforced (would reject reading undefined variables) |
 | NoReadBeforeWrite(R, W, i) | §3.2 | `_check_forward_contamination()` in `check()` |
 | NoWriteAfterRead(R, W, i) | §3.2 | `_check_backward_mutation_new()` in `check()` |
@@ -381,7 +381,7 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 | main.tex | FORMAL_DEVELOPMENT.md | Code |
 |----------|----------------------|------|
 | Inst-Edit | §3.4 [Inst-Edit] | `mark_cell_edited()` in `kernel/reproducibility_enforcer.py` |
-| Inst-Run | §3.4 [Inst-Run] | `check()` in `kernel/reproducibility_enforcer.py` (lines ~938-1183) |
+| Inst-Run | §3.4 [Inst-Run] | `check()` in `kernel/reproducibility_enforcer.py` (line 1120) |
 | Inst-Insert | §3.5 [Inst-Insert] | `set_cell_order()` detecting new cells |
 | Inst-Delete | §3.5 [Inst-Delete] | `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
 | Inst-Move-Down/Up | §3.5 [Inst-Move-*] | `_handle_moves()` in `kernel/reproducibility_enforcer.py` |
@@ -392,12 +392,14 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 |-------------|---------------|
 | `R' = R[i := r]` | STEP 3: `record_execution()` call |
 | `W' = W[i := w]` | STEP 3: `record_execution()` call |
+| NoReadAndWrite check | STEP 2: `_check_no_read_and_write()` |
 | NoReadBeforeWrite check | STEP 2: `_check_forward_contamination()` |
 | NoWriteAfterRead check | STEP 2: `_check_backward_mutation_new()` |
 | RecoverableMutation check | STEP 2: `_check_unrecoverable_mutation()` |
 | `T'ᵢ = CLEAN` | STEP 4: `set_clean(cell_id)` |
-| ForwardStale loop | STEP 5: `_compute_forward_staleness()` using `wlocs_conflict_rlocs()` |
-| BackwardStale loop | STEP 5: LastWriter via `NotebookState.last_writer_for()` (variable level) |
+| ForwardStale loop (reads) | STEP 5: `_compute_forward_staleness()` — `wlocs_conflict_rlocs(change_wlocs, R_j)` |
+| ForwardStale loop (writes) | STEP 5: `_compute_forward_staleness()` — `wlocs_conflict_rlocs(change_wlocs, output_set(W_j))` |
+| BackwardStale loop | STEP 5: LastWriter via `NotebookState.last_writer_for()` (variable level — coverage check) |
 
 ### 7.5 Invariant and Checks
 
@@ -460,6 +462,8 @@ w ∈ WriteLoc ::= Var(x) | Col(d, c) | ColAdd(d, c) | ColDel(d, c)
 
 **Code:** `WriteLoc` in `kernel/locations.py`, `changes_to_write_locs()` converts Change objects
 
+**Storage:** `NotebookState.writes[cell_id]` stores the union of tracking-derived WriteLocs (Var, Col) and diff-derived WriteLocs (ColAdd, ColDel, Rows, Attr), filtered to only include diff-derived locs for variables that tracking also considers writes (recoverable mutations). See `record_execution()` in `kernel/notebook_state.py`.
+
 ### 8.3 The ▷ Conflict Relation
 
 `w ▷ r` means "writing w invalidates reading r".
@@ -499,15 +503,30 @@ Set-level operations:
 - `has_conflict(W, R)` — boolean W ▷ R ≠ ∅
 - `output_set(W)` — convert writes to reads for write-write overlap
 
+Typed predicate helpers (pure functions for unit testing):
+- `no_read_and_write(R_i, W_i)` — returns conflicting writes in Wᵢ ▷ Rᵢ
+- `no_read_before_write(R_i, W_after)` — forward contamination W_{i+1..n} ▷ Rᵢ
+- `no_write_after_read(W_i, R_before)` — backward mutation Wᵢ ▷ R_{1..i-1}
+- `forward_stale_reads(W_i, R_j)` — read-based forward staleness
+- `forward_stale_writes(W_i, W_j)` — write-write overlap via output*
+
+**Code:** `kernel/locations.py`
+
 ### 8.4 The output Function
 
-For ForwardStale's write-write overlap, `output : WriteLoc → ReadLoc` maps a write
-to the read that would observe its value:
+For ForwardStale's write-write overlap, `output : WriteLoc → P(ReadLoc)` maps a write
+to the set of reads that would observe its effect:
 ```
-output(ColAdd(d, c)) = Col(d, c)    — key: different ColAdds have different outputs
-output(Rows(d))      = Var(d)
-output(Attr(d, a)) = Attr(d, a)
+output(Var(x))       = { Var(x) }
+output(Col(d, c))    = { Col(d, c) } ∪ { Attr(d, a) | a ∈ COL_VALUE_ATTRS }
+output(ColAdd(d, c)) = { Attr(d, a) | a ∈ COL_ATTRS }
+output(ColDel(d, c)) = { Col(d, c) } ∪ { Attr(d, a) | a ∈ COL_ATTRS }
+output(Rows(d))      = { Attr(d, a) | a ∈ ROW_ATTRS }
+output(Attr(d, a))   = { Attr(d, a) }
+output(File(p))      = { File(p) }
 ```
+
+This lifts to sets: `output*(W) = ⋃ { output(w) | w ∈ W }`.
 
 **Code:** `WriteLoc.output()` method in `kernel/locations.py`
 
@@ -756,19 +775,22 @@ The `output*` function converts WriteLoc → ReadLoc for write-write overlap che
 The ForwardStale formula marks cell j stale when cell i's writes overlap with j's reads or writes:
 
 ```
-ForwardStale(R, W, W', i, j) ≝ j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+ForwardStale(R, W, W', i, j) ≝ j > i ∧ (
+    (Wᵢ ∪ W'ᵢ) ▷ Rⱼ ≠ ∅                   — read overlap
+    ∨ (Wᵢ ∪ W'ᵢ) ▷ output*(Wⱼ) ≠ ∅        — write-write overlap
+)
 ```
 
 This formula has two distinct overlap cases that require different handling:
 
 ### 11.1 Read Overlap vs Write Overlap
 
-**Read Overlap**: `(Wᵢ ∪ W'ᵢ) ∩ Rⱼ ≠ ∅`
+**Read Overlap**: `(Wᵢ ∪ W'ᵢ) ▷ Rⱼ ≠ ∅`
 - Cell j *reads* a location that cell i wrote
 - The value may or may not have changed
 - Reason type: `FORWARD_STALE`
 
-**Write Overlap**: `(Wᵢ ∪ W'ᵢ) ∩ Wⱼ ≠ ∅`
+**Write Overlap**: `(Wᵢ ∪ W'ᵢ) ▷ output*(Wⱼ) ≠ ∅`
 - Cell j *writes* to a location that cell i also writes
 - Both cells modify the same location
 - Reason type: `WRITE_OVERLAP`
