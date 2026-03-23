@@ -53,6 +53,9 @@ ROW_ATTRS: FrozenSet[str] = frozenset({
     "size",      # rows * cols
     "len",       # Number of rows
     "empty",     # Whether empty
+    "axes",      # [index, columns] — index is a component
+    "values",    # Full array — row count affects shape
+    "T",         # Transpose of values
 })
 
 

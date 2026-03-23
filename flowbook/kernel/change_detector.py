@@ -475,9 +475,14 @@ def changes_to_write_locs(changes: List[Change]) -> WriteLocSet:
             locs.add(WriteLoc.rows(change.variable))
         elif isinstance(change, IndexChanged):
             locs.add(WriteLoc.attr(change.variable, "index"))
+            # Derived: axes = [index, columns], so index change affects axes
+            locs.add(WriteLoc.attr(change.variable, "axes"))
         elif isinstance(change, DtypeChanged):
             locs.add(WriteLoc.col(change.variable, change.column))
             locs.add(WriteLoc.attr(change.variable, "dtypes"))
+            # Derived: dtype change affects array representation and transpose
+            locs.add(WriteLoc.attr(change.variable, "values"))
+            locs.add(WriteLoc.attr(change.variable, "T"))
     return frozenset(locs)
 
 

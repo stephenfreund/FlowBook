@@ -204,7 +204,16 @@ const COL_ATTRS = new Set([
 /**
  * Attributes that reveal row structure.
  */
-const ROW_ATTRS = new Set(['index', 'shape', 'size', 'len', 'empty']);
+const ROW_ATTRS = new Set([
+  'index',
+  'shape',
+  'size',
+  'len',
+  'empty',
+  'axes',
+  'values',
+  'T'
+]);
 
 /**
  * Does write `w` invalidate read `r`?

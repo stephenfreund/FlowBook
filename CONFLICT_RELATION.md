@@ -102,9 +102,9 @@ Two sets define which DataFrame attributes are sensitive to which kind of struct
 | Group        | Members                                                                    | Meaning                       |
 |-------------|----------------------------------------------------------------------------|-------------------------------|
 | `COL_ATTRS` | `columns`, `keys`, `dtypes`, `axes`, `T`, `values`, `iter`, `describe`, `shape`, `size` | Attributes that reveal column structure |
-| `ROW_ATTRS` | `index`, `shape`, `size`, `len`, `empty`                                   | Attributes that reveal row structure    |
+| `ROW_ATTRS` | `index`, `axes`, `values`, `T`, `shape`, `size`, `len`, `empty`            | Attributes that reveal row structure    |
 
-`shape` and `size` appear in both — they expose both dimensions.
+`shape`, `size`, `axes`, `values`, and `T` appear in both — they expose both dimensions. For example, `axes = [index, columns]` is affected by both row and column structural changes.
 
 ### Read-Write Conflict Matrix
 
@@ -128,8 +128,8 @@ Key observations:
 - **`Col(d, c)` is maximally precise.** Modifying column values only invalidates reads of that *exact* column. It does not touch attributes or other columns. This is what enables *column independence*: cell A reads `df["qty"]`, cell B writes `df["price"]` → no conflict.
 - **`ColAdd(d, c)` does not invalidate existing column reads.** The old columns' data is untouched. It only invalidates structural attributes like `columns` and `shape` that would now reflect the extra column.
 - **`ColDel(d, c)` is stricter than `ColAdd`.** It invalidates reads of the deleted column (it no longer exists) *plus* the same structural attributes.
-- **`Rows(d)` is column-wide but attribute-narrow.** Every column's data changed (more or fewer values), so all column reads conflict. But only row-structural attributes are affected — `df.columns` is unchanged by adding a row.
-- **`Attr(d, a)` is point-to-point.** Only the exact same attribute conflicts. Changing the index does not invalidate reading `dtypes`.
+- **`Rows(d)` is column-wide.** Every column's data changed (more or fewer values), so all column reads conflict. Row-structural attributes (`index`, `shape`, `len`, `empty`) and shared attributes (`axes`, `values`, `T`) are also affected — but `df.columns` and `df.dtypes` are unchanged by adding a row.
+- **`Attr(d, a)` is point-to-point in ▷.** Only the exact same attribute conflicts. Changing the index does not *directly* invalidate reading `dtypes`. However, some attribute changes have *derived effects* — for example, changing the index also changes `axes` (since `axes = [index, columns]`). The change detector handles this by emitting `Attr` writes for all affected derived attributes, not just the root cause. This keeps ▷ simple (point-to-point) while ensuring derived attributes are correctly invalidated.
 
 
 ## Write-Write Conflict (Forward Staleness)

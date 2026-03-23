@@ -109,7 +109,10 @@ class TestIndexChanged:
         result = changes_to_write_locs([
             IndexChanged(variable="df"),
         ])
-        assert result == frozenset({WriteLoc.attr("df", "index")})
+        assert result == frozenset({
+            WriteLoc.attr("df", "index"),
+            WriteLoc.attr("df", "axes"),  # Derived: axes = [index, columns]
+        })
 
 
 class TestDtypeChanged:
@@ -120,6 +123,8 @@ class TestDtypeChanged:
         assert result == frozenset({
             WriteLoc.col("df", "x"),
             WriteLoc.attr("df", "dtypes"),
+            WriteLoc.attr("df", "values"),  # Derived: array representation changes
+            WriteLoc.attr("df", "T"),  # Derived: transpose of values
         })
 
     def test_dtype_changed_multiple_columns(self):
@@ -131,6 +136,8 @@ class TestDtypeChanged:
             WriteLoc.col("df", "x"),
             WriteLoc.col("df", "y"),
             WriteLoc.attr("df", "dtypes"),
+            WriteLoc.attr("df", "values"),
+            WriteLoc.attr("df", "T"),
         })
 
 
@@ -155,4 +162,5 @@ class TestMixedChanges:
             WriteLoc.col_add("df", "new"),
             WriteLoc.rows("df2"),
             WriteLoc.attr("df3", "index"),
+            WriteLoc.attr("df3", "axes"),
         })
