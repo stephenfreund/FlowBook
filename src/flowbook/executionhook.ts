@@ -22,7 +22,7 @@ import {
   IWriteLoc,
   findConflictingReads,
   formatReadLoc,
-  writeLocOutput
+  writeLocOutputs
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
@@ -851,10 +851,15 @@ export class ReproducibilityExecutionHookManager {
     const causingCellReadLocs: IReadLoc[] = metadata.read_locs || [];
 
     // Project stale cell's writes to reads via output(), then intersect
-    const staleOutputs = staleCellWriteLocs.map(w => writeLocOutput(w));
+    const staleOutputs: IReadLoc[] = staleCellWriteLocs.flatMap(w => writeLocOutputs(w));
     // Check which of the stale cell's output reads match the causing cell's reads
     const writerConflicts: string[] = [];
+    const seen = new Set<string>();
     for (const output of staleOutputs) {
+      const key = `${output.type}:${output.qualifier || ''}:${output.name}`;
+      if (seen.has(key)) {
+        continue;
+      }
       for (const r of causingCellReadLocs) {
         if (
           output.type === r.type &&
@@ -862,6 +867,7 @@ export class ReproducibilityExecutionHookManager {
           output.qualifier === r.qualifier
         ) {
           writerConflicts.push(formatReadLoc(output));
+          seen.add(key);
           break;
         }
       }

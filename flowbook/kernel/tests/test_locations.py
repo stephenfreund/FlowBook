@@ -154,32 +154,50 @@ class TestWriteLoc:
 
 
 class TestOutput:
+    """output() now returns FrozenSet[ReadLoc] — the reads that observe the write."""
+
     def test_var(self):
-        assert WriteLoc.var("x").output() == ReadLoc.var("x")
+        assert WriteLoc.var("x").output() == frozenset({ReadLoc.var("x")})
 
     def test_col(self):
-        assert WriteLoc.col("df", "price").output() == ReadLoc.col("df", "price")
+        assert WriteLoc.col("df", "price").output() == frozenset({ReadLoc.col("df", "price")})
 
     def test_col_add(self):
-        assert WriteLoc.col_add("df", "new").output() == ReadLoc.col("df", "new")
+        """ColAdd produces Attr reads for all COL_ATTRS."""
+        result = WriteLoc.col_add("df", "new").output()
+        # Should contain Attr(df, a) for each a in COL_ATTRS
+        assert all(r.type == ReadLocType.ATTR for r in result)
+        assert all(r.qualifier == "df" for r in result)
+        from flowbook.kernel.locations import COL_ATTRS
+        assert {r.name for r in result} == COL_ATTRS
 
     def test_col_del(self):
-        assert WriteLoc.col_del("df", "old").output() == ReadLoc.col("df", "old")
+        """ColDel produces Col(d,c) plus Attr reads for all COL_ATTRS."""
+        result = WriteLoc.col_del("df", "old").output()
+        assert ReadLoc.col("df", "old") in result
+        from flowbook.kernel.locations import COL_ATTRS
+        for a in COL_ATTRS:
+            assert ReadLoc.attr("df", a) in result
 
     def test_rows(self):
-        assert WriteLoc.rows("df").output() == ReadLoc.var("df")
+        """Rows produces Attr reads for all ROW_ATTRS."""
+        result = WriteLoc.rows("df").output()
+        assert all(r.type == ReadLocType.ATTR for r in result)
+        assert all(r.qualifier == "df" for r in result)
+        from flowbook.kernel.locations import ROW_ATTRS
+        assert {r.name for r in result} == ROW_ATTRS
 
     def test_attr(self):
-        assert WriteLoc.attr("df", "index").output() == ReadLoc.attr("df", "index")
+        assert WriteLoc.attr("df", "index").output() == frozenset({ReadLoc.attr("df", "index")})
 
     def test_file(self):
-        assert WriteLoc.file("out.csv").output() == ReadLoc.file("out.csv")
+        assert WriteLoc.file("out.csv").output() == frozenset({ReadLoc.file("out.csv")})
 
-    def test_col_add_different_columns_different_output(self):
-        """Independent column additions have different outputs."""
+    def test_col_add_same_df_same_output(self):
+        """ColAdd for same df produces same outputs (both affect COL_ATTRS)."""
         o1 = WriteLoc.col_add("df", "price").output()
         o2 = WriteLoc.col_add("df", "qty").output()
-        assert o1 != o2  # Col(df, price) ≠ Col(df, qty)
+        assert o1 == o2  # Both produce {Attr(df, a) | a ∈ COL_ATTRS}
 
 
 # =============================================================================
@@ -427,16 +445,25 @@ class TestSetOperations:
     def test_output_set(self):
         writes = frozenset({
             WriteLoc.var("x"),
-            WriteLoc.col_add("df", "price"),
-            WriteLoc.rows("df"),
+            WriteLoc.col("df", "price"),
+            WriteLoc.attr("df", "index"),
         })
         result = output_set(writes)
         expected = frozenset({
             ReadLoc.var("x"),
             ReadLoc.col("df", "price"),
-            ReadLoc.var("df"),
+            ReadLoc.attr("df", "index"),
         })
         assert result == expected
+
+    def test_output_set_structural_writes(self):
+        """Structural writes expand to multiple output reads."""
+        writes = frozenset({WriteLoc.rows("df")})
+        result = output_set(writes)
+        from flowbook.kernel.locations import ROW_ATTRS
+        # Should contain Attr(df, a) for each a in ROW_ATTRS
+        assert len(result) == len(ROW_ATTRS)
+        assert all(r.type == ReadLocType.ATTR for r in result)
 
 
 # =============================================================================
@@ -445,16 +472,17 @@ class TestSetOperations:
 
 
 class TestWorkedExamples:
-    def test_independent_column_additions_no_write_write_conflict(self):
+    def test_independent_column_additions_have_structural_overlap(self):
         """
-        Plan example: B adds df["price"], C adds df["qty"].
-        Their outputs are different → no ForwardStale write-write overlap.
+        B adds df["price"], C adds df["qty"].
+        Both affect df.columns, df.shape, etc. — so write-write overlap IS detected.
+        ColAdd(df, price) ▷ Attr(df, columns) = True.
         """
         W_B = frozenset({WriteLoc.col_add("df", "price")})
         W_C = frozenset({WriteLoc.col_add("df", "qty")})
 
         # Write-write overlap via output: W_B ▷ output*(W_C)
-        assert not has_conflict(W_B, output_set(W_C))
+        assert has_conflict(W_B, output_set(W_C))
 
     def test_col_add_doesnt_conflict_with_var_read(self):
         """

@@ -339,23 +339,33 @@ export function formatWriteLoc(loc: IWriteLoc): string {
 }
 
 /**
- * Map a WriteLoc to its output ReadLoc (for write-write conflict via ▷).
+ * Map a WriteLoc to the ReadLocs that would observe its effect.
+ * Returns multiple locs for structural writes (ColAdd, ColDel, Rows).
+ * Used for write-write overlap detection via ▷.
  */
-export function writeLocOutput(w: IWriteLoc): IReadLoc {
+export function writeLocOutputs(w: IWriteLoc): IReadLoc[] {
   switch (w.type) {
     case 'var':
-      return { type: 'var', name: w.name };
+      return [{ type: 'var', name: w.name }];
     case 'col':
+      return [{ type: 'col', name: w.name, qualifier: w.qualifier }];
     case 'col_add':
+      // ColAdd conflicts with Attr(d, a) for a ∈ COL_ATTRS
+      return [...COL_ATTRS].map(a => ({ type: 'attr' as const, name: a, qualifier: w.qualifier }));
     case 'col_del':
-      return { type: 'col', name: w.name, qualifier: w.qualifier };
+      // ColDel conflicts with Col(d, c) and Attr(d, a) for a ∈ COL_ATTRS
+      return [
+        { type: 'col', name: w.name, qualifier: w.qualifier },
+        ...[...COL_ATTRS].map(a => ({ type: 'attr' as const, name: a, qualifier: w.qualifier }))
+      ];
     case 'rows':
-      return { type: 'var', name: w.name };
+      // Rows conflicts with Attr(d, a) for a ∈ ROW_ATTRS
+      return [...ROW_ATTRS].map(a => ({ type: 'attr' as const, name: a, qualifier: w.name }));
     case 'attr':
-      return { type: 'attr', name: w.name, qualifier: w.qualifier };
+      return [{ type: 'attr', name: w.name, qualifier: w.qualifier }];
     case 'file':
-      return { type: 'file', name: w.name };
+      return [{ type: 'file', name: w.name }];
     default:
-      return { type: 'var', name: w.name };
+      return [{ type: 'var', name: w.name }];
   }
 }

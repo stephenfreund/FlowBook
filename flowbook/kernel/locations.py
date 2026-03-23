@@ -220,24 +220,43 @@ class WriteLoc:
             return self.name
         return self.qualifier  # COL, COL_ADD, COL_DEL, ATTR
 
-    def output(self) -> ReadLoc:
-        """Convert to the ReadLoc that would observe this write's value.
+    def output(self) -> FrozenSet[ReadLoc]:
+        """Return the ReadLocs that would observe this write's effect.
 
         Used for write-write overlap in ForwardStale:
           (Wᵢ ∪ W'ᵢ) ▷ output*(Wⱼ) ≠ ∅
 
-        Formal ref: LOCSET_UNIFICATION_PLAN.md §The Output Function
+        Each write type returns exactly the reads it would conflict with,
+        so W ▷ output(W') correctly detects write-write overlap.
+
+        Formal ref: CONFLICT_RELATION.md §The output Function
         """
         if self.type == WriteLocType.VAR:
-            return ReadLoc.var(self.name)
-        elif self.type in (WriteLocType.COL, WriteLocType.COL_ADD, WriteLocType.COL_DEL):
-            return ReadLoc.col(self.qualifier, self.name)
+            return frozenset({ReadLoc.var(self.name)})
+        elif self.type == WriteLocType.COL:
+            return frozenset({ReadLoc.col(self.qualifier, self.name)})
+        elif self.type == WriteLocType.COL_ADD:
+            # ColAdd conflicts with Attr(d, a) for a ∈ COL_ATTRS
+            return frozenset(
+                ReadLoc.attr(self.qualifier, a) for a in COL_ATTRS
+            )
+        elif self.type == WriteLocType.COL_DEL:
+            # ColDel conflicts with Col(d, c) and Attr(d, a) for a ∈ COL_ATTRS
+            return frozenset(
+                {ReadLoc.col(self.qualifier, self.name)}
+                | {ReadLoc.attr(self.qualifier, a) for a in COL_ATTRS}
+            )
         elif self.type == WriteLocType.ROWS:
-            return ReadLoc.var(self.name)
+            # Rows conflicts with Attr(d, a) for a ∈ ROW_ATTRS
+            # (also conflicts with all Col(d, *), but we can't enumerate columns;
+            # the attr overlap suffices for write-write detection)
+            return frozenset(
+                ReadLoc.attr(self.name, a) for a in ROW_ATTRS
+            )
         elif self.type == WriteLocType.ATTR:
-            return ReadLoc.attr(self.qualifier, self.name)
+            return frozenset({ReadLoc.attr(self.qualifier, self.name)})
         elif self.type == WriteLocType.FILE:
-            return ReadLoc.file(self.name)
+            return frozenset({ReadLoc.file(self.name)})
         raise ValueError(f"Unknown write type: {self.type}")
 
     def display_name(self) -> str:
@@ -405,12 +424,15 @@ def has_conflict(writes: WriteLocSet, reads: ReadLocSet) -> bool:
 
 def output_set(writes: WriteLocSet) -> ReadLocSet:
     """
-    output*(W) = { output(w) | w ∈ W }
+    output*(W) = ⋃ { output(w) | w ∈ W }
 
     Convert writes to the reads they produce.
     Used for write-write overlap in ForwardStale.
     """
-    return frozenset(w.output() for w in writes)
+    result: Set[ReadLoc] = set()
+    for w in writes:
+        result.update(w.output())
+    return frozenset(result)
 
 
 # =============================================================================

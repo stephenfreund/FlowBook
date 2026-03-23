@@ -138,19 +138,23 @@ There is no separate write-write conflict function. Instead, the system converts
 
 ### The Output Function
 
-`output(w)` maps each `WriteLoc` to the `ReadLoc` that would *observe* the value that `w` produced:
+`output(w)` maps a `WriteLoc` to the set of `ReadLoc`s that would *observe* the effect that `w` produced. Each write type returns exactly the reads it would conflict with in ▷, ensuring `W ▷ output(W')` correctly detects write-write overlap:
 
-| WriteLoc            | `output()` → ReadLoc |
-|--------------------|----------------------|
-| `Var(x)`           | `Var(x)`             |
-| `Col(d, c)`        | `Col(d, c)`          |
-| `ColAdd(d, c)`     | `Col(d, c)`          |
-| `ColDel(d, c)`     | `Col(d, c)`          |
-| `Rows(d)`          | `Var(d)`             |
-| `Attr(d, a)` | `Attr(d, a)`        |
-| `File(p)`          | `File(p)`            |
+| WriteLoc            | `output()` → ReadLoc set |
+|--------------------|--------------------------|
+| `Var(x)`           | `{ Var(x) }`             |
+| `Col(d, c)`        | `{ Col(d, c) }`          |
+| `ColAdd(d, c)`     | `{ Attr(d, a) \| a ∈ COL_ATTRS }` |
+| `ColDel(d, c)`     | `{ Col(d, c) } ∪ { Attr(d, a) \| a ∈ COL_ATTRS }` |
+| `Rows(d)`          | `{ Attr(d, a) \| a ∈ ROW_ATTRS }` |
+| `Attr(d, a)`       | `{ Attr(d, a) }`         |
+| `File(p)`          | `{ File(p) }`            |
 
-This lifts to sets: `output*(W) = { output(w) | w ∈ W }`.
+This lifts to sets: `output*(W) = ⋃ { output(w) | w ∈ W }`.
+
+**Key insight:** Structural writes (`ColAdd`, `ColDel`, `Rows`) expand to multiple output reads because they affect shared structural attributes. For example, `output(Rows(d))` = `{Attr(d, a) | a ∈ ROW_ATTRS}` rather than `Var(d)`, because row changes affect shape, index, etc. — not the variable binding itself.
+
+**Note on Rows and columns:** `Rows(d) ▷ Col(d, *)` in ▷, but `output(Rows(d))` does not include column reads because we cannot enumerate column names at the loc level. Write-write overlap between `Rows(d)` and `Col(d, c)` is detected in the other direction: `Rows(d) ▷ output(Col(d, c)) = Rows(d) ▷ Col(d, c) = True`.
 
 ### Forward Staleness Check
 
@@ -167,17 +171,20 @@ Composing `output()` with ▷ yields the effective write-write table. An entry i
 
 | Cell `i` wrote ↓  \  Cell `j` wrote → | **Var(x)** | **Col(d, c)** | **ColAdd(d, c)** | **ColDel(d, c)** | **Rows(d)** | **Attr(d, a)** | **File(p)** |
 |---------------------------------------|------------|---------------|------------------|------------------|-------------|----------------------|-------------|
-| **Var(x)**                            | same `x`   | `x == d`      | `x == d`         | `x == d`         | same `x`    | `x == d`             | —           |
-| **Col(d, c)**                         | —          | same `d,c`    | same `d,c`       | same `d,c`       | —           | —                    | —           |
-| **ColAdd(d, c)**                      | —          | —             | —                | —                | —           | —                    | —           |
-| **ColDel(d, c)**                      | —          | same `d,c`    | same `d,c`       | same `d,c`       | —           | —                    | —           |
-| **Rows(d)**                           | same `d`   | `d` matches   | `d` matches      | `d` matches      | same `d`    | `d` matches          | —           |
-| **Attr(d, a)**                 | —          | —             | —                | —                | —           | same `d,a`           | —           |
+| **Var(x)**                            | same `x`   | `x == d`      | `x == d`, `a ∈ COL_ATTRS` | `x == d`  | `x == d`, `a ∈ ROW_ATTRS` | `x == d`             | —           |
+| **Col(d, c)**                         | —          | same `d,c`    | —                | same `d,c`       | same `d`    | —                    | —           |
+| **ColAdd(d, c)**                      | —          | —             | same `d`, `a ∈ COL_ATTRS` | —         | —           | `a ∈ COL_ATTRS`      | —           |
+| **ColDel(d, c)**                      | —          | same `d,c`    | same `d`, `a ∈ COL_ATTRS` | same `d,c` or `a ∈ COL_ATTRS` | —  | `a ∈ COL_ATTRS`      | —           |
+| **Rows(d)**                           | —          | same `d`      | same `d`, `a ∈ COL_ATTRS` | same `d`  | same `d`    | `a ∈ ROW_ATTRS`      | —           |
+| **Attr(d, a)**                        | —          | —             | `a ∈ COL_ATTRS`  | `a ∈ COL_ATTRS`  | `a ∈ ROW_ATTRS` | same `d,a`       | —           |
 | **File(p)**                           | —          | —             | —                | —                | —           | —                    | same `p`    |
 
 (**—** = no write-write staleness)
 
-Notable: **`ColAdd` in cell `i` never triggers write-write staleness for any write type in cell `j`.** Its `output()` is `Col(d, c)`, and `ColAdd ▷ Col(d, c)` is always false — adding a column does not invalidate reading that column's values. This reflects the semantics: if both cells independently add the same column, there is no data-flow dependency between them (though the second execution will overwrite the first's value).
+Notable changes from the corrected `output()`:
+- **`ColAdd` now detects overlap** with other `ColAdd`, `ColDel`, and `Attr` writes on the same DataFrame, because `output(ColAdd)` projects to `COL_ATTRS` attributes.
+- **`Rows` detects overlap** with other `Rows` writes and with `Attr` writes on `ROW_ATTRS`, because `output(Rows)` projects to `ROW_ATTRS` attributes (not `Var(d)`).
+- **`Col` vs `Rows`** overlap is asymmetric: `Rows(d) ▷ output(Col(d,c)) = True` (Rows conflicts with Col reads), but `Col(d,c) ▷ output(Rows(d)) = False` (Col doesn't conflict with Attr reads). The direct `▷` check on `Rⱼ` catches the Col→Rows direction if cell j reads any columns.
 
 
 ## Why Qualifiers Are Variable Names, Not Object References
