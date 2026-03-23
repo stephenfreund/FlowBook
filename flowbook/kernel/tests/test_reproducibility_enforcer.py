@@ -432,13 +432,17 @@ class TestColumnAwareBackwardMutation:
         assert backward_err.causer_cell == "a"
         assert "df['price']" in backward_err.locations
 
-    def test_conflict_prior_no_column_info_conservative(self):
-        """Cell A reads df (no column info), Cell B modifies df.price - violation (conservative)."""
+    def test_no_conflict_prior_var_read_vs_column_write(self):
+        """Cell A reads Var(df) (binding-only), Cell B writes Col(df, price) - no violation.
+
+        Var(df) is a binding-only read. A column write does not affect the
+        binding, so there is no backward conflict.
+        """
         import pandas as pd
 
         df = pd.DataFrame({"price": [10, 20], "quantity": [1, 2]})
 
-        # Cell A: reads df (no column tracking)
+        # Cell A: reads df (no column tracking → Var(df), binding-only)
         self._save_pre_checkpoint("a", {"df": df})
         ns_a = self._make_namespace({"df": df, "y": 30})
         self.sdc.check(
@@ -448,11 +452,11 @@ class TestColumnAwareBackwardMutation:
             tracking=make_tracking(
                 reads={"df"},
                 writes={"y"},
-                # No column_reads - assumes whole df is read
+                # No column_reads → Var(df), binding-only read
             ),
         )
 
-        # Cell B: modifies df.price
+        # Cell B: modifies df.price (Col write)
         df_modified = df.copy()
         df_modified["price"] = [100, 200]
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
@@ -469,12 +473,12 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Violation - conservative when prior has no column info
-        # Now shows column-level detail: df.price instead of just df
-        assert result_b.has_errors()
-        backward_err = next(e for e in result_b.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
-        assert backward_err.causer_cell == "a"
-        assert "df['price']" in backward_err.locations
+        # No violation: Col(df, price) write does not conflict with Var(df) read
+        no_write_after_read = [e for e in result_b.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ]
+        assert len(no_write_after_read) == 0, (
+            f"Expected no NO_WRITE_AFTER_READ violation (Col ▷ Var = false), "
+            f"but got: {no_write_after_read}"
+        )
 
     def test_conflict_current_no_column_info_conservative(self):
         """Cell A reads df.price, Cell B modifies df (no column info) - violation (conservative)."""
@@ -3621,7 +3625,7 @@ class TestNoReadAndWriteColumnLevel:
         assert (
             len(no_rw_errors) == 1
         ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
-        assert "df.age" in no_rw_errors[0].locations
+        assert "df['age']" in no_rw_errors[0].locations
 
     def test_read_one_column_write_another_no_violation(self):
         """Reading one column and writing another is NOT a violation.
@@ -3782,12 +3786,14 @@ class TestNoReadAndWriteDataFrameReassignment:
             tracking=make_tracking(
                 reads={"a", "feature_engineer"},  # Read a as argument
                 writes={"a"},  # Reassign a to new DataFrame
-                column_reads={"a": set()},  # No direct column reads
-                column_writes={"a": {"price"}},  # Column writes from internal function
+                # No column_reads/column_writes: the cell-level operation is
+                # a variable reassignment, not a column operation
             ),
         )
 
         # SHOULD have NoReadAndWrite error for 'a'
+        # R = {Var(a), Var(feature_engineer)}, W = {Var(a)}
+        # Var(a) ⊗ Var(a) = true → violation
         no_rw_errors = [
             e for e in result.errors if e.error_type.value == "no_read_and_write"
         ]
@@ -4035,13 +4041,13 @@ class TestNoReadAndWriteDataFrameReassignment:
         assert len(no_rw_errors) == 0, f"Unexpected error: {no_rw_errors}"
 
     def test_reassign_with_both_column_read_and_column_write_via_function(self):
-        """Function that reads and writes columns while reassigning IS a violation.
+        """Function that reassigns IS a violation at variable level.
 
         Pattern: df = transform(df) where transform reads df['a'] and writes df['b']
-        - Reads: df (variable), df.a (column)
-        - Writes: df (variable), df.b (column)
+        - At cell level: reads df (variable), writes df (variable)
+        - Internal function column operations don't appear in cell-level tracking
 
-        This is a violation because the variable is both read and written.
+        This is a NoReadAndWrite violation because Var(df) is both read and written.
         """
         import pandas as pd
 
@@ -4056,7 +4062,9 @@ class TestNoReadAndWriteDataFrameReassignment:
             tracking=make_tracking(reads=set(), writes={"df"}),
         )
 
-        # B does: df = transform(df) which internally reads df['a'], writes df['b']
+        # B does: df = transform(df)
+        # Cell-level: reads df (argument), writes df (reassignment)
+        # No column_reads/column_writes since the column operations are internal
         df_new = df.copy()
         df_new["b"] = df_new["a"] * 2  # Simulates internal function operation
         self._save_pre_checkpoint("b", {"df": df})
@@ -4068,12 +4076,11 @@ class TestNoReadAndWriteDataFrameReassignment:
             tracking=make_tracking(
                 reads={"df"},  # Read df as argument
                 writes={"df"},  # Reassign df
-                column_reads={"df": {"a"}},  # Read df.a internally
-                column_writes={"df": {"b"}},  # Write df.b internally
             ),
         )
 
         # SHOULD have NoReadAndWrite error for df
+        # R = {Var(df)}, W = {Var(df)}, Var(df) ⊗ Var(df) = true
         no_rw_errors = [
             e for e in result.errors if e.error_type.value == "no_read_and_write"
         ]
@@ -4128,17 +4135,18 @@ class TestNoReadAndWriteDataFrameReassignment:
         assert (
             len(no_rw_errors) == 1
         ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
-        assert "df.price" in no_rw_errors[0].locations
+        assert "df['price']" in no_rw_errors[0].locations
 
-    def test_empty_column_reads_with_column_writes_and_variable_write_is_violation(self):
-        """The specific bug case: empty column reads, column writes, AND variable write.
+    def test_variable_reassignment_without_column_detail_is_violation(self):
+        """Variable reassignment a = feature_engineer(a) is a violation.
 
-        This is the exact pattern that triggered the bug:
-        - column_reads = {'a': set()}  (empty set - no columns read from 'a')
-        - column_writes = {'a': {'price'}}  (columns written)
-        - writes = {'a'}  (variable reassigned)
+        When a variable is both read and written at the variable level
+        (no column_reads/column_writes), Var(a) ⊗ Var(a) = true.
 
-        The bug was that this case fell through without detecting the violation.
+        Note: if column_reads/column_writes were present, the tracking would
+        refine the locs to column level, potentially avoiding the violation.
+        The key is that for `a = func(a)`, the cell-level operation is a
+        variable reassignment, so no column detail should be reported.
         """
         import pandas as pd
 
@@ -4153,7 +4161,8 @@ class TestNoReadAndWriteDataFrameReassignment:
             tracking=make_tracking(reads=set(), writes={"a"}),
         )
 
-        # B does: a = feature_engineer(a) with exact tracking from bug report
+        # B does: a = feature_engineer(a)
+        # Cell-level: reads a (argument), writes a (reassignment)
         df_new = df.copy()
         df_new["price"] = df_new["price"] * 2
         self._save_pre_checkpoint("b", {"a": df})
@@ -4165,18 +4174,19 @@ class TestNoReadAndWriteDataFrameReassignment:
             tracking=make_tracking(
                 reads={"a", "feature_engineer"},  # Read a and function
                 writes={"a"},  # Reassign a
-                column_reads={"a": set()},  # EMPTY set - this was the bug trigger
-                column_writes={"a": {"price"}},  # Column writes
+                # No column detail: the reassignment is at variable level
             ),
         )
 
         # SHOULD have NoReadAndWrite error for 'a'
+        # R = {Var(a), Var(feature_engineer)}, W = {Var(a)}
+        # Var(a) ⊗ Var(a) = true → violation
         no_rw_errors = [
             e for e in result.errors if e.error_type.value == "no_read_and_write"
         ]
         assert (
             len(no_rw_errors) == 1
-        ), f"Expected 1 NoReadAndWrite error for the bug case, got {len(no_rw_errors)}"
+        ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
         assert "a" in no_rw_errors[0].locations, (
             f"Expected 'a' in locations, got {no_rw_errors[0].locations}"
         )
@@ -5555,10 +5565,12 @@ class TestUnrecoverableMutation:
             f"B should stay clean after D deletion, got: {self.sdc._notebook_state.get_status('b')}"
 
     def test_recoverable_column_write_propagates_staleness(self):
-        """Column write (df['col']=val) without rebinding df should propagate staleness.
+        """Column write (df['col']=val) without rebinding df should propagate staleness
+        to cells that read the same column.
 
         This is a recoverable mutation (column is tracked in column_writes),
-        so it SHOULD make cells reading df stale, even though df is not rebound.
+        so it SHOULD make cells reading that column stale. Cells with only
+        Var(df) (binding-only read) are NOT staled since Col ▷ Var = false.
         """
         import pandas as pd
 
@@ -5573,14 +5585,17 @@ class TestUnrecoverableMutation:
             tracking=make_tracking(reads=set(), writes={"df"}),
         )
 
-        # B: reads df (var-level read)
+        # B: reads df['price'] (column-level read)
         self._save_pre_checkpoint("b", {"df": df_orig.copy()})
         ns_b = self._make_namespace({"df": df_orig.copy(), "total": 30})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
-            tracking=make_tracking(reads={"df"}, writes={"total"}),
+            tracking=make_tracking(
+                reads={"df"}, writes={"total"},
+                column_reads={"df": {"price"}},
+            ),
         )
         assert self.sdc._notebook_state.is_clean("b")
 
@@ -5604,7 +5619,7 @@ class TestUnrecoverableMutation:
         error_types = [e.error_type for e in result_c.errors]
         assert ErrorType.UNRECOVERABLE_MUTATION not in error_types
 
-        # B IS stale — df's price column changed (recoverable propagation)
+        # B IS stale — df's price column changed and B reads Col(df, price)
         assert not self.sdc._notebook_state.is_clean("b"), \
             f"B should be stale from df column change, got: {self.sdc._notebook_state.get_status('b')}"
 

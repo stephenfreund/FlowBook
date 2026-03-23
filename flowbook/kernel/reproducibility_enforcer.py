@@ -64,7 +64,7 @@ NotebookState: Single source of truth for formal model S = ⟨C, O, Σ, T, R, W�
     - tracking_data: Per-cell TrackingData for conflict detection
 
 LocSet operations (wlocs_conflict_rlocs): Column-aware conflict detection
-    - Uses typed ReadLoc/WriteLoc with ⊗ operator
+    - Uses typed ReadLoc/WriteLoc with ▷ operator
     - Column-level precision for DataFrame operations
     - Structural attribute awareness for shape/columns changes
 
@@ -662,6 +662,10 @@ def _changes_to_writelocset(
 
     For variables with column-level change info, emits Col write locs.
     For variables without column info, emits Var write locs (conservative).
+
+    Note: ValueChanged (complete replacement) is handled separately via
+    typed_changes in _compute_forward_staleness_syntactic, which adds
+    Var(x) for variables whose identity/binding changed.
     """
     locs: Set[WriteLoc] = set()
     for var in changed_vars:
@@ -1632,7 +1636,7 @@ class ReproducibilityEnforcer:
         Formal ref: NoReadBeforeWrite(R, W, i) ≝ Rᵢ ∩ W_{i+1..n} = ∅
         FORMAL_DEVELOPMENT.md §3.2, line 178
 
-        Uses LocSet ⊗ operator for column-aware conflict detection.
+        Uses LocSet ▷ operator for column-aware conflict detection.
         Prefers diff-based WriteLocSet (from typed_changes) when available
         for column-level precision, falls back to tracking-based writes.
         """
@@ -1823,92 +1827,22 @@ class ReproducibilityEnforcer:
         tracking: TrackingData,
     ) -> Optional[ReproducibilityError]:
         """
-        Check NoReadAndWrite predicate: Rᵢ ∩ Wᵢ = ∅
+        Check NoReadAndWrite predicate: Wᵢ ▷ Rᵢ = ∅
 
         Cell should not both read and write the same location.
+        Uses the ▷ conflict relation for proper Var(x) = binding-only semantics:
+        - Col(df, y) ▷ Var(df) = false → column write + binding read is OK
+        - Col(df, x) ▷ Col(df, x) = true → same column read+write is a violation
+        - Var(x) ▷ Var(x) = true → variable reassignment + read is a violation
 
         Formal ref: main.tex §3.2, FORMAL_DEVELOPMENT.md §3.2, line 176
-
-        Note: The implementation uses reads_before_writes which already
-        excludes locations that are written before being read. So this
-        check catches variables that are first read, then written - patterns
-        like `x = x + 1` or `df['col'] = df['col'] * 2`.
-
-        This predicate ensures cells have clear input/output boundaries.
-
-        Implementation note: We include column_writes.keys() in W_i because
-        in-place DataFrame column modifications (e.g., df['a'] = df['a'] * 2)
-        don't trigger namespace-level writes (tracking.writes), only column-level
-        writes. Without this, patterns like `df['a'] = df['a'] * 10` would pass
-        the check even though they read and write the same location.
         """
-        # R_i: variables read (including those with column-level reads)
-        R_i = (tracking.reads_before_writes or set()) | set(
-            (tracking.column_reads_before_writes or {}).keys()
-        )
+        R_i = tracking_to_readlocset(tracking)
+        W_i = self._tracking_to_noreadandwrite_wlocs(tracking)
 
-        # W_i: variables written (including those with column-level writes)
-        # Column-level writes (e.g., df['a'] = ...) don't appear in tracking.writes
-        # because the variable binding doesn't change, only the object's contents.
-        W_i = (tracking.writes or set()) | set(
-            (tracking.column_writes or {}).keys()
-        )
-
-        # Build detailed location list with column info
-        locations: List[str] = []
-
-        # Variable-level overlap (now includes vars with column-only access)
-        var_overlap = R_i & W_i
-
-        # For each overlapping variable, check if we have column-level detail
-        col_reads = tracking.column_reads_before_writes or {}
-        col_writes = tracking.column_writes or {}
-
-        for var in sorted(var_overlap):
-            var_col_reads = col_reads.get(var, set())
-            var_col_writes = col_writes.get(var, set())
-            col_overlap = var_col_reads & var_col_writes
-
-            if col_overlap:
-                # Have column-level detail with overlap - show each overlapping column
-                for col in sorted(col_overlap):
-                    locations.append(f"{var}.{col}")
-            elif var_col_reads and var_col_writes:
-                # Have column detail but no overlap - different columns read vs written.
-                # Check if the variable binding itself was written (not just columns).
-                if var in (tracking.writes or set()):
-                    # Variable was read AND the binding was written (e.g., df = transform(df))
-                    # This is a NoReadAndWrite violation at the variable level, even though
-                    # different columns were read vs written internally.
-                    locations.append(var)
-                # Otherwise, just column operations with no variable reassignment - this is fine
-                # (e.g., reading df['a'] and writing df['b'] without reassigning df).
-            elif var_col_writes and not var_col_reads:
-                # Have column writes but no column reads.
-                # Check if the variable binding itself was written (not just columns).
-                if var in (tracking.writes or set()):
-                    # Variable was read AND the binding was written (e.g., a = feature_engineer(a))
-                    # This is a NoReadAndWrite violation at the variable level.
-                    # The column writes may be from internal function operations that got
-                    # attributed to this variable when the new object was assigned.
-                    locations.append(var)
-                # Otherwise, variable was read to access the object, but only columns were written.
-                # This is NOT a NoReadAndWrite violation because reading the variable binding
-                # (e.g., `df`) and writing to its column (e.g., `df['age']`) are semantically
-                # different locations. The formal predicate Rᵢ ∩ Wᵢ = ∅ requires the SAME
-                # location to be both read and written.
-                # Example: `df['age'] = 1` reads `df` (binding) and writes `df.age` (column).
-            elif var_col_reads and not var_col_writes:
-                # Have column reads but no column writes
-                # Check if variable-level write overlaps with column reads
-                if var in (tracking.writes or set()):
-                    # Columns were read, then variable itself was written
-                    locations.append(var)
-            else:
-                # No column info - just show variable
-                locations.append(var)
-
-        if locations:
+        conflicting = wlocs_conflict_rlocs(W_i, R_i)
+        if conflicting:
+            locations = sorted(w.display_name() for w in conflicting)
             cell_alpha = self._cell_id_to_alpha(cell_id)
             vars_str = format_variable_list(locations)
             message = f"Cell {cell_alpha} reads and writes the same locations: {vars_str}"
@@ -1919,6 +1853,36 @@ class ReproducibilityEnforcer:
                 message=message,
             )
         return None
+
+    def _tracking_to_noreadandwrite_wlocs(self, tracking: TrackingData) -> WriteLocSet:
+        """Build WriteLocSet for NoReadAndWrite check.
+
+        For column assignments like df["y"] = ..., the tracking reports
+        writes={"df"} but the actual write is Col(df, y), not Var(df).
+        We use column_writes to distinguish: if a variable has column_writes,
+        emit Col locs; otherwise emit Var.
+        """
+        locs: set = set()
+        col_writes = tracking.column_writes or {}
+        var_writes = tracking.writes or set()
+
+        for var in var_writes:
+            if var in col_writes:
+                # Has column detail → emit Col for each column written
+                for col in col_writes[var]:
+                    locs.add(WriteLoc.col(var, col))
+            else:
+                # No column detail → Var (whole variable reassignment)
+                locs.add(WriteLoc.var(var))
+
+        # Also include column writes for vars not in tracking.writes
+        # (column writes via in-place mutation without rebinding)
+        for var, cols in col_writes.items():
+            if var not in var_writes:
+                for col in cols:
+                    locs.add(WriteLoc.col(var, col))
+
+        return frozenset(locs)
 
     def _check_unrecoverable_mutation(
         self,
@@ -1991,10 +1955,10 @@ class ReproducibilityEnforcer:
         typed_changes: Optional[List] = None,
     ) -> Tuple[List[str], List[str]]:
         """
-        Syntactic ForwardStale: (Wᵢ ∪ W'ᵢ ∪ ΔV) ⊗ (Rⱼ ∪ Wⱼ) ≠ ∅ for j > i.
+        Syntactic ForwardStale: (Wᵢ ∪ W'ᵢ ∪ ΔV) ▷ (Rⱼ ∪ Wⱼ) ≠ ∅ for j > i.
 
         Cell j becomes stale if cell i's writes conflict with what cell j reads
-        or writes, using the ⊗ relation for column-level precision.
+        or writes, using the ▷ relation for column-level precision.
 
         Uses typed Change objects (when available) for precise WriteLoc types:
         ColAdd vs Col vs ColDel matters because ColAdd conflicts with Attr reads
@@ -2007,14 +1971,14 @@ class ReproducibilityEnforcer:
         # Wᵢ ∪ W'ᵢ ∪ ΔV: all locations cell i has written (old, new, or diff-detected)
         W_i_union = old_writes | current_writes | changed_vars
 
-        # Build WriteLocSet for ⊗-based staleness checks.
+        # Build WriteLocSet for ▷-based staleness checks.
         # Base: use tracking-based column info (column_changed) for column-level precision.
         # Augment: add ColAdd/ColDel from typed changes (diff-based) when available,
         # because these affect structural attributes (shape, columns) that Col does not.
         change_wlocs = _changes_to_writelocset(W_i_union, column_changed)
 
         if typed_changes:
-            # Add structural-affecting WriteLocs from the diff (ColAdd, ColDel, Rows, AttrChanged)
+            # Add structural-affecting WriteLocs from the diff (ColAdd, ColDel, Rows, Attr)
             # that _changes_to_writelocset misses (it only produces Var and Col).
             from flowbook.kernel.changes import ColumnAdded, ColumnRemoved, RowsAdded, RowsRemoved, IndexChanged, DtypeChanged
             for change in typed_changes:
@@ -2025,9 +1989,9 @@ class ReproducibilityEnforcer:
                 elif isinstance(change, (RowsAdded, RowsRemoved)):
                     change_wlocs = change_wlocs | frozenset({WriteLoc.rows(change.variable)})
                 elif isinstance(change, IndexChanged):
-                    change_wlocs = change_wlocs | frozenset({WriteLoc.attr_changed(change.variable, "index")})
+                    change_wlocs = change_wlocs | frozenset({WriteLoc.attr(change.variable, "index")})
                 elif isinstance(change, DtypeChanged):
-                    change_wlocs = change_wlocs | frozenset({WriteLoc.attr_changed(change.variable, "dtypes")})
+                    change_wlocs = change_wlocs | frozenset({WriteLoc.attr(change.variable, "dtypes")})
 
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:
@@ -2048,7 +2012,7 @@ class ReproducibilityEnforcer:
                         )
                     continue
 
-            # Use ⊗ operator for column-aware overlap check.
+            # Use ▷ operator for column-aware overlap check.
             # change_wlocs captures what actually changed at the right granularity:
             # - Var(x) for whole-variable changes
             # - Col(df, c) for column-level changes
@@ -2134,7 +2098,7 @@ class ReproducibilityEnforcer:
         """
         newly_stale: List[str] = []
 
-        # Convert changes to WriteLocSet for ⊗-based conflict detection
+        # Convert changes to WriteLocSet for ▷-based conflict detection
         change_wlocs = _changes_to_writelocset(changed_vars, column_changed)
 
         for prior_cell_id in self._cell_order[:my_position]:
@@ -2144,7 +2108,7 @@ class ReproducibilityEnforcer:
             if not self._notebook_state.has_record(prior_cell_id):
                 continue  # Never executed
 
-            # Use ⊗ operator: check if changes conflict with prior cell's reads.
+            # Use ▷ operator: check if changes conflict with prior cell's reads.
             # Use precise read set: when column info is available, Var(x) is
             # refined to Col(x, c) reads so column-independent writes don't conflict.
             prior_read_locs = self._notebook_state.reads.get(prior_cell_id, frozenset())

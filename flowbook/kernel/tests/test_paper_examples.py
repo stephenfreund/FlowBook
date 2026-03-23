@@ -905,17 +905,19 @@ class TestIPyflowComparison:
         )
 
         # Run B (after C): df.sum()
-        # B reads the entire DataFrame (no column-level tracking for .sum()).
-        # C below wrote df (added column 'b'), so B is forward-contaminated.
+        # df.sum() aggregates across all columns, which is a structural read
+        # on the column structure (Attr(df, columns)). C below added column 'b'
+        # (ColAdd(df, b)), which conflicts with Attr(df, columns).
         result_b = self.helper.execute_cell(
             cell_id="b",
             pre_namespace={"pd": pd, "df": df_with_b},
             post_namespace={"pd": pd, "df": df_with_b},
             reads={"df"},
-            # No column_reads: df.sum() reads the whole DataFrame
+            structural_reads={"df": {"columns"}},  # df.sum() depends on column structure
             continue_on_violation=True,
         )
-        # FlowBook detects forward contamination: B reads df written by C below
+        # FlowBook detects forward contamination: B reads Attr(df, columns),
+        # C below wrote ColAdd(df, b) which conflicts with it
         assert _has_error(result_b, ErrorType.NO_READ_BEFORE_WRITE), \
             f"Expected NO_READ_BEFORE_WRITE, got {[e.error_type for e in result_b.errors]}"
 

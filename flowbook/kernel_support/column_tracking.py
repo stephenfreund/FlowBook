@@ -568,6 +568,54 @@ class ColumnAccessTracker:
 
         pd.DataFrame.drop_duplicates = tracked_drop_duplicates
 
+        # ========== DataFrame aggregation/transformation methods ==========
+        # These methods read all (or all numeric) columns. We record reads of
+        # every column so that column-level staleness works correctly.
+        # Without this, df.sum() would only produce Var(df) in the read set,
+        # and Col writes wouldn't trigger staleness (Col ▷ Var = false).
+        _ALL_COL_METHODS = [
+            'sum', 'mean', 'std', 'var', 'min', 'max', 'median',
+            'describe', 'corr', 'cov', 'quantile', 'nunique',
+            'apply', 'to_numpy', 'to_dict', 'to_records',
+        ]
+
+        for method_name in _ALL_COL_METHODS:
+            original = getattr(pd.DataFrame, method_name, None)
+            if original is None:
+                continue
+            self._original_methods[f'DataFrame.{method_name}'] = original
+
+            def _make_all_col_tracked(orig, name):
+                def tracked_method(df_self, *args, **kwargs):
+                    tracker = ColumnAccessTracker._get_active_tracker()
+                    if tracker is not None:
+                        df_id = id(df_self)
+                        if df_id in tracker._id_to_path:
+                            cols = [str(c) for c in df_self.columns]
+                            tracker.record_read(df_id, cols)
+                    return orig(df_self, *args, **kwargs)
+                tracked_method.__name__ = name
+                tracked_method.__doc__ = orig.__doc__
+                return tracked_method
+
+            setattr(pd.DataFrame, method_name, _make_all_col_tracked(original, method_name))
+
+        # ========== DataFrame.values (property) ==========
+        original_values_fget = pd.DataFrame.values.fget
+        if original_values_fget is not None:
+            self._original_methods['DataFrame.values'] = original_values_fget
+
+            def tracked_values(df_self):
+                tracker = ColumnAccessTracker._get_active_tracker()
+                if tracker is not None:
+                    df_id = id(df_self)
+                    if df_id in tracker._id_to_path:
+                        cols = [str(c) for c in df_self.columns]
+                        tracker.record_read(df_id, cols)
+                return original_values_fget(df_self)
+
+            pd.DataFrame.values = property(tracked_values)
+
         # Save to class-level storage for other instances
         ColumnAccessTracker._class_original_methods = self._original_methods.copy()
 
@@ -590,6 +638,18 @@ class ColumnAccessTracker:
             pd.DataFrame.sort_values = self._original_methods['DataFrame.sort_values']
         if 'DataFrame.drop_duplicates' in self._original_methods:
             pd.DataFrame.drop_duplicates = self._original_methods['DataFrame.drop_duplicates']
+
+        # Restore aggregation/transformation methods
+        for method_name in ['sum', 'mean', 'std', 'var', 'min', 'max', 'median',
+                            'describe', 'corr', 'cov', 'quantile', 'nunique',
+                            'apply', 'to_numpy', 'to_dict', 'to_records']:
+            key = f'DataFrame.{method_name}'
+            if key in self._original_methods:
+                setattr(pd.DataFrame, method_name, self._original_methods[key])
+
+        # Restore values property
+        if 'DataFrame.values' in self._original_methods:
+            pd.DataFrame.values = property(self._original_methods['DataFrame.values'])
 
         # Restore indexer methods
         try:

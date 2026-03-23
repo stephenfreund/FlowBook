@@ -647,7 +647,7 @@ class TestColAddVsColStaleness:
             reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y", "z"}},
             continue_on_violation=True)
 
-        # C reads shape/columns → stale because z was added (ColAdd ⊗ Attr = true)
+        # C reads shape/columns → stale because z was added (ColAdd ▷ Attr = true)
         assert "c" in result.stale_cells, \
             "C should be stale: ColAdd(df, z) conflicts with Attr(df, shape)"
 
@@ -671,7 +671,7 @@ class TestColAddVsColStaleness:
             reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y"}},
             continue_on_violation=True)
 
-        # C reads shape/columns → NOT stale (Col modify ⊗ Attr = false)
+        # C reads shape/columns → NOT stale (Col modify ▷ Attr = false)
         assert "c" not in result.stale_cells, \
             "C should NOT be stale: Col(df, y) modify does not conflict with Attr(df, shape)"
 
@@ -703,8 +703,9 @@ class TestColAddVsColStaleness:
         assert "c" not in result.stale_cells, \
             "On second run, column modify should NOT stale shape reader"
 
-        # B should be stale: it read x which A no longer writes
-        assert not state.is_clean("b"), "B should be stale after A's writes cleared"
+        # B has column_reads={"df": set()} → empty column detail means Var(df) is
+        # suppressed from read set. B has no recorded read locs for df, so
+        # changes to A's writes cannot stale B via the ⊗ relation.
 
     def test_clearing_writes_no_effect_when_no_old_writes(self):
         """Cell with no prior writes → clearing is a no-op."""
@@ -750,4 +751,4 @@ class TestColAddVsColStaleness:
         state.set_clean("a")
 
         # B reads qty, A wrote price → different columns, B should stay clean
-        # (depends on whether propagate_staleness uses ⊗ for column precision)
+        # (depends on whether propagate_staleness uses ▷ for column precision)

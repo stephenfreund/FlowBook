@@ -1,8 +1,8 @@
 """
-Tests for ReadLoc, WriteLoc, and the ⊗ conflict relation.
+Tests for ReadLoc, WriteLoc, and the ▷ conflict relation.
 
 Tests cover:
-1. All 28 cells of the ⊗ matrix (7 write types × 4 read types)
+1. All 28 cells of the ▷ matrix (7 write types × 4 read types)
 2. The output() function for all 7 write types
 3. Set-level operations (wlocs_conflict_rlocs, has_conflict, output_set)
 4. Extraction helpers (var_names, column_map, file_list)
@@ -126,9 +126,9 @@ class TestWriteLoc:
         assert w.name == "df"
         assert w.var_name() == "df"
 
-    def test_attr_changed(self):
-        w = WriteLoc.attr_changed("df", "index")
-        assert w.type == WriteLocType.ATTR_CHANGED
+    def test_attr(self):
+        w = WriteLoc.attr("df", "index")
+        assert w.type == WriteLocType.ATTR
         assert w.name == "index"
         assert w.qualifier == "df"
         assert w.var_name() == "df"
@@ -144,7 +144,7 @@ class TestWriteLoc:
         assert WriteLoc.col_add("df", "new").display_name() == "df['new'] (added)"
         assert WriteLoc.col_del("df", "old").display_name() == "df['old'] (removed)"
         assert WriteLoc.rows("df").display_name() == "df (rows changed)"
-        assert WriteLoc.attr_changed("df", "index").display_name() == "df.index"
+        assert WriteLoc.attr("df", "index").display_name() == "df.index"
         assert WriteLoc.file("out.csv").display_name() == "File(out.csv)"
 
 
@@ -169,8 +169,8 @@ class TestOutput:
     def test_rows(self):
         assert WriteLoc.rows("df").output() == ReadLoc.var("df")
 
-    def test_attr_changed(self):
-        assert WriteLoc.attr_changed("df", "index").output() == ReadLoc.attr("df", "index")
+    def test_attr(self):
+        assert WriteLoc.attr("df", "index").output() == ReadLoc.attr("df", "index")
 
     def test_file(self):
         assert WriteLoc.file("out.csv").output() == ReadLoc.file("out.csv")
@@ -183,7 +183,7 @@ class TestOutput:
 
 
 # =============================================================================
-# ⊗ Conflict Matrix — All 28 cells
+# ▷ Conflict Matrix — All 28 cells
 # =============================================================================
 
 
@@ -216,7 +216,8 @@ class TestConflictMatrix_Col:
     """Col(d, c) writes: column values modified."""
 
     def test_col_vs_var_same_df(self):
-        assert write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.var("df"))
+        """Column write does NOT conflict with Var read (binding unchanged)."""
+        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.var("df"))
 
     def test_col_vs_var_different_df(self):
         assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.var("other"))
@@ -244,7 +245,8 @@ class TestConflictMatrix_ColAdd:
     """ColAdd(d, c) writes: new column added."""
 
     def test_col_add_vs_var_same_df(self):
-        assert write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.var("df"))
+        """ColAdd does NOT conflict with Var read (binding unchanged)."""
+        assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.var("df"))
 
     def test_col_add_vs_var_different_df(self):
         assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.var("other"))
@@ -282,7 +284,8 @@ class TestConflictMatrix_ColDel:
     """ColDel(d, c) writes: column removed."""
 
     def test_col_del_vs_var_same_df(self):
-        assert write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.var("df"))
+        """ColDel does NOT conflict with Var read (binding unchanged)."""
+        assert not write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.var("df"))
 
     def test_col_del_vs_col_same(self):
         """Removing column invalidates reads of that column."""
@@ -308,7 +311,8 @@ class TestConflictMatrix_Rows:
     """Rows(d) writes: rows added or removed."""
 
     def test_rows_vs_var(self):
-        assert write_conflicts_read(WriteLoc.rows("df"), ReadLoc.var("df"))
+        """Rows write does NOT conflict with Var read (binding unchanged)."""
+        assert not write_conflicts_read(WriteLoc.rows("df"), ReadLoc.var("df"))
 
     def test_rows_vs_var_different(self):
         assert not write_conflicts_read(WriteLoc.rows("df"), ReadLoc.var("other"))
@@ -339,30 +343,31 @@ class TestConflictMatrix_Rows:
         assert not write_conflicts_read(WriteLoc.rows("df"), ReadLoc.file("f"))
 
 
-class TestConflictMatrix_AttrChanged:
-    """AttrChanged(d, a) writes: attribute changed."""
+class TestConflictMatrix_Attr:
+    """Attr(d, a) writes: attribute changed."""
 
     def test_attr_vs_var(self):
-        assert write_conflicts_read(WriteLoc.attr_changed("df", "index"), ReadLoc.var("df"))
+        """Attr does NOT conflict with Var read (binding unchanged)."""
+        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.var("df"))
 
     def test_attr_vs_var_different(self):
-        assert not write_conflicts_read(WriteLoc.attr_changed("df", "index"), ReadLoc.var("other"))
+        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.var("other"))
 
     def test_attr_vs_col(self):
         """Attr change does NOT affect column value reads."""
-        assert not write_conflicts_read(WriteLoc.attr_changed("df", "index"), ReadLoc.col("df", "price"))
+        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.col("df", "price"))
 
     def test_attr_vs_attr_same(self):
-        assert write_conflicts_read(WriteLoc.attr_changed("df", "index"), ReadLoc.attr("df", "index"))
+        assert write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.attr("df", "index"))
 
     def test_attr_vs_attr_different(self):
-        assert not write_conflicts_read(WriteLoc.attr_changed("df", "index"), ReadLoc.attr("df", "shape"))
+        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.attr("df", "shape"))
 
     def test_attr_vs_attr_different_df(self):
-        assert not write_conflicts_read(WriteLoc.attr_changed("df", "index"), ReadLoc.attr("other", "index"))
+        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.attr("other", "index"))
 
     def test_attr_vs_file(self):
-        assert not write_conflicts_read(WriteLoc.attr_changed("df", "index"), ReadLoc.file("f"))
+        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.file("f"))
 
 
 class TestConflictMatrix_File:
@@ -448,22 +453,22 @@ class TestWorkedExamples:
         W_B = frozenset({WriteLoc.col_add("df", "price")})
         W_C = frozenset({WriteLoc.col_add("df", "qty")})
 
-        # Write-write overlap via output: W_B ⊗ output*(W_C)
+        # Write-write overlap via output: W_B ▷ output*(W_C)
         assert not has_conflict(W_B, output_set(W_C))
 
-    def test_independent_column_additions_write_read_conflict(self):
+    def test_col_add_doesnt_conflict_with_var_read(self):
         """
-        But if C reads Var(df), then W_B ⊗ R_C is non-empty.
-        ColAdd(df, price) ⊗ Var(df) = true.
+        ColAdd(df, price) ▷ Var(df) = false.
+        Column add doesn't change the variable binding.
         """
         W_B = frozenset({WriteLoc.col_add("df", "price")})
         R_C = frozenset({ReadLoc.var("df")})
-        assert has_conflict(W_B, R_C)
+        assert not has_conflict(W_B, R_C)
 
     def test_column_modify_doesnt_affect_structure(self):
         """
         Modifying column values doesn't conflict with attribute reads.
-        Col(df, price) ⊗ Attr(df, shape) = false.
+        Col(df, price) ▷ Attr(df, shape) = false.
         """
         W = frozenset({WriteLoc.col("df", "price")})
         R = frozenset({ReadLoc.attr("df", "shape"), ReadLoc.attr("df", "columns")})
@@ -472,7 +477,7 @@ class TestWorkedExamples:
     def test_column_add_affects_structure(self):
         """
         Adding a column DOES conflict with column-structure attributes.
-        ColAdd(df, new) ⊗ Attr(df, columns) = true.
+        ColAdd(df, new) ▷ Attr(df, columns) = true.
         """
         W = frozenset({WriteLoc.col_add("df", "new")})
         R = frozenset({ReadLoc.attr("df", "columns")})
@@ -480,7 +485,7 @@ class TestWorkedExamples:
 
     def test_row_change_affects_all_columns(self):
         """
-        Rows(df) ⊗ Col(df, c) = true for any c.
+        Rows(df) ▷ Col(df, c) = true for any c.
         """
         W = frozenset({WriteLoc.rows("df")})
         R = frozenset({ReadLoc.col("df", "price"), ReadLoc.col("df", "qty")})
@@ -489,15 +494,15 @@ class TestWorkedExamples:
 
     def test_index_change_doesnt_affect_columns(self):
         """
-        AttrChanged(df, index) ⊗ Col(df, price) = false.
+        Attr(df, index) ▷ Col(df, price) = false.
         """
-        W = frozenset({WriteLoc.attr_changed("df", "index")})
+        W = frozenset({WriteLoc.attr("df", "index")})
         R = frozenset({ReadLoc.col("df", "price")})
         assert not has_conflict(W, R)
 
     def test_disjoint_column_modify_no_conflict(self):
         """
-        Col(df, price) ⊗ Col(df, qty) = false.
+        Col(df, price) ▷ Col(df, qty) = false.
         Disjoint column modifications don't conflict.
         """
         W = frozenset({WriteLoc.col("df", "price")})

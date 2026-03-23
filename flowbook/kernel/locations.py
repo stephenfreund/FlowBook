@@ -4,7 +4,7 @@ Typed Read and Write Locations for Reproducibility Analysis.
 This module defines the core location types for FlowBook's reproducibility system:
 - ReadLoc: what a cell accessed during execution (4 constructors)
 - WriteLoc: what a cell changed and how (7 constructors)
-- ⊗ (write_conflicts_read): does a write invalidate a read?
+- ▷ (write_conflicts_read): does a write invalidate a read?
 
 The key design insight: reads and writes are different types. Reads describe
 "what did I look at?" while writes describe "what did I change and how?"
@@ -144,7 +144,7 @@ class WriteLocType(str, Enum):
     COL_ADD = "col_add"      # ColAdd(d, c): new column added
     COL_DEL = "col_del"      # ColDel(d, c): column removed
     ROWS = "rows"            # Rows(d): rows added or removed
-    ATTR_CHANGED = "attr"    # AttrChanged(d, a): attribute changed
+    ATTR = "attr"            # Attr(d, a): attribute changed
     FILE = "file"            # File(p): file written
 
 
@@ -154,7 +154,7 @@ class WriteLoc:
     A write location — identifies what a cell changed and how.
 
     WriteLoc ::= Var(x) | Col(d, c) | ColAdd(d, c) | ColDel(d, c)
-               | Rows(d) | AttrChanged(d, a) | File(p)
+               | Rows(d) | Attr(d, a) | File(p)
 
     The "how" (modify vs add vs delete vs rows) determines which reads
     are invalidated. This is what eliminates the need for a separate
@@ -192,9 +192,9 @@ class WriteLoc:
         return cls(WriteLocType.ROWS, var)
 
     @classmethod
-    def attr_changed(cls, var: str, attribute: str) -> "WriteLoc":
-        """AttrChanged(d, a) — attribute changed (index, dtypes, etc.)."""
-        return cls(WriteLocType.ATTR_CHANGED, attribute, qualifier=var)
+    def attr(cls, var: str, attribute: str) -> "WriteLoc":
+        """Attr(d, a) — attribute changed (index, dtypes, etc.)."""
+        return cls(WriteLocType.ATTR, attribute, qualifier=var)
 
     @classmethod
     def file(cls, path: str) -> "WriteLoc":
@@ -208,13 +208,13 @@ class WriteLoc:
         """
         if self.type in (WriteLocType.VAR, WriteLocType.ROWS, WriteLocType.FILE):
             return self.name
-        return self.qualifier  # COL, COL_ADD, COL_DEL, ATTR_CHANGED
+        return self.qualifier  # COL, COL_ADD, COL_DEL, ATTR
 
     def output(self) -> ReadLoc:
         """Convert to the ReadLoc that would observe this write's value.
 
         Used for write-write overlap in ForwardStale:
-          (Wᵢ ∪ W'ᵢ) ⊗ output*(Wⱼ) ≠ ∅
+          (Wᵢ ∪ W'ᵢ) ▷ output*(Wⱼ) ≠ ∅
 
         Formal ref: LOCSET_UNIFICATION_PLAN.md §The Output Function
         """
@@ -224,7 +224,7 @@ class WriteLoc:
             return ReadLoc.col(self.qualifier, self.name)
         elif self.type == WriteLocType.ROWS:
             return ReadLoc.var(self.name)
-        elif self.type == WriteLocType.ATTR_CHANGED:
+        elif self.type == WriteLocType.ATTR:
             return ReadLoc.attr(self.qualifier, self.name)
         elif self.type == WriteLocType.FILE:
             return ReadLoc.file(self.name)
@@ -242,7 +242,7 @@ class WriteLoc:
             return f"{self.qualifier}['{self.name}'] (removed)"
         elif self.type == WriteLocType.ROWS:
             return f"{self.name} (rows changed)"
-        elif self.type == WriteLocType.ATTR_CHANGED:
+        elif self.type == WriteLocType.ATTR:
             return f"{self.qualifier}.{self.name}"
         elif self.type == WriteLocType.FILE:
             return f"File({self.name})"
@@ -259,8 +259,8 @@ class WriteLoc:
             return f"ColDel({self.qualifier}, {self.name})"
         elif self.type == WriteLocType.ROWS:
             return f"Rows({self.name})"
-        elif self.type == WriteLocType.ATTR_CHANGED:
-            return f"AttrChanged({self.qualifier}, {self.name})"
+        elif self.type == WriteLocType.ATTR:
+            return f"Attr({self.qualifier}, {self.name})"
         elif self.type == WriteLocType.FILE:
             return f"File({self.name})"
         return repr(self)
@@ -272,9 +272,9 @@ WriteLocSet = FrozenSet[WriteLoc]
 
 
 # =============================================================================
-# The ⊗ Conflict Relation
+# The ▷ Conflict Relation
 # =============================================================================
-# w ⊗ r: does writing w invalidate reading r?
+# w ▷ r: does writing w invalidate reading r?
 #
 # This is the SINGLE conflict check for all reproducibility analysis.
 # Supersedes the old ConflictResolver + CONFLICT_RULES table.
@@ -286,12 +286,12 @@ WriteLocSet = FrozenSet[WriteLoc]
 
 def write_conflicts_read(w: WriteLoc, r: ReadLoc) -> bool:
     """
-    w ⊗ r — does writing w invalidate reading r?
+    w ▷ r — does writing w invalidate reading r?
 
     This is the core conflict relation. All validity predicates
     and staleness checks are defined in terms of this function.
 
-    Formal ref: LOCSET_UNIFICATION_PLAN.md §The Conflict Relation: ⊗
+    Formal ref: LOCSET_UNIFICATION_PLAN.md §The Conflict Relation: ▷
     """
     # --- Var(x) writes: invalidate any read involving x ---
     if w.type == WriteLocType.VAR:
@@ -302,33 +302,26 @@ def write_conflicts_read(w: WriteLoc, r: ReadLoc) -> bool:
         return False  # Var vs File: no conflict
 
     # --- Col(d, c) writes: column values modified ---
-    # Invalidates: same-column reads, whole-variable reads
-    # Does NOT invalidate: attribute reads (values ≠ structure)
+    # Invalidates: same-column reads
+    # Does NOT invalidate: Var reads (binding unchanged), attribute reads (values ≠ structure)
     elif w.type == WriteLocType.COL:
-        if r.type == ReadLocType.VAR:
-            return w.qualifier == r.name
-        elif r.type == ReadLocType.COLUMN:
+        if r.type == ReadLocType.COLUMN:
             return w.qualifier == r.qualifier and w.name == r.name
-        return False  # Col vs Attr: no conflict (values don't change structure)
+        return False
 
     # --- ColAdd(d, c) writes: new column added ---
-    # Invalidates: whole-variable reads, column-structure attribute reads
-    # Does NOT invalidate: existing column reads (new column is independent)
+    # Invalidates: column-structure attribute reads
+    # Does NOT invalidate: Var reads (binding unchanged), existing column reads
     elif w.type == WriteLocType.COL_ADD:
-        if r.type == ReadLocType.VAR:
-            return w.qualifier == r.name
-        elif r.type == ReadLocType.COLUMN:
-            return False  # Adding column doesn't affect existing column reads
-        elif r.type == ReadLocType.ATTR:
+        if r.type == ReadLocType.ATTR:
             return w.qualifier == r.qualifier and r.name in COL_ATTRS
         return False
 
     # --- ColDel(d, c) writes: column removed ---
-    # Invalidates: that column's reads, whole-variable reads, column-structure attrs
+    # Invalidates: that column's reads, column-structure attrs
+    # Does NOT invalidate: Var reads (binding unchanged)
     elif w.type == WriteLocType.COL_DEL:
-        if r.type == ReadLocType.VAR:
-            return w.qualifier == r.name
-        elif r.type == ReadLocType.COLUMN:
+        if r.type == ReadLocType.COLUMN:
             return w.qualifier == r.qualifier and w.name == r.name
         elif r.type == ReadLocType.ATTR:
             return w.qualifier == r.qualifier and r.name in COL_ATTRS
@@ -336,24 +329,21 @@ def write_conflicts_read(w: WriteLoc, r: ReadLoc) -> bool:
 
     # --- Rows(d) writes: rows added or removed ---
     # Invalidates: all column reads (data changed), row-structure attrs
+    # Does NOT invalidate: Var reads (binding unchanged)
     elif w.type == WriteLocType.ROWS:
-        if r.type == ReadLocType.VAR:
-            return w.name == r.name
-        elif r.type == ReadLocType.COLUMN:
+        if r.type == ReadLocType.COLUMN:
             return w.name == r.qualifier
         elif r.type == ReadLocType.ATTR:
             return w.name == r.qualifier and r.name in ROW_ATTRS
         return False
 
-    # --- AttrChanged(d, a) writes: attribute changed ---
-    # Invalidates: same attribute reads, whole-variable reads
-    # Does NOT invalidate: column value reads (attr change ≠ data change)
-    elif w.type == WriteLocType.ATTR_CHANGED:
-        if r.type == ReadLocType.VAR:
-            return w.qualifier == r.name
-        elif r.type == ReadLocType.ATTR:
+    # --- Attr(d, a) writes: attribute changed ---
+    # Invalidates: same attribute reads
+    # Does NOT invalidate: Var reads (binding unchanged), column value reads
+    elif w.type == WriteLocType.ATTR:
+        if r.type == ReadLocType.ATTR:
             return w.qualifier == r.qualifier and w.name == r.name
-        return False  # AttrChanged vs Column: no conflict
+        return False
 
     # --- File(p) writes ---
     elif w.type == WriteLocType.FILE:
@@ -371,10 +361,10 @@ def write_conflicts_read(w: WriteLoc, r: ReadLoc) -> bool:
 
 def wlocs_conflict_rlocs(writes: WriteLocSet, reads: ReadLocSet) -> WriteLocSet:
     """
-    W ⊗ R — return write locs in W that conflict with some read in R.
+    W ▷ R — return write locs in W that conflict with some read in R.
 
-    This is the set-level extension of ⊗:
-      A ⊗ B = { w ∈ A | ∃ r ∈ B . w ⊗ r }
+    This is the set-level extension of ▷:
+      A ▷ B = { w ∈ A | ∃ r ∈ B . w ▷ r }
     """
     if not writes or not reads:
         return frozenset()
@@ -386,7 +376,7 @@ def wlocs_conflict_rlocs(writes: WriteLocSet, reads: ReadLocSet) -> WriteLocSet:
 
 def has_conflict(writes: WriteLocSet, reads: ReadLocSet) -> bool:
     """
-    W ⊗ R ≠ ∅ — quick boolean check for any conflict.
+    W ▷ R ≠ ∅ — quick boolean check for any conflict.
 
     Short-circuits on first conflict found.
     """
@@ -507,7 +497,7 @@ def tracking_to_writelocset(tracking: TrackingData) -> WriteLocSet:
     """
     Convert TrackingData writes to WriteLocSet.
 
-    Note: TrackingData doesn't distinguish ColAdd/ColDel/Rows/AttrChanged.
+    Note: TrackingData doesn't distinguish ColAdd/ColDel/Rows/Attr.
     All column writes are treated as Col (modification). The diff-based
     detect_write_locs() function produces the full typed WriteLocs.
 

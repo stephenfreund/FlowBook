@@ -419,10 +419,10 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 
 ---
 
-## 8. Typed Read/Write Locations and the ⊗ Conflict Relation
+## 8. Typed Read/Write Locations and the ▷ Conflict Relation
 
 The implementation uses typed read and write locations with a conflict relation
-⊗ that provides column-level granularity for all predicates and staleness checks.
+▷ that provides column-level granularity for all predicates and staleness checks.
 
 ### 8.1 Read Locations
 
@@ -445,7 +445,7 @@ r ∈ ReadLoc ::= Var(x) | Col(d, c) | Attr(d, a) | File(p)
 Write locations describe what changed and *how*:
 ```
 w ∈ WriteLoc ::= Var(x) | Col(d, c) | ColAdd(d, c) | ColDel(d, c)
-               | Rows(d) | AttrChanged(d, a) | File(p)
+               | Rows(d) | Attr(d, a) | File(p)
 ```
 
 | Constructor | Meaning | Example |
@@ -455,23 +455,40 @@ w ∈ WriteLoc ::= Var(x) | Col(d, c) | ColAdd(d, c) | ColDel(d, c)
 | ColAdd(d, c) | New column added | df["new"] = [4,5,6] |
 | ColDel(d, c) | Column removed | df.drop("old") |
 | Rows(d) | Rows added/removed | df.append(...) |
-| AttrChanged(d, a) | Attribute changed | df.reset_index() |
+| Attr(d, a) | Attribute changed | df.reset_index() |
 | File(p) | File written | df.to_csv("out.csv") |
 
 **Code:** `WriteLoc` in `kernel/locations.py`, `changes_to_write_locs()` converts Change objects
 
-### 8.3 The ⊗ Conflict Relation
+### 8.3 The ▷ Conflict Relation
 
-`w ⊗ r` means "writing w invalidates reading r". Key rules:
+`w ▷ r` means "writing w invalidates reading r".
+
+**Var(x) semantics**: `Var(x)` as a read means "read the namespace binding" —
+the pointer from name `x` to an object. Sub-variable writes (Col, ColAdd, ColDel,
+Rows, Attr) do NOT change the binding, so they do NOT conflict with `Var(x)`.
+Only `Var(x)` writes (replacing the entire variable) conflict with `Var(x)` reads.
+
+DataFrame methods like `df.sum()` that read column data are intercepted to produce
+individual `Col(d, c)` reads, not `Var(d)`. This ensures column-level staleness
+precision.
+
+Key rules:
 
 | Write | Read | Conflicts? |
 |---|---|---|
+| Var(x) | Var(x) | **Yes** (replacing variable invalidates binding read) |
+| Var(x) | Col(d, c) | **Yes** if x = d (replacing df invalidates column reads) |
+| Col(d, c) | Var(x) | **No** (column write doesn't change binding) |
 | Col(d, c) | Col(d, c') | Only if c = c' (column-level precision) |
 | Col(d, c) | Attr(d, a) | **No** (modifying values ≠ structural change) |
+| ColAdd(d, c) | Var(x) | **No** (column add doesn't change binding) |
 | ColAdd(d, c) | Col(d, c') | **No** (adding column ≠ changing existing columns) |
 | ColAdd(d, c) | Attr(d, a) | Yes if a ∈ COL_ATTRS (adding changes structure) |
+| Rows(d) | Var(x) | **No** (row change doesn't change binding) |
 | Rows(d) | Col(d, c) | **Yes** (row change affects all column data) |
-| AttrChanged(d, a) | Col(d, c) | **No** (attr change ≠ data change) |
+| Attr(d, a) | Var(x) | **No** (attr change doesn't change binding) |
+| Attr(d, a) | Col(d, c) | **No** (attr change ≠ data change) |
 
 Attribute conflicts are always enforced (no OFF/WARN mode).
 
@@ -479,7 +496,7 @@ Attribute conflicts are always enforced (no OFF/WARN mode).
 
 Set-level operations:
 - `wlocs_conflict_rlocs(W, R)` — return writes in W that conflict with some read in R
-- `has_conflict(W, R)` — boolean W ⊗ R ≠ ∅
+- `has_conflict(W, R)` — boolean W ▷ R ≠ ∅
 - `output_set(W)` — convert writes to reads for write-write overlap
 
 ### 8.4 The output Function
@@ -489,7 +506,7 @@ to the read that would observe its value:
 ```
 output(ColAdd(d, c)) = Col(d, c)    — key: different ColAdds have different outputs
 output(Rows(d))      = Var(d)
-output(AttrChanged(d, a)) = Attr(d, a)
+output(Attr(d, a)) = Attr(d, a)
 ```
 
 **Code:** `WriteLoc.output()` method in `kernel/locations.py`
@@ -526,7 +543,7 @@ memory checkpoints that snapshot variable states.
 ### 9.3 Conflict Resolution
 
 The implementation uses typed read/write locations (`ReadLoc`/`WriteLoc`) with a conflict
-relation (`⊗`) for column-level precision. All conflict detection uses
+relation (`▷`) for column-level precision. All conflict detection uses
 `wlocs_conflict_rlocs(W, R)` which computes the set of writes in W that conflict
 with some read in R, using `write_conflicts_read()` as the per-element check.
 
@@ -547,24 +564,24 @@ then evaluates all predicates using pure set operations on R and W.
 **Stored state**:
 ```
 R[i] : ReadLocSet     — locations read before write (Var, Col, Attr, File)
-W[i] : WriteLocSet    — locations that actually changed (Var, Col, ColAdd, ColDel, Rows, AttrChanged, File)
+W[i] : WriteLocSet    — locations that actually changed (Var, Col, ColAdd, ColDel, Rows, Attr, File)
 ```
 
-**Predicates** (using ⊗ conflict relation for column-level precision):
+**Predicates** (using ▷ conflict relation for column-level precision):
 ```
-NoReadAndWrite(R, W, i)    ≝  Wᵢ ⊗ Rᵢ = ∅
-WriteBeforeRead(R, W, i)   ≝  ∀ r ∈ Rᵢ . r ∈ ambient ∨ ∃ j < i . Wⱼ ⊗ {r} ≠ ∅
-NoReadBeforeWrite(R, W, i) ≝  W_{i+1..n} ⊗ Rᵢ = ∅
-NoWriteAfterRead(R, W, i)  ≝  Wᵢ ⊗ R_{1..i-1} = ∅  (clean cells only)
+NoReadAndWrite(R, W, i)    ≝  Wᵢ ▷ Rᵢ = ∅
+WriteBeforeRead(R, W, i)   ≝  ∀ r ∈ Rᵢ . r ∈ ambient ∨ ∃ j < i . Wⱼ ▷ {r} ≠ ∅
+NoReadBeforeWrite(R, W, i) ≝  W_{i+1..n} ▷ Rᵢ = ∅
+NoWriteAfterRead(R, W, i)  ≝  Wᵢ ▷ R_{1..i-1} = ∅  (clean cells only)
 
 ForwardStale(R, W, W', i, j) ≝  j > i ∧ (
-    (Wᵢ ∪ W'ᵢ) ⊗ Rⱼ ≠ ∅                   — write-read conflict
-    ∨ (Wᵢ ∪ W'ᵢ) ⊗ output*(Wⱼ) ≠ ∅        — write-write overlap
+    (Wᵢ ∪ W'ᵢ) ▷ Rⱼ ≠ ∅                   — write-read conflict
+    ∨ (Wᵢ ∪ W'ᵢ) ▷ output*(Wⱼ) ≠ ∅        — write-write overlap
 )
 ```
 
 Note: The paper uses `∩` (set intersection) because R and W share a single Loc type.
-The implementation uses `⊗` because ReadLoc and WriteLoc are different types.
+The implementation uses `▷` because ReadLoc and WriteLoc are different types.
 The `output*` function converts WriteLoc → ReadLoc for write-write overlap checks.
 
 **Properties**:
