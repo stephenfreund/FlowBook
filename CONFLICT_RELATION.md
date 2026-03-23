@@ -149,7 +149,7 @@ There is no separate write-write conflict function. Instead, the system converts
 | WriteLoc            | `output()` → ReadLoc set |
 |--------------------|--------------------------|
 | `Var(x)`           | `{ Var(x) }`             |
-| `Col(d, c)`        | `{ Col(d, c) } ∪ { Attr(d, a) \| a ∈ COL_VALUE_ATTRS }` |
+| `Col(d, c)`        | `{ Col(d, c) }`             |
 | `ColAdd(d, c)`     | `{ Attr(d, a) \| a ∈ COL_ATTRS }` |
 | `ColDel(d, c)`     | `{ Col(d, c) } ∪ { Attr(d, a) \| a ∈ COL_ATTRS }` |
 | `Rows(d)`          | `{ Attr(d, a) \| a ∈ ROW_ATTRS }` |
@@ -160,7 +160,9 @@ This lifts to sets: `output*(W) = ⋃ { output(w) | w ∈ W }`.
 
 **Key insight:** Structural writes (`ColAdd`, `ColDel`, `Rows`) expand to multiple output reads because they affect shared structural attributes. For example, `output(Rows(d))` = `{Attr(d, a) | a ∈ ROW_ATTRS}` rather than `Var(d)`, because row changes affect shape, index, etc. — not the variable binding itself.
 
-**Note on Rows and columns:** `Rows(d) ▷ Col(d, *)` in ▷, but `output(Rows(d))` does not include column reads because we cannot enumerate column names at the loc level. Write-write overlap between `Rows(d)` and `Col(d, c)` is detected via `Rows(d) ▷ output(Col(d, c))`: since `output(Col(d, c))` contains `Col(d, c)` and `Rows(d) ▷ Col(d, c) = True`, overlap is always detected. The reverse direction (`Col(d,c) ▷ output(Rows(d))`) also works because `output(Rows(d))` contains `Attr(d, values)` and `Attr(d, T)`, both in `COL_VALUE_ATTRS`.
+**Why `output(Col)` is minimal.** `output(Col(d, c))` = `{Col(d, c)}` — just the column itself, with no attribute inflation. Including `COL_VALUE_ATTRS` (`values`, `T`, `describe`) would create false write-write overlap between independent column writes: `Col(d, "price") ▷ Attr(d', "values")` would fire, making any two column writes on the same DataFrame appear to conflict. Column independence is preserved because ▷ already handles cross-level conflicts directly (e.g., `Rows ▷ Col`).
+
+**Rows ↔ Col bidirectional detection.** `Rows(d) ▷ Col(d, *)` in ▷, but `output(Rows(d))` does not include column reads because we cannot enumerate column names at the loc level. Write-write overlap between `Rows(d)` and `Col(d, c)` is detected via `Rows(d) ▷ output(Col(d, c))`: since `output(Col(d, c))` contains `Col(d, c)` and `Rows(d) ▷ Col(d, c) = True`, overlap is always detected. The reverse direction (`Col(d,c) ▷ output(Rows(d))`) also works because `output(Rows(d))` contains `Attr(d, values)` and `Attr(d, T)`, both in `COL_VALUE_ATTRS`.
 
 ### Forward Staleness Check
 
@@ -173,24 +175,28 @@ Both checks use the same ▷ relation. The second catches cases like: cell A and
 
 ### Effective Write-Write Conflict Matrix
 
-Composing `output()` with ▷ yields the effective write-write table. An entry is `True` when executing cell `i` (row) makes cell `j`'s write (column) stale.
+Composing `output()` with ▷ yields the effective write-write table. An entry shows the condition under which `wᵢ ▷ output(wⱼ)` holds — i.e., executing cell `i` (row) makes cell `j`'s write (column) stale. Comparison operators are the same as in the read-write matrix above: `≡` for DataFrame identity, `name()` for Address → VarName extraction, `=` for string equality.
 
-| Cell `i` wrote ↓  \  Cell `j` wrote → | **Var(x)** | **Col(d, c)** | **ColAdd(d, c)** | **ColDel(d, c)** | **Rows(d)** | **Attr(d, a)** | **File(p)** |
-|---------------------------------------|------------|---------------|------------------|------------------|-------------|----------------------|-------------|
-| **Var(x)**                            | same `x`   | `x == d`      | `x == d`, `a ∈ COL_ATTRS` | `x == d`  | `x == d`, `a ∈ ROW_ATTRS` | `x == d`             | —           |
-| **Col(d, c)**                         | —          | same `d,c` or `a ∈ COL_VALUE_ATTRS` | `a ∈ COL_VALUE_ATTRS` | same `d,c` or `a ∈ COL_VALUE_ATTRS` | same `d`, `a ∈ ROW_ATTRS ∩ COL_VALUE_ATTRS` | `a ∈ COL_VALUE_ATTRS` | —           |
-| **ColAdd(d, c)**                      | —          | —             | same `d`, `a ∈ COL_ATTRS` | —         | —           | `a ∈ COL_ATTRS`      | —           |
-| **ColDel(d, c)**                      | —          | same `d,c`    | same `d`, `a ∈ COL_ATTRS` | same `d,c` or `a ∈ COL_ATTRS` | —  | `a ∈ COL_ATTRS`      | —           |
-| **Rows(d)**                           | —          | same `d`      | same `d`, `a ∈ COL_ATTRS` | same `d`  | same `d`    | `a ∈ ROW_ATTRS`      | —           |
-| **Attr(d, a)**                        | —          | —             | `a ∈ COL_ATTRS`  | `a ∈ COL_ATTRS`  | `a ∈ ROW_ATTRS` | same `d,a`       | —           |
-| **File(p)**                           | —          | —             | —                | —                | —           | —                    | same `p`    |
+| `wᵢ` ↓ \ `wⱼ` → | **Var(x')** | **Col(d', c')** | **ColAdd(d', c')** | **ColDel(d', c')** | **Rows(d')** | **Attr(d', a')** | **File(p')** |
+|---|---|---|---|---|---|---|---|
+| **Var(x)** | `x = x'` | `x = name(d')` | `x = name(d')` | `x = name(d')` | `x = name(d')` | `x = name(d')` | — |
+| **Col(d, c)** | — | `d ≡ d'` AND `c = c'` | `d ≡ d'` | `d ≡ d'` | `d ≡ d'` | `d ≡ d'` AND `a' ∈ COL_VALUE_ATTRS` | — |
+| **ColAdd(d, c)** | — | — | `d ≡ d'` | `d ≡ d'` | `d ≡ d'` | `d ≡ d'` AND `a' ∈ COL_ATTRS` | — |
+| **ColDel(d, c)** | — | `d ≡ d'` AND `c = c'` | `d ≡ d'` | `d ≡ d'` | `d ≡ d'` | `d ≡ d'` AND `a' ∈ COL_ATTRS` | — |
+| **Rows(d)** | — | `d ≡ d'` | `d ≡ d'` | `d ≡ d'` | `d ≡ d'` | `d ≡ d'` AND `a' ∈ ROW_ATTRS` | — |
+| **Attr(d, a)** | — | — | `d ≡ d'` AND `a ∈ COL_ATTRS` | `d ≡ d'` AND `a ∈ COL_ATTRS` | `d ≡ d'` AND `a ∈ ROW_ATTRS` | `d ≡ d'` AND `a = a'` | — |
+| **File(p)** | — | — | — | — | — | — | `p = p'` |
 
 (**—** = no write-write staleness)
 
-Notable changes from the corrected `output()`:
-- **`ColAdd` now detects overlap** with other `ColAdd`, `ColDel`, and `Attr` writes on the same DataFrame, because `output(ColAdd)` projects to `COL_ATTRS` attributes.
-- **`Rows` detects overlap** with other `Rows` writes and with `Attr` writes on `ROW_ATTRS`, because `output(Rows)` projects to `ROW_ATTRS` attributes (not `Var(d)`).
-- **`Col` vs `Rows`** overlap is detected in both directions: `Rows(d) ▷ output(Col(d,c)) = True` (Rows conflicts with Col reads), and `Col(d,c) ▷ output(Rows(d)) = True` because `output(Rows(d))` contains `Attr(d, values)` and `Attr(d, T)`, both in `COL_VALUE_ATTRS`.
+**Column independence is preserved.** Because `output(Col(d, c)) = {Col(d, c)}` (no attribute inflation), two writes to distinct columns of the same DataFrame do NOT conflict: `Col(d, "price") ▷ output(Col(d', "qty"))` requires `c = c'`, which fails. The same applies to `ColAdd ▷ output(Col)` and `Attr ▷ output(Col)` — both are `—` because `ColAdd` and `Attr` don't conflict with `Col` reads in the base ▷ matrix.
+
+Key observations:
+- **`Var(x)` bridges via `name()`**: Since `x` is a `VarName` (string) and `d'` is an `Address` (`LocRef`), the comparison uses `name(d')` to extract the variable name — the same cross-domain bridge as in the read-write matrix.
+- **`Col` vs `Col`** requires exact column match (`c = c'`) — column independence at the write-write level.
+- **`Col` vs `Rows` overlap** is detected in both directions without attribute inflation: `Rows(d) ▷ {Col(d',c')}` succeeds directly (Rows ▷ Col in base ▷), and `Col(d,c) ▷ output(Rows(d'))` succeeds because `output(Rows)` contains `Attr(d', values)` and `Attr(d', T)`, both in `COL_VALUE_ATTRS`.
+- **`ColDel` vs `Col`** requires `c = c'` — deleting column "price" only overlaps with writing column "price", not other columns.
+- **Structural writes** (`ColAdd`, `ColDel`, `Rows`) still detect broad overlap with each other because their `output()` includes `COL_ATTRS` or `ROW_ATTRS`, which intersect across structural write types.
 
 
 ## Stable Object Identity via StableIdMap

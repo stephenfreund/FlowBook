@@ -274,10 +274,13 @@ class WriteLoc:
         if self.type == WriteLocType.VAR:
             return frozenset({ReadLoc.var(self.name)})
         elif self.type == WriteLocType.COL:
-            return frozenset(
-                {ReadLoc.col(self.qualifier, self.name)}
-                | {ReadLoc.attr(self.qualifier, a) for a in COL_VALUE_ATTRS}
-            )
+            # Just the column itself — no COL_VALUE_ATTRS inflation.
+            # Including attrs like 'values'/'T' would create false
+            # write-write overlap between independent column writes
+            # (Col(d,"price") vs Col(d,"qty")), breaking column independence.
+            # Rows↔Col overlap is unaffected: Rows ▷ Col is True in ▷,
+            # and Col ▷ output(Rows) works via ROW_ATTRS ∩ CVA.
+            return frozenset({ReadLoc.col(self.qualifier, self.name)})
         elif self.type == WriteLocType.COL_ADD:
             # ColAdd conflicts with Attr(d, a) for a ∈ COL_ATTRS
             return frozenset(

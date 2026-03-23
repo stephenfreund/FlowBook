@@ -324,16 +324,14 @@ class TestForwardStaleWrites:
 
         THIS IS THE KEY TEST: with variable-name-level checking, both
         write "df" so they would overlap. With typed ▷, they don't because
-        output(Col(df, qty)) = {Col(df, qty)} ∪ {Attr(df, values), ...}
-        and Col(df, price) ▷ Col(df, qty) = False (different columns).
-        However, Col(df, price) ▷ Attr(df, values) = True (Gap 2 fix).
-        So they DO overlap through COL_VALUE_ATTRS.
+        output(Col(df, qty)) = {Col(df, qty)} and
+        Col(df, price) ▷ Col(df, qty) = False (different columns).
+        Column independence is preserved at the write-write level.
         """
         W_i = _wset(WriteLoc.col(LR_DF, "price"))
         W_j = _wset(WriteLoc.col(LR_DF, "qty"))
-        # After Gap 2 fix: Col(df, price) ▷ output(Col(df, qty)) includes
-        # Col(df, price) ▷ Attr(df, values) = True (values in COL_VALUE_ATTRS)
-        assert forward_stale_writes(W_i, W_j)
+        # Independent column writes: no overlap
+        assert not forward_stale_writes(W_i, W_j)
 
     def test_col_alias_overlap(self):
         """Cell i writes Col(df, price), cell j writes Col(X, price) → overlap via loc_id."""
@@ -436,13 +434,10 @@ class TestOutputFunction:
     def test_var_output(self):
         assert WriteLoc.var("x").output() == frozenset({ReadLoc.var("x")})
 
-    def test_col_output_includes_value_attrs(self):
-        """Col(df, price) output includes Col(df, price) + Attr(df, a) for a ∈ COL_VALUE_ATTRS."""
+    def test_col_output_is_minimal(self):
+        """Col(df, price) output is just {Col(df, price)} — no attr inflation."""
         result = WriteLoc.col(LR_DF, "price").output()
-        assert ReadLoc.col(LR_DF, "price") in result
-        for a in COL_VALUE_ATTRS:
-            assert ReadLoc.attr(LR_DF, a) in result
-        assert len(result) == 1 + len(COL_VALUE_ATTRS)
+        assert result == frozenset({ReadLoc.col(LR_DF, "price")})
 
     def test_coladd_output(self):
         """ColAdd output is Attr(df, a) for all COL_ATTRS."""

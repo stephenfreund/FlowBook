@@ -160,13 +160,9 @@ class TestOutput:
         assert WriteLoc.var("x").output() == frozenset({ReadLoc.var("x")})
 
     def test_col(self):
-        """Col produces Col(d,c) plus Attr reads for COL_VALUE_ATTRS."""
+        """Col produces just Col(d,c) — no attr inflation for column independence."""
         result = WriteLoc.col("df", "price").output()
-        assert ReadLoc.col("df", "price") in result
-        from flowbook.kernel.locations import COL_VALUE_ATTRS
-        for a in COL_VALUE_ATTRS:
-            assert ReadLoc.attr("df", a) in result
-        assert len(result) == 1 + len(COL_VALUE_ATTRS)
+        assert result == frozenset({ReadLoc.col("df", "price")})
 
     def test_col_add(self):
         """ColAdd produces Attr reads for all COL_ATTRS."""
@@ -455,12 +451,11 @@ class TestSetOperations:
             WriteLoc.attr("df", "index"),
         })
         result = output_set(writes)
-        from flowbook.kernel.locations import COL_VALUE_ATTRS
+        # Col output is just {Col(df, price)} — no CVA inflation
         expected = frozenset({
             ReadLoc.var("x"),
             ReadLoc.col("df", "price"),
             ReadLoc.attr("df", "index"),
-            *(ReadLoc.attr("df", a) for a in COL_VALUE_ATTRS),
         })
         assert result == expected
 

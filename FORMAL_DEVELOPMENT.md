@@ -518,7 +518,7 @@ For ForwardStale's write-write overlap, `output : WriteLoc → P(ReadLoc)` maps 
 to the set of reads that would observe its effect:
 ```
 output(Var(x))       = { Var(x) }
-output(Col(d, c))    = { Col(d, c) } ∪ { Attr(d, a) | a ∈ COL_VALUE_ATTRS }
+output(Col(d, c))    = { Col(d, c) }
 output(ColAdd(d, c)) = { Attr(d, a) | a ∈ COL_ATTRS }
 output(ColDel(d, c)) = { Col(d, c) } ∪ { Attr(d, a) | a ∈ COL_ATTRS }
 output(Rows(d))      = { Attr(d, a) | a ∈ ROW_ATTRS }
