@@ -120,6 +120,13 @@ class ReadLoc:
             return f"File({self.name})"
         return str(self)
 
+    def to_dict(self) -> Dict[str, str]:
+        """Serialize to JSON-friendly dict for frontend metadata."""
+        d: Dict[str, str] = {"type": self.type.value, "name": self.name}
+        if self.qualifier is not None:
+            d["qualifier"] = self.qualifier
+        return d
+
     def __str__(self) -> str:
         if self.type == ReadLocType.VAR:
             return f"Var({self.name})"
@@ -247,6 +254,13 @@ class WriteLoc:
         elif self.type == WriteLocType.FILE:
             return f"File({self.name})"
         return str(self)
+
+    def to_dict(self) -> Dict[str, str]:
+        """Serialize to JSON-friendly dict for frontend metadata."""
+        d: Dict[str, str] = {"type": self.type.value, "name": self.name}
+        if self.qualifier is not None:
+            d["qualifier"] = self.qualifier
+        return d
 
     def __str__(self) -> str:
         if self.type == WriteLocType.VAR:
@@ -446,6 +460,22 @@ def readlocset_to_file_list(locs: ReadLocSet) -> List[str]:
 def writelocset_to_file_list(locs: WriteLocSet) -> List[str]:
     """Extract file paths from a WriteLocSet."""
     return sorted(loc.name for loc in locs if loc.type == WriteLocType.FILE)
+
+
+def readlocset_to_list(locs: ReadLocSet) -> List[Dict[str, str]]:
+    """Serialize ReadLocSet to sorted list of dicts for frontend metadata."""
+    return sorted(
+        (loc.to_dict() for loc in locs),
+        key=lambda d: (d["type"], d.get("qualifier", ""), d["name"]),
+    )
+
+
+def writelocset_to_list(locs: WriteLocSet) -> List[Dict[str, str]]:
+    """Serialize WriteLocSet to sorted list of dicts for frontend metadata."""
+    return sorted(
+        (loc.to_dict() for loc in locs),
+        key=lambda d: (d["type"], d.get("qualifier", ""), d["name"]),
+    )
 
 
 # =============================================================================

@@ -166,7 +166,7 @@ The primary kernel with always-on reproducibility enforcement:
 - `flowbook_kernel.py` - Main `FlowbookKernel` implementation with magic commands
 - `flowbook_client.py` - `FlowbookKernelClient` with `cell_order` injection for reproducibility checks
 - `reproducibility_enforcer.py` - `ReproducibilityEnforcer` implements formal transition rules (see below)
-- `models.py` - `ReproducibilityMetadata`, `ReproducibilityViolation`, `ReproducibilityResult`, `ReproducibilityExecutionRecord` data classes
+- `models.py` - `ReproducibilityMetadata`, `ReproducibilityResult`, `ReproducibilityError`, `CellStatus`, `Reason` data classes
 - `changes.py` - Typed records of what changed between checkpoints (`ValueChanged`, `ColumnAdded`, etc.)
 - `access_events.py` - Typed records of variable/column/structural access during cell execution
 - `change_detector.py` - Converts `MemoryCheckpointDiffResult` to typed `Change` list and `WriteLocSet`
@@ -174,67 +174,67 @@ The primary kernel with always-on reproducibility enforcement:
 
 **Formal Transition Rules** (from `FORMAL_DEVELOPMENT.md`):
 
-The enforcer implements four transition rules from the formal specification:
+The enforcer implements two instrumented transition rules:
 
-| Rule              | Condition                                              | Cell status | Effect   |
-| ----------------- | ------------------------------------------------------ | ----------- | -------- |
-| EXEC-ACCEPT       | No backward conflict, not forward-contaminated         | fresh       | StaleFwd |
-| EXEC-CONTAMINATED | No backward conflict, forward-contaminated             | stale       | StaleFwd |
-| EXEC-REJECT       | Backward conflict (BackConflict)                       | unchanged   | rollback |
-| EXEC-RESTORE      | All predecessors fresh, execute from prefix checkpoint | fresh       | StaleFwd |
+**[Inst-Edit]**: When cell source is modified, mark it STALE. Read/write sets are preserved (they describe the last execution).
 
-And three runtime checks:
+**[Inst-Run]**: When cell i executes, the enforcer:
+1. Records new read/write sets: R' = R[i := r], W' = W[i := w]
+2. Checks four **validity predicates** (all must pass):
+   - `NoReadAndWrite(R', W', i)` — Rᵢ ∩ Wᵢ = ∅ (cell doesn't read and write same location)
+   - `WriteBeforeRead(R', W', i)` — Rᵢ ⊆ W_{1..i-1} (reads only defined variables)
+   - `NoReadBeforeWrite(R', W', i)` — Rᵢ ∩ W_{i+1..n} = ∅ (no forward contamination)
+   - `NoWriteAfterRead(R', W', i)` — Wᵢ ∩ R_{1..i-1} = ∅ (no backward mutation)
+3. Checks `RecoverableMutation` — all diff-detected changes are in tracking writes
+4. If all predicates pass: marks cell i CLEAN, computes **staleness propagation**:
+   - `ForwardStale(R, W, W', i, j)` — cell j > i reads/writes location that i wrote → mark stale
+   - `BackwardStale(W, W', i, j)` — cell j < i was last writer of location i no longer writes → mark stale
+5. If any predicate fails: execution rejected, namespace rolled back
 
-- **BackConflict** (Def 1.8.2): Cell wrote to location read by earlier _fresh_ cell → reject
-- **FwdContaminated** (Def 1.8.3): Cell read location written by later executed cell → accept as stale
-- **StaleFwd** (Def 1.8.1): Cell wrote to location read by later fresh cell → mark later cell stale
+All conflict checks use the typed `▷` relation (`write_conflicts_read`) from `locations.py`.
 
 **Magic Commands**:
 
 | Command                                   | Description                                                      |
 | ----------------------------------------- | ---------------------------------------------------------------- |
 | `%notebook_structure <ids...>`            | Set notebook cell order (sent by frontend before each execution) |
-| `%cell_edited <cell_id>`                  | Mark edited cell stale (EDIT transition §2.3, sent by frontend)  |
+| `%cell_edited <cell_id>`                  | Mark edited cell stale ([Inst-Edit], sent by frontend)           |
 | `%flowbook_status`                        | Display current reproducibility state                            |
 | `%flowbook_stale`                         | Show stale cells                                                 |
-| `%continue_after_violation <on/off>`      | Control whether backward violations reject or warn               |
-| `%structural_tracking <off/warn/enforce>` | Set DataFrame structural attribute tracking mode                 |
+| `%continue_after_violation <on/off>`      | Control whether violations reject or warn                        |
 
 **Features** (always enabled):
 
-- Variable tracking for all executions
-- Staleness computation (which cells need re-execution)
-- Backward mutation detection with column-aware conflict resolution
-- Forward contamination detection (cell marked stale, not rejected)
-- EXEC-RESTORE from prefix checkpoint when all predecessors are fresh
+- Variable and column-level tracking for all executions
+- Staleness computation via typed `ReadLoc`/`WriteLoc` with `▷` conflict relation
+- Forward and backward staleness propagation
+- Forward contamination detection (violation, not just staleness)
+- Backward mutation detection with automatic rollback
+- Unrecoverable mutation detection (in-place mutation without rebinding)
 - Edit-triggered staleness via frontend notification
-- Automatic rollback on backward reproducibility violations
+- Structural attribute tracking (always ENFORCE mode)
 
 **Metadata Format** (sent via `display_data` output):
+
+Uses typed `ReadLoc`/`WriteLoc` dicts matching the loc grammars from `CONFLICT_RELATION.md`:
 
 ```python
 {
   "flowbook": {
     "cell_id": str,
     "execution_seq": int,
-    "reads": List[str],
-    "writes": List[str],
-    "changed_variables": List[str],
+    "read_locs": List[{"type": str, "name": str, "qualifier"?: str}],   # ReadLoc dicts
+    "write_locs": List[{"type": str, "name": str, "qualifier"?: str}],  # WriteLoc dicts (tracking-observed)
+    "changed_locs": List[{"type": str, "name": str, "qualifier"?: str}], # WriteLoc dicts (diff-detected)
     "stale_cells": List[str],
-    "violation": Optional[dict],
     "cell_order": List[str],
-    "column_reads": Dict[str, List[str]],
-    "column_writes": Dict[str, List[str]],
-    "column_changed": Dict[str, List[str]],
-    "structural_reads": Dict[str, List[str]],
     "structural_warnings": List[str],
-    "file_reads": List[str],
-    "file_writes": List[str],
-    "run_duration_ms": float,
+    "execute_duration_ms": float,
+    "code_duration_ms": float,
     "state_duration_ms": float,
     "check_duration_ms": float,
-    "cell_is_contaminated": bool,
-    "exec_mode": "live" | "restore"
+    "staleness_reasons": Dict[str, List[dict]],
+    "errors": List[dict],  # ReproducibilityError dicts
   }
 }
 ```

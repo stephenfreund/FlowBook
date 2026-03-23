@@ -524,19 +524,123 @@ Reason = CODE_CHANGED | INPUT_CHANGED(loc, cell) | NEVER_EXECUTED | ...
 
 ## 9. Known Differences with Implementation
 
-### 9.1 Aliasing and Reference Sharing
+### 9.1 Variable Names as Location Qualifiers
 
-The formal model assumes distinct locations. Python has aliasing:
-- `x = y` makes both names reference the same object
-- DataFrame columns may share underlying arrays
+In the formal model, `Col(d, c)` uses `d` as an abstract store reference — a
+stable identity for the DataFrame object. In the implementation, `d` is a
+**variable name** (a string like `"df"`), not a Python object reference
+(`id(obj)`).
 
-**Implementation:** `_expand_with_deep_aliases()` expands accessed variables to
-include all their aliases before computing diffs.
+This is a deliberate design choice driven by the interaction between Python's
+object identity semantics and the checkpoint-based enforcement system.
+
+#### Why not use object references?
+
+A natural alternative would be to use Python's `id()` as the qualifier:
+`Col(id(df), "price")`. This would handle aliasing for free — if `X = df`,
+then `id(X) == id(df)`, so `Col(id(X), "price")` and `Col(id(df), "price")`
+are the same location. The ▷ relation would correctly detect cross-alias
+conflicts without any additional machinery.
+
+This approach works in the formal model because abstract store locations
+survive all operations — including rollback, which restores the same store.
+In Python, rollback is implemented via checkpoint restore (deep copy), which
+**severs object identity**.
+
+#### Example: Rollback breaks object identity
+
+```
+Cell A executes:  total = df["price"].sum()
+  → Records: ReadLoc.col(id=0x7f3a, "price")
+
+Cell B executes:  df["price"] = df["price"] * 2
+  → Backward violation detected → execution rejected → namespace rolled back
+  → Rollback restores df from checkpoint (deep copy)
+  → df is now a NEW object: id = 0x8b2c
+
+Cell C executes:  df["price"] = new_values
+  → Records: WriteLoc.col(id=0x8b2c, "price")
+
+Staleness check:  Col(0x8b2c, "price") ▷ Col(0x7f3a, "price")
+  → 0x8b2c ≠ 0x7f3a → False → CONFLICT MISSED
+```
+
+Cell A's read is stale (C wrote the same column of the same conceptual
+DataFrame), but the id-based check misses it because the rollback deep copy
+created a new object. This applies to every checkpoint restore path:
+violation rollback and re-execution of a cell.
+
+#### Example: Variable names survive checkpoint restore
+
+The same scenario with name-based qualifiers:
+
+```
+Cell A executes:  total = df["price"].sum()
+  → Records: ReadLoc.col("df", "price")
+
+Cell B executes and is rolled back (same as above)
+  → df is restored from checkpoint — different object, but still named "df"
+
+Cell C executes:  df["price"] = new_values
+  → Records: WriteLoc.col("df", "price")
+
+Staleness check:  Col("df", "price") ▷ Col("df", "price")
+  → "df" == "df" → True → CONFLICT DETECTED ✓
+```
+
+Variable names are the one identifier that survives deep copy — the name
+`"df"` still refers to "the DataFrame the user calls df" regardless of which
+Python object it points to.
+
+#### The aliasing trade-off
+
+The cost of using variable names is that aliasing is not handled by ▷ alone:
+
+```
+Cell A executes:  total = df["price"].sum()
+  → Records: ReadLoc.col("df", "price")
+
+Cell B executes:  X = df; X["price"] = [0, 0, 0]
+  → Records: WriteLoc.col("X", "price")
+
+Staleness check:  Col("X", "price") ▷ Col("df", "price")
+  → "X" ≠ "df" → False → MISSED by ▷
+```
+
+The implementation compensates with a separate **deep alias detection** pass
+(`_expand_with_deep_aliases()` in `reproducibility_enforcer.py`) that detects
+shared internal references between variables at checkpoint-diff time. This
+expands the set of variables to diff, ensuring that mutations through aliases
+are caught even though the ▷ relation operates on names.
+
+#### Design summary
+
+| Approach | Aliasing | Checkpoint restore | ▷ self-contained? |
+|---|---|---|---|
+| Object refs (`id()`) | Handled natively | **Broken** by deep copy | Yes |
+| Variable names (current) | Needs alias detection | **Survives** deep copy | Yes |
+| Hybrid (name + ref) | Handled natively | **Broken** by deep copy | No (needs name↔ref mapping) |
+
+The implementation chooses variable names because checkpoint-based enforcement
+is fundamental to the system (it enables rollback on violation
+and accurate diff computation), and names are the only identifier that survives
+deep copy. The alias detection layer is the price paid for this choice.
+
+**Code:**
+- Name-based ▷: `write_conflicts_read()` in `kernel/locations.py`
+- Alias detection: `_expand_with_deep_aliases()` in `kernel/reproducibility_enforcer.py`
+- Checkpoint restore: `MemoryCheckpoint.restore()` in `kernel_support/memory_checkpoint.py`
 
 ### 9.2 Checkpoint-Based Comparison
 
 Rather than comparing pre/post stores directly, the implementation uses
-memory checkpoints that snapshot variable states.
+memory checkpoints that snapshot variable states via deep copy.
+
+The checkpoint system introduces the identity-severing behavior described in
+§9.1: every checkpoint restore creates new Python objects with new `id()`
+values. This is an inherent consequence of using deep copy for isolation —
+the checkpoint must be independent of the live namespace, so it cannot share
+object identity with it.
 
 **Code:** `MemoryCheckpoint` in `kernel_support/memory_checkpoint.py`
 
@@ -546,6 +650,14 @@ The implementation uses typed read/write locations (`ReadLoc`/`WriteLoc`) with a
 relation (`▷`) for column-level precision. All conflict detection uses
 `wlocs_conflict_rlocs(W, R)` which computes the set of writes in W that conflict
 with some read in R, using `write_conflicts_read()` as the per-element check.
+
+Because qualifiers are variable names (§9.1), the `Var(x) ▷ Col(d, c)` rule
+in the conflict matrix (checking `x == d`) serves double duty: it catches both
+rebinding (`df = new_value` invalidates column reads of `df`) and acts as the
+name-based linkage between whole-variable and sub-variable operations. This
+rule would be unnecessary in an object-ref system where `Var ▷ Var` handles
+rebinding and `Col ▷ Col` handles mutations, but it is required when both
+use the name domain.
 
 **Code:** `write_conflicts_read()`, `wlocs_conflict_rlocs()` in `kernel/locations.py`
 

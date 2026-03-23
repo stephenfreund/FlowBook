@@ -2,22 +2,35 @@
  * Type definitions for FlowBook kernel extension (reproducibility)
  */
 
+/**
+ * A typed read location from the ReadLoc grammar:
+ *   Var(x) | Col(d, c) | Attr(d, a) | File(p)
+ */
+export interface IReadLoc {
+  type: 'var' | 'col' | 'attr' | 'file';
+  name: string;
+  qualifier?: string;
+}
+
+/**
+ * A typed write location from the WriteLoc grammar:
+ *   Var(x) | Col(d, c) | ColAdd(d, c) | ColDel(d, c) | Rows(d) | Attr(d, a) | File(p)
+ */
+export interface IWriteLoc {
+  type: 'var' | 'col' | 'col_add' | 'col_del' | 'rows' | 'attr' | 'file';
+  name: string;
+  qualifier?: string;
+}
+
 export interface IReproducibilityMetadata {
   cell_id: string;
   execution_seq: number;
-  reads: string[];
-  writes: string[];
-  changed_variables: string[];
+  read_locs: IReadLoc[];
+  write_locs: IWriteLoc[];
+  changed_locs: IWriteLoc[];
   stale_cells: string[];
   cell_order: string[];
-  column_reads?: { [key: string]: string[] };
-  column_writes?: { [key: string]: string[] };
-  column_changed?: { [key: string]: string[] };
-  structural_reads?: { [key: string]: string[] };
   structural_warnings?: string[];
-  // File I/O tracking
-  file_reads?: string[];
-  file_writes?: string[];
   // Timing information (in milliseconds)
   execute_duration_ms?: number; // Total time in _do_execute_impl
   code_duration_ms?: number; // Time for _ipython_do_execute (user code)
@@ -25,17 +38,27 @@ export interface IReproducibilityMetadata {
   check_duration_ms?: number;
   // Staleness reasons per cell: { cell_id: [reason, ...] }
   staleness_reasons?: { [cell_id: string]: IBackendStalenessReason[] };
-  // Proposed fix for violations
-  proposed_fix?: IProposedFix;
-  // Unified predicate violation (new format)
-  predicate_violation?: IPredicateViolation;
+  // Reproducibility errors (formal predicate violations)
+  errors?: IReproducibilityError[];
+}
+
+/**
+ * Reproducibility error from kernel (formal predicate violation).
+ */
+export interface IReproducibilityError {
+  error_type: string;
+  cell_id: string;
+  locations: string[];
+  message: string;
+  causer_cell?: string;
+  detail?: Record<string, unknown>;
 }
 
 export interface IReproducibilityCellState {
   cellId: string;
   executionSeq: number;
-  reads: string[];
-  writes: string[];
+  readLocs: IReadLoc[];
+  writeLocs: IWriteLoc[];
   isStale: boolean;
 }
 
@@ -158,3 +181,172 @@ export interface IPredicateViolation {
   };
 }
 
+// ============================================================================
+// Conflict Relation (▷) — TypeScript port of write_conflicts_read
+// ============================================================================
+
+/**
+ * Attributes that reveal column structure.
+ */
+const COL_ATTRS = new Set([
+  'columns',
+  'keys',
+  'dtypes',
+  'axes',
+  'T',
+  'values',
+  'iter',
+  'describe',
+  'shape',
+  'size'
+]);
+
+/**
+ * Attributes that reveal row structure.
+ */
+const ROW_ATTRS = new Set(['index', 'shape', 'size', 'len', 'empty']);
+
+/**
+ * Does write `w` invalidate read `r`?
+ *
+ * This is the ▷ conflict relation — the single 7×4 function that determines
+ * all staleness in the system. Port of Python write_conflicts_read().
+ */
+export function writeConflictsRead(w: IWriteLoc, r: IReadLoc): boolean {
+  switch (w.type) {
+    case 'var':
+      // Var(x) write conflicts with any read on the same variable
+      if (r.type === 'var' || r.type === 'file') {
+        return w.name === r.name;
+      }
+      // Col(d,c) or Attr(d,a): conflicts if x == d (qualifier)
+      return w.name === r.qualifier;
+
+    case 'col':
+      // Col(d,c) only conflicts with Col(d,c) — same dataframe AND same column
+      return r.type === 'col' && w.qualifier === r.qualifier && w.name === r.name;
+
+    case 'col_add':
+      // ColAdd(d,c) only conflicts with Attr reads on COL_ATTRS
+      return (
+        r.type === 'attr' &&
+        w.qualifier === r.qualifier &&
+        COL_ATTRS.has(r.name)
+      );
+
+    case 'col_del':
+      // ColDel(d,c) conflicts with Col(d,c) AND Attr(d, COL_ATTRS)
+      if (r.type === 'col') {
+        return w.qualifier === r.qualifier && w.name === r.name;
+      }
+      return (
+        r.type === 'attr' &&
+        w.qualifier === r.qualifier &&
+        COL_ATTRS.has(r.name)
+      );
+
+    case 'rows':
+      // Rows(d) conflicts with all Col(d,*) AND Attr(d, ROW_ATTRS)
+      if (r.type === 'col') {
+        return w.name === r.qualifier;
+      }
+      if (r.type === 'attr') {
+        return w.name === r.qualifier && ROW_ATTRS.has(r.name);
+      }
+      return false;
+
+    case 'attr':
+      // Attr(d,a) only conflicts with Attr(d,a) — same dataframe AND same attr
+      return (
+        r.type === 'attr' &&
+        w.qualifier === r.qualifier &&
+        w.name === r.name
+      );
+
+    case 'file':
+      // File(p) only conflicts with File(p)
+      return r.type === 'file' && w.name === r.name;
+
+    default:
+      return false;
+  }
+}
+
+/**
+ * Check if any write loc in `wlocs` conflicts with any read loc in `rlocs`.
+ */
+export function hasConflict(
+  wlocs: IWriteLoc[],
+  rlocs: IReadLoc[]
+): boolean {
+  for (const w of wlocs) {
+    for (const r of rlocs) {
+      if (writeConflictsRead(w, r)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Find all read locs from `rlocs` that are invalidated by any write in `wlocs`.
+ * Returns the conflicting read locs.
+ */
+export function findConflictingReads(
+  wlocs: IWriteLoc[],
+  rlocs: IReadLoc[]
+): IReadLoc[] {
+  const result: IReadLoc[] = [];
+  for (const r of rlocs) {
+    for (const w of wlocs) {
+      if (writeConflictsRead(w, r)) {
+        result.push(r);
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Format a ReadLoc for display (e.g., "df.price", "x", "data.csv").
+ */
+export function formatReadLoc(loc: IReadLoc): string {
+  if (loc.qualifier) {
+    return `${loc.qualifier}.${loc.name}`;
+  }
+  return loc.name;
+}
+
+/**
+ * Format a WriteLoc for display with type annotation.
+ */
+export function formatWriteLoc(loc: IWriteLoc): string {
+  if (loc.qualifier) {
+    return `${loc.qualifier}.${loc.name}`;
+  }
+  return loc.name;
+}
+
+/**
+ * Map a WriteLoc to its output ReadLoc (for write-write conflict via ▷).
+ */
+export function writeLocOutput(w: IWriteLoc): IReadLoc {
+  switch (w.type) {
+    case 'var':
+      return { type: 'var', name: w.name };
+    case 'col':
+    case 'col_add':
+    case 'col_del':
+      return { type: 'col', name: w.name, qualifier: w.qualifier };
+    case 'rows':
+      return { type: 'var', name: w.name };
+    case 'attr':
+      return { type: 'attr', name: w.name, qualifier: w.qualifier };
+    case 'file':
+      return { type: 'file', name: w.name };
+    default:
+      return { type: 'var', name: w.name };
+  }
+}

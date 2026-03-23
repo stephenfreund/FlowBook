@@ -367,6 +367,34 @@ from flowbook.kernel.reproducibility_enforcer import (
 )
 
 
+def _format_locs_preview(locs: list, max_vars: int = 3) -> str:
+    """Format a loc list into a compact display string like 'df[price,qty],x'."""
+    # Group by variable (qualifier or name for non-qualified locs)
+    from collections import defaultdict
+    grouped: dict = defaultdict(list)
+    for loc in locs:
+        qualifier = loc.get("qualifier")
+        if qualifier:
+            grouped[qualifier].append(loc["name"])
+        else:
+            grouped[loc["name"]]  # ensure key exists
+    # Format each variable
+    parts = []
+    for var in list(grouped.keys())[:max_vars]:
+        cols = grouped[var]
+        if cols:
+            cols_sorted = sorted(cols)[:3]
+            cols_str = ",".join(cols_sorted)
+            if len(cols) > 3:
+                cols_str += f",+{len(cols) - 3}"
+            parts.append(f"{var}[{cols_str}]")
+        else:
+            parts.append(var)
+    if len(grouped) > max_vars:
+        parts.append(f"+{len(grouped) - max_vars}")
+    return ",".join(parts)
+
+
 @magics_class
 class FlowbookKernel(BaseFlowbookKernel, Magics):
     """
@@ -1616,36 +1644,6 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
         return result
 
-    def _format_var_with_columns(
-        self,
-        var: str,
-        column_reads: dict,
-        column_writes: dict,
-    ) -> str:
-        """
-        Format variable with inline column info: df[price,qty].
-
-        Args:
-            var: Variable name
-            column_reads: Dict mapping var names to sets/lists of read columns
-            column_writes: Dict mapping var names to sets/lists of written columns
-
-        Returns:
-            Formatted string like "df[price,qty]" or "x" if no columns
-        """
-        # Handle both sets and lists
-        read_cols = column_reads.get(var, [])
-        write_cols = column_writes.get(var, [])
-        all_cols = set(read_cols) | set(write_cols)
-
-        if all_cols:
-            cols_list = sorted(all_cols)[:3]  # Show first 3
-            cols_str = ",".join(cols_list)
-            if len(all_cols) > 3:
-                cols_str += f",+{len(all_cols) - 3}"
-            return f"{var}[{cols_str}]"
-        return var
-
     def _display_execution_result(
         self,
         execute_duration_ms: float,
@@ -1660,45 +1658,15 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         # Build metadata for display
         structural_warnings = sdc_result.structural_warnings if sdc_result else []
 
-        # Use TrackingData.to_json_friendly() for clean serialization
-        tracking_json = (
-            tracking.to_json_friendly()
-            if tracking
-            else {
-                "reads": [],
-                "writes": [],
-                "column_reads": {},
-                "column_writes": {},
-                "structural_reads": {},
-            }
-        )
-
-        # Get file tracking data (separate from variable tracking)
-        # Only include files that were read before being written (important for reproducibility)
-        file_rbw = (
-            sorted(os.path.relpath(p) for p in tracking.file_reads_before_writes)
-            if tracking
-            else []
-        )
-        file_writes_list = (
-            sorted(os.path.relpath(p) for p in tracking.file_writes) if tracking else []
-        )
-
         metadata = ReproducibilityMetadata(
             cell_id=self._cell_id or "",
             execution_seq=self._enforcer.seq_counter,
-            reads=tracking_json["reads"],  # Variable reads only
-            writes=tracking_json["writes"],  # Variable writes only
-            changed_variables=sdc_result.changed_variables if sdc_result else [],
+            read_locs=sdc_result.read_locs if sdc_result else [],
+            write_locs=sdc_result.write_locs if sdc_result else [],
+            changed_locs=sdc_result.changed_locs if sdc_result else [],
             stale_cells=sdc_result.stale_cells if sdc_result else [],
             cell_order=self._enforcer.cell_order,
-            column_reads=tracking_json["column_reads"],
-            column_writes=tracking_json["column_writes"],
-            column_changed=sdc_result.column_changed if sdc_result else {},
-            structural_reads=tracking_json["structural_reads"],
             structural_warnings=structural_warnings,
-            file_reads=file_rbw,  # File reads (separate from variables)
-            file_writes=file_writes_list,  # File writes (separate from variables)
             execute_duration_ms=execute_duration_ms,
             code_duration_ms=code_duration_ms,
             state_duration_ms=state_duration_ms,
@@ -1722,35 +1690,15 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             f"Check: {check_duration_ms:.0f} ms",
         ]
 
-        # Variable reads (separate from file reads)
-        if tracking_json["reads"] or tracking_json["column_reads"]:
-            read_vars = set(tracking_json["reads"]) | set(
-                tracking_json["column_reads"].keys()
-            )
-            if read_vars:
-                reads_preview = [
-                    self._format_var_with_columns(v, tracking_json["column_reads"], {})
-                    for v in list(read_vars)[:3]
-                ]
-                parts.append(f"Reads: {','.join(reads_preview)}")
+        # Reads summary from read_locs
+        read_locs = metadata.read_locs
+        if read_locs:
+            parts.append(f"Reads: {_format_locs_preview(read_locs)}")
 
-        # Variable writes (separate from file writes)
-        write_vars = set(tracking_json["writes"]) | set(
-            tracking_json["column_writes"].keys()
-        )
-        if write_vars:
-            writes_preview = [
-                self._format_var_with_columns(v, {}, tracking_json["column_writes"])
-                for v in list(write_vars)[:3]
-            ]
-            parts.append(f"Writes: {','.join(writes_preview)}")
-
-        # File I/O (separate section)
-        if file_rbw or file_writes_list:
-            if file_rbw:
-                parts.append(f"File Reads: {','.join(file_rbw)}")
-            if file_writes_list:
-                parts.append(f"File Writes: {','.join(file_writes_list)}")
+        # Writes summary from changed_locs (what actually changed)
+        changed_locs = metadata.changed_locs
+        if changed_locs:
+            parts.append(f"Writes: {_format_locs_preview(changed_locs)}")
 
         if sdc_result and sdc_result.stale_cells:
             # Show only newly stale cells (cells that became stale from this execution)

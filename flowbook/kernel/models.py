@@ -237,6 +237,10 @@ class ReproducibilityResult:
     changed_variables: List[str]  # variables that changed value
     column_changed: Dict[str, List[str]] = field(default_factory=dict)  # var -> [changed columns]
     structural_warnings: List[str] = field(default_factory=list)  # warnings from WARN mode
+    # Typed loc sets for metadata serialization
+    read_locs: List[Dict[str, str]] = field(default_factory=list)  # serialized ReadLocs
+    write_locs: List[Dict[str, str]] = field(default_factory=list)  # serialized WriteLocs (tracking)
+    changed_locs: List[Dict[str, str]] = field(default_factory=list)  # serialized WriteLocs (diff)
     # Staleness reasons per cell: { cell_id: [reason_dict, ...] }
     staleness_reasons: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     # Reproducibility errors (formal predicate violations that cause rejection)
@@ -251,23 +255,21 @@ class ReproducibilityResult:
 class ReproducibilityMetadata:
     """
     Metadata returned after each cell execution.
-    Designed to work with existing metadata viewer.
+
+    Uses typed loc lists matching the ReadLoc/WriteLoc grammar:
+    - read_locs: what the cell accessed (ReadLoc dicts)
+    - write_locs: what the cell intended to write (WriteLoc dicts from tracking)
+    - changed_locs: what actually changed (WriteLoc dicts from checkpoint diff)
     """
 
     cell_id: str
     execution_seq: int
-    reads: List[str]
-    writes: List[str]
-    changed_variables: List[str]
+    read_locs: List[Dict[str, str]]  # serialized ReadLoc dicts
+    write_locs: List[Dict[str, str]]  # serialized WriteLoc dicts (tracking-observed)
+    changed_locs: List[Dict[str, str]]  # serialized WriteLoc dicts (diff-detected)
     stale_cells: List[str]
     cell_order: List[str]  # current notebook structure
-    column_reads: Dict[str, List[str]] = field(default_factory=dict)  # var -> [read columns]
-    column_writes: Dict[str, List[str]] = field(default_factory=dict)  # var -> [written columns]
-    column_changed: Dict[str, List[str]] = field(default_factory=dict)  # var -> [changed columns]
-    structural_reads: Dict[str, List[str]] = field(default_factory=dict)  # var -> [structural attrs read]
-    structural_warnings: List[str] = field(default_factory=list)  # warnings from WARN mode
-    file_reads: List[str] = field(default_factory=list)  # absolute file paths read
-    file_writes: List[str] = field(default_factory=list)  # absolute file paths written
+    structural_warnings: List[str] = field(default_factory=list)
     # Timing information (in milliseconds)
     execute_duration_ms: float = 0.0  # Total time in _do_execute_impl
     code_duration_ms: float = 0.0  # Time for _ipython_do_execute (user code)
@@ -284,18 +286,12 @@ class ReproducibilityMetadata:
             "flowbook": {
                 "cell_id": self.cell_id,
                 "execution_seq": self.execution_seq,
-                "reads": self.reads,
-                "writes": self.writes,
-                "changed_variables": self.changed_variables,
+                "read_locs": self.read_locs,
+                "write_locs": self.write_locs,
+                "changed_locs": self.changed_locs,
                 "stale_cells": self.stale_cells,
                 "cell_order": self.cell_order,
-                "column_reads": self.column_reads,
-                "column_writes": self.column_writes,
-                "column_changed": self.column_changed,
-                "structural_reads": self.structural_reads,
                 "structural_warnings": self.structural_warnings,
-                "file_reads": self.file_reads,
-                "file_writes": self.file_writes,
                 "execute_duration_ms": self.execute_duration_ms,
                 "code_duration_ms": self.code_duration_ms,
                 "state_duration_ms": self.state_duration_ms,

@@ -11,6 +11,12 @@ Reads and writes are different types. Reads describe *what a cell looked at*; wr
 ### ReadLoc
 
 ```
+x ∈ VarName               -- variable name (e.g., "df", "config")
+d ∈ VarName               -- DataFrame variable name (see §"Why Qualifiers Are Variable Names")
+c ∈ ColName               -- column name (e.g., "price", "qty")
+a ∈ AttrName              -- structural attribute name (e.g., "shape", "columns")
+p ∈ FilePath              -- file path (e.g., "data.csv")
+
 ReadLoc ::= Var(x)        -- whole-variable read
           | Col(d, c)     -- column c of DataFrame d
           | Attr(d, a)    -- structural attribute a of DataFrame d
@@ -28,13 +34,15 @@ ReadLoc ::= Var(x)        -- whole-variable read
 
 ### WriteLoc
 
+Using the same metavariables as ReadLoc:
+
 ```
 WriteLoc ::= Var(x)            -- variable completely replaced
            | Col(d, c)         -- column c values modified in place
            | ColAdd(d, c)      -- new column c added to DataFrame d
            | ColDel(d, c)      -- column c removed from DataFrame d
            | Rows(d)           -- rows added or removed from DataFrame d
-           | Attr(d, a) -- structural attribute a changed
+           | Attr(d, a)        -- structural attribute a changed
            | File(p)           -- file at path p written
 ```
 
@@ -171,6 +179,44 @@ Composing `output()` with ▷ yields the effective write-write table. An entry i
 
 Notable: **`ColAdd` in cell `i` never triggers write-write staleness for any write type in cell `j`.** Its `output()` is `Col(d, c)`, and `ColAdd ▷ Col(d, c)` is always false — adding a column does not invalidate reading that column's values. This reflects the semantics: if both cells independently add the same column, there is no data-flow dependency between them (though the second execution will overwrite the first's value).
 
+
+## Why Qualifiers Are Variable Names, Not Object References
+
+In the grammars above, the qualifier `d` in `Col(d, c)`, `Attr(d, a)`, etc. is a **variable name** — the string `"df"`, not the Python object identity `id(df)`. This is a departure from the formal model (where `d` is an abstract store reference) driven by the checkpoint system.
+
+### The checkpoint problem
+
+FlowBook detects changes by diffing memory checkpoints (deep copies of the namespace). Deep copy creates new Python objects with new `id()` values. This happens on every checkpoint restore: violation rollback and re-execution.
+
+If qualifiers were object refs, they would break after any restore:
+
+```python
+# Cell A: reads df["price"]  →  ReadLoc.col(id=0x7f3a, "price")
+# Cell B: violation → rollback → df restored from checkpoint → id = 0x8b2c
+# Cell C: writes df["price"]  →  WriteLoc.col(id=0x8b2c, "price")
+# Check: Col(0x8b2c, "price") ▷ Col(0x7f3a, "price")  →  ids differ  →  MISS
+```
+
+Variable names survive deep copy — after rollback, `df` is still `"df"`:
+
+```python
+# Cell A: ReadLoc.col("df", "price")
+# Cell B: rollback (df is a new object, but still named "df")
+# Cell C: WriteLoc.col("df", "price")
+# Check: Col("df", "price") ▷ Col("df", "price")  →  "df" == "df"  →  HIT ✓
+```
+
+### The aliasing trade-off
+
+The cost is that aliasing is invisible to ▷: if `X = df`, then `Col("X", "price") ▷ Col("df", "price")` returns `False` because `"X" ≠ "df"`, even though they reference the same object. The enforcer compensates with a separate **deep alias detection** pass that identifies shared internal references at checkpoint-diff time.
+
+Object refs would handle aliasing natively (same `id()` → same qualifier), but would break on every checkpoint restore. Variable names handle checkpoints natively but require the alias-detection layer. Since checkpoint-based enforcement is fundamental to the system, names are the right choice.
+
+### The `Var(x) ▷ Col(d, c)` cross-domain rule
+
+This trade-off also explains why the conflict matrix has `Var(x) ▷ Col(d, c) = True` when `x == d`. In an object-ref system, rebinding (`df = new_value`) would produce `Var("df")` while column reads would carry the old object's ref — the two domains wouldn't interact, and `Var ▷ Var` alone would catch rebinding (since the read set would always include `Var("df")` alongside `Col(ref, c)`). With name-based qualifiers, `Var(x) ▷ Col(d, c)` is needed to propagate rebinding to column-level reads, because the implementation's granularity rule omits `Var(d)` from reads when column detail is present.
+
+See `FORMAL_DEVELOPMENT.md` §9.1 for the full design analysis.
 
 ## Design Summary
 

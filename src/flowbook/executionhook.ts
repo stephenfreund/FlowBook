@@ -17,7 +17,12 @@ import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import {
   IReproducibilityMetadata,
   IFrontendStalenessReason,
-  IPredicateViolation
+  IPredicateViolation,
+  IReadLoc,
+  IWriteLoc,
+  findConflictingReads,
+  formatReadLoc,
+  writeLocOutput
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
@@ -786,7 +791,10 @@ export class ReproducibilityExecutionHookManager {
   }
 
   /**
-   * Compute why a cell became stale.
+   * Compute why a cell became stale using the ▷ conflict relation.
+   *
+   * Uses typed ReadLoc/WriteLoc sets and writeConflictsRead() to determine
+   * which specific locations were invalidated.
    */
   private _computeStalenessReason(
     panel: NotebookPanel,
@@ -797,10 +805,10 @@ export class ReproducibilityExecutionHookManager {
     const causingCellId = metadata.cell_id;
 
     // Edit case: the cell that triggered the update is the stale cell itself
-    // and there are no changed_variables (pure source edit)
+    // and there are no changed_locs (pure source edit)
     if (
       staleCellId === causingCellId &&
-      (!metadata.changed_variables || metadata.changed_variables.length === 0)
+      (!metadata.changed_locs || metadata.changed_locs.length === 0)
     ) {
       return {
         type: 'source_edited',
@@ -809,7 +817,7 @@ export class ReproducibilityExecutionHookManager {
       };
     }
 
-    // StaleFwd case: look up stale cell's stored reads, intersect with changed_variables
+    // Look up the stale cell's stored read_locs
     const staleCell = this._findCell(panel, staleCellId);
     const storedMeta = staleCell?.model.metadata as any;
     const storedFlowbook = storedMeta?.flowbook as
@@ -820,65 +828,56 @@ export class ReproducibilityExecutionHookManager {
     const causingRef =
       causingIdx >= 0 ? indexToAlpha(causingIdx) : causingCellId;
 
-    // Intersect variable reads with changed_variables
-    const changedVars = metadata.changed_variables || [];
-    const cellReads = storedFlowbook?.reads || [];
-    const intersectVars = changedVars.filter(v => cellReads.includes(v));
+    // StaleFwd case: use ▷ to find which of the stale cell's reads are
+    // invalidated by the causing cell's changed_locs
+    const changedLocs: IWriteLoc[] = metadata.changed_locs || [];
+    const cellReadLocs: IReadLoc[] = storedFlowbook?.read_locs || [];
 
-    // Intersect column reads with column_changed
-    const columnChanged = metadata.column_changed || {};
-    const cellColumnReads = storedFlowbook?.column_reads || {};
-    const intersectCols: { [key: string]: string[] } = {};
-    for (const [dfName, changedCols] of Object.entries(columnChanged)) {
-      const readCols = cellColumnReads[dfName];
-      if (readCols) {
-        const overlap = changedCols.filter(c => readCols.includes(c));
-        if (overlap.length > 0) {
-          intersectCols[dfName] = overlap;
-        }
-      }
-    }
+    const conflicting = findConflictingReads(changedLocs, cellReadLocs);
 
-    // Build variable parts for the message
-    const parts: string[] = [];
-    for (const v of intersectVars) {
-      parts.push('`' + v + '`');
-    }
-    for (const [dfName, cols] of Object.entries(intersectCols)) {
-      for (const col of cols) {
-        parts.push('`' + dfName + '.' + col + '`');
-      }
-    }
-
-    if (parts.length > 0) {
+    if (conflicting.length > 0) {
+      const parts = conflicting.map(r => '`' + formatReadLoc(r) + '`');
       return {
         type: 'variable_modified',
         causing_cell: causingCellId,
-        variables: intersectVars.length > 0 ? intersectVars : undefined,
-        columns:
-          Object.keys(intersectCols).length > 0 ? intersectCols : undefined,
+        variables: conflicting.map(r => formatReadLoc(r)),
         message: `${parts.join(', ')} modified by ${causingRef}`
       };
     }
 
-    // WriterCheck case: stale cell WRITES to variables the causing cell READS
+    // WriterCheck case: stale cell's write outputs conflict with causing cell's reads
     // (EXEC-RESTORE marks cells that would cause BackConflict if run)
-    const causingCellReads = metadata.reads || [];
-    const staleCellWrites = storedFlowbook?.writes || [];
-    const writerConflictVars = staleCellWrites.filter(v =>
-      causingCellReads.includes(v)
-    );
-    if (writerConflictVars.length > 0) {
-      const varParts = writerConflictVars.map(v => '`' + v + '`');
+    const staleCellWriteLocs: IWriteLoc[] = storedFlowbook?.write_locs || [];
+    const causingCellReadLocs: IReadLoc[] = metadata.read_locs || [];
+
+    // Project stale cell's writes to reads via output(), then intersect
+    const staleOutputs = staleCellWriteLocs.map(w => writeLocOutput(w));
+    // Check which of the stale cell's output reads match the causing cell's reads
+    const writerConflicts: string[] = [];
+    for (const output of staleOutputs) {
+      for (const r of causingCellReadLocs) {
+        if (
+          output.type === r.type &&
+          output.name === r.name &&
+          output.qualifier === r.qualifier
+        ) {
+          writerConflicts.push(formatReadLoc(output));
+          break;
+        }
+      }
+    }
+
+    if (writerConflicts.length > 0) {
+      const varParts = writerConflicts.map(v => '`' + v + '`');
       return {
         type: 'writer_conflict',
         causing_cell: causingCellId,
-        variables: writerConflictVars,
+        variables: writerConflicts,
         message: `Writes ${varParts.join(', ')}, which was read by ${causingRef}`
       };
     }
 
-    // Fallback: we know there was a change but can't identify the specific variables
+    // Fallback
     return {
       type: 'unknown',
       causing_cell: causingCellId,

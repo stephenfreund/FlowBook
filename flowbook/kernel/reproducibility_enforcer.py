@@ -257,7 +257,8 @@ from flowbook.kernel.change_detector import detect_changes, changes_to_write_loc
 from flowbook.kernel.locations import (
     WriteLoc, WriteLocType, WriteLocSet, ReadLocSet,
     has_conflict, wlocs_conflict_rlocs,
-    tracking_to_readlocset,
+    tracking_to_readlocset, tracking_to_writelocset,
+    readlocset_to_list, writelocset_to_list,
 )
 from flowbook.util.output import output, timer
 
@@ -1217,6 +1218,9 @@ class ReproducibilityEnforcer:
                 changed_variables=[],
                 column_changed={},
                 structural_warnings=list(current_diff.warnings) if current_diff.warnings else [],
+                read_locs=readlocset_to_list(tracking_to_readlocset(tracking)),
+                write_locs=writelocset_to_list(tracking_to_writelocset(tracking)),
+                changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes)),
                 errors=[ReproducibilityError(
                     error_type=ErrorType.UNRECOVERABLE_MUTATION,
                     cell_id=cell_id,
@@ -1326,6 +1330,9 @@ class ReproducibilityEnforcer:
                 column_changed=column_changed,
                 structural_warnings=structural_warnings,
                 staleness_reasons=self._notebook_state.get_all_reasons(),
+                read_locs=readlocset_to_list(tracking_to_readlocset(tracking)),
+                write_locs=writelocset_to_list(tracking_to_writelocset(tracking)),
+                changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes)),
             )
 
         # ================================================================
@@ -1548,6 +1555,9 @@ class ReproducibilityEnforcer:
             column_changed=column_changed,
             structural_warnings=structural_warnings,
             staleness_reasons=staleness_reasons,
+            read_locs=readlocset_to_list(tracking_to_readlocset(tracking)),
+            write_locs=writelocset_to_list(tracking_to_writelocset(tracking)),
+            changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes)),
             errors=errors,  # All formal predicate violations
         )
 

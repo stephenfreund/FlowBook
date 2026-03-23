@@ -841,6 +841,22 @@
   color: var(--jp-ui-font-color2);
 }
 
+.flowbook-loc-sublist {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  list-style-type: none;
+}
+
+.flowbook-loc-sublist li {
+  margin: 2px 0;
+}
+
+.flowbook-loc-type {
+  color: var(--jp-ui-font-color2);
+  font-size: 0.85em;
+  font-style: italic;
+}
+
 .flowbook-changed code {
   color: var(--jp-warn-color1);
 }
