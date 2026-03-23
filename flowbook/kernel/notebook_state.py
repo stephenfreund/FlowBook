@@ -24,6 +24,7 @@ And additional per-cell metadata:
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Optional, Set, TYPE_CHECKING
 
+from flowbook.kernel.loc_ids import StableIdMap
 from flowbook.kernel.models import CellStateSnapshot, CellStatus, Reason, ReasonType
 from flowbook.kernel.locations import (
     ReadLoc, ReadLocSet, WriteLoc, WriteLocSet,
@@ -198,6 +199,8 @@ class NotebookState:
         execution_seq: Optional[int] = None,
         structural_reads_values: Optional[Dict[str, Dict[str, str]]] = None,
         typed_changes: Optional[List["Change"]] = None,
+        namespace: Optional[dict] = None,
+        stable_map: Optional[StableIdMap] = None,
     ) -> None:
         """
         Record cell execution: update R, W, and tracking data.
@@ -211,13 +214,15 @@ class NotebookState:
             execution_seq: Execution sequence number
             structural_reads_values: Captured structural values for error messages
             typed_changes: Cached typed changes for fast forward dependency checks
+            namespace: Current kernel namespace (for LocRef qualifiers)
+            stable_map: StableIdMap instance (for LocRef qualifiers)
         """
         # Store the TrackingData object directly
         self.tracking_data[cell_id] = tracking
 
         # Core R, W tracking (derived from TrackingData) — typed LocSets
-        self.reads[cell_id] = tracking_to_readlocset(tracking)
-        self.writes[cell_id] = tracking_to_writelocset(tracking)
+        self.reads[cell_id] = tracking_to_readlocset(tracking, namespace, stable_map)
+        self.writes[cell_id] = tracking_to_writelocset(tracking, namespace, stable_map)
 
         # Additional per-cell metadata (not in TrackingData)
         if execution_seq is not None:

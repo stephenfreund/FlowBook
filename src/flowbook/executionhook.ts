@@ -22,7 +22,8 @@ import {
   IWriteLoc,
   findConflictingReads,
   formatReadLoc,
-  writeLocOutputs
+  writeLocOutputs,
+  readLocsMatchQualifier
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
@@ -864,7 +865,7 @@ export class ReproducibilityExecutionHookManager {
         if (
           output.type === r.type &&
           output.name === r.name &&
-          output.qualifier === r.qualifier
+          readLocsMatchQualifier(output, r)
         ) {
           writerConflicts.push(formatReadLoc(output));
           seen.add(key);

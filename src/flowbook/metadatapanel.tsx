@@ -33,6 +33,19 @@ function cellIdToReference(cellId: string, cellOrder: string[]): string {
 }
 
 /**
+ * Get display name for a loc qualifier (handles both string and numeric loc_ids).
+ */
+function displayQualifier(loc: { qualifier?: string | number; var_name?: string }): string | undefined {
+  if (loc.var_name !== undefined) {
+    return loc.var_name;
+  }
+  if (typeof loc.qualifier === 'string') {
+    return loc.qualifier;
+  }
+  return undefined;
+}
+
+/**
  * Group read locs by variable, producing a map from variable name to its sub-locs.
  * Var(x) locs appear as standalone entries. Col/Attr locs are grouped under their qualifier.
  */
@@ -42,12 +55,13 @@ function groupReadLocs(
   const groups = new Map<string, { types: Map<string, string[]> }>();
 
   for (const loc of locs) {
-    if (loc.qualifier) {
-      // Col(d,c) or Attr(d,a) — group under qualifier
-      let group = groups.get(loc.qualifier);
+    const q = displayQualifier(loc);
+    if (q) {
+      // Col(d,c) or Attr(d,a) — group under variable name
+      let group = groups.get(q);
       if (!group) {
         group = { types: new Map() };
-        groups.set(loc.qualifier, group);
+        groups.set(q, group);
       }
       const typeLabel = loc.type === 'col' ? 'Col' : 'Attr';
       let names = group.types.get(typeLabel);
@@ -93,11 +107,12 @@ function groupWriteLocs(
 
   for (const loc of locs) {
     const label = typeLabels[loc.type] || loc.type;
-    if (loc.qualifier) {
-      let group = groups.get(loc.qualifier);
+    const q = displayQualifier(loc);
+    if (q) {
+      let group = groups.get(q);
       if (!group) {
         group = { types: new Map() };
-        groups.set(loc.qualifier, group);
+        groups.set(q, group);
       }
       let names = group.types.get(label);
       if (!names) {

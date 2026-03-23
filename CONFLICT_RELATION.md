@@ -12,7 +12,7 @@ Reads and writes are different types. Reads describe *what a cell looked at*; wr
 
 ```
 x ∈ VarName               -- variable name (e.g., "df", "config")
-d ∈ VarName               -- DataFrame variable name (see §"Why Qualifiers Are Variable Names")
+d ∈ Address               -- stable DataFrame address (see §"Stable Object Identity via StableIdMap")
 c ∈ ColName               -- column name (e.g., "price", "qty")
 a ∈ AttrName              -- structural attribute name (e.g., "shape", "columns")
 p ∈ FilePath              -- file path (e.g., "data.csv")
@@ -187,43 +187,77 @@ Notable changes from the corrected `output()`:
 - **`Col` vs `Rows`** overlap is asymmetric: `Rows(d) ▷ output(Col(d,c)) = True` (Rows conflicts with Col reads), but `Col(d,c) ▷ output(Rows(d)) = False` (Col doesn't conflict with Attr reads). The direct `▷` check on `Rⱼ` catches the Col→Rows direction if cell j reads any columns.
 
 
-## Why Qualifiers Are Variable Names, Not Object References
+## Stable Object Identity via StableIdMap
 
-In the grammars above, the qualifier `d` in `Col(d, c)`, `Attr(d, a)`, etc. is a **variable name** — the string `"df"`, not the Python object identity `id(df)`. This is a departure from the formal model (where `d` is an abstract store reference) driven by the checkpoint system.
+In the grammars above, the qualifier `d` in `Col(d, c)`, `Attr(d, a)`, etc. is a
+**`LocRef(loc_id, var_name)`** — a dual-purpose identifier combining stable object
+identity with the variable name used to access it. This matches the formal model
+where `d ∈ Address` is a stable DataFrame address.
 
-### The checkpoint problem
-
-FlowBook detects changes by diffing memory checkpoints (deep copies of the namespace). Deep copy creates new Python objects with new `id()` values. This happens on every checkpoint restore: violation rollback and re-execution.
-
-If qualifiers were object refs, they would break after any restore:
-
-```python
-# Cell A: reads df["price"]  →  ReadLoc.col(id=0x7f3a, "price")
-# Cell B: violation → rollback → df restored from checkpoint → id = 0x8b2c
-# Cell C: writes df["price"]  →  WriteLoc.col(id=0x8b2c, "price")
-# Check: Col(0x8b2c, "price") ▷ Col(0x7f3a, "price")  →  ids differ  →  MISS
-```
-
-Variable names survive deep copy — after rollback, `df` is still `"df"`:
+### The `LocRef` qualifier
 
 ```python
-# Cell A: ReadLoc.col("df", "price")
-# Cell B: rollback (df is a new object, but still named "df")
-# Cell C: WriteLoc.col("df", "price")
-# Check: Col("df", "price") ▷ Col("df", "price")  →  "df" == "df"  →  HIT ✓
+@dataclass(frozen=True)
+class LocRef:
+    loc_id: int    # Stable object identity (from StableIdMap)
+    var_name: str  # Variable name at access time (for Var ▷ Col bridging)
 ```
 
-### The aliasing trade-off
+**Two LocRefs with the same `loc_id` refer to the same DataFrame object**, even if
+accessed through different variable names (aliases). The `var_name` records which
+name was used to access the object, enabling `Var(x) ▷ Col(d, c)` bridging.
 
-The cost is that aliasing is invisible to ▷: if `X = df`, then `Col("X", "price") ▷ Col("df", "price")` returns `False` because `"X" ≠ "df"`, even though they reference the same object. The enforcer compensates with a separate **deep alias detection** pass that identifies shared internal references at checkpoint-diff time.
+### StableIdMap: Surviving deep copy
 
-Object refs would handle aliasing natively (same `id()` → same qualifier), but would break on every checkpoint restore. Variable names handle checkpoints natively but require the alias-detection layer. Since checkpoint-based enforcement is fundamental to the system, names are the right choice.
+The challenge: Python's `id()` breaks on checkpoint deep copy — every `deepcopy()`
+creates new objects with new ids. The `StableIdMap` solves this with a weakref-based
+side-table:
+
+1. **Assignment**: Maps `id(obj)` → `(stable_id, weakref(obj))`
+2. **Lookup**: Checks `ref() is obj` to verify same object (detects id reuse after GC)
+3. **Checkpoint transfer**: `apply_memo(memo)` copies stable_ids from originals
+   to their deep-copy targets using the checkpoint's memo dict
+
+| Scenario | Action | Result |
+|----------|--------|--------|
+| Same object | `ref() is obj` → return existing stable_id | ✓ |
+| Alias (`df2 = df`) | Same object → same stable_id | ✓ |
+| User copy (`df.copy()`) | Different object → new stable_id | ✓ |
+| id reuse after GC | `ref()` dead → new stable_id | ✓ |
+| Our deepcopy (checkpoint) | `apply_memo()` transfers stable_id | ✓ |
+
+### How ▷ uses qualifiers
+
+The ▷ relation uses two comparison modes:
+
+- **`_same_dataframe(w.qualifier, r.qualifier)`** — for DataFrame-to-DataFrame checks
+  (Col, ColAdd, ColDel, Rows, Attr). Compares `loc_id`s when both are LocRef.
+  Aliased DataFrames match automatically.
+- **`_var_targets_ref(w.name, r.qualifier)`** — for `Var(x) ▷ Col(d, c)` bridging.
+  Compares `w.name` against `r.qualifier.var_name`. Var rebinding only invalidates
+  reads that went through that specific variable name.
 
 ### The `Var(x) ▷ Col(d, c)` cross-domain rule
 
-This trade-off also explains why the conflict matrix has `Var(x) ▷ Col(d, c) = True` when `x == d`. In an object-ref system, rebinding (`df = new_value`) would produce `Var("df")` while column reads would carry the old object's ref — the two domains wouldn't interact, and `Var ▷ Var` alone would catch rebinding (since the read set would always include `Var("df")` alongside `Col(ref, c)`). With name-based qualifiers, `Var(x) ▷ Col(d, c)` is needed to propagate rebinding to column-level reads, because the implementation's granularity rule omits `Var(d)` from reads when column detail is present.
+The conflict matrix has `Var(x) ▷ Col(d, c) = True` when `x == d.var_name`.
+This catches rebinding: when `df = new_value`, all column reads that went through
+the name `"df"` are invalidated. Reads through an alias (`df2 = df`) are NOT
+invalidated by `Var("df")` because `"df" ≠ "df2"` — which is correct, since `df2`
+still points to the original object.
+
+### Backward compatibility
+
+When `StableIdMap` is not available (e.g., in tests), qualifiers fall back to plain
+strings. The `_same_dataframe()` helper handles mixed comparisons:
+`_same_dataframe(LocRef(42, "df"), "df")` returns `True` via var_name matching.
 
 See `FORMAL_DEVELOPMENT.md` §9.1 for the full design analysis.
+
+**Code:**
+- StableIdMap + LocRef: `kernel/loc_ids.py`
+- Qualifier comparison: `_same_dataframe()`, `_var_targets_ref()` in `kernel/locations.py`
+- Memo transfer: `_apply_restore_memo()` in `kernel/flowbook_kernel.py`
+- Alias detection (Phase 1 safety net): `_expand_with_deep_aliases()` in `kernel/reproducibility_enforcer.py`
 
 ## Design Summary
 

@@ -524,38 +524,29 @@ Reason = CODE_CHANGED | INPUT_CHANGED(loc, cell) | NEVER_EXECUTED | ...
 
 ## 9. Known Differences with Implementation
 
-### 9.1 Variable Names as Location Qualifiers
+### 9.1 Stable Object Identity via StableIdMap
 
-In the formal model, `Col(d, c)` uses `d` as an abstract store reference — a
-stable identity for the DataFrame object. In the implementation, `d` is a
-**variable name** (a string like `"df"`), not a Python object reference
-(`id(obj)`).
+In the formal model, `Col(d, c)` uses `d ∈ Address` as a stable DataFrame
+identity. The paper assumes: *"DataFrame addresses are immutable: address d
+always refers to the same DataFrame object."*
 
-This is a deliberate design choice driven by the interaction between Python's
-object identity semantics and the checkpoint-based enforcement system.
+The implementation realizes this with **`StableIdMap`** — a weakref-based
+side-table that maps Python `id()` to stable integer identifiers. These
+stable identifiers survive checkpoint deep copy (via memo dict transfer) and
+correctly detect `id()` reuse after garbage collection (via weakref
+validation).
 
-#### Why not use object references?
+#### The core problem: `id()` breaks on deep copy
 
-A natural alternative would be to use Python's `id()` as the qualifier:
-`Col(id(df), "price")`. This would handle aliasing for free — if `X = df`,
-then `id(X) == id(df)`, so `Col(id(X), "price")` and `Col(id(df), "price")`
-are the same location. The ▷ relation would correctly detect cross-alias
-conflicts without any additional machinery.
-
-This approach works in the formal model because abstract store locations
-survive all operations — including rollback, which restores the same store.
-In Python, rollback is implemented via checkpoint restore (deep copy), which
-**severs object identity**.
-
-#### Example: Rollback breaks object identity
+Python's `id()` cannot serve directly as a stable address because the
+checkpoint system uses `deepcopy()` for isolation. Every checkpoint
+save/restore creates new objects with new `id()` values:
 
 ```
 Cell A executes:  total = df["price"].sum()
   → Records: ReadLoc.col(id=0x7f3a, "price")
 
-Cell B executes:  df["price"] = df["price"] * 2
-  → Backward violation detected → execution rejected → namespace rolled back
-  → Rollback restores df from checkpoint (deep copy)
+Cell B violates → namespace rolled back via deep copy
   → df is now a NEW object: id = 0x8b2c
 
 Cell C executes:  df["price"] = new_values
@@ -565,82 +556,124 @@ Staleness check:  Col(0x8b2c, "price") ▷ Col(0x7f3a, "price")
   → 0x8b2c ≠ 0x7f3a → False → CONFLICT MISSED
 ```
 
-Cell A's read is stale (C wrote the same column of the same conceptual
-DataFrame), but the id-based check misses it because the rollback deep copy
-created a new object. This applies to every checkpoint restore path:
-violation rollback and re-execution of a cell.
+#### Solution: Weakref-validated stable IDs with memo transfer
 
-#### Example: Variable names survive checkpoint restore
+`StableIdMap` assigns each object a monotonically increasing integer
+(`stable_id`) on first encounter. It uses `weakref.ref` to detect when
+Python reuses an `id()` for a different object after GC:
 
-The same scenario with name-based qualifiers:
-
-```
-Cell A executes:  total = df["price"].sum()
-  → Records: ReadLoc.col("df", "price")
-
-Cell B executes and is rolled back (same as above)
-  → df is restored from checkpoint — different object, but still named "df"
-
-Cell C executes:  df["price"] = new_values
-  → Records: WriteLoc.col("df", "price")
-
-Staleness check:  Col("df", "price") ▷ Col("df", "price")
-  → "df" == "df" → True → CONFLICT DETECTED ✓
+```python
+def get_stable(self, obj) -> int:
+    pid = id(obj)
+    entry = self._entries.get(pid)
+    if entry is not None:
+        stable_id, ref = entry
+        if ref() is obj:  # Same object, not id reuse
+            return stable_id
+    # New object or id reuse → assign fresh stable_id
+    stable_id = self._next_id; self._next_id += 1
+    self._entries[pid] = (stable_id, weakref.ref(obj))
+    return stable_id
 ```
 
-Variable names are the one identifier that survives deep copy — the name
-`"df"` still refers to "the DataFrame the user calls df" regardless of which
-Python object it points to.
+To survive checkpoint deep copy, the map transfers stable_ids from originals
+to their copies using the `deepcopy` memo dict:
 
-#### The aliasing trade-off
-
-The cost of using variable names is that aliasing is not handled by ▷ alone:
-
-```
-Cell A executes:  total = df["price"].sum()
-  → Records: ReadLoc.col("df", "price")
-
-Cell B executes:  X = df; X["price"] = [0, 0, 0]
-  → Records: WriteLoc.col("X", "price")
-
-Staleness check:  Col("X", "price") ▷ Col("df", "price")
-  → "X" ≠ "df" → False → MISSED by ▷
+```python
+def apply_memo(self, memo: Dict[int, Any]) -> None:
+    for old_id, new_obj in memo.items():
+        entry = self._entries.get(old_id)
+        if entry is not None:
+            stable_id, _ = entry
+            new_pid = id(new_obj)
+            self._entries[new_pid] = (stable_id, weakref.ref(new_obj))
 ```
 
-The implementation compensates with a separate **deep alias detection** pass
-(`_expand_with_deep_aliases()` in `reproducibility_enforcer.py`) that detects
-shared internal references between variables at checkpoint-diff time. This
-expands the set of variables to diff, ensuring that mutations through aliases
-are caught even though the ▷ relation operates on names.
+This is called after every `_take_checkpoint()` and `_restore_checkpoint()`
+in `flowbook_kernel.py`.
 
-#### Design summary
+#### Correctness by scenario
 
-| Approach | Aliasing | Checkpoint restore | ▷ self-contained? |
-|---|---|---|---|
-| Object refs (`id()`) | Handled natively | **Broken** by deep copy | Yes |
-| Variable names (current) | Needs alias detection | **Survives** deep copy | Yes |
-| Hybrid (name + ref) | Handled natively | **Broken** by deep copy | No (needs name↔ref mapping) |
+| Scenario | `ref() is obj` | Action | Result |
+|----------|----------------|--------|--------|
+| Same object | True | Return existing stable_id | ✓ |
+| Alias (`df2 = df`) | True (same obj) | Return same stable_id | ✓ |
+| User copy (`df.copy()`) | False (different obj) | Assign new stable_id | ✓ |
+| id reuse after GC | False (ref dead → None) | Assign new stable_id | ✓ |
+| Our deepcopy (checkpoint) | N/A | `apply_memo()` transfers stable_id | ✓ |
 
-The implementation chooses variable names because checkpoint-based enforcement
-is fundamental to the system (it enables rollback on violation
-and accurate diff computation), and names are the only identifier that survives
-deep copy. The alias detection layer is the price paid for this choice.
+#### LocRef: Dual-purpose qualifier
+
+Sub-location qualifiers use `LocRef(loc_id, var_name)` — a frozen dataclass
+that carries both the stable identity and the variable name used to access
+the object:
+
+```python
+@dataclass(frozen=True)
+class LocRef:
+    loc_id: int    # Stable identity (from StableIdMap)
+    var_name: str  # Variable name at access time
+```
+
+This dual representation enables two different comparison modes in the ▷
+relation:
+
+- **`_same_dataframe(a, b)`**: Compares `LocRef.loc_id` values — used for
+  intra-DataFrame conflicts (Col vs Col, Rows vs Col, etc.). Aliases share
+  the same loc_id, so `Col(LocRef(42,"df"), "price")` and
+  `Col(LocRef(42,"X"), "price")` correctly conflict.
+
+- **`_var_targets_ref(var_name, ref)`**: Compares `var_name` against
+  `ref.var_name` — used for `Var(x) ▷ Col(d, c)` bridging. Var rebinding
+  only invalidates reads that accessed the object through that specific
+  variable name.
+
+#### Relationship with deep alias detection
+
+StableIdMap and the deep alias index (`_build_alias_index` in
+`MemoryCheckpoint`) solve **different problems** and are complementary:
+
+- **StableIdMap** gives same-object aliases the same `loc_id`, so the ▷
+  relation correctly matches sub-locations across variable names:
+  `Col(LocRef(42,"X"), "price") ▷ Col(LocRef(42,"df"), "price")` → True.
+
+- **Deep alias detection** finds different objects that share internal
+  mutable state (e.g., two DataFrames sharing an underlying column array,
+  or two dicts sharing a nested list). These are different objects with
+  different `loc_id`s — the ▷ relation correctly sees them as unrelated.
+  But in-place mutation through one affects the other, so the diff step
+  must examine both. The deep alias index ensures this.
+
+Neither mechanism subsumes the other. StableIdMap cannot detect shared
+internals between different objects. Deep alias detection cannot make ▷
+match sub-locations across variable name aliases (it operates at the diff
+level, not the conflict relation level).
+
+#### Backward compatibility
+
+When `StableIdMap` is not available (e.g., in unit tests), qualifiers fall
+back to plain strings. `_same_dataframe(str, str)` compares strings directly,
+preserving the previous behavior. All existing tests pass unchanged.
 
 **Code:**
-- Name-based ▷: `write_conflicts_read()` in `kernel/locations.py`
-- Alias detection: `_expand_with_deep_aliases()` in `kernel/reproducibility_enforcer.py`
-- Checkpoint restore: `MemoryCheckpoint.restore()` in `kernel_support/memory_checkpoint.py`
+- StableIdMap, LocRef: `kernel/loc_ids.py`
+- Qualifier helpers: `_same_dataframe()`, `_var_targets_ref()`, `_display_qualifier()` in `kernel/locations.py`
+- Memo exposure: `MemoryCheckpoints._last_memo` in `kernel_support/memory_checkpoint.py`
+- Memo transfer: `_apply_restore_memo()` in `kernel/flowbook_kernel.py`
+- Deep alias detection: `_build_alias_index()`, `get_aliases_for_vars()` in `kernel_support/memory_checkpoint.py`
 
 ### 9.2 Checkpoint-Based Comparison
 
 Rather than comparing pre/post stores directly, the implementation uses
 memory checkpoints that snapshot variable states via deep copy.
 
-The checkpoint system introduces the identity-severing behavior described in
-§9.1: every checkpoint restore creates new Python objects with new `id()`
-values. This is an inherent consequence of using deep copy for isolation —
-the checkpoint must be independent of the live namespace, so it cannot share
-object identity with it.
+The checkpoint system's `deepcopy` creates new Python objects with new
+`id()` values. The `StableIdMap` (§9.1) compensates for this by transferring
+stable identifiers from originals to copies via the `deepcopy` memo dict.
+The memo dict is exposed as `MemoryCheckpoints._last_memo` after each
+`save()`, `save_incremental()`, and `restore()` call, and
+`flowbook_kernel.py` calls `stable_map.apply_memo(memo)` after every
+checkpoint operation.
 
 **Code:** `MemoryCheckpoint` in `kernel_support/memory_checkpoint.py`
 
@@ -651,13 +684,24 @@ relation (`▷`) for column-level precision. All conflict detection uses
 `wlocs_conflict_rlocs(W, R)` which computes the set of writes in W that conflict
 with some read in R, using `write_conflicts_read()` as the per-element check.
 
-Because qualifiers are variable names (§9.1), the `Var(x) ▷ Col(d, c)` rule
-in the conflict matrix (checking `x == d`) serves double duty: it catches both
-rebinding (`df = new_value` invalidates column reads of `df`) and acts as the
-name-based linkage between whole-variable and sub-variable operations. This
-rule would be unnecessary in an object-ref system where `Var ▷ Var` handles
-rebinding and `Col ▷ Col` handles mutations, but it is required when both
-use the name domain.
+With `LocRef` qualifiers (§9.1), the ▷ relation uses two distinct comparison
+modes:
+
+- **Intra-DataFrame** (`Col ▷ Col`, `Rows ▷ Col`, `ColDel ▷ Col`, etc.):
+  Uses `_same_dataframe()` to compare `loc_id` values. Aliased DataFrames
+  (`X = df`) share the same `loc_id`, so cross-alias conflicts are detected
+  natively without additional alias expansion.
+
+- **Cross-domain** (`Var(x) ▷ Col(d, c)`, `Var(x) ▷ Attr(d, a)`): Uses
+  `_var_targets_ref()` to compare the variable name `x` against
+  `LocRef.var_name`. This catches rebinding (`df = new_value` invalidates
+  column reads through `df`) while correctly ignoring reads through other
+  aliases (`X = df; df = new_value` does not invalidate reads through `X`).
+
+The `Var ▷ Col` bridge is specific to Python's name-based rebinding semantics:
+reassigning a variable name does not affect other names pointing to the same
+object, so invalidation must target the specific access path, not the object
+identity.
 
 **Code:** `write_conflicts_read()`, `wlocs_conflict_rlocs()` in `kernel/locations.py`
 

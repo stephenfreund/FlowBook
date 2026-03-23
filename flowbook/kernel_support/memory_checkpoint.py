@@ -1968,6 +1968,10 @@ class MemoryCheckpoints:
         # Register this instance as the singleton
         MemoryCheckpoints._instance = self
 
+        # Memo dict from the last deepcopy operation, exposed for StableIdMap transfer
+        # Maps id(original) → copy_object. See flowbook/kernel/loc_ids.py
+        self._last_memo: dict[int, Any] = {}
+
         # Per-variable memory costs from last deepcopy (populated by Scalene tracking)
         self._last_var_memory_costs: dict[str, dict] = {}
 
@@ -2355,6 +2359,9 @@ class MemoryCheckpoints:
             with timer(key="checkpoint:deepcopy", message="Deep copying variables"):
                 cp, memo, failed = self._deep_copy_user_ns(vars_to_copy)
 
+            # Expose memo for StableIdMap transfer (see loc_ids.py)
+            self._last_memo = memo
+
             # Remove failed variables from original_ids
             for k in failed:
                 original_ids.pop(k, None)
@@ -2516,6 +2523,9 @@ class MemoryCheckpoints:
             with timer(key="checkpoint:deepcopy", message="Deep copying variables"):
                 copied, memo, failed = self._deep_copy_user_ns(must_copy_vars)
 
+            # Expose memo for StableIdMap transfer (see loc_ids.py)
+            self._last_memo = memo
+
             # Merge reused variables into the checkpoint
             cp = dict(copied)
             cp.update(reusable_vars)
@@ -2663,7 +2673,10 @@ class MemoryCheckpoints:
 
         # Deep copy the checkpoint before restoring to keep the checkpoint pristine
         # This ensures that modifications to restored variables don't affect the checkpoint
-        restored_vars, _, _ = self._deep_copy_user_ns(cp.user_ns)
+        restored_vars, memo, _ = self._deep_copy_user_ns(cp.user_ns)
+
+        # Expose memo for StableIdMap transfer (see loc_ids.py)
+        self._last_memo = memo
 
         # Convert pandas objects back to cudf if they originated from cudf
         for k in list(restored_vars.keys()):

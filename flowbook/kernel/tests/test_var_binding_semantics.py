@@ -491,7 +491,7 @@ class TestEndToEndMethodStaleness:
         b_reads = state.reads.get("b", frozenset())
         # B should have Var(df) only (no column detail)
         assert any(r.type.value == "var" and r.name == "df" for r in b_reads)
-        assert not any(r.type.value == "column" for r in b_reads)
+        assert not any(r.type.value == "col" for r in b_reads)
 
         # Edit and rerun A with column change
         state.handle_edit("a")

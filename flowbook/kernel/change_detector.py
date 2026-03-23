@@ -43,6 +43,7 @@ from flowbook.kernel.changes import (
     RowsRemoved,
     ValueChanged,
 )
+from flowbook.kernel.loc_ids import StableIdMap, get_qualifier
 from flowbook.kernel.locations import WriteLoc, WriteLocSet
 
 
@@ -457,39 +458,60 @@ def _analyze_column_change(variable: str, column: str, node: Any) -> Optional[Ch
     return None
 
 
-def changes_to_write_locs(changes: List[Change]) -> WriteLocSet:
-    """Convert typed Change objects to WriteLocSet."""
+def changes_to_write_locs(
+    changes: List[Change],
+    namespace: Optional[dict] = None,
+    stable_map: Optional[StableIdMap] = None,
+) -> WriteLocSet:
+    """Convert typed Change objects to WriteLocSet.
+
+    Args:
+        changes: List of typed Change objects
+        namespace: Current kernel namespace (optional, for LocRef qualifiers)
+        stable_map: StableIdMap instance (optional, for LocRef qualifiers)
+    """
     locs = set()
     for change in changes:
         if isinstance(change, ValueChanged):
             locs.add(WriteLoc.var(change.variable))
         elif isinstance(change, ColumnModified):
-            locs.add(WriteLoc.col(change.variable, change.column))
+            q = get_qualifier(change.variable, namespace, stable_map)
+            locs.add(WriteLoc.col(q, change.column))
         elif isinstance(change, ColumnAdded):
-            locs.add(WriteLoc.col_add(change.variable, change.column))
+            q = get_qualifier(change.variable, namespace, stable_map)
+            locs.add(WriteLoc.col_add(q, change.column))
         elif isinstance(change, ColumnRemoved):
-            locs.add(WriteLoc.col_del(change.variable, change.column))
+            q = get_qualifier(change.variable, namespace, stable_map)
+            locs.add(WriteLoc.col_del(q, change.column))
         elif isinstance(change, RowsAdded):
-            locs.add(WriteLoc.rows(change.variable))
+            q = get_qualifier(change.variable, namespace, stable_map)
+            locs.add(WriteLoc.rows(change.variable, qualifier=q))
         elif isinstance(change, RowsRemoved):
-            locs.add(WriteLoc.rows(change.variable))
+            q = get_qualifier(change.variable, namespace, stable_map)
+            locs.add(WriteLoc.rows(change.variable, qualifier=q))
         elif isinstance(change, IndexChanged):
-            locs.add(WriteLoc.attr(change.variable, "index"))
+            q = get_qualifier(change.variable, namespace, stable_map)
+            locs.add(WriteLoc.attr(q, "index"))
             # Derived: axes = [index, columns], so index change affects axes
-            locs.add(WriteLoc.attr(change.variable, "axes"))
+            locs.add(WriteLoc.attr(q, "axes"))
         elif isinstance(change, DtypeChanged):
-            locs.add(WriteLoc.col(change.variable, change.column))
-            locs.add(WriteLoc.attr(change.variable, "dtypes"))
+            q = get_qualifier(change.variable, namespace, stable_map)
+            locs.add(WriteLoc.col(q, change.column))
+            locs.add(WriteLoc.attr(q, "dtypes"))
             # Derived: dtype change affects array representation and transpose
-            locs.add(WriteLoc.attr(change.variable, "values"))
-            locs.add(WriteLoc.attr(change.variable, "T"))
+            locs.add(WriteLoc.attr(q, "values"))
+            locs.add(WriteLoc.attr(q, "T"))
     return frozenset(locs)
 
 
-def detect_write_locs(diff: MemoryCheckpointDiffResult) -> WriteLocSet:
+def detect_write_locs(
+    diff: MemoryCheckpointDiffResult,
+    namespace: Optional[dict] = None,
+    stable_map: Optional[StableIdMap] = None,
+) -> WriteLocSet:
     """Convert diff result to WriteLocSet."""
     changes = detect_changes(diff)
-    return changes_to_write_locs(changes)
+    return changes_to_write_locs(changes, namespace, stable_map)
 
 
 def get_changed_variables(diff: MemoryCheckpointDiffResult) -> set:

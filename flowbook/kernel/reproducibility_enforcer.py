@@ -228,6 +228,7 @@ Properties:
 See FORMAL_DEVELOPMENT.md §10 for the full formal specification.
 """
 
+import logging
 import os
 import pprint
 import re
@@ -251,6 +252,7 @@ from flowbook.kernel.models import (
     ReproducibilityError,
     ReproducibilityResult,
 )
+from flowbook.kernel.loc_ids import StableIdMap, LocRef
 from flowbook.kernel.notebook_state import NotebookState
 
 from flowbook.kernel.change_detector import detect_changes, changes_to_write_locs
@@ -265,6 +267,8 @@ from flowbook.util.output import output, timer
 # Structural tracking is always ENFORCE — import once for passing to diff functions
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode as _StructuralTrackingMode
 _STRUCTURAL_ENFORCE = _StructuralTrackingMode.ENFORCE
+
+_logger = logging.getLogger(__name__)
 
 # Checkpoint naming constants
 PRE_CHECKPOINT_PREFIX = "_pre_"
@@ -709,6 +713,9 @@ class ReproducibilityEnforcer:
         self._pending_checkpoint_deletion: Optional[str] = None
         # Snapshot for rollback if execution is rejected
         self._pending_snapshot: Optional[CellStateSnapshot] = None
+        # Stable object identity map for DataFrame location qualifiers.
+        # Maps Python id() → stable int via weakref. See loc_ids.py.
+        self._stable_map = StableIdMap()
 
     @property
     def cell_order(self) -> List[str]:
@@ -1218,9 +1225,9 @@ class ReproducibilityEnforcer:
                 changed_variables=[],
                 column_changed={},
                 structural_warnings=list(current_diff.warnings) if current_diff.warnings else [],
-                read_locs=readlocset_to_list(tracking_to_readlocset(tracking)),
-                write_locs=writelocset_to_list(tracking_to_writelocset(tracking)),
-                changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes)),
+                read_locs=readlocset_to_list(tracking_to_readlocset(tracking, namespace, self._stable_map)),
+                write_locs=writelocset_to_list(tracking_to_writelocset(tracking, namespace, self._stable_map)),
+                changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes, namespace, self._stable_map)),
                 errors=[ReproducibilityError(
                     error_type=ErrorType.UNRECOVERABLE_MUTATION,
                     cell_id=cell_id,
@@ -1323,6 +1330,8 @@ class ReproducibilityEnforcer:
                 execution_seq=self.seq_counter,
                 structural_reads_values=structural_read_values,
                 typed_changes=typed_changes,
+                namespace=namespace,
+                stable_map=self._stable_map,
             )
             return ReproducibilityResult(
                 stale_cells=self._notebook_state.get_stale_cells(),
@@ -1330,9 +1339,9 @@ class ReproducibilityEnforcer:
                 column_changed=column_changed,
                 structural_warnings=structural_warnings,
                 staleness_reasons=self._notebook_state.get_all_reasons(),
-                read_locs=readlocset_to_list(tracking_to_readlocset(tracking)),
-                write_locs=writelocset_to_list(tracking_to_writelocset(tracking)),
-                changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes)),
+                read_locs=readlocset_to_list(tracking_to_readlocset(tracking, namespace, self._stable_map)),
+                write_locs=writelocset_to_list(tracking_to_writelocset(tracking, namespace, self._stable_map)),
+                changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes, namespace, self._stable_map)),
             )
 
         # ================================================================
@@ -1344,7 +1353,7 @@ class ReproducibilityEnforcer:
         # NoReadAndWrite(R', W', i) ≝ Rᵢ ∩ Wᵢ = ∅
         # Ref: FORMAL_DEVELOPMENT.md §3.2, line 176
         # (Cell reads and writes same location - potential issue for reproducibility)
-        no_read_and_write_error = self._check_no_read_and_write(cell_id, tracking)
+        no_read_and_write_error = self._check_no_read_and_write(cell_id, tracking, namespace)
         if no_read_and_write_error:
             errors.append(no_read_and_write_error)
             log(f"[Inst-Run] {cell_id}: NoReadAndWrite=fail")
@@ -1368,7 +1377,7 @@ class ReproducibilityEnforcer:
         if typed_changes:
             with timer(key="check:NoWriteAfterRead", message=f"[Inst-Run] NoWriteAfterRead check for {cell_id}"):
                 backward_error = self._check_backward_mutation_new(
-                    cell_id, my_position, typed_changes, current_diff, column_changed
+                    cell_id, my_position, typed_changes, current_diff, column_changed, namespace
                 )
         if backward_error:
             errors.append(backward_error)
@@ -1389,7 +1398,7 @@ class ReproducibilityEnforcer:
         # Ref: FORMAL_DEVELOPMENT.md §3.2, line 178
         # (Forward contamination check)
         with timer(key="check:NoReadBeforeWrite", message=f"[Inst-Run] NoReadBeforeWrite check for {cell_id}"):
-            forward_error = self._check_forward_contamination(cell_id, my_position, tracking)
+            forward_error = self._check_forward_contamination(cell_id, my_position, tracking, namespace)
         if forward_error:
             errors.append(forward_error)
         log(f"[Inst-Run] {cell_id}: NoReadBeforeWrite={'fail' if forward_error else 'pass'}")
@@ -1555,9 +1564,9 @@ class ReproducibilityEnforcer:
             column_changed=column_changed,
             structural_warnings=structural_warnings,
             staleness_reasons=staleness_reasons,
-            read_locs=readlocset_to_list(tracking_to_readlocset(tracking)),
-            write_locs=writelocset_to_list(tracking_to_writelocset(tracking)),
-            changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes)),
+            read_locs=readlocset_to_list(tracking_to_readlocset(tracking, namespace, self._stable_map)),
+            write_locs=writelocset_to_list(tracking_to_writelocset(tracking, namespace, self._stable_map)),
+            changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes, namespace, self._stable_map)),
             errors=errors,  # All formal predicate violations
         )
 
@@ -1605,6 +1614,32 @@ class ReproducibilityEnforcer:
             accessed_vars = set(tracking.reads_before_writes) | set(tracking.writes)
             keys_to_include = _expand_with_deep_aliases(accessed_vars, pre_checkpoint)
 
+            # Safety-net logging: check if aliases are already unified by StableIdMap
+            alias_only = keys_to_include - accessed_vars
+            if alias_only and _logger.isEnabledFor(logging.DEBUG):
+                already_unified = set()
+                for alias in alias_only:
+                    alias_obj = namespace.get(alias)
+                    if alias_obj is None:
+                        continue
+                    alias_sid = self._stable_map.get_stable(alias_obj)
+                    for orig in accessed_vars:
+                        orig_obj = namespace.get(orig)
+                        if orig_obj is not None and self._stable_map.get_stable(orig_obj) == alias_sid:
+                            already_unified.add(alias)
+                            break
+                not_unified = alias_only - already_unified
+                if already_unified:
+                    _logger.debug(
+                        "Alias expansion found %d aliases already unified by StableIdMap: %s",
+                        len(already_unified), already_unified,
+                    )
+                if not_unified:
+                    _logger.debug(
+                        "Alias expansion found %d aliases NOT unified by StableIdMap: %s",
+                        len(not_unified), not_unified,
+                    )
+
         # Compute diff
         _is_combined = isinstance(pre_checkpoint, Checkpoint)
         if _is_combined:
@@ -1639,6 +1674,7 @@ class ReproducibilityEnforcer:
         cell_id: str,
         my_position: int,
         tracking: TrackingData,
+        namespace: Optional[dict] = None,
     ) -> Optional[ReproducibilityError]:
         """
         Check NoReadBeforeWrite predicate.
@@ -1650,7 +1686,7 @@ class ReproducibilityEnforcer:
         Prefers diff-based WriteLocSet (from typed_changes) when available
         for column-level precision, falls back to tracking-based writes.
         """
-        R_i = tracking_to_readlocset(tracking)
+        R_i = tracking_to_readlocset(tracking, namespace, self._stable_map)
         if not R_i:
             return None
 
@@ -1661,7 +1697,7 @@ class ReproducibilityEnforcer:
             # Prefer diff-based writes for column-level precision
             later_changes = self._notebook_state.get_typed_changes(later_cell_id)
             if later_changes:
-                W_later = changes_to_write_locs(later_changes)
+                W_later = changes_to_write_locs(later_changes, namespace, self._stable_map)
             else:
                 W_later = self._notebook_state.writes.get(later_cell_id, frozenset())
 
@@ -1692,6 +1728,7 @@ class ReproducibilityEnforcer:
         typed_changes: List,
         current_diff: MemoryCheckpointDiffResult,
         modified_columns: Dict[str, List[str]],
+        namespace: Optional[dict] = None,
     ) -> Optional[ReproducibilityError]:
         """
         Check NoWriteAfterRead predicate.
@@ -1704,7 +1741,7 @@ class ReproducibilityEnforcer:
         if not typed_changes:
             return None
 
-        W_i_diff = changes_to_write_locs(typed_changes)
+        W_i_diff = changes_to_write_locs(typed_changes, namespace, self._stable_map)
         if not W_i_diff:
             return None
 
@@ -1835,6 +1872,7 @@ class ReproducibilityEnforcer:
         self,
         cell_id: str,
         tracking: TrackingData,
+        namespace: Optional[dict] = None,
     ) -> Optional[ReproducibilityError]:
         """
         Check NoReadAndWrite predicate: Wᵢ ▷ Rᵢ = ∅
@@ -1847,8 +1885,8 @@ class ReproducibilityEnforcer:
 
         Formal ref: main.tex §3.2, FORMAL_DEVELOPMENT.md §3.2, line 176
         """
-        R_i = tracking_to_readlocset(tracking)
-        W_i = self._tracking_to_noreadandwrite_wlocs(tracking)
+        R_i = tracking_to_readlocset(tracking, namespace, self._stable_map)
+        W_i = self._tracking_to_noreadandwrite_wlocs(tracking, namespace)
 
         conflicting = wlocs_conflict_rlocs(W_i, R_i)
         if conflicting:
@@ -1864,7 +1902,11 @@ class ReproducibilityEnforcer:
             )
         return None
 
-    def _tracking_to_noreadandwrite_wlocs(self, tracking: TrackingData) -> WriteLocSet:
+    def _tracking_to_noreadandwrite_wlocs(
+        self,
+        tracking: TrackingData,
+        namespace: Optional[dict] = None,
+    ) -> WriteLocSet:
         """Build WriteLocSet for NoReadAndWrite check.
 
         For column assignments like df["y"] = ..., the tracking reports
@@ -1872,6 +1914,7 @@ class ReproducibilityEnforcer:
         We use column_writes to distinguish: if a variable has column_writes,
         emit Col locs; otherwise emit Var.
         """
+        from flowbook.kernel.loc_ids import get_qualifier
         locs: set = set()
         col_writes = tracking.column_writes or {}
         var_writes = tracking.writes or set()
@@ -1879,8 +1922,9 @@ class ReproducibilityEnforcer:
         for var in var_writes:
             if var in col_writes:
                 # Has column detail → emit Col for each column written
+                q = get_qualifier(var, namespace, self._stable_map)
                 for col in col_writes[var]:
-                    locs.add(WriteLoc.col(var, col))
+                    locs.add(WriteLoc.col(q, col))
             else:
                 # No column detail → Var (whole variable reassignment)
                 locs.add(WriteLoc.var(var))
@@ -1889,8 +1933,9 @@ class ReproducibilityEnforcer:
         # (column writes via in-place mutation without rebinding)
         for var, cols in col_writes.items():
             if var not in var_writes:
+                q = get_qualifier(var, namespace, self._stable_map)
                 for col in cols:
-                    locs.add(WriteLoc.col(var, col))
+                    locs.add(WriteLoc.col(q, col))
 
         return frozenset(locs)
 
@@ -2389,7 +2434,7 @@ class ReproducibilityEnforcer:
             # Conflict resolution (simulated for timing measurement)
             my_position = self._get_position(cell_id)
             if my_position >= 0:
-                R_i = tracking_to_readlocset(tracking)
+                R_i = tracking_to_readlocset(tracking, namespace, self._stable_map)
 
                 # Simulate forward contamination check
                 for later_cell_id in self._cell_order[my_position + 1:]:
@@ -2425,6 +2470,7 @@ class ReproducibilityEnforcer:
         self._notebook_state.clear()  # Clear status, R, W, tracking_data
         self._pending_checkpoint_deletion = None
         self._pending_snapshot = None
+        self._stable_map.clear()
 
     def rollback_last_check(self) -> None:
         """
