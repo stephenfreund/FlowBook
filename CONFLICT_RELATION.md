@@ -110,17 +110,22 @@ Two sets define which DataFrame attributes are sensitive to which kind of struct
 
 > **`True`** means the write invalidates the read (the cell that did the read is now stale).
 
-| Write `w` ↓  \  Read `r` → | **Var(x)**          | **Col(d, c)**              | **Attr(d, a)**                  | **File(p)**          |
+| Write `w` ↓  \  Read `r` → | **Var(x')**         | **Col(d', c')**            | **Attr(d', a')**                | **File(p')**         |
 |-----------------------------|---------------------|----------------------------|---------------------------------|----------------------|
-| **Var(x)**                  | same `x`            | `x == d`                   | `x == d`                        | —                    |
-| **Col(d, c)**               | —                   | same `d` AND same `c`      | —                               | —                    |
-| **ColAdd(d, c)**            | —                   | —                          | same `d` AND `a ∈ COL_ATTRS`   | —                    |
-| **ColDel(d, c)**            | —                   | same `d` AND same `c`      | same `d` AND `a ∈ COL_ATTRS`   | —                    |
-| **Rows(d)**                 | —                   | same `d` (all columns)     | same `d` AND `a ∈ ROW_ATTRS`   | —                    |
-| **Attr(d, a)**       | —                   | —                          | same `d` AND same `a`           | —                    |
-| **File(p)**                 | —                   | —                          | —                               | same `p`             |
+| **Var(x)**                  | `x = x'`            | `x = d'`                   | `x = d'`                        | —                    |
+| **Col(d, c)**               | —                   | `d = d'` AND `c = c'`      | —                               | —                    |
+| **ColAdd(d, c)**            | —                   | —                          | `d = d'` AND `a' ∈ COL_ATTRS`  | —                    |
+| **ColDel(d, c)**            | —                   | `d = d'` AND `c = c'`      | `d = d'` AND `a' ∈ COL_ATTRS`  | —                    |
+| **Rows(d)**                 | —                   | `d = d'` (all columns)     | `d = d'` AND `a' ∈ ROW_ATTRS`  | —                    |
+| **Attr(d, a)**              | —                   | —                          | `d = d'` AND `a = a'`          | —                    |
+| **File(p)**                 | —                   | —                          | —                               | `p = p'`             |
 
 (**—** = never conflicts)
+
+The `=` comparison has different semantics depending on the domain:
+- **`d = d'`**: Compares `LocRef.loc_id` values (stable object identity via `StableIdMap`)
+- **`x = d'`**: Compares variable name `x` against `LocRef.var_name` (Var rebinding bridge)
+- **`x = x'`, `c = c'`, `a = a'`, `p = p'`**: String equality
 
 Key observations:
 
