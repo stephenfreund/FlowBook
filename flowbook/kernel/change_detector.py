@@ -474,10 +474,10 @@ def changes_to_write_locs(changes: List[Change]) -> WriteLocSet:
         elif isinstance(change, RowsRemoved):
             locs.add(WriteLoc.rows(change.variable))
         elif isinstance(change, IndexChanged):
-            locs.add(WriteLoc.attr_changed(change.variable, "index"))
+            locs.add(WriteLoc.attr(change.variable, "index"))
         elif isinstance(change, DtypeChanged):
             locs.add(WriteLoc.col(change.variable, change.column))
-            locs.add(WriteLoc.attr_changed(change.variable, "dtypes"))
+            locs.add(WriteLoc.attr(change.variable, "dtypes"))
     return frozenset(locs)
 
 

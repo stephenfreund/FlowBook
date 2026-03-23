@@ -432,7 +432,7 @@ class TestIntegration:
 
     def test_column_modification_conflict_detection(self):
         """
-        Full pipeline: TrackingData + MemoryCheckpointDiffResult -> Conflict via LocSet ⊗
+        Full pipeline: TrackingData + MemoryCheckpointDiffResult -> Conflict via LocSet ▷
 
         Scenario:
         - Prior cell read df['price']
@@ -476,7 +476,7 @@ class TestIntegration:
 
     def test_structural_change_conflict_detection(self):
         """
-        Full pipeline with structural changes via LocSet ⊗.
+        Full pipeline with structural changes via LocSet ▷.
 
         Scenario:
         - Prior cell read df.columns

@@ -363,8 +363,8 @@ class NotebookState:
         Propagate staleness to later cells.
 
         For j in {i+1, ..., n}:
-            for w ∈ W' ⊗ R_j: AddReason(j, InputChanged(w, i))
-            for w ∈ W' ⊗ output*(W_j): AddReason(j, WriteConflict(w, i))
+            for w ∈ W' ▷ R_j: AddReason(j, InputChanged(w, i))
+            for w ∈ W' ▷ output*(W_j): AddReason(j, WriteConflict(w, i))
         """
         if writer_cell not in self.cell_order:
             return
@@ -378,14 +378,14 @@ class NotebookState:
             later_reads = self.reads.get(later_cell, frozenset())
             later_writes = self.writes.get(later_cell, frozenset())
 
-            # ForwardStale: W' ⊗ R_j
+            # ForwardStale: W' ▷ R_j
             conflicting_writes = wlocs_conflict_rlocs(written_locs, later_reads)
             for w in conflicting_writes:
                 self.add_reason(later_cell, Reason(
                     ReasonType.FORWARD_STALE, loc=w.display_name(), cell_id=writer_cell
                 ))
 
-            # BackwardStale: W' ⊗ output*(W_j)
+            # BackwardStale: W' ▷ output*(W_j)
             later_output = output_set(later_writes)
             write_conflicting = wlocs_conflict_rlocs(written_locs, later_output)
             for w in write_conflicting - conflicting_writes:
@@ -412,7 +412,7 @@ class NotebookState:
         2. Keep L(x) pointing to deleted cell (for orphan detection)
         3. Remove deleted cell from status/reads/writes/cell_order
 
-        ForwardStale: j > i, Wᵢ ⊗ Rⱼ ≠ ∅ or Wᵢ ⊗ output*(Wⱼ) ≠ ∅
+        ForwardStale: j > i, Wᵢ ▷ Rⱼ ≠ ∅ or Wᵢ ▷ output*(Wⱼ) ≠ ∅
         BackwardStale: j < i, j = LastWriter(W, i, y) for y ∈ Wᵢ
 
         Note: We intentionally keep last_writer pointing to the deleted cell
@@ -424,7 +424,7 @@ class NotebookState:
         if deleted_writes and deleted_cell in self.cell_order:
             my_position = self.cell_order.index(deleted_cell)
 
-            # ForwardStale: j > i, Wᵢ ⊗ (Rⱼ ∪ output*(Wⱼ)) ≠ ∅
+            # ForwardStale: j > i, Wᵢ ▷ (Rⱼ ∪ output*(Wⱼ)) ≠ ∅
             for cell_id in self.cell_order[my_position + 1:]:
                 cell_reads = self.reads.get(cell_id, frozenset())
                 cell_writes = self.writes.get(cell_id, frozenset())
