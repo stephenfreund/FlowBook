@@ -101,6 +101,8 @@ class ColumnAccessTracker:
         # Mapping from GroupBy object id -> source DataFrame id
         # Used for cudf compatibility where gb.obj may not be accessible
         self._groupby_to_df: Dict[int, int] = {}
+        # Current cell ID (set during activate, used for column provenance)
+        self._cell_id: Optional[str] = None
 
     def set_namespace_ref(self, namespace_ref: dict) -> None:
         """Set the namespace reference for lazy fallback walks."""
@@ -118,12 +120,17 @@ class ColumnAccessTracker:
             from flowbook.kernel_support import cudf_compat
             cudf_compat.install_cudf_tracking(self)
 
-    def activate(self) -> None:
+    def activate(self, cell_id: Optional[str] = None) -> None:
         """Activate this tracker instance for the current thread.
 
         This makes this tracker the active one that receives column access events.
         Very fast (~0.1µs) - just sets a thread-local pointer.
+
+        Args:
+            cell_id: The ID of the cell being executed. Used for column
+                provenance tracking (recording which cell created each column).
         """
+        self._cell_id = cell_id
         self._ensure_patches_installed()
         ColumnAccessTracker._set_active_tracker(self)
 
@@ -135,6 +142,7 @@ class ColumnAccessTracker:
         """
         if ColumnAccessTracker._get_active_tracker() is self:
             ColumnAccessTracker._set_active_tracker(None)
+        self._cell_id = None
 
     def install(self) -> None:
         """Monkey-patch DataFrame methods to track column access.
@@ -316,13 +324,49 @@ class ColumnAccessTracker:
                 # Track column writes
                 if isinstance(key, str):
                     tracker.record_write(id(df), [key])
+                    # Record column provenance (first writer wins)
+                    if tracker._cell_id is not None:
+                        from flowbook.kernel_support.column_provenance import ColumnProvenanceTracker
+                        ColumnProvenanceTracker.record_column_write(df, key, tracker._cell_id)
                 elif isinstance(key, list):
                     str_keys = [k for k in key if isinstance(k, str)]
                     if str_keys:
                         tracker.record_write(id(df), str_keys)
+                        if tracker._cell_id is not None:
+                            from flowbook.kernel_support.column_provenance import ColumnProvenanceTracker
+                            for k in str_keys:
+                                ColumnProvenanceTracker.record_column_write(df, k, tracker._cell_id)
             return original_df_setitem(df, key, value)
 
         pd.DataFrame.__setitem__ = tracked_df_setitem
+
+        # ========== DataFrame.__delitem__ ==========
+        self._original_methods['DataFrame.__delitem__'] = pd.DataFrame.__delitem__
+        original_df_delitem = self._original_methods['DataFrame.__delitem__']
+
+        def tracked_df_delitem(df: pd.DataFrame, key):
+            tracker = ColumnAccessTracker._get_active_tracker()
+            if tracker is not None and isinstance(key, str):
+                from flowbook.kernel_support.column_provenance import ColumnProvenanceTracker
+                ColumnProvenanceTracker.record_column_delete(df, key)
+            return original_df_delitem(df, key)
+
+        pd.DataFrame.__delitem__ = tracked_df_delitem
+
+        # ========== DataFrame.insert ==========
+        self._original_methods['DataFrame.insert'] = pd.DataFrame.insert
+        original_df_insert = self._original_methods['DataFrame.insert']
+
+        def tracked_df_insert(df: pd.DataFrame, loc, column, value, allow_duplicates=False):
+            tracker = ColumnAccessTracker._get_active_tracker()
+            if tracker is not None and isinstance(column, str):
+                tracker.record_write(id(df), [column])
+                if tracker._cell_id is not None:
+                    from flowbook.kernel_support.column_provenance import ColumnProvenanceTracker
+                    ColumnProvenanceTracker.record_column_write(df, column, tracker._cell_id)
+            return original_df_insert(df, loc, column, value, allow_duplicates=allow_duplicates)
+
+        pd.DataFrame.insert = tracked_df_insert
 
         # ========== DataFrame.assign ==========
         # Note: assign() returns a NEW DataFrame, it does NOT modify the original.

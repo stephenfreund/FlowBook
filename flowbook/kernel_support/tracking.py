@@ -156,6 +156,10 @@ class TrackingDict(dict):
                 if not _is_ipython_result_var(key):
                     self._column_tracker.register_df(value, key)
                     self._structural_tracker.register(value, key)
+                    # Record provenance: all columns attributed to current cell
+                    if self._column_tracker._cell_id is not None:
+                        from flowbook.kernel_support.column_provenance import ColumnProvenanceTracker
+                        ColumnProvenanceTracker.record_var_write(value, self._column_tracker._cell_id)
             elif isinstance(value, pd.Series):
                 if not _is_ipython_result_var(key):
                     self._structural_tracker.register(value, key)
@@ -282,13 +286,17 @@ class TrackingDict(dict):
     # Column tracking
     # =========================================================================
 
-    def start_column_tracking(self) -> None:
+    def start_column_tracking(self, cell_id: Optional[str] = None) -> None:
         """Call before cell execution to enable column and structural tracking.
 
         Uses the always-on pattern for performance:
         - Patches are installed once (idempotent) and stay installed across cells
         - Per-cell: just reset tracking state and activate this tracker (~10µs total)
         - DataFrames are registered lazily when accessed from namespace (no walking)
+
+        Args:
+            cell_id: The ID of the cell being executed. Passed to column
+                tracker for provenance recording.
         """
         # Reset tracking state for new cell
         with timer(key="tracking:reset", message="Track reset"):
@@ -298,7 +306,7 @@ class TrackingDict(dict):
         # Activate tracking for this cell execution
         # Patches are installed idempotently (first call only)
         with timer(key="tracking:activate_trackers", message="Activate trackers"):
-            self._column_tracker.activate()
+            self._column_tracker.activate(cell_id=cell_id)
             self._structural_tracker.activate()
 
     def stop_column_tracking(self) -> None:
@@ -319,7 +327,7 @@ class TrackingDict(dict):
     # =========================================================================
 
     @contextmanager
-    def track_execution(self) -> Generator[None, None, None]:
+    def track_execution(self, cell_id: Optional[str] = None) -> Generator[None, None, None]:
         """
         Context manager for tracking a cell execution.
 
@@ -329,16 +337,20 @@ class TrackingDict(dict):
         to retrieve the captured data.
 
         Usage:
-            with user_ns.track_execution():
+            with user_ns.track_execution(cell_id="abc"):
                 exec(code, user_ns)
             data = user_ns.get_tracking_data()
+
+        Args:
+            cell_id: The ID of the cell being executed. Passed through to
+                column tracker for provenance recording.
 
         Yields:
             None - execute your code inside the with block
         """
         self.reset_tracking()
         self._tracking_enabled = True
-        self.start_column_tracking()
+        self.start_column_tracking(cell_id=cell_id)
         try:
             yield
         finally:

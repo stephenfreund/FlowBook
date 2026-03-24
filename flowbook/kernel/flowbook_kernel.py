@@ -1252,7 +1252,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 try:
                     # Execute with tracking
                     if isinstance(user_ns, TrackingDict):
-                        with user_ns.track_execution():
+                        with user_ns.track_execution(cell_id=self._cell_id):
                             with timer(
                                 key="kernel:track_execution",
                                 message="Run cell code",

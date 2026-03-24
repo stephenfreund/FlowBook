@@ -237,6 +237,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from flowbook.kernel_support.checkpoint import Checkpoint, CheckpointDiffResult
 from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoint, MemoryCheckpoints
+import pandas as pd
+
 from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel_support.types import MemoryCheckpointDiffResult, DiffNode, ValueComparison, CompoundDiff
 from flowbook.util.cell_index import index_to_alpha
@@ -257,7 +259,7 @@ from flowbook.kernel.notebook_state import NotebookState
 
 from flowbook.kernel.change_detector import detect_changes, changes_to_write_locs
 from flowbook.kernel.locations import (
-    WriteLoc, WriteLocSet, ReadLocSet,
+    WriteLoc, WriteLocType, WriteLocSet, ReadLocSet,
     wlocs_conflict_rlocs, output_set,
     tracking_to_readlocset, tracking_to_writelocset,
     readlocset_to_list, writelocset_to_list,
@@ -1456,6 +1458,38 @@ class ReproducibilityEnforcer:
 
         return current_diff, typed_changes
 
+    def _upgrade_writes_with_provenance(
+        self,
+        W_later: WriteLocSet,
+        later_cell_id: str,
+        namespace: Optional[dict],
+    ) -> WriteLocSet:
+        """Upgrade Col writes to ColAdd where provenance shows the column
+        was first created by this cell.
+
+        When a cell re-executes df['x'] = 5, the diff detects ColumnModified
+        (not ColumnAdded) because the column already exists from the prior run.
+        But provenance records that this cell originally created column x.
+        Upgrading Col → ColAdd restores the correct structural conflict:
+        ColAdd ▷ Attr(shape) = true, while Col ▷ Attr(shape) = false.
+        """
+        if namespace is None:
+            return W_later
+
+        from flowbook.kernel_support.column_provenance import ColumnProvenanceTracker
+
+        upgraded: Set[WriteLoc] = set()
+        for w in W_later:
+            if w.type == WriteLocType.COL:
+                var_name = w.var_name()
+                df = namespace.get(var_name) if var_name else None
+                if df is not None and isinstance(df, pd.DataFrame):
+                    if ColumnProvenanceTracker.is_column_added_by(df, w.name, later_cell_id):
+                        upgraded.add(WriteLoc.col_add(w.qualifier, w.name))
+                        continue
+            upgraded.add(w)
+        return frozenset(upgraded)
+
     def _check_forward_contamination(
         self,
         cell_id: str,
@@ -1472,6 +1506,11 @@ class ReproducibilityEnforcer:
         Uses LocSet ▷ operator for column-aware conflict detection.
         Prefers diff-based WriteLocSet (from typed_changes) when available
         for column-level precision, falls back to tracking-based writes.
+
+        Uses column provenance (df.attrs) to upgrade Col writes to ColAdd
+        where the column was first created by the later cell, ensuring
+        structural conflicts (e.g., ColAdd ▷ Attr(shape)) are detected
+        even after re-execution.
         """
         R_i = tracking_to_readlocset(tracking, namespace, self._stable_map)
         if not R_i:
@@ -1490,6 +1529,9 @@ class ReproducibilityEnforcer:
 
             if not W_later:
                 continue
+
+            # Upgrade Col → ColAdd using provenance for structural precision
+            W_later = self._upgrade_writes_with_provenance(W_later, later_cell_id, namespace)
 
             conflicting = wlocs_conflict_rlocs(W_later, R_i)
             if conflicting:

@@ -6095,8 +6095,12 @@ class TestForwardContaminationStructuralRead:
         )
 
         # C first run: df['x'] = 5 (ColAdd — new column)
+        # Simulate provenance: A created {name, age, score}, C creates {x}
+        from flowbook.kernel_support.column_provenance import ColumnProvenanceTracker
         df_after_c1 = df_orig.copy()
+        ColumnProvenanceTracker.record_var_write(df_after_c1, "a")  # inherits A's columns
         df_after_c1["x"] = 5
+        ColumnProvenanceTracker.record_column_write(df_after_c1, "x", "c")  # C adds x
         self._save_pre_checkpoint("c", {"df": df_orig})
         ns_c1 = {"df": df_after_c1}
         self.sdc.check(
@@ -6111,6 +6115,7 @@ class TestForwardContaminationStructuralRead:
         )
 
         # C second run: df['x'] = 5 again (Col — column already exists)
+        # Provenance persists: x still originated from "c" (first writer wins)
         df_after_c2 = df_after_c1.copy()
         df_after_c2["x"] = 5
         self._save_pre_checkpoint("c", {"df": df_after_c1})
