@@ -8,7 +8,7 @@
 import { Widget } from '@lumino/widgets';
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
-import { IReproducibilityMetadata, IReadLoc, IWriteLoc } from './types';
+import { IReproducibilityMetadata, IReproducibilityError, IReadLoc, IWriteLoc } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
 interface IReproducibilityMetadataDisplayProps {
@@ -221,6 +221,20 @@ function writeLocsEqual(a: IWriteLoc[], b: IWriteLoc[]): boolean {
   return true;
 }
 
+/**
+ * Convert error_type enum value to a human-readable label.
+ */
+function formatErrorType(errorType: string): string {
+  const labels: Record<string, string> = {
+    'no_read_and_write': 'Read And Write Same Location',
+    'write_before_read': 'Undefined Variable',
+    'no_read_before_write': 'Forward Contamination',
+    'no_write_after_read': 'Backward Mutation',
+    'unrecoverable_mutation': 'Unrecoverable Mutation'
+  };
+  return labels[errorType] || errorType;
+}
+
 const ReproducibilityMetadataDisplay: React.FC<
   IReproducibilityMetadataDisplayProps
 > = ({ metadata, cellId, currentCellOrder }) => {
@@ -268,6 +282,35 @@ const ReproducibilityMetadataDisplay: React.FC<
           <strong>Execution #:</strong> {metadata.execution_seq}
         </div>
       </div>
+
+      {/* Errors (validity predicate violations) */}
+      {metadata.errors && metadata.errors.length > 0 && (
+        <>
+          <div className="flowbook-metadata-divider" />
+          <div className="flowbook-metadata-section flowbook-error-section">
+            <div className="flowbook-metadata-item">
+              <strong style={{ color: '#d32f2f' }}>Errors:</strong>
+              <ul className="flowbook-error-list" style={{ margin: '4px 0', paddingLeft: '16px' }}>
+                {metadata.errors.map((err: IReproducibilityError, i: number) => (
+                  <li key={i} style={{ marginBottom: '6px' }}>
+                    <div style={{ fontWeight: 600, color: '#d32f2f', fontSize: '0.9em' }}>
+                      {formatErrorType(err.error_type)}
+                    </div>
+                    <div style={{ fontSize: '0.85em', color: '#333' }}>
+                      {err.message}
+                    </div>
+                    {err.causer_cell && (
+                      <div style={{ fontSize: '0.85em', color: '#666' }}>
+                        Conflicts with: <code>{cellIdToReference(err.causer_cell, currentCellOrder)}</code>
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Timing Info */}
       {(metadata.execute_duration_ms !== undefined ||

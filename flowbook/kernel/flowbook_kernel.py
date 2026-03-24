@@ -1352,6 +1352,17 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             for err in sdc_result.errors:
                                 self._send_predicate_violation(err, accepted=False)
 
+                            # Send metadata so the panel can show reads/writes/errors
+                            self._display_execution_result(
+                                execute_duration_ms=time.perf_counter() * 1000 - start_time,
+                                code_duration_ms=execution_time or 0.0,
+                                state_duration_ms=pre_timer.duration(),
+                                check_duration_ms=check_timer.duration(),
+                                tracking=tracking,
+                                sdc_result=sdc_result,
+                                stale_before=stale_before,
+                            )
+
                             # Return error status (use first error for exception message)
                             first_error = sdc_result.errors[0]
                             return {
