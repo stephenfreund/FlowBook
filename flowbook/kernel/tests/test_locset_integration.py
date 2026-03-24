@@ -512,10 +512,12 @@ class TestLocSetConversionIntegration:
         self.helper = ReproducibilityTestHelper()
         self.helper.set_cell_order(["a", "b"])
 
-    def test_column_reads_produce_col_locs_not_var(self):
-        """When column_reads are provided, reads should be Col locs, not Var locs.
+    def test_column_reads_produce_col_and_var_locs(self):
+        """When column_reads are provided, reads should include both Col and Var locs.
 
-        This ensures the enforcer has column-level precision for conflict detection.
+        Var(df) is always present alongside Col reads. Rebinding is caught
+        by Var(df) ▷ Var(df); column independence is preserved because
+        Col/Rows/Attr ▷ Var = false in the ▷ matrix.
         """
         df = pd.DataFrame({"x": [1], "y": [2]})
         self.helper.execute_cell(
@@ -525,7 +527,6 @@ class TestLocSetConversionIntegration:
 
         # Check the stored read locs in notebook state
         stored_reads = self.helper.sdc._notebook_state.reads.get("a", frozenset())
-        # Should have Col(df, x), not Var(df)
         has_col_loc = any(
             r.type.value == "col" and r.qualifier == "df" and r.name == "x"
             for r in stored_reads
@@ -535,8 +536,8 @@ class TestLocSetConversionIntegration:
             for r in stored_reads
         )
         assert has_col_loc, f"Expected Col(df, x) in reads, got: {stored_reads}"
-        # Var(df) should NOT be present when column detail is available
-        assert not has_var_loc, f"Var(df) should not be present when column reads exist, got: {stored_reads}"
+        # Var(df) IS present alongside column reads
+        assert has_var_loc, f"Expected Var(df) in reads alongside Col reads, got: {stored_reads}"
 
     def test_structural_reads_produce_attr_locs(self):
         """When structural_reads are provided, reads should include Attr locs."""

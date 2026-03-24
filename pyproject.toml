@@ -30,7 +30,7 @@ dependencies = [
     "openai",
     "jupyterlab>=4.0.0",
     "nbformat>=5.0.0",
-    "openai-agents[litellm],
+    "openai-agents[litellm]",
     "jupyter",
     "termcolor",
     "dill",

@@ -16,7 +16,7 @@ from flowbook.kernel.locations import (
     ReadLoc, WriteLoc,
     write_conflicts_read, has_conflict,
     tracking_to_readlocset, tracking_to_writelocset,
-    _same_dataframe, _var_targets_ref,
+    _same_dataframe,
 )
 from flowbook.kernel_support.models import TrackingData
 
@@ -239,22 +239,6 @@ class TestSameDataframe:
         assert _same_dataframe(None, "df") is False
 
 
-class TestVarTargetsRef:
-    """Test _var_targets_ref helper for Var ▷ Col bridging."""
-
-    def test_string_qualifier(self):
-        assert _var_targets_ref("df", "df") is True
-        assert _var_targets_ref("df", "other") is False
-
-    def test_locref_qualifier(self):
-        """Var rebinding checks var_name, not loc_id."""
-        ref = LocRef(42, "df")
-        assert _var_targets_ref("df", ref) is True
-        assert _var_targets_ref("other", ref) is False
-
-    def test_none_qualifier(self):
-        assert _var_targets_ref("df", None) is False
-
 
 class TestConflictRelationWithLocRef:
     """Test ▷ relation with LocRef qualifiers."""
@@ -279,10 +263,10 @@ class TestConflictRelationWithLocRef:
         assert write_conflicts_read(w, r) is False
 
     def test_var_col_same_var_name(self):
-        """Var(x) ▷ Col(LocRef(42, x), c) = True — var rebinding invalidates."""
+        """Var(x) ▷ Col(LocRef(42, x), c) = False — Var only conflicts with Var."""
         w = WriteLoc.var("df")
         r = ReadLoc.col(LocRef(42, "df"), "price")
-        assert write_conflicts_read(w, r) is True
+        assert write_conflicts_read(w, r) is False
 
     def test_var_col_different_var_name(self):
         """Var(x) ▷ Col(LocRef(42, y), c) = False — different variable name."""

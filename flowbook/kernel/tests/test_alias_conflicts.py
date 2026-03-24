@@ -5,7 +5,7 @@ Covers every scenario from ALIAS_CONFLICT_ANALYSIS.md:
 - Same-object aliases (X = df) → same loc_id
 - User copies (df2 = df.copy()) → different loc_id
 - All 7 write types × 4 read types with alias/copy/self combinations
-- Var(x) ▷ Col/Attr bridging via name(d')
+- Var(x) only conflicts with Var(x) reads (no cross-domain bridge)
 
 See ALIAS_CONFLICT_ANALYSIS.md for the full correctness analysis.
 """
@@ -53,77 +53,67 @@ class TestVarVarConflicts:
 
 
 # ============================================================================
-# Var(x) ▷ Col(d', c') — the name(d') bridge
+# Var(x) ▷ Col(d', c') — no cross-domain conflict
 # ============================================================================
 
 class TestVarColConflicts:
-    """Var rebinding invalidates column reads through the SAME variable name.
+    """Var(x) does NOT directly conflict with Col/Attr reads.
 
-    Uses name(d') — compares x against LocRef.var_name, NOT loc_id.
-    This correctly scopes rebinding: rebinding df does not affect reads
-    through alias X, even though they point to the same object.
+    Rebinding detection works because Var(x) is always present in read
+    sets alongside Col reads (via tracking_to_readlocset). So Var(x)
+    write ▷ Var(x) read catches the rebinding case.
     """
 
-    def test_rebind_invalidates_own_col_reads(self):
-        """Var("df") ▷ Col(LR(1,"df"), "price") → True"""
+    def test_rebind_does_not_conflict_with_col_reads(self):
+        """Var("df") ▷ Col(LR(1,"df"), "price") → False"""
         w = WriteLoc.var("df")
         r = ReadLoc.col(LR_DF, "price")
-        assert write_conflicts_read(w, r)
+        assert not write_conflicts_read(w, r)
 
     def test_rebind_does_not_invalidate_alias_col_reads(self):
-        """Var("df") ▷ Col(LR(1,"X"), "price") → False
-
-        Key alias case: rebinding df doesn't affect X. X still points
-        to the old DataFrame, so its column reads are valid.
-        """
+        """Var("df") ▷ Col(LR(1,"X"), "price") → False"""
         w = WriteLoc.var("df")
         r = ReadLoc.col(LR_X, "price")
         assert not write_conflicts_read(w, r)
 
     def test_rebind_alias_does_not_invalidate_original_col_reads(self):
-        """Var("X") ▷ Col(LR(1,"df"), "price") → False
-
-        Rebinding X doesn't affect df's column reads.
-        """
+        """Var("X") ▷ Col(LR(1,"df"), "price") → False"""
         w = WriteLoc.var("X")
         r = ReadLoc.col(LR_DF, "price")
         assert not write_conflicts_read(w, r)
 
-    def test_rebind_alias_invalidates_own_col_reads(self):
-        """Var("X") ▷ Col(LR(1,"X"), "price") → True"""
+    def test_rebind_alias_does_not_conflict_with_own_col_reads(self):
+        """Var("X") ▷ Col(LR(1,"X"), "price") → False"""
         w = WriteLoc.var("X")
         r = ReadLoc.col(LR_X, "price")
-        assert write_conflicts_read(w, r)
+        assert not write_conflicts_read(w, r)
 
     def test_rebind_does_not_invalidate_copy_col_reads(self):
-        """Var("df") ▷ Col(LR(2,"df2"), "price") → False
-
-        df2 is a different variable AND different object.
-        """
+        """Var("df") ▷ Col(LR(2,"df2"), "price") → False"""
         w = WriteLoc.var("df")
         r = ReadLoc.col(LR_DF2, "price")
         assert not write_conflicts_read(w, r)
 
-    def test_rebind_any_column(self):
-        """Var rebinding invalidates ALL column reads through that name."""
+    def test_rebind_no_col_conflict_any_column(self):
+        """Var(x) does not conflict with any Col read."""
         w = WriteLoc.var("df")
-        assert write_conflicts_read(w, ReadLoc.col(LR_DF, "price"))
-        assert write_conflicts_read(w, ReadLoc.col(LR_DF, "qty"))
-        assert write_conflicts_read(w, ReadLoc.col(LR_DF, "anything"))
+        assert not write_conflicts_read(w, ReadLoc.col(LR_DF, "price"))
+        assert not write_conflicts_read(w, ReadLoc.col(LR_DF, "qty"))
+        assert not write_conflicts_read(w, ReadLoc.col(LR_DF, "anything"))
 
 
 # ============================================================================
-# Var(x) ▷ Attr(d', a') — same name(d') bridge as Col
+# Var(x) ▷ Attr(d', a') — no cross-domain conflict
 # ============================================================================
 
 class TestVarAttrConflicts:
-    """Var rebinding invalidates attr reads through the SAME variable name."""
+    """Var(x) does NOT directly conflict with Attr reads."""
 
-    def test_rebind_invalidates_own_attr_reads(self):
-        """Var("df") ▷ Attr(LR(1,"df"), "shape") → True"""
+    def test_rebind_does_not_conflict_with_attr_reads(self):
+        """Var("df") ▷ Attr(LR(1,"df"), "shape") → False"""
         w = WriteLoc.var("df")
         r = ReadLoc.attr(LR_DF, "shape")
-        assert write_conflicts_read(w, r)
+        assert not write_conflicts_read(w, r)
 
     def test_rebind_does_not_invalidate_alias_attr_reads(self):
         """Var("df") ▷ Attr(LR(1,"X"), "shape") → False"""
@@ -137,12 +127,12 @@ class TestVarAttrConflicts:
         r = ReadLoc.attr(LR_DF, "shape")
         assert not write_conflicts_read(w, r)
 
-    def test_rebind_any_attr(self):
-        """Var rebinding invalidates ALL attr reads through that name."""
+    def test_rebind_no_attr_conflict_any_attr(self):
+        """Var(x) does not conflict with any Attr read."""
         w = WriteLoc.var("df")
-        assert write_conflicts_read(w, ReadLoc.attr(LR_DF, "shape"))
-        assert write_conflicts_read(w, ReadLoc.attr(LR_DF, "columns"))
-        assert write_conflicts_read(w, ReadLoc.attr(LR_DF, "index"))
+        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "shape"))
+        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "columns"))
+        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "index"))
 
     def test_var_does_not_conflict_with_file(self):
         """Var("df") ▷ File("data.csv") → False — always."""
@@ -524,16 +514,13 @@ class TestMixedQualifiers:
         assert write_conflicts_read(w, r)
 
     def test_var_vs_string_qualifier(self):
-        """Var("df") ▷ Col("df", "price") → True (string fallback)."""
+        """Var("df") ▷ Col("df", "price") → False (Var only conflicts with Var)."""
         w = WriteLoc.var("df")
         r = ReadLoc.col("df", "price")
-        assert write_conflicts_read(w, r)
+        assert not write_conflicts_read(w, r)
 
     def test_var_vs_locref_alias(self):
-        """Var("df") ▷ Col(LocRef(1,"X"), "price") → False
-
-        Var rebinding uses name(d'), which is "X" — doesn't match "df".
-        """
+        """Var("df") ▷ Col(LocRef(1,"X"), "price") → False"""
         w = WriteLoc.var("df")
         r = ReadLoc.col(LR_X, "price")
         assert not write_conflicts_read(w, r)
@@ -560,10 +547,10 @@ class TestThreeWayAliases:
         r = ReadLoc.col(self.LR_Y, "price")
         assert write_conflicts_read(w, r)
 
-    def test_var_rebind_only_affects_own_name(self):
-        """Var("df") only invalidates reads through "df", not X or Y."""
+    def test_var_rebind_does_not_conflict_with_any_col(self):
+        """Var("df") does not conflict with any Col read."""
         w = WriteLoc.var("df")
-        assert write_conflicts_read(w, ReadLoc.col(LR_DF, "price"))
+        assert not write_conflicts_read(w, ReadLoc.col(LR_DF, "price"))
         assert not write_conflicts_read(w, ReadLoc.col(LR_X, "price"))
         assert not write_conflicts_read(w, ReadLoc.col(self.LR_Y, "price"))
 

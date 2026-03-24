@@ -208,7 +208,11 @@ class TestOutput:
 
 
 class TestConflictMatrix_Var:
-    """Var(x) writes: invalidate any read involving x."""
+    """Var(x) writes: only conflict with Var(x) reads.
+
+    Rebinding detection for Col/Attr readers is handled by always
+    including Var(x) in read sets alongside Col/Attr reads.
+    """
 
     def test_var_vs_var_same(self):
         assert write_conflicts_read(WriteLoc.var("x"), ReadLoc.var("x"))
@@ -216,14 +220,16 @@ class TestConflictMatrix_Var:
     def test_var_vs_var_different(self):
         assert not write_conflicts_read(WriteLoc.var("x"), ReadLoc.var("y"))
 
-    def test_var_vs_col_same_df(self):
-        assert write_conflicts_read(WriteLoc.var("df"), ReadLoc.col("df", "price"))
+    def test_var_vs_col_no_conflict(self):
+        """Var(x) does NOT directly conflict with Col reads."""
+        assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.col("df", "price"))
 
     def test_var_vs_col_different_df(self):
         assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.col("other", "price"))
 
-    def test_var_vs_attr_same_df(self):
-        assert write_conflicts_read(WriteLoc.var("df"), ReadLoc.attr("df", "shape"))
+    def test_var_vs_attr_no_conflict(self):
+        """Var(x) does NOT directly conflict with Attr reads."""
+        assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.attr("df", "shape"))
 
     def test_var_vs_attr_different_df(self):
         assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.attr("other", "shape"))
@@ -643,9 +649,10 @@ class TestTrackingConversion:
             file_writes=set(),
         )
         result = tracking_to_readlocset(td)
-        # "df" has column/structural detail, so no Var(df) — only Col and Attr locs.
-        # "config" has no detail, so it gets Var(config).
+        # Var(x) is always emitted for every variable in reads_before_writes,
+        # alongside any Col/Attr detail.
         expected = frozenset({
+            ReadLoc.var("df"),
             ReadLoc.var("config"),
             ReadLoc.col("df", "price"),
             ReadLoc.col("df", "qty"),

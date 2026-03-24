@@ -987,16 +987,20 @@ class TestHandleDeleteLocSet:
         assert self.state.is_clean("b")  # different column, no conflict
 
     def test_delete_var_writer_stales_column_reader(self):
-        """Delete cell that wrote Var(df) -> cell reading Col(df, price) is stale."""
+        """Delete cell that wrote Var(df) -> cell reading Col(df, price) is stale.
+
+        Read set includes Var(df) alongside Col(df, price), so
+        Var(df) ▷ Var(df) catches the rebinding.
+        """
         self.state.reads["a"] = frozenset()
         self.state.writes["a"] = frozenset({WriteLoc.var("df")})
         self.state.status["a"] = CellStatus.clean()
-        self.state.reads["b"] = frozenset({ReadLoc.col("df", "price")})
+        self.state.reads["b"] = frozenset({ReadLoc.var("df"), ReadLoc.col("df", "price")})
         self.state.writes["b"] = frozenset()
         self.state.status["b"] = CellStatus.clean()
 
         self.state.handle_delete("a")
-        assert not self.state.is_clean("b")  # Var(df) conflicts with Col(df, price)
+        assert not self.state.is_clean("b")  # Var(df) ▷ Var(df) = true
 
     def test_delete_backward_stale_last_writer(self):
         """Delete cell C that wrote x -> cell A (LastWriter of x before C) is backward-stale."""
@@ -1051,16 +1055,20 @@ class TestPropagateStalenessColumnLevel:
         assert self.state.is_clean("b")  # different column
 
     def test_var_write_stales_col_reader(self):
-        """Writing Var(df) stales cell reading Col(df, anything)."""
+        """Writing Var(df) stales cell reading Col(df, anything).
+
+        Read set includes Var(df) alongside Col reads, so
+        Var(df) ▷ Var(df) catches the rebinding.
+        """
         self.state.reads["a"] = frozenset()
         self.state.writes["a"] = frozenset()
         self.state.status["a"] = CellStatus.clean()
-        self.state.reads["b"] = frozenset({ReadLoc.col("df", "qty")})
+        self.state.reads["b"] = frozenset({ReadLoc.var("df"), ReadLoc.col("df", "qty")})
         self.state.writes["b"] = frozenset()
         self.state.status["b"] = CellStatus.clean()
 
         self.state.propagate_staleness("a", frozenset({WriteLoc.var("df")}))
-        assert not self.state.is_clean("b")  # Var(df) conflicts with any df read
+        assert not self.state.is_clean("b")  # Var(df) ▷ Var(df) = true
 
 
 # =============================================================================

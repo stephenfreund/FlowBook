@@ -87,8 +87,12 @@ class TestNoReadAndWrite:
         assert not no_read_and_write(R, W)
 
     def test_var_write_col_read(self):
-        """Var("df") write conflicts with Col(df, price) read."""
-        R = _rset(ReadLoc.col(LR_DF, "price"))
+        """Var("df") write conflicts via Var("df") read (always in read set).
+
+        Col(df, price) alone doesn't conflict with Var("df") write.
+        The read set must include Var("df") for rebinding detection.
+        """
+        R = _rset(ReadLoc.col(LR_DF, "price"), ReadLoc.var("df"))
         W = _wset(WriteLoc.var("df"))
         assert no_read_and_write(R, W)
 
@@ -398,13 +402,15 @@ class TestForwardStaleWrites:
         assert not forward_stale_writes(W_i, W_j)
 
     def test_var_write_vs_col_write(self):
-        """Var("df") overlaps with Col(df, price) because Var is nuclear.
+        """Var("df") does NOT overlap with Col(df, price) via write-write path.
 
-        Var("df") ▷ output(Col(df, price)) includes Var("df") ▷ Col(df, price) = True.
+        Var("df") ▷ output(Col(df, price)) = Var("df") ▷ Col(df, price) = False.
+        Rebinding detection is handled by the read overlap path instead:
+        the read set always includes Var("df"), so Var("df") ▷ Var("df") catches it.
         """
         W_i = _wset(WriteLoc.var("df"))
         W_j = _wset(WriteLoc.col(LR_DF, "price"))
-        assert forward_stale_writes(W_i, W_j)
+        assert not forward_stale_writes(W_i, W_j)
 
     def test_col_write_vs_var_write(self):
         """Col(df, price) vs Var("df"): Col ▷ output(Var("df")) = Col ▷ Var("df") = False.

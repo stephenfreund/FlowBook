@@ -1943,12 +1943,9 @@ class ReproducibilityEnforcer:
                 continue  # Never executed
 
             # Use ▷ operator: check if changes conflict with prior cell's reads.
-            # Use precise read set: when column info is available, Var(x) is
-            # refined to Col(x, c) reads so column-independent writes don't conflict.
+            # Read sets always include Var(x) alongside Col/Attr reads, so
+            # variable rebinding is caught by Var(x) ▷ Var(x) = true.
             prior_read_locs = self._notebook_state.reads.get(prior_cell_id, frozenset())
-            prior_tracking = self._notebook_state.get_tracking(prior_cell_id)
-            if prior_tracking is not None:
-                prior_read_locs = _precise_readlocset(prior_read_locs, prior_tracking)
             conflicting_wlocs = wlocs_conflict_rlocs(change_wlocs, prior_read_locs)
 
             if conflicting_wlocs:
