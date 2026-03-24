@@ -179,12 +179,13 @@ The enforcer implements two instrumented transition rules:
 **[Inst-Edit]**: When cell source is modified, mark it STALE. Read/write sets are preserved (they describe the last execution).
 
 **[Inst-Run]**: When cell i executes, the enforcer:
+
 1. Records new read/write sets: R' = R[i := r], W' = W[i := w]
 2. Checks four **validity predicates** (all must pass):
    - `NoReadAndWrite(R', W', i)` — Rᵢ ∩ Wᵢ = ∅ (cell doesn't read and write same location)
-   - `WriteBeforeRead(R', W', i)` — Rᵢ ⊆ W_{1..i-1} (reads only defined variables)
-   - `NoReadBeforeWrite(R', W', i)` — Rᵢ ∩ W_{i+1..n} = ∅ (no forward contamination)
-   - `NoWriteAfterRead(R', W', i)` — Wᵢ ∩ R_{1..i-1} = ∅ (no backward mutation)
+   - `WriteBeforeRead(R', W', i)` — Rᵢ ⊆ W\_{1..i-1} (reads only defined variables)
+   - `NoReadBeforeWrite(R', W', i)` — Rᵢ ∩ W\_{i+1..n} = ∅ (no forward contamination)
+   - `NoWriteAfterRead(R', W', i)` — Wᵢ ∩ R\_{1..i-1} = ∅ (no backward mutation)
 3. Checks `RecoverableMutation` — all diff-detected changes are in tracking writes
 4. If all predicates pass: marks cell i CLEAN, computes **staleness propagation**:
    - `ForwardStale(R, W, W', i, j)` — cell j > i reads/writes location that i wrote → mark stale
@@ -195,13 +196,13 @@ All conflict checks use the typed `▷` relation (`write_conflicts_read`) from `
 
 **Magic Commands**:
 
-| Command                                   | Description                                                      |
-| ----------------------------------------- | ---------------------------------------------------------------- |
-| `%notebook_structure <ids...>`            | Set notebook cell order (sent by frontend before each execution) |
-| `%cell_edited <cell_id>`                  | Mark edited cell stale ([Inst-Edit], sent by frontend)           |
-| `%flowbook_status`                        | Display current reproducibility state                            |
-| `%flowbook_stale`                         | Show stale cells                                                 |
-| `%continue_after_violation <on/off>`      | Control whether violations reject or warn                        |
+| Command                              | Description                                                      |
+| ------------------------------------ | ---------------------------------------------------------------- |
+| `%notebook_structure <ids...>`       | Set notebook cell order (sent by frontend before each execution) |
+| `%cell_edited <cell_id>`             | Mark edited cell stale ([Inst-Edit], sent by frontend)           |
+| `%flowbook_status`                   | Display current reproducibility state                            |
+| `%flowbook_stale`                    | Show stale cells                                                 |
+| `%continue_after_violation <on/off>` | Control whether violations reject or warn                        |
 
 **Features** (always enabled):
 

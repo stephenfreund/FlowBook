@@ -49,9 +49,9 @@ function registerExecRestoreCommand(
         if (!activeCell || activeCell.model.type !== 'code') {
           return false;
         }
-        const violations = activeCell.model.getMetadata('flowbook_violations') as
-          | IPredicateViolation[]
-          | undefined;
+        const violations = activeCell.model.getMetadata(
+          'flowbook_violations'
+        ) as IPredicateViolation[] | undefined;
         return (
           violations !== undefined &&
           violations.some(v => v.predicate === 'no_read_before_write')

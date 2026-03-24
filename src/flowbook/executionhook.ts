@@ -833,7 +833,9 @@ export class ReproducibilityExecutionHookManager {
     const causingCellReadLocs: IReadLoc[] = metadata.read_locs || [];
 
     // Project stale cell's writes to reads via output(), then intersect
-    const staleOutputs: IReadLoc[] = staleCellWriteLocs.flatMap(w => writeLocOutputs(w));
+    const staleOutputs: IReadLoc[] = staleCellWriteLocs.flatMap(w =>
+      writeLocOutputs(w)
+    );
     // Check which of the stale cell's output reads match the causing cell's reads
     const writerConflicts: string[] = [];
     const seen = new Set<string>();

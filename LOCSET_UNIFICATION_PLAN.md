@@ -14,12 +14,14 @@ duplicates concepts already expressible through locations.
 Two parallel systems exist for the same purpose (conflict detection):
 
 **System 1: String-based R/W + ad-hoc column logic**
+
 - `NotebookState.reads/writes`: `Dict[str, Set[str]]` (variable names only)
 - Column info threaded via `changed_vars`, `column_changed` parameters
 - `_has_relevant_overlap_by_id()`: 50-line manual column-overlap check
 - Used for: staleness propagation, forward contamination
 
 **System 2: Typed Change/AccessEvent pipeline**
+
 - `Change` hierarchy: `ValueChanged`, `ColumnAdded`, `ColumnModified`, `ColumnRemoved`,
   `RowsAdded`, `RowsRemoved`, `IndexChanged`, `DtypeChanged`
 - `AccessEvent` hierarchy: `VariableRead`, `ColumnRead`, `StructuralRead`
@@ -31,8 +33,9 @@ Two parallel systems exist for the same purpose (conflict detection):
 **One mechanism. One conflict check. One set of types.**
 
 Replace both systems with:
+
 - `ReadLoc` — what a cell reads (4 constructors)
-- `WriteLoc` — what a cell writes and *how* it changed (7 constructors)
+- `WriteLoc` — what a cell writes and _how_ it changed (7 constructors)
 - `▷ : WriteLoc × ReadLoc → bool` — the conflict relation (one 7×4 matrix)
 - `output : WriteLoc → ReadLoc` — maps a write to the read it produces (for write-write overlap)
 
@@ -52,33 +55,33 @@ Read locations describe what a cell accessed during execution:
 r ∈ ReadLoc ::= Var(x) | Col(d, c) | Attr(d, a) | File(p)
 ```
 
-| Constructor | Meaning | Example |
-|---|---|---|
-| `Var(x)` | Whole variable `x` | `df`, `config`, `model` |
-| `Col(d, c)` | Column `c` of DataFrame `d` | `df["price"]` |
+| Constructor  | Meaning                        | Example                  |
+| ------------ | ------------------------------ | ------------------------ |
+| `Var(x)`     | Whole variable `x`             | `df`, `config`, `model`  |
+| `Col(d, c)`  | Column `c` of DataFrame `d`    | `df["price"]`            |
 | `Attr(d, a)` | Attribute `a` of DataFrame `d` | `df.shape`, `df.columns` |
-| `File(p)` | File at path `p` | `data.csv` |
+| `File(p)`    | File at path `p`               | `data.csv`               |
 
 **R_i ⊆ ReadLoc** — the set of read locations for cell `i`.
 
 ### Write Location Grammar
 
-Write locations describe what a cell changed and *how*:
+Write locations describe what a cell changed and _how_:
 
 ```
 w ∈ WriteLoc ::= Var(x) | Col(d, c) | ColAdd(d, c) | ColDel(d, c)
                | Rows(d) | Attr(d, a) | File(p)
 ```
 
-| Constructor | Meaning | Example |
-|---|---|---|
-| `Var(x)` | Variable `x` completely replaced | `x = 42` |
-| `Col(d, c)` | Column `c` values modified | `df["price"] = [1,2,3]` |
-| `ColAdd(d, c)` | New column `c` added | `df["new"] = [4,5,6]` |
-| `ColDel(d, c)` | Column `c` removed | `df.drop("old", axis=1)` |
-| `Rows(d)` | Rows added or removed | `df.append(...)` |
-| `Attr(d, a)` | Attribute `a` changed | `df.reset_index()` |
-| `File(p)` | File at path `p` written | `df.to_csv("out.csv")` |
+| Constructor    | Meaning                          | Example                  |
+| -------------- | -------------------------------- | ------------------------ |
+| `Var(x)`       | Variable `x` completely replaced | `x = 42`                 |
+| `Col(d, c)`    | Column `c` values modified       | `df["price"] = [1,2,3]`  |
+| `ColAdd(d, c)` | New column `c` added             | `df["new"] = [4,5,6]`    |
+| `ColDel(d, c)` | Column `c` removed               | `df.drop("old", axis=1)` |
+| `Rows(d)`      | Rows added or removed            | `df.append(...)`         |
+| `Attr(d, a)`   | Attribute `a` changed            | `df.reset_index()`       |
+| `File(p)`      | File at path `p` written         | `df.to_csv("out.csv")`   |
 
 **W_i ⊆ WriteLoc** — the set of write locations for cell `i`.
 
@@ -125,6 +128,7 @@ File(p)          ▷  File(q)          ≝  p = q
 ```
 
 where:
+
 ```
 COL_ATTRS = { columns, keys, dtypes, axes, T, values, iter, describe, shape, size }
 ROW_ATTRS = { index, shape, size, len, empty }
@@ -220,27 +224,27 @@ LastWriter(W, i, w) = max { j < i | var(w) ∈ { var(w') | w' ∈ Wⱼ } }
 
 The diff system produces typed changes. Each maps to `WriteLoc` as follows:
 
-| Diff result | WriteLoc |
-|---|---|
-| Variable completely replaced | `Var(x)` |
-| DataFrame column values changed | `Col(d, c)` |
-| DataFrame column added | `ColAdd(d, c)` |
-| DataFrame column removed | `ColDel(d, c)` |
-| DataFrame rows added/removed | `Rows(d)` |
-| DataFrame index changed | `Attr(d, index)` |
-| DataFrame dtype changed | `Col(d, c)` + `Attr(d, dtypes)` |
-| File written | `File(p)` |
+| Diff result                     | WriteLoc                        |
+| ------------------------------- | ------------------------------- |
+| Variable completely replaced    | `Var(x)`                        |
+| DataFrame column values changed | `Col(d, c)`                     |
+| DataFrame column added          | `ColAdd(d, c)`                  |
+| DataFrame column removed        | `ColDel(d, c)`                  |
+| DataFrame rows added/removed    | `Rows(d)`                       |
+| DataFrame index changed         | `Attr(d, index)`                |
+| DataFrame dtype changed         | `Col(d, c)` + `Attr(d, dtypes)` |
+| File written                    | `File(p)`                       |
 
 ### Tracking → ReadLoc Mapping
 
 The runtime tracking system records what a cell accessed:
 
-| Tracking field | ReadLoc |
-|---|---|
-| `reads_before_writes: {"df"}` | `Var(df)` |
-| `column_reads: {"df": {"price"}}` | `Col(df, price)` |
+| Tracking field                        | ReadLoc           |
+| ------------------------------------- | ----------------- |
+| `reads_before_writes: {"df"}`         | `Var(df)`         |
+| `column_reads: {"df": {"price"}}`     | `Col(df, price)`  |
 | `structural_reads: {"df": {"shape"}}` | `Attr(df, shape)` |
-| `file_reads: {"data.csv"}` | `File(data.csv)` |
+| `file_reads: {"data.csv"}`            | `File(data.csv)`  |
 
 This is exactly what `tracking_to_read_locs()` already does (modulo the rename
 from `Loc` to `ReadLoc`).
@@ -665,6 +669,7 @@ def _df_diff_to_write_locs(var: str, children: Dict) -> Set[WriteLoc]:
 **Goal**: Implement the type system and conflict relation.
 
 **Files**:
+
 1. **`flowbook/kernel/models.py`**:
    - Add `ReadLoc`, `WriteLoc`, `ReadLocSet`, `WriteLocSet` (code above)
    - Add `write_conflicts_read()`, `wlocs_conflict_rlocs()`, `has_conflict()`, `output_set()`
@@ -682,6 +687,7 @@ def _df_diff_to_write_locs(var: str, children: Dict) -> Set[WriteLoc]:
 **Goal**: The diff→changes pipeline produces `WriteLocSet` instead of `List[Change]`.
 
 **Files**:
+
 1. **`flowbook/kernel/change_detector.py`**: Rewrite `detect_changes()` → `detect_write_locs()`
    (code above). Keep `detect_changes()` temporarily as a wrapper.
 
@@ -692,11 +698,14 @@ def _df_diff_to_write_locs(var: str, children: Dict) -> Set[WriteLoc]:
 **Goal**: Core state uses typed location sets.
 
 **Files**:
+
 1. **`flowbook/kernel/notebook_state.py`**:
+
    ```python
    reads: Dict[str, ReadLocSet]    # was Set[str]
    writes: Dict[str, WriteLocSet]  # was Set[str]
    ```
+
    - `record_execution()`: store `ReadLocSet` from `tracking_to_read_locs()`,
      `WriteLocSet` from `detect_write_locs()` (or from tracking)
    - `handle_delete()`: use `has_conflict()` / `wlocs_conflict_rlocs()`
@@ -714,6 +723,7 @@ def _df_diff_to_write_locs(var: str, children: Dict) -> Set[WriteLoc]:
 **Goal**: All predicate checks and staleness computations use `▷`.
 
 **Files**:
+
 1. **`flowbook/kernel/reproducibility_enforcer.py`**:
    - `_check_no_read_and_write()`: `has_conflict(W_i, R_i)`
    - `_check_backward_mutation_new()`: `wlocs_conflict_rlocs(W_i, R_before_i)` (replaces ConflictResolver)
@@ -732,27 +742,32 @@ def _df_diff_to_write_locs(var: str, children: Dict) -> Set[WriteLoc]:
 **Goal**: Remove the entire typed-change pipeline.
 
 **Files to DELETE**:
+
 - `flowbook/kernel/conflict_resolver.py` — replaced by `▷`
 - `flowbook/kernel/conflict_rules.py` — rules absorbed into `▷` matrix
 - `flowbook/kernel/access_events.py` — replaced by `ReadLoc`
 - `flowbook/kernel/changes.py` — replaced by `WriteLoc`
 
 **Files to UPDATE**:
+
 - `flowbook/kernel/change_detector.py` — no longer imports `Change` types
 - Remove old `Loc`, `LocSet`, `LocType` from `models.py` (replaced by `ReadLoc`/`WriteLoc`)
 - Remove `check_loc_conflicts()`, `_locs_conflict()`, `diff_to_write_locs()` from `models.py`
 
 **Tests to DELETE/UPDATE**:
+
 - `flowbook/kernel/tests/test_conflict_rules.py` — delete (rules are now in ▷)
 - `flowbook/kernel/tests/test_converters.py` — delete or rewrite for WriteLocSet
 
 ### Phase 7: Update Reason.loc, frontend bridge, and spec
 
 **Reason.loc**:
+
 - `Reason.loc`: change from `Optional[str]` to `Optional[ReadLoc]`
 - `Reason.to_dict()`: serialize via `loc.display_name()` for frontend
 
 **Frontend output bridge** (helpers in `models.py`):
+
 ```python
 def readlocset_to_var_names(locs: ReadLocSet) -> List[str]:
 def readlocset_to_column_map(locs: ReadLocSet) -> Dict[str, List[str]]:
@@ -762,6 +777,7 @@ def writelocset_to_column_map(locs: WriteLocSet) -> Dict[str, List[str]]:
 ```
 
 **FORMAL_DEVELOPMENT.md**:
+
 - §1.2: R_i ⊆ ReadLoc, W_i ⊆ WriteLoc
 - §3.2: Predicates use ▷
 - §3.3: Staleness uses ▷ + output
@@ -773,17 +789,17 @@ def writelocset_to_column_map(locs: WriteLocSet) -> Dict[str, List[str]]:
 
 ## What Gets Deleted
 
-| File | Lines | Replacement |
-|---|---|---|
-| `conflict_resolver.py` | ~394 | `wlocs_conflict_rlocs()` (~5 lines) |
-| `conflict_rules.py` | ~415 | `write_conflicts_read()` (~60 lines) |
-| `access_events.py` | ~143 | `ReadLoc` (~30 lines) |
-| `changes.py` | ~150 | `WriteLoc` (~60 lines) |
-| `_has_relevant_overlap_by_id()` | ~50 | `has_conflict()` (3 lines) |
-| `_locs_conflict()` | ~55 | absorbed into `write_conflicts_read()` |
-| `check_loc_conflicts()` | ~50 | `wlocs_conflict_rlocs()` |
-| `StructuralTrackingMode` + branches | ~100 | deleted (always enforce) |
-| **Total removed** | **~1350** | **~160 replacement** |
+| File                                | Lines     | Replacement                            |
+| ----------------------------------- | --------- | -------------------------------------- |
+| `conflict_resolver.py`              | ~394      | `wlocs_conflict_rlocs()` (~5 lines)    |
+| `conflict_rules.py`                 | ~415      | `write_conflicts_read()` (~60 lines)   |
+| `access_events.py`                  | ~143      | `ReadLoc` (~30 lines)                  |
+| `changes.py`                        | ~150      | `WriteLoc` (~60 lines)                 |
+| `_has_relevant_overlap_by_id()`     | ~50       | `has_conflict()` (3 lines)             |
+| `_locs_conflict()`                  | ~55       | absorbed into `write_conflicts_read()` |
+| `check_loc_conflicts()`             | ~50       | `wlocs_conflict_rlocs()`               |
+| `StructuralTrackingMode` + branches | ~100      | deleted (always enforce)               |
+| **Total removed**                   | **~1350** | **~160 replacement**                   |
 
 ## Key Design Decisions
 
@@ -806,7 +822,7 @@ def writelocset_to_column_map(locs: WriteLocSet) -> Dict[str, List[str]]:
 6. **`WriteBeforeRead` keeps the ambient exclusion.** Pragmatic: pre-existing namespace
    variables are not flagged.
 
-7. **`TrackingData` is unchanged.** It remains the runtime *collection* format. Conversion
+7. **`TrackingData` is unchanged.** It remains the runtime _collection_ format. Conversion
    to `ReadLocSet`/`WriteLocSet` happens once at `record_execution()` time.
 
 ## Risk Assessment

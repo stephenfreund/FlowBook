@@ -8,7 +8,12 @@
 import { Widget } from '@lumino/widgets';
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
-import { IReproducibilityMetadata, IReproducibilityError, IReadLoc, IWriteLoc } from './types';
+import {
+  IReproducibilityMetadata,
+  IReproducibilityError,
+  IReadLoc,
+  IWriteLoc
+} from './types';
 import { indexToAlpha } from '../cellindexutils';
 
 interface IReproducibilityMetadataDisplayProps {
@@ -35,7 +40,10 @@ function cellIdToReference(cellId: string, cellOrder: string[]): string {
 /**
  * Get display name for a loc qualifier (handles both string and numeric loc_ids).
  */
-function displayQualifier(loc: { qualifier?: string | number; var_name?: string }): string | undefined {
+function displayQualifier(loc: {
+  qualifier?: string | number;
+  var_name?: string;
+}): string | undefined {
   if (loc.var_name !== undefined) {
     return loc.var_name;
   }
@@ -226,11 +234,11 @@ function writeLocsEqual(a: IWriteLoc[], b: IWriteLoc[]): boolean {
  */
 function formatErrorType(errorType: string): string {
   const labels: Record<string, string> = {
-    'no_read_and_write': 'Read And Write Same Location',
-    'write_before_read': 'Undefined Variable',
-    'no_read_before_write': 'Forward Contamination',
-    'no_write_after_read': 'Backward Mutation',
-    'unrecoverable_mutation': 'Unrecoverable Mutation'
+    no_read_and_write: 'Read And Write Same Location',
+    write_before_read: 'Undefined Variable',
+    no_read_before_write: 'Forward Contamination',
+    no_write_after_read: 'Backward Mutation',
+    unrecoverable_mutation: 'Unrecoverable Mutation'
   };
   return labels[errorType] || errorType;
 }
@@ -290,22 +298,39 @@ const ReproducibilityMetadataDisplay: React.FC<
           <div className="flowbook-metadata-section flowbook-error-section">
             <div className="flowbook-metadata-item">
               <strong style={{ color: '#d32f2f' }}>Errors:</strong>
-              <ul className="flowbook-error-list" style={{ margin: '4px 0', paddingLeft: '16px' }}>
-                {metadata.errors.map((err: IReproducibilityError, i: number) => (
-                  <li key={i} style={{ marginBottom: '6px' }}>
-                    <div style={{ fontWeight: 600, color: '#d32f2f', fontSize: '0.9em' }}>
-                      {formatErrorType(err.error_type)}
-                    </div>
-                    <div style={{ fontSize: '0.85em', color: '#333' }}>
-                      {err.message}
-                    </div>
-                    {err.causer_cell && (
-                      <div style={{ fontSize: '0.85em', color: '#666' }}>
-                        Conflicts with: <code>{cellIdToReference(err.causer_cell, currentCellOrder)}</code>
+              <ul
+                className="flowbook-error-list"
+                style={{ margin: '4px 0', paddingLeft: '16px' }}
+              >
+                {metadata.errors.map(
+                  (err: IReproducibilityError, i: number) => (
+                    <li key={i} style={{ marginBottom: '6px' }}>
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          color: '#d32f2f',
+                          fontSize: '0.9em'
+                        }}
+                      >
+                        {formatErrorType(err.error_type)}
                       </div>
-                    )}
-                  </li>
-                ))}
+                      <div style={{ fontSize: '0.85em', color: '#333' }}>
+                        {err.message}
+                      </div>
+                      {err.causer_cell && (
+                        <div style={{ fontSize: '0.85em', color: '#666' }}>
+                          Conflicts with:{' '}
+                          <code>
+                            {cellIdToReference(
+                              err.causer_cell,
+                              currentCellOrder
+                            )}
+                          </code>
+                        </div>
+                      )}
+                    </li>
+                  )
+                )}
               </ul>
             </div>
           </div>
@@ -365,7 +390,9 @@ const ReproducibilityMetadataDisplay: React.FC<
       <div className="flowbook-metadata-divider" />
       <div className="flowbook-metadata-section">
         <div className="flowbook-metadata-item">
-          <strong>{writesAndChangedSame ? 'Writes:' : 'Writes (Intended):'}</strong>
+          <strong>
+            {writesAndChangedSame ? 'Writes:' : 'Writes (Intended):'}
+          </strong>
           {renderLocGroups(writeGroups)}
         </div>
       </div>
@@ -418,7 +445,6 @@ const ReproducibilityMetadataDisplay: React.FC<
             </div>
           </>
         )}
-
     </div>
   );
 };

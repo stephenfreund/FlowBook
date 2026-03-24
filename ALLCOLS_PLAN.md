@@ -3,6 +3,7 @@
 ## Problem
 
 `Var(df)` in a read set conflates two meanings:
+
 1. **Binding read** — `df["y"] = ...` accesses the namespace binding `df` to get the object
 2. **Data read** — `df.sum()` reads all column data through an untracked method
 
@@ -39,15 +40,15 @@ Only `Var(x) ▷ Var(x)` (variable completely replaced) conflicts with a Var rea
 
 The updated 7×4 matrix:
 
-| Write ↓ \ Read → | Var(x) | Col(d,c) | Attr(d,a) | File(p) |
-|---|---|---|---|---|
-| Var(x) | x=x' | x=d | x=d | — |
-| Col(d,c) | **false** | d=d'∧c=c' | — | — |
-| ColAdd(d,c) | **false** | — | d=d'∧a∈COL | — |
-| ColDel(d,c) | **false** | d=d'∧c=c' | d=d'∧a∈COL | — |
-| Rows(d) | **false** | d=d' | d=d'∧a∈ROW | — |
-| Attr(d,a) | **false** | — | d=d'∧a=a' | — |
-| File(p) | — | — | — | p=p' |
+| Write ↓ \ Read → | Var(x)    | Col(d,c)  | Attr(d,a)  | File(p) |
+| ---------------- | --------- | --------- | ---------- | ------- |
+| Var(x)           | x=x'      | x=d       | x=d        | —       |
+| Col(d,c)         | **false** | d=d'∧c=c' | —          | —       |
+| ColAdd(d,c)      | **false** | —         | d=d'∧a∈COL | —       |
+| ColDel(d,c)      | **false** | d=d'∧c=c' | d=d'∧a∈COL | —       |
+| Rows(d)          | **false** | d=d'      | d=d'∧a∈ROW | —       |
+| Attr(d,a)        | **false** | —         | d=d'∧a=a'  | —       |
+| File(p)          | —         | —         | —          | p=p'    |
 
 (**bold** = changed from `d=x` to `false`)
 
@@ -66,10 +67,12 @@ The updated 7×4 matrix:
 ### Tests
 
 Update `test_locations.py`:
+
 - Change 5 existing tests from `assert True` to `assert False` for the changed rules
 - Add 2 new tests verifying Var(df) is NOT conflicted by Col/ColAdd writes
 
 Update enforcer tests:
+
 - Tests expecting NoReadAndWrite for column assignments: remove that expectation
 
 ## Phase 2: Intercept Tier 1 DataFrame methods
@@ -85,14 +88,17 @@ exists, so we enumerate its columns directly.
 Add patches for these methods in `_patch_dataframe_methods()`:
 
 **Aggregation methods** (read all columns, return Series/scalar):
+
 - `sum`, `mean`, `std`, `var`, `min`, `max`, `median`
 - `describe`, `corr`, `cov`
 - `quantile`, `nunique`
 
 **Transformation methods** (read all columns, return DataFrame):
+
 - `apply` (axis=0 default: each column), `to_numpy`, `to_dict`, `to_records`
 
 **Property access** (read all columns):
+
 - `values` (property — returns numpy array of all column data)
 
 **Pattern for each patch:**
@@ -143,6 +149,7 @@ pd.DataFrame.values = property(tracked_values)
 Cell: `result = df.sum()` where df has columns {price, qty, name}
 
 Before (no interception):
+
 ```
 reads_before_writes = {"df"}
 column_reads_before_writes = {}
@@ -150,6 +157,7 @@ column_reads_before_writes = {}
 ```
 
 After (with interception):
+
 ```
 reads_before_writes = {"df"}
 column_reads_before_writes = {"df": {"price", "qty", "name"}}
@@ -251,13 +259,13 @@ by existing column staleness tests once the methods produce Col reads.)
 
 ## Summary
 
-| Phase | What | Lines | New Tests |
-|---|---|---|---|
-| 1 | Change 5 ▷ rules to false | ~10 | ~7 update |
-| 2 | Patch 12 DataFrame methods | ~150 | ~8 |
-| 3 | End-to-end integration | ~40 | ~3 |
-| 4 | Spec updates | ~20 | — |
-| **Total** | | **~220** | **~18** |
+| Phase     | What                       | Lines    | New Tests |
+| --------- | -------------------------- | -------- | --------- |
+| 1         | Change 5 ▷ rules to false  | ~10      | ~7 update |
+| 2         | Patch 12 DataFrame methods | ~150     | ~8        |
+| 3         | End-to-end integration     | ~40      | ~3        |
+| 4         | Spec updates               | ~20      | —         |
+| **Total** |                            | **~220** | **~18**   |
 
 No new types. No new constructors. No ▷ matrix expansion.
 Just 5 rules change + method interception that produces existing Col locs.

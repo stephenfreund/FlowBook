@@ -38,6 +38,7 @@ placeholder-package/
 ### 1. Set Up PyPI Trusted Publishing (One-Time)
 
 Go to https://pypi.org/manage/account/publishing/ and add:
+
 - PyPI Project Name: `flowbook-python`
 - Owner: `stephenfreund`
 - Repository: `FlowBook`
@@ -47,6 +48,7 @@ Go to https://pypi.org/manage/account/publishing/ and add:
 ### 2. Publish the Placeholder
 
 1. Push this branch to GitHub (if not already pushed):
+
    ```bash
    git push origin placeholder
    ```
@@ -67,6 +69,7 @@ Go to https://pypi.org/manage/account/publishing/ and add:
 ### 3. Verify Publication
 
 After the workflow completes:
+
 ```bash
 pip install flowbook-python
 python -c "import flowbook; print(flowbook.__version__)"
@@ -85,6 +88,7 @@ python -c "import flowbook; print(flowbook.__version__)"
 ```
 
 Or use the helper script:
+
 ```bash
 ./setup-placeholder.sh
 ```
@@ -112,16 +116,16 @@ The transition is designed to be seamless for users - they simply upgrade their 
 
 ## File Descriptions
 
-| File | Purpose |
-|------|---------|
-| `placeholder-package/pyproject.toml` | Package configuration (name, version, dependencies) |
-| `placeholder-package/README.md` | User-facing documentation explaining the placeholder |
-| `placeholder-package/flowbook/__init__.py` | Minimal Python module with version info |
-| `placeholder-package/LICENSE` | BSD 3-Clause license |
-| `.github/workflows/release.yaml` | GitHub Actions workflow for PyPI publishing |
-| `PLACEHOLDER_SETUP.md` | Implementation details and usage guide |
-| `TRANSITION.md` | Guide for transitioning to full package |
-| `setup-placeholder.sh` | Helper script for testing the setup |
+| File                                       | Purpose                                              |
+| ------------------------------------------ | ---------------------------------------------------- |
+| `placeholder-package/pyproject.toml`       | Package configuration (name, version, dependencies)  |
+| `placeholder-package/README.md`            | User-facing documentation explaining the placeholder |
+| `placeholder-package/flowbook/__init__.py` | Minimal Python module with version info              |
+| `placeholder-package/LICENSE`              | BSD 3-Clause license                                 |
+| `.github/workflows/release.yaml`           | GitHub Actions workflow for PyPI publishing          |
+| `PLACEHOLDER_SETUP.md`                     | Implementation details and usage guide               |
+| `TRANSITION.md`                            | Guide for transitioning to full package              |
+| `setup-placeholder.sh`                     | Helper script for testing the setup                  |
 
 ## Important Notes
 
@@ -135,6 +139,7 @@ The transition is designed to be seamless for users - they simply upgrade their 
 ## Support
 
 For questions or issues:
+
 - See `PLACEHOLDER_SETUP.md` for detailed setup information
 - See `TRANSITION.md` for transition guidance
 - GitHub: https://github.com/stephenfreund/FlowBook

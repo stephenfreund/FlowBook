@@ -5,6 +5,7 @@ This document explains how to transition from the placeholder `flowbook-python` 
 ## Current Setup (Placeholder Branch)
 
 The `placeholder` branch contains:
+
 - `placeholder-package/` directory with minimal package structure
 - `.github/workflows/release.yaml` workflow for PyPI publishing
 - Package name: `flowbook-python`
@@ -17,6 +18,7 @@ When ready to publish the full FlowBook package to PyPI:
 ### Option 1: Update the Placeholder Branch (Recommended for seamless transition)
 
 1. **Merge main into placeholder branch:**
+
    ```bash
    git checkout placeholder
    git merge main
@@ -33,11 +35,13 @@ When ready to publish the full FlowBook package to PyPI:
    - Update dependencies and metadata
 
 4. **Remove placeholder-package directory:**
+
    ```bash
    git rm -r placeholder-package/
    ```
 
 5. **Test the build:**
+
    ```bash
    python -m build
    ```
@@ -51,6 +55,7 @@ When ready to publish the full FlowBook package to PyPI:
 ### Option 2: Configure Main Branch for Releases
 
 1. **Copy the workflow to main branch:**
+
    ```bash
    git checkout main
    git checkout placeholder -- .github/workflows/release.yaml
@@ -84,6 +89,7 @@ The workflow uses PyPI's trusted publishing feature. To enable it:
    - Environment: (leave blank or set to `release`)
 
 If not using trusted publishing, you'll need to:
+
 1. Create a PyPI API token
 2. Add it to GitHub Secrets as `PYPI_API_TOKEN`
 3. Uncomment the password line in the workflow

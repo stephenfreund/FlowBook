@@ -463,7 +463,9 @@ export class ReproducibilityCellHighlighter {
     if (cellId) {
       const causingIdx = cellOrder.indexOf(cellId);
       causingIsDeleted = causingIdx < 0;
-      causingRef = causingIsDeleted ? 'a deleted cell' : indexToAlpha(causingIdx);
+      causingRef = causingIsDeleted
+        ? 'a deleted cell'
+        : indexToAlpha(causingIdx);
       // Determine relative position (only if cell still exists)
       if (!causingIsDeleted && currentIdx >= 0) {
         causingDirection = causingIdx < currentIdx ? ' above' : ' below';
@@ -610,7 +612,7 @@ export class ReproducibilityCellHighlighter {
         : `\u26a0\ufe0f ${message}`;
 
       const infoIcon = '';
-//        '<span class="flowbook-staleness-info-icon" title="This cell may produce different results than shown">ⓘ</span>';
+      //        '<span class="flowbook-staleness-info-icon" title="This cell may produce different results than shown">ⓘ</span>';
       const stalenessOutput: IOutput = {
         output_type: 'display_data',
         data: {

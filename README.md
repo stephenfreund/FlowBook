@@ -1,6 +1,5 @@
 # flowbook
 
-
 ## TL;DR
 
 - Clone repository
@@ -12,7 +11,7 @@ Once JupyterLab opens, create or open a notebook and select the
 FlowBook automatically highlights stale cells that must be run or
 re-run in yellow. It marks cells whose execution would violate rerun
 consistency in red. The metadata panel (right sidebar) shows a bunch
-of analysis state.  When no cells are stale, the notebook's outputs
+of analysis state. When no cells are stale, the notebook's outputs
 will match a top-to-bottom run in a newly-created kernel.
 
 Start with the `GettingStarted.ipynb` notebook, and the maybe the
@@ -34,7 +33,7 @@ pip install flowbook
 
 FlowBook provides several command line tools for notebook processing,
 optimization, and analysis. See [CLI.md](CLI.md) for complete
-documentation.  These were not intended for public consumption.  Your
+documentation. These were not intended for public consumption. Your
 mileage may vary.
 
 - `flowbook` - Main CLI for notebook processing commands

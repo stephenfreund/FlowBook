@@ -18,7 +18,7 @@ export interface IReadLoc {
   type: 'var' | 'col' | 'attr' | 'file';
   name: string;
   qualifier?: string | number;
-  var_name?: string;  // Present when qualifier is a loc_id (number)
+  var_name?: string; // Present when qualifier is a loc_id (number)
 }
 
 /**
@@ -31,7 +31,7 @@ export interface IWriteLoc {
   type: 'var' | 'col' | 'col_add' | 'col_del' | 'rows' | 'attr' | 'file';
   name: string;
   qualifier?: string | number;
-  var_name?: string;  // Present when qualifier is a loc_id (number)
+  var_name?: string; // Present when qualifier is a loc_id (number)
 }
 
 export interface IReproducibilityMetadata {
@@ -218,9 +218,9 @@ const COL_ATTRS = new Set([
  * Col(d, c) writes invalidate these.
  */
 const COL_VALUE_ATTRS = new Set([
-  'values',   // df.values — 2D array of all column data
-  'T',        // df.T — transpose exposes all column data
-  'describe'  // df.describe() — statistics computed from column values
+  'values', // df.values — 2D array of all column data
+  'T', // df.T — transpose exposes all column data
+  'describe' // df.describe() — statistics computed from column values
 ]);
 
 /**
@@ -241,7 +241,10 @@ const ROW_ATTRS = new Set([
  * Get the display variable name from a qualifier.
  * If qualifier is a loc_id (number), use var_name. Otherwise use qualifier directly.
  */
-function _displayQualifier(loc: { qualifier?: string | number; var_name?: string }): string | undefined {
+function _displayQualifier(loc: {
+  qualifier?: string | number;
+  var_name?: string;
+}): string | undefined {
   if (loc.var_name !== undefined) {
     return loc.var_name;
   }
@@ -317,22 +320,14 @@ export function writeConflictsRead(w: IWriteLoc, r: IReadLoc): boolean {
 
     case 'col_add':
       // ColAdd(d,c) only conflicts with Attr reads on COL_ATTRS
-      return (
-        r.type === 'attr' &&
-        _sameDataframe(w, r) &&
-        COL_ATTRS.has(r.name)
-      );
+      return r.type === 'attr' && _sameDataframe(w, r) && COL_ATTRS.has(r.name);
 
     case 'col_del':
       // ColDel(d,c) conflicts with Col(d,c) AND Attr(d, COL_ATTRS)
       if (r.type === 'col') {
         return _sameDataframe(w, r) && w.name === r.name;
       }
-      return (
-        r.type === 'attr' &&
-        _sameDataframe(w, r) &&
-        COL_ATTRS.has(r.name)
-      );
+      return r.type === 'attr' && _sameDataframe(w, r) && COL_ATTRS.has(r.name);
 
     case 'rows':
       // Rows(d) conflicts with all Col(d,*) AND Attr(d, ROW_ATTRS)
@@ -346,11 +341,7 @@ export function writeConflictsRead(w: IWriteLoc, r: IReadLoc): boolean {
 
     case 'attr':
       // Attr(d,a) only conflicts with Attr(d,a) — same dataframe AND same attr
-      return (
-        r.type === 'attr' &&
-        _sameDataframe(w, r) &&
-        w.name === r.name
-      );
+      return r.type === 'attr' && _sameDataframe(w, r) && w.name === r.name;
 
     case 'file':
       // File(p) only conflicts with File(p)
@@ -364,10 +355,7 @@ export function writeConflictsRead(w: IWriteLoc, r: IReadLoc): boolean {
 /**
  * Check if any write loc in `wlocs` conflicts with any read loc in `rlocs`.
  */
-export function hasConflict(
-  wlocs: IWriteLoc[],
-  rlocs: IReadLoc[]
-): boolean {
+export function hasConflict(wlocs: IWriteLoc[], rlocs: IReadLoc[]): boolean {
   for (const w of wlocs) {
     for (const r of rlocs) {
       if (writeConflictsRead(w, r)) {
@@ -447,16 +435,28 @@ export function writeLocOutputs(w: IWriteLoc): IReadLoc[] {
     case 'col':
       return [
         { type: 'col', name: w.name, qualifier: w.qualifier },
-        ...[...COL_VALUE_ATTRS].map(a => ({ type: 'attr' as const, name: a, qualifier: w.qualifier }))
+        ...[...COL_VALUE_ATTRS].map(a => ({
+          type: 'attr' as const,
+          name: a,
+          qualifier: w.qualifier
+        }))
       ];
     case 'col_add':
       // ColAdd conflicts with Attr(d, a) for a ∈ COL_ATTRS
-      return [...COL_ATTRS].map(a => ({ type: 'attr' as const, name: a, qualifier: w.qualifier }));
+      return [...COL_ATTRS].map(a => ({
+        type: 'attr' as const,
+        name: a,
+        qualifier: w.qualifier
+      }));
     case 'col_del':
       // ColDel conflicts with Col(d, c) and Attr(d, a) for a ∈ COL_ATTRS
       return [
         { type: 'col', name: w.name, qualifier: w.qualifier },
-        ...[...COL_ATTRS].map(a => ({ type: 'attr' as const, name: a, qualifier: w.qualifier }))
+        ...[...COL_ATTRS].map(a => ({
+          type: 'attr' as const,
+          name: a,
+          qualifier: w.qualifier
+        }))
       ];
     case 'rows':
       // Rows conflicts with Attr(d, a) for a ∈ ROW_ATTRS

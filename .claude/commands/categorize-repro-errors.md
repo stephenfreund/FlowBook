@@ -10,21 +10,25 @@ Analyze reproducibility errors from a FlowBook error report or directly from a p
 ```
 
 **Mode 1: Error Report Mode**
+
 - `ERROR_REPORT_FILE`: Path to the error report file (e.g., `errors.txt`)
 - `NOTEBOOKS_DIR`: Directory containing the notebook files
 - `--fix`: Optional flag to apply fixes after categorization
 
 **Mode 2: Single Notebook Mode** (when only a `.ipynb` path is provided)
+
 - `NOTEBOOK_PATH`: Path to a processed notebook (must have been run through FlowBook kernel)
 - `--fix`: Optional flag to apply fixes after categorization
 
 ## Task
 
 ### For Error Report Mode:
+
 1. Parse the error report file using `flowbook/scripts/parse_repro_errors.py`
 2. For each notebook with errors, launch a parallel agent to analyze and categorize errors
 
 ### For Single Notebook Mode:
+
 1. Extract errors directly from the notebook's cell metadata (see "Extracting Errors from Notebook" below)
 2. Analyze and categorize errors for that single notebook
 
@@ -32,25 +36,25 @@ Analyze reproducibility errors from a FlowBook error report or directly from a p
 
 ### Error Categories
 
-| Category | Description | Example | Fix Strategy |
-|----------|-------------|---------|--------------|
-| **In-place variable reassignment** | Cell reads and overwrites same variable | `train = pd.concat([train, extra])` | Deep-copy + alpha-rename |
-| **Sequential transformation chain** | Downstream depends on upstream transformation | Imputation then feature engineering | Deep-copy + alpha-rename |
-| **Diagnostic inspection before mutation** | Read-only cell captures pre-transformation state | `df.info()` before `df["col"] = ...` | Add `%diagnostic` magic |
-| **Visualization before mutation** | Plot accesses all columns before column added | `sns.heatmap(df.corr())` before new col | Add `%diagnostic` magic |
-| **Reusing variable for different purposes** | Variable reused for different purposes in disjoint regions of the code | `model` reused for different model | Alpha-rename downstream |
-| **Unrecoverable in-place mutation** | Cell mutates object without rebinding | `model.fit()`, `df.drop(inplace=True)` | See sub-types below |
+| Category                                    | Description                                                            | Example                                 | Fix Strategy             |
+| ------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------- | ------------------------ |
+| **In-place variable reassignment**          | Cell reads and overwrites same variable                                | `train = pd.concat([train, extra])`     | Deep-copy + alpha-rename |
+| **Sequential transformation chain**         | Downstream depends on upstream transformation                          | Imputation then feature engineering     | Deep-copy + alpha-rename |
+| **Diagnostic inspection before mutation**   | Read-only cell captures pre-transformation state                       | `df.info()` before `df["col"] = ...`    | Add `%diagnostic` magic  |
+| **Visualization before mutation**           | Plot accesses all columns before column added                          | `sns.heatmap(df.corr())` before new col | Add `%diagnostic` magic  |
+| **Reusing variable for different purposes** | Variable reused for different purposes in disjoint regions of the code | `model` reused for different model      | Alpha-rename downstream  |
+| **Unrecoverable in-place mutation**         | Cell mutates object without rebinding                                  | `model.fit()`, `df.drop(inplace=True)`  | See sub-types below      |
 
 ### Unrecoverable Mutation Sub-types
 
 When the predicate is `"unrecoverable_mutation"`, identify the sub-type from the cell source:
 
-| Sub-type | Detection Pattern | Fix Type | Example |
-|----------|-------------------|----------|---------|
-| **ML model mutation** | `.fit()`, `.fit_transform()`, `.predict()` on model/scaler | `model-copy` | `model.fit(X, y)` |
-| **DataFrame inplace** | `inplace=True` argument | `inplace-to-copy` | `df.drop(col, inplace=True)` |
-| **Structural assignment** | `.columns = ...`, `.index = ...` | `struct-copy` | `df.columns = ['a', 'b']` |
-| **Container mutation** | `.append()`, `[i] = ...` on list/dict/array | `inplace-reassign` | `arr[5] = 99` |
+| Sub-type                  | Detection Pattern                                          | Fix Type           | Example                      |
+| ------------------------- | ---------------------------------------------------------- | ------------------ | ---------------------------- |
+| **ML model mutation**     | `.fit()`, `.fit_transform()`, `.predict()` on model/scaler | `model-copy`       | `model.fit(X, y)`            |
+| **DataFrame inplace**     | `inplace=True` argument                                    | `inplace-to-copy`  | `df.drop(col, inplace=True)` |
+| **Structural assignment** | `.columns = ...`, `.index = ...`                           | `struct-copy`      | `df.columns = ['a', 'b']`    |
+| **Container mutation**    | `.append()`, `[i] = ...` on list/dict/array                | `inplace-reassign` | `arr[5] = 99`                |
 
 **Why these are unrecoverable:** Re-executing the cell cannot restore the full value of the variable. For example, `model.fit()` only trains the model — it cannot "un-train" changes from a deleted cell. Similarly, `arr[5] = 99` sets one element but cannot restore what a deleted cell wrote to `arr[3]`.
 
@@ -87,6 +91,7 @@ python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type struct-c
 ```
 
 The script creates `<notebook>-fixed.ipynb` with:
+
 - Comments marked `# [FLOWBOOK FIX]` explaining the original error and fix
 - Deep copies with `_flow_XXXX` suffix for renamed variables
 - `%diagnostic` magic for inspection cells (tells kernel to skip reproducibility checks)
@@ -180,6 +185,7 @@ def extract_errors_from_notebook(notebook_path: str) -> dict:
 ```
 
 **Key metadata locations in notebook JSON:**
+
 - `cell.outputs[].metadata.predicate_violation` - Violation details:
   - `predicate`: Type of violation (`"no_read_and_write"`, `"backward_stale"`, etc.)
   - `cell_id`: Cell that triggered the violation
@@ -199,12 +205,14 @@ When the user invokes this command:
 ### Detect Mode
 
 First, determine which mode to use:
+
 - If the first argument ends with `.ipynb`, use **Single Notebook Mode**
 - Otherwise, use **Error Report Mode**
 
 ### Error Report Mode
 
 1. Run the parsing script to get structured error data:
+
    ```bash
    python flowbook/scripts/parse_repro_errors.py $ERROR_REPORT_FILE $NOTEBOOKS_DIR --json
    ```
