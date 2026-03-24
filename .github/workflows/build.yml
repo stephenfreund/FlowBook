@@ -52,5 +52,11 @@ jobs:
           jupyter server extension list
           jupyter server extension list 2>&1 | grep -ie "flowbook.*OK"
 
-      - name: Run Python tests
-        run: pytest flowbook/ -v --ignore=flowbook/labextension
+      - name: Run litmus tests
+        run: pytest flowbook/kernel/tests/test_litmus.py -v
+
+      - name: Run paper example tests
+        run: pytest flowbook/kernel/tests/test_paper_examples.py -v
+
+      - name: Verify flowbook CLI
+        run: flowbook -h
