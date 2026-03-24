@@ -5867,3 +5867,116 @@ class TestRerunEmptiedCell:
             f"B should be stale after C stops writing x (B is now last writer). "
             f"stale_cells={stale}"
         )
+
+
+class TestColumnRerunNoSpuriousStaleness:
+    """Test that re-running a column-write cell doesn't spuriously mark the
+    DataFrame creator as stale.
+
+    Scenario (04_Column_Independence.ipynb):
+        A: df = pd.DataFrame({...})            → writes Var(df)
+        B: avg_age = df['age'].mean()          → reads Col(df, age), writes Var(avg_age)
+        C: df['adjusted_age'] = df['age']*1.1  → reads Col(df, age), writes Col(df, adjusted_age)
+
+    Execute A→B→C→C. After the second run of C, A should NOT be marked stale.
+
+    Root cause of the bug: W_i_old is derived from the stored WriteLocSet
+    (which includes DataFrame names from column writes via writelocset_var_names),
+    but W_i_current = tracking.writes only includes rebound variables.
+    Column mutations (df['col'] = ...) don't rebind df, so df is NOT in
+    tracking.writes. The removed_writes = W_i_old - W_i_current wrongly
+    includes 'df', triggering BackwardStale on A (the last writer of df).
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(
+            f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
+        )
+
+    def test_rerun_column_write_does_not_stale_creator(self):
+        """Re-running C (column write) should not mark A (df creator) stale."""
+        import pandas as pd
+
+        df = pd.DataFrame({
+            "name": ["Alice", "Bob"],
+            "age": [30, 25],
+            "score": [85, 92],
+        })
+
+        # A: df = pd.DataFrame({...})
+        self._save_pre_checkpoint("a", {})
+        ns_a = {"df": df}
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B: avg_age = df['age'].mean()
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = {"df": df, "avg_age": 27.5}
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"}, writes={"avg_age"},
+                column_reads={"df": {"age"}},
+            ),
+        )
+
+        # C (first run): df['adjusted_age'] = df['age'] * 1.1
+        df_after_c1 = df.copy()
+        df_after_c1["adjusted_age"] = df_after_c1["age"] * 1.1
+        self._save_pre_checkpoint("c", {"df": df, "avg_age": 27.5})
+        ns_c1 = {"df": df_after_c1, "avg_age": 27.5}
+        result_c1 = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c1,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_reads={"df": {"age"}},
+                column_writes={"df": {"adjusted_age"}},
+            ),
+        )
+        assert not result_c1.has_errors(), f"First run of C should not error: {result_c1.errors}"
+        assert self.sdc._notebook_state.is_clean("a"), "A should be clean after first C run"
+        assert self.sdc._notebook_state.is_clean("b"), "B should be clean after first C run"
+
+        # C (second run): same code, same effect — column already exists
+        df_after_c2 = df_after_c1.copy()
+        df_after_c2["adjusted_age"] = df_after_c2["age"] * 1.1
+        self._save_pre_checkpoint("c", {"df": df_after_c1, "avg_age": 27.5})
+        ns_c2 = {"df": df_after_c2, "avg_age": 27.5}
+        result_c2 = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c2,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_reads={"df": {"age"}},
+                column_writes={"df": {"adjusted_age"}},
+            ),
+        )
+        assert not result_c2.has_errors(), f"Second run of C should not error: {result_c2.errors}"
+
+        # THE BUG: A should NOT be stale. C only wrote a column of df,
+        # it did not rebind df. A's creation of df is not invalidated.
+        assert "a" not in result_c2.stale_cells, (
+            f"A should NOT be stale after second run of C (column write only). "
+            f"stale_cells={result_c2.stale_cells}, "
+            f"C only wrote Col(df, adjusted_age), not Var(df)"
+        )
+        assert self.sdc._notebook_state.is_clean("a"), (
+            "A should remain clean — column mutation does not invalidate df creator"
+        )

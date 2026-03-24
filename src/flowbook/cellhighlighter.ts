@@ -11,6 +11,7 @@ import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { IOutput } from '@jupyterlab/nbformat';
 import { StalenessManager } from './stalenessmanager';
 import { ReproducibilityMetadataPanel } from './metadatapanel';
+import { DependenciesPanel, ICellGraphData } from './dependenciespanel';
 import {
   IReproducibilityMetadata,
   IStalenessReason,
@@ -31,6 +32,8 @@ function isFrontendReason(
 export class ReproducibilityCellHighlighter {
   private _tracker: INotebookTracker;
   private _panel: ReproducibilityMetadataPanel;
+  private _dependenciesPanel: DependenciesPanel | null = null;
+  private _depPanelFrameId: number | null = null; // debounce for dep panel updates
   private _stalenessManagers = new Map<string, StalenessManager>();
   private _pendingRestartUpdate = new Set<string>(); // notebook paths awaiting update after restart
   private _executedInSession = new Map<string, Set<string>>(); // notebook path -> set of executed cell IDs
@@ -39,6 +42,34 @@ export class ReproducibilityCellHighlighter {
     this._tracker = tracker;
     this._panel = panel;
     this._initialize();
+  }
+
+  /**
+   * Set the dependencies panel for graph updates.
+   */
+  setDependenciesPanel(panel: DependenciesPanel): void {
+    this._dependenciesPanel = panel;
+  }
+
+  /**
+   * Schedule a dependency graph refresh on the next animation frame.
+   * Multiple calls within the same frame collapse into one update,
+   * ensuring the panel always reads the latest metadata regardless
+   * of signal ordering between IOPub, executed, and staleness handlers.
+   */
+  refreshDependencies(): void {
+    if (this._depPanelFrameId !== null) {
+      cancelAnimationFrame(this._depPanelFrameId);
+    }
+    this._depPanelFrameId = requestAnimationFrame(() => {
+      this._depPanelFrameId = null;
+      const notebook = this._tracker.currentWidget;
+      if (notebook) {
+        const stalenessManager = this.getStalenessManager(notebook);
+        const cellOrder = this._getCurrentCellOrder(notebook);
+        this._updateDependenciesPanel(notebook, stalenessManager, cellOrder);
+      }
+    });
   }
 
   private _initialize(): void {
@@ -140,20 +171,21 @@ export class ReproducibilityCellHighlighter {
       this._updatePanelWithCurrentCellOrder(notebook);
     });
 
-    // Listen for cell execution to track executed cells and update highlight
+    // Listen for cell execution to track executed cells.
+    // Note: updateCell is NOT called here — it is called by
+    // ReproducibilityExecutionHookManager._onCellExecuted after it has
+    // finished extracting and storing violation/flowbook metadata.
+    // Calling updateCell here would run _updateViolationOutput too early,
+    // destroying the kernel's predicate_violation display_data before the
+    // execution hook can read it.
     NotebookActions.executed.connect((_sender, args) => {
       if (args.notebook === notebook.content) {
-        // Track this cell as executed in current session
         let executed = this._executedInSession.get(path);
         if (!executed) {
           executed = new Set<string>();
           this._executedInSession.set(path, executed);
         }
         executed.add(args.cell.model.id);
-
-        const stalenessManager = this.getStalenessManager(notebook);
-        const cellOrder = this._getCurrentCellOrder(notebook);
-        this.updateCell(args.cell, stalenessManager, cellOrder, path);
       }
     });
 
@@ -221,6 +253,71 @@ export class ReproducibilityCellHighlighter {
         this.updateCell(cell, stalenessManager, cellOrder, path);
       }
     });
+
+    // Schedule dependency panel refresh (debounced to next frame)
+    this.refreshDependencies();
+  }
+
+  /**
+   * Collect graph data from all code cells and update the dependencies panel.
+   */
+  private _updateDependenciesPanel(
+    notebook: NotebookPanel,
+    stalenessManager: StalenessManager,
+    cellOrder: string[]
+  ): void {
+    if (!this._dependenciesPanel) {
+      return;
+    }
+
+    const cellData: ICellGraphData[] = [];
+    const cells = notebook.content.widgets;
+
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i];
+      if (cell.model.type !== 'code') {
+        continue;
+      }
+
+      const cellId = cell.model.id;
+      const orderIndex = cellOrder.indexOf(cellId);
+      if (orderIndex < 0) {
+        continue;
+      }
+
+      const metadata = cell.model.metadata as any;
+      const flowbook = metadata?.flowbook as
+        | IReproducibilityMetadata
+        | undefined;
+      const violations =
+        (cell.model.getMetadata('flowbook_violations') as
+          | IPredicateViolation[]
+          | undefined) || [];
+
+      let label: string;
+      try {
+        label = indexToAlpha(orderIndex);
+      } catch {
+        label = cellId;
+      }
+
+      cellData.push({
+        cellId,
+        index: orderIndex,
+        label,
+        readLocs: flowbook?.read_locs || [],
+        writeLocs: flowbook?.write_locs || [],
+        isStale: stalenessManager.isCellStale(cellId),
+        isExecuted: flowbook !== undefined,
+        hasError: violations.length > 0,
+        violations
+      });
+    }
+
+    // Sort by program order index
+    cellData.sort((a, b) => a.index - b.index);
+
+    this._dependenciesPanel.updateGraph(cellData);
   }
 
   /**

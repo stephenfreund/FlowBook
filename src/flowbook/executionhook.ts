@@ -498,6 +498,11 @@ export class ReproducibilityExecutionHookManager {
       cellOrder,
       panel.context.path
     );
+
+    // Refresh dependency graph now that all metadata is stored.
+    // Must happen here (not in highlighter's executed handler) because
+    // this hook stores flowbook_violations metadata that the graph reads.
+    this._highlighter.refreshDependencies();
   }
 
   /**
