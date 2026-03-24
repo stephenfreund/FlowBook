@@ -5980,3 +5980,174 @@ class TestColumnRerunNoSpuriousStaleness:
         assert self.sdc._notebook_state.is_clean("a"), (
             "A should remain clean — column mutation does not invalidate df creator"
         )
+
+
+class TestForwardContaminationStructuralRead:
+    """Test that reading a structural attribute (df.shape) after a later cell
+    adds a column triggers NoReadBeforeWrite (forward contamination).
+
+    Scenario:
+        A (pos 0): df = pd.DataFrame({"y": [1,2,3]})  → writes Var(df)
+        B (pos 1): df.shape                            → reads Attr(df, shape), Var(df)
+        C (pos 2): df['x'] = 5                         → writes ColAdd(df, x)
+
+    Run A→C→B. When B executes, it reads df.shape which includes the column
+    added by C. This is not rerun-consistent: top-to-bottom A→B→C would give
+    df.shape = (3,1) but A→C→B gives (3,2). NoReadBeforeWrite should catch this
+    because ColAdd(df, x) ▷ Attr(df, shape) = true (shape ∈ COL_ATTRS).
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(
+            f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
+        )
+
+    def test_shape_read_after_column_add_is_forward_contamination(self):
+        """B reading df.shape should error when C (below) added a column."""
+        import pandas as pd
+
+        df_orig = pd.DataFrame({"y": [1, 2, 3]})
+
+        # A: df = pd.DataFrame({"y": [1,2,3]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = {"df": df_orig}
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # C (executed before B in wall-clock): df['x'] = 5
+        df_after_c = df_orig.copy()
+        df_after_c["x"] = 5
+        self._save_pre_checkpoint("c", {"df": df_orig})
+        ns_c = {"df": df_after_c}
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_reads={"df": set()},
+                column_writes={"df": {"x"}},
+            ),
+        )
+        assert not result_c.has_errors(), f"C should not error: {result_c.errors}"
+
+        # B (executed after C): df.shape — reads structural attribute
+        # df now has 2 columns (y, x) instead of 1 (y)
+        self._save_pre_checkpoint("b", {"df": df_after_c})
+        ns_b = {"df": df_after_c}
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                structural_reads={"df": {"shape"}},
+            ),
+        )
+
+        # NoReadBeforeWrite should FAIL: C (pos 2) adds a column to df,
+        # and B (pos 1) reads df.shape which is affected.
+        # ColAdd(df, x) ▷ Attr(df, shape) = true because shape ∈ COL_ATTRS
+        assert result_b.has_errors(), (
+            f"B should have NoReadBeforeWrite error. "
+            f"B reads Attr(df, shape), C wrote ColAdd(df, x). "
+            f"errors={result_b.errors}, "
+            f"read_locs={result_b.read_locs}, "
+            f"C_typed_changes={self.sdc._notebook_state.get_typed_changes('c')}, "
+            f"C_writes={self.sdc._notebook_state.writes.get('c', frozenset())}"
+        )
+        assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE, (
+            f"Expected NO_READ_BEFORE_WRITE, got {result_b.errors[0].error_type}"
+        )
+
+    def test_shape_read_after_column_rewrite_is_forward_contamination(self):
+        """A→C→C→B: second run of C overwrites existing column (Col, not ColAdd).
+
+        After C runs twice, its typed_changes no longer contain ColumnAdded
+        (column already exists). But the stored writes from C's first run
+        included ColAdd(df, x). The NoReadBeforeWrite check should still
+        detect the conflict because C's stored WriteLocSet includes ColAdd.
+        """
+        import pandas as pd
+
+        df_orig = pd.DataFrame({"y": [1, 2, 3]})
+
+        # A: df = pd.DataFrame({"y": [1,2,3]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = {"df": df_orig}
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # C first run: df['x'] = 5 (ColAdd — new column)
+        df_after_c1 = df_orig.copy()
+        df_after_c1["x"] = 5
+        self._save_pre_checkpoint("c", {"df": df_orig})
+        ns_c1 = {"df": df_after_c1}
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c1,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_reads={"df": set()},
+                column_writes={"df": {"x"}},
+            ),
+        )
+
+        # C second run: df['x'] = 5 again (Col — column already exists)
+        df_after_c2 = df_after_c1.copy()
+        df_after_c2["x"] = 5
+        self._save_pre_checkpoint("c", {"df": df_after_c1})
+        ns_c2 = {"df": df_after_c2}
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c2,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_reads={"df": set()},
+                column_writes={"df": {"x"}},
+            ),
+        )
+
+        # B: df.shape — reads structural attribute
+        self._save_pre_checkpoint("b", {"df": df_after_c2})
+        ns_b = {"df": df_after_c2}
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                structural_reads={"df": {"shape"}},
+            ),
+        )
+
+        # Should STILL detect forward contamination. Even though C's second
+        # run detected Col (not ColAdd), C's stored writes should retain
+        # the structural impact — df has a column 'x' that wouldn't exist
+        # in a clean top-to-bottom run at B's position.
+        assert result_b.has_errors(), (
+            f"B should have NoReadBeforeWrite error after A→C→C→B. "
+            f"B reads Attr(df, shape), C added column x. "
+            f"errors={result_b.errors}, "
+            f"C_typed_changes={self.sdc._notebook_state.get_typed_changes('c')}, "
+            f"C_writes={self.sdc._notebook_state.writes.get('c', frozenset())}"
+        )
+        assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE
