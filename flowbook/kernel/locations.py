@@ -389,19 +389,6 @@ def _same_dataframe(a: Optional[Qualifier], b: Optional[Qualifier]) -> bool:
     return a_name == b_name
 
 
-def _var_targets_ref(var_name: str, ref: Optional[Qualifier]) -> bool:
-    """Does Var(x) target the DataFrame accessed through ref?
-
-    Var rebinding invalidates reads that went through that specific
-    variable name, so we compare against ref.var_name (not loc_id).
-    """
-    if ref is None:
-        return False
-    if isinstance(ref, LocRef):
-        return var_name == ref.var_name
-    return var_name == ref
-
-
 # =============================================================================
 # The ▷ Conflict Relation
 # =============================================================================
@@ -413,9 +400,12 @@ def _var_targets_ref(var_name: str, ref: Optional[Qualifier]) -> bool:
 # The "how" is encoded in the WriteLoc type constructor.
 # The matrix has 7 write types × 4 read types = 28 cells.
 #
+# Var(x) only conflicts with Var(x) reads. Rebinding detection for
+# column/attr readers works because Var(x) is always present in the
+# read set alongside Col/Attr reads (see tracking_to_readlocset).
+#
 # Qualifier comparison uses _same_dataframe() for DataFrame-to-DataFrame
-# checks (compares loc_ids when LocRef is available) and _var_targets_ref()
-# for Var-to-DataFrame checks (compares variable names).
+# checks (compares loc_ids when LocRef is available).
 # =============================================================================
 
 
@@ -428,14 +418,11 @@ def write_conflicts_read(w: WriteLoc, r: ReadLoc) -> bool:
 
     Formal ref: LOCSET_UNIFICATION_PLAN.md §The Conflict Relation: ▷
     """
-    # --- Var(x) writes: invalidate any read involving x ---
+    # --- Var(x) writes: only conflict with Var(x) reads ---
+    # Rebinding detection for Col/Attr readers is handled by always
+    # including Var(x) in read sets alongside Col/Attr reads.
     if w.type == WriteLocType.VAR:
-        if r.type == ReadLocType.VAR:
-            return w.name == r.name
-        elif r.type in (ReadLocType.COLUMN, ReadLocType.ATTR):
-            # Var rebinding → compare by variable name, not object identity
-            return _var_targets_ref(w.name, r.qualifier)
-        return False  # Var vs File: no conflict
+        return r.type == ReadLocType.VAR and w.name == r.name
 
     # --- Col(d, c) writes: column values modified ---
     # Invalidates: same-column reads on same DataFrame,
@@ -698,14 +685,15 @@ def tracking_to_readlocset(
     Convert TrackingData reads to ReadLocSet.
 
     This creates the unified read set Rᵢ from runtime tracking data:
-    - Variable reads → Var(x) (only for variables WITHOUT column/structural detail)
+    - Variable reads → Var(x) (always emitted for every read variable)
     - Column reads → Col(d, c) with LocRef qualifier when stable_map available
     - Structural reads → Attr(d, a) with LocRef qualifier when stable_map available
     - File reads → File(p)
 
-    Variables that have column-level or structural-level read detail are NOT
-    included as Var(x) reads, since the finer-grained locs already capture
-    their read footprint. This matches the semantics of TrackingData.to_read_events().
+    Var(x) is always emitted alongside Col/Attr reads. This ensures
+    variable rebinding is caught by the simple Var(x) ▷ Var(x) = true
+    check, without needing a cross-domain bridge rule. Column independence
+    is preserved because Col/Rows/Attr ▷ Var = false in the ▷ matrix.
 
     Args:
         tracking: TrackingData from cell execution
@@ -714,25 +702,22 @@ def tracking_to_readlocset(
     """
     locs: Set[ReadLoc] = set()
 
-    # Track variables with finer-grained read info
-    vars_with_detail: Set[str] = set()
-
     for var, cols in (tracking.column_reads_before_writes or {}).items():
-        vars_with_detail.add(var)
         q = get_qualifier(var, namespace, stable_map)
         for col in cols:
             locs.add(ReadLoc.col(q, col))
 
     for var, attrs in (tracking.structural_reads or {}).items():
-        vars_with_detail.add(var)
         q = get_qualifier(var, namespace, stable_map)
         for attr in attrs:
             locs.add(ReadLoc.attr(q, attr))
 
-    # Only emit Var(x) for variables without column/structural detail
+    # Always emit Var(x) for every variable in reads_before_writes.
+    # Var(x) captures the binding read; Col/Attr locs capture finer detail.
+    # Rebinding is caught by Var(x) ▷ Var(x); column independence is
+    # preserved because Col/Rows/Attr ▷ Var = false in the ▷ matrix.
     for var in (tracking.reads_before_writes or set()):
-        if var not in vars_with_detail:
-            locs.add(ReadLoc.var(var))
+        locs.add(ReadLoc.var(var))
 
     for path in (tracking.file_reads_before_writes or set()):
         locs.add(ReadLoc.file(path))

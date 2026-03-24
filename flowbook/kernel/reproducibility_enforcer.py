@@ -435,32 +435,6 @@ def _expand_var_set_dict_with_aliases(
     return result
 
 
-def _precise_readlocset(read_locs: ReadLocSet, tracking: TrackingData) -> ReadLocSet:
-    """Refine a ReadLocSet by replacing Var(x) with column-level reads when available.
-
-    When a cell has column_reads_before_writes for variable x, the Var(x) read
-    is overly broad (conflicts with ANY write to x). Replace it with the precise
-    Col(x, c) reads so that column-independent writes don't cause false staleness.
-
-    The Var(x) read is kept only when:
-    - The cell has no column-level reads for x (conservative)
-    """
-    from flowbook.kernel.locations import ReadLoc, ReadLocType
-
-    col_read_vars = set(tracking.column_reads_before_writes.keys()) if tracking.column_reads_before_writes else set()
-    if not col_read_vars:
-        return read_locs  # No refinement needed
-
-    result: Set[ReadLoc] = set()
-    for loc in read_locs:
-        if loc.type == ReadLocType.VAR and loc.name in col_read_vars:
-            # Replace Var(x) with Col(x, c) for each column read
-            # The column reads are already in the ReadLocSet from tracking_to_readlocset
-            # so we just drop the Var(x)
-            continue
-        result.add(loc)
-    return frozenset(result)
-
 
 def _changes_to_writelocset(
     changed_vars: Set[str],
@@ -1874,10 +1848,9 @@ class ReproducibilityEnforcer:
             # change_wlocs captures what actually changed at the right granularity:
             # - Var(x) for whole-variable changes
             # - Col(df, c) for column-level changes
-            # Use precise read set: Var(x) is refined to Col(x, c) reads when
-            # column info is available, so column-independent writes don't conflict.
+            # Read sets always include Var(x) alongside Col/Attr reads, so
+            # variable rebinding is caught by Var(x) ▷ Var(x) = true.
             cell_read_locs = self._notebook_state.reads.get(cell_id, frozenset())
-            cell_read_locs = _precise_readlocset(cell_read_locs, cell_tracking)
             conflicting_wlocs = wlocs_conflict_rlocs(change_wlocs, cell_read_locs)
 
             # Write-write overlap: W'_i ▷ output*(W_j) — typed column-level check.

@@ -27,10 +27,10 @@ classifiers = [
 ]
 dependencies = [
     "jupyter_server>=2.4.0,<3",
-    "openai==2.15.0",
+    "openai",
     "jupyterlab>=4.0.0",
     "nbformat>=5.0.0",
-    "openai-agents[litellm]==0.6.5",
+    "openai-agents[litellm],
     "jupyter",
     "termcolor",
     "dill",
