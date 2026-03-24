@@ -111,7 +111,7 @@ Two sets define which DataFrame attributes are sensitive to which kind of struct
 
 | Write `w` ↓ \ Read `r` → | **Var(x')** | **Col(d', c')**        | **Attr(d', a')**                    | **File(p')** |
 | ------------------------ | ----------- | ---------------------- | ----------------------------------- | ------------ |
-| **Var(x)**               | `x = x'`    | `x = name(d')`         | `x = name(d')`                      | —            |
+| **Var(x)**               | `x = x'`    | —                      | —                                   | —            |
 | **Col(d, c)**            | —           | `d ≡ d'` AND `c = c'`  | `d ≡ d'` AND `a' ∈ COL_VALUE_ATTRS` | —            |
 | **ColAdd(d, c)**         | —           | —                      | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
 | **ColDel(d, c)**         | —           | `d ≡ d'` AND `c = c'`  | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
@@ -124,12 +124,11 @@ Two sets define which DataFrame attributes are sensitive to which kind of struct
 **Comparison operators:**
 
 - **`d ≡ d'`** (identity): Compares `LocRef.loc_id` values — same DataFrame object via `StableIdMap`
-- **`name(d')`**: Extracts the variable name from an address (`LocRef.var_name`) — used for the `Var(x) ▷ Col/Attr` bridge, where variable rebinding invalidates reads through that name
 - **`=`** (equality): String comparison for names, columns, attributes, and paths
 
 Key observations:
 
-- **`Var(x)` is the nuclear option.** Replacing a variable conflicts with _every_ read type on that variable — column reads, attribute reads, everything. The entire binding changed.
+- **`Var(x)` only conflicts with `Var(x)` reads.** Rebinding detection for column/attribute readers works because `Var(x)` is always present in read sets alongside `Col`/`Attr` reads (see `tracking_to_readlocset`). When `df = new_value`, the read set `{Var("df"), Col(df, "price"), ...}` ensures `Var("df") ▷ Var("df") = true` catches the rebinding. No cross-domain bridge rule is needed.
 - **`Col(d, c)` is maximally precise.** Modifying column values invalidates reads of that _exact_ column, plus value-dependent attributes (`values`, `T`, `describe`) that expose the raw data. It does not touch structural attributes or other columns. This is what enables _column independence_: cell A reads `df["qty"]`, cell B writes `df["price"]` → no conflict (unless A also reads `df.values`).
 - **`ColAdd(d, c)` does not invalidate existing column reads.** The old columns' data is untouched. It only invalidates structural attributes like `columns` and `shape` that would now reflect the extra column.
 - **`ColDel(d, c)` is stricter than `ColAdd`.** It invalidates reads of the deleted column (it no longer exists) _plus_ the same structural attributes.
@@ -177,7 +176,7 @@ Composing `output()` with ▷ yields the effective write-write table. An entry s
 
 | `wᵢ` ↓ \ `wⱼ` →  | **Var(x')** | **Col(d', c')**       | **ColAdd(d', c')**           | **ColDel(d', c')**           | **Rows(d')**                 | **Attr(d', a')**                    | **File(p')** |
 | ---------------- | ----------- | --------------------- | ---------------------------- | ---------------------------- | ---------------------------- | ----------------------------------- | ------------ |
-| **Var(x)**       | `x = x'`    | `x = name(d')`        | `x = name(d')`               | `x = name(d')`               | `x = name(d')`               | `x = name(d')`                      | —            |
+| **Var(x)**       | `x = x'`    | —                     | —                            | —                            | —                            | —                                   | —            |
 | **Col(d, c)**    | —           | `d ≡ d'` AND `c = c'` | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ COL_VALUE_ATTRS` | —            |
 | **ColAdd(d, c)** | —           | —                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
 | **ColDel(d, c)** | —           | `d ≡ d'` AND `c = c'` | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
@@ -191,7 +190,7 @@ Composing `output()` with ▷ yields the effective write-write table. An entry s
 
 Key observations:
 
-- **`Var(x)` bridges via `name()`**: Since `x` is a `VarName` (string) and `d'` is an `Address` (`LocRef`), the comparison uses `name(d')` to extract the variable name — the same cross-domain bridge as in the read-write matrix.
+- **`Var(x)` only overlaps with `Var(x')`** via `output(Var(x')) = {Var(x')}`. Write-write overlap between `Var("df")` and `Col(df, c)` is not detected by the write-write path; instead, it is caught by the read overlap path because the read set always contains `Var("df")` alongside `Col` reads.
 - **`Col` vs `Col`** requires exact column match (`c = c'`) — column independence at the write-write level.
 - **`Col` vs `Rows` overlap** is detected in both directions without attribute inflation: `Rows(d) ▷ {Col(d',c')}` succeeds directly (Rows ▷ Col in base ▷), and `Col(d,c) ▷ output(Rows(d'))` succeeds because `output(Rows)` contains `Attr(d', values)` and `Attr(d', T)`, both in `COL_VALUE_ATTRS`.
 - **`ColDel` vs `Col`** requires `c = c'` — deleting column "price" only overlaps with writing column "price", not other columns.
@@ -238,22 +237,15 @@ side-table:
 
 ### How ▷ uses qualifiers
 
-The ▷ relation uses two comparison modes:
+The ▷ relation uses one comparison mode for DataFrame-level checks:
 
 - **`_same_dataframe(w.qualifier, r.qualifier)`** — for DataFrame-to-DataFrame checks
   (Col, ColAdd, ColDel, Rows, Attr). Compares `loc_id`s when both are LocRef.
   Aliased DataFrames match automatically.
-- **`_var_targets_ref(w.name, r.qualifier)`** — for `Var(x) ▷ Col(d, c)` bridging.
-  Compares `w.name` against `r.qualifier.var_name`. Var rebinding only invalidates
-  reads that went through that specific variable name.
 
-### The `Var(x) ▷ Col(d, c)` cross-domain rule
-
-The conflict matrix has `Var(x) ▷ Col(d, c) = True` when `x == d.var_name`.
-This catches rebinding: when `df = new_value`, all column reads that went through
-the name `"df"` are invalidated. Reads through an alias (`df2 = df`) are NOT
-invalidated by `Var("df")` because `"df" ≠ "df2"` — which is correct, since `df2`
-still points to the original object.
+`Var(x)` writes only conflict with `Var(x)` reads (simple name equality). Rebinding
+detection for column/attribute readers works because `Var(x)` is always present in
+read sets alongside `Col`/`Attr` reads — see `tracking_to_readlocset()`.
 
 ### Backward compatibility
 
@@ -266,7 +258,7 @@ See `FORMAL_DEVELOPMENT.md` §9.1 for the full design analysis.
 **Code:**
 
 - StableIdMap + LocRef: `kernel/loc_ids.py`
-- Qualifier comparison: `_same_dataframe()`, `_var_targets_ref()` in `kernel/locations.py`
+- Qualifier comparison: `_same_dataframe()` in `kernel/locations.py`
 - Memo transfer: `_apply_restore_memo()` in `kernel/flowbook_kernel.py`
 - Alias detection (Phase 1 safety net): `_expand_with_deep_aliases()` in `kernel/reproducibility_enforcer.py`
 

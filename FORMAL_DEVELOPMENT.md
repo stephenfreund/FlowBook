@@ -404,7 +404,7 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 | main.tex          | FORMAL_DEVELOPMENT.md | Code                                                          |
 | ----------------- | --------------------- | ------------------------------------------------------------- |
 | Inst-Edit         | §3.4 [Inst-Edit]      | `mark_cell_edited()` in `kernel/reproducibility_enforcer.py`  |
-| Inst-Run          | §3.4 [Inst-Run]       | `check()` in `kernel/reproducibility_enforcer.py` (line 1120) |
+| Inst-Run          | §3.4 [Inst-Run]       | `check()` in `kernel/reproducibility_enforcer.py`             |
 | Inst-Insert       | §3.5 [Inst-Insert]    | `set_cell_order()` detecting new cells                        |
 | Inst-Delete       | §3.5 [Inst-Delete]    | `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
 | Inst-Move-Down/Up | §3.5 [Inst-Move-*]    | `_handle_moves()` in `kernel/reproducibility_enforcer.py`     |
@@ -440,7 +440,7 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 | Staleness reasons   | `Reason`, `ReasonType` in `kernel/models.py`                   |
 | Metadata output     | `flowbook` key in `display_data` output                        |
 | TypeScript types    | `IReproducibilityMetadata` in `src/flowbook/types.ts`          |
-| Metadata extraction | `extractFlowbookMetadata()` in `src/flowbook/executionhook.ts` |
+| Metadata extraction | `_extractReproducibilityMetadata()` in `src/flowbook/executionhook.ts` |
 
 ---
 
@@ -507,7 +507,7 @@ Key rules:
 | Write        | Read       | Conflicts?                                                             |
 | ------------ | ---------- | ---------------------------------------------------------------------- |
 | Var(x)       | Var(x)     | **Yes** (replacing variable invalidates binding read)                  |
-| Var(x)       | Col(d, c)  | **Yes** if x = d (replacing df invalidates column reads)               |
+| Var(x)       | Col(d, c)  | **No** (rebinding caught via Var(x) read always in read set)           |
 | Col(d, c)    | Var(x)     | **No** (column write doesn't change binding)                           |
 | Col(d, c)    | Col(d, c') | Only if c = c' (column-level precision)                                |
 | Col(d, c)    | Attr(d, a) | Yes if a ∈ COL_VALUE_ATTRS (values, T, describe depend on column data) |
@@ -671,10 +671,10 @@ relation:
   the same loc_id, so `Col(LocRef(42,"df"), "price")` and
   `Col(LocRef(42,"X"), "price")` correctly conflict.
 
-- **`_var_targets_ref(var_name, ref)`**: Compares `var_name` against
-  `ref.var_name` — used for `Var(x) ▷ Col(d, c)` bridging. Var rebinding
-  only invalidates reads that accessed the object through that specific
-  variable name.
+- **`Var(x)` only conflicts with `Var(x)` reads** (simple name equality).
+  Rebinding detection for column/attribute readers works because `Var(x)` is
+  always present in read sets alongside `Col`/`Attr` reads — see
+  `tracking_to_readlocset()`. No cross-domain bridge rule is needed.
 
 #### Relationship with deep alias detection
 
@@ -706,7 +706,7 @@ preserving the previous behavior. All existing tests pass unchanged.
 **Code:**
 
 - StableIdMap, LocRef: `kernel/loc_ids.py`
-- Qualifier helpers: `_same_dataframe()`, `_var_targets_ref()`, `_display_qualifier()` in `kernel/locations.py`
+- Qualifier helpers: `_same_dataframe()`, `_display_qualifier()` in `kernel/locations.py`
 - Memo exposure: `MemoryCheckpoints._last_memo` in `kernel_support/memory_checkpoint.py`
 - Memo transfer: `_apply_restore_memo()` in `kernel/flowbook_kernel.py`
 - Deep alias detection: `_build_alias_index()`, `get_aliases_for_vars()` in `kernel_support/memory_checkpoint.py`
@@ -741,16 +741,12 @@ modes:
   (`X = df`) share the same `loc_id`, so cross-alias conflicts are detected
   natively without additional alias expansion.
 
-- **Cross-domain** (`Var(x) ▷ Col(d, c)`, `Var(x) ▷ Attr(d, a)`): Uses
-  `_var_targets_ref()` to compare the variable name `x` against
-  `LocRef.var_name`. This catches rebinding (`df = new_value` invalidates
-  column reads through `df`) while correctly ignoring reads through other
-  aliases (`X = df; df = new_value` does not invalidate reads through `X`).
-
-The `Var ▷ Col` bridge is specific to Python's name-based rebinding semantics:
-reassigning a variable name does not affect other names pointing to the same
-object, so invalidation must target the specific access path, not the object
-identity.
+- **Var(x)** only conflicts with `Var(x)` reads (simple name equality).
+  No cross-domain bridge is needed because `Var(x)` is always present in
+  read sets alongside `Col`/`Attr` reads (see `tracking_to_readlocset()`).
+  When `df = new_value`, the read set `{Var("df"), Col(df, "price"), ...}`
+  ensures `Var("df") ▷ Var("df") = true` catches the rebinding. Column
+  independence is preserved because `Col/Rows/Attr ▷ Var = false`.
 
 **Code:** `write_conflicts_read()`, `wlocs_conflict_rlocs()` in `kernel/locations.py`
 

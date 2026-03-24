@@ -76,14 +76,18 @@ class TestVarWriteDoesConflictWithVar:
         assert not write_conflicts_read(WriteLoc.var("x"), ReadLoc.var("y"))
 
 
-class TestVarWriteConflictsWithSubVariableReads:
-    """Var(x) write DOES conflict with Col/Attr reads of x."""
+class TestVarWriteDoesNotConflictWithSubVariableReads:
+    """Var(x) write does NOT directly conflict with Col/Attr reads.
+
+    Rebinding detection works because Var(x) is always present in read
+    sets alongside Col/Attr reads, so Var(x) ▷ Var(x) catches it.
+    """
 
     def test_var_vs_col(self):
-        assert write_conflicts_read(WriteLoc.var("df"), ReadLoc.col("df", "price"))
+        assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.col("df", "price"))
 
     def test_var_vs_attr(self):
-        assert write_conflicts_read(WriteLoc.var("df"), ReadLoc.attr("df", "shape"))
+        assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.attr("df", "shape"))
 
 
 class TestSubVariableWritesDoConflictWithColReads:
@@ -330,15 +334,15 @@ class TestBackwardMutationBindingSemantics:
 
 
 # =============================================================================
-# 5. tracking_to_readlocset: column detail suppresses Var
+# 5. tracking_to_readlocset: Var always emitted alongside Col/Attr
 # =============================================================================
 
 
 class TestTrackingReadLocConversion:
-    """Verify that column-detail tracking produces Col locs, not Var."""
+    """Verify that Var(x) is always emitted alongside Col/Attr reads."""
 
-    def test_column_reads_produce_col_not_var(self):
-        """TrackingData with column reads → Col locs, no Var."""
+    def test_column_reads_produce_col_and_var(self):
+        """TrackingData with column reads → both Col and Var locs."""
         td = TrackingData(
             reads_before_writes={"df"},
             writes=set(),
@@ -348,7 +352,7 @@ class TestTrackingReadLocConversion:
         locs = tracking_to_readlocset(td)
         assert ReadLoc.col("df", "price") in locs
         assert ReadLoc.col("df", "qty") in locs
-        assert ReadLoc.var("df") not in locs  # suppressed by column detail
+        assert ReadLoc.var("df") in locs  # always emitted
 
     def test_no_column_reads_produce_var(self):
         """TrackingData without column reads → Var only."""
@@ -361,8 +365,8 @@ class TestTrackingReadLocConversion:
         locs = tracking_to_readlocset(td)
         assert ReadLoc.var("df") in locs
 
-    def test_structural_reads_suppress_var(self):
-        """Structural reads also suppress Var."""
+    def test_structural_reads_include_var(self):
+        """Structural reads include Var alongside Attr."""
         td = TrackingData(
             reads_before_writes={"df"},
             writes=set(),
@@ -372,10 +376,10 @@ class TestTrackingReadLocConversion:
         )
         locs = tracking_to_readlocset(td)
         assert ReadLoc.attr("df", "shape") in locs
-        assert ReadLoc.var("df") not in locs
+        assert ReadLoc.var("df") in locs  # always emitted
 
-    def test_mixed_vars_some_with_detail(self):
-        """Some vars have column detail, others don't."""
+    def test_mixed_vars_all_have_var(self):
+        """All variables in reads_before_writes get Var, regardless of detail."""
         td = TrackingData(
             reads_before_writes={"df", "config"},
             writes=set(),
@@ -384,8 +388,8 @@ class TestTrackingReadLocConversion:
         )
         locs = tracking_to_readlocset(td)
         assert ReadLoc.col("df", "price") in locs
-        assert ReadLoc.var("df") not in locs  # df has detail
-        assert ReadLoc.var("config") in locs  # config has no detail
+        assert ReadLoc.var("df") in locs  # always emitted
+        assert ReadLoc.var("config") in locs
 
 
 # =============================================================================
