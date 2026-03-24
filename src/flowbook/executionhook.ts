@@ -22,7 +22,8 @@ import {
   IWriteLoc,
   findConflictingReads,
   formatReadLoc,
-  writeLocOutputs
+  writeLocOutputs,
+  readLocsMatchQualifier
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
@@ -447,24 +448,9 @@ export class ReproducibilityExecutionHookManager {
       // Also store first one in singular key for backward compatibility
       cell.model.setMetadata('flowbook_violation', predicateViolations[0]);
 
-      // Let cellhighlighter handle the rendering
-      const cellOrder = this._getCurrentCellOrder(panel);
-      const stalenessManager = this._highlighter.getStalenessManager(panel);
-      this._highlighter.updateCell(
-        cell,
-        stalenessManager,
-        cellOrder,
-        panel.context.path
-      );
-
       console.log(
         `ReproducibilityExecutionHook: Handled ${predicateViolations.length} predicate violation(s) for cell ${cell.model.id}, accepted=${predicateViolations[0].accepted}`
       );
-
-      // If rejected (not accepted), no further processing needed
-      if (!predicateViolations[0].accepted) {
-        return;
-      }
     } else {
       // Clear any previous violation metadata from earlier rejected executions.
       // This ensures that re-running a cell after fixing the cause of a violation
@@ -478,15 +464,9 @@ export class ReproducibilityExecutionHookManager {
       metadata: reproducibilityMetadata,
       outputIndex: metadataOutputIndex
     } = this._extractReproducibilityMetadata(outputs);
-    if (!reproducibilityMetadata) {
-      // If we had predicate violations but no metadata, we're done
-      if (predicateViolations.length > 0) {
-        return;
-      }
-      return;
-    }
 
-    // Remove the metadata output from cell display (keep it clean for the user)
+    // Remove the metadata output from cell display (keep it clean for the user).
+    // Must happen before updateCell() to avoid index shifts from inserted notices.
     if (metadataOutputIndex !== null) {
       const codeModel = cell.model as ICodeCellModel;
       codeModel.outputs.remove(metadataOutputIndex);
@@ -495,26 +475,28 @@ export class ReproducibilityExecutionHookManager {
       );
     }
 
-    // Store metadata on cell
-    cell.model.setMetadata('flowbook', reproducibilityMetadata);
+    if (reproducibilityMetadata) {
+      // Store metadata on cell
+      cell.model.setMetadata('flowbook', reproducibilityMetadata);
 
-    // Process staleness reasons and update manager
-    this._processMetadataUpdate(panel, reproducibilityMetadata);
+      // Process staleness reasons and update manager
+      this._processMetadataUpdate(panel, reproducibilityMetadata);
 
+      console.log(
+        `ReproducibilityExecutionHook: Extracted metadata for cell ${cell.model.id}:`,
+        reproducibilityMetadata
+      );
+    }
+
+    // Let cellhighlighter handle all cell rendering (staleness + violations).
+    // Single updateCell() call to avoid double-rendering and index shift issues.
     const cellOrder = this._getCurrentCellOrder(panel);
-
-    // Let cellhighlighter handle all cell rendering
     const stalenessManager = this._highlighter.getStalenessManager(panel);
     this._highlighter.updateCell(
       cell,
       stalenessManager,
       cellOrder,
       panel.context.path
-    );
-
-    console.log(
-      `ReproducibilityExecutionHook: Extracted metadata for cell ${cell.model.id}:`,
-      reproducibilityMetadata
     );
   }
 
@@ -864,7 +846,7 @@ export class ReproducibilityExecutionHookManager {
         if (
           output.type === r.type &&
           output.name === r.name &&
-          output.qualifier === r.qualifier
+          readLocsMatchQualifier(output, r)
         ) {
           writerConflicts.push(formatReadLoc(output));
           seen.add(key);

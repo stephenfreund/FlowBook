@@ -492,9 +492,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 metadata = ReproducibilityMetadata(
                     cell_id="",  # No specific cell (order change)
                     execution_seq=self._enforcer.seq_counter,
-                    reads=[],
-                    writes=[],
-                    changed_variables=[],
+                    read_locs=[],
+                    write_locs=[],
+                    changed_locs=[],
                     stale_cells=stale_cells,
                     cell_order=self._enforcer.cell_order,
                     staleness_reasons=staleness_reasons,
@@ -527,9 +527,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         metadata = ReproducibilityMetadata(
             cell_id="",  # No specific cell
             execution_seq=self._enforcer.seq_counter,
-            reads=[],
-            writes=[],
-            changed_variables=[],
+            read_locs=[],
+            write_locs=[],
+            changed_locs=[],
             stale_cells=state.get_stale_cells(),
             cell_order=self._enforcer.cell_order,
             staleness_reasons=state.get_all_reasons(),
@@ -652,9 +652,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             metadata = ReproducibilityMetadata(
                 cell_id=cell_id,
                 execution_seq=self._enforcer.seq_counter,
-                reads=[],
-                writes=[],
-                changed_variables=[],
+                read_locs=[],
+                write_locs=[],
+                changed_locs=[],
                 stale_cells=stale_cells,
                 cell_order=self._enforcer.cell_order,
                 staleness_reasons=staleness_reasons,
@@ -1218,6 +1218,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}"
                     )
 
+                # Transfer stable ids from originals to checkpoint copies
+                if hasattr(self._checkpoints, 'memory') and hasattr(self._checkpoints.memory, '_last_memo'):
+                    self._enforcer._stable_map.apply_memo(self._checkpoints.memory._last_memo)
+
                 # Handle uncopyable variables based on configuration
                 if uncopyable_vars:
                     if not self._uncopyable_as_write:
@@ -1296,6 +1300,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 except KeyboardInterrupt:
                     # Timeout occurred - restore pre-state
                     self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
+                    self._apply_restore_memo()
                     return self._handle_timeout_error(timeout)
                 finally:
                     timeout_handler.cancel()
@@ -1305,6 +1310,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 # If execution had an error, restore pre-state and skip Reproducibility checks
                 if result.get("status") == "error":
                     self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
+                    self._apply_restore_memo()
                     return result
 
                 # Add uncopyable variables to writes if configured (conservative soundness)
@@ -1337,6 +1343,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         if not self._continue_after_violation:
                             # ROLLBACK: Restore pre-execution state (namespace)
                             self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
+                            self._apply_restore_memo()
 
                             # ROLLBACK: Restore enforcer analysis state
                             self._enforcer.rollback_last_check()
@@ -1344,6 +1351,17 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             # Send ALL violations to frontend (rejected)
                             for err in sdc_result.errors:
                                 self._send_predicate_violation(err, accepted=False)
+
+                            # Send metadata so the panel can show reads/writes/errors
+                            self._display_execution_result(
+                                execute_duration_ms=time.perf_counter() * 1000 - start_time,
+                                code_duration_ms=execution_time or 0.0,
+                                state_duration_ms=pre_timer.duration(),
+                                check_duration_ms=check_timer.duration(),
+                                tracking=tracking,
+                                sdc_result=sdc_result,
+                                stale_before=stale_before,
+                            )
 
                             # Return error status (use first error for exception message)
                             first_error = sdc_result.errors[0]
@@ -1445,9 +1463,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                         metadata = ReproducibilityMetadata(
                             cell_id="",  # No specific cell (order change)
                             execution_seq=self._enforcer.seq_counter,
-                            reads=[],
-                            writes=[],
-                            changed_variables=[],
+                            read_locs=[],
+                            write_locs=[],
+                            changed_locs=[],
                             stale_cells=stale_cells,
                                     cell_order=self._enforcer.cell_order,
                             staleness_reasons=staleness_reasons,
@@ -1537,6 +1555,16 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             timeout = self._default_cell_timeout
 
         return parsed_code, timeout
+
+    def _apply_restore_memo(self) -> None:
+        """Transfer stable ids after checkpoint restore.
+
+        When a checkpoint is restored, new objects are created via deep copy.
+        The memo dict maps old object ids to new objects. We transfer stable
+        ids so the restored objects keep their identity.
+        """
+        if hasattr(self._checkpoints, 'memory') and hasattr(self._checkpoints.memory, '_last_memo'):
+            self._enforcer._stable_map.apply_memo(self._checkpoints.memory._last_memo)
 
     def _handle_timeout_error(self, timeout: float) -> dict:
         """Create timeout error result."""
@@ -1629,9 +1657,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             empty_metadata = ReproducibilityMetadata(
                 cell_id=self._cell_id,
                 execution_seq=self._enforcer.seq_counter,
-                reads=[],
-                writes=[],
-                changed_variables=[],
+                read_locs=[],
+                write_locs=[],
+                changed_locs=[],
                 stale_cells=self._enforcer.get_stale_cells(),
                 cell_order=self._enforcer.cell_order,
                 staleness_reasons=self._enforcer._notebook_state.get_all_reasons(),

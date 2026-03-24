@@ -96,15 +96,31 @@ class TestColumnAccessTracker:
         assert result["df2"] == {"b"}
 
     def test_install_uninstall(self):
-        """Test that install/uninstall properly patches and restores methods."""
+        """Test that install/uninstall properly patches and restores methods.
+
+        Note: the always-on pattern means patches may already be installed from
+        a prior tracker in the same process.  We verify behaviour (tracking
+        happens while installed, stops after uninstall) rather than comparing
+        function identity, which is fragile across test ordering.
+        """
         tracker = ColumnAccessTracker()
-        original_getitem = pd.DataFrame.__getitem__
+        df = pd.DataFrame({"x": [1]})
+        tracker.register_df(df, "df")
 
         tracker.install()
-        assert pd.DataFrame.__getitem__ != original_getitem
+        # While installed, column access should be tracked
+        _ = df["x"]
+        result = tracker.resolve_to_paths()
+        assert "df" in result and "x" in result["df"]
 
         tracker.uninstall()
-        assert pd.DataFrame.__getitem__ == original_getitem
+        # After uninstall, new access should NOT be tracked
+        tracker.reset()
+        tracker.register_df(df, "df")
+        _ = df["x"]
+        result = tracker.resolve_to_paths()
+        # No active tracker after uninstall, so nothing recorded
+        assert result.get("df", set()) == set()
 
     def test_tracking_via_patched_getitem(self):
         """Test that patched __getitem__ tracks column access."""

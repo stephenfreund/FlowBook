@@ -24,6 +24,7 @@ And additional per-cell metadata:
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Optional, Set, TYPE_CHECKING
 
+from flowbook.kernel.loc_ids import StableIdMap
 from flowbook.kernel.models import CellStateSnapshot, CellStatus, Reason, ReasonType
 from flowbook.kernel.locations import (
     ReadLoc, ReadLocSet, WriteLoc, WriteLocSet,
@@ -31,6 +32,7 @@ from flowbook.kernel.locations import (
     writelocset_var_names, readlocset_var_names,
     tracking_to_readlocset, tracking_to_writelocset,
 )
+from flowbook.kernel.change_detector import changes_to_write_locs
 from flowbook.kernel_support.models import TrackingData
 
 if TYPE_CHECKING:
@@ -198,6 +200,8 @@ class NotebookState:
         execution_seq: Optional[int] = None,
         structural_reads_values: Optional[Dict[str, Dict[str, str]]] = None,
         typed_changes: Optional[List["Change"]] = None,
+        namespace: Optional[dict] = None,
+        stable_map: Optional[StableIdMap] = None,
     ) -> None:
         """
         Record cell execution: update R, W, and tracking data.
@@ -211,13 +215,30 @@ class NotebookState:
             execution_seq: Execution sequence number
             structural_reads_values: Captured structural values for error messages
             typed_changes: Cached typed changes for fast forward dependency checks
+            namespace: Current kernel namespace (for LocRef qualifiers)
+            stable_map: StableIdMap instance (for LocRef qualifiers)
         """
         # Store the TrackingData object directly
         self.tracking_data[cell_id] = tracking
 
         # Core R, W tracking (derived from TrackingData) — typed LocSets
-        self.reads[cell_id] = tracking_to_readlocset(tracking)
-        self.writes[cell_id] = tracking_to_writelocset(tracking)
+        self.reads[cell_id] = tracking_to_readlocset(tracking, namespace, stable_map)
+        tracking_wlocs = tracking_to_writelocset(tracking, namespace, stable_map)
+        # Merge diff-derived WriteLocs (ColAdd, ColDel, Rows, Attr) when available.
+        # tracking_to_writelocset only produces Var + Col + File; the diff provides
+        # the full typed set needed for column-level write-write overlap via output().
+        # Only include diff-derived locs for variables that tracking also considers
+        # as writes — otherwise unrecoverable mutations (in-place changes not tracked
+        # as writes) would incorrectly appear as writes in last_writer_for().
+        if typed_changes:
+            tracking_write_vars = (tracking.writes or set()) | set(tracking.column_writes.keys() if tracking.column_writes else [])
+            diff_wlocs = changes_to_write_locs(typed_changes, namespace, stable_map)
+            recoverable_diff_wlocs = frozenset(
+                w for w in diff_wlocs if w.var_name() in tracking_write_vars
+            )
+            self.writes[cell_id] = tracking_wlocs | recoverable_diff_wlocs
+        else:
+            self.writes[cell_id] = tracking_wlocs
 
         # Additional per-cell metadata (not in TrackingData)
         if execution_seq is not None:

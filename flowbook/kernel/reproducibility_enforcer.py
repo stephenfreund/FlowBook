@@ -228,6 +228,7 @@ Properties:
 See FORMAL_DEVELOPMENT.md §10 for the full formal specification.
 """
 
+import logging
 import os
 import pprint
 import re
@@ -251,12 +252,13 @@ from flowbook.kernel.models import (
     ReproducibilityError,
     ReproducibilityResult,
 )
+from flowbook.kernel.loc_ids import StableIdMap
 from flowbook.kernel.notebook_state import NotebookState
 
 from flowbook.kernel.change_detector import detect_changes, changes_to_write_locs
 from flowbook.kernel.locations import (
-    WriteLoc, WriteLocType, WriteLocSet, ReadLocSet,
-    has_conflict, wlocs_conflict_rlocs,
+    WriteLoc, WriteLocSet, ReadLocSet,
+    wlocs_conflict_rlocs, output_set,
     tracking_to_readlocset, tracking_to_writelocset,
     readlocset_to_list, writelocset_to_list,
 )
@@ -265,6 +267,8 @@ from flowbook.util.output import output, timer
 # Structural tracking is always ENFORCE — import once for passing to diff functions
 from flowbook.kernel_support.structural_tracking import StructuralTrackingMode as _StructuralTrackingMode
 _STRUCTURAL_ENFORCE = _StructuralTrackingMode.ENFORCE
+
+_logger = logging.getLogger(__name__)
 
 # Checkpoint naming constants
 PRE_CHECKPOINT_PREFIX = "_pre_"
@@ -336,203 +340,6 @@ def _writes_in_range(
             result.update(tracking.writes)
     return result
 
-
-def _reads_in_range(
-    notebook_state: "NotebookState",
-    cell_order: List[str],
-    start: int,
-    end: int,
-) -> Set[str]:
-    """
-    Compute R_{start..end} = ⋃_{k ∈ [start..end]} Rₖ
-
-    Formal ref: FORMAL_DEVELOPMENT.md §1.3
-    """
-    result: Set[str] = set()
-    for k in range(start, min(end + 1, len(cell_order))):
-        cell_id = cell_order[k]
-        tracking = notebook_state.get_tracking(cell_id)
-        if tracking is not None:
-            result.update(tracking.reads_before_writes)
-    return result
-
-
-def _overwritten(
-    notebook_state: "NotebookState",
-    cell_order: List[str],
-    i: int,
-) -> Set[str]:
-    """
-    Overwritten(W, i) ≝ W_{i+1..n}
-
-    The set of locations written by cells after position i.
-
-    Formal ref: main.tex Definition (Overwritten), FORMAL_DEVELOPMENT.md §1.4.1
-    """
-    return _writes_in_range(notebook_state, cell_order, i + 1, len(cell_order) - 1)
-
-
-def _forward_stale(
-    R_j: Set[str],
-    W_j: Set[str],
-    W_i_old: Set[str],
-    W_i_new: Set[str],
-    i: int,
-    j: int,
-) -> bool:
-    """
-    ForwardStale(R, W, W', i, j) ≝ j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
-
-    Cell j (after i) becomes stale if cell i's old OR new writes overlap with
-    what cell j reads or writes.
-
-    Formal ref: main.tex §Staleness predicates, FORMAL_DEVELOPMENT.md §3.3
-
-    Args:
-        R_j: Read set of cell j
-        W_j: Write set of cell j
-        W_i_old: Old write set of cell i (Wᵢ, from previous execution)
-        W_i_new: New write set of cell i (W'ᵢ, from current execution)
-        i: Position of executing cell
-        j: Position of cell to check
-
-    Returns:
-        True if cell j should become stale due to cell i's execution
-    """
-    if j <= i:
-        return False
-    W_i_union = W_i_old | W_i_new
-    return bool(W_i_union & (R_j | W_j))
-
-
-def _backward_stale(
-    W_old: Dict[str, Set[str]],
-    W_new_i: Set[str],
-    W_old_i: Set[str],
-    last_writer_func,
-    i: int,
-    j: int,
-) -> bool:
-    """
-    BackwardStale(W, W', i, j) ≝ j < i ∧ j = LastWriter(W, i, y) for some y ∈ Wᵢ \\ W'ᵢ
-
-    Cell j (before i) becomes stale if it was the last writer of a location
-    that cell i no longer writes (i.e., i's write set shrank).
-
-    Formal ref: main.tex §Staleness predicates, FORMAL_DEVELOPMENT.md §3.3
-
-    Args:
-        W_old: Old write sets by cell_id
-        W_new_i: New write set of cell i
-        W_old_i: Old write set of cell i
-        last_writer_func: Function(var, cell_id) -> last writer cell_id
-        i: Position of executing cell
-        j: Position of cell to check
-
-    Returns:
-        True if cell j should become stale due to cell i's changed writes
-    """
-    if j >= i:
-        return False
-    # Find locations that i used to write but no longer writes
-    removed_writes = W_old_i - W_new_i
-    for y in removed_writes:
-        # Check if j was the last writer of y before cell i
-        writer = last_writer_func(y, i)
-        if writer is not None and writer == j:
-            return True
-    return False
-
-
-
-def _write_before_read(
-    R_i: Set[str],
-    W_before_i: Set[str],
-) -> bool:
-    """
-    WriteBeforeRead(R, W, i) ≝ Rᵢ ⊆ W_{1..i-1}
-
-    All reads come from writes by earlier cells.
-
-    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
-
-    Args:
-        R_i: Read set of cell i
-        W_before_i: Union of write sets of cells 1..i-1
-
-    Returns:
-        True if the validity predicate holds
-    """
-    return R_i <= W_before_i
-
-
-def _no_read_before_write(
-    R_i: Set[str],
-    W_after_i: Set[str],
-) -> bool:
-    """
-    NoReadBeforeWrite(R, W, i) ≝ Rᵢ ∩ W_{i+1..n} = ∅
-
-    Cell i does not read locations that will be written by later cells.
-    (This detects forward contamination at the variable level.)
-
-    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
-
-    Args:
-        R_i: Read set of cell i
-        W_after_i: Union of write sets of cells i+1..n
-
-    Returns:
-        True if the validity predicate holds
-    """
-    return not bool(R_i & W_after_i)
-
-
-def _no_write_after_read(
-    W_i: Set[str],
-    R_before_i: Set[str],
-) -> bool:
-    """
-    NoWriteAfterRead(R, W, i) ≝ Wᵢ ∩ R_{1..i-1} = ∅
-
-    Cell i does not write locations that earlier cells read.
-    (This is the backward mutation check at the variable level.)
-
-    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
-
-    Args:
-        W_i: Write set of cell i
-        R_before_i: Union of read sets of cells 1..i-1
-
-    Returns:
-        True if the validity predicate holds (no backward mutation)
-    """
-    return not bool(W_i & R_before_i)
-
-
-def _no_read_and_write(
-    R_i: Set[str],
-    W_i: Set[str],
-) -> bool:
-    """
-    NoReadAndWrite(R, W, i) ≝ Rᵢ ∩ Wᵢ = ∅
-
-    Cell i does not both read and write the same location.
-    (This simplifies reasoning; actual impl allows read-then-write.)
-
-    Formal ref: main.tex §Validity predicates, FORMAL_DEVELOPMENT.md §3.2
-
-    Note: The implementation uses reads_before_writes which already
-    excludes locations that are written before being read.
-
-    Args:
-        R_i: Read set of cell i
-        W_i: Write set of cell i
-
-    Returns:
-        True if the validity predicate holds
-    """
-    return not bool(R_i & W_i)
 
 
 # ============================================================================
@@ -709,6 +516,9 @@ class ReproducibilityEnforcer:
         self._pending_checkpoint_deletion: Optional[str] = None
         # Snapshot for rollback if execution is rejected
         self._pending_snapshot: Optional[CellStateSnapshot] = None
+        # Stable object identity map for DataFrame location qualifiers.
+        # Maps Python id() → stable int via weakref. See loc_ids.py.
+        self._stable_map = StableIdMap()
 
     @property
     def cell_order(self) -> List[str]:
@@ -808,10 +618,10 @@ class ReproducibilityEnforcer:
         Formal ref: FORMAL_DEVELOPMENT.md §3.3, §3.5 [Inst-Delete]
 
         Deleting cell i is modeled as W''=W[i:={}], R''=R[i:={}], then:
-        - ForwardStale(R, W, W'', i, j): j > i ∧ Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
-        - BackwardStale(W, W'', i, j):   j < i ∧ j = LastWriter(W, i, y) for y ∈ Wᵢ
+        - ForwardStale: j > i, Wᵢ ▷ Rⱼ ≠ ∅ or Wᵢ ▷ output*(Wⱼ) ≠ ∅
+        - BackwardStale: j < i, j = LastWriter(W, i, y) for y ∈ Wᵢ
 
-        Reuses the same staleness predicates as [Inst-Run].
+        Uses typed ▷ conflict relation for column-level precision.
 
         Args:
             deleted_cells: List of deleted cell IDs (cell i being deleted)
@@ -828,55 +638,50 @@ class ReproducibilityEnforcer:
             deleted_set = set(deleted_cells)
 
             for deleted_id in deleted_cells:
-                deleted_tracking = self._notebook_state.get_tracking(deleted_id)
-                if deleted_tracking is None:
-                    continue  # No execution record, nothing to propagate
-
-                deleted_writes = deleted_tracking.writes
-
-                if not deleted_writes:
+                deleted_wlocs = self._notebook_state.writes.get(deleted_id, frozenset())
+                if not deleted_wlocs:
                     continue  # Deleted cell didn't write anything
 
                 my_position = old_order.index(deleted_id)
                 fwd_marked = 0
                 bwd_marked = 0
 
-                # ForwardStale: j > i, Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+                # ForwardStale: j > i, Wᵢ ▷ Rⱼ ≠ ∅ or Wᵢ ▷ output*(Wⱼ) ≠ ∅
                 for cell_id in old_order[my_position + 1:]:
                     if cell_id in deleted_set:
                         continue
                     if not self._notebook_state.is_clean(cell_id):
                         continue
 
-                    other_tracking = self._notebook_state.get_tracking(cell_id)
-                    if other_tracking is None:
-                        continue
+                    cell_read_locs = self._notebook_state.reads.get(cell_id, frozenset())
+                    cell_write_locs = self._notebook_state.writes.get(cell_id, frozenset())
 
-                    other_reads = other_tracking.reads_before_writes or set()
-                    other_writes = other_tracking.writes or set()
-                    read_overlap = deleted_writes & other_reads
-                    write_overlap = deleted_writes & other_writes
+                    read_conflicting = wlocs_conflict_rlocs(deleted_wlocs, cell_read_locs)
+                    write_conflicting = wlocs_conflict_rlocs(deleted_wlocs, output_set(cell_write_locs))
 
-                    if read_overlap or write_overlap:
+                    if read_conflicting or write_conflicting:
                         if cell_id not in newly_stale:
                             newly_stale.append(cell_id)
                         fwd_marked += 1
-                        for var in read_overlap:
+                        stale_var_names: set = set()
+                        for wloc in read_conflicting:
                             self._notebook_state.add_reason(
                                 cell_id,
-                                Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=deleted_id)
+                                Reason(ReasonType.FORWARD_STALE, loc=wloc.display_name(), cell_id=deleted_id)
                             )
-                        for var in write_overlap - read_overlap:
-                            self._notebook_state.add_reason(
-                                cell_id,
-                                Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=deleted_id)
-                            )
+                            stale_var_names.add(wloc.var_name())
+                        for wloc in write_conflicting:
+                            if wloc.var_name() not in stale_var_names:
+                                self._notebook_state.add_reason(
+                                    cell_id,
+                                    Reason(ReasonType.WRITE_OVERLAP, loc=wloc.display_name(), cell_id=deleted_id)
+                                )
                         alpha_deleted = self._cell_id_to_alpha(deleted_id)
                         alpha_other = self._cell_id_to_alpha(cell_id)
-                        overlap = read_overlap | write_overlap
+                        all_locs = sorted({w.display_name() for w in read_conflicting | write_conflicting})
                         warning = (
                             f"Cell @{alpha_other} marked stale: "
-                            f"deleted cell @{alpha_deleted} wrote {sorted(overlap)}"
+                            f"deleted cell @{alpha_deleted} wrote {all_locs}"
                         )
                         warnings.append(warning)
                         log(f"[DELETE-FWD] {warning}")
@@ -889,14 +694,20 @@ class ReproducibilityEnforcer:
                     if cell_id not in deleted_set
                     and self._notebook_state.is_clean(cell_id)
                 }
-                for y in deleted_writes:
-                    # Find last writer of y among cells before i
+                # BackwardStale iterates over variable names from the typed WriteLocs
+                seen_vars: Set[str] = set()
+                for wloc in deleted_wlocs:
+                    var_name = wloc.var_name()
+                    if var_name in seen_vars:
+                        continue
+                    seen_vars.add(var_name)
+                    # Find last writer of var_name among cells before i
                     last_j = None
                     for cell_id in old_order[:my_position]:
                         if cell_id in deleted_set:
                             continue
                         cell_writes = self._notebook_state.writes.get(cell_id, frozenset())
-                        if any(w.var_name() == y for w in cell_writes):
+                        if any(w.var_name() == var_name for w in cell_writes):
                             last_j = cell_id  # Keep scanning; last one wins
 
                     if last_j is not None and last_j in originally_clean:
@@ -905,13 +716,13 @@ class ReproducibilityEnforcer:
                         bwd_marked += 1
                         self._notebook_state.add_reason(
                             last_j,
-                            Reason(ReasonType.BACKWARD_STALE, loc=y, cell_id=deleted_id)
+                            Reason(ReasonType.BACKWARD_STALE, loc=var_name, cell_id=deleted_id)
                         )
                         alpha_deleted = self._cell_id_to_alpha(deleted_id)
                         alpha_last = self._cell_id_to_alpha(last_j)
                         warning = (
                             f"Cell @{alpha_last} marked stale (backward): "
-                            f"was last writer of '{y}' before deleted cell @{alpha_deleted}"
+                            f"was last writer of '{var_name}' before deleted cell @{alpha_deleted}"
                         )
                         warnings.append(warning)
                         log(f"[DELETE-BWD] {warning}")
@@ -963,12 +774,11 @@ class ReproducibilityEnforcer:
             for move in moved_cells:
                 cell_id = move.cell_id
 
-                cell_tracking = self._notebook_state.get_tracking(cell_id)
-                if cell_tracking is None:
+                # Use typed ReadLocSet/WriteLocSet from notebook_state
+                cell_rlocs = self._notebook_state.reads.get(cell_id, frozenset())
+                cell_wlocs = self._notebook_state.writes.get(cell_id, frozenset())
+                if not cell_rlocs and not cell_wlocs:
                     continue  # No execution record, nothing to check
-
-                cell_reads = cell_tracking.reads_before_writes
-                cell_writes = cell_tracking.writes
 
                 old_pos = move.old_position
                 new_pos = move.new_position
@@ -999,55 +809,53 @@ class ReproducibilityEnforcer:
                 cells_marked = 0
 
                 for other_id in crossed_ids:
-                    other_tracking = self._notebook_state.get_tracking(other_id)
-                    if other_tracking is None:
+                    other_rlocs = self._notebook_state.reads.get(other_id, frozenset())
+                    other_wlocs = self._notebook_state.writes.get(other_id, frozenset())
+                    if not other_rlocs and not other_wlocs:
                         continue
-
-                    other_reads = other_tracking.reads_before_writes
-                    other_writes = other_tracking.writes
 
                     # Determine direction of crossing for this specific pair
                     other_old_pos = old_positions[other_id]
-                    other_new_pos = new_positions[other_id]
                     was_after = other_old_pos > old_pos
-                    # is_after = other_new_pos > new_pos  # Must be opposite of was_after
 
                     if was_after:
                         # other_id was after cell_id, now before: cell_id moved forward past other_id
                         # (Ex1) Crossed cells that read moved cell's writes → stale
-                        overlap1 = other_reads & cell_writes
+                        # cell_wlocs ▷ other_rlocs
+                        overlap1 = wlocs_conflict_rlocs(cell_wlocs, other_rlocs)
                         if overlap1 and self._notebook_state.is_clean(other_id):
                             newly_stale.append(other_id)
                             cells_marked += 1
-                            # Track reason: ORDER_CHANGED
                             self._notebook_state.add_reason(
                                 other_id, Reason(ReasonType.ORDER_CHANGED)
                             )
                             alpha_moved = self._cell_id_to_alpha(cell_id)
                             alpha_other = self._cell_id_to_alpha(other_id)
+                            locs = sorted({w.display_name() for w in overlap1})
                             warning = (
                                 f"Cell @{alpha_other} marked stale: "
                                 f"cell @{alpha_moved} moved forward past it, "
-                                f"lost dependency on {sorted(overlap1)}"
+                                f"lost dependency on {locs}"
                             )
                             warnings.append(warning)
                             log(f"[MOVE] {warning}")
 
                         # (Ex2) Moved cell reads from crossed cells' writes → stale
-                        overlap2 = cell_reads & other_writes
+                        # other_wlocs ▷ cell_rlocs
+                        overlap2 = wlocs_conflict_rlocs(other_wlocs, cell_rlocs)
                         if overlap2 and self._notebook_state.is_clean(cell_id):
                             newly_stale.append(cell_id)
                             cells_marked += 1
-                            # Track reason: ORDER_CHANGED
                             self._notebook_state.add_reason(
                                 cell_id, Reason(ReasonType.ORDER_CHANGED)
                             )
                             alpha_moved = self._cell_id_to_alpha(cell_id)
                             alpha_other = self._cell_id_to_alpha(other_id)
+                            locs = sorted({w.display_name() for w in overlap2})
                             warning = (
                                 f"Cell @{alpha_moved} marked stale: "
                                 f"moved forward past @{alpha_other}, "
-                                f"now reads {sorted(overlap2)} from it"
+                                f"now reads {locs} from it"
                             )
                             warnings.append(warning)
                             log(f"[MOVE] {warning}")
@@ -1055,43 +863,45 @@ class ReproducibilityEnforcer:
                     else:
                         # other_id was before cell_id, now after: cell_id moved backward past other_id
                         # (Ex3) Moved cell reads from crossed cells' writes → stale
-                        overlap3 = cell_reads & other_writes
+                        # other_wlocs ▷ cell_rlocs
+                        overlap3 = wlocs_conflict_rlocs(other_wlocs, cell_rlocs)
                         if overlap3 and self._notebook_state.is_clean(cell_id):
                             newly_stale.append(cell_id)
                             cells_marked += 1
-                            # Track reason: NO_READ_BEFORE_WRITE (forward contamination)
-                            for var in overlap3:
+                            for wloc in overlap3:
                                 self._notebook_state.add_reason(
                                     cell_id,
-                                    Reason(ReasonType.NO_READ_BEFORE_WRITE, loc=var, cell_id=other_id)
+                                    Reason(ReasonType.NO_READ_BEFORE_WRITE, loc=wloc.display_name(), cell_id=other_id)
                                 )
                             alpha_moved = self._cell_id_to_alpha(cell_id)
                             alpha_other = self._cell_id_to_alpha(other_id)
+                            locs = sorted({w.display_name() for w in overlap3})
                             warning = (
                                 f"Cell @{alpha_moved} marked stale: "
                                 f"moved backward before @{alpha_other}, "
-                                f"forward contamination on {sorted(overlap3)}"
+                                f"forward contamination on {locs}"
                             )
                             warnings.append(warning)
                             log(f"[MOVE] {warning}")
 
                         # (Ex4) Crossed cells that read moved cell's writes → stale
-                        overlap4 = other_reads & cell_writes
+                        # cell_wlocs ▷ other_rlocs
+                        overlap4 = wlocs_conflict_rlocs(cell_wlocs, other_rlocs)
                         if overlap4 and self._notebook_state.is_clean(other_id):
                             newly_stale.append(other_id)
                             cells_marked += 1
-                            # Track reason: FORWARD_STALE (gains input from moved cell)
-                            for var in overlap4:
+                            for wloc in overlap4:
                                 self._notebook_state.add_reason(
                                     other_id,
-                                    Reason(ReasonType.FORWARD_STALE, loc=var, cell_id=cell_id)
+                                    Reason(ReasonType.FORWARD_STALE, loc=wloc.display_name(), cell_id=cell_id)
                                 )
                             alpha_moved = self._cell_id_to_alpha(cell_id)
                             alpha_other = self._cell_id_to_alpha(other_id)
+                            locs = sorted({w.display_name() for w in overlap4})
                             warning = (
                                 f"Cell @{alpha_other} marked stale: "
                                 f"cell @{alpha_moved} moved backward before it, "
-                                f"gains input from {sorted(overlap4)}"
+                                f"gains input from {locs}"
                             )
                             warnings.append(warning)
                             log(f"[MOVE] {warning}")
@@ -1218,9 +1028,9 @@ class ReproducibilityEnforcer:
                 changed_variables=[],
                 column_changed={},
                 structural_warnings=list(current_diff.warnings) if current_diff.warnings else [],
-                read_locs=readlocset_to_list(tracking_to_readlocset(tracking)),
-                write_locs=writelocset_to_list(tracking_to_writelocset(tracking)),
-                changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes)),
+                read_locs=readlocset_to_list(tracking_to_readlocset(tracking, namespace, self._stable_map)),
+                write_locs=writelocset_to_list(tracking_to_writelocset(tracking, namespace, self._stable_map)),
+                changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes, namespace, self._stable_map)),
                 errors=[ReproducibilityError(
                     error_type=ErrorType.UNRECOVERABLE_MUTATION,
                     cell_id=cell_id,
@@ -1323,6 +1133,8 @@ class ReproducibilityEnforcer:
                 execution_seq=self.seq_counter,
                 structural_reads_values=structural_read_values,
                 typed_changes=typed_changes,
+                namespace=namespace,
+                stable_map=self._stable_map,
             )
             return ReproducibilityResult(
                 stale_cells=self._notebook_state.get_stale_cells(),
@@ -1330,9 +1142,9 @@ class ReproducibilityEnforcer:
                 column_changed=column_changed,
                 structural_warnings=structural_warnings,
                 staleness_reasons=self._notebook_state.get_all_reasons(),
-                read_locs=readlocset_to_list(tracking_to_readlocset(tracking)),
-                write_locs=writelocset_to_list(tracking_to_writelocset(tracking)),
-                changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes)),
+                read_locs=readlocset_to_list(tracking_to_readlocset(tracking, namespace, self._stable_map)),
+                write_locs=writelocset_to_list(tracking_to_writelocset(tracking, namespace, self._stable_map)),
+                changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes, namespace, self._stable_map)),
             )
 
         # ================================================================
@@ -1344,7 +1156,7 @@ class ReproducibilityEnforcer:
         # NoReadAndWrite(R', W', i) ≝ Rᵢ ∩ Wᵢ = ∅
         # Ref: FORMAL_DEVELOPMENT.md §3.2, line 176
         # (Cell reads and writes same location - potential issue for reproducibility)
-        no_read_and_write_error = self._check_no_read_and_write(cell_id, tracking)
+        no_read_and_write_error = self._check_no_read_and_write(cell_id, tracking, namespace)
         if no_read_and_write_error:
             errors.append(no_read_and_write_error)
             log(f"[Inst-Run] {cell_id}: NoReadAndWrite=fail")
@@ -1368,7 +1180,7 @@ class ReproducibilityEnforcer:
         if typed_changes:
             with timer(key="check:NoWriteAfterRead", message=f"[Inst-Run] NoWriteAfterRead check for {cell_id}"):
                 backward_error = self._check_backward_mutation_new(
-                    cell_id, my_position, typed_changes, current_diff, column_changed
+                    cell_id, my_position, typed_changes, current_diff, column_changed, namespace
                 )
         if backward_error:
             errors.append(backward_error)
@@ -1389,7 +1201,7 @@ class ReproducibilityEnforcer:
         # Ref: FORMAL_DEVELOPMENT.md §3.2, line 178
         # (Forward contamination check)
         with timer(key="check:NoReadBeforeWrite", message=f"[Inst-Run] NoReadBeforeWrite check for {cell_id}"):
-            forward_error = self._check_forward_contamination(cell_id, my_position, tracking)
+            forward_error = self._check_forward_contamination(cell_id, my_position, tracking, namespace)
         if forward_error:
             errors.append(forward_error)
         log(f"[Inst-Run] {cell_id}: NoReadBeforeWrite={'fail' if forward_error else 'pass'}")
@@ -1555,9 +1367,9 @@ class ReproducibilityEnforcer:
             column_changed=column_changed,
             structural_warnings=structural_warnings,
             staleness_reasons=staleness_reasons,
-            read_locs=readlocset_to_list(tracking_to_readlocset(tracking)),
-            write_locs=writelocset_to_list(tracking_to_writelocset(tracking)),
-            changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes)),
+            read_locs=readlocset_to_list(tracking_to_readlocset(tracking, namespace, self._stable_map)),
+            write_locs=writelocset_to_list(tracking_to_writelocset(tracking, namespace, self._stable_map)),
+            changed_locs=writelocset_to_list(changes_to_write_locs(typed_changes, namespace, self._stable_map)),
             errors=errors,  # All formal predicate violations
         )
 
@@ -1605,6 +1417,32 @@ class ReproducibilityEnforcer:
             accessed_vars = set(tracking.reads_before_writes) | set(tracking.writes)
             keys_to_include = _expand_with_deep_aliases(accessed_vars, pre_checkpoint)
 
+            # Safety-net logging: check if aliases are already unified by StableIdMap
+            alias_only = keys_to_include - accessed_vars
+            if alias_only and _logger.isEnabledFor(logging.DEBUG):
+                already_unified = set()
+                for alias in alias_only:
+                    alias_obj = namespace.get(alias)
+                    if alias_obj is None:
+                        continue
+                    alias_sid = self._stable_map.get_stable(alias_obj)
+                    for orig in accessed_vars:
+                        orig_obj = namespace.get(orig)
+                        if orig_obj is not None and self._stable_map.get_stable(orig_obj) == alias_sid:
+                            already_unified.add(alias)
+                            break
+                not_unified = alias_only - already_unified
+                if already_unified:
+                    _logger.debug(
+                        "Alias expansion found %d aliases already unified by StableIdMap: %s",
+                        len(already_unified), already_unified,
+                    )
+                if not_unified:
+                    _logger.debug(
+                        "Alias expansion found %d aliases NOT unified by StableIdMap: %s",
+                        len(not_unified), not_unified,
+                    )
+
         # Compute diff
         _is_combined = isinstance(pre_checkpoint, Checkpoint)
         if _is_combined:
@@ -1639,6 +1477,7 @@ class ReproducibilityEnforcer:
         cell_id: str,
         my_position: int,
         tracking: TrackingData,
+        namespace: Optional[dict] = None,
     ) -> Optional[ReproducibilityError]:
         """
         Check NoReadBeforeWrite predicate.
@@ -1650,7 +1489,7 @@ class ReproducibilityEnforcer:
         Prefers diff-based WriteLocSet (from typed_changes) when available
         for column-level precision, falls back to tracking-based writes.
         """
-        R_i = tracking_to_readlocset(tracking)
+        R_i = tracking_to_readlocset(tracking, namespace, self._stable_map)
         if not R_i:
             return None
 
@@ -1661,7 +1500,7 @@ class ReproducibilityEnforcer:
             # Prefer diff-based writes for column-level precision
             later_changes = self._notebook_state.get_typed_changes(later_cell_id)
             if later_changes:
-                W_later = changes_to_write_locs(later_changes)
+                W_later = changes_to_write_locs(later_changes, namespace, self._stable_map)
             else:
                 W_later = self._notebook_state.writes.get(later_cell_id, frozenset())
 
@@ -1692,6 +1531,7 @@ class ReproducibilityEnforcer:
         typed_changes: List,
         current_diff: MemoryCheckpointDiffResult,
         modified_columns: Dict[str, List[str]],
+        namespace: Optional[dict] = None,
     ) -> Optional[ReproducibilityError]:
         """
         Check NoWriteAfterRead predicate.
@@ -1704,7 +1544,7 @@ class ReproducibilityEnforcer:
         if not typed_changes:
             return None
 
-        W_i_diff = changes_to_write_locs(typed_changes)
+        W_i_diff = changes_to_write_locs(typed_changes, namespace, self._stable_map)
         if not W_i_diff:
             return None
 
@@ -1835,6 +1675,7 @@ class ReproducibilityEnforcer:
         self,
         cell_id: str,
         tracking: TrackingData,
+        namespace: Optional[dict] = None,
     ) -> Optional[ReproducibilityError]:
         """
         Check NoReadAndWrite predicate: Wᵢ ▷ Rᵢ = ∅
@@ -1847,8 +1688,8 @@ class ReproducibilityEnforcer:
 
         Formal ref: main.tex §3.2, FORMAL_DEVELOPMENT.md §3.2, line 176
         """
-        R_i = tracking_to_readlocset(tracking)
-        W_i = self._tracking_to_noreadandwrite_wlocs(tracking)
+        R_i = tracking_to_readlocset(tracking, namespace, self._stable_map)
+        W_i = self._tracking_to_noreadandwrite_wlocs(tracking, namespace)
 
         conflicting = wlocs_conflict_rlocs(W_i, R_i)
         if conflicting:
@@ -1864,7 +1705,11 @@ class ReproducibilityEnforcer:
             )
         return None
 
-    def _tracking_to_noreadandwrite_wlocs(self, tracking: TrackingData) -> WriteLocSet:
+    def _tracking_to_noreadandwrite_wlocs(
+        self,
+        tracking: TrackingData,
+        namespace: Optional[dict] = None,
+    ) -> WriteLocSet:
         """Build WriteLocSet for NoReadAndWrite check.
 
         For column assignments like df["y"] = ..., the tracking reports
@@ -1872,6 +1717,7 @@ class ReproducibilityEnforcer:
         We use column_writes to distinguish: if a variable has column_writes,
         emit Col locs; otherwise emit Var.
         """
+        from flowbook.kernel.loc_ids import get_qualifier
         locs: set = set()
         col_writes = tracking.column_writes or {}
         var_writes = tracking.writes or set()
@@ -1879,8 +1725,9 @@ class ReproducibilityEnforcer:
         for var in var_writes:
             if var in col_writes:
                 # Has column detail → emit Col for each column written
+                q = get_qualifier(var, namespace, self._stable_map)
                 for col in col_writes[var]:
-                    locs.add(WriteLoc.col(var, col))
+                    locs.add(WriteLoc.col(q, col))
             else:
                 # No column detail → Var (whole variable reassignment)
                 locs.add(WriteLoc.var(var))
@@ -1889,8 +1736,9 @@ class ReproducibilityEnforcer:
         # (column writes via in-place mutation without rebinding)
         for var, cols in col_writes.items():
             if var not in var_writes:
+                q = get_qualifier(var, namespace, self._stable_map)
                 for col in cols:
-                    locs.add(WriteLoc.col(var, col))
+                    locs.add(WriteLoc.col(q, col))
 
         return frozenset(locs)
 
@@ -2032,11 +1880,13 @@ class ReproducibilityEnforcer:
             cell_read_locs = _precise_readlocset(cell_read_locs, cell_tracking)
             conflicting_wlocs = wlocs_conflict_rlocs(change_wlocs, cell_read_locs)
 
-            # Also check write-write overlap (WRITE_OVERLAP - no convergence)
-            cell_writes = cell_tracking.writes or set()
-            write_overlap = W_i_union & cell_writes
+            # Write-write overlap: W'_i ▷ output*(W_j) — typed column-level check.
+            # Uses stored WriteLocSet (includes diff-derived ColAdd/ColDel/Rows/Attr)
+            # and output_set() to convert j's writes to the reads they produce.
+            cell_write_locs = self._notebook_state.writes.get(cell_id, frozenset())
+            write_conflicting = wlocs_conflict_rlocs(change_wlocs, output_set(cell_write_locs))
 
-            if conflicting_wlocs or write_overlap:
+            if conflicting_wlocs or write_conflicting:
                 # Build staleness reasons from conflicting WriteLocs
                 stale_var_names: set = set()
                 for wloc in conflicting_wlocs:
@@ -2047,11 +1897,12 @@ class ReproducibilityEnforcer:
                     stale_var_names.add(wloc.var_name())
 
                 # Then handle write-only overlaps (WRITE_OVERLAP - no convergence)
-                for var in write_overlap - stale_var_names:
-                    self._notebook_state.add_reason(
-                        cell_id,
-                        Reason(ReasonType.WRITE_OVERLAP, loc=var, cell_id=just_executed)
-                    )
+                for wloc in write_conflicting:
+                    if wloc.var_name() not in stale_var_names:
+                        self._notebook_state.add_reason(
+                            cell_id,
+                            Reason(ReasonType.WRITE_OVERLAP, loc=wloc.display_name(), cell_id=just_executed)
+                        )
 
         return self._notebook_state.get_stale_cells(), all_warnings
 
@@ -2389,7 +2240,7 @@ class ReproducibilityEnforcer:
             # Conflict resolution (simulated for timing measurement)
             my_position = self._get_position(cell_id)
             if my_position >= 0:
-                R_i = tracking_to_readlocset(tracking)
+                R_i = tracking_to_readlocset(tracking, namespace, self._stable_map)
 
                 # Simulate forward contamination check
                 for later_cell_id in self._cell_order[my_position + 1:]:
@@ -2425,6 +2276,7 @@ class ReproducibilityEnforcer:
         self._notebook_state.clear()  # Clear status, R, W, tracking_data
         self._pending_checkpoint_deletion = None
         self._pending_snapshot = None
+        self._stable_map.clear()
 
     def rollback_last_check(self) -> None:
         """
@@ -2880,52 +2732,6 @@ def format_structural_violation(
 
     return "\n".join(lines)
 
-
-def format_structural_warning(
-    mutating_cell_alpha: str,
-    affected_cell_alpha: str,
-    var_name: str,
-    structural_reads_values: Dict[str, str],
-    changes: List[str],
-) -> str:
-    """
-    Format a detailed structural warning message.
-
-    Args:
-        mutating_cell_alpha: Cell that caused the change (@A notation)
-        affected_cell_alpha: Earlier cell whose reads were affected (@A notation)
-        var_name: Name of the affected variable
-        structural_reads_values: Dict of {attr_name: value_repr} at read time
-        changes: List of change descriptions
-
-    Returns:
-        Formatted multi-line message string
-    """
-    lines = [
-        "⚠️ Structural Warning",
-        "",
-        f"Cell {mutating_cell_alpha} modified '{var_name}' which Cell {affected_cell_alpha} previously read.",
-    ]
-
-    # What was read
-    if structural_reads_values:
-        lines.append("")
-        lines.append(f"What Cell {affected_cell_alpha} read:")
-        for attr, value in sorted(structural_reads_values.items()):
-            lines.append(f"  • {var_name}.{attr} → {value}")
-
-    # What changed
-    if changes:
-        lines.append("")
-        lines.append(f"What Cell {mutating_cell_alpha} changed:")
-        for change in changes:
-            lines.append(f"  • {change}")
-
-    # Impact
-    lines.append("")
-    lines.append(f"Impact: Re-running from top will give Cell {affected_cell_alpha} different results.")
-
-    return "\n".join(lines)
 
 
 def format_forward_dependency_message(

@@ -22,9 +22,13 @@ Usage:
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, FrozenSet, List, Optional, Set
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Union
 
+from flowbook.kernel.loc_ids import LocRef, StableIdMap, get_qualifier
 from flowbook.kernel_support.models import TrackingData
+
+# Type alias for qualifier: either a variable name string or a LocRef
+Qualifier = Union[str, LocRef]
 
 
 # =============================================================================
@@ -44,6 +48,15 @@ COL_ATTRS: FrozenSet[str] = frozenset({
     "describe",  # describe() includes all columns
     "shape",     # (rows, cols)
     "size",      # rows * cols
+})
+
+# Attributes that depend on column DATA values (not just structure).
+# Col(d, c) writes invalidate these because modifying column values
+# changes the data these attributes expose.
+COL_VALUE_ATTRS: FrozenSet[str] = frozenset({
+    "values",    # df.values — 2D array of all column data
+    "T",         # df.T — transpose exposes all column data
+    "describe",  # df.describe() — statistics computed from column values
 })
 
 # Attributes that reveal row structure
@@ -67,7 +80,7 @@ ROW_ATTRS: FrozenSet[str] = frozenset({
 class ReadLocType(str, Enum):
     """Read location type."""
     VAR = "var"           # Var(x): whole variable
-    COLUMN = "column"     # Col(d, c): DataFrame column
+    COLUMN = "col"        # Col(d, c): DataFrame column
     ATTR = "attr"         # Attr(d, a): DataFrame attribute (shape, columns, etc.)
     FILE = "file"         # File(p): file path
 
@@ -79,11 +92,15 @@ class ReadLoc:
 
     ReadLoc ::= Var(x) | Col(d, c) | Attr(d, a) | File(p)
 
+    The qualifier is either a variable name (str) or a LocRef(loc_id, var_name)
+    for stable DataFrame identity. LocRef qualifiers enable correct conflict
+    detection for aliased DataFrames (same object, different variable names).
+
     Formal ref: LOCSET_UNIFICATION_PLAN.md §Read Location Grammar
     """
     type: ReadLocType
     name: str
-    qualifier: Optional[str] = None
+    qualifier: Optional[Qualifier] = None
 
     @classmethod
     def var(cls, name: str) -> "ReadLoc":
@@ -91,14 +108,14 @@ class ReadLoc:
         return cls(ReadLocType.VAR, name)
 
     @classmethod
-    def col(cls, var: str, column: str) -> "ReadLoc":
+    def col(cls, qualifier: Qualifier, column: str) -> "ReadLoc":
         """Col(d, c) — DataFrame column read."""
-        return cls(ReadLocType.COLUMN, column, qualifier=var)
+        return cls(ReadLocType.COLUMN, column, qualifier=qualifier)
 
     @classmethod
-    def attr(cls, var: str, attribute: str) -> "ReadLoc":
+    def attr(cls, qualifier: Qualifier, attribute: str) -> "ReadLoc":
         """Attr(d, a) — DataFrame attribute read (shape, columns, etc.)."""
-        return cls(ReadLocType.ATTR, attribute, qualifier=var)
+        return cls(ReadLocType.ATTR, attribute, qualifier=qualifier)
 
     @classmethod
     def file(cls, path: str) -> "ReadLoc":
@@ -109,34 +126,42 @@ class ReadLoc:
         """Extract the top-level variable name."""
         if self.type in (ReadLocType.VAR, ReadLocType.FILE):
             return self.name
-        return self.qualifier  # COLUMN, ATTR
+        if isinstance(self.qualifier, LocRef):
+            return self.qualifier.var_name
+        return self.qualifier  # COLUMN, ATTR with str qualifier
 
     def display_name(self) -> str:
         """Human-readable representation for UI display."""
+        q = _display_qualifier(self.qualifier)
         if self.type == ReadLocType.VAR:
             return self.name
         elif self.type == ReadLocType.COLUMN:
-            return f"{self.qualifier}['{self.name}']"
+            return f"{q}['{self.name}']"
         elif self.type == ReadLocType.ATTR:
-            return f"{self.qualifier}.{self.name}"
+            return f"{q}.{self.name}"
         elif self.type == ReadLocType.FILE:
             return f"File({self.name})"
         return str(self)
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> Dict[str, Any]:
         """Serialize to JSON-friendly dict for frontend metadata."""
-        d: Dict[str, str] = {"type": self.type.value, "name": self.name}
+        d: Dict[str, Any] = {"type": self.type.value, "name": self.name}
         if self.qualifier is not None:
-            d["qualifier"] = self.qualifier
+            if isinstance(self.qualifier, LocRef):
+                d["qualifier"] = self.qualifier.loc_id
+                d["var_name"] = self.qualifier.var_name
+            else:
+                d["qualifier"] = self.qualifier
         return d
 
     def __str__(self) -> str:
+        q = _display_qualifier(self.qualifier)
         if self.type == ReadLocType.VAR:
             return f"Var({self.name})"
         elif self.type == ReadLocType.COLUMN:
-            return f"Col({self.qualifier}, {self.name})"
+            return f"Col({q}, {self.name})"
         elif self.type == ReadLocType.ATTR:
-            return f"Attr({self.qualifier}, {self.name})"
+            return f"Attr({q}, {self.name})"
         elif self.type == ReadLocType.FILE:
             return f"File({self.name})"
         return repr(self)
@@ -170,11 +195,16 @@ class WriteLoc:
     are invalidated. This is what eliminates the need for a separate
     ConflictResolver — the conflict semantics are encoded in the type.
 
+    The qualifier is either a variable name (str) or a LocRef(loc_id, var_name)
+    for stable DataFrame identity. For Rows(d), the qualifier holds the
+    DataFrame identifier (same as Col/ColAdd/ColDel/Attr), and name holds
+    the display variable name.
+
     Formal ref: LOCSET_UNIFICATION_PLAN.md §Write Location Grammar
     """
     type: WriteLocType
     name: str
-    qualifier: Optional[str] = None
+    qualifier: Optional[Qualifier] = None
 
     @classmethod
     def var(cls, name: str) -> "WriteLoc":
@@ -182,29 +212,34 @@ class WriteLoc:
         return cls(WriteLocType.VAR, name)
 
     @classmethod
-    def col(cls, var: str, column: str) -> "WriteLoc":
+    def col(cls, qualifier: Qualifier, column: str) -> "WriteLoc":
         """Col(d, c) — column values modified."""
-        return cls(WriteLocType.COL, column, qualifier=var)
+        return cls(WriteLocType.COL, column, qualifier=qualifier)
 
     @classmethod
-    def col_add(cls, var: str, column: str) -> "WriteLoc":
+    def col_add(cls, qualifier: Qualifier, column: str) -> "WriteLoc":
         """ColAdd(d, c) — new column added."""
-        return cls(WriteLocType.COL_ADD, column, qualifier=var)
+        return cls(WriteLocType.COL_ADD, column, qualifier=qualifier)
 
     @classmethod
-    def col_del(cls, var: str, column: str) -> "WriteLoc":
+    def col_del(cls, qualifier: Qualifier, column: str) -> "WriteLoc":
         """ColDel(d, c) — column removed."""
-        return cls(WriteLocType.COL_DEL, column, qualifier=var)
+        return cls(WriteLocType.COL_DEL, column, qualifier=qualifier)
 
     @classmethod
-    def rows(cls, var: str) -> "WriteLoc":
-        """Rows(d) — rows added or removed."""
-        return cls(WriteLocType.ROWS, var)
+    def rows(cls, var: str, qualifier: Optional[Qualifier] = None) -> "WriteLoc":
+        """Rows(d) — rows added or removed.
+
+        Args:
+            var: Variable name (for display and var_name())
+            qualifier: DataFrame identifier (LocRef or str). Defaults to var.
+        """
+        return cls(WriteLocType.ROWS, var, qualifier=qualifier if qualifier is not None else var)
 
     @classmethod
-    def attr(cls, var: str, attribute: str) -> "WriteLoc":
+    def attr(cls, qualifier: Qualifier, attribute: str) -> "WriteLoc":
         """Attr(d, a) — attribute changed (index, dtypes, etc.)."""
-        return cls(WriteLocType.ATTR, attribute, qualifier=var)
+        return cls(WriteLocType.ATTR, attribute, qualifier=qualifier)
 
     @classmethod
     def file(cls, path: str) -> "WriteLoc":
@@ -216,9 +251,14 @@ class WriteLoc:
 
         Used by LastWriter which operates at the variable level.
         """
-        if self.type in (WriteLocType.VAR, WriteLocType.ROWS, WriteLocType.FILE):
+        if self.type in (WriteLocType.VAR, WriteLocType.FILE):
             return self.name
-        return self.qualifier  # COL, COL_ADD, COL_DEL, ATTR
+        if self.type == WriteLocType.ROWS:
+            return self.name  # Rows stores display var name in name
+        # COL, COL_ADD, COL_DEL, ATTR
+        if isinstance(self.qualifier, LocRef):
+            return self.qualifier.var_name
+        return self.qualifier
 
     def output(self) -> FrozenSet[ReadLoc]:
         """Return the ReadLocs that would observe this write's effect.
@@ -234,6 +274,12 @@ class WriteLoc:
         if self.type == WriteLocType.VAR:
             return frozenset({ReadLoc.var(self.name)})
         elif self.type == WriteLocType.COL:
+            # Just the column itself — no COL_VALUE_ATTRS inflation.
+            # Including attrs like 'values'/'T' would create false
+            # write-write overlap between independent column writes
+            # (Col(d,"price") vs Col(d,"qty")), breaking column independence.
+            # Rows↔Col overlap is unaffected: Rows ▷ Col is True in ▷,
+            # and Col ▷ output(Rows) works via ROW_ATTRS ∩ CVA.
             return frozenset({ReadLoc.col(self.qualifier, self.name)})
         elif self.type == WriteLocType.COL_ADD:
             # ColAdd conflicts with Attr(d, a) for a ∈ COL_ATTRS
@@ -248,10 +294,9 @@ class WriteLoc:
             )
         elif self.type == WriteLocType.ROWS:
             # Rows conflicts with Attr(d, a) for a ∈ ROW_ATTRS
-            # (also conflicts with all Col(d, *), but we can't enumerate columns;
-            # the attr overlap suffices for write-write detection)
+            # qualifier holds the DataFrame identifier (LocRef or str)
             return frozenset(
-                ReadLoc.attr(self.name, a) for a in ROW_ATTRS
+                ReadLoc.attr(self.qualifier, a) for a in ROW_ATTRS
             )
         elif self.type == WriteLocType.ATTR:
             return frozenset({ReadLoc.attr(self.qualifier, self.name)})
@@ -261,42 +306,48 @@ class WriteLoc:
 
     def display_name(self) -> str:
         """Human-readable representation for UI display."""
+        q = _display_qualifier(self.qualifier)
         if self.type == WriteLocType.VAR:
             return self.name
         elif self.type == WriteLocType.COL:
-            return f"{self.qualifier}['{self.name}']"
+            return f"{q}['{self.name}']"
         elif self.type == WriteLocType.COL_ADD:
-            return f"{self.qualifier}['{self.name}'] (added)"
+            return f"{q}['{self.name}'] (added)"
         elif self.type == WriteLocType.COL_DEL:
-            return f"{self.qualifier}['{self.name}'] (removed)"
+            return f"{q}['{self.name}'] (removed)"
         elif self.type == WriteLocType.ROWS:
             return f"{self.name} (rows changed)"
         elif self.type == WriteLocType.ATTR:
-            return f"{self.qualifier}.{self.name}"
+            return f"{q}.{self.name}"
         elif self.type == WriteLocType.FILE:
             return f"File({self.name})"
         return str(self)
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> Dict[str, Any]:
         """Serialize to JSON-friendly dict for frontend metadata."""
-        d: Dict[str, str] = {"type": self.type.value, "name": self.name}
+        d: Dict[str, Any] = {"type": self.type.value, "name": self.name}
         if self.qualifier is not None:
-            d["qualifier"] = self.qualifier
+            if isinstance(self.qualifier, LocRef):
+                d["qualifier"] = self.qualifier.loc_id
+                d["var_name"] = self.qualifier.var_name
+            else:
+                d["qualifier"] = self.qualifier
         return d
 
     def __str__(self) -> str:
+        q = _display_qualifier(self.qualifier)
         if self.type == WriteLocType.VAR:
             return f"Var({self.name})"
         elif self.type == WriteLocType.COL:
-            return f"Col({self.qualifier}, {self.name})"
+            return f"Col({q}, {self.name})"
         elif self.type == WriteLocType.COL_ADD:
-            return f"ColAdd({self.qualifier}, {self.name})"
+            return f"ColAdd({q}, {self.name})"
         elif self.type == WriteLocType.COL_DEL:
-            return f"ColDel({self.qualifier}, {self.name})"
+            return f"ColDel({q}, {self.name})"
         elif self.type == WriteLocType.ROWS:
             return f"Rows({self.name})"
         elif self.type == WriteLocType.ATTR:
-            return f"Attr({self.qualifier}, {self.name})"
+            return f"Attr({q}, {self.name})"
         elif self.type == WriteLocType.FILE:
             return f"File({self.name})"
         return repr(self)
@@ -305,6 +356,50 @@ class WriteLoc:
 # Type aliases
 ReadLocSet = FrozenSet[ReadLoc]
 WriteLocSet = FrozenSet[WriteLoc]
+
+
+# =============================================================================
+# Qualifier Comparison Helpers
+# =============================================================================
+
+
+def _display_qualifier(q: Optional[Qualifier]) -> str:
+    """Extract display string from a qualifier (str or LocRef)."""
+    if q is None:
+        return "?"
+    if isinstance(q, LocRef):
+        return q.var_name
+    return q
+
+
+def _same_dataframe(a: Optional[Qualifier], b: Optional[Qualifier]) -> bool:
+    """Compare two DataFrame identifiers (str or LocRef).
+
+    If both are LocRef, compares loc_ids (same object → same id, even
+    if accessed through different variable names).
+    If mixed or both strings, falls back to var_name comparison.
+    """
+    if a is None or b is None:
+        return a is b
+    if isinstance(a, LocRef) and isinstance(b, LocRef):
+        return a.loc_id == b.loc_id
+    # Mixed or both strings — compare var names
+    a_name = a.var_name if isinstance(a, LocRef) else a
+    b_name = b.var_name if isinstance(b, LocRef) else b
+    return a_name == b_name
+
+
+def _var_targets_ref(var_name: str, ref: Optional[Qualifier]) -> bool:
+    """Does Var(x) target the DataFrame accessed through ref?
+
+    Var rebinding invalidates reads that went through that specific
+    variable name, so we compare against ref.var_name (not loc_id).
+    """
+    if ref is None:
+        return False
+    if isinstance(ref, LocRef):
+        return var_name == ref.var_name
+    return var_name == ref
 
 
 # =============================================================================
@@ -317,6 +412,10 @@ WriteLocSet = FrozenSet[WriteLoc]
 #
 # The "how" is encoded in the WriteLoc type constructor.
 # The matrix has 7 write types × 4 read types = 28 cells.
+#
+# Qualifier comparison uses _same_dataframe() for DataFrame-to-DataFrame
+# checks (compares loc_ids when LocRef is available) and _var_targets_ref()
+# for Var-to-DataFrame checks (compares variable names).
 # =============================================================================
 
 
@@ -334,51 +433,55 @@ def write_conflicts_read(w: WriteLoc, r: ReadLoc) -> bool:
         if r.type == ReadLocType.VAR:
             return w.name == r.name
         elif r.type in (ReadLocType.COLUMN, ReadLocType.ATTR):
-            return w.name == r.qualifier
+            # Var rebinding → compare by variable name, not object identity
+            return _var_targets_ref(w.name, r.qualifier)
         return False  # Var vs File: no conflict
 
     # --- Col(d, c) writes: column values modified ---
-    # Invalidates: same-column reads
-    # Does NOT invalidate: Var reads (binding unchanged), attribute reads (values ≠ structure)
+    # Invalidates: same-column reads on same DataFrame,
+    #              value-dependent attrs (values, T, describe) on same DataFrame
+    # Does NOT invalidate: Var reads (binding unchanged), structural attrs (shape, columns)
     elif w.type == WriteLocType.COL:
         if r.type == ReadLocType.COLUMN:
-            return w.qualifier == r.qualifier and w.name == r.name
+            return _same_dataframe(w.qualifier, r.qualifier) and w.name == r.name
+        if r.type == ReadLocType.ATTR:
+            return _same_dataframe(w.qualifier, r.qualifier) and r.name in COL_VALUE_ATTRS
         return False
 
     # --- ColAdd(d, c) writes: new column added ---
-    # Invalidates: column-structure attribute reads
+    # Invalidates: column-structure attribute reads on same DataFrame
     # Does NOT invalidate: Var reads (binding unchanged), existing column reads
     elif w.type == WriteLocType.COL_ADD:
         if r.type == ReadLocType.ATTR:
-            return w.qualifier == r.qualifier and r.name in COL_ATTRS
+            return _same_dataframe(w.qualifier, r.qualifier) and r.name in COL_ATTRS
         return False
 
     # --- ColDel(d, c) writes: column removed ---
-    # Invalidates: that column's reads, column-structure attrs
+    # Invalidates: that column's reads, column-structure attrs on same DataFrame
     # Does NOT invalidate: Var reads (binding unchanged)
     elif w.type == WriteLocType.COL_DEL:
         if r.type == ReadLocType.COLUMN:
-            return w.qualifier == r.qualifier and w.name == r.name
+            return _same_dataframe(w.qualifier, r.qualifier) and w.name == r.name
         elif r.type == ReadLocType.ATTR:
-            return w.qualifier == r.qualifier and r.name in COL_ATTRS
+            return _same_dataframe(w.qualifier, r.qualifier) and r.name in COL_ATTRS
         return False
 
     # --- Rows(d) writes: rows added or removed ---
-    # Invalidates: all column reads (data changed), row-structure attrs
+    # Invalidates: all column reads (data changed), row-structure attrs on same DataFrame
     # Does NOT invalidate: Var reads (binding unchanged)
     elif w.type == WriteLocType.ROWS:
         if r.type == ReadLocType.COLUMN:
-            return w.name == r.qualifier
+            return _same_dataframe(w.qualifier, r.qualifier)
         elif r.type == ReadLocType.ATTR:
-            return w.name == r.qualifier and r.name in ROW_ATTRS
+            return _same_dataframe(w.qualifier, r.qualifier) and r.name in ROW_ATTRS
         return False
 
     # --- Attr(d, a) writes: attribute changed ---
-    # Invalidates: same attribute reads
+    # Invalidates: same attribute reads on same DataFrame
     # Does NOT invalidate: Var reads (binding unchanged), column value reads
     elif w.type == WriteLocType.ATTR:
         if r.type == ReadLocType.ATTR:
-            return w.qualifier == r.qualifier and w.name == r.name
+            return _same_dataframe(w.qualifier, r.qualifier) and w.name == r.name
         return False
 
     # --- File(p) writes ---
@@ -436,6 +539,81 @@ def output_set(writes: WriteLocSet) -> ReadLocSet:
 
 
 # =============================================================================
+# Typed Formal Predicates
+# =============================================================================
+# These are the typed (column-aware) versions of the formal predicates from
+# FORMAL_DEVELOPMENT.md §3.2-3.3. Each takes ReadLocSet/WriteLocSet and uses
+# the ▷ relation for column-level precision.
+#
+# The four VALIDITY predicates (must all hold for execution to be accepted):
+#   no_read_and_write, write_before_read, no_read_before_write, no_write_after_read
+#
+# The two STALENESS predicates (used after acceptance to propagate staleness):
+#   forward_stale_reads, forward_stale_writes
+
+
+def no_read_and_write(R_i: ReadLocSet, W_i: WriteLocSet) -> WriteLocSet:
+    """
+    NoReadAndWrite(R, W, i) — Rᵢ ∩ Wᵢ = ∅
+
+    Returns the WriteLocs that conflict with reads in the same cell.
+    Empty means predicate holds.
+
+    Formal ref: FORMAL_DEVELOPMENT.md §3.2
+    """
+    return wlocs_conflict_rlocs(W_i, R_i)
+
+
+def no_read_before_write(R_i: ReadLocSet, W_after: WriteLocSet) -> WriteLocSet:
+    """
+    NoReadBeforeWrite(R, W, i) — Rᵢ ∩ W_{i+1..n} = ∅
+
+    Returns the WriteLocs from later cells that conflict with cell i's reads.
+    Empty means predicate holds (no forward contamination).
+
+    Formal ref: FORMAL_DEVELOPMENT.md §3.2
+    """
+    return wlocs_conflict_rlocs(W_after, R_i)
+
+
+def no_write_after_read(W_i: WriteLocSet, R_before: ReadLocSet) -> WriteLocSet:
+    """
+    NoWriteAfterRead(R, W, i) — Wᵢ ∩ R_{1..i-1} = ∅
+
+    Returns the WriteLocs from cell i that conflict with earlier cells' reads.
+    Empty means predicate holds (no backward mutation).
+
+    Formal ref: FORMAL_DEVELOPMENT.md §3.2
+    """
+    return wlocs_conflict_rlocs(W_i, R_before)
+
+
+def forward_stale_reads(W_i: WriteLocSet, R_j: ReadLocSet) -> WriteLocSet:
+    """
+    ForwardStale read overlap: W'ᵢ ▷ Rⱼ
+
+    Returns the WriteLocs from cell i that invalidate cell j's reads.
+    Non-empty means cell j should become stale.
+
+    Formal ref: FORMAL_DEVELOPMENT.md §3.3
+    """
+    return wlocs_conflict_rlocs(W_i, R_j)
+
+
+def forward_stale_writes(W_i: WriteLocSet, W_j: WriteLocSet) -> WriteLocSet:
+    """
+    ForwardStale write overlap: W'ᵢ ▷ output*(Wⱼ)
+
+    Returns the WriteLocs from cell i that overlap with cell j's write effects.
+    Non-empty means cell j should become stale (write-write overlap).
+    Uses output() to convert j's writes to the reads they produce.
+
+    Formal ref: FORMAL_DEVELOPMENT.md §3.3, CONFLICT_RELATION.md §Write-Write Conflict
+    """
+    return wlocs_conflict_rlocs(W_i, output_set(W_j))
+
+
+# =============================================================================
 # Extraction Helpers (for metadata output)
 # =============================================================================
 
@@ -451,29 +629,32 @@ def writelocset_var_names(locs: WriteLocSet) -> Set[str]:
 
 
 def readlocset_to_column_map(locs: ReadLocSet) -> Dict[str, List[str]]:
-    """Group Col read locs by variable → [column names]."""
+    """Group Col read locs by variable name → [column names]."""
     result: Dict[str, List[str]] = {}
     for loc in locs:
         if loc.type == ReadLocType.COLUMN and loc.qualifier:
-            result.setdefault(loc.qualifier, []).append(loc.name)
+            key = _display_qualifier(loc.qualifier)
+            result.setdefault(key, []).append(loc.name)
     return {k: sorted(v) for k, v in result.items()}
 
 
 def writelocset_to_column_map(locs: WriteLocSet) -> Dict[str, List[str]]:
-    """Group Col/ColAdd/ColDel write locs by variable → [column names]."""
+    """Group Col/ColAdd/ColDel write locs by variable name → [column names]."""
     result: Dict[str, List[str]] = {}
     for loc in locs:
         if loc.type in (WriteLocType.COL, WriteLocType.COL_ADD, WriteLocType.COL_DEL) and loc.qualifier:
-            result.setdefault(loc.qualifier, []).append(loc.name)
+            key = _display_qualifier(loc.qualifier)
+            result.setdefault(key, []).append(loc.name)
     return {k: sorted(v) for k, v in result.items()}
 
 
 def readlocset_to_attr_map(locs: ReadLocSet) -> Dict[str, List[str]]:
-    """Group Attr read locs by variable → [attribute names]."""
+    """Group Attr read locs by variable name → [attribute names]."""
     result: Dict[str, List[str]] = {}
     for loc in locs:
         if loc.type == ReadLocType.ATTR and loc.qualifier:
-            result.setdefault(loc.qualifier, []).append(loc.name)
+            key = _display_qualifier(loc.qualifier)
+            result.setdefault(key, []).append(loc.name)
     return {k: sorted(v) for k, v in result.items()}
 
 
@@ -508,19 +689,28 @@ def writelocset_to_list(locs: WriteLocSet) -> List[Dict[str, str]]:
 # =============================================================================
 
 
-def tracking_to_readlocset(tracking: TrackingData) -> ReadLocSet:
+def tracking_to_readlocset(
+    tracking: TrackingData,
+    namespace: Optional[dict] = None,
+    stable_map: Optional[StableIdMap] = None,
+) -> ReadLocSet:
     """
     Convert TrackingData reads to ReadLocSet.
 
     This creates the unified read set Rᵢ from runtime tracking data:
     - Variable reads → Var(x) (only for variables WITHOUT column/structural detail)
-    - Column reads → Col(d, c)
-    - Structural reads → Attr(d, a)
+    - Column reads → Col(d, c) with LocRef qualifier when stable_map available
+    - Structural reads → Attr(d, a) with LocRef qualifier when stable_map available
     - File reads → File(p)
 
     Variables that have column-level or structural-level read detail are NOT
     included as Var(x) reads, since the finer-grained locs already capture
     their read footprint. This matches the semantics of TrackingData.to_read_events().
+
+    Args:
+        tracking: TrackingData from cell execution
+        namespace: Current kernel namespace (optional, for LocRef qualifiers)
+        stable_map: StableIdMap instance (optional, for LocRef qualifiers)
     """
     locs: Set[ReadLoc] = set()
 
@@ -529,13 +719,15 @@ def tracking_to_readlocset(tracking: TrackingData) -> ReadLocSet:
 
     for var, cols in (tracking.column_reads_before_writes or {}).items():
         vars_with_detail.add(var)
+        q = get_qualifier(var, namespace, stable_map)
         for col in cols:
-            locs.add(ReadLoc.col(var, col))
+            locs.add(ReadLoc.col(q, col))
 
     for var, attrs in (tracking.structural_reads or {}).items():
         vars_with_detail.add(var)
+        q = get_qualifier(var, namespace, stable_map)
         for attr in attrs:
-            locs.add(ReadLoc.attr(var, attr))
+            locs.add(ReadLoc.attr(q, attr))
 
     # Only emit Var(x) for variables without column/structural detail
     for var in (tracking.reads_before_writes or set()):
@@ -548,7 +740,11 @@ def tracking_to_readlocset(tracking: TrackingData) -> ReadLocSet:
     return frozenset(locs)
 
 
-def tracking_to_writelocset(tracking: TrackingData) -> WriteLocSet:
+def tracking_to_writelocset(
+    tracking: TrackingData,
+    namespace: Optional[dict] = None,
+    stable_map: Optional[StableIdMap] = None,
+) -> WriteLocSet:
     """
     Convert TrackingData writes to WriteLocSet.
 
@@ -558,6 +754,11 @@ def tracking_to_writelocset(tracking: TrackingData) -> WriteLocSet:
 
     This function is used when no diff is available (e.g., for the basic
     write set before diff refinement).
+
+    Args:
+        tracking: TrackingData from cell execution
+        namespace: Current kernel namespace (optional, for LocRef qualifiers)
+        stable_map: StableIdMap instance (optional, for LocRef qualifiers)
     """
     locs: Set[WriteLoc] = set()
 
@@ -565,8 +766,9 @@ def tracking_to_writelocset(tracking: TrackingData) -> WriteLocSet:
         locs.add(WriteLoc.var(var))
 
     for var, cols in (tracking.column_writes or {}).items():
+        q = get_qualifier(var, namespace, stable_map)
         for col in cols:
-            locs.add(WriteLoc.col(var, col))
+            locs.add(WriteLoc.col(q, col))
 
     for path in (tracking.file_writes or set()):
         locs.add(WriteLoc.file(path))

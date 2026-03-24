@@ -527,7 +527,7 @@ class TestLocSetConversionIntegration:
         stored_reads = self.helper.sdc._notebook_state.reads.get("a", frozenset())
         # Should have Col(df, x), not Var(df)
         has_col_loc = any(
-            r.type.value == "column" and r.qualifier == "df" and r.name == "x"
+            r.type.value == "col" and r.qualifier == "df" and r.name == "x"
             for r in stored_reads
         )
         has_var_loc = any(

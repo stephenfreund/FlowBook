@@ -160,7 +160,9 @@ class TestOutput:
         assert WriteLoc.var("x").output() == frozenset({ReadLoc.var("x")})
 
     def test_col(self):
-        assert WriteLoc.col("df", "price").output() == frozenset({ReadLoc.col("df", "price")})
+        """Col produces just Col(d,c) — no attr inflation for column independence."""
+        result = WriteLoc.col("df", "price").output()
+        assert result == frozenset({ReadLoc.col("df", "price")})
 
     def test_col_add(self):
         """ColAdd produces Attr reads for all COL_ATTRS."""
@@ -449,6 +451,7 @@ class TestSetOperations:
             WriteLoc.attr("df", "index"),
         })
         result = output_set(writes)
+        # Col output is just {Col(df, price)} — no CVA inflation
         expected = frozenset({
             ReadLoc.var("x"),
             ReadLoc.col("df", "price"),
@@ -493,14 +496,27 @@ class TestWorkedExamples:
         R_C = frozenset({ReadLoc.var("df")})
         assert not has_conflict(W_B, R_C)
 
-    def test_column_modify_doesnt_affect_structure(self):
+    def test_column_modify_doesnt_affect_structural_attrs(self):
         """
-        Modifying column values doesn't conflict with attribute reads.
+        Modifying column values doesn't conflict with structural attribute reads.
         Col(df, price) ▷ Attr(df, shape) = false.
+        Col(df, price) ▷ Attr(df, columns) = false.
         """
         W = frozenset({WriteLoc.col("df", "price")})
         R = frozenset({ReadLoc.attr("df", "shape"), ReadLoc.attr("df", "columns")})
         assert not has_conflict(W, R)
+
+    def test_column_modify_affects_value_attrs(self):
+        """
+        Modifying column values DOES conflict with value-dependent attribute reads.
+        Col(df, price) ▷ Attr(df, values) = true.
+        Col(df, price) ▷ Attr(df, T) = true.
+        Col(df, price) ▷ Attr(df, describe) = true.
+        """
+        W = frozenset({WriteLoc.col("df", "price")})
+        assert has_conflict(W, frozenset({ReadLoc.attr("df", "values")}))
+        assert has_conflict(W, frozenset({ReadLoc.attr("df", "T")}))
+        assert has_conflict(W, frozenset({ReadLoc.attr("df", "describe")}))
 
     def test_column_add_affects_structure(self):
         """
