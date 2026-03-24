@@ -873,3 +873,130 @@ x's value (from some prior state) hasn't changed.
 | ----------------------- | ----------------------------------------- |
 | WRITE_OVERLAP enum      | `ReasonType.WRITE_OVERLAP` in `models.py` |
 | Write overlap detection | `_compute_forward_staleness_syntactic()`  |
+
+## 12. Column Provenance: Upgrading Col to ColAdd on Re-execution
+
+### 12.1 The Problem
+
+Write locations are determined by diffing memory checkpoints. On first execution of
+`df['x'] = 5`, column `x` is absent in the pre-checkpoint and present in the
+post-checkpoint, producing `ColAdd(d, x)`. On re-execution, `x` exists in both
+checkpoints (from the prior run), so the diff produces `Col(d, x)` instead.
+
+This matters because `ColAdd ▷ Attr(d, a)` for `a ∈ COL_ATTRS` (shape, columns, etc.)
+but `Col ▷ Attr(d, a)` only for `a ∈ COL_VALUE_ATTRS` (values, T, describe). If an
+earlier cell reads `df.shape`, the `NoReadBeforeWrite` predicate misses the forward
+contamination:
+
+```
+Cell A:  df = pd.DataFrame({"y": [1,2,3]})   # W_A = {Var(df)}
+Cell C:  df['x'] = 5                          # First run: W_C = {ColAdd(df, x)}
+Cell B:  df.shape                             # R_B = {Attr(df, shape)}
+
+Execute A → C → B.  All clean.
+Re-execute C:                                 # W_C = {Col(df, x)}  ← diff sees modify, not add
+Check NoReadBeforeWrite(R_B, W_{B+1..n}, B):
+  Col(df, x) ▷ Attr(df, shape)?  → No (shape ∉ COL_VALUE_ATTRS)
+  → Passes incorrectly.  B would see different shape in a clean rerun.
+```
+
+### 12.2 Solution: df.attrs Provenance
+
+Column provenance records which cell first created each column of a DataFrame in
+`df.attrs['_flowbook_col_origins']` — a dict `{column_name: cell_id}`.
+
+**Semantics:**
+
+| Operation | Effect on provenance |
+| --- | --- |
+| `record_var_write(df, cell_id)` | Reset ALL origins: every column → cell_id |
+| `record_column_write(df, col, cell_id)` | First writer wins — no overwrite if origin exists |
+| `record_column_delete(df, col)` | Remove origin entry |
+
+**First writer wins** ensures that re-executing `df['x'] = 5` does not change the
+origin from the cell that first added column `x`. The origin is cleared only by
+`record_var_write` (full DataFrame replacement) or `record_column_delete`.
+
+**record_var_write is called when:**
+- A DataFrame is assigned to a variable (`df = pd.read_csv(...)`, `df = pd.DataFrame(...)`,
+  `merged = df1.merge(df2)`, `result = pd.concat([df1, df2])`)
+- This covers all operations that create a new DataFrame object
+
+**record_column_write is called when:**
+- A column is assigned via `__setitem__` (`df['x'] = val`)
+- A column is inserted via `df.insert(loc, col, val)`
+
+**Storage:** Provenance lives in `df.attrs`, which is automatically preserved by
+`df.copy(deep=False)` (used by the checkpoint system's deepcopy), `df.copy()`, and
+aliasing. Each copy gets an independent dict, so mutations to one do not affect others.
+
+### 12.3 Provenance Upgrade in NoReadBeforeWrite
+
+The enforcer applies provenance-based upgrade in `_check_forward_contamination`:
+
+```
+UpgradeWrites(W, cell_id, Σ) ≝ { upgrade(w) | w ∈ W }
+  where upgrade(Col(d, c)) = ColAdd(d, c)  if provenance(Σ(d), c) = cell_id
+        upgrade(w)          = w             otherwise
+```
+
+For each `Col(d, c)` write by a later cell, if the provenance shows that cell first
+created column `c`, the write is upgraded to `ColAdd(d, c)`. This restores the
+correct conflict behavior:
+
+```
+Re-execute C:  W_C = {Col(df, x)}
+Upgrade:       provenance says x was first created by C
+               → W_C upgraded to {ColAdd(df, x)}
+Check:         ColAdd(df, x) ▷ Attr(df, shape)?  → Yes (shape ∈ COL_ATTRS)
+               → NoReadBeforeWrite violation detected correctly
+```
+
+### 12.4 Formal Integration
+
+The upgrade is applied **only** in `NoReadBeforeWrite` (forward contamination).
+It does not affect `ForwardStale`, `BackwardStale`, or other predicates because:
+
+- **ForwardStale** uses W from the executing cell, which already has the correct
+  ColAdd on first execution. On re-execution, the structural change is already
+  captured in the checkpoint diff.
+- **NoWriteAfterRead** checks writes of the current cell against earlier reads.
+  If the current cell adds a column, the diff correctly produces ColAdd.
+- **BackwardStale** checks removed writes, which are about variable names, not
+  column-level write types.
+
+The modified predicate:
+
+```
+NoReadBeforeWrite(R, W, i, Σ) ≝  UpgradeWrites(W_{i+1..n}, Σ) ▷ Rᵢ = ∅
+```
+
+where `UpgradeWrites` applies per-cell provenance lookup for each later cell's writes.
+
+### 12.5 Edge Cases
+
+| Case | Handling |
+| --- | --- |
+| `pd.read_csv()` → `df['x'] = 5` | `record_var_write` sets all CSV columns to cell A. `record_column_write` sets `x` to cell C. Upgrade correctly applies to `x` only. |
+| `df = df.merge(...)` | New DataFrame → `record_var_write` resets all origins to the merging cell. Prior provenance discarded. |
+| Checkpoint restore | `df.copy(deep=False)` preserves `.attrs`. Provenance survives rollback. |
+| Cell movement/deletion | Origin references cell_id of a moved/deleted cell. `_check_forward_contamination` looks up cell position — if not found, cell is skipped. Provenance becomes stale but harmless. |
+| Aliasing (`X = df`) | Same object, same `.attrs` → provenance shared. Correct. |
+| `df.assign(x=val)` | Returns new DataFrame → `record_var_write` covers it. |
+| Column deleted then recreated | `record_column_delete` clears origin. Next `record_column_write` sets new origin. |
+
+### 12.6 Implementation Map
+
+| Concept | Code Location |
+| --- | --- |
+| Provenance tracker | `ColumnProvenanceTracker` in `kernel_support/column_provenance.py` |
+| Provenance key | `PROVENANCE_KEY = '_flowbook_col_origins'` in `kernel_support/column_provenance.py` |
+| Column write hook | `__setitem__` patch in `kernel_support/column_tracking.py` |
+| Column insert hook | `insert` patch in `kernel_support/column_tracking.py` |
+| Column delete hook | `__delitem__` patch in `kernel_support/column_tracking.py` |
+| Var write hook | `TrackingDict.__setitem__` in `kernel_support/tracking.py` |
+| cell_id threading | `track_execution(cell_id=...)` in `kernel_support/tracking.py` |
+| Provenance upgrade | `_upgrade_writes_with_provenance()` in `kernel/reproducibility_enforcer.py` |
+| Upgrade application | `_check_forward_contamination()` in `kernel/reproducibility_enforcer.py` |
+| Unit tests | `kernel_support/tests/test_column_provenance.py` |
+| Integration tests | `TestForwardContaminationStructuralRead` in `kernel/tests/test_reproducibility_enforcer.py` |
