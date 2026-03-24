@@ -435,11 +435,11 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 
 ### 7.6 Frontend Communication
 
-| Concept             | Code                                                           |
-| ------------------- | -------------------------------------------------------------- |
-| Staleness reasons   | `Reason`, `ReasonType` in `kernel/models.py`                   |
-| Metadata output     | `flowbook` key in `display_data` output                        |
-| TypeScript types    | `IReproducibilityMetadata` in `src/flowbook/types.ts`          |
+| Concept             | Code                                                                   |
+| ------------------- | ---------------------------------------------------------------------- |
+| Staleness reasons   | `Reason`, `ReasonType` in `kernel/models.py`                           |
+| Metadata output     | `flowbook` key in `display_data` output                                |
+| TypeScript types    | `IReproducibilityMetadata` in `src/flowbook/types.ts`                  |
 | Metadata extraction | `_extractReproducibilityMetadata()` in `src/flowbook/executionhook.ts` |
 
 ---
