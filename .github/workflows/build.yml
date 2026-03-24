@@ -44,6 +44,8 @@ jobs:
 
       - name: Build extension
         run: |
+          set -x
+          pip install -e "." --no-build-isolation
           python -m pip install -e "." --no-build-isolation
           jupyter labextension list
           jupyter labextension list 2>&1 | grep -ie "flowbook.*OK"
