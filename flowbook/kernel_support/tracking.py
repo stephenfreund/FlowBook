@@ -158,8 +158,8 @@ class TrackingDict(dict):
                     self._structural_tracker.register(value, key)
                     # Record provenance: all columns attributed to current cell
                     if self._column_tracker._cell_id is not None:
-                        from flowbook.kernel_support.column_provenance import ColumnProvenanceTracker
-                        ColumnProvenanceTracker.record_var_write(value, self._column_tracker._cell_id)
+                        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                        DataFrameProvenanceTracker.record_var_write(value, self._column_tracker._cell_id)
             elif isinstance(value, pd.Series):
                 if not _is_ipython_result_var(key):
                     self._structural_tracker.register(value, key)

@@ -874,7 +874,7 @@ x's value (from some prior state) hasn't changed.
 | WRITE_OVERLAP enum      | `ReasonType.WRITE_OVERLAP` in `models.py` |
 | Write overlap detection | `_compute_forward_staleness_syntactic()`  |
 
-## 12. Column Provenance: Upgrading Col to ColAdd on Re-execution
+## 12. Structural Provenance: Injecting Structural WriteLocs on Re-execution
 
 ### 12.1 The Problem
 
@@ -900,103 +900,144 @@ Check NoReadBeforeWrite(R_B, W_{B+1..n}, B):
   → Passes incorrectly.  B would see different shape in a clean rerun.
 ```
 
-### 12.2 Solution: df.attrs Provenance
+### 12.2 Solution: df.attrs Structural Provenance
 
-Column provenance records which cell first created each column of a DataFrame in
-`df.attrs['_flowbook_col_origins']` — a dict `{column_name: cell_id}`.
+Structural provenance records which cell first caused each structural effect on a
+DataFrame, stored as a single `DataFrameProvenance` object in
+`df.attrs['_flowbook_provenance']`.
+
+**DataFrameProvenance fields:**
+
+| Field | Type | Tracks |
+| --- | --- | --- |
+| `col_origins` | `{column: cell_id}` | Which cell first created each column |
+| `col_deletions` | `{column: cell_id}` | Which cell first deleted each column |
+| `dtype_origins` | `{column: cell_id}` | Which cell first changed each column's dtype |
+| `row_mutators` | `set[cell_id]` | Cells that mutated the row count |
+| `index_mutators` | `set[cell_id]` | Cells that mutated the index |
 
 **Semantics:**
 
 | Operation | Effect on provenance |
 | --- | --- |
-| `record_var_write(df, cell_id)` | Reset ALL origins: every column → cell_id |
-| `record_column_write(df, col, cell_id)` | First writer wins — no overwrite if origin exists |
-| `record_column_delete(df, col)` | Remove origin entry |
+| `record_var_write(df, cell_id)` | Create fresh `DataFrameProvenance()`, set ALL column origins → cell_id |
+| `record_column_write(df, col, cell_id)` | First writer wins — no overwrite if col_origin exists |
+| `record_column_delete(df, col, cell_id)` | Record first deleter of column; remove col_origin |
+| `record_dtype_change(df, col, cell_id)` | Record first dtype changer for column |
+| `record_row_mutation(df, cell_id)` | Add cell to row_mutators set |
+| `record_index_mutation(df, cell_id)` | Add cell to index_mutators set |
 
-**First writer wins** ensures that re-executing `df['x'] = 5` does not change the
-origin from the cell that first added column `x`. The origin is cleared only by
-`record_var_write` (full DataFrame replacement) or `record_column_delete`.
+**First writer/deleter/changer wins** ensures that re-executing a structural operation
+does not change the provenance from the cell that first caused the effect. Provenance
+is cleared only by `record_var_write` (full DataFrame replacement).
 
 **record_var_write is called when:**
 - A DataFrame is assigned to a variable (`df = pd.read_csv(...)`, `df = pd.DataFrame(...)`,
   `merged = df1.merge(df2)`, `result = pd.concat([df1, df2])`)
 - This covers all operations that create a new DataFrame object
 
-**record_column_write is called when:**
-- A column is assigned via `__setitem__` (`df['x'] = val`)
-- A column is inserted via `df.insert(loc, col, val)`
+**Monkey-patched hooks recording provenance:**
+- `__setitem__`: records column write + dtype change detection
+- `insert`: records column write
+- `__delitem__`: records column deletion
+- `.loc.__setitem__`: records row mutation (if row count changes)
+- `drop`: records column deletion and/or row mutation
+- `_set_axis`: records index mutation (when `axis == 0`, i.e., `df.index = ...`)
+- Inplace wrapper (`_wrap_inplace_for_provenance`): applied to `dropna`, `drop_duplicates`,
+  `reset_index`, `set_index`, `sort_index`, `sort_values`, `rename`, `fillna`, `replace` —
+  checks row count, index identity, and dtypes before/after, records mutations as appropriate
 
 **Storage:** Provenance lives in `df.attrs`, which is automatically preserved by
 `df.copy(deep=False)` (used by the checkpoint system's deepcopy), `df.copy()`, and
-aliasing. Each copy gets an independent dict, so mutations to one do not affect others.
+aliasing. Each copy gets an independent `DataFrameProvenance` via `__copy__`/`__deepcopy__`,
+so mutations to one do not affect others.
 
-### 12.3 Provenance Upgrade in NoReadBeforeWrite
+### 12.3 Structural Write Injection
 
-The enforcer applies provenance-based upgrade in `_check_forward_contamination`:
-
-```
-UpgradeWrites(W, cell_id, Σ) ≝ { upgrade(w) | w ∈ W }
-  where upgrade(Col(d, c)) = ColAdd(d, c)  if provenance(Σ(d), c) = cell_id
-        upgrade(w)          = w             otherwise
-```
-
-For each `Col(d, c)` write by a later cell, if the provenance shows that cell first
-created column `c`, the write is upgraded to `ColAdd(d, c)`. This restores the
-correct conflict behavior:
+The enforcer applies `_inject_structural_writes(W, cell_id, Σ)` to augment diff-derived
+write sets with provenance-recorded structural effects:
 
 ```
-Re-execute C:  W_C = {Col(df, x)}
-Upgrade:       provenance says x was first created by C
-               → W_C upgraded to {ColAdd(df, x)}
-Check:         ColAdd(df, x) ▷ Attr(df, shape)?  → Yes (shape ∈ COL_ATTRS)
+InjectStructuralWrites(W, cell_id, Σ) ≝ W' where:
+  1. For each Col(d, c) ∈ W:  if col_origins(Σ(d), c) = cell_id → replace with ColAdd(d, c)
+  2. For each d ∈ DataFrames(Σ):
+     a. For each (c, id) ∈ col_deletions(Σ(d)):  if id = cell_id → add ColDel(d, c)
+     b. If cell_id ∈ row_mutators(Σ(d)):  add Rows(d)
+     c. If cell_id ∈ index_mutators(Σ(d)):  add Attr(d, index), Attr(d, axes)
+     d. If ∃c: dtype_origins(Σ(d), c) = cell_id:  add Attr(d, dtypes), Attr(d, values), Attr(d, T)
+```
+
+The injection scans ALL DataFrames in namespace (not just those in W), because on
+re-execution W may be empty while provenance persists. This is critical for detecting
+forward contamination from idempotent structural changes.
+
+**Example — column deletion:**
+
+```
+Re-execute C:  W_C = {} (diff sees no change — column already deleted)
+Inject:        provenance says C deleted column 'b'
+               → W_C injected to {ColDel(df, b)}
+Check:         ColDel(df, b) ▷ Attr(df, shape)?  → Yes (shape ∈ COL_ATTRS)
                → NoReadBeforeWrite violation detected correctly
 ```
 
 ### 12.4 Formal Integration
 
-The upgrade is applied **only** in `NoReadBeforeWrite` (forward contamination).
-It does not affect `ForwardStale`, `BackwardStale`, or other predicates because:
+The injection is applied in three predicates:
 
-- **ForwardStale** uses W from the executing cell, which already has the correct
-  ColAdd on first execution. On re-execution, the structural change is already
-  captured in the checkpoint diff.
-- **NoWriteAfterRead** checks writes of the current cell against earlier reads.
-  If the current cell adds a column, the diff correctly produces ColAdd.
-- **BackwardStale** checks removed writes, which are about variable names, not
-  column-level write types.
+- **NoReadBeforeWrite** (`_check_forward_contamination`): injects structural writes
+  for each later cell before checking `W_{i+1..n} ▷ Rᵢ = ∅`. Injection happens
+  *before* the emptiness check, so cells with empty diff-writes but structural
+  provenance are still checked.
+- **NoWriteAfterRead** (`_check_backward_mutation_new`): injects structural writes
+  for the current cell before checking `Wᵢ ▷ R_{1..i-1} = ∅`. Same pre-emptiness
+  ordering applies.
+- **ForwardStale** (`_compute_forward_staleness_syntactic`): injects structural writes
+  into the executing cell's change-derived write set for staleness propagation.
 
-The modified predicate:
+The modified predicates:
 
 ```
-NoReadBeforeWrite(R, W, i, Σ) ≝  UpgradeWrites(W_{i+1..n}, Σ) ▷ Rᵢ = ∅
+NoReadBeforeWrite(R, W, i, Σ) ≝  InjectStructuralWrites(W_j, j, Σ) ▷ Rᵢ = ∅  ∀j > i
+NoWriteAfterRead(R, W, i, Σ) ≝  InjectStructuralWrites(Wᵢ, i, Σ) ▷ R_j = ∅  ∀j < i
+ForwardStale(R, W, W', i, j, Σ) uses InjectStructuralWrites(W'ᵢ, i, Σ) for conflict checks
 ```
-
-where `UpgradeWrites` applies per-cell provenance lookup for each later cell's writes.
 
 ### 12.5 Edge Cases
 
 | Case | Handling |
 | --- | --- |
-| `pd.read_csv()` → `df['x'] = 5` | `record_var_write` sets all CSV columns to cell A. `record_column_write` sets `x` to cell C. Upgrade correctly applies to `x` only. |
-| `df = df.merge(...)` | New DataFrame → `record_var_write` resets all origins to the merging cell. Prior provenance discarded. |
-| Checkpoint restore | `df.copy(deep=False)` preserves `.attrs`. Provenance survives rollback. |
-| Cell movement/deletion | Origin references cell_id of a moved/deleted cell. `_check_forward_contamination` looks up cell position — if not found, cell is skipped. Provenance becomes stale but harmless. |
+| `pd.read_csv()` → `df['x'] = 5` | `record_var_write` sets all CSV columns to cell A. `record_column_write` sets `x` to cell C. Injection correctly applies to `x` only. |
+| `df = df.merge(...)` | New DataFrame → `record_var_write` creates fresh provenance. Prior provenance discarded. |
+| Checkpoint restore | `df.copy(deep=False)` preserves `.attrs`. `DataFrameProvenance.__copy__` creates isolated copy. Provenance survives rollback. |
+| Cell movement/deletion | Origin references cell_id of a moved/deleted cell. Predicates look up cell position — if not found, cell is skipped. Provenance becomes stale but harmless. |
 | Aliasing (`X = df`) | Same object, same `.attrs` → provenance shared. Correct. |
 | `df.assign(x=val)` | Returns new DataFrame → `record_var_write` covers it. |
-| Column deleted then recreated | `record_column_delete` clears origin. Next `record_column_write` sets new origin. |
+| Column deleted then recreated | `record_column_delete` records deleter and clears col_origin. Next `record_column_write` sets new origin. |
+| Idempotent row mutation (re-exec) | `row_mutators` is a set — adding the same cell_id again is a no-op. Provenance persists correctly. |
+| `df.dropna(inplace=True)` | Inplace wrapper detects row count change → `record_row_mutation`. Dtypes/index also checked. |
+| `df.index = new_idx` | `_set_axis` patch (axis=0) → `record_index_mutation`. |
+| `df['x'] = df['x'].astype(float)` | `__setitem__` dtype detection compares pre/post dtypes → `record_dtype_change`. |
 
 ### 12.6 Implementation Map
 
 | Concept | Code Location |
 | --- | --- |
-| Provenance tracker | `ColumnProvenanceTracker` in `kernel_support/column_provenance.py` |
-| Provenance key | `PROVENANCE_KEY = '_flowbook_col_origins'` in `kernel_support/column_provenance.py` |
+| Provenance class | `DataFrameProvenance` in `kernel_support/column_provenance.py` |
+| Provenance tracker | `DataFrameProvenanceTracker` in `kernel_support/column_provenance.py` |
+| Provenance key | `PROVENANCE_KEY = '_flowbook_provenance'` in `kernel_support/column_provenance.py` |
 | Column write hook | `__setitem__` patch in `kernel_support/column_tracking.py` |
 | Column insert hook | `insert` patch in `kernel_support/column_tracking.py` |
 | Column delete hook | `__delitem__` patch in `kernel_support/column_tracking.py` |
+| Row mutation hook | `.loc.__setitem__`, `drop`, inplace wrappers in `kernel_support/column_tracking.py` |
+| Index mutation hook | `_set_axis` patch in `kernel_support/column_tracking.py` |
+| Dtype change hook | `__setitem__` dtype detection in `kernel_support/column_tracking.py` |
+| Inplace wrapper | `_wrap_inplace_for_provenance()` in `kernel_support/column_tracking.py` |
 | Var write hook | `TrackingDict.__setitem__` in `kernel_support/tracking.py` |
 | cell_id threading | `track_execution(cell_id=...)` in `kernel_support/tracking.py` |
-| Provenance upgrade | `_upgrade_writes_with_provenance()` in `kernel/reproducibility_enforcer.py` |
-| Upgrade application | `_check_forward_contamination()` in `kernel/reproducibility_enforcer.py` |
+| Structural write injection | `_inject_structural_writes()` in `kernel/reproducibility_enforcer.py` |
+| Injection in NoReadBeforeWrite | `_check_forward_contamination()` in `kernel/reproducibility_enforcer.py` |
+| Injection in NoWriteAfterRead | `_check_backward_mutation_new()` in `kernel/reproducibility_enforcer.py` |
+| Injection in ForwardStale | `_compute_forward_staleness_syntactic()` in `kernel/reproducibility_enforcer.py` |
 | Unit tests | `kernel_support/tests/test_column_provenance.py` |
-| Integration tests | `TestForwardContaminationStructuralRead` in `kernel/tests/test_reproducibility_enforcer.py` |
+| Integration tests | `TestForwardContaminationStructuralRead`, `TestStructuralProvenanceIntegration` in `kernel/tests/test_reproducibility_enforcer.py` |

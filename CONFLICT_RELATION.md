@@ -295,13 +295,14 @@ For each later cell j with write Col(d, c):
 
 After upgrade, `ColAdd(d, c) ▷ Attr(d, shape) = True`, correctly detecting forward contamination.
 
-The upgrade is applied **only** in `NoReadBeforeWrite`. Other predicates (`ForwardStale`, `NoWriteAfterRead`, `BackwardStale`) use raw diff-derived writes, where the checkpoint diff already produces the correct write type.
+The injection is applied in `NoReadBeforeWrite`, `NoWriteAfterRead`, and `ForwardStale` — all predicates that need structural write precision on re-execution. The `DataFrameProvenance` class (stored in `df.attrs['_flowbook_provenance']`) tracks five structural effect types: column origins, column deletions, dtype changes, row mutations, and index mutations.
 
 **Code:**
 
-- Provenance tracker: `ColumnProvenanceTracker` in `kernel_support/column_provenance.py`
-- Write upgrade: `_upgrade_writes_with_provenance()` in `kernel/reproducibility_enforcer.py`
-- Integration point: `_check_forward_contamination()` in `kernel/reproducibility_enforcer.py`
+- Provenance class: `DataFrameProvenance` in `kernel_support/column_provenance.py`
+- Provenance tracker: `DataFrameProvenanceTracker` in `kernel_support/column_provenance.py`
+- Structural write injection: `_inject_structural_writes()` in `kernel/reproducibility_enforcer.py`
+- Integration points: `_check_forward_contamination()`, `_check_backward_mutation_new()`, `_compute_forward_staleness_syntactic()` in `kernel/reproducibility_enforcer.py`
 
 See `FORMAL_DEVELOPMENT.md` §12 for the full formal treatment.
 
