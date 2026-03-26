@@ -11,6 +11,7 @@ import { Cell } from '@jupyterlab/cells';
 
 import { KernelDetector } from '../shared/kerneldetection';
 import { ReproducibilityMetadataPanel } from './metadatapanel';
+import { DependenciesPanel } from './dependenciespanel';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { CellIndexManager } from '../cellindex';
@@ -115,6 +116,7 @@ class FlowbookActivationManager {
   private _tracker: INotebookTracker;
   private _kernelDetector: KernelDetector;
   private _panel: ReproducibilityMetadataPanel | null = null;
+  private _dependenciesPanel: DependenciesPanel | null = null;
   private _highlighter: ReproducibilityCellHighlighter | null = null;
   private _cellIndexManager: CellIndexManager;
   private _toolbarExtension: FlowbookToolbarExtension;
@@ -202,15 +204,19 @@ class FlowbookActivationManager {
 
     console.log('FlowBook Plugin: Activating for flowbook_kernel');
 
-    // Create panel
+    // Create panels
     this._panel = new ReproducibilityMetadataPanel();
     this._app.shell.add(this._panel, 'right', { rank: 510 });
 
-    // Create highlighter
+    this._dependenciesPanel = new DependenciesPanel();
+    this._app.shell.add(this._dependenciesPanel, 'right', { rank: 520 });
+
+    // Create highlighter (dependencies panel must be set before _initialize runs)
     this._highlighter = new ReproducibilityCellHighlighter(
       this._tracker,
       this._panel
     );
+    this._highlighter.setDependenciesPanel(this._dependenciesPanel);
 
     // Set highlighter on toolbar extension so it can access staleness manager
     this._toolbarExtension.setHighlighter(this._highlighter);
@@ -221,6 +227,10 @@ class FlowbookActivationManager {
       this._tracker,
       this._highlighter
     );
+
+    // Trigger initial dependency graph update (highlighter's constructor may
+    // have called _updateAllCells before the dependencies panel was set)
+    this._highlighter.refreshDependencies();
 
     // Start cell index overlays for current notebook
     const widget = this._tracker.currentWidget;
@@ -288,10 +298,14 @@ class FlowbookActivationManager {
       this._activeNotebookPath = null;
     }
 
-    // Remove panel
+    // Remove panels
     if (this._panel) {
       this._panel.dispose();
       this._panel = null;
+    }
+    if (this._dependenciesPanel) {
+      this._dependenciesPanel.dispose();
+      this._dependenciesPanel = null;
     }
 
     // Highlighter cleanup

@@ -1294,8 +1294,18 @@ class ReproducibilityEnforcer:
 
         _changed_file_paths = tracking.file_writes if tracking.file_writes else None
 
-        # W_i_current = current tracking.writes (what cell claims to write now)
-        W_i_current = tracking.writes or set()
+        # W_i_current: current writes at variable-name granularity.
+        # Must include DataFrame names from tracking.column_writes to be
+        # consistent with how W_i_old is computed (via writelocset_var_names
+        # on the stored WriteLocSet, which extracts 'df' from Col/ColAdd locs).
+        # tracking.column_writes records column mutations (df['col'] = ...)
+        # even when the diff detects no change (same values re-written).
+        # Without this, 'df' appears in W_i_old but not W_i_current, causing
+        # a spurious "removed write" that marks the df creator stale.
+        W_i_current = (
+            (tracking.writes or set())
+            | set((tracking.column_writes or {}).keys())
+        )
 
         if not will_be_rejected:
             with timer(key="check:ForwardStale", message=f"[Inst-Run] ForwardStale computation for {cell_id}"):
