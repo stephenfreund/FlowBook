@@ -134,3 +134,72 @@ def normalize_notebook(notebook: Dict[str, Any]) -> Dict[str, Any]:
             cell["source"] = "".join(cell["source"])
 
     return normalized
+
+
+def _int_to_alpha(n: int) -> str:
+    """Convert 0-based index to Excel-style alpha label (A, B, ..., Z, AA, AB, ...).
+
+    0 → A, 25 → Z, 26 → AA, 27 → AB, ...
+    """
+    if n < 26:
+        return chr(ord('A') + n)
+    # Two letters
+    n -= 26
+    return chr(ord('A') + n // 26) + chr(ord('A') + n % 26)
+
+
+def normalize_notebook_alpha(notebook: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a notebook with alphabetic cell IDs for MCP use.
+
+    Code cells get sequential alpha IDs: A, B, C, ... Z, AA, AB, ...
+    Markdown/raw cells get prefixed IDs: mA, mB, mC, ...
+
+    Also converts source from list to string format.
+
+    Args:
+        notebook: Notebook JSON as dict
+
+    Returns:
+        Normalized notebook (new copy with alpha IDs)
+    """
+    import copy as copy_mod
+
+    normalized = {**notebook}
+    normalized["cells"] = copy_mod.deepcopy(notebook["cells"])
+
+    code_idx = 0
+    md_idx = 0
+
+    for cell in normalized["cells"]:
+        if cell.get("cell_type") == "code":
+            cell["id"] = _int_to_alpha(code_idx)
+            code_idx += 1
+        else:
+            cell["id"] = "m" + _int_to_alpha(md_idx)
+            md_idx += 1
+
+        # Convert source from list to string if needed
+        if isinstance(cell.get("source"), list):
+            cell["source"] = "".join(cell["source"])
+
+    return normalized
+
+
+def next_insertion_id(before_id: str, existing_ids: Set[str]) -> str:
+    """Generate an insertion ID between two cells.
+
+    Given cell ID "B", produces "B1", "B2", "B3", ... choosing the first
+    that doesn't conflict with existing IDs.
+
+    Args:
+        before_id: The cell ID that the new cell follows.
+        existing_ids: Set of IDs already in use.
+
+    Returns:
+        A new unique ID like "B1", "B2", etc.
+    """
+    for n in range(1, 100):
+        candidate = f"{before_id}{n}"
+        if candidate not in existing_ids:
+            return candidate
+    raise ValueError(f"Too many insertions after {before_id}")

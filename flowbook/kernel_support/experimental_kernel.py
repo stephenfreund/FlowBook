@@ -808,7 +808,7 @@ class ExperimentalKernel(IPythonKernel, Magics):
         tracking_data: Optional[TrackingData] = None
 
         if self._use_global_tracking and isinstance(user_ns, TrackingDict):
-            with user_ns.track_execution():
+            with user_ns.track_execution(cell_id=self._cell_id):
                 result, self._profile_contents = await self._do_execute_code(
                     context, should_profile, silent, store_history,
                     user_expressions, allow_stdin, cell_meta

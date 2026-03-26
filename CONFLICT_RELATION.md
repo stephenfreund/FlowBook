@@ -262,6 +262,50 @@ See `FORMAL_DEVELOPMENT.md` §9.1 for the full design analysis.
 - Memo transfer: `_apply_restore_memo()` in `kernel/flowbook_kernel.py`
 - Alias detection (Phase 1 safety net): `_expand_with_deep_aliases()` in `kernel/reproducibility_enforcer.py`
 
+## Column Provenance: Col vs ColAdd on Re-execution
+
+The distinction between `Col(d, c)` and `ColAdd(d, c)` is critical for correct conflict detection. Adding a column changes structural attributes (`shape`, `columns`, etc.) while modifying an existing column's values does not. The ▷ matrix encodes this: `ColAdd ▷ Attr(d, a)` for `a ∈ COL_ATTRS`, but `Col ▷ Attr(d, a)` only for `a ∈ COL_VALUE_ATTRS`.
+
+### The re-execution problem
+
+Write locations are determined by checkpoint diffs. On first execution of `df['x'] = 5`, column `x` is absent in the pre-checkpoint → `ColAdd(d, x)`. On re-execution, `x` exists in both checkpoints (from the prior run) → `Col(d, x)`. The diff cannot distinguish "modified existing column" from "re-added a column this cell originally created."
+
+This causes the `NoReadBeforeWrite` predicate to miss forward contamination when an earlier cell reads a structural attribute like `df.shape`.
+
+### Column provenance tracking
+
+FlowBook stores provenance metadata in `df.attrs['_flowbook_col_origins']` — a dict mapping `{column_name: cell_id}` recording which cell first created each column.
+
+| Hook | Trigger | Provenance effect |
+| --- | --- | --- |
+| `record_var_write(df, cell_id)` | DataFrame assigned to variable | All columns → cell_id (reset) |
+| `record_column_write(df, col, cell_id)` | `df[col] = val` or `df.insert(...)` | First writer wins (no overwrite) |
+| `record_column_delete(df, col)` | `del df[col]` | Remove origin entry |
+
+**First writer wins** means re-executing `df['x'] = 5` preserves the original creator. The origin is only reset by full DataFrame replacement (`record_var_write`).
+
+### Provenance-based write upgrade
+
+In `_check_forward_contamination`, the enforcer upgrades `Col` writes to `ColAdd` where provenance shows the column was first created by that cell:
+
+```
+For each later cell j with write Col(d, c):
+  If provenance(d, c) = j  →  upgrade to ColAdd(d, c)
+```
+
+After upgrade, `ColAdd(d, c) ▷ Attr(d, shape) = True`, correctly detecting forward contamination.
+
+The injection is applied in `NoReadBeforeWrite`, `NoWriteAfterRead`, and `ForwardStale` — all predicates that need structural write precision on re-execution. The `DataFrameProvenance` class (stored in `df.attrs['_flowbook_provenance']`) tracks five structural effect types: column origins, column deletions, dtype changes, row mutations, and index mutations.
+
+**Code:**
+
+- Provenance class: `DataFrameProvenance` in `kernel_support/column_provenance.py`
+- Provenance tracker: `DataFrameProvenanceTracker` in `kernel_support/column_provenance.py`
+- Structural write injection: `_inject_structural_writes()` in `kernel/reproducibility_enforcer.py`
+- Integration points: `_check_forward_contamination()`, `_check_backward_mutation_new()`, `_compute_forward_staleness_syntactic()` in `kernel/reproducibility_enforcer.py`
+
+See `FORMAL_DEVELOPMENT.md` §12 for the full formal treatment.
+
 ## Design Summary
 
 The entire conflict system rests on three primitives:
