@@ -15,10 +15,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from flowbook.cli.helpers import (
     cleanup_kernel,
-    load_notebook as cli_load_notebook,
     save_notebook as cli_save_notebook,
     setup_kernel,
 )
+from flowbook.util.cell_ids import normalize_notebook_alpha, next_insertion_id
 from flowbook.server.kernel_helper import KernelHelper
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.scripts.fix_repro_errors import (
@@ -140,24 +140,31 @@ def format_flowbook_meta(meta: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _to_str(value) -> str:
+    """Convert a value that may be a string or list of strings to a string."""
+    if isinstance(value, list):
+        return "".join(value)
+    return str(value) if value is not None else ""
+
+
 def format_outputs_text(outputs: List[Dict[str, Any]]) -> str:
     """Extract human-readable text from cell outputs."""
     parts = []
     for output in outputs:
         otype = output.get("output_type", "")
         if otype == "stream":
-            parts.append(output.get("text", ""))
+            parts.append(_to_str(output.get("text", "")))
         elif otype == "execute_result":
             data = output.get("data", {})
             if "text/plain" in data:
-                parts.append(data["text/plain"])
+                parts.append(_to_str(data["text/plain"]))
         elif otype == "display_data":
             data = output.get("data", {})
             meta = output.get("metadata", {})
             # Skip flowbook metadata display_data
             if "flowbook" not in meta:
                 if "text/plain" in data:
-                    parts.append(data["text/plain"])
+                    parts.append(_to_str(data["text/plain"]))
                 elif "text/html" in data:
                     parts.append("[HTML output]")
                 elif "image/png" in data:
@@ -276,12 +283,14 @@ class NotebookSession:
     # ------------------------------------------------------------------
 
     def load(self, path: str) -> Dict[str, Any]:
-        """Load notebook from disk, start kernel, configure for violations."""
+        """Load notebook from disk, start kernel, assign alpha cell IDs."""
         # Close any previous session
         if self.is_loaded:
             self.close()
 
-        self.notebook = cli_load_notebook(path)
+        with open(path, "r", encoding="utf-8") as f:
+            raw_notebook = json.load(f)
+        self.notebook = normalize_notebook_alpha(raw_notebook)
         self.notebook_path = path
         self.executed_cells = set()
         self.cell_flowbook_meta = {}
@@ -291,10 +300,14 @@ class NotebookSession:
         self._event_log = []
         self._session_start = time.time()
 
-        # Start FlowBook kernel
+        # Start FlowBook kernel with cwd set to the notebook's directory
+        # so relative paths (pd.read_csv("data.csv")) resolve correctly
+        import os
+        notebook_dir = os.path.dirname(os.path.abspath(path))
         self.kernel_manager, self.kernel_client = setup_kernel(
             connection_file=None,
             kernel_name="flowbook_kernel",
+            cwd=notebook_dir,
         )
 
         cells = self.notebook.get("cells", [])
@@ -357,6 +370,14 @@ class NotebookSession:
             for c in self.notebook["cells"]
             if c.get("cell_type") == "code"
         ]
+
+    def _all_cell_ids(self) -> Set[str]:
+        """Return set of all cell IDs in the notebook."""
+        return {c.get("id", "") for c in self.notebook.get("cells", [])}
+
+    def _next_insert_id(self, after_id: str) -> str:
+        """Generate an insertion ID after the given cell (e.g., B → B1, B2, ...)."""
+        return next_insertion_id(after_id, self._all_cell_ids())
 
     def _find_cell(self, cell_id: str) -> Tuple[int, Dict[str, Any]]:
         """Find cell by ID, return (index_in_cells_list, cell_dict)."""
@@ -582,6 +603,70 @@ class NotebookSession:
             "cell_results": results,
         }
 
+    def run_from(self, cell_id: str, timeout: float = 300) -> Dict[str, Any]:
+        """Run cell_id and subsequent cells that need execution, stopping on error.
+
+        Skips cells that are already clean. Only runs cells that are
+        unexecuted, stale, or have violations.
+
+        Args:
+            cell_id: Cell to start from.
+            timeout: Per-cell timeout in seconds.
+
+        Returns:
+            Summary with list of executed cells, skipped count, error cell
+            (if any), and violation/stale counts.
+        """
+        self._require_loaded()
+        cell_order = self.get_cell_order()
+        try:
+            start = cell_order.index(cell_id)
+        except ValueError:
+            raise ValueError(f"Cell not found in code cell order: {cell_id}")
+
+        executed = []
+        skipped = 0
+        error_cell = None
+        violations = []
+
+        for cid in cell_order[start:]:
+            _, cell = self._find_cell(cid)
+            source = get_cell_source(cell)
+            if not source.strip():
+                continue
+
+            # Skip clean cells (executed, not stale, no violations)
+            has_violation = bool(self.cell_flowbook_meta.get(cid, {}).get("errors"))
+            is_clean = (
+                cid in self.executed_cells
+                and cid not in self._stale_cells
+                and not has_violation
+            )
+            if is_clean:
+                skipped += 1
+                continue
+
+            result = self.run_cell(cid, timeout=timeout)
+            executed.append(cid)
+
+            # Collect violations
+            fb_meta = self.cell_flowbook_meta.get(cid, {})
+            for e in fb_meta.get("errors", []):
+                violations.append({"cell_id": cid, **e})
+
+            if result.get("status") == "error":
+                error_cell = cid
+                break
+
+        final_stale = self._stale_cells & set(cell_order)
+        return {
+            "executed": executed,
+            "skipped": skipped,
+            "error_cell": error_cell,
+            "violations": violations,
+            "stale_remaining": len(final_stale),
+        }
+
     # ------------------------------------------------------------------
     # Editing
     # ------------------------------------------------------------------
@@ -725,7 +810,11 @@ class NotebookSession:
         return ckpt_id
 
     def restore(self, checkpoint_id: str) -> Dict[str, Any]:
-        """Restore notebook to a checkpoint and re-run to rebuild kernel state."""
+        """Restore notebook cell sources to a checkpoint.
+
+        Does NOT restart the kernel. Changed cells are marked stale so
+        they can be re-run incrementally via run_until_clean() or manually.
+        """
         self._require_loaded()
         if checkpoint_id not in self._checkpoints:
             raise ValueError(f"Unknown checkpoint: {checkpoint_id}")
@@ -733,7 +822,7 @@ class NotebookSession:
         ckpt = self._checkpoints[checkpoint_id]
         cell_sources = ckpt["cell_sources"]
 
-        # Restore cell sources
+        # Restore cell sources and mark changed cells as stale
         changed_cells = []
         for cell in self.notebook["cells"]:
             cid = cell.get("id", "")
@@ -742,42 +831,22 @@ class NotebookSession:
                 if old != cell_sources[cid]:
                     set_cell_source(cell, cell_sources[cid])
                     changed_cells.append(cid)
-
-        # Restart kernel to get clean enforcer state
-        cleanup_kernel(self.kernel_client, self.kernel_manager)
-        self.kernel_manager, self.kernel_client = setup_kernel(
-            connection_file=None,
-            kernel_name="flowbook_kernel",
-        )
-        KernelHelper.execute_code(
-            self.kernel_client,
-            "%continue_after_violation on",
-            timeout=10,
-            store_history=False,
-        )
-
-        # Clear execution tracking
-        previously_executed = set(self.executed_cells)
-        self.executed_cells = set()
-        self.cell_flowbook_meta = {}
-        self.cell_status = {}
-        self._stale_cells = set()
-
-        # Re-run all previously executed cells to rebuild enforcer state
-        rerun_results = []
-        for cell_id in self.get_cell_order():
-            if cell_id in previously_executed:
-                result = self.run_cell(cell_id)
-                rerun_results.append(
-                    {"cell_id": cell_id, "status": result.get("status", "ok")}
-                )
-                if result.get("status") == "error":
-                    break
+                    # Mark as stale and notify kernel
+                    if cid in self.executed_cells:
+                        self._stale_cells.add(cid)
+                        KernelHelper.execute_code(
+                            self.kernel_client,
+                            f"%cell_edited {cid}",
+                            timeout=10,
+                            store_history=False,
+                        )
+                    # Clear old violation metadata for changed cells
+                    self.cell_flowbook_meta.pop(cid, None)
+                    self.cell_status.pop(cid, None)
 
         return {
             "checkpoint_id": checkpoint_id,
             "cells_restored": len(changed_cells),
-            "cells_rerun": len(rerun_results),
             "changed_cells": changed_cells,
         }
 

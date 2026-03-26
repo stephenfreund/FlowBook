@@ -277,15 +277,11 @@ def edit_cell(cell_id: str, new_source: str, ctx: Context) -> str:
 
 @mcp.tool()
 @_logged_tool
-def run_cell(cell_id: str, ctx: Context) -> str:
+def run_cell(cell_id: str, ctx: Context = None) -> str:
     """Execute a single cell and return outputs + flowbook metadata.
 
-    The cell is executed in the FlowBook kernel with reproducibility tracking.
-    The response includes: execution status, text outputs, and flowbook metadata
-    (reads, writes, errors, stale cells, staleness reasons).
-
     Args:
-        cell_id: The 4-character cell ID to execute.
+        cell_id: The cell ID to execute.
     """
     session = _get_session(ctx)
     result = session.run_cell(cell_id)
@@ -296,7 +292,6 @@ def run_cell(cell_id: str, ctx: Context) -> str:
 
     output_text = result.get("outputs_text", "").strip()
     if output_text:
-        # Show first 200 chars of output
         preview = output_text[:200]
         if len(output_text) > 200:
             preview += "..."
@@ -339,6 +334,41 @@ def run_all_cells(ctx: Context) -> str:
             if loc_str:
                 line += f" [{loc_str}]"
 
+    return line
+
+
+@mcp.tool()
+@_logged_tool
+def run_from(cell_id: str, ctx: Context = None) -> str:
+    """Run from a cell through the end of the notebook, stopping on error.
+
+    Executes cell_id and all subsequent non-empty code cells in order.
+    Stops on the first runtime error or rejected violation.
+
+    Args:
+        cell_id: Cell ID to start from.
+    """
+    session = _get_session(ctx)
+    result = session.run_from(cell_id)
+    n = len(result["executed"])
+    v = len(result["violations"])
+    s = result["stale_remaining"]
+    sk = result["skipped"]
+    line = f"Ran {n} cells from {cell_id}"
+    if sk:
+        line += f" ({sk} clean skipped)"
+    if result["error_cell"]:
+        line += f" | error at {result['error_cell']}"
+    line += f" | {v} violations | {s} stale"
+    if result["violations"]:
+        for e in result["violations"]:
+            etype = e.get("error_type", "?")
+            cid = e.get("cell_id", "?")
+            locs = e.get("locations", [])
+            loc_str = ", ".join(format_loc(l) for l in locs) if locs else ""
+            line += f"\n  {cid}: {etype}"
+            if loc_str:
+                line += f" [{loc_str}]"
     return line
 
 
@@ -426,21 +456,16 @@ def checkpoint(ctx: Context) -> str:
 def restore(checkpoint_id: str, ctx: Context) -> str:
     """Restore the notebook to a previous checkpoint.
 
-    Reverts all cell sources to the snapshot, restarts the kernel, and
-    re-runs all previously executed cells to rebuild enforcer state.
-    This is the safe way to undo a failed fix attempt.
+    Reverts cell sources to the snapshot without restarting the kernel.
+    Changed cells are marked stale so they can be re-run incrementally.
 
     Args:
         checkpoint_id: The checkpoint ID returned by checkpoint().
     """
     session = _get_session(ctx)
     result = session.restore(checkpoint_id)
-    return (
-        f"Restored checkpoint: {result['checkpoint_id']}\n"
-        f"Cells restored: {result['cells_restored']}\n"
-        f"Cells re-run: {result['cells_rerun']}\n"
-        f"Changed cells: {', '.join(result['changed_cells']) or 'none'}"
-    )
+    changed = ", ".join(result["changed_cells"]) or "none"
+    return f"Restored {result['cells_restored']} cells (stale: {changed})"
 
 
 @mcp.tool()
