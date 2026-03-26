@@ -297,14 +297,6 @@ class NotebookSession:
             kernel_name="flowbook_kernel",
         )
 
-        # Configure kernel to continue after violations (report but don't halt)
-        KernelHelper.execute_code(
-            self.kernel_client,
-            "%continue_after_violation on",
-            timeout=10,
-            store_history=False,
-        )
-
         cells = self.notebook.get("cells", [])
         code_cells = [c for c in cells if c.get("cell_type") == "code"]
 
@@ -334,6 +326,24 @@ class NotebookSession:
         self.cell_status = {}
         self._stale_cells = set()
         self._checkpoints = {}
+
+    def set_continue_after_violation(self, enabled: bool) -> None:
+        """Configure whether violations reject execution or just report.
+
+        When enabled (True): violations are reported but execution continues,
+        cell stays CLEAN. Good for /basic-run where you want a full picture.
+
+        When disabled (False, default): violations cause rollback and the cell
+        is rejected. Good for /fix-notebook where you want a clean namespace.
+        """
+        self._require_loaded()
+        flag = "on" if enabled else "off"
+        KernelHelper.execute_code(
+            self.kernel_client,
+            f"%continue_after_violation {flag}",
+            timeout=10,
+            store_history=False,
+        )
 
     # ------------------------------------------------------------------
     # Cell access

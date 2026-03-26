@@ -133,6 +133,28 @@ def load_notebook(path: str, ctx: Context) -> str:
 
 @mcp.tool()
 @_logged_tool
+def continue_after_violation(enabled: bool, ctx: Context) -> str:
+    """Configure whether violations reject execution or just report.
+
+    When True: violations are reported but execution continues and the
+    cell stays CLEAN.  Use this for analysis runs (/basic-run) where you
+    want a full picture of all violations without halting.
+
+    When False (default after load): violations cause rollback — the cell
+    is rejected and the namespace is restored to pre-execution state.
+    Use this for fix runs (/fix-notebook) where you need a clean namespace.
+
+    Args:
+        enabled: True to continue after violations, False to reject.
+    """
+    session = _get_session(ctx)
+    session.set_continue_after_violation(enabled)
+    mode = "continue (report only)" if enabled else "reject (rollback)"
+    return f"Violation mode: {mode}"
+
+
+@mcp.tool()
+@_logged_tool
 def close_notebook(ctx: Context) -> str:
     """Close the current notebook and shutdown the kernel."""
     session = _get_session(ctx)
