@@ -74,6 +74,7 @@ flowbook_slurm = "flowbook.slurm.slurm_cli:main"
 flowbook_compare_overhead = "flowbook.cli.compare_overhead:main"
 flowbook_show_errors = "flowbook.cli.show_errors:main"
 flowlab = "flowbook.cli.lab_cli:lab_main"
+flowbook_mcp = "flowbook.mcp.server:main"
 
 [tool.hatch.version]
 source = "nodejs"
