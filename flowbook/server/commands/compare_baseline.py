@@ -918,14 +918,14 @@ def execute_cell_flowbook(
 
         msg_type = msg["header"]["msg_type"]
 
-        # Look for display_data with flowbook metadata or predicate violations
-        if msg_type == "display_data":
-            output_meta = msg.get("content", {}).get("metadata", {})
-            if "flowbook" in output_meta:
-                flowbook_metadata = output_meta["flowbook"]
-            # Capture predicate violations (sent even when continue_after_violation=True)
-            if "predicate_violation" in output_meta:
-                predicate_violations.append(output_meta["predicate_violation"])
+        # Look for flowbook_update messages (new protocol)
+        if msg_type == "flowbook_update":
+            fb_data = msg.get("content", {}).get("flowbook", msg.get("content", {}))
+            fb_type = fb_data.get("type")
+            if fb_type == "metadata":
+                flowbook_metadata = fb_data
+            elif fb_type == "violation":
+                predicate_violations.append(fb_data)
 
         if msg_type == "error":
             content = msg["content"]
@@ -947,10 +947,9 @@ def execute_cell_flowbook(
     # Calculate client-side elapsed time (same methodology as baseline)
     elapsed = time.perf_counter() - start
 
-    # Build violation message from predicate_violations or legacy violation field
+    # Build violation message from predicate_violations
     violation_msg = None
     if predicate_violations:
-        # Format predicate violations as messages
         msgs = []
         for pv in predicate_violations:
             predicate = pv.get("predicate", "unknown")
@@ -962,12 +961,6 @@ def execute_cell_flowbook(
         violation_msg = "; ".join(msgs)
 
     if flowbook_metadata:
-        # Also check for legacy violations in flowbook metadata
-        if not violation_msg:
-            violation = flowbook_metadata.get("violation")
-            if violation:
-                violation_msg = violation.get("message", "Reproducibility violation")
-
         # Extract checking result for this cell
         staleness_reasons = flowbook_metadata.get("staleness_reasons", {})
         cell_reasons = staleness_reasons.get(cell_id, [])
@@ -2655,11 +2648,10 @@ def measure_rerun_overhead(
                     continue
 
                 msg_type = msg['header']['msg_type']
-                if msg_type == 'display_data':
-                    metadata = msg['content'].get('metadata', {})
-                    flowbook_meta = metadata.get('flowbook', {})
-                    if 'rerun_overhead' in flowbook_meta:
-                        overhead_data = flowbook_meta['rerun_overhead']
+                if msg_type == 'flowbook_update':
+                    fb_data = msg.get('content', {}).get('flowbook', msg.get('content', {}))
+                    if fb_data.get('type') == 'rerun_overhead':
+                        overhead_data = fb_data['rerun_overhead']
                         # Don't break - continue draining until idle
                 elif msg_type == 'status':
                     if msg['content']['execution_state'] == 'idle':

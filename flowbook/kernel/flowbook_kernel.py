@@ -1065,7 +1065,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         2. Full diff against the checkpoint (timed - will be empty)
         3. Full check using the cell's original R/W (timed)
 
-        Returns timing data via display_data output with flowbook metadata.
+        Returns timing data via flowbook_update IOPub message.
 
         Usage:
             %measure_rerun_overhead <cell_id>
@@ -1083,18 +1083,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             namespace=self.shell.user_ns,
         )
 
-        # Send the result as flowbook metadata (same format as execution metadata)
-        from IPython.display import display
-
-        display(
-            {"text/plain": ""},
-            raw=True,
-            metadata={
-                "flowbook": {
-                    "rerun_overhead": result,
-                }
-            },
-        )
+        # Send the result via the flowbook protocol
+        self._send_flowbook_message({
+            "type": "rerun_overhead",
+            "rerun_overhead": result,
+        })
 
     @line_magic
     def df_subset_checkpoints(self, line: str) -> None:
