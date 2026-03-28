@@ -471,36 +471,17 @@ class NotebookSession:
     # Execution
     # ------------------------------------------------------------------
 
-    def _extract_flowbook_meta_from_protocol(
-        self, flowbook_messages: List[Dict[str, Any]]
+    def _extract_flowbook_meta(
+        self, flowbook_messages: List[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        """Extract flowbook metadata from protocol messages."""
+        """Extract flowbook metadata from protocol messages.
+
+        Args:
+            flowbook_messages: Protocol messages from KernelHelper.execute_code()
+        """
         for msg in flowbook_messages:
             if msg.get("type") == "metadata":
                 return msg
-        return None
-
-    def _extract_flowbook_meta(
-        self, outputs: List[Dict[str, Any]],
-        flowbook_messages: Optional[List[Dict[str, Any]]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Extract flowbook metadata — protocol messages first, legacy fallback.
-
-        Args:
-            outputs: Cell output list (legacy path — scans display_data)
-            flowbook_messages: Protocol messages from KernelHelper (preferred)
-        """
-        # Prefer protocol messages
-        if flowbook_messages:
-            meta = self._extract_flowbook_meta_from_protocol(flowbook_messages)
-            if meta:
-                return meta
-        # Legacy fallback: scan display_data outputs
-        for output in outputs:
-            if output.get("output_type") == "display_data":
-                output_meta = output.get("metadata", {})
-                if "flowbook" in output_meta:
-                    return output_meta["flowbook"]
         return None
 
     def run_cell(self, cell_id: str, timeout: float = 300) -> Dict[str, Any]:
@@ -535,7 +516,7 @@ class NotebookSession:
 
         # Extract flowbook metadata
         fb_meta = self._extract_flowbook_meta(
-            result["outputs"], result.get("flowbook_messages")
+            result.get("flowbook_messages", [])
         )
         if fb_meta:
             self.cell_flowbook_meta[cell_id] = fb_meta

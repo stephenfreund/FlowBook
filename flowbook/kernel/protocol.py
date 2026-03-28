@@ -160,3 +160,45 @@ ALL_TYPES = KERNEL_TO_CLIENT_TYPES | CLIENT_TO_KERNEL_TYPES
 def validate_message(msg: dict) -> bool:
     """Check that a message has a valid type field."""
     return isinstance(msg, dict) and msg.get("type") in ALL_TYPES
+
+
+# ===========================================================================
+# CLI formatting
+# ===========================================================================
+
+def format_message_for_cli(msg: dict, cell_order: Optional[List[str]] = None) -> Optional[str]:
+    """Format a kernel-to-client protocol message for CLI display.
+
+    Returns a single-line string, or None if the message should not be printed.
+    """
+    msg_type = msg.get("type")
+
+    if msg_type == STATUS:
+        cell_id = msg.get("cell_id", "")
+        cell_ref = _cell_id_to_ref(cell_id, cell_order) if cell_id else ""
+        prefix = f"{cell_ref} " if cell_ref else ""
+        return f"{prefix}{msg.get('icon', '')} {msg.get('text', '')}"
+
+    if msg_type == VIOLATION:
+        cell_id = msg.get("cell_id", "")
+        cell_ref = _cell_id_to_ref(cell_id, cell_order) if cell_id else cell_id
+        predicate = msg.get("predicate", "")
+        message = msg.get("message", "")
+        accepted = msg.get("accepted", False)
+        tag = "ACCEPTED" if accepted else "REJECTED"
+        return f"{cell_ref} ✗ [{tag}] {predicate}: {message}"
+
+    # Don't print metadata messages — the status message covers the summary
+    return None
+
+
+def _cell_id_to_ref(cell_id: str, cell_order: Optional[List[str]]) -> str:
+    """Convert a cell ID to @A notation if cell_order is available."""
+    if not cell_order or not cell_id:
+        return cell_id
+    try:
+        from flowbook.util.cell_index import index_to_alpha
+        idx = cell_order.index(cell_id)
+        return index_to_alpha(idx)
+    except (ValueError, IndexError):
+        return cell_id

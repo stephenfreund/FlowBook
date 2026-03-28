@@ -170,11 +170,11 @@ class ExecuteCommand(NotebookCommand):
                             cell["execution_count"] = result["execution_count"]
                             cell["outputs"] = result["outputs"]
 
-                            # Extract SDC metadata from flowbook protocol messages,
-                            # falling back to legacy display_data extraction
-                            sdc_meta = self._extract_sdc_metadata_from_protocol(
-                                result.get("flowbook_messages", [])
-                            ) or self._extract_sdc_metadata(result["outputs"])
+                            # Print flowbook protocol messages (status, violations)
+                            self.print_flowbook_messages(result, cell_order)
+
+                            # Extract SDC metadata from protocol messages
+                            sdc_meta = self.extract_flowbook_metadata(result)
                             if sdc_meta:
                                 sdc_results.append(
                                     {
@@ -308,29 +308,3 @@ class ExecuteCommand(NotebookCommand):
             total_time=total_time,
         )
 
-    def _extract_sdc_metadata_from_protocol(
-        self, flowbook_messages: List[Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
-        """Extract SDC metadata from FlowBook protocol messages.
-
-        Looks for messages with type="metadata" in the flowbook_messages list
-        returned by KernelHelper.execute_code().
-        """
-        for msg in flowbook_messages:
-            if msg.get("type") == "metadata":
-                return msg
-        return None
-
-    def _extract_sdc_metadata(
-        self, outputs: List[Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
-        """Extract SDC metadata from cell outputs (legacy fallback).
-
-        Looks for display_data outputs with flowbook in metadata.
-        """
-        for output in outputs:
-            if output.get("output_type") == "display_data":
-                output_meta = output.get("metadata", {})
-                if "flowbook" in output_meta:
-                    return output_meta["flowbook"]
-        return None

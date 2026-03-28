@@ -12,6 +12,7 @@ from flowbook.kernel.protocol import (
     build_sync_message,
     build_exec_restore_message,
     validate_message,
+    format_message_for_cli,
 )
 from flowbook.kernel.models import (
     ReproducibilityMetadata,
@@ -171,3 +172,52 @@ class TestValidateMessage:
         assert not validate_message({"type": "unknown"})
         assert not validate_message("not a dict")
         assert not validate_message(None)
+
+
+class TestFormatMessageForCli:
+    def test_status_with_cell_order(self):
+        msg = {"type": STATUS, "icon": "✓", "text": "Execute: 42 ms", "cell_id": "abcd"}
+        result = format_message_for_cli(msg, cell_order=["abcd", "efgh"])
+        assert result.startswith("@A ")
+        assert "✓" in result
+        assert "Execute: 42 ms" in result
+
+    def test_status_without_cell_id(self):
+        msg = {"type": STATUS, "icon": "📋", "text": "Order updated", "cell_id": ""}
+        result = format_message_for_cli(msg, cell_order=["abcd"])
+        assert result == "📋 Order updated"
+
+    def test_violation_rejected(self):
+        msg = {
+            "type": VIOLATION,
+            "predicate": "no_write_after_read",
+            "cell_id": "efgh",
+            "message": "Backward mutation on x",
+            "accepted": False,
+            "locations": ["x"],
+        }
+        result = format_message_for_cli(msg, cell_order=["abcd", "efgh"])
+        assert "@B" in result
+        assert "REJECTED" in result
+        assert "no_write_after_read" in result
+
+    def test_violation_accepted(self):
+        msg = {
+            "type": VIOLATION,
+            "predicate": "no_read_before_write",
+            "cell_id": "abcd",
+            "message": "Forward contamination",
+            "accepted": True,
+            "locations": [],
+        }
+        result = format_message_for_cli(msg, cell_order=["abcd"])
+        assert "ACCEPTED" in result
+
+    def test_metadata_returns_none(self):
+        msg = {"type": METADATA, "cell_id": "abcd"}
+        assert format_message_for_cli(msg) is None
+
+    def test_status_no_cell_order(self):
+        msg = {"type": STATUS, "icon": "✓", "text": "Done", "cell_id": "abcd"}
+        result = format_message_for_cli(msg, cell_order=None)
+        assert "abcd" in result
