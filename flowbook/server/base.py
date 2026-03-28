@@ -8,14 +8,13 @@ from contextlib import contextmanager
 import argparse
 import time
 
-from agents import Usage
 from pydantic import BaseModel, Field
 from flowbook.agent.agent import FlowbookStats
 from flowbook.kernel.protocol import format_message_for_cli
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.server.config import FlowbookConfig
 from jupyter_server.serverapp import ServerApp
-
+from flowbook.util.output import print
 
 class ProcessingResult(BaseModel):
     """Result of a notebook processing command."""
