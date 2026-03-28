@@ -243,12 +243,7 @@ def display_errors(
             print("  Reasons:")
             for reason in reasons:
                 reason_type = reason.get("type", "unknown")
-                if reason_type == "skipped_upstream":
-                    loc = reason.get("loc", "?")
-                    expected = reason.get("expected_cell_id", "?")
-                    print(f"    - {reason_type}: {loc} (expected from {expected})")
-                else:
-                    print(f"    - {reason_type}")
+                print(f"    - {reason_type}")
             print()
 
         # Display cell source

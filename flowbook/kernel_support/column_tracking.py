@@ -101,6 +101,8 @@ class ColumnAccessTracker:
         # Mapping from GroupBy object id -> source DataFrame id
         # Used for cudf compatibility where gb.obj may not be accessible
         self._groupby_to_df: Dict[int, int] = {}
+        # Current cell ID (set during activate, used for column provenance)
+        self._cell_id: Optional[str] = None
 
     def set_namespace_ref(self, namespace_ref: dict) -> None:
         """Set the namespace reference for lazy fallback walks."""
@@ -118,12 +120,17 @@ class ColumnAccessTracker:
             from flowbook.kernel_support import cudf_compat
             cudf_compat.install_cudf_tracking(self)
 
-    def activate(self) -> None:
+    def activate(self, cell_id: Optional[str] = None) -> None:
         """Activate this tracker instance for the current thread.
 
         This makes this tracker the active one that receives column access events.
         Very fast (~0.1µs) - just sets a thread-local pointer.
+
+        Args:
+            cell_id: The ID of the cell being executed. Used for column
+                provenance tracking (recording which cell created each column).
         """
+        self._cell_id = cell_id
         self._ensure_patches_installed()
         ColumnAccessTracker._set_active_tracker(self)
 
@@ -135,6 +142,7 @@ class ColumnAccessTracker:
         """
         if ColumnAccessTracker._get_active_tracker() is self:
             ColumnAccessTracker._set_active_tracker(None)
+        self._cell_id = None
 
     def install(self) -> None:
         """Monkey-patch DataFrame methods to track column access.
@@ -313,16 +321,75 @@ class ColumnAccessTracker:
         def tracked_df_setitem(df: pd.DataFrame, key, value):
             tracker = ColumnAccessTracker._get_active_tracker()
             if tracker is not None:
+                # Snapshot dtype before write for dtype-change provenance.
+                # Use df.dtypes[key] instead of df[key].dtype to avoid
+                # triggering tracked_df_getitem (which would record a
+                # spurious column read).
+                old_dtypes = {}
+                if tracker._cell_id is not None:
+                    dtypes = df.dtypes
+                    if isinstance(key, str) and key in df.columns:
+                        old_dtypes[key] = dtypes[key]
+                    elif isinstance(key, list):
+                        for k in key:
+                            if isinstance(k, str) and k in df.columns:
+                                old_dtypes[k] = dtypes[k]
                 # Track column writes
                 if isinstance(key, str):
                     tracker.record_write(id(df), [key])
+                    # Record column provenance (first writer wins)
+                    if tracker._cell_id is not None:
+                        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                        DataFrameProvenanceTracker.record_column_write(df, key, tracker._cell_id)
                 elif isinstance(key, list):
                     str_keys = [k for k in key if isinstance(k, str)]
                     if str_keys:
                         tracker.record_write(id(df), str_keys)
-            return original_df_setitem(df, key, value)
+                        if tracker._cell_id is not None:
+                            from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                            for k in str_keys:
+                                DataFrameProvenanceTracker.record_column_write(df, k, tracker._cell_id)
+            result = original_df_setitem(df, key, value)
+            # Check for dtype changes after write.
+            # Use df.dtypes[col] instead of df[col].dtype to avoid triggering
+            # tracked_df_getitem (which would record a spurious column read).
+            if tracker is not None and tracker._cell_id is not None and old_dtypes:
+                from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                new_dtypes = df.dtypes
+                for col, old_dt in old_dtypes.items():
+                    if col in df.columns and new_dtypes[col] != old_dt:
+                        DataFrameProvenanceTracker.record_dtype_change(df, col, tracker._cell_id)
+            return result
 
         pd.DataFrame.__setitem__ = tracked_df_setitem
+
+        # ========== DataFrame.__delitem__ ==========
+        self._original_methods['DataFrame.__delitem__'] = pd.DataFrame.__delitem__
+        original_df_delitem = self._original_methods['DataFrame.__delitem__']
+
+        def tracked_df_delitem(df: pd.DataFrame, key):
+            tracker = ColumnAccessTracker._get_active_tracker()
+            if tracker is not None and isinstance(key, str):
+                from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                DataFrameProvenanceTracker.record_column_delete(df, key, tracker._cell_id)
+            return original_df_delitem(df, key)
+
+        pd.DataFrame.__delitem__ = tracked_df_delitem
+
+        # ========== DataFrame.insert ==========
+        self._original_methods['DataFrame.insert'] = pd.DataFrame.insert
+        original_df_insert = self._original_methods['DataFrame.insert']
+
+        def tracked_df_insert(df: pd.DataFrame, loc, column, value, allow_duplicates=False):
+            tracker = ColumnAccessTracker._get_active_tracker()
+            if tracker is not None and isinstance(column, str):
+                tracker.record_write(id(df), [column])
+                if tracker._cell_id is not None:
+                    from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                    DataFrameProvenanceTracker.record_column_write(df, column, tracker._cell_id)
+            return original_df_insert(df, loc, column, value, allow_duplicates=allow_duplicates)
+
+        pd.DataFrame.insert = tracked_df_insert
 
         # ========== DataFrame.assign ==========
         # Note: assign() returns a NEW DataFrame, it does NOT modify the original.
@@ -347,8 +414,29 @@ class ColumnAccessTracker:
                 # Track column drops as reads (need to know what columns exist)
                 cols = [columns] if isinstance(columns, str) else list(columns)
                 tracker.record_read(id(df), cols)
-            return original_drop(df, labels=labels, axis=axis, index=index,
-                                 columns=columns, level=level, inplace=inplace, errors=errors)
+
+            # Snapshot state for provenance detection on inplace drops
+            pre_len = None
+            pre_cols = None
+            if inplace and tracker is not None and tracker._cell_id is not None:
+                pre_len = len(df)
+                pre_cols = set(str(c) for c in df.columns)
+
+            result = original_drop(df, labels=labels, axis=axis, index=index,
+                                   columns=columns, level=level, inplace=inplace, errors=errors)
+
+            if pre_len is not None:
+                from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                cell_id = tracker._cell_id
+                # Row drop provenance
+                if len(df) != pre_len:
+                    DataFrameProvenanceTracker.record_row_mutation(df, cell_id)
+                # Column deletion provenance
+                post_cols = set(str(c) for c in df.columns)
+                for col in pre_cols - post_cols:
+                    DataFrameProvenanceTracker.record_column_delete(df, col, cell_id)
+
+            return result
 
         pd.DataFrame.drop = tracked_drop
 
@@ -403,13 +491,21 @@ class ColumnAccessTracker:
 
             def tracked_loc_setitem(loc_indexer, key, value):
                 tracker = ColumnAccessTracker._get_active_tracker()
+                pre_len = None
                 if tracker is not None:
                     df = loc_indexer.obj
                     if isinstance(df, pd.DataFrame):
                         columns = _extract_columns_from_loc_key(key, df)
                         if columns:
                             tracker.record_write(id(df), columns)
-                return original_loc_setitem(loc_indexer, key, value)
+                        if tracker._cell_id is not None:
+                            pre_len = len(df)
+                original_loc_setitem(loc_indexer, key, value)
+                if pre_len is not None:
+                    df = loc_indexer.obj
+                    if len(df) != pre_len:
+                        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                        DataFrameProvenanceTracker.record_row_mutation(df, tracker._cell_id)
 
             _LocIndexer.__setitem__ = tracked_loc_setitem
         except (ImportError, AttributeError):
@@ -568,6 +664,121 @@ class ColumnAccessTracker:
 
         pd.DataFrame.drop_duplicates = tracked_drop_duplicates
 
+        # ========== DataFrame aggregation/transformation methods ==========
+        # These methods read all (or all numeric) columns. We record reads of
+        # every column so that column-level staleness works correctly.
+        # Without this, df.sum() would only produce Var(df) in the read set,
+        # and Col writes wouldn't trigger staleness (Col ▷ Var = false).
+        _ALL_COL_METHODS = [
+            'sum', 'mean', 'std', 'var', 'min', 'max', 'median',
+            'describe', 'corr', 'cov', 'quantile', 'nunique',
+            'apply', 'to_numpy', 'to_dict', 'to_records',
+        ]
+
+        for method_name in _ALL_COL_METHODS:
+            original = getattr(pd.DataFrame, method_name, None)
+            if original is None:
+                continue
+            self._original_methods[f'DataFrame.{method_name}'] = original
+
+            def _make_all_col_tracked(orig, name):
+                def tracked_method(df_self, *args, **kwargs):
+                    tracker = ColumnAccessTracker._get_active_tracker()
+                    if tracker is not None:
+                        df_id = id(df_self)
+                        if df_id in tracker._id_to_path:
+                            cols = [str(c) for c in df_self.columns]
+                            tracker.record_read(df_id, cols)
+                    return orig(df_self, *args, **kwargs)
+                tracked_method.__name__ = name
+                tracked_method.__doc__ = orig.__doc__
+                return tracked_method
+
+            setattr(pd.DataFrame, method_name, _make_all_col_tracked(original, method_name))
+
+        # ========== DataFrame.values (property) ==========
+        original_values_fget = pd.DataFrame.values.fget
+        if original_values_fget is not None:
+            self._original_methods['DataFrame.values'] = original_values_fget
+
+            def tracked_values(df_self):
+                tracker = ColumnAccessTracker._get_active_tracker()
+                if tracker is not None:
+                    df_id = id(df_self)
+                    if df_id in tracker._id_to_path:
+                        cols = [str(c) for c in df_self.columns]
+                        tracker.record_read(df_id, cols)
+                return original_values_fget(df_self)
+
+            pd.DataFrame.values = property(tracked_values)
+
+        # ========== DataFrame._set_axis (index/columns setter) ==========
+        # pd.DataFrame.index is an AxisProperty (Cython descriptor), not a
+        # Python property, so we can't patch fget/fset. Instead patch _set_axis,
+        # which is called when df.index = ... (axis=0) or df.columns = ... (axis=1).
+        self._original_methods['DataFrame._set_axis'] = pd.DataFrame._set_axis
+        original_set_axis = self._original_methods['DataFrame._set_axis']
+
+        def patched_set_axis(df_self, axis, labels):
+            tracker = ColumnAccessTracker._get_active_tracker()
+            if tracker is not None and tracker._cell_id is not None and axis == 0:
+                from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                DataFrameProvenanceTracker.record_index_mutation(df_self, tracker._cell_id)
+            return original_set_axis(df_self, axis, labels)
+
+        pd.DataFrame._set_axis = patched_set_axis
+
+        # ========== Inplace method provenance wrapper ==========
+        # Wraps DataFrame methods that accept inplace=True to detect
+        # row mutations, index mutations, and dtype changes.
+        import functools
+
+        def _wrap_inplace_for_provenance(original, method_name):
+            @functools.wraps(original)
+            def wrapper(df_self, *args, inplace=False, **kwargs):
+                tracker = ColumnAccessTracker._get_active_tracker()
+                if not inplace or tracker is None or tracker._cell_id is None:
+                    return original(df_self, *args, inplace=inplace, **kwargs)
+
+                pre_len = len(df_self)
+                pre_index = df_self.index.copy()
+                pre_dtypes = {str(c): df_self[c].dtype for c in df_self.columns}
+
+                result = original(df_self, *args, inplace=True, **kwargs)
+
+                from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                cell_id = tracker._cell_id
+                if len(df_self) != pre_len:
+                    DataFrameProvenanceTracker.record_row_mutation(df_self, cell_id)
+                if not df_self.index.equals(pre_index):
+                    DataFrameProvenanceTracker.record_index_mutation(df_self, cell_id)
+                post_dtypes = {str(c): df_self[c].dtype for c in df_self.columns}
+                for col in post_dtypes:
+                    if col in pre_dtypes and pre_dtypes[col] != post_dtypes[col]:
+                        DataFrameProvenanceTracker.record_dtype_change(df_self, col, cell_id)
+
+                return result
+            return wrapper
+
+        _INPLACE_METHODS = [
+            'dropna', 'drop_duplicates', 'reset_index', 'set_index',
+            'sort_index', 'sort_values', 'rename', 'fillna', 'replace',
+        ]
+
+        for method_name in _INPLACE_METHODS:
+            original = getattr(pd.DataFrame, method_name, None)
+            if original is None:
+                continue
+            key = f'DataFrame.{method_name}_provenance'
+            # Only save original if not already saved by an earlier patch
+            if f'DataFrame.{method_name}' not in self._original_methods:
+                self._original_methods[f'DataFrame.{method_name}'] = original
+            self._original_methods[key] = original
+            wrapped = _wrap_inplace_for_provenance(
+                self._original_methods[f'DataFrame.{method_name}'], method_name
+            )
+            setattr(pd.DataFrame, method_name, wrapped)
+
         # Save to class-level storage for other instances
         ColumnAccessTracker._class_original_methods = self._original_methods.copy()
 
@@ -590,6 +801,29 @@ class ColumnAccessTracker:
             pd.DataFrame.sort_values = self._original_methods['DataFrame.sort_values']
         if 'DataFrame.drop_duplicates' in self._original_methods:
             pd.DataFrame.drop_duplicates = self._original_methods['DataFrame.drop_duplicates']
+
+        # Restore aggregation/transformation methods
+        for method_name in ['sum', 'mean', 'std', 'var', 'min', 'max', 'median',
+                            'describe', 'corr', 'cov', 'quantile', 'nunique',
+                            'apply', 'to_numpy', 'to_dict', 'to_records']:
+            key = f'DataFrame.{method_name}'
+            if key in self._original_methods:
+                setattr(pd.DataFrame, method_name, self._original_methods[key])
+
+        # Restore values property
+        if 'DataFrame.values' in self._original_methods:
+            pd.DataFrame.values = property(self._original_methods['DataFrame.values'])
+
+        # Restore _set_axis
+        if 'DataFrame._set_axis' in self._original_methods:
+            pd.DataFrame._set_axis = self._original_methods['DataFrame._set_axis']
+
+        # Restore inplace methods
+        for method_name in ['dropna', 'drop_duplicates', 'reset_index', 'set_index',
+                            'sort_index', 'sort_values', 'rename', 'fillna', 'replace']:
+            key = f'DataFrame.{method_name}'
+            if key in self._original_methods:
+                setattr(pd.DataFrame, method_name, self._original_methods[key])
 
         # Restore indexer methods
         try:

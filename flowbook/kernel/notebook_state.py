@@ -2,14 +2,13 @@
 Notebook state for reproducibility tracking.
 
 This module implements the core state model for tracking notebook reproducibility:
-    S = ⟨C, O, Σ, T, R, W, L⟩
+    S = ⟨C, O, Σ, T, R, W⟩
 
 Where:
     C, O, Σ: Managed elsewhere (notebook content, outputs, kernel namespace)
     T: Cell → Status (managed here)
     R: Cell → P(Loc) - reads per cell (managed here)
     W: Cell → P(Loc) - writes per cell (managed here)
-    L: Loc → Cell - last writer map (managed here)
 
 This module also stores per-cell TrackingData for:
     - Column-level reads/writes for DataFrames
@@ -23,9 +22,17 @@ And additional per-cell metadata:
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Dict, FrozenSet, List, Optional, Set, TYPE_CHECKING
 
+from flowbook.kernel.loc_ids import StableIdMap
 from flowbook.kernel.models import CellStateSnapshot, CellStatus, Reason, ReasonType
+from flowbook.kernel.locations import (
+    ReadLoc, ReadLocSet, WriteLoc, WriteLocSet,
+    has_conflict, wlocs_conflict_rlocs, output_set,
+    writelocset_var_names, readlocset_var_names,
+    tracking_to_readlocset, tracking_to_writelocset,
+)
+from flowbook.kernel.change_detector import changes_to_write_locs
 from flowbook.kernel_support.models import TrackingData
 
 if TYPE_CHECKING:
@@ -40,16 +47,14 @@ class NotebookState:
     This class maintains the state needed to track cell staleness and detect
     reproducibility issues. It implements the formal model transitions:
     - EDIT: Mark cell stale with CodeChanged reason
-    - EXEC: Record reads/writes, update last_writer, propagate staleness
+    - EXEC: Record reads/writes, propagate staleness
     - INSERT/DELETE/MOVE: Handle structural changes
 
     Attributes:
-        # Formal model state (T, R, W, L)
+        # Formal model state (T, R, W)
         status: Map from cell ID to CellStatus (T in formal model)
         reads: Map from cell ID to set of locations read (R in formal model)
         writes: Map from cell ID to set of locations written (W in formal model)
-        last_writer: Map from location to cell that last wrote it (L in formal model)
-        column_last_writer: Map from (var, col) to cell that last wrote it
         cell_order: List of cell IDs in document order
 
         # Per-cell tracking data
@@ -59,12 +64,10 @@ class NotebookState:
         typed_changes: Cached typed Change objects for fast forward dependency checks
     """
 
-    # Formal model state (T, R, W, L)
+    # Formal model state (T, R, W)
     status: Dict[str, CellStatus] = field(default_factory=dict)
-    reads: Dict[str, Set[str]] = field(default_factory=dict)
-    writes: Dict[str, Set[str]] = field(default_factory=dict)
-    last_writer: Dict[str, str] = field(default_factory=dict)
-    column_last_writer: Dict[str, Dict[str, str]] = field(default_factory=dict)  # var -> col -> cell_id
+    reads: Dict[str, ReadLocSet] = field(default_factory=dict)
+    writes: Dict[str, WriteLocSet] = field(default_factory=dict)
     cell_order: List[str] = field(default_factory=list)
 
     # Per-cell tracking data
@@ -136,7 +139,6 @@ class NotebookState:
         """
         # Priority order: lower = higher priority (shown first)
         priority = {
-            ReasonType.SKIPPED_UPSTREAM: 0,  # Most actionable: run the expected cell first
             ReasonType.FORWARD_STALE: 1,
             ReasonType.CODE_CHANGED: 2,
             ReasonType.BACKWARD_STALE: 3,
@@ -161,12 +163,15 @@ class NotebookState:
     # Derived Functions (from formal model)
     # =========================================================================
 
-    def last_writer_for(self, loc: str, before_cell: str) -> Optional[str]:
+    def last_writer_for(self, var_name: str, before_cell: str) -> Optional[str]:
         """
         LastWriter(W, i, x) = max { j < i | x ∈ W_j }, or None
 
-        Find which cell before `before_cell` should have written `loc`
+        Find which cell before `before_cell` should have written `var_name`
         based on document order and recorded writes.
+
+        Operates at variable level: checks if any WriteLoc in a cell's writes
+        has a matching var_name().
         """
         if before_cell not in self.cell_order:
             return None
@@ -176,54 +181,13 @@ class NotebookState:
         result_pos = -1
 
         for cell_id, cell_writes in self.writes.items():
-            if loc in cell_writes and cell_id in self.cell_order:
+            if any(w.var_name() == var_name for w in cell_writes) and cell_id in self.cell_order:
                 pos = self.cell_order.index(cell_id)
                 if pos < before_pos and pos > result_pos:
                     result = cell_id
                     result_pos = pos
 
         return result
-
-    def is_runnable(self, cell_id: str) -> bool:
-        """
-        Runnable(L, W, R, i) ≡ ∀x ∈ Rᵢ. L(x) = lastWriter(W, i, x)
-
-        A cell is runnable iff every location it reads has the expected provenance:
-        the actual last writer equals the expected last writer based on document order.
-        """
-        cell_reads = self.reads.get(cell_id, set())
-        for loc in cell_reads:
-            actual = self.last_writer.get(loc)
-            expected = self.last_writer_for(loc, cell_id)
-            if actual != expected:
-                return False
-        return True
-
-    def get_contamination_reasons(self, cell_id: str, new_reads: Set[str]) -> Set[Reason]:
-        """
-        Check if cell reads from later cells (contamination).
-
-        Returns set of ReadsFromLater reasons for each location where
-        the actual writer is positioned after this cell in document order.
-        """
-        if cell_id not in self.cell_order:
-            return set()
-
-        cell_pos = self.cell_order.index(cell_id)
-        reasons: Set[Reason] = set()
-
-        for loc in new_reads:
-            writer = self.last_writer.get(loc)
-            if writer and writer in self.cell_order:
-                writer_pos = self.cell_order.index(writer)
-                if writer_pos > cell_pos:
-                    reasons.add(Reason(
-                        ReasonType.NO_READ_BEFORE_WRITE,
-                        loc=loc,
-                        cell_id=writer
-                    ))
-
-        return reasons
 
     # =========================================================================
     # Transitions
@@ -233,14 +197,14 @@ class NotebookState:
         self,
         cell_id: str,
         tracking: TrackingData,
-        changed_vars: Optional[Set[str]] = None,
-        column_changed: Optional[Dict[str, Set[str]]] = None,
         execution_seq: Optional[int] = None,
         structural_reads_values: Optional[Dict[str, Dict[str, str]]] = None,
         typed_changes: Optional[List["Change"]] = None,
+        namespace: Optional[dict] = None,
+        stable_map: Optional[StableIdMap] = None,
     ) -> None:
         """
-        Record cell execution: update R, W, L, column_last_writer, and tracking data.
+        Record cell execution: update R, W, and tracking data.
 
         Called after successful execution (not on rollback).
         This corresponds to the "commit" phase of EXEC.
@@ -248,40 +212,33 @@ class NotebookState:
         Args:
             cell_id: The cell that executed
             tracking: TrackingData from cell execution (contains reads, writes, columns, etc.)
-            changed_vars: Variables that actually CHANGED (from diff, for L tracking)
-            column_changed: Columns that changed {var: {col1, col2, ...}}
             execution_seq: Execution sequence number
             structural_reads_values: Captured structural values for error messages
             typed_changes: Cached typed changes for fast forward dependency checks
+            namespace: Current kernel namespace (for LocRef qualifiers)
+            stable_map: StableIdMap instance (for LocRef qualifiers)
         """
         # Store the TrackingData object directly
         self.tracking_data[cell_id] = tracking
 
-        # Core R, W tracking (derived from TrackingData)
-        self.reads[cell_id] = tracking.get_rbw_vars()
-        new_writes = tracking.get_written_variables()
-        self.writes[cell_id] = new_writes
-
-        # Clear stale last_writer entries: if this cell was the last writer
-        # for a variable it NO LONGER writes, clear that entry.
-        # This handles the case where a cell is edited to write different variables.
-        for loc in list(self.last_writer.keys()):
-            if self.last_writer[loc] == cell_id and loc not in new_writes:
-                del self.last_writer[loc]
-
-        # Update L: only for variables that CHANGED (diff-based, not all writes)
-        # This prevents false forward contamination when a cell writes but doesn't change
-        if changed_vars:
-            for loc in changed_vars:
-                self.last_writer[loc] = cell_id
-
-        # Update column-level provenance (only for changed columns)
-        if column_changed:
-            for var, cols in column_changed.items():
-                if var not in self.column_last_writer:
-                    self.column_last_writer[var] = {}
-                for col in cols:
-                    self.column_last_writer[var][col] = cell_id
+        # Core R, W tracking (derived from TrackingData) — typed LocSets
+        self.reads[cell_id] = tracking_to_readlocset(tracking, namespace, stable_map)
+        tracking_wlocs = tracking_to_writelocset(tracking, namespace, stable_map)
+        # Merge diff-derived WriteLocs (ColAdd, ColDel, Rows, Attr) when available.
+        # tracking_to_writelocset only produces Var + Col + File; the diff provides
+        # the full typed set needed for column-level write-write overlap via output().
+        # Only include diff-derived locs for variables that tracking also considers
+        # as writes — otherwise unrecoverable mutations (in-place changes not tracked
+        # as writes) would incorrectly appear as writes in last_writer_for().
+        if typed_changes:
+            tracking_write_vars = (tracking.writes or set()) | set(tracking.column_writes.keys() if tracking.column_writes else [])
+            diff_wlocs = changes_to_write_locs(typed_changes, namespace, stable_map)
+            recoverable_diff_wlocs = frozenset(
+                w for w in diff_wlocs if w.var_name() in tracking_write_vars
+            )
+            self.writes[cell_id] = tracking_wlocs | recoverable_diff_wlocs
+        else:
+            self.writes[cell_id] = tracking_wlocs
 
         # Additional per-cell metadata (not in TrackingData)
         if execution_seq is not None:
@@ -304,14 +261,6 @@ class NotebookState:
         Returns:
             CellStateSnapshot containing all state that will be modified
         """
-        # Capture full last_writer dict (will be replaced on restore)
-        last_writer_entries = dict(self.last_writer)
-
-        # Capture full column_last_writer dict (deep copy)
-        column_entries: Dict[str, Dict[str, str]] = {}
-        for var, cols in self.column_last_writer.items():
-            column_entries[var] = dict(cols)
-
         return CellStateSnapshot(
             cell_id=cell_id,
             reads=self.reads.get(cell_id),
@@ -321,8 +270,6 @@ class NotebookState:
             execution_seq=self.execution_seq.get(cell_id),
             structural_reads_values=self.structural_reads_values.get(cell_id),
             typed_changes=self.typed_changes.get(cell_id),
-            last_writer_entries=last_writer_entries,
-            column_last_writer_entries=column_entries,
         )
 
     def restore_cell_state(self, snapshot: CellStateSnapshot) -> None:
@@ -372,19 +319,6 @@ class NotebookState:
             self.typed_changes.pop(cell_id, None)
         else:
             self.typed_changes[cell_id] = snapshot.typed_changes
-
-        # Restore last_writer to pre-execution state
-        self.last_writer.clear()
-        self.last_writer.update(snapshot.last_writer_entries)
-
-        # Restore column_last_writer to pre-execution state
-        self.column_last_writer.clear()
-        for var, cols in snapshot.column_last_writer_entries.items():
-            self.column_last_writer[var] = dict(cols)
-
-    def get_column_writer(self, var: str, col: str) -> Optional[str]:
-        """Get the cell_id that last wrote column col of var, or None."""
-        return self.column_last_writer.get(var, {}).get(col)
 
     # =========================================================================
     # Per-Cell Tracking Data Access
@@ -445,13 +379,13 @@ class NotebookState:
         """Check if a cell has been executed (has tracking data)."""
         return cell_id in self.tracking_data
 
-    def propagate_staleness(self, writer_cell: str, written_locs: Set[str]) -> None:
+    def propagate_staleness(self, writer_cell: str, written_locs: WriteLocSet) -> None:
         """
         Propagate staleness to later cells.
 
         For j in {i+1, ..., n}:
-            for x ∈ W' ∩ R_j: AddReason(j, InputChanged(x, i))
-            for x ∈ W' ∩ W_j: AddReason(j, WriteConflict(x, i))
+            for w ∈ W' ▷ R_j: AddReason(j, InputChanged(w, i))
+            for w ∈ W' ▷ output*(W_j): AddReason(j, WriteConflict(w, i))
         """
         if writer_cell not in self.cell_order:
             return
@@ -462,36 +396,35 @@ class NotebookState:
             if not self.is_clean(later_cell):
                 continue  # Already stale, skip
 
-            later_reads = self.reads.get(later_cell, set())
-            later_writes = self.writes.get(later_cell, set())
+            later_reads = self.reads.get(later_cell, frozenset())
+            later_writes = self.writes.get(later_cell, frozenset())
 
-            # ForwardStale: written ∩ reads
-            for loc in written_locs & later_reads:
+            # ForwardStale: W' ▷ R_j
+            conflicting_writes = wlocs_conflict_rlocs(written_locs, later_reads)
+            for w in conflicting_writes:
                 self.add_reason(later_cell, Reason(
-                    ReasonType.FORWARD_STALE, loc=loc, cell_id=writer_cell
+                    ReasonType.FORWARD_STALE, loc=w.display_name(), cell_id=writer_cell
                 ))
 
-            # BackwardStale: written ∩ writes
-            for loc in written_locs & later_writes:
+            # BackwardStale: W' ▷ output*(W_j)
+            later_output = output_set(later_writes)
+            write_conflicting = wlocs_conflict_rlocs(written_locs, later_output)
+            for w in write_conflicting - conflicting_writes:
                 self.add_reason(later_cell, Reason(
-                    ReasonType.BACKWARD_STALE, loc=loc, cell_id=writer_cell
+                    ReasonType.BACKWARD_STALE, loc=w.display_name(), cell_id=writer_cell
                 ))
 
     def handle_edit(self, cell_id: str) -> None:
         """
-        EDIT transition: T_i := Stale({CodeChanged})
+        EDIT transition [Inst-Edit]: T' = T[i := stale], R and W unchanged.
 
-        Editing replaces any prior reasons with just CodeChanged.
-        Also clears R/W sets and tracking data since the cell's behavior may change.
+        Per the formal semantics, editing a cell only changes its status to stale.
+        R and W are preserved so that:
+        - ForwardStale on rerun can compute W_i \\ W'_i (removed writes)
+        - BackwardStale on rerun can detect when a cell stops writing a variable
+        - Other cells' staleness propagation still sees the old R/W
         """
         self.set_stale(cell_id, {Reason(ReasonType.CODE_CHANGED)})
-        # Clear per-cell state since the code has changed
-        self.reads.pop(cell_id, None)
-        self.writes.pop(cell_id, None)
-        self.tracking_data.pop(cell_id, None)
-        self.typed_changes.pop(cell_id, None)
-        self.structural_reads_values.pop(cell_id, None)
-        self.execution_seq.pop(cell_id, None)
 
     def handle_delete(self, deleted_cell: str) -> None:
         """
@@ -500,32 +433,32 @@ class NotebookState:
         2. Keep L(x) pointing to deleted cell (for orphan detection)
         3. Remove deleted cell from status/reads/writes/cell_order
 
-        ForwardStale: j > i, Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+        ForwardStale: j > i, Wᵢ ▷ Rⱼ ≠ ∅ or Wᵢ ▷ output*(Wⱼ) ≠ ∅
         BackwardStale: j < i, j = LastWriter(W, i, y) for y ∈ Wᵢ
 
         Note: We intentionally keep last_writer pointing to the deleted cell
         so that forward dependency checks can detect "orphaned values" -
         values that came from a cell that no longer exists.
         """
-        deleted_writes = self.writes.get(deleted_cell, set())
+        deleted_writes = self.writes.get(deleted_cell, frozenset())
 
         if deleted_writes and deleted_cell in self.cell_order:
             my_position = self.cell_order.index(deleted_cell)
 
-            # ForwardStale: j > i, Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅
+            # ForwardStale: j > i, Wᵢ ▷ (Rⱼ ∪ output*(Wⱼ)) ≠ ∅
             for cell_id in self.cell_order[my_position + 1:]:
-                cell_reads = self.reads.get(cell_id, set())
-                cell_writes = self.writes.get(cell_id, set())
-                read_overlap = deleted_writes & cell_reads
-                write_overlap = deleted_writes & cell_writes
+                cell_reads = self.reads.get(cell_id, frozenset())
+                cell_writes = self.writes.get(cell_id, frozenset())
+                read_conflicting = wlocs_conflict_rlocs(deleted_writes, cell_reads)
+                write_conflicting = wlocs_conflict_rlocs(deleted_writes, output_set(cell_writes))
 
-                for loc in read_overlap:
+                for w in read_conflicting:
                     self.add_reason(cell_id, Reason(
-                        ReasonType.FORWARD_STALE, loc=loc, cell_id=deleted_cell
+                        ReasonType.FORWARD_STALE, loc=w.display_name(), cell_id=deleted_cell
                     ))
-                for loc in write_overlap - read_overlap:
+                for w in write_conflicting - read_conflicting:
                     self.add_reason(cell_id, Reason(
-                        ReasonType.WRITE_OVERLAP, loc=loc, cell_id=deleted_cell
+                        ReasonType.WRITE_OVERLAP, loc=w.display_name(), cell_id=deleted_cell
                     ))
 
             # BackwardStale: j < i, j = LastWriter(W, i, y) for y ∈ Wᵢ
@@ -534,15 +467,16 @@ class NotebookState:
                 cell_id for cell_id in self.cell_order[:my_position]
                 if self.is_clean(cell_id)
             }
-            for y in deleted_writes:
+            for w in deleted_writes:
+                var_name = w.var_name()
                 last_j = None
                 for cell_id in self.cell_order[:my_position]:
-                    cell_w = self.writes.get(cell_id, set())
-                    if y in cell_w:
+                    cell_w = self.writes.get(cell_id, frozenset())
+                    if any(ww.var_name() == var_name for ww in cell_w):
                         last_j = cell_id
                 if last_j is not None and last_j in originally_clean:
                     self.add_reason(last_j, Reason(
-                        ReasonType.BACKWARD_STALE, loc=y, cell_id=deleted_cell
+                        ReasonType.BACKWARD_STALE, loc=w.display_name(), cell_id=deleted_cell
                     ))
 
         # Remove deleted cell from state
@@ -571,13 +505,11 @@ class NotebookState:
 
         self.cell_order.insert(position, cell_id)
         self.status[cell_id] = CellStatus.never_executed()
-        self.reads[cell_id] = set()
-        self.writes[cell_id] = set()
+        self.reads[cell_id] = frozenset()
+        self.writes[cell_id] = frozenset()
 
-        # Check Runnable for cells after insertion point
-        for later_cell in self.cell_order[position + 1:]:
-            if self.is_clean(later_cell) and not self.is_runnable(later_cell):
-                self.add_reason(later_cell, Reason(ReasonType.ORDER_CHANGED))
+        # Cells after insertion point may be affected by order change
+        # but without provenance tracking we cannot check Runnable here.
 
     def handle_move(self, cell_id: str, new_position: int) -> None:
         """
@@ -604,13 +536,8 @@ class NotebookState:
         # Insert at new position
         self.cell_order.insert(new_position, cell_id)
 
-        # Check Runnable for affected range
-        lo = min(old_position, new_position)
-        hi = max(old_position, new_position) + 1
-
-        for affected_cell in self.cell_order[lo:hi]:
-            if self.is_clean(affected_cell) and not self.is_runnable(affected_cell):
-                self.add_reason(affected_cell, Reason(ReasonType.ORDER_CHANGED))
+        # Cells in affected range may be affected by order change
+        # but without provenance tracking we cannot check Runnable here.
 
     def set_cell_order(self, new_order: List[str]) -> List[str]:
         """
@@ -639,8 +566,8 @@ class NotebookState:
             # Don't use handle_insert as it modifies cell_order
             # Just initialize the new cell's state
             self.status[inserted] = CellStatus.never_executed()
-            self.reads[inserted] = set()
-            self.writes[inserted] = set()
+            self.reads[inserted] = frozenset()
+            self.writes[inserted] = frozenset()
 
         # Check if order actually changed (not just same cells in same positions)
         old_order = self.cell_order
@@ -649,12 +576,8 @@ class NotebookState:
         # Update order
         self.cell_order = list(new_order)
 
-        # Check Runnable for all cells - but only add ORDER_CHANGED if order actually changed
-        # This prevents spurious ORDER_CHANGED when cells are just stale due to value changes
-        if order_changed:
-            for cell_id in self.cell_order:
-                if self.is_clean(cell_id) and not self.is_runnable(cell_id):
-                    self.add_reason(cell_id, Reason(ReasonType.ORDER_CHANGED))
+        # Note: without provenance tracking, we cannot check Runnable here.
+        # ORDER_CHANGED detection now relies on structural changes only.
 
         # Return newly stale cells
         currently_stale = set(self.get_stale_cells())
@@ -666,8 +589,6 @@ class NotebookState:
         self.status.clear()
         self.reads.clear()
         self.writes.clear()
-        self.last_writer.clear()
-        self.column_last_writer.clear()
         self.cell_order.clear()
         # Per-cell tracking data
         self.tracking_data.clear()
@@ -684,9 +605,8 @@ class NotebookState:
         return {
             "cell_order": self.cell_order,
             "status": {k: v.to_dict() for k, v in self.status.items()},
-            "reads": {k: sorted(v) for k, v in self.reads.items()},
-            "writes": {k: sorted(v) for k, v in self.writes.items()},
-            "last_writer": dict(self.last_writer),
+            "reads": {k: sorted(str(loc) for loc in v) for k, v in self.reads.items()},
+            "writes": {k: sorted(str(loc) for loc in v) for k, v in self.writes.items()},
         }
 
     def __str__(self) -> str:
@@ -696,5 +616,4 @@ class NotebookState:
         for cell_id in self.cell_order:
             status = self.get_status(cell_id)
             lines.append(f"    {cell_id}: {status}")
-        lines.append(f"  last_writer: {self.last_writer}")
         return "\n".join(lines)

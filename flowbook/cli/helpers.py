@@ -152,7 +152,8 @@ def load_notebook(notebook_path: str) -> Dict[str, Any]:
 
 def setup_kernel(
     connection_file: Optional[str] = None,
-    kernel_name: str = "flowbook_kernel"
+    kernel_name: str = "flowbook_kernel",
+    cwd: Optional[str] = None,
 ) -> Tuple[Optional[KernelManager], FlowbookKernelClient]:
     """
     Start a new kernel or connect to an existing one.
@@ -226,7 +227,7 @@ def setup_kernel(
 
                     # Start fresh kernel
                     kernel_manager = KernelManager(kernel_name=kernel_name)
-                    kernel_manager.start_kernel()
+                    kernel_manager.start_kernel(**({"cwd": cwd} if cwd else {}))
 
                     kernel_client = FlowbookKernelClient(kernel_id=kernel_manager.kernel_id)
                     kernel_client.load_connection_info(kernel_manager.get_connection_info())

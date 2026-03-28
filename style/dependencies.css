@@ -1,0 +1,56 @@
+/* Dependencies Panel - ReactFlow graph visualization */
+
+/* The panel widget node - must fill its dock panel slot */
+.flowbook-dependencies-panel {
+  min-width: 250px;
+}
+
+/* The graph container - absolute-fill pattern ensures ReactFlow
+   always has measurable pixel dimensions for its ResizeObserver. */
+.flowbook-dependencies-graph {
+  width: 100%;
+  height: 100%;
+}
+
+/* Custom node styling */
+.flowbook-dep-node {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-family: var(--jp-ui-font-family);
+  font-size: var(--jp-ui-font-size1);
+  font-weight: 600;
+  border: 2px solid var(--jp-border-color1);
+  background-color: var(--jp-layout-color0);
+  color: var(--jp-ui-font-color0);
+  text-align: center;
+  min-width: 40px;
+}
+
+.flowbook-dep-node-stale {
+  border-color: #ffc107;
+  background-color: #fff3cd;
+}
+
+.flowbook-dep-node-error {
+  border-color: #dc3545;
+  background-color: #f8d7da;
+}
+
+.flowbook-dep-node-unexecuted {
+  border-color: var(--jp-border-color2);
+  background-color: var(--jp-layout-color2);
+  color: var(--jp-ui-font-color2);
+}
+
+/* Edge label styling */
+.flowbook-edge-label {
+  font-size: 10px;
+  font-family: var(--jp-code-font-family);
+  background-color: var(--jp-layout-color1);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.flowbook-edge-label-error {
+  color: #dc3545;
+}

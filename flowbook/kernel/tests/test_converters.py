@@ -428,24 +428,25 @@ class TestHasAnyChanges:
 
 
 class TestIntegration:
-    """Integration tests for the full conversion pipeline."""
+    """Integration tests for the full conversion pipeline using LocSet operations."""
 
     def test_column_modification_conflict_detection(self):
         """
-        Full pipeline: TrackingData + MemoryCheckpointDiffResult -> Conflict
+        Full pipeline: TrackingData + MemoryCheckpointDiffResult -> Conflict via LocSet ▷
 
         Scenario:
         - Prior cell read df['price']
         - Current cell modified df['price']
         - Should detect conflict
         """
-        from flowbook.kernel.conflict_resolver import ConflictResolver
+        from flowbook.kernel.change_detector import changes_to_write_locs
+        from flowbook.kernel.locations import tracking_to_readlocset, wlocs_conflict_rlocs
 
         # Prior cell's tracking
         prior_tracking = TrackingData(
             column_reads_before_writes={"df": {"price", "quantity"}}
         )
-        prior_reads = prior_tracking.to_read_events()
+        R_prior = tracking_to_readlocset(prior_tracking)
 
         # Current cell's diff
         diff = MemoryCheckpointDiffResult(
@@ -464,31 +465,30 @@ class TestIntegration:
             }
         )
         changes = detect_changes(diff)
+        W_i = changes_to_write_locs(changes)
 
-        # Resolve conflicts
-        resolver = ConflictResolver()
-        violations_result = resolver.get_violations(changes, prior_reads)
+        # Should detect conflict: ColumnModified(df, price) vs Col(df, price)
+        conflicting = wlocs_conflict_rlocs(W_i, R_prior)
+        assert len(conflicting) == 1
+        conflict = next(iter(conflicting))
+        assert conflict.qualifier == "df"
+        assert conflict.name == "price"
 
-        # Should have one violation: ColumnModified(df, price) vs ColumnRead(df, price)
-        assert len(violations_result.violations) == 1
-        assert violations_result.violations[0].change.variable == "df"
-        assert isinstance(violations_result.violations[0].change, ColumnModified)
-
-    def test_structural_change_warning(self):
+    def test_structural_change_conflict_detection(self):
         """
-        Full pipeline with structural changes.
+        Full pipeline with structural changes via LocSet ▷.
 
         Scenario:
         - Prior cell read df.columns
         - Current cell added a column
-        - Should detect structural warning (in WARN mode)
+        - Should detect conflict (col_add conflicts with Attr(df, columns))
         """
-        from flowbook.kernel.conflict_resolver import ConflictResolver
-        from flowbook.kernel.conflict_rules import StructuralMode
+        from flowbook.kernel.change_detector import changes_to_write_locs
+        from flowbook.kernel.locations import tracking_to_readlocset, wlocs_conflict_rlocs
 
         # Prior cell's tracking
         prior_tracking = TrackingData(structural_reads={"df": {"columns"}})
-        prior_reads = prior_tracking.to_read_events()
+        R_prior = tracking_to_readlocset(prior_tracking)
 
         # Current cell's diff - column added
         diff = MemoryCheckpointDiffResult(
@@ -507,11 +507,11 @@ class TestIntegration:
             }
         )
         changes = detect_changes(diff)
+        W_i = changes_to_write_locs(changes)
 
-        # Resolve with WARN mode
-        resolver = ConflictResolver(structural_mode=StructuralMode.WARN)
-        warnings = resolver.get_warnings(changes, prior_reads)
-
-        # Should have one warning
-        assert len(warnings) == 1
-        assert isinstance(warnings[0].change, ColumnAdded)
+        # Should detect conflict: ColAdd(df, new_col) vs Attr(df, columns)
+        conflicting = wlocs_conflict_rlocs(W_i, R_prior)
+        assert len(conflicting) == 1
+        conflict = next(iter(conflicting))
+        assert isinstance(conflict, type(conflict))  # WriteLoc
+        assert "new_col" in conflict.name

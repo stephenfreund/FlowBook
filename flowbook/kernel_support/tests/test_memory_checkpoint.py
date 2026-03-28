@@ -644,8 +644,8 @@ class TestCopyOnWriteVerification:
     """Test that CoW is verified and enabled on initialization (pandas 2.x only)."""
 
     @pytest.mark.skipif(
-        not hasattr(pd.options.mode, 'copy_on_write'),
-        reason="copy_on_write option not available in this pandas version"
+        not hasattr(pd.options.mode, 'copy_on_write') or pd.__version__ >= '3',
+        reason="copy_on_write option not available or always enabled in this pandas version"
     )
     def test_cow_enabled_check(self):
         """Test that CoW gets enabled if disabled."""

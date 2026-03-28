@@ -132,7 +132,7 @@ class TestHelperFunctions:
         result = sdc_helper_with_order.execute_cell(
             "a", {}, {"x": 1}, writes={"x"}
         )
-        assert result.violation is None
+        assert not result.has_errors()
         # b, c, d are stale (NEVER_EXECUTED), a is clean (just executed)
         assert "a" not in result.stale_cells
         assert set(result.stale_cells) == {"b", "c", "d"}
@@ -150,9 +150,10 @@ class TestHelperFunctions:
             reads={"df"}, writes={"total"},
             column_reads={"df": {"price"}}
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
-        # B modifies df.qty (different column) - no violation
+        # B modifies df.qty (different column) - no backward mutation
+        from flowbook.kernel.models import ErrorType
         df_modified = df.copy()
         df_modified["qty"] = [10, 20]
         result_b = helper.execute_cell(
@@ -161,7 +162,10 @@ class TestHelperFunctions:
             column_reads={"df": set()},
             column_writes={"df": {"qty"}}
         )
-        assert result_b.violation is None
+        # B reads and writes df so NoReadAndWrite fires, but no backward mutation
+        assert not any(
+            e.error_type == ErrorType.NO_WRITE_AFTER_READ for e in result_b.errors
+        )
 
     def test_execute_cell_detects_violation(self, sdc_helper_with_order):
         """execute_cell detects backward mutation."""
@@ -175,9 +179,9 @@ class TestHelperFunctions:
             "b", {"x": 1, "y": 2}, {"x": 999, "y": 2},
             writes={"x"}
         )
-        assert result.violation is not None
-        assert result.violation.affected_cell == "a"
-        assert result.violation.mutating_cell == "b"
+        assert result.has_errors()
+        assert result.errors[0].causer_cell == "a"
+        assert result.errors[0].cell_id == "b"
 
 
 class TestMakeTracking:

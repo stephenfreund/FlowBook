@@ -11,10 +11,11 @@ import { Cell } from '@jupyterlab/cells';
 
 import { KernelDetector } from '../shared/kerneldetection';
 import { ReproducibilityMetadataPanel } from './metadatapanel';
+import { DependenciesPanel } from './dependenciespanel';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { CellIndexManager } from '../cellindex';
-import { IReproducibilityMetadata } from './types';
+import { IPredicateViolation } from './types';
 import { FlowbookToolbarExtension } from './toolbar';
 
 /**
@@ -22,7 +23,7 @@ import { FlowbookToolbarExtension } from './toolbar';
  *
  * The command is registered once, but its isEnabled check gates on:
  * 1. Current kernel is flowbook_kernel
- * 2. Active cell has cell_is_contaminated === true
+ * 2. Active cell has a no_read_before_write predicate violation in flowbook_violations
  *
  * The context menu item is defined declaratively in schema/plugin.json.
  */
@@ -49,10 +50,13 @@ function registerExecRestoreCommand(
         if (!activeCell || activeCell.model.type !== 'code') {
           return false;
         }
-        const meta = activeCell.model.getMetadata('flowbook') as
-          | IReproducibilityMetadata
-          | undefined;
-        return meta?.cell_is_contaminated === true;
+        const violations = activeCell.model.getMetadata(
+          'flowbook_violations'
+        ) as IPredicateViolation[] | undefined;
+        return (
+          violations !== undefined &&
+          violations.some(v => v.predicate === 'no_read_before_write')
+        );
       } catch (e) {
         console.error('FlowBook exec-restore isEnabled error:', e);
         return false;
@@ -84,11 +88,7 @@ function registerExecRestoreCommand(
         return;
       }
 
-      // Send %exec_restore magic silently — sets the pending flag in the kernel.
-      // The kernel's ZMQ queue ensures ordering:
-      //   1. %exec_restore <cell_id>
-      //   2. %notebook_structure <order>  (sent by _onExecutionScheduled)
-      //   3. Cell code                    (_do_execute_impl consumes the flag)
+      // Send exec_restore via protocol (deprecated — kernel shows error message).
       const future = session.kernel.requestExecute({
         code: `%exec_restore ${cellId}`,
         silent: true,
@@ -112,7 +112,9 @@ class FlowbookActivationManager {
   private _tracker: INotebookTracker;
   private _kernelDetector: KernelDetector;
   private _panel: ReproducibilityMetadataPanel | null = null;
+  private _dependenciesPanel: DependenciesPanel | null = null;
   private _highlighter: ReproducibilityCellHighlighter | null = null;
+  private _executionHook: ReproducibilityExecutionHookManager | null = null;
   private _cellIndexManager: CellIndexManager;
   private _toolbarExtension: FlowbookToolbarExtension;
   private _isActive = false;
@@ -199,25 +201,33 @@ class FlowbookActivationManager {
 
     console.log('FlowBook Plugin: Activating for flowbook_kernel');
 
-    // Create panel
+    // Create panels
     this._panel = new ReproducibilityMetadataPanel();
     this._app.shell.add(this._panel, 'right', { rank: 510 });
 
-    // Create highlighter
+    this._dependenciesPanel = new DependenciesPanel();
+    this._app.shell.add(this._dependenciesPanel, 'right', { rank: 520 });
+
+    // Create highlighter (dependencies panel must be set before _initialize runs)
     this._highlighter = new ReproducibilityCellHighlighter(
       this._tracker,
       this._panel
     );
+    this._highlighter.setDependenciesPanel(this._dependenciesPanel);
 
     // Set highlighter on toolbar extension so it can access staleness manager
     this._toolbarExtension.setHighlighter(this._highlighter);
 
-    // Create execution hook
-    new ReproducibilityExecutionHookManager(
+    // Create execution hook (store reference for sendCommand access)
+    this._executionHook = new ReproducibilityExecutionHookManager(
       this._app,
       this._tracker,
       this._highlighter
     );
+
+    // Trigger initial dependency graph update (highlighter's constructor may
+    // have called _updateAllCells before the dependencies panel was set)
+    this._highlighter.refreshDependencies();
 
     // Start cell index overlays for current notebook
     const widget = this._tracker.currentWidget;
@@ -235,12 +245,11 @@ class FlowbookActivationManager {
 
   /**
    * Sync initial staleness state from kernel on notebook load.
-   * Sends cell order and requests current state.
+   * Sends cell order and requests current state via comm channel.
    */
   private _syncInitialState(panel: NotebookPanel): void {
-    const session = panel.sessionContext.session;
-    if (!session?.kernel) {
-      console.log('FlowBook Plugin: No kernel available for sync');
+    if (!this._executionHook) {
+      console.log('FlowBook Plugin: No execution hook available for sync');
       return;
     }
 
@@ -254,22 +263,14 @@ class FlowbookActivationManager {
       return;
     }
 
-    // Send cell order first, then request sync
-    const structureCmd = `%notebook_structure ${cellOrder.join(' ')}`;
-    session.kernel.requestExecute({
-      code: structureCmd,
-      silent: true,
-      store_history: false
+    // Send cell order first, then request sync via comm
+    this._executionHook.sendCommand({
+      type: 'notebook_structure',
+      cell_order: cellOrder
     });
+    this._executionHook.sendCommand({ type: 'sync' });
 
-    // Request staleness sync (output will be processed by execution hook)
-    session.kernel.requestExecute({
-      code: '%flowbook_sync',
-      silent: true,
-      store_history: false
-    });
-
-    console.log('FlowBook Plugin: Sent initial sync request');
+    console.log('FlowBook Plugin: Sent initial sync via comm');
   }
 
   private _deactivate(): void {
@@ -285,10 +286,14 @@ class FlowbookActivationManager {
       this._activeNotebookPath = null;
     }
 
-    // Remove panel
+    // Remove panels
     if (this._panel) {
       this._panel.dispose();
       this._panel = null;
+    }
+    if (this._dependenciesPanel) {
+      this._dependenciesPanel.dispose();
+      this._dependenciesPanel = null;
     }
 
     // Highlighter cleanup

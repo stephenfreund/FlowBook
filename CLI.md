@@ -25,8 +25,9 @@ flowbook <command> [options] <notebook.ipynb>
 Runs a notebook through multiple phases to measure FlowBook's timing and memory overhead compared to a vanilla Python kernel.
 
 **Default phases** (3 of 4 run by default):
+
 1. **FlowBook Timing** — Execute with FlowBook kernel, measure per-cell timing breakdown (code, state, check)
-2. **Baseline Timing** — *Skipped by default* (enable with `--baseline-timing`)
+2. **Baseline Timing** — _Skipped by default_ (enable with `--baseline-timing`)
 3. **Baseline Memory** — Execute with vanilla kernel, measure namespace size before/after each cell
 4. **FlowBook Memory** — Execute with FlowBook kernel, measure namespace + checkpoint + enforcer overhead
 
@@ -53,22 +54,19 @@ flowbook compare-baseline notebook.ipynb --trials 3
 # With cell timeout and rerun passes
 flowbook compare-baseline notebook.ipynb --timeout 120 --rerun-k 2
 
-# Syntactic staleness mode (lower memory, less precise)
-flowbook compare-baseline notebook.ipynb --staleness-mode syntactic
 ```
 
 #### Options
 
-| Flag | Default | Description |
-|---|---|---|
-| `--timeout TIMEOUT` | no limit | Timeout in seconds per cell |
-| `--skip-memory` | off | Skip all memory measurement phases |
-| `--skip-baseline` | off | Skip baseline memory run (disables cross-run comparison) |
-| `--baseline-timing` | off | Also run baseline timing phase |
-| `--rerun-k K` | 0 | Number of extra top-to-bottom rerun passes after initial execution |
-| `--trials N` | 1 | Number of independent trials (saved as `notebook-1.json`, `notebook-2.json`, ...) |
-| `--start N` | 1 | Starting trial number |
-| `--staleness-mode` | semantic | `syntactic` (set intersection) or `semantic` (checkpoint diff) |
+| Flag                | Default  | Description                                                                       |
+| ------------------- | -------- | --------------------------------------------------------------------------------- |
+| `--timeout TIMEOUT` | no limit | Timeout in seconds per cell                                                       |
+| `--skip-memory`     | off      | Skip all memory measurement phases                                                |
+| `--skip-baseline`   | off      | Skip baseline memory run (disables cross-run comparison)                          |
+| `--baseline-timing` | off      | Also run baseline timing phase                                                    |
+| `--rerun-k K`       | 0        | Number of extra top-to-bottom rerun passes after initial execution                |
+| `--trials N`        | 1        | Number of independent trials (saved as `notebook-1.json`, `notebook-2.json`, ...) |
+| `--start N`         | 1        | Starting trial number                                                             |
 
 #### Output JSON (v3.0)
 
@@ -119,28 +117,28 @@ flowbook_compare_overhead user@host:/path/to/*.json --plot
 
 #### Options
 
-| Flag | Default | Description |
-|---|---|---|
-| `--format {table,json,csv}` | table | Output format for statistics |
-| `--sort-by {slowdown,memory,runtime,name}` | slowdown | Sort order for notebooks |
-| `--plot` | off | Generate PDF plots |
-| `--output FILE` | all_overhead.pdf | Output PDF filename |
-| `--output-dir DIR` | current dir | Directory for plot output |
-| `--large-fonts` | off | Larger fonts for publication-ready plots |
-| `--top-n N` | 10 | Number of top variables to show individually in plots |
-| `--force-download` | off | Re-download remote files (ignore cache) |
-| `--clear-cache` | off | Clear cached remote files and exit |
+| Flag                                       | Default          | Description                                           |
+| ------------------------------------------ | ---------------- | ----------------------------------------------------- |
+| `--format {table,json,csv}`                | table            | Output format for statistics                          |
+| `--sort-by {slowdown,memory,runtime,name}` | slowdown         | Sort order for notebooks                              |
+| `--plot`                                   | off              | Generate PDF plots                                    |
+| `--output FILE`                            | all_overhead.pdf | Output PDF filename                                   |
+| `--output-dir DIR`                         | current dir      | Directory for plot output                             |
+| `--large-fonts`                            | off              | Larger fonts for publication-ready plots              |
+| `--top-n N`                                | 10               | Number of top variables to show individually in plots |
+| `--force-download`                         | off              | Re-download remote files (ignore cache)               |
+| `--clear-cache`                            | off              | Clear cached remote files and exit                    |
 
 #### Generated Plots (6 panels per notebook)
 
-| Panel | Title | Content |
-|---|---|---|
-| 1 (top-left) | Timing | Cumulative time: baseline vs FlowBook (code + state + check + other) |
-| 2 (top-right) | Checkpoint Time by Variable | Per-variable stacked area of checkpoint deepcopy time |
-| 3 (mid-left) | Memory Overhead | Cross-run: baseline namespace + FlowBook overhead. Fallback: FlowBook namespace + checkpoint_var_costs |
-| 4 (mid-right) | Checkpoint Memory by Variable | Per-variable stacked area of checkpoint memory |
-| 5 (bottom-left) | Overhead Time per Cell | Per-cell bar chart of state + check + other overhead |
-| 6 (bottom-right) | Checkpoint Overhead Ratio | Cross-run: Checkpoint_i / Base_i. Fallback: checkpoint_var_costs delta / namespace |
+| Panel            | Title                         | Content                                                                                                |
+| ---------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------ |
+| 1 (top-left)     | Timing                        | Cumulative time: baseline vs FlowBook (code + state + check + other)                                   |
+| 2 (top-right)    | Checkpoint Time by Variable   | Per-variable stacked area of checkpoint deepcopy time                                                  |
+| 3 (mid-left)     | Memory Overhead               | Cross-run: baseline namespace + FlowBook overhead. Fallback: FlowBook namespace + checkpoint_var_costs |
+| 4 (mid-right)    | Checkpoint Memory by Variable | Per-variable stacked area of checkpoint memory                                                         |
+| 5 (bottom-left)  | Overhead Time per Cell        | Per-cell bar chart of state + check + other overhead                                                   |
+| 6 (bottom-right) | Checkpoint Overhead Ratio     | Cross-run: Checkpoint_i / Base_i. Fallback: checkpoint_var_costs delta / namespace                     |
 
 Additional pages: aggregate histograms and CDFs across all notebooks.
 
@@ -182,19 +180,19 @@ flowbook_timers user@host:/path/flowbook-times.json
 
 #### Options
 
-| Flag | Default | Description |
-|---|---|---|
-| `--format {table,json,csv}` | table | Output format |
-| `--sort-by {total,mean,count,max,key}` | key | Sort order |
-| `--top N` | all | Show only top N timers |
-| `--keys KEY [KEY ...]` | all | Filter to specific timer keys |
-| `--histograms` | off | Show ASCII histograms (table mode) |
-| `--histplot KEY` | — | Generate histogram PDF for a timer key |
-| `--scatterplot KEY%KEY` | — | Generate scatter plot PDF for two keys |
-| `--output-dir DIR` | current dir | Directory for plot output |
-| `--clip PERCENTILE` | — | Clip outliers above this percentile |
-| `--force-download` | off | Re-download remote files |
-| `--clear-cache` | off | Clear cached remote files |
+| Flag                                   | Default     | Description                            |
+| -------------------------------------- | ----------- | -------------------------------------- |
+| `--format {table,json,csv}`            | table       | Output format                          |
+| `--sort-by {total,mean,count,max,key}` | key         | Sort order                             |
+| `--top N`                              | all         | Show only top N timers                 |
+| `--keys KEY [KEY ...]`                 | all         | Filter to specific timer keys          |
+| `--histograms`                         | off         | Show ASCII histograms (table mode)     |
+| `--histplot KEY`                       | —           | Generate histogram PDF for a timer key |
+| `--scatterplot KEY%KEY`                | —           | Generate scatter plot PDF for two keys |
+| `--output-dir DIR`                     | current dir | Directory for plot output              |
+| `--clip PERCENTILE`                    | —           | Clip outliers above this percentile    |
+| `--force-download`                     | off         | Re-download remote files               |
+| `--clear-cache`                        | off         | Clear cached remote files              |
 
 ## `flowbook_slurm` — Batch Execution on Slurm Clusters
 
@@ -233,21 +231,21 @@ flowbook_slurm notebooks.txt --make-env -- compare-baseline
 
 #### Options
 
-| Flag | Default | Description |
-|---|---|---|
-| `--partition PARTITION` | gpmoo-b | Slurm partition |
-| `--time TIME_LIMIT` | 24:00:00 | Time limit |
-| `--mem MEM` | 16G | Memory request |
-| `--cpus CPUS` | 4 | CPUs per task |
-| `--gpus GPUS` | 1 | GPUs per task |
-| `--job-name JOB_NAME` | flowbook-batch | Slurm job name prefix |
-| `--env ENV` | auto-discover | Conda environment (overrides per-notebook `_env` discovery) |
-| `--make-env` | off | Create/recreate `_env` environments before submitting |
-| `--dry-run` | off | Print sbatch commands without submitting |
-| `--local` | off | Run commands locally in sequence instead of Slurm |
-| `--no-wait` | off | Submit jobs and exit without waiting for completion |
-| `--poll-interval SECS` | — | Seconds between job status polls |
-| `--log-dir DIR` | — | Directory for Slurm log files |
+| Flag                    | Default        | Description                                                 |
+| ----------------------- | -------------- | ----------------------------------------------------------- |
+| `--partition PARTITION` | gpmoo-b        | Slurm partition                                             |
+| `--time TIME_LIMIT`     | 24:00:00       | Time limit                                                  |
+| `--mem MEM`             | 16G            | Memory request                                              |
+| `--cpus CPUS`           | 4              | CPUs per task                                               |
+| `--gpus GPUS`           | 1              | GPUs per task                                               |
+| `--job-name JOB_NAME`   | flowbook-batch | Slurm job name prefix                                       |
+| `--env ENV`             | auto-discover  | Conda environment (overrides per-notebook `_env` discovery) |
+| `--make-env`            | off            | Create/recreate `_env` environments before submitting       |
+| `--dry-run`             | off            | Print sbatch commands without submitting                    |
+| `--local`               | off            | Run commands locally in sequence instead of Slurm           |
+| `--no-wait`             | off            | Submit jobs and exit without waiting for completion         |
+| `--poll-interval SECS`  | —              | Seconds between job status polls                            |
+| `--log-dir DIR`         | —              | Directory for Slurm log files                               |
 
 #### Input files
 
@@ -296,19 +294,6 @@ flowbook_timers flowbook-times.json --histplot "state_total_ms" --histplot "chec
 
 # Correlate state vs check time
 flowbook_timers flowbook-times.json --scatterplot "state_total_ms%check_total_ms"
-```
-
-### Comparing semantic vs syntactic staleness modes
-
-```bash
-flowbook compare-baseline notebook.ipynb --staleness-mode semantic --trials 3
-mv notebook_comparison.json results/semantic/
-
-flowbook compare-baseline notebook.ipynb --staleness-mode syntactic --trials 3
-mv notebook_comparison.json results/syntactic/
-
-flowbook_compare_overhead results/semantic/ --plot --output semantic.pdf
-flowbook_compare_overhead results/syntactic/ --plot --output syntactic.pdf
 ```
 
 ### Interactive development

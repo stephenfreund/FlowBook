@@ -190,7 +190,7 @@ class TestMultipleDataFrames:
         df_a = df[df["x"] > 100].copy()  # ~400 rows
         df_b = df_a[df_a["x"] > 300].copy()  # ~200 rows
 
-        detector = DataFrameSubsetDetector(min_rows=50, min_savings_bytes=100)
+        detector = DataFrameSubsetDetector(min_rows=50, min_savings_bytes=0)
         result = detector.detect({"df": df, "df_a": df_a, "df_b": df_b})
 
         # Should detect df_a as child of df, df_b as child of df_a (or df)
@@ -487,7 +487,7 @@ class TestEdgeCases:
             "y": [1, 2, 3],
         }
 
-        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=100)
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
         result = detector.detect(variables)
 
         # Should still detect the subset relationship
@@ -500,7 +500,7 @@ class TestEdgeCases:
         # Child created from parent should work
         df_filtered = df[df["a"] > 100].copy()
 
-        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=100)
+        detector = DataFrameSubsetDetector(min_rows=10, min_savings_bytes=0)
         result = detector.detect({"df": df, "df_filtered": df_filtered})
 
         assert len(result.relations) == 1

@@ -8,7 +8,6 @@ Memory Data Format (v4):
 {
   "version": "4.0",
   "metadata": {
-    "staleness_mode": "syntactic" | "semantic",
     "num_cells": int,
     "timeout_seconds": float,
     "notebook_path": str,
@@ -33,14 +32,8 @@ Memory Data Format (v4):
 
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Any
-from enum import Enum
 import numpy as np
 
-
-class StalenessMode(str, Enum):
-    """Staleness tracking mode."""
-    SYNTACTIC = "syntactic"
-    SEMANTIC = "semantic"
 
 
 # ============ Baseline Memory Models ============
@@ -667,7 +660,6 @@ class CDFData:
 @dataclass
 class ComparisonMetadata:
     """Metadata for a comparison run."""
-    staleness_mode: str  # "syntactic" or "semantic"
     num_cells: int
     timeout_seconds: float
     notebook_path: str = ""
@@ -675,7 +667,6 @@ class ComparisonMetadata:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "staleness_mode": self.staleness_mode,
             "num_cells": self.num_cells,
             "timeout_seconds": self.timeout_seconds,
             "notebook_path": self.notebook_path,
@@ -685,7 +676,6 @@ class ComparisonMetadata:
     @classmethod
     def from_dict(cls, d: Dict) -> "ComparisonMetadata":
         return cls(
-            staleness_mode=d.get("staleness_mode", "semantic"),
             num_cells=d.get("num_cells", 0),
             timeout_seconds=d.get("timeout_seconds", 0.0),
             notebook_path=d.get("notebook_path", ""),

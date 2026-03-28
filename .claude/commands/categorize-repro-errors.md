@@ -10,21 +10,25 @@ Analyze reproducibility errors from a FlowBook error report or directly from a p
 ```
 
 **Mode 1: Error Report Mode**
+
 - `ERROR_REPORT_FILE`: Path to the error report file (e.g., `errors.txt`)
 - `NOTEBOOKS_DIR`: Optional directory containing the notebook files
 - `--fix`: Optional flag to apply fixes after categorization
 
 **Mode 2: Single Notebook Mode** (when only a `.ipynb` path is provided)
+
 - `NOTEBOOK_PATH`: Path to a processed notebook (must have been run through FlowBook kernel)
 - `--fix`: Optional flag to apply fixes after categorization
 
 ## Task
 
 ### For Error Report Mode:
+
 1. Parse the error report file using `flowbook/scripts/parse_repro_errors.py`
 2. For each notebook with errors, launch a parallel agent to analyze and categorize errors
 
 ### For Single Notebook Mode:
+
 1. Extract errors directly from the notebook's cell metadata (see "Extracting Errors from Notebook" below)
 2. Analyze and categorize errors for that single notebook
 
@@ -45,12 +49,12 @@ Analyze reproducibility errors from a FlowBook error report or directly from a p
 
 When the predicate is `"unrecoverable_mutation"`, identify the sub-type from the cell source:
 
-| Sub-type | Detection Pattern | Fix Type | Example |
-|----------|-------------------|----------|---------|
-| **ML model mutation** | `.fit()`, `.fit_transform()`, `.predict()` on model/scaler | `model-copy` | `model.fit(X, y)` |
-| **DataFrame inplace** | `inplace=True` argument | `inplace-to-copy` | `df.drop(col, inplace=True)` |
-| **Structural assignment** | `.columns = ...`, `.index = ...` | `struct-copy` | `df.columns = ['a', 'b']` |
-| **Container mutation** | `.append()`, `[i] = ...` on list/dict/array | `inplace-reassign` | `arr[5] = 99` |
+| Sub-type                  | Detection Pattern                                          | Fix Type           | Example                      |
+| ------------------------- | ---------------------------------------------------------- | ------------------ | ---------------------------- |
+| **ML model mutation**     | `.fit()`, `.fit_transform()`, `.predict()` on model/scaler | `model-copy`       | `model.fit(X, y)`            |
+| **DataFrame inplace**     | `inplace=True` argument                                    | `inplace-to-copy`  | `df.drop(col, inplace=True)` |
+| **Structural assignment** | `.columns = ...`, `.index = ...`                           | `struct-copy`      | `df.columns = ['a', 'b']`    |
+| **Container mutation**    | `.append()`, `[i] = ...` on list/dict/array                | `inplace-reassign` | `arr[5] = 99`                |
 
 **Why these are unrecoverable:** Re-executing the cell cannot restore the full value of the variable. For example, `model.fit()` only trains the model — it cannot "un-train" changes from a deleted cell. Similarly, `arr[5] = 99` sets one element but cannot restore what a deleted cell wrote to `arr[3]`.
 
@@ -123,6 +127,7 @@ python flowbook/scripts/fix_repro_errors.py NOTEBOOK @N --fix-type add-diagnosti
 4. **Add `# [FLOWBOOK FIX]` comments** to both the mutation and diagnostic cells explaining what was done
 
 The script creates `<notebook>-fixed.ipynb` with:
+
 - Comments marked `# [FLOWBOOK FIX]` explaining the original error and fix
 - Deep copies with `_flow_XXXX` suffix for renamed variables
 - Split cells with `%diagnostic` magic on the read-only part
@@ -216,6 +221,7 @@ def extract_errors_from_notebook(notebook_path: str) -> dict:
 ```
 
 **Key metadata locations in notebook JSON:**
+
 - `cell.outputs[].metadata.predicate_violation` - Violation details:
   - `predicate`: Type of violation (`"no_read_and_write"`, `"backward_stale"`, etc.)
   - `cell_id`: Cell that triggered the violation
@@ -235,12 +241,14 @@ When the user invokes this command:
 ### Detect Mode
 
 First, determine which mode to use:
+
 - If the first argument ends with `.ipynb`, use **Single Notebook Mode**
 - Otherwise, use **Error Report Mode**
 
 ### Error Report Mode
 
 1. Run the parsing script to get structured error data:
+
    ```bash
    python flowbook/scripts/parse_repro_errors.py $ERROR_REPORT_FILE $NOTEBOOKS_DIR --json
    ```

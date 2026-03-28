@@ -59,6 +59,7 @@ placeholder-package/
      - Environment: (leave blank)
 
 2. **Push the placeholder branch**:
+
    ```bash
    git push origin placeholder
    ```
@@ -92,6 +93,7 @@ When ready to publish the actual FlowBook package, see `TRANSITION.md` for detai
 ### Quick Summary of Transition
 
 **Option 1: Update Placeholder Branch** (Easiest)
+
 ```bash
 git checkout placeholder
 git merge main
@@ -103,6 +105,7 @@ git push origin placeholder v0.1.0
 ```
 
 **Option 2: Switch to Main Branch**
+
 ```bash
 git checkout main
 git checkout placeholder -- .github/workflows/release.yaml
@@ -117,17 +120,20 @@ git push origin main v0.1.0
 The package has been tested and verified:
 
 ✅ **Build succeeds**:
+
 ```
 Successfully built flowbook-0.0.1.tar.gz and flowbook-0.0.1-py3-none-any.whl
 ```
 
 ✅ **Installation works**:
+
 ```bash
 pip install flowbook-0.0.1-py3-none-any.whl
 # Successfully installed flowbook-python-0.0.1
 ```
 
 ✅ **Import works**:
+
 ```python
 import flowbook
 print(flowbook.__version__)  # Output: 0.0.1
@@ -168,6 +174,7 @@ print(flowbook.__version__)  # Output: 0.0.1
 ## Next Steps
 
 1. **Review the placeholder branch**:
+
    ```bash
    git checkout placeholder
    git log
@@ -175,6 +182,7 @@ print(flowbook.__version__)  # Output: 0.0.1
    ```
 
 2. **Test the package build locally**:
+
    ```bash
    cd placeholder-package
    python -m build
@@ -185,9 +193,11 @@ print(flowbook.__version__)  # Output: 0.0.1
 3. **Set up PyPI trusted publishing** (one-time setup)
 
 4. **Push the placeholder branch and create a release** (when ready):
+
    ```bash
    git push origin placeholder
    ```
+
    Then go to GitHub and create a new release with tag `v0.0.1`
 
 5. **Monitor the GitHub Actions workflow** to ensure successful publication
@@ -205,6 +215,7 @@ print(flowbook.__version__)  # Output: 0.0.1
 ## Support
 
 For questions or issues:
+
 - GitHub Repository: https://github.com/stephenfreund/FlowBook
 - See `TRANSITION.md` for transition guidance
 - Check `.github/workflows/release.yaml` for workflow details

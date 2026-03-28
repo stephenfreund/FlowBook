@@ -1583,7 +1583,7 @@ class TestHeapSizerCheckpointSubsetInteraction:
 
         # Measure restored child
         sizer = HeapSizer()
-        restored_child_size = sizer.sizeof(user_ns['child'])
+        restored_child_size = sizer.sizeof(user_ns['child'], owned_only=False)
 
         # Should be substantial (at least 20KB for 5K rows * 2 cols)
         # Note: reconstructed DataFrames may have different internal structure

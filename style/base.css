@@ -36,6 +36,13 @@
   background-color: var(--jp-layout-color1);
 }
 
+.flowbook-status-header {
+  padding: 6px 10px;
+  background-color: var(--jp-layout-color2);
+  border-bottom: 1px solid var(--jp-border-color1);
+  flex-shrink: 0;
+}
+
 .flowbook-metadata-content {
   padding: 16px;
   font-family: var(--jp-ui-font-family);
@@ -841,6 +848,22 @@
   color: var(--jp-ui-font-color2);
 }
 
+.flowbook-loc-sublist {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  list-style-type: none;
+}
+
+.flowbook-loc-sublist li {
+  margin: 2px 0;
+}
+
+.flowbook-loc-type {
+  color: var(--jp-ui-font-color2);
+  font-size: 0.85em;
+  font-style: italic;
+}
+
 .flowbook-changed code {
   color: var(--jp-warn-color1);
 }
@@ -867,16 +890,13 @@
 }
 
 .flowbook-violation-section {
-  background-color: rgb(244 67 54 / 10%);
-  padding: 12px;
-  border-radius: 4px;
-  margin: 8px -8px;
-  border: 1px solid var(--jp-error-color1);
+  margin-top: 4px;
+  border: none;
+  background: none;
 }
 
 .flowbook-violation-header {
-  font-weight: bold;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
 }
 
 .flowbook-violation-content {
@@ -949,7 +969,8 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: max(33%, 300px);
+  max-width: 33%;
+  min-width: 300px;
   background-color: #fff3cd;
   border: 1px solid #ffc107;
   border-radius: 3px;
@@ -962,6 +983,7 @@
   background-color: rgb(255 193 7 / 18%);
   padding: 1px 4px;
   border-radius: 2px;
+  margin-right: -2px; /* Tighten spacing before punctuation */
 }
 
 .flowbook-staleness-info-icon {
@@ -988,6 +1010,7 @@
   background-color: rgb(220 53 69 / 15%);
   padding: 1px 4px;
   border-radius: 2px;
+  margin-right: -2px; /* Tighten spacing before punctuation */
 }
 
 /* Error notice output (rejected violations) */
@@ -1004,20 +1027,10 @@
   background-color: rgb(220 53 69 / 15%);
   padding: 1px 4px;
   border-radius: 2px;
+  margin-right: -2px; /* Tighten spacing before punctuation */
 }
 
 /* Contamination notice - DEPRECATED, now uses flowbook-violation-notice */
-
-/* Violation notice sections for detailed messages */
-.flowbook-violation-header {
-  margin-bottom: 4px;
-}
-
-.flowbook-violation-section {
-  margin-top: 4px;
-  border: none;
-  background: none;
-}
 
 .flowbook-violation-section ul {
   margin: 2px 0 0 20px;

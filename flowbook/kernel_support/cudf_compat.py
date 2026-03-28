@@ -185,13 +185,23 @@ _HAS_CUDF: Optional[bool] = None
 
 
 def has_cudf() -> bool:
-    """Check if cuDF is available. Result is cached."""
+    """Check if cuDF is available. Result is cached.
+
+    Returns True only if cudf can be imported AND has the required
+    DataFrame/Series/Index types. Some partial installations or stub
+    modules may import successfully but lack these core types.
+    """
     global _HAS_CUDF, _cudf_module
     if _HAS_CUDF is None:
         try:
             import cudf
-            _cudf_module = cudf
-            _HAS_CUDF = True
+            # Verify cudf has the core types we need
+            # Some partial installs or stubs may import but lack DataFrame
+            if not hasattr(cudf, 'DataFrame'):
+                _HAS_CUDF = False
+            else:
+                _cudf_module = cudf
+                _HAS_CUDF = True
         except ImportError:
             _HAS_CUDF = False
     return _HAS_CUDF

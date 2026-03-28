@@ -24,7 +24,18 @@ import pytest
 
 from flowbook.kernel.models import ReasonType
 from flowbook.kernel.notebook_state import NotebookState, CellStatus
+from flowbook.kernel.locations import ReadLoc, WriteLoc, ReadLocSet, WriteLocSet
 from flowbook.kernel.tests.conftest import make_tracking, ReproducibilityTestHelper
+
+
+def _rset(var_names: set) -> ReadLocSet:
+    """Convert a set of variable names to a ReadLocSet of Var locs."""
+    return frozenset(ReadLoc.var(v) for v in var_names)
+
+
+def _wset(var_names: set) -> WriteLocSet:
+    """Convert a set of variable names to a WriteLocSet of Var locs."""
+    return frozenset(WriteLoc.var(v) for v in var_names)
 
 
 class TestDeleteForwardStale:
@@ -471,8 +482,8 @@ class TestDeleteNotebookState:
         from flowbook.kernel.notebook_state import NotebookState, CellStatus
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.writes["B"] = {"x"}
-        state.reads["C"] = {"x"}
+        state.writes["B"] = _wset({"x"})
+        state.reads["C"] = _rset({"x"})
         state.status["C"] = CellStatus.clean()
 
         state.handle_delete("B")
@@ -486,9 +497,9 @@ class TestDeleteNotebookState:
         from flowbook.kernel.notebook_state import NotebookState, CellStatus
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.writes["B"] = {"x"}
-        state.writes["C"] = {"x"}
-        state.reads["C"] = set()
+        state.writes["B"] = _wset({"x"})
+        state.writes["C"] = _wset({"x"})
+        state.reads["C"] = frozenset()
         state.status["C"] = CellStatus.clean()
 
         state.handle_delete("B")
@@ -501,8 +512,8 @@ class TestDeleteNotebookState:
         """NotebookState.handle_delete uses BACKWARD_STALE for upstream last writer."""
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.writes["A"] = {"x"}
-        state.writes["B"] = {"x"}
+        state.writes["A"] = _wset({"x"})
+        state.writes["B"] = _wset({"x"})
         state.status["A"] = CellStatus.clean()
 
         state.handle_delete("B")
@@ -517,8 +528,8 @@ class TestDeleteNotebookState:
         state.cell_order = ["A", "B"]
         state.status["A"] = CellStatus.clean()
         state.status["B"] = CellStatus.clean()
-        state.reads["B"] = {"x"}
-        state.writes["B"] = {"y"}
+        state.reads["B"] = _rset({"x"})
+        state.writes["B"] = _wset({"y"})
 
         state.handle_delete("B")
 
@@ -531,8 +542,8 @@ class TestDeleteNotebookState:
         """Deleting a cell with no writes causes no staleness."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.writes["A"] = set()
-        state.reads["B"] = {"x"}
+        state.writes["A"] = frozenset()
+        state.reads["B"] = _rset({"x"})
         state.status["B"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
 
@@ -541,27 +552,14 @@ class TestDeleteNotebookState:
         assert state.is_clean("B")
         assert state.is_clean("C")
 
-    def test_handle_delete_preserves_last_writer(self):
-        """Deleting a cell keeps last_writer entries for orphan detection."""
-        state = NotebookState()
-        state.cell_order = ["A", "B"]
-        state.writes["A"] = {"x"}
-        state.last_writer["x"] = "A"
-        state.status["B"] = CellStatus.clean()
-
-        state.handle_delete("A")
-
-        # last_writer intentionally NOT cleared for orphan detection
-        assert state.last_writer.get("x") == "A"
-
     def test_handle_delete_multiple_readers(self):
         """Multiple downstream readers all get marked stale."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C", "D"]
-        state.writes["A"] = {"x"}
-        state.reads["B"] = {"x"}
-        state.reads["C"] = {"x"}
-        state.reads["D"] = {"y"}  # no overlap
+        state.writes["A"] = _wset({"x"})
+        state.reads["B"] = _rset({"x"})
+        state.reads["C"] = _rset({"x"})
+        state.reads["D"] = _rset({"y"})  # no overlap
         state.status["B"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
         state.status["D"] = CellStatus.clean()
@@ -1275,10 +1273,10 @@ class TestDeleteNotebookStateAdvanced:
         """Downstream cell with no overlap stays clean."""
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.writes["A"] = {"x"}
-        state.reads["B"] = {"y"}
-        state.writes["B"] = {"z"}
-        state.reads["C"] = {"z"}
+        state.writes["A"] = _wset({"x"})
+        state.reads["B"] = _rset({"y"})
+        state.writes["B"] = _wset({"z"})
+        state.reads["C"] = _rset({"z"})
         state.status["B"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
 
@@ -1292,8 +1290,8 @@ class TestDeleteNotebookStateAdvanced:
         from flowbook.kernel.models import Reason
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.writes["A"] = {"x"}
-        state.reads["B"] = {"x"}
+        state.writes["A"] = _wset({"x"})
+        state.reads["B"] = _rset({"x"})
         state.status["B"] = CellStatus.stale({Reason(ReasonType.CODE_CHANGED)})
 
         state.handle_delete("A")
@@ -1308,8 +1306,8 @@ class TestDeleteNotebookStateAdvanced:
         """Upstream cell that doesn't write the same var stays clean."""
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.writes["A"] = {"y"}  # different var
-        state.writes["B"] = {"x"}
+        state.writes["A"] = _wset({"y"})  # different var
+        state.writes["B"] = _wset({"x"})
         state.status["A"] = CellStatus.clean()
 
         state.handle_delete("B")
@@ -1320,8 +1318,8 @@ class TestDeleteNotebookStateAdvanced:
         """Deleting first cell: no upstream → no BackwardStale possible."""
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.writes["A"] = {"x"}
-        state.reads["B"] = {"x"}
+        state.writes["A"] = _wset({"x"})
+        state.reads["B"] = _rset({"x"})
         state.status["B"] = CellStatus.clean()
 
         state.handle_delete("A")
@@ -1335,8 +1333,8 @@ class TestDeleteNotebookStateAdvanced:
         """Deleting last cell: no downstream → only BackwardStale possible."""
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.writes["A"] = {"x"}
-        state.writes["B"] = {"x"}
+        state.writes["A"] = _wset({"x"})
+        state.writes["B"] = _wset({"x"})
         state.status["A"] = CellStatus.clean()
 
         state.handle_delete("B")
@@ -1358,7 +1356,7 @@ class TestDeleteNotebookStateAdvanced:
         """Deleting a cell not in cell_order is a no-op for staleness."""
         state = NotebookState()
         state.cell_order = ["A", "B"]
-        state.writes["X"] = {"z"}
+        state.writes["X"] = _wset({"z"})
         state.status["A"] = CellStatus.clean()
         state.status["B"] = CellStatus.clean()
 
@@ -1375,10 +1373,10 @@ class TestDeleteNotebookStateAdvanced:
         """
         state = NotebookState()
         state.cell_order = ["A", "B", "C", "D"]
-        state.writes["A"] = {"x"}
-        state.writes["B"] = {"x"}
-        state.writes["C"] = {"x"}
-        state.writes["D"] = {"x"}
+        state.writes["A"] = _wset({"x"})
+        state.writes["B"] = _wset({"x"})
+        state.writes["C"] = _wset({"x"})
+        state.writes["D"] = _wset({"x"})
         state.status["A"] = CellStatus.clean()
         state.status["B"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
@@ -1398,9 +1396,9 @@ class TestDeleteNotebookStateAdvanced:
         """
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.writes["A"] = {"x"}
-        state.writes["B"] = {"x"}
-        state.reads["C"] = {"x"}
+        state.writes["A"] = _wset({"x"})
+        state.writes["B"] = _wset({"x"})
+        state.reads["C"] = _rset({"x"})
         state.status["A"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
 
@@ -1421,9 +1419,9 @@ class TestDeleteNotebookStateAdvanced:
         """
         state = NotebookState()
         state.cell_order = ["A", "B", "C"]
-        state.writes["A"] = {"y"}
-        state.writes["B"] = {"x", "y"}
-        state.reads["C"] = {"x"}
+        state.writes["A"] = _wset({"y"})
+        state.writes["B"] = _wset({"x", "y"})
+        state.reads["C"] = _rset({"x"})
         state.status["A"] = CellStatus.clean()
         state.status["C"] = CellStatus.clean()
 

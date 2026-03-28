@@ -4,3 +4,15 @@ node_modules
 **/package.json
 !/package.json
 data_ferret
+
+# Large/generated files
+*.ipynb
+flowbook-times.json
+flowbook/labextension
+**/*_comparison.json
+**/*_processed.ipynb
+coverup-log
+agent-logs
+slurm_logs
+gpmoo-logs
+formal-development

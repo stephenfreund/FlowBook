@@ -135,7 +135,7 @@ export class StalenessManager {
       Object.fromEntries(this._stalenessReasons)
     );
 
-    // Emit signal if cells changed OR reasons changed (e.g., SKIPPED_UPSTREAM → FORWARD_STALE)
+    // Emit signal if cells changed OR reasons changed (e.g., reason type updated)
     if (added.length > 0 || removed.length > 0 || reasonsChanged) {
       this._stalenessChanged.emit({
         added,

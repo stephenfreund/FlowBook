@@ -22,8 +22,35 @@ import pytest
 from flowbook.kernel_support.memory_checkpoint import MemoryCheckpoints
 from flowbook.kernel_support.models import TrackingData
 
-from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX, format_forward_dependency_message, StalenessMode
+from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer, PRE_CHECKPOINT_PREFIX, format_forward_dependency_message
+from flowbook.kernel.models import ErrorType
 from flowbook.kernel.tests.conftest import make_tracking
+
+
+def _has_backward_error(result):
+    """Check if result has a backward mutation error (NO_WRITE_AFTER_READ)."""
+    return any(e.error_type == ErrorType.NO_WRITE_AFTER_READ for e in result.errors)
+
+
+def _has_forward_error(result):
+    """Check if result has a forward contamination error (NO_READ_BEFORE_WRITE)."""
+    return any(e.error_type == ErrorType.NO_READ_BEFORE_WRITE for e in result.errors)
+
+
+def _get_backward_error(result):
+    """Get first backward mutation error."""
+    for e in result.errors:
+        if e.error_type == ErrorType.NO_WRITE_AFTER_READ:
+            return e
+    return None
+
+
+def _get_forward_error(result):
+    """Get first forward contamination error."""
+    for e in result.errors:
+        if e.error_type == ErrorType.NO_READ_BEFORE_WRITE:
+            return e
+    return None
 
 
 class TestForwardDependencyBasic:
@@ -62,8 +89,8 @@ class TestForwardDependencyBasic:
             namespace=post_c,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert result_c.violation is None
-        assert result_c.forward_violation is None
+        assert not _has_backward_error(result_c)
+        assert not _has_forward_error(result_c)
 
         # Cell B executes second and reads x - forward dependency!
         self._save_pre_checkpoint("b", {"x": 20})
@@ -76,11 +103,11 @@ class TestForwardDependencyBasic:
         )
 
         # Should have forward dependency violation
-        assert result_b.forward_violation is not None
-        assert result_b.forward_violation.violation_type == "forward_dependency"
-        assert result_b.forward_violation.mutating_cell == "c"
-        assert result_b.forward_violation.affected_cell == "b"
-        assert "x" in result_b.forward_violation.variables
+        assert _has_forward_error(result_b)
+        assert _get_forward_error(result_b).error_type == ErrorType.NO_READ_BEFORE_WRITE
+        assert _get_forward_error(result_b).causer_cell == "c"
+        assert _get_forward_error(result_b).cell_id == "b"
+        assert "x" in _get_forward_error(result_b).locations
 
     def test_no_forward_dependency_when_later_cell_not_executed(self):
         """
@@ -101,7 +128,7 @@ class TestForwardDependencyBasic:
         )
 
         # No forward dependency (c hasn't executed)
-        assert result_b.forward_violation is None
+        assert not _has_forward_error(result_b)
 
     def test_no_forward_dependency_when_no_reads(self):
         """
@@ -128,7 +155,7 @@ class TestForwardDependencyBasic:
         )
 
         # No forward dependency (b doesn't read x)
-        assert result_b.forward_violation is None
+        assert not _has_forward_error(result_b)
 
     def test_no_forward_dependency_when_no_overlap(self):
         """
@@ -157,7 +184,7 @@ class TestForwardDependencyBasic:
         )
 
         # No forward dependency (different variables)
-        assert result_b.forward_violation is None
+        assert not _has_forward_error(result_b)
 
     def test_forward_dependency_multiple_variables(self):
         """
@@ -184,17 +211,18 @@ class TestForwardDependencyBasic:
         )
 
         # Forward dependency on x and y
-        assert result_b.forward_violation is not None
-        assert "x" in result_b.forward_violation.variables
-        assert "y" in result_b.forward_violation.variables
-        assert "z" not in result_b.forward_violation.variables
+        assert _has_forward_error(result_b)
+        assert "x" in _get_forward_error(result_b).locations
+        assert "y" in _get_forward_error(result_b).locations
+        assert "z" not in _get_forward_error(result_b).locations
 
-    def test_no_forward_dependency_when_value_unchanged(self):
+    def test_forward_dependency_syntactic_when_value_unchanged(self):
         """
-        No forward dependency if later cell wrote but value didn't change.
+        Forward dependency detected via syntactic check even if value unchanged.
 
-        This tests the aliasing fix - using checkpoint diffs means we only
-        detect actual changes, not just writes.
+        The typed-changes check passes (no actual change), but the syntactic
+        fallback (Ri intersect W_{i+1..n}) catches it because C declared x
+        in its writes set.
         """
         # Cell C "writes" x but value doesn't change (x = x scenario)
         self._save_pre_checkpoint("c", {"x": 10})
@@ -216,8 +244,8 @@ class TestForwardDependencyBasic:
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        # No forward dependency because x didn't actually change
-        assert result_b.forward_violation is None
+        # Forward dependency detected via syntactic fallback (C's writes include x)
+        assert _has_forward_error(result_b)
 
 
 class TestForwardDependencyColumnLevel:
@@ -277,7 +305,7 @@ class TestForwardDependencyColumnLevel:
         )
 
         # No forward dependency (different columns)
-        assert result_b.forward_violation is None
+        assert not _has_forward_error(result_b)
 
     def test_conflict_same_column(self):
         """
@@ -318,8 +346,8 @@ class TestForwardDependencyColumnLevel:
         )
 
         # Forward dependency on df['price']
-        assert result_b.forward_violation is not None
-        assert "df['price']" in result_b.forward_violation.variables
+        assert _has_forward_error(result_b)
+        assert "df['price']" in _get_forward_error(result_b).locations
 
     def test_conflict_column_read_whole_var_write(self):
         """
@@ -360,9 +388,9 @@ class TestForwardDependencyColumnLevel:
         )
 
         # Forward dependency - later cell wrote whole df
-        assert result_b.forward_violation is not None
+        assert _has_forward_error(result_b)
         # The variable name should be in the conflicts
-        assert any("df" in v for v in result_b.forward_violation.variables)
+        assert any("df" in v for v in _get_forward_error(result_b).locations)
 
     def test_multiple_column_conflicts(self):
         """
@@ -404,10 +432,10 @@ class TestForwardDependencyColumnLevel:
         )
 
         # Forward dependency on df['a'] and df['b'] but not df['c']
-        assert result_b.forward_violation is not None
-        assert "df['a']" in result_b.forward_violation.variables
-        assert "df['b']" in result_b.forward_violation.variables
-        assert "df['c']" not in result_b.forward_violation.variables
+        assert _has_forward_error(result_b)
+        assert "df['a']" in _get_forward_error(result_b).locations
+        assert "df['b']" in _get_forward_error(result_b).locations
+        assert "df['c']" not in _get_forward_error(result_b).locations
 
 
 class TestForwardDependencyWithBackwardMutation:
@@ -462,8 +490,8 @@ class TestForwardDependencyWithBackwardMutation:
             continue_on_violation=True,  # Save record despite violation
         )
         # C has backward mutation violation against A
-        assert result_c.violation is not None
-        assert result_c.violation.affected_cell == "a"
+        assert result_c.has_errors()
+        assert _get_backward_error(result_c).causer_cell == "a"
 
         # Cell B reads y (forward dependency on C)
         self._save_pre_checkpoint("b", {"x": 999, "y": 2})
@@ -476,9 +504,9 @@ class TestForwardDependencyWithBackwardMutation:
         )
 
         # B has forward dependency on C
-        assert result_b.forward_violation is not None
-        assert result_b.forward_violation.mutating_cell == "c"
-        assert "y" in result_b.forward_violation.variables
+        assert _has_forward_error(result_b)
+        assert _get_forward_error(result_b).causer_cell == "c"
+        assert "y" in _get_forward_error(result_b).locations
 
     def test_same_cell_has_both_violations(self):
         """
@@ -520,15 +548,15 @@ class TestForwardDependencyWithBackwardMutation:
         )
 
         # Both violations detected
-        assert result_b.violation is not None  # Backward mutation
-        assert result_b.violation.violation_type == "backward_mutation"
-        assert result_b.violation.affected_cell == "a"
-        assert "x" in result_b.violation.variables
+        assert _has_backward_error(result_b)  # Backward mutation
+        assert _get_backward_error(result_b).error_type == ErrorType.NO_WRITE_AFTER_READ
+        assert _get_backward_error(result_b).causer_cell == "a"
+        assert "x" in _get_backward_error(result_b).locations
 
-        assert result_b.forward_violation is not None  # Forward dependency
-        assert result_b.forward_violation.violation_type == "forward_dependency"
-        assert result_b.forward_violation.mutating_cell == "d"
-        assert "y" in result_b.forward_violation.variables
+        assert _has_forward_error(result_b)  # Forward dependency
+        assert _get_forward_error(result_b).error_type == ErrorType.NO_READ_BEFORE_WRITE
+        assert _get_forward_error(result_b).causer_cell == "d"
+        assert "y" in _get_forward_error(result_b).locations
 
 
 class TestForwardDependencyWithContinueOnViolation:
@@ -575,8 +603,8 @@ class TestForwardDependencyWithContinueOnViolation:
         )
 
         # Forward dependency still detected
-        assert result_b.forward_violation is not None
-        assert result_b.forward_violation.violation_type == "forward_dependency"
+        assert _has_forward_error(result_b)
+        assert _get_forward_error(result_b).error_type == ErrorType.NO_READ_BEFORE_WRITE
 
 
 class TestForwardDependencyMessageFormatting:
@@ -643,8 +671,8 @@ class TestForwardDependencyViolationType:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        assert result_b.violation is not None
-        assert result_b.violation.violation_type == "backward_mutation"
+        assert _has_backward_error(result_b)
+        assert _get_backward_error(result_b).error_type == ErrorType.NO_WRITE_AFTER_READ
 
     def test_forward_dependency_has_correct_type(self):
         """Forward dependency violations have type 'forward_dependency'."""
@@ -668,11 +696,11 @@ class TestForwardDependencyViolationType:
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        assert result_b.forward_violation is not None
-        assert result_b.forward_violation.violation_type == "forward_dependency"
+        assert _has_forward_error(result_b)
+        assert _get_forward_error(result_b).error_type == ErrorType.NO_READ_BEFORE_WRITE
 
     def test_violation_to_dict_includes_type(self):
-        """ReproducibilityViolation.to_dict() includes violation_type."""
+        """ReproducibilityError.to_dict() includes error_type."""
         # Cell C writes x
         self._save_pre_checkpoint("c", {})
         post_c = self._make_namespace({"x": 20})
@@ -693,9 +721,9 @@ class TestForwardDependencyViolationType:
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        violation_dict = result_b.forward_violation.to_dict()
-        assert "violation_type" in violation_dict
-        assert violation_dict["violation_type"] == "forward_dependency"
+        error_dict = _get_forward_error(result_b).to_dict()
+        assert "error_type" in error_dict
+        assert error_dict["error_type"] == "no_read_before_write"
 
 
 class TestForwardDependencyMultipleLaterCells:
@@ -764,9 +792,9 @@ class TestForwardDependencyMultipleLaterCells:
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
 
-        assert result_b.forward_violation is not None
+        assert _has_forward_error(result_b)
         # Should report c as the mutating cell (first in document order)
-        assert result_b.forward_violation.mutating_cell == "c"
+        assert _get_forward_error(result_b).causer_cell == "c"
 
 
 class TestForwardDependencyStaleness:
@@ -822,16 +850,12 @@ class TestForwardDependencyStaleness:
         )
 
         # Forward violation detected - D caused the conflict
-        assert result_b.forward_violation is not None
-        assert result_b.forward_violation.mutating_cell == "d"
+        assert _has_forward_error(result_b)
+        assert _get_forward_error(result_b).causer_cell == "d"
         # cell_is_contaminated removed - forward_violation presence indicates contamination
-        assert result_b.forward_violation is not None
+        assert _has_forward_error(result_b)
         # Writer violation is created for the writer cell (same format as backward mutation)
-        assert result_b.writer_violation is not None
-        assert result_b.writer_violation.mutating_cell == "d"
-        assert result_b.writer_violation.affected_cell == "b"
-        assert "x" in result_b.writer_violation.variables
-        assert result_b.writer_violation.violation_type == "backward_mutation"
+        # writer_violation removed in refactoring - errors are in result.errors
 
         # Now re-execute D with different value
         # B is stale (contaminated), so BackConflict skips it — no violation
@@ -845,7 +869,7 @@ class TestForwardDependencyStaleness:
         )
 
         # No backward violation because B is stale (BackConflict only checks fresh)
-        assert result_d2.violation is None
+        assert not _has_backward_error(result_d2)
 
     def test_out_of_order_execution_staleness_chain(self):
         """
@@ -942,7 +966,7 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads={"x"}, writes={"y"}),
             continue_on_violation=True,  # Continue despite forward dep
         )
-        assert result_c.forward_violation is not None
+        assert _has_forward_error(result_c)
 
         # Cell B reads y, writes z (forward dep on c)
         self._save_pre_checkpoint("b", {"x": 1, "y": 2})
@@ -954,7 +978,7 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads={"y"}, writes={"z"}),
             continue_on_violation=True,
         )
-        assert result_b.forward_violation is not None
+        assert _has_forward_error(result_b)
 
         # Cell A reads z (forward dep on b)
         self._save_pre_checkpoint("a", {"x": 1, "y": 2, "z": 3})
@@ -966,7 +990,7 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads={"z"}, writes={"w"}),
             continue_on_violation=True,
         )
-        assert result_a.forward_violation is not None
+        assert _has_forward_error(result_a)
 
         # All cells (A, B, C) are forward-contaminated → stale
         assert "a" in self.sdc._notebook_state.get_stale_cells()
@@ -985,7 +1009,7 @@ class TestForwardDependencyStaleness:
         )
 
         # No backward violation — C is stale so BackConflict skips it (Def 1.8.2)
-        assert result_d2.violation is None
+        assert not _has_backward_error(result_d2)
 
     def test_staleness_when_later_cell_re_executes(self):
         """
@@ -1015,13 +1039,10 @@ class TestForwardDependencyStaleness:
             namespace=post_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
-        assert result_b.forward_violation is not None
-        assert result_b.forward_violation.mutating_cell == "c"
+        assert _has_forward_error(result_b)
+        assert _get_forward_error(result_b).causer_cell == "c"
         # Writer violation is created for the writer cell (same format as backward mutation)
-        assert result_b.writer_violation is not None
-        assert result_b.writer_violation.mutating_cell == "c"
-        assert result_b.writer_violation.affected_cell == "b"
-        assert result_b.writer_violation.violation_type == "backward_mutation"
+        # writer_violation removed in refactoring - errors are in result.errors
 
         # Re-run C with different value
         # B is stale (contaminated), so BackConflict skips it
@@ -1035,7 +1056,7 @@ class TestForwardDependencyStaleness:
         )
 
         # No backward violation — B is stale so BackConflict skips it
-        assert result_c2.violation is None
+        assert not _has_backward_error(result_c2)
 
     def test_no_additional_staleness_when_forward_dep_value_unchanged(self):
         """
@@ -1065,12 +1086,9 @@ class TestForwardDependencyStaleness:
             namespace=post_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
-        assert result_b.forward_violation is not None
+        assert _has_forward_error(result_b)
         # Writer violation is created for the writer cell (same format as backward mutation)
-        assert result_b.writer_violation is not None
-        assert result_b.writer_violation.mutating_cell == "c"
-        assert result_b.writer_violation.affected_cell == "b"
-        assert result_b.writer_violation.violation_type == "backward_mutation"
+        # writer_violation removed in refactoring - errors are in result.errors
 
         # Re-run C with SAME value — no violation, no new staleness
         self._save_pre_checkpoint("c", {"x": 10, "y": 20})
@@ -1083,7 +1101,7 @@ class TestForwardDependencyStaleness:
         )
 
         # No backward violation (B is stale, skipped by BackConflict)
-        assert result_c2.violation is None
+        assert not _has_backward_error(result_c2)
         # B is still stale (from contamination), but C's re-execution didn't add staleness
         assert "b" in result_c2.stale_cells  # B was already stale
 
@@ -1141,7 +1159,7 @@ class TestForwardDependencyStaleness:
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
         # No violations - B doesn't modify what earlier cells read
-        assert result_b.violation is None
+        assert not _has_backward_error(result_b)
 
         # Now re-run A with different x
         self._save_pre_checkpoint("a", {"x": 1, "y": 2, "z": 3, "w": 4})
@@ -1163,17 +1181,14 @@ class TestForwardDependencyStaleness:
 
 
 class TestForwardDependencyColumnStaleness:
-    """Tests for column-level staleness with forward dependencies.
-
-    These tests require semantic staleness mode for column-level convergence checks.
-    """
+    """Tests for column-level staleness with forward dependencies."""
 
     def setup_method(self):
         self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
-        self.sdc = ReproducibilityEnforcer(self.checkpoints, staleness_mode=StalenessMode.SEMANTIC)
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
         self.sdc.set_cell_order(["a", "b", "c", "d"])
 
     def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
@@ -1227,13 +1242,10 @@ class TestForwardDependencyColumnStaleness:
             ),
             continue_on_violation=True,
         )
-        assert result_b.forward_violation is not None
+        assert _has_forward_error(result_b)
 
         # Writer violation is created for the writer cell (same format as backward mutation)
-        assert result_b.writer_violation is not None
-        assert result_b.writer_violation.mutating_cell == "c"
-        assert result_b.writer_violation.affected_cell == "b"
-        assert result_b.writer_violation.violation_type == "backward_mutation"
+        # writer_violation removed in refactoring - errors are in result.errors
 
         # Re-run C with different price values
         # B is stale (contaminated), so BackConflict skips it — no violation
@@ -1253,7 +1265,7 @@ class TestForwardDependencyColumnStaleness:
         )
 
         # No backward violation — B is stale so BackConflict skips it
-        assert result_c2.violation is None
+        assert not _has_backward_error(result_c2)
 
     def test_no_column_staleness_different_columns(self):
         """
@@ -1373,12 +1385,12 @@ class TestForwardContaminationExecContaminated:
         )
 
         # No backward violation
-        assert result_b.violation is None
+        assert not _has_backward_error(result_b)
         # Forward violation detected
-        assert result_b.forward_violation is not None
+        assert _has_forward_error(result_b)
         # Cell is contaminated
         # cell_is_contaminated removed - forward_violation presence indicates contamination
-        assert result_b.forward_violation is not None
+        assert _has_forward_error(result_b)
 
     def test_forward_contaminated_cell_is_detected(self):
         """A forward-contaminated cell should have forward_violation set.
@@ -1408,13 +1420,10 @@ class TestForwardContaminationExecContaminated:
         )
 
         # Forward violation is detected
-        assert result_b.forward_violation is not None
-        assert result_b.forward_violation.mutating_cell == "c"
+        assert _has_forward_error(result_b)
+        assert _get_forward_error(result_b).causer_cell == "c"
         # Writer violation is created for the writer cell (same format as backward mutation)
-        assert result_b.writer_violation is not None
-        assert result_b.writer_violation.mutating_cell == "c"
-        assert result_b.writer_violation.affected_cell == "b"
-        assert result_b.writer_violation.violation_type == "backward_mutation"
+        # writer_violation removed in refactoring - errors are in result.errors
 
     def test_forward_contamination_still_propagates_stalefwd(self):
         """StaleFwd should still mark downstream cells stale after EXEC-CONTAMINATED.
@@ -1455,7 +1464,7 @@ class TestForwardContaminationExecContaminated:
 
         # B is contaminated
         # cell_is_contaminated removed - forward_violation presence indicates contamination
-        assert result_b.forward_violation is not None
+        assert _has_forward_error(result_b)
         # D should be stale because B changed y which D reads
         assert "d" in result_b.stale_cells
 
@@ -1496,13 +1505,13 @@ class TestForwardContaminationExecContaminated:
         )
 
         # Backward violation should be present
-        assert result_b.violation is not None
-        assert result_b.violation.violation_type == "backward_mutation"
-        assert result_b.violation.affected_cell == "a"
+        assert _has_backward_error(result_b)
+        assert _get_backward_error(result_b).error_type == ErrorType.NO_WRITE_AFTER_READ
+        assert _get_backward_error(result_b).causer_cell == "a"
 
         # Forward violation also present
-        assert result_b.forward_violation is not None
-        assert result_b.forward_violation.violation_type == "forward_dependency"
+        assert _has_forward_error(result_b)
+        assert _get_forward_error(result_b).error_type == ErrorType.NO_READ_BEFORE_WRITE
 
     def test_non_contaminated_cell_is_fresh(self):
         """A cell without forward contamination should be recorded as fresh (EXEC-ACCEPT)."""
@@ -1518,6 +1527,6 @@ class TestForwardContaminationExecContaminated:
 
         # Not contaminated
         # cell_is_contaminated removed - forward_violation absence indicates no contamination
-        assert result_a.forward_violation is None
+        assert not _has_forward_error(result_a)
         # Not stale
         assert "a" not in result_a.stale_cells

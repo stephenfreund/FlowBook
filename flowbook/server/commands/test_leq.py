@@ -330,6 +330,9 @@ class TestLeqCommand(NotebookCommand):
                             cell["execution_count"] = result["execution_count"]
                             cell["outputs"] = result["outputs"]
 
+                            # Print flowbook protocol messages
+                            self.print_flowbook_messages(result)
+
                             # Step 2c: Extract metadata including dynamic dependencies
                             extract_and_set_metadata(cell, result["outputs"])
 

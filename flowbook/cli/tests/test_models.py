@@ -295,7 +295,6 @@ class TestComparisonResult:
     def test_round_trip(self):
         """Full result round-trips through dict."""
         metadata = ComparisonMetadata(
-            staleness_mode="semantic",
             num_cells=10,
             timeout_seconds=300.0,
         )
@@ -325,16 +324,15 @@ class TestComparisonResult:
         d = r.to_dict()
         r2 = ComparisonResult.from_dict(d)
 
-        assert r2.metadata.staleness_mode == "semantic"
         assert r2.baseline.final_user_ns_mb == 100.0
         assert r2.flowbook.final_overhead_mb == 50.0
 
 
-class TestSyntacticVsSemanticModels:
-    """Test that models work correctly for both modes."""
+class TestCheckpointModels:
+    """Test that checkpoint models work correctly."""
 
-    def test_syntactic_single_checkpoint(self):
-        """Syntactic mode: one checkpoint per cell."""
+    def test_single_checkpoint(self):
+        """One checkpoint per cell."""
         post = FlowBookMemorySnapshot(
             user_ns_mb=100.0, gpu_mb=0.0, overhead_mb=50.0,
             checkpoint_vars={
@@ -346,8 +344,8 @@ class TestSyntacticVsSemanticModels:
         assert post.checkpoint_count == 1
         assert post.total_checkpoint_mb == 50.0
 
-    def test_semantic_multiple_checkpoints(self):
-        """Semantic mode: multiple checkpoints accumulate."""
+    def test_multiple_checkpoints(self):
+        """Multiple checkpoints accumulate."""
         post = FlowBookMemorySnapshot(
             user_ns_mb=100.0, gpu_mb=0.0, overhead_mb=150.0,
             checkpoint_vars={
@@ -359,21 +357,3 @@ class TestSyntacticVsSemanticModels:
         assert post.checkpoint_count == 3
         assert post.total_checkpoint_mb == 150.0
         assert post.var_totals()["df"] == 150.0
-
-    def test_semantic_larger_than_syntactic(self):
-        """Semantic overhead > syntactic for same namespace size."""
-        syntactic = FlowBookMemorySnapshot(
-            user_ns_mb=100.0, gpu_mb=0.0, overhead_mb=50.0,
-            checkpoint_vars={"_pre_a": CheckpointVarSizes(vars={"df": CheckpointVarInfo(50.0)})}
-        )
-
-        semantic = FlowBookMemorySnapshot(
-            user_ns_mb=100.0, gpu_mb=0.0, overhead_mb=500.0,
-            checkpoint_vars={
-                f"_pre_{i}": CheckpointVarSizes(vars={"df": CheckpointVarInfo(50.0)})
-                for i in range(10)
-            }
-        )
-
-        assert semantic.overhead_mb > syntactic.overhead_mb
-        assert semantic.total_checkpoint_mb > syntactic.total_checkpoint_mb

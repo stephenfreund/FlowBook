@@ -131,7 +131,8 @@ src/
     ├── stalenessmanager.ts  # Tracks stale cells per notebook
     ├── metadatapanel.tsx    # Reproducibility metadata panel (reads, writes, stale cells)
     ├── cellhighlighter.ts   # Red highlighting for stale cells
-    └── executionhook.ts     # Extract flowbook metadata from outputs + cell edit detection
+    ├── protocol.ts          # FlowBook comm protocol types (shared with kernel)
+    └── executionhook.ts     # Comm-based kernel communication + cell edit detection
 ```
 
 **Plugin Activation**:
@@ -163,80 +164,100 @@ The server uses the modern **ExtensionApp** pattern (not legacy extension points
 
 The primary kernel with always-on reproducibility enforcement:
 
-- `flowbook_kernel.py` - Main `FlowbookKernel` implementation with magic commands
-- `flowbook_client.py` - `FlowbookKernelClient` with `cell_order` injection for reproducibility checks
+- `flowbook_kernel.py` - Main `FlowbookKernel` implementation with comm channel + magic commands
+- `flowbook_client.py` - `FlowbookKernelClient` with `cell_order` injection and `send_flowbook_command()`
+- `protocol.py` - FlowBook communication protocol (message types, builders, validation)
 - `reproducibility_enforcer.py` - `ReproducibilityEnforcer` implements formal transition rules (see below)
-- `models.py` - `ReproducibilityMetadata`, `ReproducibilityViolation`, `ReproducibilityResult`, `ReproducibilityExecutionRecord` data classes
+- `models.py` - `ReproducibilityMetadata`, `ReproducibilityResult`, `ReproducibilityError`, `CellStatus`, `Reason` data classes
 - `changes.py` - Typed records of what changed between checkpoints (`ValueChanged`, `ColumnAdded`, etc.)
 - `access_events.py` - Typed records of variable/column/structural access during cell execution
-- `change_detector.py` - Converts `MemoryCheckpointDiffResult` to typed `Change` list
-- `conflict_resolver.py` - Matches `Change`s against `AccessEvent`s using declarative rules
-- `conflict_rules.py` - Declarative specification of reproducibility conflict detection
+- `change_detector.py` - Converts `MemoryCheckpointDiffResult` to typed `Change` list and `WriteLocSet`
+- `locations.py` - Typed `ReadLoc`/`WriteLoc` with `write_conflicts_read()` (▷) and set operations
 
 **Formal Transition Rules** (from `FORMAL_DEVELOPMENT.md`):
 
-The enforcer implements four transition rules from the formal specification:
+The enforcer implements two instrumented transition rules:
 
-| Rule              | Condition                                              | Cell status | Effect   |
-| ----------------- | ------------------------------------------------------ | ----------- | -------- |
-| EXEC-ACCEPT       | No backward conflict, not forward-contaminated         | fresh       | StaleFwd |
-| EXEC-CONTAMINATED | No backward conflict, forward-contaminated             | stale       | StaleFwd |
-| EXEC-REJECT       | Backward conflict (BackConflict)                       | unchanged   | rollback |
-| EXEC-RESTORE      | All predecessors fresh, execute from prefix checkpoint | fresh       | StaleFwd |
+**[Inst-Edit]**: When cell source is modified, mark it STALE. Read/write sets are preserved (they describe the last execution).
 
-And three runtime checks:
+**[Inst-Run]**: When cell i executes, the enforcer:
 
-- **BackConflict** (Def 1.8.2): Cell wrote to location read by earlier _fresh_ cell → reject
-- **FwdContaminated** (Def 1.8.3): Cell read location written by later executed cell → accept as stale
-- **StaleFwd** (Def 1.8.1): Cell wrote to location read by later fresh cell → mark later cell stale
+1. Records new read/write sets: R' = R[i := r], W' = W[i := w]
+2. Checks four **validity predicates** (all must pass):
+   - `NoReadAndWrite(R', W', i)` — Rᵢ ∩ Wᵢ = ∅ (cell doesn't read and write same location)
+   - `WriteBeforeRead(R', W', i)` — Rᵢ ⊆ W\_{1..i-1} (reads only defined variables)
+   - `NoReadBeforeWrite(R', W', i)` — Rᵢ ∩ W\_{i+1..n} = ∅ (no forward contamination)
+   - `NoWriteAfterRead(R', W', i)` — Wᵢ ∩ R\_{1..i-1} = ∅ (no backward mutation)
+3. Checks `RecoverableMutation` — all diff-detected changes are in tracking writes
+4. If all predicates pass: marks cell i CLEAN, computes **staleness propagation**:
+   - `ForwardStale(R, W, W', i, j)` — cell j > i reads/writes location that i wrote → mark stale
+   - `BackwardStale(W, W', i, j)` — cell j < i was last writer of location i no longer writes → mark stale
+5. If any predicate fails: execution rejected, namespace rolled back
 
-**Magic Commands**:
+All conflict checks use the typed `▷` relation (`write_conflicts_read`) from `locations.py`.
 
-| Command                                   | Description                                                      |
-| ----------------------------------------- | ---------------------------------------------------------------- |
-| `%notebook_structure <ids...>`            | Set notebook cell order (sent by frontend before each execution) |
-| `%cell_edited <cell_id>`                  | Mark edited cell stale (EDIT transition §2.3, sent by frontend)  |
-| `%flowbook_status`                        | Display current reproducibility state                            |
-| `%flowbook_stale`                         | Show stale cells                                                 |
-| `%continue_after_violation <on/off>`      | Control whether backward violations reject or warn               |
-| `%structural_tracking <off/warn/enforce>` | Set DataFrame structural attribute tracking mode                 |
+**Communication Protocol** (`flowbook/kernel/protocol.py`, `src/flowbook/protocol.ts`):
+
+The kernel communicates with clients via a unified JSON protocol with a `"type"` discriminator:
+
+| Transport | Frontend (TypeScript) | Python clients |
+|---|---|---|
+| Client → Kernel | Comm channel (`comm.send()`) | Execute request metadata (`cell_meta.flowbook`) |
+| Kernel → Client | Comm channel + custom IOPub `flowbook_update` | Custom IOPub `flowbook_update` |
+
+Kernel → Client message types:
+- `"metadata"` — post-execution reproducibility data (read/write locs, stale cells, timing, errors)
+- `"violation"` — predicate violation (NO_READ_AND_WRITE, etc.)
+- `"status"` — status line (icon + text, displayed in panel header)
+
+Client → Kernel message types:
+- `"notebook_structure"` — set cell order
+- `"cell_edited"` — mark cell stale ([Inst-Edit])
+- `"continue_after_violation"` — toggle violation handling
+- `"sync"` — request full current state
+
+**User-facing magic commands** (typed by users in code cells, produce visible output):
+
+| Command                              | Description                                    |
+| ------------------------------------ | ---------------------------------------------- |
+| `%flowbook_status`                   | Display current reproducibility state          |
+| `%flowbook_stale`                    | Show stale cells                               |
+| `%continue_after_violation <on/off>` | Control whether violations reject or warn      |
+| `%notebook_structure <ids...>`       | Set notebook cell order (thin wrapper)         |
+| `%cell_edited <cell_id>`             | Mark edited cell stale (thin wrapper)          |
 
 **Features** (always enabled):
 
-- Variable tracking for all executions
-- Staleness computation (which cells need re-execution)
-- Backward mutation detection with column-aware conflict resolution
-- Forward contamination detection (cell marked stale, not rejected)
-- EXEC-RESTORE from prefix checkpoint when all predecessors are fresh
+- Variable and column-level tracking for all executions
+- Staleness computation via typed `ReadLoc`/`WriteLoc` with `▷` conflict relation
+- Forward and backward staleness propagation
+- Forward contamination detection (violation, not just staleness)
+- Backward mutation detection with automatic rollback
+- Unrecoverable mutation detection (in-place mutation without rebinding)
 - Edit-triggered staleness via frontend notification
-- Automatic rollback on backward reproducibility violations
+- Structural attribute tracking (always ENFORCE mode)
 
-**Metadata Format** (sent via `display_data` output):
+**Metadata Format** (sent via `flowbook_update` IOPub / comm):
+
+Uses typed `ReadLoc`/`WriteLoc` dicts matching the loc grammars from `CONFLICT_RELATION.md`:
 
 ```python
 {
-  "flowbook": {
-    "cell_id": str,
-    "execution_seq": int,
-    "reads": List[str],
-    "writes": List[str],
-    "changed_variables": List[str],
-    "stale_cells": List[str],
-    "violation": Optional[dict],
-    "cell_order": List[str],
-    "column_reads": Dict[str, List[str]],
-    "column_writes": Dict[str, List[str]],
-    "column_changed": Dict[str, List[str]],
-    "structural_reads": Dict[str, List[str]],
-    "structural_warnings": List[str],
-    "file_reads": List[str],
-    "file_writes": List[str],
-    "run_duration_ms": float,
-    "state_duration_ms": float,
-    "check_duration_ms": float,
-    "cell_is_contaminated": bool,
-    "exec_mode": "live" | "restore"
-  }
+  "type": "metadata",
+  "cell_id": str,
+  "execution_seq": int,
+  "read_locs": List[{"type": str, "name": str, "qualifier"?: str}],
+  "write_locs": List[{"type": str, "name": str, "qualifier"?: str}],
+  "changed_locs": List[{"type": str, "name": str, "qualifier"?: str}],
+  "stale_cells": List[str],
+  "cell_order": List[str],
+  "structural_warnings": List[str],
+  "execute_duration_ms": float,
+  "code_duration_ms": float,
+  "state_duration_ms": float,
+  "check_duration_ms": float,
+  "staleness_reasons": Dict[str, List[dict]],
+  "errors": List[dict],
 }
 ```
 
@@ -369,7 +390,7 @@ This normalization happens transparently at entry points:
 - Kernel spec: `flowbook/kernel/kernelspec/`
 - Main kernel class: `flowbook/kernel/flowbook_kernel.py`
 - Reproducibility logic: `flowbook/kernel/reproducibility_enforcer.py`
-- Conflict detection pipeline: `access_events.py` → `change_detector.py` → `conflict_rules.py` → `conflict_resolver.py`
+- Conflict detection pipeline: `change_detector.py` → `locations.py` (ReadLoc/WriteLoc with ▷)
 - Formal specification: `FORMAL_DEVELOPMENT.md`
 
 **Experimental Kernel** (AI commands, profiling):
@@ -444,7 +465,7 @@ jupyter labextension develop . --overwrite
 - Timer utilities (`flowbook/util/output.py`) provide performance instrumentation throughout
 - Cell metadata tracking requires `FlowbookKernelClient` for proper `cell_id` propagation
 - Formal specification of reproducibility rules is in `FORMAL_DEVELOPMENT.md` with an Implementation Map linking formal definitions to code locations
-- The frontend `executionhook.ts` sends `%notebook_structure` before each cell execution and `%cell_edited` (debounced 1s) when a previously-executed cell's source changes
+- The frontend `executionhook.ts` sends `notebook_structure` via comm before each cell execution and `cell_edited` (debounced 1s) when a previously-executed cell's source changes
 
 ## Formal Specification Sync
 

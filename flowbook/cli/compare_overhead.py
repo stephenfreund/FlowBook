@@ -1180,9 +1180,6 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
 
         cumulative_totals = [get_cumulative_total(c) for c in flowbook_mem_cells]
 
-        # Get staleness mode to determine how to compute checkpoint overhead
-        staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
-
         for i, fc in enumerate(flowbook_mem_cells):
             if i == 0:
                 base_mb = 0  # No prior namespace for first cell
@@ -1202,15 +1199,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
                 delta_mb = overhead.get("checkpoints_mb")
             if not (delta_mb is not None and delta_mb > 0):
                 # Derive from cumulative totals
-                if staleness_mode == "semantic":
-                    if i == 0:
-                        delta_mb = cumulative_totals[0]
-                    else:
-                        delta_mb = max(
-                            0, cumulative_totals[i] - cumulative_totals[i - 1]
-                        )
-                else:
-                    delta_mb = cumulative_totals[i]
+                delta_mb = cumulative_totals[i]
 
             if base_mb >= min_meaningful_base_mb:
                 ratio = delta_mb / base_mb
@@ -2559,14 +2548,6 @@ def extract_checkpoint_var_data(
                 v: max(var_by_cell[v]) if var_by_cell[v] else 0 for v in all_var_names
             }
 
-    # In semantic mode, checkpoints accumulate - each cell adds a new checkpoint
-    # so we cumulative SUM across cells (not max). Each checkpoint is retained.
-    # In syntactic mode, there's only one checkpoint, so use raw values (current cell only)
-    staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
-    if staleness_mode == "semantic":
-        for var_name in var_by_cell:
-            var_by_cell[var_name] = list(np.cumsum(var_by_cell[var_name]))
-
     # Order variables by MAX cumulative size descending (not final - captures vars that get cleaned up)
     vars_ordered = sorted(var_max.keys(), key=lambda v: var_max[v], reverse=True)
 
@@ -3105,18 +3086,9 @@ def plot_combined_v2(
                 )
             return 0
 
-        checkpoint_cumulative_mb_raw = np.array(
+        checkpoint_cumulative_mb = np.array(
             [get_checkpoint_mb(c) for c in flowbook_mem_cells]
         )
-        # In semantic mode, checkpoints accumulate - carry forward max seen
-        # In syntactic mode, there's only one checkpoint, so use raw values
-        staleness_mode = data.get("metadata", {}).get("staleness_mode", "semantic")
-        if staleness_mode == "semantic":
-            checkpoint_cumulative_mb = np.maximum.accumulate(
-                checkpoint_cumulative_mb_raw
-            )
-        else:
-            checkpoint_cumulative_mb = checkpoint_cumulative_mb_raw
         gpu_mb = np.array(
             [c.get("gpu_mb", c.get("gpu_mem_samples", 0)) for c in flowbook_mem_cells]
         )
@@ -3414,14 +3386,7 @@ def plot_combined_v2(
                 )
             return 0
 
-        cumulative_totals_raw = [get_cumulative_total(c) for c in flowbook_mem_cells]
-        # In semantic mode, checkpoints accumulate - carry forward max seen
-        # In syntactic mode, there's only one checkpoint, so use raw values
-        staleness_mode_p6 = data.get("metadata", {}).get("staleness_mode", "semantic")
-        if staleness_mode_p6 == "semantic":
-            cumulative_totals = list(np.maximum.accumulate(cumulative_totals_raw))
-        else:
-            cumulative_totals = cumulative_totals_raw
+        cumulative_totals = [get_cumulative_total(c) for c in flowbook_mem_cells]
 
         ratios = []
         for i, c in enumerate(flowbook_mem_cells):

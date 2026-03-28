@@ -21,7 +21,6 @@ v3.0 adds pre-cell memory measurements for cross-run comparison:
 Usage via CLI:
     flowbook compare-baseline notebook.ipynb                              # FlowBook only (default)
     flowbook compare-baseline notebook.ipynb --run-baseline               # Include baseline comparison
-    flowbook compare-baseline notebook.ipynb --staleness-mode syntactic   # Use syntactic mode
     flowbook compare-baseline notebook.ipynb --df-subset-optimization     # Enable DF subset optimization
     flowbook compare-baseline notebook.ipynb --timeout 14400              # optional timeout (default: 4 hours)
 
@@ -34,7 +33,6 @@ OUTPUT JSON SCHEMA (version 3.0):
   "metadata": {
     "num_cells": int,                      # Number of code cells
     "timeout_seconds": float,              # Cell execution timeout
-    "staleness_mode": str,                 # "semantic" or "syntactic"
     "rerun_k": int,                        # Number of rerun iterations (optional)
     "trial": int,                          # Trial number (optional, for multi-trial runs)
     "num_trials": int                      # Total trials (optional)
@@ -446,7 +444,6 @@ def create_v4_comparison_result(
     """
     # Build metadata
     metadata = ComparisonMetadata(
-        staleness_mode=metadata_dict.get("staleness_mode", "semantic"),
         num_cells=metadata_dict.get("num_cells", 0),
         timeout_seconds=metadata_dict.get("timeout_seconds", 0.0),
         notebook_path=notebook_path,
@@ -527,7 +524,6 @@ def create_v5_comparison_result(
     result: Dict[str, Any] = {
         "version": "5.0",
         "metadata": {
-            "staleness_mode": metadata_dict.get("staleness_mode", "semantic"),
             "num_cells": metadata_dict.get("num_cells", 0),
             "timeout_seconds": metadata_dict.get("timeout_seconds", 0.0),
             "notebook_path": notebook_path,
@@ -1865,7 +1861,6 @@ def run_baseline_timing(
 def run_flowbook_timing(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
-    staleness_mode: str = "syntactic",
     rerun_n: int = 0,
 ) -> Tuple[TimingResults, Optional[RerunOverheadResult]]:
     """
@@ -1874,7 +1869,6 @@ def run_flowbook_timing(
     Args:
         notebook_content: Notebook JSON
         cell_timeout: Timeout per cell in seconds
-        staleness_mode: Staleness computation mode ('syntactic' or 'semantic')
         rerun_n: Number of rerun overhead measurement iterations at quartile cells
 
     Returns:
@@ -1899,11 +1893,6 @@ def run_flowbook_timing(
         kernel_client.execute("%continue_after_violation on", silent=True)
         _wait_for_idle(kernel_client)
         log("FlowBook Timing: continue_after_violation enabled")
-
-        # Set staleness computation mode
-        kernel_client.execute(f"%staleness_mode {staleness_mode}", silent=True)
-        _wait_for_idle(kernel_client)
-        log(f"FlowBook Timing: staleness_mode set to {staleness_mode}")
 
         # Run a warm-up cell to trigger lazy initialization (cudf import, tracking patches, etc.)
         # This ensures the overhead doesn't appear in the first real cell
@@ -2171,7 +2160,6 @@ def run_flowbook_memory(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
     rerun_k: int = 0,
-    staleness_mode: str = "syntactic",
 ) -> MemoryResults:
     """
     Run notebook on FlowBook kernel and collect MEMORY metrics using HeapSizer.
@@ -2180,7 +2168,6 @@ def run_flowbook_memory(
         notebook_content: Notebook JSON
         cell_timeout: Timeout per cell in seconds
         rerun_k: Number of rerun iterations
-        staleness_mode: Staleness computation mode ('syntactic' or 'semantic')
 
     Returns:
         MemoryResults with cell memory data from HeapSizer + checkpoint var costs
@@ -2206,11 +2193,6 @@ def run_flowbook_memory(
         # Enable continue_after_violation
         kernel_client.execute("%continue_after_violation on", silent=True)
         _wait_for_idle(kernel_client)
-
-        # Set staleness computation mode
-        kernel_client.execute(f"%staleness_mode {staleness_mode}", silent=True)
-        _wait_for_idle(kernel_client)
-        log(f"FlowBook Memory: staleness_mode set to {staleness_mode}")
 
         # Run a warm-up cell to trigger lazy initialization (cudf import, tracking patches, etc.)
         log("FlowBook Memory: Running warm-up cell...")
@@ -2472,7 +2454,6 @@ def run_flowbook_memory(
 def run_flowbook_memory_v5(
     notebook_content: Dict[str, Any],
     cell_timeout: float,
-    staleness_mode: str = "syntactic",
 ) -> V5MemoryResult:
     """
     Run notebook on FlowBook kernel and collect v5 simplified MEMORY metrics.
@@ -2484,7 +2465,6 @@ def run_flowbook_memory_v5(
     Args:
         notebook_content: Notebook JSON
         cell_timeout: Timeout per cell in seconds
-        staleness_mode: Staleness computation mode ('syntactic' or 'semantic')
 
     Returns:
         V5MemoryResult with simplified cell memory data
@@ -2507,11 +2487,6 @@ def run_flowbook_memory_v5(
         # Enable continue_after_violation
         kernel_client.execute("%continue_after_violation on", silent=True)
         _wait_for_idle(kernel_client)
-
-        # Set staleness computation mode
-        kernel_client.execute(f"%staleness_mode {staleness_mode}", silent=True)
-        _wait_for_idle(kernel_client)
-        log(f"FlowBook Memory v5: staleness_mode set to {staleness_mode}")
 
         # Run a warm-up cell
         log("FlowBook Memory v5: Running warm-up cell...")
@@ -2791,13 +2766,6 @@ class CompareBaselineCommand(NotebookCommand):
             default=1,
             help="Starting trial number (default: 1). Use negative numbers for counting down (e.g., --trials 3 --start -4 produces -4, -3, -2)",
         )
-        subparser.add_argument(
-            "--staleness-mode",
-            type=str,
-            choices=["syntactic", "semantic"],
-            default="syntactic",
-            help="Staleness computation mode: 'syntactic' (set intersection, lower memory) or 'semantic' (checkpoint diff, precise). Default: syntactic",
-        )
         return subparser
 
     async def process(
@@ -2834,8 +2802,6 @@ class CompareBaselineCommand(NotebookCommand):
         rerun_n = kwargs.get("rerun", 0)
         num_trials = kwargs.get("trials", 1)
         start_trial = kwargs.get("start", 1)
-        staleness_mode = kwargs.get("staleness_mode", "syntactic")
-
         notebook_path = kwargs.get("notebook_path", "unknown.ipynb")
 
         cells = notebook_content.get("cells", [])
@@ -2910,7 +2876,7 @@ class CompareBaselineCommand(NotebookCommand):
                 log("PHASE 1: FLOWBOOK TIMING (Scalene OFF)")
                 log("=" * 60)
                 flowbook_timing, rerun_overhead = run_flowbook_timing(
-                    notebook_content, cell_timeout, staleness_mode, rerun_n=rerun_n
+                    notebook_content, cell_timeout, rerun_n=rerun_n
                 )
                 log("")
 
@@ -2954,7 +2920,7 @@ class CompareBaselineCommand(NotebookCommand):
                     log("=" * 60)
                     log("PHASE 4: FLOWBOOK MEMORY (HeapSizer) - v5")
                     log("=" * 60)
-                    flowbook_memory = run_flowbook_memory_v5(notebook_content, cell_timeout, staleness_mode)
+                    flowbook_memory = run_flowbook_memory_v5(notebook_content, cell_timeout)
                     log("")
 
                 # Override gpu_checkpoint_mb using diff-based measurement:
@@ -2986,7 +2952,6 @@ class CompareBaselineCommand(NotebookCommand):
                 metadata_dict: Dict[str, Any] = {
                     "num_cells": len(code_cells),
                     "timeout_seconds": cell_timeout,
-                    "staleness_mode": staleness_mode,
                 }
                 if rerun_n > 0:
                     metadata_dict["rerun_n"] = rerun_n

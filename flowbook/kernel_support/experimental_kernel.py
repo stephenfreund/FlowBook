@@ -181,8 +181,12 @@ class ExperimentalKernel(IPythonKernel, Magics):
         contents: Optional[str] = None,
         metadata: Optional[dict] = None,
     ) -> None:
-        """Display an icon with text, optionally with expandable contents."""
-        self._display.display_icon_and_text(icon, text, contents, metadata)
+        """Display an icon with text, optionally with expandable contents.
+
+        The metadata parameter is accepted for backward compatibility but
+        ignored — protocol metadata is now sent via comm/IOPub, not display output.
+        """
+        self._display.display_icon_and_text(icon, text, contents)
 
     def diff_checkpoints(self, old: Checkpoint, new: Checkpoint) -> None:
         """Display the diff between two checkpoints."""
@@ -808,7 +812,7 @@ class ExperimentalKernel(IPythonKernel, Magics):
         tracking_data: Optional[TrackingData] = None
 
         if self._use_global_tracking and isinstance(user_ns, TrackingDict):
-            with user_ns.track_execution():
+            with user_ns.track_execution(cell_id=self._cell_id):
                 result, self._profile_contents = await self._do_execute_code(
                     context, should_profile, silent, store_history,
                     user_expressions, allow_stdin, cell_meta

@@ -1914,7 +1914,7 @@ class Diff:
         # ======================================================================
         if val_a.shape == val_b.shape and val_a.dtype == val_b.dtype:
             try:
-                if _is_floating_dtype(val_a.dtype) or np.issubdtype(val_a.dtype, np.complexfloating):
+                if _is_floating_dtype(val_a.dtype) or (isinstance(val_a.dtype, np.dtype) and np.issubdtype(val_a.dtype, np.complexfloating)):
                     if _arrays_equal(val_a, val_b, self.rtol, self.atol, equal_nan=True):
                         return None  # Arrays are equal
                 else:
@@ -1976,9 +1976,9 @@ class Diff:
 
         # Fast path: use vectorized operations to check if arrays are equal
         try:
-            if _is_floating_dtype(val_a_cmp.dtype) or np.issubdtype(
+            if _is_floating_dtype(val_a_cmp.dtype) or (isinstance(val_a_cmp.dtype, np.dtype) and np.issubdtype(
                 val_a_cmp.dtype, np.complexfloating
-            ):
+            )):
                 # Fast vectorized check for floats
                 if _arrays_equal(val_a_cmp, val_b_cmp, self.rtol, self.atol, equal_nan=True):
                     return None  # Arrays are equal
@@ -1993,9 +1993,9 @@ class Diff:
         diff_count = 0
 
         try:
-            if _is_floating_dtype(val_a_cmp.dtype) or np.issubdtype(
+            if _is_floating_dtype(val_a_cmp.dtype) or (isinstance(val_a_cmp.dtype, np.dtype) and np.issubdtype(
                 val_a_cmp.dtype, np.complexfloating
-            ):
+            )):
                 # Iterate to find specific differences
                 flat_a = val_a_cmp.ravel()
                 flat_b = val_b_cmp.ravel()
@@ -2325,7 +2325,7 @@ class Diff:
         is_numeric = (
             pd.api.types.is_float_dtype(dtype) or
             pd.api.types.is_integer_dtype(dtype) or
-            np.issubdtype(dtype, np.complexfloating)
+            (isinstance(dtype, np.dtype) and np.issubdtype(dtype, np.complexfloating))
         )
 
         if is_numeric:
@@ -2376,7 +2376,7 @@ class Diff:
             is_numeric = (
                 pd.api.types.is_float_dtype(dtype) or
                 pd.api.types.is_integer_dtype(dtype) or
-                np.issubdtype(dtype, np.complexfloating)
+                (isinstance(dtype, np.dtype) and np.issubdtype(dtype, np.complexfloating))
             )
             if is_numeric:
                 try:

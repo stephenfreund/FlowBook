@@ -1,5 +1,9 @@
 /**
- * Execution hook for FlowBook kernel - extracts reproducibility metadata
+ * Execution hook for FlowBook kernel — comm-based protocol communication.
+ *
+ * Uses a Jupyter comm channel ("flowbook" target) for bidirectional
+ * kernel <-> frontend communication, replacing the old display_data
+ * metadata and magic command approach.
  */
 
 import { JupyterFrontEnd } from '@jupyterlab/application';
@@ -11,15 +15,24 @@ import {
 } from '@jupyterlab/notebook';
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { CellChange } from '@jupyter/ydoc';
-import { IOutput } from '@jupyterlab/nbformat';
 import { Kernel, KernelMessage } from '@jupyterlab/services';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import {
   IReproducibilityMetadata,
   IFrontendStalenessReason,
-  IViolationInfo,
-  IPredicateViolation
+  IPredicateViolation,
+  IReadLoc,
+  IWriteLoc,
+  findConflictingReads,
+  formatReadLoc,
+  writeLocOutputs,
+  readLocsMatchQualifier
 } from './types';
+import {
+  COMM_TARGET,
+  FlowbookKernelMessage,
+  FlowbookClientMessage
+} from './protocol';
 import { indexToAlpha } from '../cellindexutils';
 
 export class ReproducibilityExecutionHookManager {
@@ -29,7 +42,11 @@ export class ReproducibilityExecutionHookManager {
   private _executedCells: Set<string> = new Set();
   private _attachedKernel: Kernel.IKernelConnection | null = null;
   private _listenedCellIds: Set<string> = new Set();
-  private _silentEditMsgIds: Set<string> = new Set();
+  private _comm: Kernel.IComm | null = null;
+
+  // Pending violations received via comm before _onCellExecuted fires.
+  // _onCellExecuted picks these up and stores them on the cell.
+  private _pendingViolations: IPredicateViolation[] = [];
 
   constructor(
     _app: JupyterFrontEnd,
@@ -41,11 +58,26 @@ export class ReproducibilityExecutionHookManager {
     this._setupHooks();
   }
 
+  /**
+   * Send a FlowBook protocol command to the kernel via the comm channel.
+   * Used by plugin.ts for sync, exec-restore, etc.
+   */
+  sendCommand(msg: FlowbookClientMessage): void {
+    if (this._comm) {
+      this._comm.send(msg as any);
+    } else {
+      console.warn(
+        'ReproducibilityExecutionHook: No comm channel, cannot send command:',
+        msg
+      );
+    }
+  }
+
   private _setupHooks(): void {
     // Listen for cell execution completion
     NotebookActions.executed.connect(this._onCellExecuted, this);
 
-    // Listen for cell execution start to set cell_order via magic
+    // Listen for cell execution start to send cell order via comm
     NotebookActions.executionScheduled.connect(
       this._onExecutionScheduled,
       this
@@ -54,8 +86,8 @@ export class ReproducibilityExecutionHookManager {
     // [EDIT transition (§2.3)] Listen for cell content changes
     this._tracker.currentChanged.connect(this._setupCellEditListener, this);
 
-    // Listen for IOPub messages (catches silent magic responses like %cell_edited)
-    this._tracker.currentChanged.connect(this._setupIOPubListener, this);
+    // Set up comm channel for kernel communication
+    this._tracker.currentChanged.connect(this._setupComm, this);
 
     // Also set up listeners for already-open notebook (signal may have fired before we subscribed)
     console.log(
@@ -64,7 +96,7 @@ export class ReproducibilityExecutionHookManager {
     );
     if (this._tracker.currentWidget) {
       this._setupCellEditListener();
-      this._setupIOPubListener();
+      this._setupComm();
     }
 
     console.log(
@@ -99,12 +131,44 @@ export class ReproducibilityExecutionHookManager {
       this._attachCellEditListener(notebook.widgets[i]);
     }
 
-    // Watch for newly inserted cells
-    notebook.model?.cells.changed.connect(() => {
+    // Watch for cell changes (insert/delete) to update kernel and attach listeners
+    notebook.model?.cells.changed.connect((_sender, change) => {
+      // Attach edit listeners to any new cells
       for (let i = 0; i < notebook.widgets.length; i++) {
         this._attachCellEditListener(notebook.widgets[i]);
       }
+
+      // If cells were added or removed, notify the kernel about the new cell order
+      // This ensures staleness is updated immediately (e.g., when a cell is deleted,
+      // cells that read from it should be marked stale)
+      if (change.type === 'add' || change.type === 'remove') {
+        this._sendNotebookStructure(panel);
+      }
     });
+  }
+
+  /**
+   * Send notebook_structure command to kernel via comm.
+   * Called when cells are added/removed to update staleness immediately.
+   */
+  private _sendNotebookStructure(panel: NotebookPanel): void {
+    const notebook = panel.content;
+
+    // Build cell order array (only code cells)
+    const cellOrder: string[] = [];
+    for (let i = 0; i < notebook.widgets.length; i++) {
+      const c = notebook.widgets[i];
+      if (c.model.type === 'code') {
+        cellOrder.push(c.model.id);
+      }
+    }
+
+    if (cellOrder.length > 0) {
+      this.sendCommand({ type: 'notebook_structure', cell_order: cellOrder });
+      console.log(
+        `ReproducibilityExecutionHook: Sent notebook_structure via comm with ${cellOrder.length} cells`
+      );
+    }
   }
 
   /**
@@ -166,102 +230,128 @@ export class ReproducibilityExecutionHookManager {
   }
 
   /**
-   * [EDIT transition (§2.3)] Send %cell_edited magic to kernel.
+   * [EDIT transition (§2.3)] Send cell_edited command to kernel via comm.
    */
   private _sendCellEdited(cellId: string): void {
-    const panel = this._tracker.currentWidget;
-    if (!panel) {
-      return;
-    }
-
-    const session = panel.sessionContext.session;
-    if (session && session.kernel) {
-      const future = session.kernel.requestExecute({
-        code: `%cell_edited ${cellId}`,
-        silent: true,
-        store_history: false
-      });
-      const msgId = future.msg.header.msg_id;
-      this._silentEditMsgIds.add(msgId);
-      console.log(
-        `ReproducibilityExecutionHook: Sent cell_edited for ${cellId}, msgId = ${msgId}`
-      );
-    }
+    this.sendCommand({ type: 'cell_edited', cell_id: cellId });
+    console.log(
+      `ReproducibilityExecutionHook: Sent cell_edited via comm for ${cellId}`
+    );
   }
 
   /**
-   * Set up an IOPub listener on the current kernel to catch display_data
-   * messages containing flowbook metadata — including those from silent
-   * magic executions like %cell_edited that never reach a cell's output area.
+   * Set up a comm channel to the kernel's "flowbook" target.
+   * This replaces the old IOPub listener for metadata and the
+   * silent magic executions for sending commands.
    */
-  private _setupIOPubListener(): void {
+  private _setupComm(): void {
     const panel = this._tracker.currentWidget;
     if (!panel) {
       return;
     }
 
-    this._connectIOPub(panel);
+    this._connectComm(panel);
 
-    // Re-attach when the kernel restarts or changes
+    // Re-open comm when the kernel object changes (e.g., switching kernels)
     panel.sessionContext.kernelChanged.connect(() => {
-      this._connectIOPub(panel);
+      this._attachedKernel = null; // force reconnect
+      this._connectComm(panel);
+    });
+
+    // Re-open comm after kernel restart. The kernel object stays the same
+    // on restart, so kernelChanged doesn't fire — we must watch statusChanged.
+    panel.sessionContext.statusChanged.connect((_sender, status) => {
+      if (status === 'restarting') {
+        // Clear the guard so _connectComm will re-open on next idle
+        this._attachedKernel = null;
+        this._comm = null;
+      } else if (status === 'idle' && this._comm === null) {
+        this._connectComm(panel);
+      }
     });
   }
 
-  private _connectIOPub(panel: NotebookPanel): void {
+  private _connectComm(panel: NotebookPanel): void {
     const kernel = panel.sessionContext.session?.kernel;
     if (!kernel || kernel === this._attachedKernel) {
       return;
     }
 
     this._attachedKernel = kernel;
-    kernel.iopubMessage.connect(this._onIOPubMessage, this);
+
+    // Open a comm to the kernel's "flowbook" target
+    this._comm = kernel.createComm(COMM_TARGET);
+    this._comm.onMsg = this._onCommMessage.bind(this);
+    this._comm.open();
 
     console.log(
-      'ReproducibilityExecutionHook: IOPub listener attached to kernel'
+      'ReproducibilityExecutionHook: Comm channel opened to kernel'
     );
   }
 
-  private _onIOPubMessage(
-    _sender: Kernel.IKernelConnection,
-    msg: KernelMessage.IIOPubMessage
-  ): void {
-    if (msg.header.msg_type !== 'display_data') {
+  /**
+   * Handle incoming comm messages from the kernel.
+   * Dispatches on message type: metadata, violation, or status.
+   */
+  private _onCommMessage(msg: KernelMessage.ICommMsgMsg): void {
+    const data = msg.content.data as unknown as FlowbookKernelMessage;
+    if (!data || !data.type) {
       return;
     }
-
-    const content = (msg as KernelMessage.IDisplayDataMsg).content;
-    const flowbook = content.metadata?.flowbook as
-      | IReproducibilityMetadata
-      | undefined;
-
-    // Process any display_data with flowbook metadata (from %cell_edited, %flowbook_sync, etc.)
-    if (!flowbook) {
-      return;
-    }
-
-    // Track which messages we've processed from our silent executions
-    const parentHeader = msg.parent_header;
-    const parentMsgId = 'msg_id' in parentHeader ? parentHeader.msg_id : '';
-    if (this._silentEditMsgIds.has(parentMsgId)) {
-      this._silentEditMsgIds.delete(parentMsgId);
-    }
-
-    console.log(
-      'ReproducibilityExecutionHook: IOPub flowbook metadata received, stale_cells =',
-      flowbook.stale_cells
-    );
 
     const panel = this._tracker.currentWidget;
     if (!panel) {
       return;
     }
 
-    this._processMetadataUpdate(panel, flowbook);
+    switch (data.type) {
+      case 'metadata': {
+        // Strip the "type" field to get IReproducibilityMetadata
+        const { type: _type, ...metadata } = data;
+        const reproMeta = metadata as unknown as IReproducibilityMetadata;
+
+        // Store metadata on the relevant cell
+        if (reproMeta.cell_id) {
+          const cell = this._findCell(panel, reproMeta.cell_id);
+          if (cell) {
+            cell.model.setMetadata('flowbook', reproMeta);
+          }
+        }
+
+        // Process staleness
+        this._processMetadataUpdate(panel, reproMeta);
+
+        console.log(
+          'ReproducibilityExecutionHook: Comm metadata received, stale_cells =',
+          reproMeta.stale_cells
+        );
+        break;
+      }
+
+      case 'violation': {
+        const { type: _type, ...violation } = data;
+        const pv = violation as unknown as IPredicateViolation;
+        // Buffer violation — _onCellExecuted will pick it up and store on cell
+        this._pendingViolations.push(pv);
+        console.log(
+          `ReproducibilityExecutionHook: Comm violation received for cell ${pv.cell_id}, predicate=${pv.predicate}`
+        );
+        break;
+      }
+
+      case 'status': {
+        // Update the metadata panel status header
+        this._highlighter.updateStatus(data.icon, data.text, data.cell_id);
+        console.log(
+          `ReproducibilityExecutionHook: Comm status: ${data.icon} ${data.text}`
+        );
+        break;
+      }
+    }
   }
 
   /**
-   * Called before cell execution - send %notebook_structure magic to set cell order
+   * Called before cell execution — send notebook_structure via comm to set cell order.
    */
   private _onExecutionScheduled(
     _sender: any,
@@ -277,7 +367,7 @@ export class ReproducibilityExecutionHookManager {
 
     // Cancel any pending edit timer for this cell.
     // If user edited and then immediately ran, the execution makes the cell fresh,
-    // so there's no need to send %cell_edited (which would incorrectly mark it stale).
+    // so there's no need to send cell_edited (which would incorrectly mark it stale).
     const cellId = cell.model.id;
     const pendingTimer = this._editTimers.get(cellId);
     if (pendingTimer) {
@@ -297,68 +387,16 @@ export class ReproducibilityExecutionHookManager {
       }
     }
 
-    // Send %notebook_structure magic to kernel
-    const session = panel.sessionContext.session;
-    if (session && session.kernel && cellOrder.length > 0) {
-      const magicCommand = `%notebook_structure ${cellOrder.join(' ')}`;
-      session.kernel.requestExecute({
-        code: magicCommand,
-        silent: true,
-        store_history: false
-      });
+    // Send notebook_structure via comm
+    if (cellOrder.length > 0) {
+      this.sendCommand({ type: 'notebook_structure', cell_order: cellOrder });
       console.log(
-        `ReproducibilityExecutionHook: Sent notebook_structure with ${cellOrder.length} cells`
+        `ReproducibilityExecutionHook: Sent notebook_structure via comm with ${cellOrder.length} cells`
       );
     }
   }
 
-  /**
-   * Extract reproducibility metadata from cell outputs.
-   * Returns the metadata and the index of the output containing it (for removal).
-   */
-  private _extractReproducibilityMetadata(outputs: IOutput[]): {
-    metadata: IReproducibilityMetadata | null;
-    outputIndex: number | null;
-  } {
-    console.log(
-      `ReproducibilityExecutionHook: Checking ${outputs.length} outputs for flowbook metadata`
-    );
-
-    for (let i = 0; i < outputs.length; i++) {
-      const output = outputs[i];
-      console.log(
-        `ReproducibilityExecutionHook: Output type = ${output.output_type}`
-      );
-
-      if (output.output_type !== 'display_data') {
-        continue;
-      }
-
-      const metadata = (output as any).metadata;
-      console.log(
-        'ReproducibilityExecutionHook: display_data metadata =',
-        metadata
-      );
-
-      if (!metadata?.flowbook) {
-        console.log('ReproducibilityExecutionHook: No flowbook in metadata');
-        continue;
-      }
-
-      console.log(
-        'ReproducibilityExecutionHook: Found flowbook metadata!',
-        metadata.flowbook
-      );
-      return {
-        metadata: metadata.flowbook as IReproducibilityMetadata,
-        outputIndex: i
-      };
-    }
-    console.log(
-      'ReproducibilityExecutionHook: No flowbook metadata found in any output'
-    );
-    return { metadata: null, outputIndex: null };
-  }
+  // _extractReproducibilityMetadata removed — metadata now arrives via comm
 
   private _onCellExecuted(
     _sender: any,
@@ -379,129 +417,35 @@ export class ReproducibilityExecutionHookManager {
       return;
     }
 
-    // Get outputs
-    const codeModel = cell.model as ICodeCellModel;
-    const outputs: IOutput[] = [];
-    for (let i = 0; i < codeModel.outputs.length; i++) {
-      outputs.push(codeModel.outputs.get(i).toJSON() as IOutput);
-    }
+    // Collect pending violations that arrived via comm during execution.
+    // Filter to violations for this cell (comm may deliver violations for
+    // other cells in rare race conditions).
+    const cellId = cell.model.id;
+    const cellViolations = this._pendingViolations.filter(
+      v => v.cell_id === cellId
+    );
+    // Keep violations for other cells (if any) for their _onCellExecuted call
+    this._pendingViolations = this._pendingViolations.filter(
+      v => v.cell_id !== cellId
+    );
 
-    // Check for predicate violation from kernel (new unified format)
-    const predicateViolation = this._extractPredicateViolation(outputs);
-    if (predicateViolation) {
-      // Store predicate violation in cell metadata
-      cell.model.setMetadata('flowbook_violation', predicateViolation);
-
-      // Let cellhighlighter handle the rendering
-      const cellOrder = this._getCurrentCellOrder(panel);
-      const stalenessManager = this._highlighter.getStalenessManager(panel);
-      this._highlighter.updateCell(
-        cell,
-        stalenessManager,
-        cellOrder,
-        panel.context.path
-      );
-
+    if (cellViolations.length > 0) {
+      cell.model.setMetadata('flowbook_violations', cellViolations);
+      cell.model.setMetadata('flowbook_violation', cellViolations[0]);
       console.log(
-        `ReproducibilityExecutionHook: Handled predicate violation for cell ${cell.model.id}, accepted=${predicateViolation.accepted}`
+        `ReproducibilityExecutionHook: Applied ${cellViolations.length} violation(s) from comm to cell ${cellId}`
       );
-
-      // If rejected (not accepted), no further processing needed
-      if (!predicateViolation.accepted) {
-        return;
-      }
-    }
-
-    // Extract reproducibility metadata
-    const {
-      metadata: reproducibilityMetadata,
-      outputIndex: metadataOutputIndex
-    } = this._extractReproducibilityMetadata(outputs);
-    if (!reproducibilityMetadata) {
-      // If we had a predicate violation but no metadata, we're done
-      if (predicateViolation) {
-        return;
-      }
-      return;
-    }
-
-    // Remove the metadata output from cell display (keep it clean for the user)
-    if (metadataOutputIndex !== null) {
-      const codeModel = cell.model as ICodeCellModel;
-      codeModel.outputs.remove(metadataOutputIndex);
-      console.log(
-        `ReproducibilityExecutionHook: Removed flowbook metadata output at index ${metadataOutputIndex}`
-      );
-    }
-
-    // Store metadata on cell
-    cell.model.setMetadata('flowbook', reproducibilityMetadata);
-
-    // Process staleness reasons and update manager
-    this._processMetadataUpdate(panel, reproducibilityMetadata);
-
-    // Store or clear violation metadata on the executing cell (legacy format)
-    const cellOrder = this._getCurrentCellOrder(panel);
-    if (reproducibilityMetadata.violation && !predicateViolation) {
-      const v = reproducibilityMetadata.violation;
-      const mutIdx = cellOrder.indexOf(v.mutating_cell);
-      const affIdx = cellOrder.indexOf(v.affected_cell);
-      const mutRef = mutIdx >= 0 ? indexToAlpha(mutIdx) : v.mutating_cell;
-      const affRef = affIdx >= 0 ? indexToAlpha(affIdx) : v.affected_cell;
-      const violationInfo: IViolationInfo = {
-        type: v.violation_type || 'backward_mutation',
-        mutating_cell: v.mutating_cell,
-        affected_cell: v.affected_cell,
-        variables: v.variables,
-        message: `Cell ${mutRef} modified ${v.variables.map(vv => '`' + vv + '`').join(', ')} read by ${affRef}`,
-        structural_reads_detail: (v as any).structural_reads_detail,
-        changes_detail: (v as any).changes_detail
-      };
-      cell.model.setMetadata('flowbook_violation', violationInfo);
-    } else if (!predicateViolation) {
+    } else {
+      // Clear any previous violation metadata
+      cell.model.deleteMetadata('flowbook_violations');
       cell.model.deleteMetadata('flowbook_violation');
     }
 
-    // If there's a writer_violation, store it on the writer cell (legacy format)
-    if (reproducibilityMetadata.writer_violation) {
-      const wv = reproducibilityMetadata.writer_violation;
-      const writerCell = this._findCell(panel, wv.mutating_cell);
-      if (writerCell) {
-        // Build IViolationInfo - same structure as for normal violations
-        const mutIdx = cellOrder.indexOf(wv.mutating_cell);
-        const affIdx = cellOrder.indexOf(wv.affected_cell);
-        const mutRef = mutIdx >= 0 ? indexToAlpha(mutIdx) : wv.mutating_cell;
-        const affRef = affIdx >= 0 ? indexToAlpha(affIdx) : wv.affected_cell;
+    // Metadata is now stored on cell by _onCommMessage when it arrives.
+    // No need to scan cell outputs.
 
-        const writerViolationInfo: IViolationInfo = {
-          type: wv.violation_type || 'backward_mutation',
-          mutating_cell: wv.mutating_cell,
-          affected_cell: wv.affected_cell,
-          variables: wv.variables,
-          message: `Cell ${mutRef} modified ${wv.variables.map(v => '`' + v + '`').join(', ')} read by ${affRef}`,
-          structural_reads_detail: (wv as any).structural_reads_detail,
-          changes_detail: (wv as any).changes_detail
-        };
-
-        // Store in metadata
-        writerCell.model.setMetadata('flowbook_violation', writerViolationInfo);
-
-        // Let cellhighlighter handle the rendering
-        const stalenessManager = this._highlighter.getStalenessManager(panel);
-        this._highlighter.updateCell(
-          writerCell,
-          stalenessManager,
-          cellOrder,
-          panel.context.path
-        );
-
-        console.log(
-          `ReproducibilityExecutionHook: Stored writer_violation on cell ${wv.mutating_cell}`
-        );
-      }
-    }
-
-    // Let cellhighlighter handle all cell rendering
+    // Let cellhighlighter handle all cell rendering (staleness + violations).
+    const cellOrder = this._getCurrentCellOrder(panel);
     const stalenessManager = this._highlighter.getStalenessManager(panel);
     this._highlighter.updateCell(
       cell,
@@ -510,39 +454,11 @@ export class ReproducibilityExecutionHookManager {
       panel.context.path
     );
 
-    console.log(
-      `ReproducibilityExecutionHook: Extracted metadata for cell ${cell.model.id}:`,
-      reproducibilityMetadata
-    );
+    // Refresh dependency graph
+    this._highlighter.refreshDependencies();
   }
 
-  /**
-   * Extract predicate violation from kernel outputs (new unified format).
-   * Returns the violation if found, null otherwise.
-   */
-  private _extractPredicateViolation(
-    outputs: IOutput[]
-  ): IPredicateViolation | null {
-    for (const output of outputs) {
-      if (output.output_type !== 'display_data') {
-        continue;
-      }
-      const metadata = (output as any).metadata;
-      if (metadata?.predicate_violation) {
-        const pv = metadata.predicate_violation;
-        return {
-          predicate: pv.predicate,
-          cell_id: pv.cell_id,
-          locations: pv.locations || [],
-          message: pv.message,
-          accepted: pv.accepted,
-          causer_cell: pv.causer_cell,
-          detail: pv.detail
-        };
-      }
-    }
-    return null;
-  }
+  // _extractPredicateViolations removed — violations now arrive via comm
 
   /**
    * Get current cell order from notebook (only code cells)
@@ -669,29 +585,16 @@ export class ReproducibilityExecutionHookManager {
       type: string;
       loc?: string;
       cell_id?: string;
-      expected_cell_id?: string;
     },
     cellOrder: string[]
   ): IFrontendStalenessReason {
     const cellId = backendReason.cell_id;
-    const expectedCellId = backendReason.expected_cell_id;
     const loc = backendReason.loc;
 
     let causingRef = '';
     if (cellId) {
       const causingIdx = cellOrder.indexOf(cellId);
       causingRef = causingIdx >= 0 ? indexToAlpha(causingIdx) : cellId;
-    }
-
-    let expectedRef = '';
-    let expectedCellDeleted = false;
-    if (expectedCellId) {
-      const expectedIdx = cellOrder.indexOf(expectedCellId);
-      if (expectedIdx >= 0) {
-        expectedRef = indexToAlpha(expectedIdx);
-      } else {
-        expectedCellDeleted = true;
-      }
     }
 
     switch (backendReason.type) {
@@ -738,34 +641,6 @@ export class ReproducibilityExecutionHookManager {
           message: causingRef
             ? `Write overlap with ${causingRef}`
             : 'Write overlap detected'
-        };
-      case 'skipped_upstream':
-        // Re-running won't help - need to run the expected cell first
-        // If expected cell was deleted, say so clearly
-        if (expectedCellDeleted) {
-          return {
-            type: 'variable_modified',
-            causing_cell: cellId,
-            variables: loc ? [loc] : undefined,
-            message: loc
-              ? `\`${loc}\` is from a deleted cell`
-              : 'Source cell was deleted'
-          };
-        }
-        if (loc && expectedRef) {
-          return {
-            type: 'variable_modified',
-            causing_cell: cellId,
-            variables: [loc],
-            message: `Run ${expectedRef} first (\`${loc}\` is from wrong source)`
-          };
-        }
-        return {
-          type: 'variable_modified',
-          causing_cell: cellId,
-          message: expectedRef
-            ? `Run ${expectedRef} first`
-            : 'Upstream cell was skipped'
         };
       case 'backward_stale':
         if (loc && causingRef) {
@@ -829,7 +704,10 @@ export class ReproducibilityExecutionHookManager {
   }
 
   /**
-   * Compute why a cell became stale.
+   * Compute why a cell became stale using the ▷ conflict relation.
+   *
+   * Uses typed ReadLoc/WriteLoc sets and writeConflictsRead() to determine
+   * which specific locations were invalidated.
    */
   private _computeStalenessReason(
     panel: NotebookPanel,
@@ -840,10 +718,10 @@ export class ReproducibilityExecutionHookManager {
     const causingCellId = metadata.cell_id;
 
     // Edit case: the cell that triggered the update is the stale cell itself
-    // and there are no changed_variables (pure source edit)
+    // and there are no changed_locs (pure source edit)
     if (
       staleCellId === causingCellId &&
-      (!metadata.changed_variables || metadata.changed_variables.length === 0)
+      (!metadata.changed_locs || metadata.changed_locs.length === 0)
     ) {
       return {
         type: 'source_edited',
@@ -852,7 +730,7 @@ export class ReproducibilityExecutionHookManager {
       };
     }
 
-    // StaleFwd case: look up stale cell's stored reads, intersect with changed_variables
+    // Look up the stale cell's stored read_locs
     const staleCell = this._findCell(panel, staleCellId);
     const storedMeta = staleCell?.model.metadata as any;
     const storedFlowbook = storedMeta?.flowbook as
@@ -863,65 +741,64 @@ export class ReproducibilityExecutionHookManager {
     const causingRef =
       causingIdx >= 0 ? indexToAlpha(causingIdx) : causingCellId;
 
-    // Intersect variable reads with changed_variables
-    const changedVars = metadata.changed_variables || [];
-    const cellReads = storedFlowbook?.reads || [];
-    const intersectVars = changedVars.filter(v => cellReads.includes(v));
+    // StaleFwd case: use ▷ to find which of the stale cell's reads are
+    // invalidated by the causing cell's changed_locs
+    const changedLocs: IWriteLoc[] = metadata.changed_locs || [];
+    const cellReadLocs: IReadLoc[] = storedFlowbook?.read_locs || [];
 
-    // Intersect column reads with column_changed
-    const columnChanged = metadata.column_changed || {};
-    const cellColumnReads = storedFlowbook?.column_reads || {};
-    const intersectCols: { [key: string]: string[] } = {};
-    for (const [dfName, changedCols] of Object.entries(columnChanged)) {
-      const readCols = cellColumnReads[dfName];
-      if (readCols) {
-        const overlap = changedCols.filter(c => readCols.includes(c));
-        if (overlap.length > 0) {
-          intersectCols[dfName] = overlap;
-        }
-      }
-    }
+    const conflicting = findConflictingReads(changedLocs, cellReadLocs);
 
-    // Build variable parts for the message
-    const parts: string[] = [];
-    for (const v of intersectVars) {
-      parts.push('`' + v + '`');
-    }
-    for (const [dfName, cols] of Object.entries(intersectCols)) {
-      for (const col of cols) {
-        parts.push('`' + dfName + '.' + col + '`');
-      }
-    }
-
-    if (parts.length > 0) {
+    if (conflicting.length > 0) {
+      const parts = conflicting.map(r => '`' + formatReadLoc(r) + '`');
       return {
         type: 'variable_modified',
         causing_cell: causingCellId,
-        variables: intersectVars.length > 0 ? intersectVars : undefined,
-        columns:
-          Object.keys(intersectCols).length > 0 ? intersectCols : undefined,
+        variables: conflicting.map(r => formatReadLoc(r)),
         message: `${parts.join(', ')} modified by ${causingRef}`
       };
     }
 
-    // WriterCheck case: stale cell WRITES to variables the causing cell READS
+    // WriterCheck case: stale cell's write outputs conflict with causing cell's reads
     // (EXEC-RESTORE marks cells that would cause BackConflict if run)
-    const causingCellReads = metadata.reads || [];
-    const staleCellWrites = storedFlowbook?.writes || [];
-    const writerConflictVars = staleCellWrites.filter(v =>
-      causingCellReads.includes(v)
+    const staleCellWriteLocs: IWriteLoc[] = storedFlowbook?.write_locs || [];
+    const causingCellReadLocs: IReadLoc[] = metadata.read_locs || [];
+
+    // Project stale cell's writes to reads via output(), then intersect
+    const staleOutputs: IReadLoc[] = staleCellWriteLocs.flatMap(w =>
+      writeLocOutputs(w)
     );
-    if (writerConflictVars.length > 0) {
-      const varParts = writerConflictVars.map(v => '`' + v + '`');
+    // Check which of the stale cell's output reads match the causing cell's reads
+    const writerConflicts: string[] = [];
+    const seen = new Set<string>();
+    for (const output of staleOutputs) {
+      const key = `${output.type}:${output.qualifier || ''}:${output.name}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      for (const r of causingCellReadLocs) {
+        if (
+          output.type === r.type &&
+          output.name === r.name &&
+          readLocsMatchQualifier(output, r)
+        ) {
+          writerConflicts.push(formatReadLoc(output));
+          seen.add(key);
+          break;
+        }
+      }
+    }
+
+    if (writerConflicts.length > 0) {
+      const varParts = writerConflicts.map(v => '`' + v + '`');
       return {
         type: 'writer_conflict',
         causing_cell: causingCellId,
-        variables: writerConflictVars,
+        variables: writerConflicts,
         message: `Writes ${varParts.join(', ')}, which was read by ${causingRef}`
       };
     }
 
-    // Fallback: we know there was a change but can't identify the specific variables
+    // Fallback
     return {
       type: 'unknown',
       causing_cell: causingCellId,

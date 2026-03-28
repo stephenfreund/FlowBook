@@ -1,17 +1,21 @@
 # flowbook
 
-[![Github Actions Status](/workflows/Build/badge.svg)](/actions/workflows/build.yml)
-
-
 ## TL;DR
 
 - Clone repository
 - Install: `pip install -e .`
 - Run: `flowlab examples`
 
-Once JupyterLab opens, create or open a notebook and select the **FlowBook** kernel from the kernel picker. As you execute cells, FlowBook automatically highlights stale cells that must be run or re-run in yellow. It marks cells whose execution would violate reproducilibity in red. The metadata panel (right sidebar) shows a bunch of analysis state.  When no cells are stale, the notebook's outputs will match a top-to-bottom run in a newly-created kernel.
+Once JupyterLab opens, create or open a notebook and select the
+**FlowBook** kernel from the kernel picker. As you execute cells,
+FlowBook automatically highlights stale cells that must be run or
+re-run in yellow. It marks cells whose execution would violate rerun
+consistency in red. The metadata panel (right sidebar) shows a bunch
+of analysis state. When no cells are stale, the notebook's outputs
+will match a top-to-bottom run in a newly-created kernel.
 
-Start with the `GettingStarted.ipynb` notebook, and them maybe the ones in the `examples` directory.
+Start with the `GettingStarted.ipynb` notebook, and the maybe the
+other ones `demos` or `litmus` directories.
 
 ## Requirements
 
@@ -27,13 +31,13 @@ pip install flowbook
 
 ## Command Line Tools
 
-FlowBook provides several command line tools for notebook processing, optimization, and analysis. See [CLI.md](CLI.md) for complete documentation including:
+FlowBook provides several command line tools for notebook processing,
+optimization, and analysis. See [CLI.md](CLI.md) for complete
+documentation. These were not intended for public consumption. Your
+mileage may vary.
 
 - `flowbook` - Main CLI for notebook processing commands
 - `flowlab` - Launch JupyterLab with FlowBook extensions
-- `flowbook_optimize` - Optimization pipeline for notebooks
-- `flowbook_compare_overhead` - Analyze baseline comparison results
-- And more...
 
 ## Uninstall
 

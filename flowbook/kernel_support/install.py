@@ -35,7 +35,6 @@ def install_kernel(
         spec_dir,
         kernel_name=kernel_name,
         user=True,
-        replace=True,
     )
 
     # Update argv to use correct python

@@ -436,8 +436,8 @@ class TestMonotonicityEdgeCases:
 class TestMonotonicityFloatTolerance:
     """Tests for float tolerance in monotonicity checking."""
 
-    def test_float_within_tolerance_passes(self):
-        """Floats within tolerance pass check."""
+    def test_float_tiny_change_detected(self):
+        """Even tiny float changes are detected (exact comparison)."""
         checkpoints = MemoryCheckpoints()
         user_ns = {"x": 1.0}
         enforcer = MonotonicityEnforcer(checkpoints, user_ns)
@@ -448,8 +448,8 @@ class TestMonotonicityFloatTolerance:
 
         tracking = TrackingData(reads_before_writes=["x"], writes=["x"])
         result = enforcer.check_and_enforce(tracking, "test")
-        # Should pass due to tolerance
-        assert result is None
+        # Exact comparison means even tiny differences are violations
+        assert result is not None
 
     def test_float_outside_tolerance_fails(self):
         """Floats outside tolerance fail check."""

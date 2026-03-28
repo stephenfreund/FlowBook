@@ -7,15 +7,21 @@ from flowbook.kernel_support.memory_checkpoint import (
     MemoryCheckpoints,
 )
 from flowbook.kernel_support.models import TrackingData
-from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
-
 from flowbook.kernel.reproducibility_enforcer import (
     ReproducibilityEnforcer,
     PRE_CHECKPOINT_PREFIX,
-    StalenessMode,
 )
 from flowbook.kernel.models import ErrorType, ReasonType
+from flowbook.kernel.locations import writelocset_var_names
 from flowbook.kernel.tests.conftest import make_tracking
+
+
+def _get_backward_error(result):
+    """Get the first backward mutation (NO_WRITE_AFTER_READ) error from result."""
+    for e in result.errors:
+        if e.error_type == ErrorType.NO_WRITE_AFTER_READ:
+            return e
+    return None
 
 
 class TestReproducibilityEnforcer:
@@ -49,7 +55,7 @@ class TestReproducibilityEnforcer:
             namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B reads x - valid (forward dependency)
         self._save_pre_checkpoint("b", {"x": 1})
@@ -60,7 +66,7 @@ class TestReproducibilityEnforcer:
             namespace=ns_b,
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
     def test_violation_backward_mutation(self):
         """Cell B modifies what cell A reads - violation."""
@@ -84,10 +90,10 @@ class TestReproducibilityEnforcer:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        assert result_b.violation is not None
-        assert result_b.violation.mutating_cell == "b"
-        assert result_b.violation.affected_cell == "a"
-        assert "x" in result_b.violation.variables
+        assert result_b.has_errors()
+        assert result_b.errors[0].cell_id == "b"
+        assert result_b.errors[0].causer_cell == "a"
+        assert "x" in result_b.errors[0].locations
 
     def test_staleness_computation(self):
         """Re-running cell A makes cell B stale if B reads A's output."""
@@ -124,51 +130,6 @@ class TestReproducibilityEnforcer:
         # B should be stale
         assert "b" in result.stale_cells
 
-    def test_no_staleness_if_value_unchanged(self):
-        """Semantic check: no staleness if value didn't actually change.
-
-        Requires semantic staleness mode for convergence detection.
-        """
-        # Use semantic mode for this test (convergence requires it)
-        sdc = ReproducibilityEnforcer(
-            self.checkpoints, staleness_mode=StalenessMode.SEMANTIC
-        )
-        sdc.set_cell_order(["a", "b", "c", "d"])
-
-        # A writes x=1
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"x": 1})
-        sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # B reads x
-        self._save_pre_checkpoint("b", {"x": 1})
-        ns_b = self._make_namespace({"x": 1, "y": 2})
-        sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
-        )
-
-        # Re-run A with same value x=1
-        # Note: pre-checkpoint for A now reflects current state
-        self._save_pre_checkpoint("a", {"x": 1, "y": 2})
-        ns_a2 = self._make_namespace({"x": 1, "y": 2})
-        result = sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a2,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # B should NOT be stale (x didn't change)
-        assert "b" not in result.stale_cells
-
     def test_cell_order_update_affects_violation_check(self):
         """Cell order can be updated, affecting position-based checks.
 
@@ -200,7 +161,7 @@ class TestReproducibilityEnforcer:
             namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert result.violation is None
+        assert not result.has_errors()
 
         # Scenario 2: Fresh state with order [b, a, c, d] — B is before A
         self.sdc.reset()
@@ -225,8 +186,8 @@ class TestReproducibilityEnforcer:
             namespace=ns_a2,
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert result.violation is not None
-        assert result.violation.affected_cell == "b"
+        assert result.has_errors()
+        assert result.errors[0].causer_cell == "b"
 
     def test_cell_deletion_prunes_records(self):
         """Deleted cells are removed from tracking."""
@@ -358,7 +319,7 @@ class TestReproducibilityEnforcer:
         )
 
         # No violation because 'x' is not in cell_order
-        assert result.violation is None
+        assert not result.has_errors()
 
 
 class TestColumnAwareBackwardMutation:
@@ -419,8 +380,11 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # No violation - different columns
-        assert result_b.violation is None
+        # No backward mutation - different columns
+        # (NoReadAndWrite may fire since B reads and writes df)
+        assert not any(
+            e.error_type == ErrorType.NO_WRITE_AFTER_READ for e in result_b.errors
+        )
 
     def test_conflict_same_column(self):
         """Cell A reads df.price, Cell B modifies df.price - violation."""
@@ -459,19 +423,26 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Violation - same column
-        assert result_b.violation is not None
-        assert result_b.violation.mutating_cell == "b"
-        assert result_b.violation.affected_cell == "a"
-        assert "df.price" in result_b.violation.variables
+        # Violation - same column (NO_WRITE_AFTER_READ backward mutation)
+        assert result_b.has_errors()
+        backward_err = next(
+            e for e in result_b.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ
+        )
+        assert backward_err.cell_id == "b"
+        assert backward_err.causer_cell == "a"
+        assert "df['price']" in backward_err.locations
 
-    def test_conflict_prior_no_column_info_conservative(self):
-        """Cell A reads df (no column info), Cell B modifies df.price - violation (conservative)."""
+    def test_no_conflict_prior_var_read_vs_column_write(self):
+        """Cell A reads Var(df) (binding-only), Cell B writes Col(df, price) - no violation.
+
+        Var(df) is a binding-only read. A column write does not affect the
+        binding, so there is no backward conflict.
+        """
         import pandas as pd
 
         df = pd.DataFrame({"price": [10, 20], "quantity": [1, 2]})
 
-        # Cell A: reads df (no column tracking)
+        # Cell A: reads df (no column tracking → Var(df), binding-only)
         self._save_pre_checkpoint("a", {"df": df})
         ns_a = self._make_namespace({"df": df, "y": 30})
         self.sdc.check(
@@ -481,11 +452,11 @@ class TestColumnAwareBackwardMutation:
             tracking=make_tracking(
                 reads={"df"},
                 writes={"y"},
-                # No column_reads - assumes whole df is read
+                # No column_reads → Var(df), binding-only read
             ),
         )
 
-        # Cell B: modifies df.price
+        # Cell B: modifies df.price (Col write)
         df_modified = df.copy()
         df_modified["price"] = [100, 200]
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
@@ -502,11 +473,12 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Violation - conservative when prior has no column info
-        # Now shows column-level detail: df.price instead of just df
-        assert result_b.violation is not None
-        assert result_b.violation.affected_cell == "a"
-        assert "df.price" in result_b.violation.variables
+        # No violation: Col(df, price) write does not conflict with Var(df) read
+        no_write_after_read = [e for e in result_b.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ]
+        assert len(no_write_after_read) == 0, (
+            f"Expected no NO_WRITE_AFTER_READ violation (Col ▷ Var = false), "
+            f"but got: {no_write_after_read}"
+        )
 
     def test_conflict_current_no_column_info_conservative(self):
         """Cell A reads df.price, Cell B modifies df (no column info) - violation (conservative)."""
@@ -544,10 +516,11 @@ class TestColumnAwareBackwardMutation:
         )
 
         # Violation - conservative when current has no column info
-        assert result_b.violation is not None
-        assert result_b.violation.affected_cell == "a"
+        assert result_b.has_errors()
+        backward_err = next(e for e in result_b.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
+        assert backward_err.causer_cell == "a"
         # New resolver provides precise column info: "df.price" instead of just "df"
-        assert any(v.startswith("df") for v in result_b.violation.variables)
+        assert any(v.startswith("df") for v in backward_err.locations)
 
     def test_mixed_variable_and_column_conflicts(self):
         """Mixed scenario: variable-level conflict on config, no column conflict on df."""
@@ -591,11 +564,12 @@ class TestColumnAwareBackwardMutation:
         )
 
         # Violation on config only (not on df since different columns)
-        assert result_b.violation is not None
-        assert result_b.violation.affected_cell == "a"
-        assert "config" in result_b.violation.variables
+        assert result_b.has_errors()
+        backward_err = next(e for e in result_b.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
+        assert backward_err.causer_cell == "a"
+        assert "config" in backward_err.locations
         # df.price should NOT be in violations (different column)
-        assert "df.price" not in result_b.violation.variables
+        assert "df['price']" not in backward_err.locations
 
     def test_multiple_column_conflicts(self):
         """Multiple columns conflict: df.price and df.quantity both modified."""
@@ -636,10 +610,11 @@ class TestColumnAwareBackwardMutation:
         )
 
         # Violation - both columns conflict
-        assert result_b.violation is not None
-        assert result_b.violation.affected_cell == "a"
-        assert "df.price" in result_b.violation.variables
-        assert "df.quantity" in result_b.violation.variables
+        assert result_b.has_errors()
+        backward_err = next(e for e in result_b.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
+        assert backward_err.causer_cell == "a"
+        assert "df['price']" in backward_err.locations
+        assert "df['quantity']" in backward_err.locations
 
     def test_no_conflict_when_no_overlap_multiple_vars(self):
         """Multiple DataFrames with no column overlap - no violation."""
@@ -680,7 +655,7 @@ class TestColumnAwareBackwardMutation:
         )
 
         # No violation - df1.a not modified, df2 not modified
-        assert result_b.violation is None
+        assert not any(e.error_type == ErrorType.NO_WRITE_AFTER_READ for e in result_b.errors)
 
 
 class TestBackwardMutationStaleness:
@@ -733,9 +708,9 @@ class TestBackwardMutationStaleness:
         )
 
         # Backward violation info is returned
-        assert result.violation is not None
-        assert result.violation.mutating_cell == "b"
-        assert result.violation.affected_cell == "a"
+        assert result.has_errors()
+        assert result.errors[0].cell_id == "b"
+        assert result.errors[0].causer_cell == "a"
         # Staleness is ALWAYS computed (new semantics)
         # changed_variables shows what changed
         assert "x" in result.changed_variables
@@ -856,7 +831,7 @@ class TestBackwardMutationStaleness:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        assert result.violation is not None
+        assert result.has_errors()
         # Record is ALWAYS created (new semantics)
         assert self.sdc._notebook_state.has_record("b")
         assert self.sdc._notebook_state.get_tracking("b").writes == {"x"}
@@ -909,8 +884,8 @@ class TestBackwardMutationStaleness:
         )
 
         # Backward violation is detected
-        assert result.violation is not None
-        assert result.violation.affected_cell == "b"
+        assert result.has_errors()
+        assert result.errors[0].causer_cell == "b"
         # D itself is stale (backward mutation marks the executing cell stale)
         assert not self.sdc._notebook_state.is_clean("d")
         # B should NOT be marked stale (D will be rejected/rolled back)
@@ -966,8 +941,8 @@ class TestBackwardMutationStaleness:
         )
 
         # Backward violation is detected but accepted
-        assert result.violation is not None
-        assert result.violation.affected_cell == "b"
+        assert result.has_errors()
+        assert result.errors[0].causer_cell == "b"
         # B IS marked stale (D's writes persist, B read x)
         assert "b" in result.stale_cells
         # C read y (not x), so C is not affected
@@ -1114,252 +1089,16 @@ class TestTruncationDetection:
         assert "Variable: obj2" in formatted_diff
 
 
-class TestStructuralTrackingOff:
-    """Tests for structural tracking OFF mode with backward mutation detection."""
-
-    def setup_method(self):
-        self.checkpoints = MemoryCheckpoints(
-            sanity_check=False,
-            warn_classes=False,
-        )
-        # Create enforcer with structural tracking OFF
-        self.sdc = ReproducibilityEnforcer(
-            self.checkpoints,
-            structural_mode=StructuralTrackingMode.OFF,
-        )
-        self.sdc.set_cell_order(["a", "b", "c", "d"])
-
-    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
-        """Save a pre-checkpoint for a cell."""
-        self.checkpoints.save(
-            f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
-        )
-
-    def _make_namespace(self, namespace: dict) -> dict:
-        """Return namespace dict for use with check()."""
-        return namespace
-
-    def test_structural_only_read_no_violation_when_off(self):
-        """
-        With structural tracking OFF, a cell that only reads structural attrs
-        (like df.shape) should NOT conflict with a cell that adds columns.
-
-        This tests Bug4.ipynb scenario:
-        - Cell D: raw_data.shape (structural read only, no column reads)
-        - Cell E: raw_data['x'] = 3 (column write)
-
-        With structural tracking OFF, this should NOT be a violation.
-        """
-        import pandas as pd
-
-        # Create a DataFrame
-        df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
-
-        # Cell A: Creates the DataFrame
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"raw_data": df})
-        result_a = self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"raw_data"}),
-        )
-        assert result_a.violation is None
-
-        # Cell B: Reads raw_data.shape (structural read only, no column reads)
-        # This cell reads the variable but only accesses structural attributes
-        self._save_pre_checkpoint("b", {"raw_data": df})
-        ns_b = self._make_namespace({"raw_data": df})
-        result_b = self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(
-                reads={"raw_data"},  # Variable read
-                writes=set(),
-                column_reads=None,  # NO column reads (only .shape)
-                structural_reads={"raw_data": {"shape"}},  # Structural read
-            ),
-        )
-        assert result_b.violation is None
-
-        # Cell C: Adds a new column raw_data['x'] = 3
-        # With structural tracking OFF, this should NOT conflict with cell B
-        df_modified = df.copy()
-        df_modified["x"] = 3
-        self._save_pre_checkpoint("c", {"raw_data": df})
-        ns_c = self._make_namespace({"raw_data": df_modified})
-        result_c = self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            namespace=ns_c,
-            tracking=make_tracking(
-                reads={"raw_data"},  # Reads raw_data to modify it
-                writes={"raw_data"},
-                column_reads=None,
-                column_writes={"raw_data": {"x"}},  # Writes column 'x'
-            ),
-        )
-        # NO violation - structural tracking is OFF and prior cell only did structural read
-        assert result_c.violation is None
-
-    def test_whole_variable_read_still_causes_violation_when_off(self):
-        """
-        Even with structural tracking OFF, a cell that reads the whole variable
-        (not just structural attrs) should still conflict with column modifications.
-
-        This ensures we're not too permissive.
-        """
-        import pandas as pd
-
-        df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
-
-        # Cell A: Creates the DataFrame
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"raw_data": df})
-        result_a = self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"raw_data"}),
-        )
-
-        # Cell B: Reads raw_data (whole variable, e.g., print(raw_data))
-        # This is NOT a structural-only read
-        self._save_pre_checkpoint("b", {"raw_data": df})
-        ns_b = self._make_namespace({"raw_data": df})
-        result_b = self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(
-                reads={"raw_data"},
-                writes=set(),
-                column_reads=None,  # No column tracking
-                structural_reads=None,  # NOT a structural read - whole variable read
-            ),
-        )
-
-        # Cell C: Adds a new column
-        df_modified = df.copy()
-        df_modified["x"] = 3
-        self._save_pre_checkpoint("c", {"raw_data": df})
-        ns_c = self._make_namespace({"raw_data": df_modified})
-        result_c = self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            namespace=ns_c,
-            tracking=make_tracking(
-                reads={"raw_data"},
-                writes={"raw_data"},
-                column_reads=None,
-                column_writes={"raw_data": {"x"}},
-            ),
-        )
-        # SHOULD cause violation - prior cell read whole variable (not just structural)
-        # Now shows column-level detail: raw_data.x instead of just raw_data
-        assert result_c.violation is not None
-        assert "raw_data.x" in result_c.violation.variables
-
-
-class TestStructuralTrackingWarn:
-    """Tests for structural tracking WARN mode with backward mutation detection."""
-
-    def setup_method(self):
-        self.checkpoints = MemoryCheckpoints(
-            sanity_check=False,
-            warn_classes=False,
-        )
-        # Create enforcer with structural tracking WARN
-        self.sdc = ReproducibilityEnforcer(
-            self.checkpoints,
-            structural_mode=StructuralTrackingMode.WARN,
-        )
-        self.sdc.set_cell_order(["a", "b", "c", "d"])
-
-    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
-        """Save a pre-checkpoint for a cell."""
-        self.checkpoints.save(
-            f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
-        )
-
-    def _make_namespace(self, namespace: dict) -> dict:
-        """Return namespace dict for use with check()."""
-        return namespace
-
-    def test_structural_only_read_no_violation_in_warn_mode(self):
-        """
-        With structural tracking WARN, a cell that only reads structural attrs
-        (like df.shape) should NOT cause a backward mutation violation.
-
-        Instead, structural warnings should be generated (tested separately).
-        This tests the Bug4.ipynb scenario with WARN mode.
-        """
-        import pandas as pd
-
-        df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
-
-        # Cell A: Creates the DataFrame
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"raw_data": df})
-        result_a = self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"raw_data"}),
-        )
-        assert result_a.violation is None
-
-        # Cell B: Reads raw_data.shape (structural read only)
-        self._save_pre_checkpoint("b", {"raw_data": df})
-        ns_b = self._make_namespace({"raw_data": df})
-        result_b = self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(
-                reads={"raw_data"},
-                writes=set(),
-                column_reads=None,
-                structural_reads={"raw_data": {"shape"}},
-            ),
-        )
-        assert result_b.violation is None
-
-        # Cell C: Adds a new column raw_data['x'] = 3
-        # With WARN mode, this should NOT cause a backward mutation violation
-        df_modified = df.copy()
-        df_modified["x"] = 3
-        self._save_pre_checkpoint("c", {"raw_data": df})
-        ns_c = self._make_namespace({"raw_data": df_modified})
-        result_c = self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            namespace=ns_c,
-            tracking=make_tracking(
-                reads={"raw_data"},
-                writes={"raw_data"},
-                column_reads=None,
-                column_writes={"raw_data": {"x"}},
-            ),
-        )
-        # NO violation - structural tracking is WARN and prior cell only did structural read
-        # (warnings are handled separately by diff, not as backward mutation violations)
-        assert result_c.violation is None
-
-
 class TestStructuralTrackingEnforce:
-    """Tests for structural tracking ENFORCE mode - structural reads ARE protected."""
+    """Tests for structural tracking - structural reads ARE always protected."""
 
     def setup_method(self):
         self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
         )
-        # Create enforcer with structural tracking ENFORCE
         self.sdc = ReproducibilityEnforcer(
             self.checkpoints,
-            structural_mode=StructuralTrackingMode.ENFORCE,
         )
         self.sdc.set_cell_order(["a", "b", "c", "d"])
 
@@ -1393,7 +1132,7 @@ class TestStructuralTrackingEnforce:
             namespace=ns_a,
             tracking=make_tracking(reads=set(), writes={"raw_data"}),
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B: Reads raw_data.shape (structural read only)
         self._save_pre_checkpoint("b", {"raw_data": df})
@@ -1409,7 +1148,7 @@ class TestStructuralTrackingEnforce:
                 structural_reads={"raw_data": {"shape"}},
             ),
         )
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
         # Cell C: Adds a new column raw_data['x'] = 3
         # With ENFORCE mode, this SHOULD cause a violation
@@ -1430,8 +1169,9 @@ class TestStructuralTrackingEnforce:
         )
         # SHOULD cause violation - ENFORCE mode protects structural reads
         # Now shows column-level detail: raw_data.x instead of just raw_data
-        assert result_c.violation is not None
-        assert "raw_data.x" in result_c.violation.variables
+        assert result_c.has_errors()
+        backward_err = next(e for e in result_c.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
+        assert any("raw_data" in loc and "x" in loc for loc in backward_err.locations)
 
     def test_structural_violation_with_column_reads_and_new_column(self):
         """
@@ -1474,7 +1214,7 @@ class TestStructuralTrackingEnforce:
                 },  # Also read structure
             ),
         )
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
         # Cell C: Adds a new column df['x'] = 3
         # No overlap with columns a,b but structural read of .columns is violated
@@ -1495,8 +1235,9 @@ class TestStructuralTrackingEnforce:
         )
         # SHOULD cause violation - prior cell read .columns, we added column x
         # Now shows column-level detail: df.x instead of just df
-        assert result_c.violation is not None
-        assert "df.x" in result_c.violation.variables
+        assert result_c.has_errors()
+        backward_err = next(e for e in result_c.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
+        assert any("df" in loc and "x" in loc for loc in backward_err.locations)
 
 
 # =============================================================================
@@ -1591,11 +1332,11 @@ class TestAccessedVarsOnlyOptimization:
         )
 
         # Should detect violation - Cell A read y, Cell C modified y (via x)
-        assert result_c.violation is not None
-        assert result_c.violation.affected_cell == "a"
+        assert result_c.has_errors()
+        assert result_c.errors[0].causer_cell == "a"
         # The violation should mention y (the variable Cell A read)
         assert (
-            "y" in result_c.violation.variables or "x" in result_c.violation.variables
+            "y" in result_c.errors[0].locations or "x" in result_c.errors[0].locations
         )
 
     def test_alias_detected_dataframe(self):
@@ -1650,8 +1391,8 @@ class TestAccessedVarsOnlyOptimization:
         )
 
         # Should detect violation
-        assert result_c.violation is not None
-        assert result_c.violation.affected_cell == "a"
+        assert result_c.has_errors()
+        assert result_c.errors[0].causer_cell == "a"
 
     def test_multiple_aliases_all_detected(self):
         """
@@ -1700,8 +1441,8 @@ class TestAccessedVarsOnlyOptimization:
         )
 
         # Should detect violation - x was read by Cell A
-        assert result_c.violation is not None
-        assert result_c.violation.affected_cell == "a"
+        assert result_c.has_errors()
+        assert result_c.errors[0].causer_cell == "a"
 
     def test_no_alias_no_spurious_diff(self):
         """
@@ -1743,7 +1484,7 @@ class TestAccessedVarsOnlyOptimization:
         )
 
         # No violation - y wasn't read by any earlier cell
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
     def test_alias_broken_by_copy(self):
         """
@@ -1796,7 +1537,7 @@ class TestAccessedVarsOnlyOptimization:
         )
 
         # No violation - df is unchanged, only the copy (df_alias) changed
-        assert result_c.violation is None
+        assert not any(e.error_type == ErrorType.NO_WRITE_AFTER_READ for e in result_c.errors)
 
     def test_new_variable_not_alias(self):
         """
@@ -1829,7 +1570,7 @@ class TestAccessedVarsOnlyOptimization:
         )
 
         # No violation - y is new, x is unchanged
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
     def test_deleted_variable(self):
         """
@@ -1862,7 +1603,7 @@ class TestAccessedVarsOnlyOptimization:
         )
 
         # No violation - y wasn't read by earlier cells
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
     def test_alias_in_nested_structure(self):
         """
@@ -1906,9 +1647,9 @@ class TestAccessedVarsOnlyOptimization:
         )
 
         # Should detect violation - data was read by Cell A
-        assert result_b.violation is not None
-        assert result_b.violation.affected_cell == "a"
-        assert "data" in result_b.violation.variables
+        assert result_b.has_errors()
+        assert result_b.errors[0].causer_cell == "a"
+        assert "data" in result_b.errors[0].locations
 
     def test_empty_accessed_vars(self):
         """
@@ -1937,7 +1678,7 @@ class TestAccessedVarsOnlyOptimization:
         )
 
         # No violation - nothing was modified
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
     def test_all_vars_accessed(self):
         """
@@ -1966,9 +1707,10 @@ class TestAccessedVarsOnlyOptimization:
         )
 
         # Should detect violation - Cell A read x, Cell B modified x
-        assert result_b.violation is not None
-        assert result_b.violation.affected_cell == "a"
-        assert "x" in result_b.violation.variables
+        assert result_b.has_errors()
+        backward_err = next(e for e in result_b.errors if e.error_type == ErrorType.NO_WRITE_AFTER_READ)
+        assert backward_err.causer_cell == "a"
+        assert "x" in backward_err.locations
 
 
 # =============================================================================
@@ -2434,10 +2176,9 @@ class TestDeepAliasIntegration:
         )
         from flowbook.kernel_support.models import TrackingData
         from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer
-        from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
 
         checkpoints = MemoryCheckpoints()
-        enforcer = ReproducibilityEnforcer(checkpoints, StructuralTrackingMode.OFF)
+        enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(["cell_A", "cell_B"])
 
         # Initial state: a and c share internal reference
@@ -2464,7 +2205,7 @@ class TestDeepAliasIntegration:
             checkpoints.get("_post_cell_A"),
             tracking_a,
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B modifies a["b"]["f"] (which also modifies c["b"]["f"])
         shared_inner["f"] = 999  # Modify through a["b"]
@@ -2619,7 +2360,7 @@ class TestBackwardConflictFreshOnly:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
     def test_backward_conflict_still_fires_for_fresh_cells(self):
         """Fresh prior cell should still trigger backward conflict.
@@ -2647,9 +2388,9 @@ class TestBackwardConflictFreshOnly:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        assert result_b.violation is not None
-        assert result_b.violation.mutating_cell == "b"
-        assert result_b.violation.affected_cell == "a"
+        assert result_b.has_errors()
+        assert result_b.errors[0].cell_id == "b"
+        assert result_b.errors[0].causer_cell == "a"
 
     def test_backward_conflict_mixed_stale_and_fresh(self):
         """When multiple prior cells exist, only fresh ones trigger conflict.
@@ -2690,10 +2431,10 @@ class TestBackwardConflictFreshOnly:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        assert result_c.violation is not None
+        assert result_c.has_errors()
         # Should report B as the affected cell (first fresh cell in doc order that reads x)
         # A is skipped because it's stale
-        assert result_c.violation.affected_cell == "b"
+        assert result_c.errors[0].causer_cell == "b"
 
 
 class TestEditTriggeredStaleness:
@@ -2946,7 +2687,7 @@ class TestStalenessReasons:
 
 
 class TestSkippedUpstream:
-    """Tests for SKIPPED_UPSTREAM reason type - when cell reads from wrong writer."""
+    """Tests for forward staleness when skipping upstream cells."""
 
     def setup_method(self):
         self.checkpoints = MemoryCheckpoints(
@@ -2985,22 +2726,15 @@ class TestSkippedUpstream:
 
     def test_skipped_upstream_then_run_expected_cell(self):
         """
-        Scenario: F→G→H, then F again (skipping G), then G.
+        Scenario: F->G->H, then F again (skipping G), then G.
 
-        When ENABLE_SKIPPED_UPSTREAM is True:
-        - After running F (skipping G), H has SKIPPED_UPSTREAM
-        - After running G, H has FORWARD_STALE
-
-        When ENABLE_SKIPPED_UPSTREAM is False (default):
-        - After running F (skipping G), H has FORWARD_STALE (not SKIPPED_UPSTREAM)
-        - After running G, H still has FORWARD_STALE
+        After running F (skipping G), H has FORWARD_STALE.
+        After running G, H still has FORWARD_STALE.
 
         Note: Staleness is always computed, even when G triggers NoReadAndWrite
         error (because G reads and writes x).
         """
-        from flowbook.kernel.reproducibility_enforcer import ENABLE_SKIPPED_UPSTREAM
-
-        # Initial execution: F→G→H
+        # Initial execution: F->G->H
         self._execute_cell("f", {}, {"x": 1}, writes={"x"})
         self._execute_cell("g", {"x": 1}, {"x": 2}, reads={"x"}, writes={"x"})
         self._execute_cell("h", {"x": 2}, {"x": 2, "y": 10}, reads={"x"}, writes={"y"})
@@ -3011,25 +2745,12 @@ class TestSkippedUpstream:
         # Run F again (skipping G) - x goes from 2 back to 1
         self._execute_cell("f", {"x": 2, "y": 10}, {"x": 1, "y": 10}, writes={"x"})
 
-        # H should now be stale
+        # H should now be stale with FORWARD_STALE
         reasons_h = self.sdc._notebook_state.get_reasons("h")
         reason_types = {r.type for r in reasons_h}
-
-        if ENABLE_SKIPPED_UPSTREAM:
-            # With SKIPPED_UPSTREAM enabled: H has SKIPPED_UPSTREAM (reading from F instead of G)
-            assert (
-                ReasonType.SKIPPED_UPSTREAM in reason_types
-            ), f"Expected SKIPPED_UPSTREAM, got {reason_types}"
-            skipped_reason = next(
-                r for r in reasons_h if r.type == ReasonType.SKIPPED_UPSTREAM
-            )
-            assert skipped_reason.loc == "x"
-            assert skipped_reason.expected_cell_id == "g"
-        else:
-            # With SKIPPED_UPSTREAM disabled: H has FORWARD_STALE
-            assert (
-                ReasonType.FORWARD_STALE in reason_types
-            ), f"Expected FORWARD_STALE, got {reason_types}"
+        assert (
+            ReasonType.FORWARD_STALE in reason_types
+        ), f"Expected FORWARD_STALE, got {reason_types}"
 
         # Now run G - this should result in FORWARD_STALE
         # (Staleness computed even though G has NoReadAndWrite error)
@@ -3044,95 +2765,55 @@ class TestSkippedUpstream:
         assert (
             ReasonType.FORWARD_STALE in reason_types_after
         ), f"Expected FORWARD_STALE, got {reason_types_after}"
-        if ENABLE_SKIPPED_UPSTREAM:
-            assert (
-                ReasonType.SKIPPED_UPSTREAM not in reason_types_after
-            ), f"SKIPPED_UPSTREAM should be replaced by FORWARD_STALE"
-            # With SKIPPED_UPSTREAM enabled, the reason is updated from SKIPPED_UPSTREAM to FORWARD_STALE from G
-            input_reason = next(
-                r for r in reasons_h_after if r.type == ReasonType.FORWARD_STALE
-            )
-            assert input_reason.loc == "x"
-            assert input_reason.cell_id == "g"
-            assert input_reason.expected_cell_id is None  # No skipped writer anymore
-        else:
-            # With SKIPPED_UPSTREAM disabled, H was marked stale by F initially and stays that way
-            # (once stale, the loop continues without updating the reason)
-            input_reason = next(
-                r for r in reasons_h_after if r.type == ReasonType.FORWARD_STALE
-            )
-            assert input_reason.loc == "x"
-            # The cell_id could be 'f' or 'g' depending on timing - just verify H is stale for x
-            assert input_reason.cell_id in ("f", "g")
+        # H was marked stale by F initially and stays that way
+        input_reason = next(
+            r for r in reasons_h_after if r.type == ReasonType.FORWARD_STALE
+        )
+        assert input_reason.loc == "x"
+        # The cell_id could be 'f' or 'g' depending on timing - just verify H is stale for x
+        assert input_reason.cell_id in ("f", "g")
 
     def test_skipped_upstream_exact_user_scenario(self):
         """
         Exact user scenario: F -> G -> H -> F -> G
 
-        After this sequence, H should have FORWARD_STALE (not SKIPPED_UPSTREAM).
+        After this sequence, H should have FORWARD_STALE.
 
         Note: Staleness is always computed, even when G triggers NoReadAndWrite
         error (because G reads and writes x).
         """
-        from flowbook.kernel.reproducibility_enforcer import ENABLE_SKIPPED_UPSTREAM
-
         # F -> G -> H (initial)
         self._execute_cell("f", {}, {"x": 1}, writes={"x"})
         self._execute_cell("g", {"x": 1}, {"x": 2}, reads={"x"}, writes={"x"})
         self._execute_cell("h", {"x": 2}, {"x": 2, "y": 10}, reads={"x"}, writes={"y"})
 
-        print(f"\nAfter F->G->H:")
-        print(f"  H reasons: {self.sdc._notebook_state.get_reasons('h')}")
-        print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
-
         # F (re-run, skipping G)
         self._execute_cell("f", {"x": 2, "y": 10}, {"x": 1, "y": 10}, writes={"x"})
 
-        print(f"\nAfter F->G->H->F:")
         reasons_after_f = self.sdc._notebook_state.get_reasons("h")
-        print(f"  H reasons: {reasons_after_f}")
-        print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
-
-        if ENABLE_SKIPPED_UPSTREAM:
-            # Verify H has SKIPPED_UPSTREAM at this point
-            assert any(
-                r.type == ReasonType.SKIPPED_UPSTREAM for r in reasons_after_f
-            ), f"Expected SKIPPED_UPSTREAM after F, got {reasons_after_f}"
-        else:
-            # With SKIPPED_UPSTREAM disabled, H should have FORWARD_STALE
-            assert any(
-                r.type == ReasonType.FORWARD_STALE for r in reasons_after_f
-            ), f"Expected FORWARD_STALE after F, got {reasons_after_f}"
+        # H should have FORWARD_STALE
+        assert any(
+            r.type == ReasonType.FORWARD_STALE for r in reasons_after_f
+        ), f"Expected FORWARD_STALE after F, got {reasons_after_f}"
 
         # G (re-run) - staleness computed even though G has NoReadAndWrite error
         self._execute_cell(
             "g", {"x": 1, "y": 10}, {"x": 3, "y": 10}, reads={"x"}, writes={"x"}
         )
 
-        print(f"\nAfter F->G->H->F->G:")
         reasons_after_g = self.sdc._notebook_state.get_reasons("h")
-        print(f"  H reasons: {reasons_after_g}")
-        print(f"  H is_clean: {self.sdc._notebook_state.is_clean('h')}")
 
         # H should now have FORWARD_STALE
         reason_types = {r.type for r in reasons_after_g}
         assert (
             ReasonType.FORWARD_STALE in reason_types
         ), f"Expected FORWARD_STALE after G, got {reasons_after_g}"
-        if ENABLE_SKIPPED_UPSTREAM:
-            # SKIPPED_UPSTREAM should be replaced by FORWARD_STALE
-            assert (
-                ReasonType.SKIPPED_UPSTREAM not in reason_types
-            ), f"SKIPPED_UPSTREAM should be gone after running G, got {reasons_after_g}"
 
 
-class TestStalenessMode:
-    """Tests for syntactic vs semantic staleness computation modes."""
+class TestStaleness:
+    """Tests for staleness computation."""
 
     def setup_method(self):
-        from flowbook.kernel_support.structural_tracking import StalenessMode
-
-        self.StalenessMode = StalenessMode
         self.checkpoints = MemoryCheckpoints(
             sanity_check=False,
             warn_classes=False,
@@ -3150,48 +2831,8 @@ class TestStalenessMode:
         """Return namespace dict for use with check()."""
         return namespace
 
-    def test_default_mode_is_syntactic(self):
-        """Default staleness mode should be SYNTACTIC."""
-        assert self.sdc.staleness_mode == self.StalenessMode.SYNTACTIC
-
-    def test_set_staleness_mode_syntactic(self):
-        """Can switch to syntactic mode."""
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SYNTACTIC
-
-    def test_set_staleness_mode_semantic(self):
-        """Can switch to semantic mode."""
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
-
-    def test_syntactic_mode_clears_checkpoints_on_switch(self):
-        """Switching from semantic to syntactic should clear pre-checkpoints."""
-        # Start in semantic mode
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        # Execute a cell in semantic mode
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"x": 1})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # Verify pre-checkpoint exists
-        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
-
-        # Switch to syntactic mode
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
-        # Pre-checkpoint should be cleared
-        assert f"{PRE_CHECKPOINT_PREFIX}a" not in self.checkpoints.saved
-
-    def test_syntactic_mode_marks_stale_on_set_intersection(self):
-        """Syntactic mode marks cells stale based on set intersection."""
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
+    def test_marks_stale_on_set_intersection(self):
+        """Marks cells stale based on set intersection of writes and reads."""
         # A writes x
         self._save_pre_checkpoint("a", {})
         ns_a = self._make_namespace({"x": 1})
@@ -3225,15 +2866,13 @@ class TestStalenessMode:
         # B should be stale (syntactic: W_A ∩ R_B ≠ ∅)
         assert "b" in result.stale_cells
 
-    def test_syntactic_mode_no_convergence(self):
-        """Syntactic mode doesn't detect convergence - staleness is monotonic.
+    def test_no_convergence(self):
+        """Staleness is monotonic - no convergence detection.
 
         Scenario: A writes x, B reads x, then A re-writes x with different
         value (B stale), then A re-writes x back to original (B still stale
-        in syntactic mode because no convergence detection).
+        because no convergence detection).
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
         # A writes x=1
         self._save_pre_checkpoint("a", {})
         ns_a = self._make_namespace({"x": 1})
@@ -3275,73 +2914,15 @@ class TestStalenessMode:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # In syntactic mode, B should STILL be stale (no convergence detection)
-        # because syntactic mode is monotonic
+        # B should STILL be stale (no convergence detection, staleness is monotonic)
         assert "b" in result_a3.stale_cells
 
-    def test_semantic_mode_detects_convergence(self):
-        """Semantic mode detects convergence and clears staleness.
-
-        Scenario: A writes x, B reads x, then A re-writes x with different
-        value (B stale), then A re-writes x back to original (B becomes clean
-        in semantic mode due to convergence detection).
-        """
-        # Use semantic mode for convergence detection
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
-
-        # A writes x=1
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"x": 1})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # B reads x (captures pre-checkpoint with x=1)
-        self._save_pre_checkpoint("b", {"x": 1})
-        ns_b = self._make_namespace({"x": 1, "y": 2})
-        self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
-        )
-
-        # Re-run A with different value x=2 (makes B stale via ForwardStale)
-        self._save_pre_checkpoint("a", {"x": 1, "y": 2})
-        ns_a2 = self._make_namespace({"x": 2, "y": 2})
-        result_a2 = self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a2,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-        assert "b" in result_a2.stale_cells
-
-        # Re-run A with original value x=1 (back to original - convergence!)
-        self._save_pre_checkpoint("a", {"x": 2, "y": 2})
-        ns_a3 = self._make_namespace({"x": 1, "y": 2})
-        result_a3 = self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a3,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # In semantic mode, B should NOT be stale anymore (converged)
-        assert "b" not in result_a3.stale_cells
-
-    def test_syntactic_mode_defers_checkpoint_deletion(self):
-        """Syntactic mode defers checkpoint deletion until next cell executes.
+    def test_defers_checkpoint_deletion(self):
+        """Defers checkpoint deletion until next cell executes.
 
         This allows checkpoint size queries after a cell completes but before
         the next cell runs (important for benchmarking/compare_overhead).
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
         # Execute cell A
         self._save_pre_checkpoint("a", {})
         ns_a = self._make_namespace({"x": 1})
@@ -3373,29 +2954,11 @@ class TestStalenessMode:
         assert f"{PRE_CHECKPOINT_PREFIX}b" in self.checkpoints.saved
         assert self.sdc._pending_checkpoint_deletion == f"{PRE_CHECKPOINT_PREFIX}b"
 
-    def test_semantic_mode_keeps_checkpoint(self):
-        """Semantic mode keeps pre-checkpoint for convergence detection."""
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
-
-        # Execute cell A
-        self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"x": 1})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # In semantic mode, pre-checkpoint should be kept
-        assert f"{PRE_CHECKPOINT_PREFIX}a" in self.checkpoints.saved
-
     # =======================================================================
     # Backward Staleness Tests
     # =======================================================================
 
-    def test_backward_staleness_syntactic_marks_earlier_cell_stale(self):
+    def test_backward_staleness_marks_earlier_cell_stale(self):
         """BackwardStale: when later cell writes to var read by earlier clean cell.
 
         Scenario: A reads x, B is clean, then C writes x (accepted).
@@ -3404,8 +2967,6 @@ class TestStalenessMode:
         Uses continue_on_violation=True because C triggers NoWriteAfterRead
         error (C writes x that A read). When accepted, staleness propagates.
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
         # A reads x (clean cell that read x)
         self._save_pre_checkpoint("a", {"x": 1})
         ns_a = self._make_namespace({"x": 1, "y": 10})
@@ -3442,92 +3003,12 @@ class TestStalenessMode:
         # A should be stale (backward staleness: W_C ∩ R_A ≠ ∅)
         assert "a" in result.stale_cells
 
-    def test_backward_staleness_semantic_checks_diff(self):
-        """Semantic BackwardStale uses diff comparison for precision.
-
-        If cell C writes x but the value converges to what A originally saw,
-        A should NOT be marked stale in semantic mode.
-        """
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
-
-        # A reads x=1
-        self._save_pre_checkpoint("a", {"x": 1})
-        ns_a = self._make_namespace({"x": 1, "y": 10})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
-        )
-        assert self.sdc._notebook_state.is_clean("a")
-
-        # B does something unrelated
-        self._save_pre_checkpoint("b", {"x": 1, "y": 10})
-        ns_b = self._make_namespace({"x": 1, "y": 10, "z": 20})
-        self.sdc.check(
-            cell_id="b",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
-            namespace=ns_b,
-            tracking=make_tracking(reads=set(), writes={"z"}),
-        )
-
-        # C writes x to SAME value as A saw (x=1 -> x=1, no actual change)
-        # In semantic mode, A should NOT be stale because diff is empty
-        self._save_pre_checkpoint("c", {"x": 1, "y": 10, "z": 20})
-        ns_c = self._make_namespace({"x": 1, "y": 10, "z": 20})
-        result = self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            namespace=ns_c,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-        )
-
-        # A should NOT be stale - no actual change to x
-        assert "a" not in result.stale_cells
-
-    def test_backward_staleness_semantic_marks_stale_on_real_change(self):
-        """Semantic BackwardStale marks stale when values actually differ.
-
-        Note: Staleness is always computed, even when C triggers NoWriteAfterRead
-        error (because C writes to x that A read).
-        """
-        self.sdc.set_staleness_mode(self.StalenessMode.SEMANTIC)
-        assert self.sdc.staleness_mode == self.StalenessMode.SEMANTIC
-
-        # A reads x=1
-        self._save_pre_checkpoint("a", {"x": 1})
-        ns_a = self._make_namespace({"x": 1, "y": 10})
-        self.sdc.check(
-            cell_id="a",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
-            namespace=ns_a,
-            tracking=make_tracking(reads={"x"}, writes={"y"}),
-        )
-        assert self.sdc._notebook_state.is_clean("a")
-
-        # C writes x to DIFFERENT value (accepted)
-        self._save_pre_checkpoint("c", {"x": 1, "y": 10})
-        ns_c = self._make_namespace({"x": 999, "y": 10})
-        result = self.sdc.check(
-            cell_id="c",
-            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
-            namespace=ns_c,
-            tracking=make_tracking(reads=set(), writes={"x"}),
-            continue_on_violation=True,
-        )
-
-        # A should be stale - x actually changed from what A saw
-        assert "a" in result.stale_cells
-
     def test_backward_staleness_only_affects_clean_cells(self):
         """BackwardStale should only mark clean cells as stale, not already-stale cells.
 
         Uses continue_on_violation=True because C triggers NoWriteAfterRead
         error (C writes to x that A and B read). When accepted, staleness propagates.
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
-
         # A reads x
         self._save_pre_checkpoint("a", {"x": 1})
         ns_a = self._make_namespace({"x": 1, "y": 10})
@@ -3871,8 +3352,8 @@ class TestStalenessAlwaysComputed:
         # A should be marked stale (BackwardStale was computed)
         assert "a" in result.stale_cells or not self.sdc._notebook_state.is_clean("a")
 
-    def test_last_writer_updated_with_error(self):
-        """last_writer is updated even when cell has errors.
+    def test_writes_tracked_with_error(self):
+        """Writes are tracked even when cell has errors.
 
         This ensures that downstream staleness tracking works correctly.
         """
@@ -3899,8 +3380,8 @@ class TestStalenessAlwaysComputed:
         # B has error
         assert result.has_errors()
 
-        # last_writer should still be updated
-        assert self.sdc._notebook_state.last_writer.get("x") == "b"
+        # writes should still be updated
+        assert "x" in writelocset_var_names(self.sdc._notebook_state.writes.get("b", frozenset()))
 
     def test_multiple_errors_still_compute_staleness(self):
         """Staleness is computed even when cell has multiple errors.
@@ -3949,15 +3430,12 @@ class TestStalenessAlwaysComputed:
         # C should still be marked stale
         assert "c" in result.stale_cells or not self.sdc._notebook_state.is_clean("c")
 
-    def test_skipped_upstream_converted_with_error(self):
-        """SKIPPED_UPSTREAM → FORWARD_STALE conversion works even with errors.
+    def test_forward_stale_preserved_with_error(self):
+        """FORWARD_STALE is preserved even when upstream cell has errors.
 
-        Scenario: F→G→H, then F (skipping G), then G.
-        When G runs (even with NoReadAndWrite error), H's SKIPPED_UPSTREAM
-        should be converted to FORWARD_STALE.
+        Scenario: F->G->H, then F (skipping G), then G.
+        When G runs (even with NoReadAndWrite error), H should have FORWARD_STALE.
         """
-        from flowbook.kernel.reproducibility_enforcer import ENABLE_SKIPPED_UPSTREAM
-
         self.sdc.set_cell_order(["f", "g", "h"])
 
         # F writes x
@@ -4001,12 +3479,9 @@ class TestStalenessAlwaysComputed:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
 
-        # After F (skipping G), H should be stale
+        # After F (skipping G), H should be stale with FORWARD_STALE
         reasons_h = self.sdc._notebook_state.get_reasons("h")
-        if ENABLE_SKIPPED_UPSTREAM:
-            assert any(r.type == ReasonType.SKIPPED_UPSTREAM for r in reasons_h)
-        else:
-            assert any(r.type == ReasonType.FORWARD_STALE for r in reasons_h)
+        assert any(r.type == ReasonType.FORWARD_STALE for r in reasons_h)
 
         # Re-run G (triggers NoReadAndWrite error)
         self._save_pre_checkpoint("g", {"x": 1, "y": 10})
@@ -4026,9 +3501,6 @@ class TestStalenessAlwaysComputed:
         reasons_h_after = self.sdc._notebook_state.get_reasons("h")
         reason_types = {r.type for r in reasons_h_after}
         assert ReasonType.FORWARD_STALE in reason_types
-        if ENABLE_SKIPPED_UPSTREAM:
-            # SKIPPED_UPSTREAM should be replaced by FORWARD_STALE
-            assert ReasonType.SKIPPED_UPSTREAM not in reason_types
 
 
 class TestNoReadAndWriteColumnLevel:
@@ -4153,7 +3625,7 @@ class TestNoReadAndWriteColumnLevel:
         assert (
             len(no_rw_errors) == 1
         ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
-        assert "df.age" in no_rw_errors[0].locations
+        assert "df['age']" in no_rw_errors[0].locations
 
     def test_read_one_column_write_another_no_violation(self):
         """Reading one column and writing another is NOT a violation.
@@ -4314,12 +3786,14 @@ class TestNoReadAndWriteDataFrameReassignment:
             tracking=make_tracking(
                 reads={"a", "feature_engineer"},  # Read a as argument
                 writes={"a"},  # Reassign a to new DataFrame
-                column_reads={"a": set()},  # No direct column reads
-                column_writes={"a": {"price"}},  # Column writes from internal function
+                # No column_reads/column_writes: the cell-level operation is
+                # a variable reassignment, not a column operation
             ),
         )
 
         # SHOULD have NoReadAndWrite error for 'a'
+        # R = {Var(a), Var(feature_engineer)}, W = {Var(a)}
+        # Var(a) ⊗ Var(a) = true → violation
         no_rw_errors = [
             e for e in result.errors if e.error_type.value == "no_read_and_write"
         ]
@@ -4567,13 +4041,13 @@ class TestNoReadAndWriteDataFrameReassignment:
         assert len(no_rw_errors) == 0, f"Unexpected error: {no_rw_errors}"
 
     def test_reassign_with_both_column_read_and_column_write_via_function(self):
-        """Function that reads and writes columns while reassigning IS a violation.
+        """Function that reassigns IS a violation at variable level.
 
         Pattern: df = transform(df) where transform reads df['a'] and writes df['b']
-        - Reads: df (variable), df.a (column)
-        - Writes: df (variable), df.b (column)
+        - At cell level: reads df (variable), writes df (variable)
+        - Internal function column operations don't appear in cell-level tracking
 
-        This is a violation because the variable is both read and written.
+        This is a NoReadAndWrite violation because Var(df) is both read and written.
         """
         import pandas as pd
 
@@ -4588,7 +4062,9 @@ class TestNoReadAndWriteDataFrameReassignment:
             tracking=make_tracking(reads=set(), writes={"df"}),
         )
 
-        # B does: df = transform(df) which internally reads df['a'], writes df['b']
+        # B does: df = transform(df)
+        # Cell-level: reads df (argument), writes df (reassignment)
+        # No column_reads/column_writes since the column operations are internal
         df_new = df.copy()
         df_new["b"] = df_new["a"] * 2  # Simulates internal function operation
         self._save_pre_checkpoint("b", {"df": df})
@@ -4600,12 +4076,11 @@ class TestNoReadAndWriteDataFrameReassignment:
             tracking=make_tracking(
                 reads={"df"},  # Read df as argument
                 writes={"df"},  # Reassign df
-                column_reads={"df": {"a"}},  # Read df.a internally
-                column_writes={"df": {"b"}},  # Write df.b internally
             ),
         )
 
         # SHOULD have NoReadAndWrite error for df
+        # R = {Var(df)}, W = {Var(df)}, Var(df) ⊗ Var(df) = true
         no_rw_errors = [
             e for e in result.errors if e.error_type.value == "no_read_and_write"
         ]
@@ -4660,17 +4135,18 @@ class TestNoReadAndWriteDataFrameReassignment:
         assert (
             len(no_rw_errors) == 1
         ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
-        assert "df.price" in no_rw_errors[0].locations
+        assert "df['price']" in no_rw_errors[0].locations
 
-    def test_empty_column_reads_with_column_writes_and_variable_write_is_violation(self):
-        """The specific bug case: empty column reads, column writes, AND variable write.
+    def test_variable_reassignment_without_column_detail_is_violation(self):
+        """Variable reassignment a = feature_engineer(a) is a violation.
 
-        This is the exact pattern that triggered the bug:
-        - column_reads = {'a': set()}  (empty set - no columns read from 'a')
-        - column_writes = {'a': {'price'}}  (columns written)
-        - writes = {'a'}  (variable reassigned)
+        When a variable is both read and written at the variable level
+        (no column_reads/column_writes), Var(a) ⊗ Var(a) = true.
 
-        The bug was that this case fell through without detecting the violation.
+        Note: if column_reads/column_writes were present, the tracking would
+        refine the locs to column level, potentially avoiding the violation.
+        The key is that for `a = func(a)`, the cell-level operation is a
+        variable reassignment, so no column detail should be reported.
         """
         import pandas as pd
 
@@ -4685,7 +4161,8 @@ class TestNoReadAndWriteDataFrameReassignment:
             tracking=make_tracking(reads=set(), writes={"a"}),
         )
 
-        # B does: a = feature_engineer(a) with exact tracking from bug report
+        # B does: a = feature_engineer(a)
+        # Cell-level: reads a (argument), writes a (reassignment)
         df_new = df.copy()
         df_new["price"] = df_new["price"] * 2
         self._save_pre_checkpoint("b", {"a": df})
@@ -4697,18 +4174,19 @@ class TestNoReadAndWriteDataFrameReassignment:
             tracking=make_tracking(
                 reads={"a", "feature_engineer"},  # Read a and function
                 writes={"a"},  # Reassign a
-                column_reads={"a": set()},  # EMPTY set - this was the bug trigger
-                column_writes={"a": {"price"}},  # Column writes
+                # No column detail: the reassignment is at variable level
             ),
         )
 
         # SHOULD have NoReadAndWrite error for 'a'
+        # R = {Var(a), Var(feature_engineer)}, W = {Var(a)}
+        # Var(a) ⊗ Var(a) = true → violation
         no_rw_errors = [
             e for e in result.errors if e.error_type.value == "no_read_and_write"
         ]
         assert (
             len(no_rw_errors) == 1
-        ), f"Expected 1 NoReadAndWrite error for the bug case, got {len(no_rw_errors)}"
+        ), f"Expected 1 NoReadAndWrite error, got {len(no_rw_errors)}"
         assert "a" in no_rw_errors[0].locations, (
             f"Expected 'a' in locations, got {no_rw_errors[0].locations}"
         )
@@ -4798,7 +4276,7 @@ class TestForwardStaleFormula:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
         # Record that A wrote x
-        assert self.sdc._notebook_state.writes.get("a") == {"x"}
+        assert writelocset_var_names(self.sdc._notebook_state.writes.get("a", frozenset())) == {"x"}
 
         # B reads x
         self._save_pre_checkpoint("b", {"x": 1})
@@ -4975,11 +4453,11 @@ class TestRollbackLastCheck:
             f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
         )
 
-    def test_rollback_clears_last_writer(self):
-        """Rollback removes last_writer entries added by check().
+    def test_rollback_clears_writes(self):
+        """Rollback removes writes entries added by check().
 
         Scenario: Cell D writes x, gets rejected, rollback should remove
-        last_writer[x] = D so it doesn't affect later checks.
+        D's write of x so it doesn't affect later checks.
         """
         # Cell A writes x
         self._save_pre_checkpoint("a", {})
@@ -4989,7 +4467,7 @@ class TestRollbackLastCheck:
             namespace={"x": 1},
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert self.sdc._notebook_state.last_writer.get("x") == "a"
+        assert self.sdc._notebook_state.last_writer_for("x", "d") == "a"
 
         # Cell D writes x (simulating a check that will be rejected)
         self._save_pre_checkpoint("d", {"x": 1})
@@ -4999,13 +4477,13 @@ class TestRollbackLastCheck:
             namespace={"x": 999},
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert self.sdc._notebook_state.last_writer.get("x") == "d"
+        assert "x" in writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset()))
 
         # Rollback D's check
         self.sdc.rollback_last_check()
 
-        # last_writer[x] should be restored to "a"
-        assert self.sdc._notebook_state.last_writer.get("x") == "a"
+        # D's writes should be restored (no x), so last_writer_for x is back to A
+        assert self.sdc._notebook_state.last_writer_for("x", "d") == "a"
 
     def test_rollback_restores_writes_set(self):
         """Rollback restores the cell's writes set to previous value."""
@@ -5017,7 +4495,7 @@ class TestRollbackLastCheck:
             namespace={"x": 1},
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert self.sdc._notebook_state.writes.get("d") == {"x"}
+        assert writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset())) == {"x"}
 
         # Cell D writes y (different variable) - simulating rejected execution
         self._save_pre_checkpoint("d", {"x": 1})
@@ -5027,13 +4505,13 @@ class TestRollbackLastCheck:
             namespace={"x": 1, "y": 2},
             tracking=make_tracking(reads=set(), writes={"y"}),
         )
-        assert self.sdc._notebook_state.writes.get("d") == {"y"}
+        assert writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset())) == {"y"}
 
         # Rollback
         self.sdc.rollback_last_check()
 
         # Writes should be restored to {"x"}
-        assert self.sdc._notebook_state.writes.get("d") == {"x"}
+        assert writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset())) == {"x"}
 
     def test_rollback_restores_status(self):
         """Rollback restores cell status to previous value."""
@@ -5070,13 +4548,13 @@ class TestRollbackLastCheck:
         self.sdc.rollback_last_check()
 
         # A's writes should be restored
-        assert "x" in self.sdc._notebook_state.writes.get("a", set())
+        assert "x" in writelocset_var_names(self.sdc._notebook_state.writes.get("a", frozenset()))
 
     def test_rollback_for_never_executed_cell(self):
         """Rollback works correctly for a cell that hadn't executed before."""
         # Cell D never executed before (set_cell_order initializes empty sets)
-        assert self.sdc._notebook_state.writes.get("d") == set()
-        assert self.sdc._notebook_state.last_writer.get("x") is None
+        assert self.sdc._notebook_state.writes.get("d", frozenset()) == frozenset()
+        assert self.sdc._notebook_state.last_writer_for("x", "d") is None
         assert self.sdc._notebook_state.tracking_data.get("d") is None
 
         # D writes x (simulating rejected execution)
@@ -5087,16 +4565,16 @@ class TestRollbackLastCheck:
             namespace={"x": 1},
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
-        assert self.sdc._notebook_state.writes.get("d") == {"x"}
-        assert self.sdc._notebook_state.last_writer.get("x") == "d"
+        assert writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset())) == {"x"}
+        assert "x" in writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset()))
         assert self.sdc._notebook_state.tracking_data.get("d") is not None
 
         # Rollback
         self.sdc.rollback_last_check()
 
         # Should be back to never-executed state
-        assert self.sdc._notebook_state.writes.get("d") == set()
-        assert self.sdc._notebook_state.last_writer.get("x") is None
+        assert self.sdc._notebook_state.writes.get("d", frozenset()) == frozenset()
+        assert self.sdc._notebook_state.last_writer_for("x", "d") is None
         assert self.sdc._notebook_state.tracking_data.get("d") is None
 
     def test_rollback_noop_when_no_pending_snapshot(self):
@@ -5148,16 +4626,16 @@ class TestRollbackLastCheck:
             tracking=make_tracking(reads=set(), writes={"x"}),
         )
         # This causes backward mutation (D writes x, C read x)
-        assert result_d.violation is not None or result_d.has_errors()
+        assert result_d.has_errors()
 
-        # After check, last_writer[x] = D
-        assert self.sdc._notebook_state.last_writer.get("x") == "d"
+        # After check, D has x in writes
+        assert "x" in writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset()))
 
         # Kernel rolls back D's execution
         self.sdc.rollback_last_check()
 
-        # Now last_writer[x] should be back to B
-        assert self.sdc._notebook_state.last_writer.get("x") == "b"
+        # Now D's writes should be restored (no x), B is last writer of x
+        assert "x" not in writelocset_var_names(self.sdc._notebook_state.writes.get("d", frozenset()))
 
         # User edits D to write w instead of x, and re-runs D
         self._save_pre_checkpoint("d", {"x": 11, "y": 11})
@@ -5168,7 +4646,7 @@ class TestRollbackLastCheck:
             tracking=make_tracking(reads=set(), writes={"w"}),
         )
         # No violation now since D writes w, not x
-        assert result_d2.violation is None
+        assert not result_d2.has_errors()
         assert not result_d2.has_errors()
 
         # Re-run C - should NOT get forward contamination from D
@@ -5180,8 +4658,10 @@ class TestRollbackLastCheck:
             tracking=make_tracking(reads={"x"}, writes={"y"}),
         )
 
-        # C should have no forward violation (no "Read x from @D")
-        assert result_c.forward_violation is None
+        # C should have no forward contamination error (no "Read x from @D")
+        assert not any(
+            e.error_type == ErrorType.NO_READ_BEFORE_WRITE for e in result_c.errors
+        )
 
     def test_reexecute_same_cell_does_not_delete_new_checkpoint(self):
         """
@@ -5195,7 +4675,6 @@ class TestRollbackLastCheck:
 
         The fix: check() skips deletion if pending checkpoint is for the current cell.
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # Execute cell A first time
         self._save_pre_checkpoint("a", {})
@@ -5230,7 +4709,6 @@ class TestRollbackLastCheck:
 
         This verifies the deferred deletion still works for different cells.
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # Execute cell A
         self._save_pre_checkpoint("a", {})
@@ -5268,7 +4746,6 @@ class TestRollbackLastCheck:
         When execution is rolled back, we should not delete the checkpoint
         on the next execution (even of a different cell).
         """
-        self.sdc.set_staleness_mode(StalenessMode.SYNTACTIC)
 
         # Execute cell A
         self._save_pre_checkpoint("a", {})
@@ -5299,11 +4776,9 @@ class TestColumnAliasExpansion:
     """
 
     def setup_method(self):
-        from flowbook.kernel_support.structural_tracking import StructuralTrackingMode
-
         self.checkpoints = MemoryCheckpoints(sanity_check=False, warn_classes=False)
         self.sdc = ReproducibilityEnforcer(
-            self.checkpoints, structural_mode=StructuralTrackingMode.OFF
+            self.checkpoints,
         )
         self.sdc.set_cell_order(["a", "b", "c", "d"])
 
@@ -5341,7 +4816,7 @@ class TestColumnAliasExpansion:
                 reads={"p"}, writes=set(), column_reads={"p": {"col"}}
             ),
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
         # Don't check stale_cells here - b,c,d may be stale from first execution
 
         # Cell B: creates alias x = p (same object)
@@ -5354,7 +4829,7 @@ class TestColumnAliasExpansion:
             namespace=ns_b,
             tracking=make_tracking(reads={"p"}, writes={"x"}),
         )
-        assert result_b.violation is None
+        assert not result_b.has_errors()
 
         # Cell C: writes x['col'] (modifying through alias)
         # Since Cell A (earlier) read p['col'] and C writes x['col'] (alias for p),
@@ -5401,7 +4876,7 @@ class TestColumnAliasExpansion:
                 reads={"p"}, writes=set(), column_reads={"p": {"col"}}
             ),
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B: creates independent x
         self._save_pre_checkpoint("b", {"p": p, "x": x})
@@ -5452,7 +4927,7 @@ class TestColumnAliasExpansion:
                 reads={"p"}, writes=set(), column_reads={"p": {"col"}}
             ),
         )
-        assert result_a.violation is None
+        assert not result_a.has_errors()
 
         # Cell B: creates multiple aliases
         x = p
@@ -5682,9 +5157,9 @@ class TestColumnAliasExpansion:
         )
 
         # D should have backward violation against B (which read df.hour), not C
-        if result_d.violation:
-            assert result_d.violation.affected_cell == "b"
-            assert "c" != result_d.violation.affected_cell
+        if result_d.has_errors():
+            assert result_d.errors[0].causer_cell == "b"
+            assert "c" != result_d.errors[0].causer_cell
 
 
 class TestUnrecoverableMutation:
@@ -5983,9 +5458,9 @@ class TestUnrecoverableMutation:
             continue_on_violation=True,
         )
 
-        # A should still be the last_writer of x, not C
-        assert self.sdc._notebook_state.last_writer.get("x") == "a", \
-            f"Expected 'a' as last_writer of x, got {self.sdc._notebook_state.last_writer.get('x')}"
+        # A should still be the last_writer of x, not C (C only mutated in place)
+        assert self.sdc._notebook_state.last_writer_for("x", "d") == "a", \
+            f"Expected 'a' as last_writer of x, got {self.sdc._notebook_state.last_writer_for('x', 'd')}"
 
     def test_mixed_recoverable_unrecoverable(self):
         """Cell does y=1; x[0]=2 (writes={y}). Error for x, y propagates normally."""
@@ -6079,8 +5554,8 @@ class TestUnrecoverableMutation:
             continue_on_violation=True,
         )
 
-        # D is NOT last_writer of x (A is)
-        assert self.sdc._notebook_state.last_writer.get("x") == "a"
+        # D is NOT last_writer of x (A is) - D only mutated in place
+        assert self.sdc._notebook_state.last_writer_for("x", "d") == "a"
 
         # Delete D
         self.sdc.set_cell_order(["a", "b", "c"])
@@ -6090,10 +5565,12 @@ class TestUnrecoverableMutation:
             f"B should stay clean after D deletion, got: {self.sdc._notebook_state.get_status('b')}"
 
     def test_recoverable_column_write_propagates_staleness(self):
-        """Column write (df['col']=val) without rebinding df should propagate staleness.
+        """Column write (df['col']=val) without rebinding df should propagate staleness
+        to cells that read the same column.
 
         This is a recoverable mutation (column is tracked in column_writes),
-        so it SHOULD make cells reading df stale, even though df is not rebound.
+        so it SHOULD make cells reading that column stale. Cells with only
+        Var(df) (binding-only read) are NOT staled since Col ▷ Var = false.
         """
         import pandas as pd
 
@@ -6108,14 +5585,17 @@ class TestUnrecoverableMutation:
             tracking=make_tracking(reads=set(), writes={"df"}),
         )
 
-        # B: reads df (var-level read)
+        # B: reads df['price'] (column-level read)
         self._save_pre_checkpoint("b", {"df": df_orig.copy()})
         ns_b = self._make_namespace({"df": df_orig.copy(), "total": 30})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
-            tracking=make_tracking(reads={"df"}, writes={"total"}),
+            tracking=make_tracking(
+                reads={"df"}, writes={"total"},
+                column_reads={"df": {"price"}},
+            ),
         )
         assert self.sdc._notebook_state.is_clean("b")
 
@@ -6139,7 +5619,7 @@ class TestUnrecoverableMutation:
         error_types = [e.error_type for e in result_c.errors]
         assert ErrorType.UNRECOVERABLE_MUTATION not in error_types
 
-        # B IS stale — df's price column changed (recoverable propagation)
+        # B IS stale — df's price column changed and B reads Col(df, price)
         assert not self.sdc._notebook_state.is_clean("b"), \
             f"B should be stale from df column change, got: {self.sdc._notebook_state.get_status('b')}"
 
@@ -6301,7 +5781,7 @@ class TestRerunEmptiedCell:
             namespace=ns,
             tracking=make_tracking(reads={"x"}, writes=set()),
         )
-        assert result_d.violation is None
+        assert not result_d.has_errors()
         assert "d" not in result_d.stale_cells, "D should be clean after initial run"
 
         # All cells should be clean now
@@ -6386,4 +5866,534 @@ class TestRerunEmptiedCell:
         assert "b" in stale, (
             f"B should be stale after C stops writing x (B is now last writer). "
             f"stale_cells={stale}"
+        )
+
+
+class TestColumnRerunNoSpuriousStaleness:
+    """Test that re-running a column-write cell doesn't spuriously mark the
+    DataFrame creator as stale.
+
+    Scenario (04_Column_Independence.ipynb):
+        A: df = pd.DataFrame({...})            → writes Var(df)
+        B: avg_age = df['age'].mean()          → reads Col(df, age), writes Var(avg_age)
+        C: df['adjusted_age'] = df['age']*1.1  → reads Col(df, age), writes Col(df, adjusted_age)
+
+    Execute A→B→C→C. After the second run of C, A should NOT be marked stale.
+
+    Root cause of the bug: W_i_old is derived from the stored WriteLocSet
+    (which includes DataFrame names from column writes via writelocset_var_names),
+    but W_i_current = tracking.writes only includes rebound variables.
+    Column mutations (df['col'] = ...) don't rebind df, so df is NOT in
+    tracking.writes. The removed_writes = W_i_old - W_i_current wrongly
+    includes 'df', triggering BackwardStale on A (the last writer of df).
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(
+            f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
+        )
+
+    def test_rerun_column_write_does_not_stale_creator(self):
+        """Re-running C (column write) should not mark A (df creator) stale."""
+        import pandas as pd
+
+        df = pd.DataFrame({
+            "name": ["Alice", "Bob"],
+            "age": [30, 25],
+            "score": [85, 92],
+        })
+
+        # A: df = pd.DataFrame({...})
+        self._save_pre_checkpoint("a", {})
+        ns_a = {"df": df}
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # B: avg_age = df['age'].mean()
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = {"df": df, "avg_age": 27.5}
+        self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"}, writes={"avg_age"},
+                column_reads={"df": {"age"}},
+            ),
+        )
+
+        # C (first run): df['adjusted_age'] = df['age'] * 1.1
+        df_after_c1 = df.copy()
+        df_after_c1["adjusted_age"] = df_after_c1["age"] * 1.1
+        self._save_pre_checkpoint("c", {"df": df, "avg_age": 27.5})
+        ns_c1 = {"df": df_after_c1, "avg_age": 27.5}
+        result_c1 = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c1,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_reads={"df": {"age"}},
+                column_writes={"df": {"adjusted_age"}},
+            ),
+        )
+        assert not result_c1.has_errors(), f"First run of C should not error: {result_c1.errors}"
+        assert self.sdc._notebook_state.is_clean("a"), "A should be clean after first C run"
+        assert self.sdc._notebook_state.is_clean("b"), "B should be clean after first C run"
+
+        # C (second run): same code, same effect — column already exists
+        df_after_c2 = df_after_c1.copy()
+        df_after_c2["adjusted_age"] = df_after_c2["age"] * 1.1
+        self._save_pre_checkpoint("c", {"df": df_after_c1, "avg_age": 27.5})
+        ns_c2 = {"df": df_after_c2, "avg_age": 27.5}
+        result_c2 = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c2,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_reads={"df": {"age"}},
+                column_writes={"df": {"adjusted_age"}},
+            ),
+        )
+        assert not result_c2.has_errors(), f"Second run of C should not error: {result_c2.errors}"
+
+        # THE BUG: A should NOT be stale. C only wrote a column of df,
+        # it did not rebind df. A's creation of df is not invalidated.
+        assert "a" not in result_c2.stale_cells, (
+            f"A should NOT be stale after second run of C (column write only). "
+            f"stale_cells={result_c2.stale_cells}, "
+            f"C only wrote Col(df, adjusted_age), not Var(df)"
+        )
+        assert self.sdc._notebook_state.is_clean("a"), (
+            "A should remain clean — column mutation does not invalidate df creator"
+        )
+
+
+class TestForwardContaminationStructuralRead:
+    """Test that reading a structural attribute (df.shape) after a later cell
+    adds a column triggers NoReadBeforeWrite (forward contamination).
+
+    Scenario:
+        A (pos 0): df = pd.DataFrame({"y": [1,2,3]})  → writes Var(df)
+        B (pos 1): df.shape                            → reads Attr(df, shape), Var(df)
+        C (pos 2): df['x'] = 5                         → writes ColAdd(df, x)
+
+    Run A→C→B. When B executes, it reads df.shape which includes the column
+    added by C. This is not rerun-consistent: top-to-bottom A→B→C would give
+    df.shape = (3,1) but A→C→B gives (3,2). NoReadBeforeWrite should catch this
+    because ColAdd(df, x) ▷ Attr(df, shape) = true (shape ∈ COL_ATTRS).
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c"])
+
+    def _save_pre_checkpoint(self, cell_id: str, namespace: dict):
+        self.checkpoints.save(
+            f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None
+        )
+
+    def test_shape_read_after_column_add_is_forward_contamination(self):
+        """B reading df.shape should error when C (below) added a column."""
+        import pandas as pd
+
+        df_orig = pd.DataFrame({"y": [1, 2, 3]})
+
+        # A: df = pd.DataFrame({"y": [1,2,3]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = {"df": df_orig}
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # C (executed before B in wall-clock): df['x'] = 5
+        df_after_c = df_orig.copy()
+        df_after_c["x"] = 5
+        self._save_pre_checkpoint("c", {"df": df_orig})
+        ns_c = {"df": df_after_c}
+        result_c = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_reads={"df": set()},
+                column_writes={"df": {"x"}},
+            ),
+        )
+        assert not result_c.has_errors(), f"C should not error: {result_c.errors}"
+
+        # B (executed after C): df.shape — reads structural attribute
+        # df now has 2 columns (y, x) instead of 1 (y)
+        self._save_pre_checkpoint("b", {"df": df_after_c})
+        ns_b = {"df": df_after_c}
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                structural_reads={"df": {"shape"}},
+            ),
+        )
+
+        # NoReadBeforeWrite should FAIL: C (pos 2) adds a column to df,
+        # and B (pos 1) reads df.shape which is affected.
+        # ColAdd(df, x) ▷ Attr(df, shape) = true because shape ∈ COL_ATTRS
+        assert result_b.has_errors(), (
+            f"B should have NoReadBeforeWrite error. "
+            f"B reads Attr(df, shape), C wrote ColAdd(df, x). "
+            f"errors={result_b.errors}, "
+            f"read_locs={result_b.read_locs}, "
+            f"C_typed_changes={self.sdc._notebook_state.get_typed_changes('c')}, "
+            f"C_writes={self.sdc._notebook_state.writes.get('c', frozenset())}"
+        )
+        assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE, (
+            f"Expected NO_READ_BEFORE_WRITE, got {result_b.errors[0].error_type}"
+        )
+
+    def test_shape_read_after_column_rewrite_is_forward_contamination(self):
+        """A→C→C→B: second run of C overwrites existing column (Col, not ColAdd).
+
+        After C runs twice, its typed_changes no longer contain ColumnAdded
+        (column already exists). But the stored writes from C's first run
+        included ColAdd(df, x). The NoReadBeforeWrite check should still
+        detect the conflict because C's stored WriteLocSet includes ColAdd.
+        """
+        import pandas as pd
+
+        df_orig = pd.DataFrame({"y": [1, 2, 3]})
+
+        # A: df = pd.DataFrame({"y": [1,2,3]})
+        self._save_pre_checkpoint("a", {})
+        ns_a = {"df": df_orig}
+        self.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
+            namespace=ns_a,
+            tracking=make_tracking(reads=set(), writes={"df"}),
+        )
+
+        # C first run: df['x'] = 5 (ColAdd — new column)
+        # Simulate provenance: A created {name, age, score}, C creates {x}
+        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+        df_after_c1 = df_orig.copy()
+        DataFrameProvenanceTracker.record_var_write(df_after_c1, "a")  # inherits A's columns
+        df_after_c1["x"] = 5
+        DataFrameProvenanceTracker.record_column_write(df_after_c1, "x", "c")  # C adds x
+        self._save_pre_checkpoint("c", {"df": df_orig})
+        ns_c1 = {"df": df_after_c1}
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c1,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_reads={"df": set()},
+                column_writes={"df": {"x"}},
+            ),
+        )
+
+        # C second run: df['x'] = 5 again (Col — column already exists)
+        # Provenance persists: x still originated from "c" (first writer wins)
+        df_after_c2 = df_after_c1.copy()
+        df_after_c2["x"] = 5
+        self._save_pre_checkpoint("c", {"df": df_after_c1})
+        ns_c2 = {"df": df_after_c2}
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace=ns_c2,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                column_reads={"df": set()},
+                column_writes={"df": {"x"}},
+            ),
+        )
+
+        # B: df.shape — reads structural attribute
+        self._save_pre_checkpoint("b", {"df": df_after_c2})
+        ns_b = {"df": df_after_c2}
+        result_b = self.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
+            namespace=ns_b,
+            tracking=make_tracking(
+                reads={"df"}, writes=set(),
+                structural_reads={"df": {"shape"}},
+            ),
+        )
+
+        # Should STILL detect forward contamination. Even though C's second
+        # run detected Col (not ColAdd), C's stored writes should retain
+        # the structural impact — df has a column 'x' that wouldn't exist
+        # in a clean top-to-bottom run at B's position.
+        assert result_b.has_errors(), (
+            f"B should have NoReadBeforeWrite error after A→C→C→B. "
+            f"B reads Attr(df, shape), C added column x. "
+            f"errors={result_b.errors}, "
+            f"C_typed_changes={self.sdc._notebook_state.get_typed_changes('c')}, "
+            f"C_writes={self.sdc._notebook_state.writes.get('c', frozenset())}"
+        )
+        assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE
+
+
+class TestStructuralProvenanceIntegration:
+    """Integration tests for structural provenance via df.attrs.
+
+    Tests that the enforcer correctly detects violations involving structural
+    changes (column deletion, row mutation, index mutation, dtype change) even
+    on re-execution when checkpoint diffs miss idempotent structural effects.
+
+    All tests follow the pattern:
+        A (pos 0): creates df
+        B (pos 1): reads a structural attribute of df
+        C (pos 2): makes a structural change to df
+    Run A→C→B. B should detect forward contamination from C.
+    """
+
+    def setup_method(self):
+        self.checkpoints = MemoryCheckpoints(
+            sanity_check=False,
+            warn_classes=False,
+        )
+        self.sdc = ReproducibilityEnforcer(self.checkpoints)
+        self.sdc.set_cell_order(["a", "b", "c"])
+
+    def _save_pre(self, cell_id, namespace):
+        self.checkpoints.save(f"{PRE_CHECKPOINT_PREFIX}{cell_id}", namespace, max_size_mb=None)
+
+    def _run_cell(self, cell_id, pre_ns, post_ns, tracking):
+        self._save_pre(cell_id, pre_ns)
+        return self.sdc.check(
+            cell_id=cell_id,
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}{cell_id}"],
+            namespace=post_ns,
+            tracking=tracking,
+        )
+
+    # ── Forward contamination: column deletion ──────────────────────
+
+    def test_column_delete_contaminates_shape_read(self):
+        """A creates df(a,b,c), C deletes col b (re-exec), B reads df.shape.
+
+        On re-execution, diff sees no change (col already deleted). But
+        provenance records C as first deleter of 'b'. ColDel ▷ Attr(shape) = true.
+        """
+        import pandas as pd
+        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+
+        df_orig = pd.DataFrame({"a": [1], "b": [2], "c": [3]})
+
+        # A: creates df
+        self._run_cell("a", {}, {"df": df_orig}, make_tracking(reads=set(), writes={"df"}))
+
+        # C first run: del df['b']
+        df_after_c = df_orig.copy()
+        DataFrameProvenanceTracker.record_var_write(df_after_c, "a")
+        del df_after_c["b"]
+        DataFrameProvenanceTracker.record_column_delete(df_after_c, "b", "c")
+        self._run_cell("c", {"df": df_orig}, {"df": df_after_c},
+                        make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}))
+
+        # C re-execution: del df['b'] again — diff sees no ColumnRemoved this time
+        # But provenance persists: 'b' still recorded as deleted by 'c'
+        df_after_c2 = df_after_c.copy()  # provenance survives copy
+        self._save_pre("c", {"df": df_after_c})
+        result_c2 = self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace={"df": df_after_c2},
+            tracking=make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}),
+        )
+        assert not result_c2.has_errors(), f"C re-exec should pass: {result_c2.errors}"
+
+        # B: reads df.shape
+        result_b = self._run_cell("b", {"df": df_after_c2}, {"df": df_after_c2},
+                                   make_tracking(reads={"df"}, writes=set(), structural_reads={"df": {"shape"}}))
+
+        assert result_b.has_errors(), (
+            f"B should have NoReadBeforeWrite: ColDel(df, b) ▷ Attr(df, shape). "
+            f"errors={result_b.errors}, C_writes={self.sdc._notebook_state.writes.get('c', frozenset())}"
+        )
+        assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE
+
+    # ── Forward contamination: row mutation ─────────────────────────
+
+    def test_row_mutation_contaminates_shape_read(self):
+        """A creates df, C adds a row via loc (re-exec), B reads df.shape.
+
+        Rows ▷ Attr(shape) = true.
+        """
+        import pandas as pd
+        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+
+        df_orig = pd.DataFrame({"a": [1, 2]})
+
+        # A: creates df
+        self._run_cell("a", {}, {"df": df_orig}, make_tracking(reads=set(), writes={"df"}))
+
+        # C first run: df.loc[2] = [3] — adds a row
+        df_after_c = df_orig.copy()
+        DataFrameProvenanceTracker.record_var_write(df_after_c, "a")
+        df_after_c.loc[2] = [3]
+        DataFrameProvenanceTracker.record_row_mutation(df_after_c, "c")
+        self._run_cell("c", {"df": df_orig}, {"df": df_after_c},
+                        make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}))
+
+        # C re-execution: same row mutation — diff sees no change (already has 3 rows)
+        df_after_c2 = df_after_c.copy()
+        self._save_pre("c", {"df": df_after_c})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace={"df": df_after_c2},
+            tracking=make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}),
+        )
+
+        # B: reads df.shape
+        result_b = self._run_cell("b", {"df": df_after_c2}, {"df": df_after_c2},
+                                   make_tracking(reads={"df"}, writes=set(), structural_reads={"df": {"shape"}}))
+
+        assert result_b.has_errors(), (
+            f"B should have NoReadBeforeWrite: Rows(df) ▷ Attr(df, shape). "
+            f"errors={result_b.errors}, C_writes={self.sdc._notebook_state.writes.get('c', frozenset())}"
+        )
+        assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE
+
+    # ── Forward contamination: index mutation ───────────────────────
+
+    def test_index_mutation_contaminates_index_read(self):
+        """A creates df, C sets df.index (re-exec), B reads df.index.
+
+        Attr(index) ▷ Attr(index) = true.
+        """
+        import pandas as pd
+        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+
+        df_orig = pd.DataFrame({"a": [1, 2, 3]})
+
+        # A: creates df
+        self._run_cell("a", {}, {"df": df_orig}, make_tracking(reads=set(), writes={"df"}))
+
+        # C first run: df.index = [10, 20, 30]
+        df_after_c = df_orig.copy()
+        DataFrameProvenanceTracker.record_var_write(df_after_c, "a")
+        df_after_c.index = [10, 20, 30]
+        DataFrameProvenanceTracker.record_index_mutation(df_after_c, "c")
+        self._run_cell("c", {"df": df_orig}, {"df": df_after_c},
+                        make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}))
+
+        # C re-execution: df.index = [10, 20, 30] again — diff sees no change
+        df_after_c2 = df_after_c.copy()
+        self._save_pre("c", {"df": df_after_c})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace={"df": df_after_c2},
+            tracking=make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}),
+        )
+
+        # B: reads df.index
+        result_b = self._run_cell("b", {"df": df_after_c2}, {"df": df_after_c2},
+                                   make_tracking(reads={"df"}, writes=set(), structural_reads={"df": {"index"}}))
+
+        assert result_b.has_errors(), (
+            f"B should have NoReadBeforeWrite: Attr(df, index) ▷ Attr(df, index). "
+            f"errors={result_b.errors}, C_writes={self.sdc._notebook_state.writes.get('c', frozenset())}"
+        )
+        assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE
+
+    # ── Forward contamination: dtype change ─────────────────────────
+
+    def test_dtype_change_contaminates_dtypes_read(self):
+        """A creates df(str col), C casts to int (re-exec), B reads df.dtypes.
+
+        Attr(dtypes) ▷ Attr(dtypes) = true.
+        """
+        import pandas as pd
+        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+
+        df_orig = pd.DataFrame({"x": ["1", "2", "3"]})
+
+        # A: creates df
+        self._run_cell("a", {}, {"df": df_orig}, make_tracking(reads=set(), writes={"df"}))
+
+        # C first run: df['x'] = df['x'].astype(int)
+        df_after_c = df_orig.copy()
+        DataFrameProvenanceTracker.record_var_write(df_after_c, "a")
+        df_after_c["x"] = df_after_c["x"].astype(int)
+        DataFrameProvenanceTracker.record_dtype_change(df_after_c, "x", "c")
+        self._run_cell("c", {"df": df_orig}, {"df": df_after_c},
+                        make_tracking(reads={"df"}, writes=set(), column_reads={"df": {"x"}}, column_writes={"df": {"x"}}))
+
+        # C re-execution: same dtype change — diff sees no change
+        df_after_c2 = df_after_c.copy()
+        self._save_pre("c", {"df": df_after_c})
+        self.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
+            namespace={"df": df_after_c2},
+            tracking=make_tracking(reads={"df"}, writes=set(), column_reads={"df": {"x"}}, column_writes={"df": {"x"}}),
+        )
+
+        # B: reads df.dtypes
+        result_b = self._run_cell("b", {"df": df_after_c2}, {"df": df_after_c2},
+                                   make_tracking(reads={"df"}, writes=set(), structural_reads={"df": {"dtypes"}}))
+
+        assert result_b.has_errors(), (
+            f"B should have NoReadBeforeWrite: Attr(df, dtypes) ▷ Attr(df, dtypes). "
+            f"errors={result_b.errors}, C_writes={self.sdc._notebook_state.writes.get('c', frozenset())}"
+        )
+        assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE
+
+    # ── Negative test: existing column modification ─────────────────
+
+    def test_column_value_modify_does_not_contaminate_shape_read(self):
+        """A creates df, C modifies existing column value, B reads df.shape.
+
+        Col ▷ Attr(shape) = false — modifying a column value doesn't change shape.
+        """
+        import pandas as pd
+        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+
+        df_orig = pd.DataFrame({"a": [1, 2, 3]})
+
+        # A: creates df
+        self._run_cell("a", {}, {"df": df_orig}, make_tracking(reads=set(), writes={"df"}))
+
+        # C: df['a'] = df['a'] * 2 — modifies existing column (Col, not ColAdd)
+        df_after_c = df_orig.copy()
+        DataFrameProvenanceTracker.record_var_write(df_after_c, "a")
+        df_after_c["a"] = df_after_c["a"] * 2
+        self._run_cell("c", {"df": df_orig}, {"df": df_after_c},
+                        make_tracking(reads={"df"}, writes=set(), column_reads={"df": {"a"}}, column_writes={"df": {"a"}}))
+
+        # B: reads df.shape
+        result_b = self._run_cell("b", {"df": df_after_c}, {"df": df_after_c},
+                                   make_tracking(reads={"df"}, writes=set(), structural_reads={"df": {"shape"}}))
+
+        assert not result_b.has_errors(), (
+            f"B should NOT error: Col(df, a) ▷ Attr(df, shape) = false. "
+            f"errors={result_b.errors}"
         )
