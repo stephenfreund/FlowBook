@@ -5,13 +5,13 @@ Analyze reproducibility errors from a FlowBook error report or directly from a p
 ## Usage
 
 ```
-/categorize-repro-errors ERROR_REPORT_FILE NOTEBOOKS_DIR [--fix]
+/categorize-repro-errors ERROR_REPORT_FILE [NOTEBOOKS_DIR] [--fix]
 /categorize-repro-errors NOTEBOOK_PATH [--fix]
 ```
 
 **Mode 1: Error Report Mode**
 - `ERROR_REPORT_FILE`: Path to the error report file (e.g., `errors.txt`)
-- `NOTEBOOKS_DIR`: Directory containing the notebook files
+- `NOTEBOOKS_DIR`: Optional directory containing the notebook files
 - `--fix`: Optional flag to apply fixes after categorization
 
 **Mode 2: Single Notebook Mode** (when only a `.ipynb` path is provided)
@@ -36,8 +36,8 @@ Analyze reproducibility errors from a FlowBook error report or directly from a p
 |----------|-------------|---------|--------------|
 | **In-place variable reassignment** | Cell reads and overwrites same variable | `train = pd.concat([train, extra])` | Deep-copy + alpha-rename |
 | **Sequential transformation chain** | Downstream depends on upstream transformation | Imputation then feature engineering | Deep-copy + alpha-rename |
-| **Diagnostic inspection before mutation** | Read-only cell captures pre-transformation state | `df.info()` before `df["col"] = ...` | Add `%diagnostic` magic |
-| **Visualization before mutation** | Plot accesses all columns before column added | `sns.heatmap(df.corr())` before new col | Add `%diagnostic` magic |
+| **Diagnostic inspection before mutation** | Read-only cell captures pre-transformation state | `df.info()` before `df["col"] = ...` | Cell split + `%diagnostic` |
+| **Visualization before mutation** | Plot accesses all columns before column added | `sns.heatmap(df.corr())` before new col | Cell split + `%diagnostic` |
 | **Reusing variable for different purposes** | Variable reused for different purposes in disjoint regions of the code | `model` reused for different model | Alpha-rename downstream |
 | **Unrecoverable in-place mutation** | Cell mutates object without rebinding | `model.fit()`, `df.drop(inplace=True)` | See sub-types below |
 
@@ -56,40 +56,76 @@ When the predicate is `"unrecoverable_mutation"`, identify the sub-type from the
 
 ## Important Notes
 
+- **Always use code cell indices (`@N`)** to reference cells, NOT cell IDs. Cell IDs in processed notebooks may not match the original notebooks. The error report provides both cell IDs and code cell indices — always use the code cell index with `@` prefix (e.g., `@5`).
 - Cell indices in error reports are **CODE cell indices** (not including markdown cells)
 - Write results to `error_categories.tsv` as you go
-- TSV format: `NOTEBOOK_NAME<TAB>ERROR_NUMBER<TAB>CELL_ID<TAB>CELL_CODE_INDEX<TAB>CATEGORY<TAB>VARIABLE<TAB>EXPLANATION`
+- TSV format: `NOTEBOOK_NAME<TAB>ERROR_NUMBER<TAB>CELL_ID<TAB>CELL_CODE_INDEX<TAB>CATEGORY<TAB>VARIABLE<TAB>FIX_TYPE<TAB>EXPLANATION`
 - The VARIABLE column should contain the primary variable involved in the error
 - The EXPLANATION column should contain the rationale for the categorization
 
 ## Fix Script Usage
 
-After categorization, apply fixes using `flowbook/scripts/fix_repro_errors.py`:
+After categorization, apply fixes using `flowbook/scripts/fix_repro_errors.py`.
+
+**IMPORTANT:** Always use `@N` notation (code cell index) when calling the fix script. Never use cell IDs.
+
+### High-level fix types (single command):
 
 ```bash
 # For in-place reassignment or sequential chain:
-python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type inplace-reassign --variable VAR
-
-# For diagnostic/visualization:
-python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type diagnostic-split
+python flowbook/scripts/fix_repro_errors.py NOTEBOOK @CODE_INDEX --fix-type inplace-reassign --variable VAR
 
 # For variable reuse:
-python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type variable-reuse --variable VAR
+python flowbook/scripts/fix_repro_errors.py NOTEBOOK @CODE_INDEX --fix-type variable-reuse --variable VAR
 
 # For ML model mutation (unrecoverable):
-python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type model-copy --variable VAR
+python flowbook/scripts/fix_repro_errors.py NOTEBOOK @CODE_INDEX --fix-type model-copy --variable VAR
 
 # For DataFrame inplace=True (unrecoverable):
-python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type inplace-to-copy --variable VAR
+python flowbook/scripts/fix_repro_errors.py NOTEBOOK @CODE_INDEX --fix-type inplace-to-copy --variable VAR
 
 # For structural assignment (unrecoverable):
-python flowbook/scripts/fix_repro_errors.py NOTEBOOK CELL_ID --fix-type struct-copy --variable VAR
+python flowbook/scripts/fix_repro_errors.py NOTEBOOK @CODE_INDEX --fix-type struct-copy --variable VAR
 ```
+
+### Diagnostic/Visualization fixes (agent-driven cell splitting):
+
+For diagnostic and visualization errors, the agent must analyze the cell and split it using primitive operations. **Do NOT blindly add `%diagnostic` to cells that contain mutations.**
+
+The fix script provides three primitive operations:
+
+```bash
+# Replace a cell's source code:
+python flowbook/scripts/fix_repro_errors.py NOTEBOOK @N --fix-type set-source --source-file PATH
+
+# Insert a new code cell after @N:
+python flowbook/scripts/fix_repro_errors.py NOTEBOOK @N --fix-type insert-cell-after --source-file PATH
+
+# Prepend %diagnostic magic to a cell:
+python flowbook/scripts/fix_repro_errors.py NOTEBOOK @N --fix-type add-diagnostic
+```
+
+**Index safety:** `insert-cell-after` shifts all subsequent code cell indices by 1. When applying multiple fixes to the same notebook, process diagnostic/visualization fixes from **highest code cell index to lowest** to avoid index invalidation. Other fix types (inplace-reassign, model-copy, etc.) don't insert cells and are safe in any order.
+
+#### How to fix diagnostic/visualization errors:
+
+1. **Read the cell source** at the error's code cell index
+2. **Classify each line** as either mutation (writes variables, assigns, calls .fit(), etc.) or diagnostic (print, display, .info(), .head(), plotting, etc.)
+3. **Decide the fix**:
+   - **If the cell is purely diagnostic** (no mutations at all): Just use `add-diagnostic`
+   - **If the cell mixes mutation and diagnostic code**: Split it:
+     a. Write the mutation lines to a temp file
+     b. Write the diagnostic lines to a temp file
+     c. Use `set-source` to replace the original cell with mutation-only code
+     d. Use `insert-cell-after` to add the diagnostic code as a new cell
+     e. Use `add-diagnostic` on the new cell (which is now at @N+1)
+   - **If the cell is purely mutation** (no diagnostic code): This was miscategorized. Do NOT add `%diagnostic`. Instead, recategorize as `inplace-reassign` or `sequential-chain` and apply the appropriate deep-copy fix.
+4. **Add `# [FLOWBOOK FIX]` comments** to both the mutation and diagnostic cells explaining what was done
 
 The script creates `<notebook>-fixed.ipynb` with:
 - Comments marked `# [FLOWBOOK FIX]` explaining the original error and fix
 - Deep copies with `_flow_XXXX` suffix for renamed variables
-- `%diagnostic` magic for inspection cells (tells kernel to skip reproducibility checks)
+- Split cells with `%diagnostic` magic on the read-only part
 - For `model-copy`: Uses `safe_model_copy()` which handles sklearn, PyTorch, XGBoost, etc.
 - For `inplace-to-copy`: Converts `df.method(inplace=True)` to `df = df.method()`
 
@@ -211,11 +247,13 @@ First, determine which mode to use:
 
 2. Create/initialize the output file `error_categories.tsv` with header
 
-3. For each notebook with errors, launch a background agent to:
+3. For each notebook with errors, launch a parallel **opus** agent to:
    - Read the relevant section from the error report (use line_range from parsed data)
    - Read the notebook to understand context
    - Categorize each error according to the taxonomy
    - Identify the primary variable involved
+   - **Always reference cells by code cell index (`@N`), never by cell ID**
+   - For diagnostic/visualization errors: read the cell source, determine which lines are mutation vs diagnostic, and note the split plan
    - Produce a short, coherent explanation for the categorization
    - Output TSV lines
 
@@ -230,6 +268,7 @@ First, determine which mode to use:
    - Look at surrounding cells for the full picture
    - Categorize the error according to the taxonomy above
    - Identify the primary variable involved (from `locations` or by analyzing the code)
+   - **Always reference cells by code cell index (`@N`)**
 
 ### Final Steps (both modes)
 
@@ -238,7 +277,14 @@ First, determine which mode to use:
 5. Print a summary of categories found
 
 6. If `--fix` flag is provided:
-   - For each error, apply fixes using the fix script
+   - For each notebook, initialize the fixed copy with `--init --force`
+   - Apply non-inserting fixes (inplace-reassign, sequential-chain, model-copy, inplace-to-copy, struct-copy, variable-reuse) in any order
+   - Apply diagnostic/visualization splits from **highest code cell index to lowest** (to avoid index shifts from cell insertions):
+     - Read the cell source
+     - Determine mutation vs diagnostic lines
+     - If purely diagnostic: use `add-diagnostic`
+     - If mixed: write temp files and use `set-source` + `insert-cell-after` + `add-diagnostic`
+     - If purely mutation: skip %diagnostic, apply appropriate rename fix instead
    - Report which notebooks were fixed and where the `-fixed.ipynb` files are
 
 ## Progress Reporting
@@ -247,10 +293,10 @@ First, determine which mode to use:
 
 ```
 [1/23] backpack-pred-baseline-ensemble-eda.ipynb (4 errors)
-  - Error 1 (cell tpje): Diagnostic inspection before mutation → train_data
-  - Error 2 (cell fdke): Sequential transformation chain → test_data
-  - Error 3 (cell gdch): Visualization before mutation → train_data
-  - Error 4 (cell sozj): Sequential transformation chain → train_data
+  - Error 1 (@3): Diagnostic inspection before mutation → train_data [split: 4 mutation + 2 diagnostic lines]
+  - Error 2 (@5): Sequential transformation chain → test_data
+  - Error 3 (@8): Visualization before mutation → train_data [pure diagnostic, add %diagnostic]
+  - Error 4 (@12): Sequential transformation chain → train_data
 ```
 
 When applying fixes (with `--fix`):
@@ -258,10 +304,10 @@ When applying fixes (with `--fix`):
 ```
 [1/23] backpack-pred-baseline-ensemble-eda.ipynb
   Initializing: backpack-pred-baseline-ensemble-eda-fixed.ipynb
-  - Fixing cell tpje: diagnostic-split
-  - Fixing cell fdke: sequential-chain --variable test_data
-  - Fixing cell gdch: visualization-split
-  - Fixing cell sozj: sequential-chain --variable train_data
+  - Fixing @5: sequential-chain --variable test_data
+  - Fixing @12: sequential-chain --variable train_data
+  - Fixing @8: add-diagnostic (pure diagnostic cell)
+  - Fixing @3: set-source + insert-cell-after + add-diagnostic (split mixed cell)
   ✓ Fixed 4 errors → backpack-pred-baseline-ensemble-eda-fixed.ipynb
 ```
 
