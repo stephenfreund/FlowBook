@@ -122,8 +122,12 @@ class ExecuteCommand(NotebookCommand):
             error_message = None
             error_cell_id = None
 
-            with timer(key="execute:magic", message="Executing magic %continue_after_violation on"):
-                kernel_client.execute("%continue_after_violation on")
+            with timer(key="execute:magic", message="Sending continue_after_violation via protocol"):
+                KernelHelper.execute_code(
+                    kernel_client, "",
+                    flowbook_msg={"type": "continue_after_violation", "enabled": True},
+                    store_history=False,
+                )
 
             # Inject CSV downsampling monkey-patch if requested
             if downsample_csv is not None:
@@ -166,8 +170,11 @@ class ExecuteCommand(NotebookCommand):
                             cell["execution_count"] = result["execution_count"]
                             cell["outputs"] = result["outputs"]
 
-                            # Extract SDC metadata from outputs
-                            sdc_meta = self._extract_sdc_metadata(result["outputs"])
+                            # Print flowbook protocol messages (status, violations)
+                            self.print_flowbook_messages(result, cell_order)
+
+                            # Extract SDC metadata from protocol messages
+                            sdc_meta = self.extract_flowbook_metadata(result)
                             if sdc_meta:
                                 sdc_results.append(
                                     {
@@ -301,17 +308,3 @@ class ExecuteCommand(NotebookCommand):
             total_time=total_time,
         )
 
-    def _extract_sdc_metadata(
-        self, outputs: List[Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Extract SDC metadata from cell outputs.
-
-        Looks for display_data outputs with flowbook in metadata.
-        """
-        for output in outputs:
-            if output.get("output_type") == "display_data":
-                output_meta = output.get("metadata", {})
-                if "flowbook" in output_meta:
-                    return output_meta["flowbook"]
-        return None

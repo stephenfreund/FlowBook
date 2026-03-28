@@ -88,11 +88,7 @@ function registerExecRestoreCommand(
         return;
       }
 
-      // Send %exec_restore magic silently — sets the pending flag in the kernel.
-      // The kernel's ZMQ queue ensures ordering:
-      //   1. %exec_restore <cell_id>
-      //   2. %notebook_structure <order>  (sent by _onExecutionScheduled)
-      //   3. Cell code                    (_do_execute_impl consumes the flag)
+      // Send exec_restore via protocol (deprecated — kernel shows error message).
       const future = session.kernel.requestExecute({
         code: `%exec_restore ${cellId}`,
         silent: true,
@@ -118,6 +114,7 @@ class FlowbookActivationManager {
   private _panel: ReproducibilityMetadataPanel | null = null;
   private _dependenciesPanel: DependenciesPanel | null = null;
   private _highlighter: ReproducibilityCellHighlighter | null = null;
+  private _executionHook: ReproducibilityExecutionHookManager | null = null;
   private _cellIndexManager: CellIndexManager;
   private _toolbarExtension: FlowbookToolbarExtension;
   private _isActive = false;
@@ -221,8 +218,8 @@ class FlowbookActivationManager {
     // Set highlighter on toolbar extension so it can access staleness manager
     this._toolbarExtension.setHighlighter(this._highlighter);
 
-    // Create execution hook
-    new ReproducibilityExecutionHookManager(
+    // Create execution hook (store reference for sendCommand access)
+    this._executionHook = new ReproducibilityExecutionHookManager(
       this._app,
       this._tracker,
       this._highlighter
@@ -248,12 +245,11 @@ class FlowbookActivationManager {
 
   /**
    * Sync initial staleness state from kernel on notebook load.
-   * Sends cell order and requests current state.
+   * Sends cell order and requests current state via comm channel.
    */
   private _syncInitialState(panel: NotebookPanel): void {
-    const session = panel.sessionContext.session;
-    if (!session?.kernel) {
-      console.log('FlowBook Plugin: No kernel available for sync');
+    if (!this._executionHook) {
+      console.log('FlowBook Plugin: No execution hook available for sync');
       return;
     }
 
@@ -267,22 +263,14 @@ class FlowbookActivationManager {
       return;
     }
 
-    // Send cell order first, then request sync
-    const structureCmd = `%notebook_structure ${cellOrder.join(' ')}`;
-    session.kernel.requestExecute({
-      code: structureCmd,
-      silent: true,
-      store_history: false
+    // Send cell order first, then request sync via comm
+    this._executionHook.sendCommand({
+      type: 'notebook_structure',
+      cell_order: cellOrder
     });
+    this._executionHook.sendCommand({ type: 'sync' });
 
-    // Request staleness sync (output will be processed by execution hook)
-    session.kernel.requestExecute({
-      code: '%flowbook_sync',
-      silent: true,
-      store_history: false
-    });
-
-    console.log('FlowBook Plugin: Sent initial sync request');
+    console.log('FlowBook Plugin: Sent initial sync via comm');
   }
 
   private _deactivate(): void {

@@ -72,6 +72,14 @@ export class ReproducibilityCellHighlighter {
     });
   }
 
+  /**
+   * Update the status display in the metadata panel header.
+   * Called when a "status" protocol message arrives from the kernel.
+   */
+  updateStatus(icon: string, text: string, cellId?: string): void {
+    this._panel.updateStatus(icon, text, cellId);
+  }
+
   private _initialize(): void {
     this._tracker.currentChanged.connect(this._onNotebookChanged, this);
     this._tracker.activeCellChanged.connect(this._onActiveCellChanged, this);

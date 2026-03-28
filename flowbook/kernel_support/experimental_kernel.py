@@ -181,8 +181,12 @@ class ExperimentalKernel(IPythonKernel, Magics):
         contents: Optional[str] = None,
         metadata: Optional[dict] = None,
     ) -> None:
-        """Display an icon with text, optionally with expandable contents."""
-        self._display.display_icon_and_text(icon, text, contents, metadata)
+        """Display an icon with text, optionally with expandable contents.
+
+        The metadata parameter is accepted for backward compatibility but
+        ignored — protocol metadata is now sent via comm/IOPub, not display output.
+        """
+        self._display.display_icon_and_text(icon, text, contents)
 
     def diff_checkpoints(self, old: Checkpoint, new: Checkpoint) -> None:
         """Display the diff between two checkpoints."""

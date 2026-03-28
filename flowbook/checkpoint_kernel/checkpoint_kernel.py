@@ -107,7 +107,6 @@ class CheckpointKernel(BaseFlowbookKernel):
             self._display.display_icon_and_text(
                 "ok" if error_msg is None else "error",
                 f"Run: {cell_runtime_s*1000:.1f}ms | Commit: {commit_time_s*1000:.1f}ms",
-                metadata=metadata.to_display_metadata(),
             )
 
         return result

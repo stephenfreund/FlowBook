@@ -449,10 +449,38 @@ const ReproducibilityMetadataDisplay: React.FC<
   );
 };
 
+/**
+ * Status header bar — shows the latest kernel status line (icon + text).
+ * Includes a small title and the cell reference (@A notation).
+ */
+const StatusHeader: React.FC<{
+  icon: string | null;
+  text: string | null;
+  cellRef: string | null;
+}> = ({ icon, text, cellRef }) => {
+  if (!icon && !text) {
+    return null;
+  }
+  return (
+    <div className="flowbook-status-header">
+      <div style={{ fontSize: '0.7em', color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>
+        Last Execution
+      </div>
+      <div style={{ fontSize: '0.85em', fontFamily: 'var(--jp-code-font-family, monospace)' }}>
+        {cellRef && <strong style={{ marginRight: '6px' }}>{cellRef}</strong>}
+        {icon} {text}
+      </div>
+    </div>
+  );
+};
+
 export class ReproducibilityMetadataPanel extends Widget {
   private _metadata: IReproducibilityMetadata | null = null;
   private _cellId: string | null = null;
   private _currentCellOrder: string[] = [];
+  private _statusIcon: string | null = null;
+  private _statusText: string | null = null;
+  private _statusCellRef: string | null = null;
 
   constructor() {
     super();
@@ -466,11 +494,18 @@ export class ReproducibilityMetadataPanel extends Widget {
 
   private render(): void {
     ReactDOM.render(
-      <ReproducibilityMetadataDisplay
-        metadata={this._metadata}
-        cellId={this._cellId}
-        currentCellOrder={this._currentCellOrder}
-      />,
+      <>
+        <StatusHeader
+          icon={this._statusIcon}
+          text={this._statusText}
+          cellRef={this._statusCellRef}
+        />
+        <ReproducibilityMetadataDisplay
+          metadata={this._metadata}
+          cellId={this._cellId}
+          currentCellOrder={this._currentCellOrder}
+        />
+      </>,
       this.node
     );
   }
@@ -483,6 +518,23 @@ export class ReproducibilityMetadataPanel extends Widget {
     this._metadata = metadata;
     this._cellId = cellId;
     this._currentCellOrder = currentCellOrder;
+    this.render();
+  }
+
+  /**
+   * Update the status header with the latest kernel status line.
+   * Called when a "status" protocol message arrives from the kernel.
+   *
+   * @param cellId - Raw cell ID from kernel; converted to @A notation using current cell order.
+   */
+  public updateStatus(icon: string, text: string, cellId?: string): void {
+    this._statusIcon = icon;
+    this._statusText = text;
+    if (cellId) {
+      this._statusCellRef = cellIdToReference(cellId, this._currentCellOrder);
+    } else {
+      this._statusCellRef = null;
+    }
     this.render();
   }
 

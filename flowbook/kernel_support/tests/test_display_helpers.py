@@ -57,20 +57,10 @@ class TestDisplayHelper:
         assert "some details here" in data["text/markdown"]
 
     @patch("flowbook.kernel_support.display_helpers.display")
-    def test_display_icon_and_text_with_metadata(self, mock_display):
-        """display_icon_and_text passes metadata through."""
-        helper = DisplayHelper()
-        metadata = {"key": "value"}
-        helper.display_icon_and_text("ok", "Done", metadata=metadata)
-        mock_display.assert_called_once()
-        _, kwargs = mock_display.call_args
-        assert kwargs.get("metadata") == metadata
-
-    @patch("flowbook.kernel_support.display_helpers.display")
-    def test_display_icon_and_text_without_metadata(self, mock_display):
-        """display_icon_and_text passes None metadata when not provided."""
+    def test_display_icon_and_text_no_metadata_param(self, mock_display):
+        """display_icon_and_text does not pass metadata (protocol uses comm/IOPub)."""
         helper = DisplayHelper()
         helper.display_icon_and_text("ok", "Done")
         mock_display.assert_called_once()
         _, kwargs = mock_display.call_args
-        assert kwargs.get("metadata") is None
+        assert "metadata" not in kwargs

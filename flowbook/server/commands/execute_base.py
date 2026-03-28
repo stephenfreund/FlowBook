@@ -141,6 +141,9 @@ class ExecuteBaseCommand(NotebookCommand):
                                     cell["execution_count"] = result["execution_count"]
                                     cell["outputs"] = result["outputs"]
 
+                                    # Print flowbook protocol messages
+                                    self.print_flowbook_messages(result)
+
                                     # Check for execution errors or timeouts
                                     if result["status"] in ("error", "timeout"):
                                         status = result["status"]
