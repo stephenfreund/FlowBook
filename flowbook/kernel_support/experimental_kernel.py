@@ -76,7 +76,7 @@ from flowbook.kernel_support.flowbook_pdb import FlowbookPdb
 from flowbook.kernel_support.json_utils import make_json_safe
 from flowbook.kernel_support.kernel_command_handlers import KernelCommandHandlers
 from flowbook.kernel_support.kernel_commands import FinalMessage
-from flowbook.kernel_support.models import ExecutionContext, ExecutionMetadata, ExecutionProfile, TrackingData
+from flowbook.kernel_support.models import ExecutionContext, TrackingData
 from flowbook.kernel_support.monotonicity import MonotonicityEnforcer
 from flowbook.kernel_support.scalene_runner import ScaleneRunner
 from flowbook.kernel_support.timeout_handler import CellTimeoutHandler
@@ -179,13 +179,8 @@ class ExperimentalKernel(IPythonKernel, Magics):
         icon: str,
         text: str,
         contents: Optional[str] = None,
-        metadata: Optional[dict] = None,
     ) -> None:
-        """Display an icon with text, optionally with expandable contents.
-
-        The metadata parameter is accepted for backward compatibility but
-        ignored — protocol metadata is now sent via comm/IOPub, not display output.
-        """
+        """Display an icon with text, optionally with expandable contents."""
         self._display.display_icon_and_text(icon, text, contents)
 
     def diff_checkpoints(self, old: Checkpoint, new: Checkpoint) -> None:
@@ -913,31 +908,16 @@ class ExperimentalKernel(IPythonKernel, Magics):
         tracking: Optional[TrackingData],
     ) -> None:
         """Display execution timing and profile results."""
-        # Build metadata
-        profile = ExecutionProfile(
-            duration=duration,
-            profile=getattr(self, "_profile_contents", None) or "",
-            env=getattr(self, "_pre_types", {}),
-            env_after=getattr(self, "_post_types", {}),
-        )
-        metadata = ExecutionMetadata(
-            profile=profile,
-            dynamic_dependencies=tracking,
-        )
-
-        # Display appropriate output
         if self._profile_contents:
             self.display_icon_and_text(
                 "\U0001F50D",
                 f"{duration:0.2f}s",
                 contents=self._profile_contents,
-                metadata=metadata.to_display_metadata(),
             )
         elif not context.has_cell_magics:
             self.display_icon_and_text(
                 "\u23F1\uFE0F",
                 f"{duration:0.2f}s",
-                metadata=metadata.to_display_metadata(),
             )
 
     def _show_checkpoint_diff(self, context: ExecutionContext) -> None:

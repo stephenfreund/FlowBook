@@ -45,10 +45,7 @@ COMM_TARGET = "flowbook"
 # ===========================================================================
 
 def build_metadata_message(metadata: "ReproducibilityMetadata") -> dict:
-    """Build a metadata message from a ReproducibilityMetadata instance.
-
-    This replaces the old to_display_metadata() method.
-    """
+    """Build a metadata message from a ReproducibilityMetadata instance."""
     return {
         "type": METADATA,
         "cell_id": metadata.cell_id,
