@@ -5,7 +5,7 @@ This is a minimal kernel that:
 1. Measures cell execution time
 2. Takes a checkpoint after each execution
 3. Measures checkpoint (commit) time
-4. Reports timing via display_data metadata
+4. Reports timing via flowbook_update IOPub messages
 
 No reproducibility tracking, no variable tracking - just execution and checkpoint timing.
 """
@@ -15,9 +15,8 @@ from typing import Optional
 
 from ipykernel.kernelapp import IPKernelApp
 
+from flowbook.kernel.protocol import IOPUB_MSG_TYPE
 from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
-
-from flowbook.checkpoint_kernel.models import CheckpointMetadata
 
 
 class CheckpointKernel(BaseFlowbookKernel):
@@ -27,7 +26,7 @@ class CheckpointKernel(BaseFlowbookKernel):
     Features:
     - Measures cell execution time
     - Measures checkpoint (state save) time
-    - Reports timing via display_data metadata
+    - Reports timing via flowbook_update IOPub messages
     """
 
     implementation = "checkpoint_kernel"
@@ -95,12 +94,19 @@ class CheckpointKernel(BaseFlowbookKernel):
 
         # Send timing metadata
         if not silent:
-            metadata = CheckpointMetadata(
-                cell_id=self._cell_id or "",
-                execution_count=self.execution_count,
-                cell_runtime_s=cell_runtime_s,
-                commit_time_s=commit_time_s,
-                error=error_msg,
+            msg = {
+                "type": "checkpoint_timing",
+                "cell_id": self._cell_id or "",
+                "execution_count": self.execution_count,
+                "cell_runtime_s": cell_runtime_s,
+                "commit_time_s": commit_time_s,
+            }
+            if error_msg:
+                msg["error"] = error_msg
+            self.send_response(
+                self.iopub_socket,
+                IOPUB_MSG_TYPE,
+                {"flowbook": msg},
             )
 
             # Display timing info

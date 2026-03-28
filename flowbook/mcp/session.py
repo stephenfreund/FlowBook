@@ -160,15 +160,12 @@ def format_outputs_text(outputs: List[Dict[str, Any]]) -> str:
                 parts.append(_to_str(data["text/plain"]))
         elif otype == "display_data":
             data = output.get("data", {})
-            meta = output.get("metadata", {})
-            # Skip flowbook metadata display_data
-            if "flowbook" not in meta:
-                if "text/plain" in data:
-                    parts.append(_to_str(data["text/plain"]))
-                elif "text/html" in data:
-                    parts.append("[HTML output]")
-                elif "image/png" in data:
-                    parts.append("[Image output]")
+            if "text/plain" in data:
+                parts.append(_to_str(data["text/plain"]))
+            elif "text/html" in data:
+                parts.append("[HTML output]")
+            elif "image/png" in data:
+                parts.append("[Image output]")
         elif otype == "error":
             ename = output.get("ename", "Error")
             evalue = output.get("evalue", "")

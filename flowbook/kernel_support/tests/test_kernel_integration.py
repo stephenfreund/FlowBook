@@ -19,8 +19,6 @@ from flowbook.kernel_support.monotonicity import MonotonicityEnforcer
 from flowbook.kernel_support.models import (
     TrackingData,
     ExecutionContext,
-    ExecutionProfile,
-    ExecutionMetadata,
     MonotonicityViolation,
 )
 
@@ -221,42 +219,6 @@ class TestExecutionContextFlow:
         )
         assert ctx3.has_shell_magics is True
         assert ctx3.should_profile is False
-
-
-class TestMetadataCreationFlow:
-    """Integration tests for metadata creation."""
-
-    def test_full_metadata_creation(self):
-        """Test creating full execution metadata."""
-        # Create profile
-        profile = ExecutionProfile(
-            duration=2.5,
-            profile="CPU: 80%, Memory: 200MB",
-            env={"x": "int", "df": "DataFrame[100x5]"},
-            env_after={"x": "int", "df": "DataFrame[100x5]", "result": "float"},
-        )
-
-        # Create tracking
-        tracking = TrackingData(
-            reads_before_writes=["x", "df"],
-            writes=["result"],
-            column_reads_before_writes={"df": ["price", "qty"]},
-            column_writes={"df": ["total"]},
-        )
-
-        # Create metadata
-        metadata = ExecutionMetadata(
-            profile=profile,
-            dynamic_dependencies=tracking,
-        )
-
-        # Convert to display format
-        display = metadata.to_display_metadata()
-
-        assert display["profile"]["duration"] == 2.5
-        assert "CPU" in display["profile"]["profile"]
-        assert display["dynamic_dependencies"]["reads_before_writes"] == {"x", "df"}
-        assert display["dynamic_dependencies"]["column_reads_before_writes"]["df"] == {"price", "qty"}
 
 
 class TestErrorHandlingFlow:

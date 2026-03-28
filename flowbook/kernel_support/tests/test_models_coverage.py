@@ -15,7 +15,6 @@ import pytest
 from flowbook.kernel_support.models import (
     TrackingData,
     ExecutionProfile,
-    ExecutionMetadata,
     MonotonicityViolation,
     ExecutionContext,
 )
@@ -291,29 +290,6 @@ class TestExecutionContext:
             original_code="!ls",
         )
         assert not ctx.should_profile
-
-
-class TestExecutionMetadata:
-    """Tests for ExecutionMetadata.to_display_metadata."""
-
-    def test_to_display_metadata_without_deps(self):
-        """to_display_metadata without dynamic dependencies."""
-        profile = ExecutionProfile(duration=1.5)
-        meta = ExecutionMetadata(profile=profile)
-        result = meta.to_display_metadata()
-        assert "profile" in result
-        assert result["profile"]["duration"] == 1.5
-        assert "dynamic_dependencies" not in result
-
-    def test_to_display_metadata_with_deps(self):
-        """to_display_metadata with dynamic dependencies."""
-        profile = ExecutionProfile(duration=1.5)
-        deps = TrackingData(reads_before_writes={"x"}, writes={"y"})
-        meta = ExecutionMetadata(profile=profile, dynamic_dependencies=deps)
-        result = meta.to_display_metadata()
-        assert "profile" in result
-        assert "dynamic_dependencies" in result
-        assert "x" in result["dynamic_dependencies"]["reads_before_writes"]
 
 
 class TestMonotonicityViolation:

@@ -155,11 +155,11 @@ def execute_cell_and_extract_timing(
 
         msg_type = msg["header"]["msg_type"]
 
-        # Look for display_data with flowbook_checkpoint metadata
-        if msg_type == "display_data":
-            metadata = msg.get("content", {}).get("metadata", {})
-            if "flowbook_checkpoint" in metadata:
-                timing_data = metadata["flowbook_checkpoint"]
+        # Look for flowbook_update with checkpoint_timing data
+        if msg_type == "flowbook_update":
+            fb_data = msg.get("content", {}).get("flowbook", msg.get("content", {}))
+            if fb_data.get("type") == "checkpoint_timing":
+                timing_data = fb_data
 
         # Check for errors
         if msg_type == "error":
