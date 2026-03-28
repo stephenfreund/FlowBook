@@ -33,17 +33,15 @@ class DisplayHelper:
         icon: str,
         text: str,
         contents: Optional[str] = None,
-        metadata: Optional[dict] = None,
     ) -> None:
         """Display an icon with text, optionally with expandable contents.
 
         Creates display data with both text/markdown and text/plain representations.
+        This is for user-visible output only. Protocol metadata is sent via
+        _send_flowbook_message() in the kernel, not through display output.
         """
         # Build plain text version
-        # if contents is None:
         plain_text = f"{icon} {text}"
-        # else:
-        #     plain_text = f"{icon} {text}\n{contents}"
 
         # Build markdown version
         if contents is None:
@@ -62,7 +60,6 @@ class DisplayHelper:
         display(
             {"text/markdown": markdown_text, "text/plain": plain_text},
             raw=True,
-            metadata=metadata,
         )
 
     def display_checkpoint_diff(self, old: Checkpoint, new: Checkpoint) -> None:
