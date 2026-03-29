@@ -73,6 +73,7 @@ flowbook_metadata = "flowbook.cli.metadata_cli:metadata_cli_main"
 flowbook_slurm = "flowbook.slurm.slurm_cli:main"
 flowbook_compare_overhead = "flowbook.cli.compare_overhead:main"
 flowbook_show_errors = "flowbook.cli.show_errors:main"
+flowbook_slurm_logs = "flowbook.cli.slurm_logs:main"
 flowlab = "flowbook.cli.lab_cli:lab_main"
 flowbook_mcp = "flowbook.mcp.server:main"
 
