@@ -84,17 +84,24 @@ def start_kernel(
     try:
         for attempt in range(max_attempts):
             try:
-                # Clean up previous failed attempt
+                # Clean up previous failed attempt — release ports and
+                # delete connection file so the next manager picks fresh ports.
                 if kernel_client is not None:
                     try:
                         kernel_client.stop_channels()
                     except Exception:
                         pass
+                    kernel_client = None
                 if kernel_manager is not None:
                     try:
                         kernel_manager.shutdown_kernel(now=True)
                     except Exception:
                         pass
+                    try:
+                        kernel_manager.cleanup_resources()
+                    except Exception:
+                        pass
+                    kernel_manager = None
 
                 kernel_manager = KernelManager(kernel_name=kernel_name)
                 kernel_manager.start_kernel()
@@ -112,23 +119,29 @@ def start_kernel(
 
             except Exception as e:
                 log(f"Kernel start attempt {attempt + 1}/{max_attempts} failed: {e}")
-                if kernel_manager is not None and kernel_manager.is_alive():
-                    kernel_manager.shutdown_kernel(now=True)
-                    while kernel_manager.is_alive():
-                        time.sleep(1)
+                # Ensure full cleanup so next attempt gets fresh ports
+                if kernel_client is not None:
+                    try:
+                        kernel_client.stop_channels()
+                    except Exception:
+                        pass
+                    kernel_client = None
+                if kernel_manager is not None:
+                    try:
+                        if kernel_manager.is_alive():
+                            kernel_manager.shutdown_kernel(now=True)
+                            while kernel_manager.is_alive():
+                                time.sleep(1)
+                    except Exception:
+                        pass
+                    try:
+                        kernel_manager.cleanup_resources()
+                    except Exception:
+                        pass
+                    kernel_manager = None
                 if attempt < max_attempts - 1:
                     time.sleep(2)
                 else:
-                    if kernel_client is not None:
-                        try:
-                            kernel_client.stop_channels()
-                        except Exception:
-                            pass
-                    if kernel_manager is not None:
-                        try:
-                            kernel_manager.shutdown_kernel(now=True)
-                        except Exception:
-                            pass
                     raise Exception(
                         f"Kernel '{kernel_name}' failed to start "
                         f"after {max_attempts} attempts: {e}"
