@@ -659,7 +659,7 @@ def readlocset_to_list(locs: ReadLocSet) -> List[Dict[str, str]]:
     """Serialize ReadLocSet to sorted list of dicts for frontend metadata."""
     return sorted(
         (loc.to_dict() for loc in locs),
-        key=lambda d: (d["type"], d.get("qualifier", ""), str(d["name"])),
+        key=lambda d: (d["type"], str(d.get("qualifier", "")), str(d["name"])),
     )
 
 
@@ -667,7 +667,7 @@ def writelocset_to_list(locs: WriteLocSet) -> List[Dict[str, str]]:
     """Serialize WriteLocSet to sorted list of dicts for frontend metadata."""
     return sorted(
         (loc.to_dict() for loc in locs),
-        key=lambda d: (d["type"], d.get("qualifier", ""), str(d["name"])),
+        key=lambda d: (d["type"], str(d.get("qualifier", "")), str(d["name"])),
     )
 
 
