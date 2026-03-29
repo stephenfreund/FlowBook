@@ -303,15 +303,14 @@ Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Cla
 
 - `server.py` - FastMCP server with `@_logged_tool` decorator for automatic event logging
 - `session.py` - `NotebookSession` manages a single (notebook, kernel) pair with reproducibility metadata
-- `ydoc_sync.py` - Y.js document sync via `jupyter-collaboration` for real-time JupyterLab collaboration
-- `jupyter_config.py` - Auto-discovers running Jupyter Server from runtime directory or environment variables
+- `jupyter_config.py` - Auto-discovers running Jupyter Server (URL, token, root_dir) from runtime directory or environment variables
 
 **Key MCP Tools:**
 
 | Tool | Purpose |
 | ---- | ------- |
-| `load_notebook` | Load notebook, start/join kernel, connect Y.js |
-| `run_cell` | Execute cell, update outputs + Y.js |
+| `load_notebook` | Load notebook, start/join kernel, set up Contents API sync |
+| `run_cell` | Execute cell, return outputs + flowbook metadata |
 | `edit_cell` | Edit source, sync to Y.js, notify kernel |
 | `list_cells` / `get_cell` | Read cell state (polls IOPub for external updates) |
 | `get_status` | Reproducibility status (violations, staleness) |
@@ -322,14 +321,14 @@ Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Cla
 
 ### MCP ↔ JupyterLab Collaboration
 
-The MCP server and JupyterLab can share a single kernel and notebook document for real-time collaboration. Either can start first.
+The MCP server and JupyterLab can share a single kernel and notebook document for real-time collaboration. Either can start first. See `MCP_ARCHITECTURE.md` for the full architecture document.
 
 **Architecture:**
 
 ```
-MCP Server ──── ZMQ ────► Shared Kernel ◄──── ZMQ ──── JupyterLab
-     │                                                       │
-     └──── WebSocket ──► Y.js Room (jupyter-collaboration) ◄─┘
+MCP ──── Contents API GET ────► Jupyter Server ◄──── Y.js ──── JupyterLab
+MCP ──── Contents API PUT ────► Jupyter Server ────► Y.js ────► JupyterLab
+MCP ──── ZMQ ────────────────► Shared Kernel  ◄──── ZMQ ─────── JupyterLab
 ```
 
 **Kernel Discovery** (`flowbook/kernel_discovery.py`):
@@ -340,13 +339,13 @@ Discovery files in `~/.jupyter/runtime/flowbook-{sha256[:12]}.json` enable kerne
 - PID liveness validation auto-cleans stale files
 - `read_discovery()` / `write_discovery()` / `remove_discovery()` are the public API
 
-**Y.js Document Sync** (`flowbook/mcp/ydoc_sync.py`):
+**Contents API Sync** (in `session.py`):
 
-When a Jupyter Server with `jupyter-collaboration` is available:
-1. MCP connects to the Y.js room via WebSocket (`/api/collaboration/room/{room_id}`)
-2. Cell edits from MCP propagate to JupyterLab instantly via Y.js CRDT operations
-3. Cell outputs from MCP execution propagate via Y.js (not IOPub — avoids "foreign message" problem)
-4. JupyterLab edits propagate to MCP via Y.js observers
+MCP syncs notebook state with JupyterLab via the Jupyter Contents API. With `jupyter-collaboration` installed, the API returns/accepts the live Y.js document state:
+1. **JupyterLab → MCP** (reading edits): `GET /api/contents/{path}` returns live cell sources; MCP merges into in-memory notebook preserving local outputs/metadata
+2. **MCP → JupyterLab** (pushing edits): `PUT /api/contents/{path}` updates the Y.js document; called after `edit_cell`, refactoring tools, and `save_notebook`
+3. **MCP → JupyterLab** (outputs): Shared kernel IOPub broadcasts execution results to both clients; FlowBook metadata propagates via comm channel
+4. Structural changes (cell add/delete/reorder in JupyterLab) are detected and synced
 
 **Cell ID Normalization in Shared Mode:**
 - MCP only normalizes cell IDs when starting fresh (no existing kernel/session)
@@ -354,16 +353,16 @@ When a Jupyter Server with `jupyter-collaboration` is available:
 
 **Protocol Reconciliation:**
 - Both clients send `notebook_structure` and `cell_edited` to the kernel independently
-- This is safe because kernel handlers are idempotent and Y.js keeps documents in sync
+- This is safe because kernel handlers are idempotent
 - MCP polls IOPub on read operations (`get_cell`, `get_status`) to catch JupyterLab-initiated executions
 
 **Graceful Degradation:**
 - If no Jupyter Server is running, MCP works standalone (own kernel, file-based notebook)
-- Y.js sync is best-effort — connection failures don't block MCP operations
+- Contents API sync is best-effort — connection failures don't block MCP operations
 
-**Dependencies:** `jupyter-collaboration`, `pycrdt`, `jupyter-ydoc`, `websockets`
+**Dependencies:** `jupyter-collaboration` (required for live Contents API state; without it, API returns disk state only)
 
-**Tests:** `flowbook/mcp/tests/` — 31 tests covering kernel discovery, Jupyter config, and shared-kernel integration
+**Tests:** `flowbook/mcp/tests/` — 45 tests covering kernel discovery, Jupyter config, shared-kernel integration, and Contents API sync
 
 ## Cell ID Normalization
 
@@ -444,7 +443,7 @@ This normalization happens transparently at entry points:
 
 - Server entry point: `flowbook/mcp/server.py` (23 tools)
 - Session management: `flowbook/mcp/session.py`
-- Y.js sync: `flowbook/mcp/ydoc_sync.py`
+- Jupyter server discovery: `flowbook/mcp/jupyter_config.py`
 - Kernel discovery: `flowbook/kernel_discovery.py`
 - Tests: `flowbook/mcp/tests/`
 
@@ -464,8 +463,7 @@ This normalization happens transparently at entry points:
 
 - `jupyter_server>=2.4.0` - Server extension base
 - `jupyterlab>=4.0.0` - Lab integration
-- `jupyter-collaboration` - Y.js real-time collaboration (required for MCP↔JupyterLab sync)
-- `pycrdt`, `jupyter-ydoc`, `websockets` - Y.js CRDT and WebSocket client
+- `jupyter-collaboration` - Real-time collaboration (Contents API returns live Y.js state for MCP↔JupyterLab sync)
 - `mcp` (FastMCP) - MCP server framework
 - `openai` + `openai-agents[litellm]` - AI capabilities
 - Data science stack: `pandas`, `numpy`, `scikit-learn`, `scipy`, `seaborn`, `matplotlib`
@@ -518,7 +516,7 @@ jupyter labextension develop . --overwrite
 - Formal specification of reproducibility rules is in `FORMAL_DEVELOPMENT.md` with an Implementation Map linking formal definitions to code locations
 - The frontend `executionhook.ts` sends `notebook_structure` via comm before each cell execution and `cell_edited` (debounced 1s) when a previously-executed cell's source changes
 - The experimental plugin is archived in `src/_archived/` — excluded from TypeScript compilation (`tsconfig.json` exclude) and ESLint (`package.json` eslintIgnore)
-- MCP and JupyterLab can share a kernel via discovery files in `~/.jupyter/runtime/`. Either can start first. Y.js sync requires `jupyter-collaboration`
+- MCP and JupyterLab can share a kernel via discovery files in `~/.jupyter/runtime/`. Either can start first. Contents API live sync requires `jupyter-collaboration`
 
 ## Formal Specification Sync
 

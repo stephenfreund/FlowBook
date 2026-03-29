@@ -479,16 +479,17 @@ class NotebookSession:
             return None
 
     def _refresh_from_contents_api(self) -> None:
-        """Refresh in-memory cell sources from the Jupyter Contents API.
+        """Refresh in-memory notebook from the Jupyter Contents API.
 
         Merges cell sources from the API response into self.notebook["cells"],
         preserving MCP-local state (outputs, execution_count, flowbook metadata).
+        Also handles structural changes (cells added/deleted in JupyterLab).
         Rate-limited to avoid excessive API calls.
         """
         if not self._jupyter_contents_path:
             return
         now = time.time()
-        if now - self._last_contents_refresh < 0.5:
+        if now - self._last_contents_refresh < 0.2:
             return
         self._last_contents_refresh = now
 
@@ -496,20 +497,63 @@ class NotebookSession:
         if not api_notebook:
             return
 
-        api_cells = {
-            c.get("id"): c
-            for c in api_notebook.get("cells", [])
-            if c.get("id")
+        api_cells_list = api_notebook.get("cells", [])
+        api_cells_by_id = {
+            c.get("id"): c for c in api_cells_list if c.get("id")
         }
 
-        for cell in self.notebook.get("cells", []):
-            cell_id = cell.get("id")
-            if not cell_id or cell_id not in api_cells:
-                continue
-            api_source = api_cells[cell_id].get("source", "")
-            current_source = get_cell_source(cell)
-            if api_source != current_source:
-                set_cell_source(cell, api_source)
+        # Snapshot local cells by ID for lookup during rebuild
+        local_cells_by_id = {
+            c.get("id"): c for c in self.notebook.get("cells", []) if c.get("id")
+        }
+        local_ids = set(local_cells_by_id.keys())
+        api_ids = set(api_cells_by_id.keys())
+
+        # Update sources for existing cells
+        for cell_id in local_ids & api_ids:
+            local_cell = local_cells_by_id[cell_id]
+            api_source = api_cells_by_id[cell_id].get("source", "")
+            if api_source != get_cell_source(local_cell):
+                set_cell_source(local_cell, api_source)
+
+        # Handle structural changes (cells added, deleted, or reordered)
+        added_ids = api_ids - local_ids
+        removed_ids = local_ids - api_ids
+        api_order = [c.get("id") for c in api_cells_list if c.get("id")]
+        local_order = [c.get("id") for c in self.notebook.get("cells", []) if c.get("id")]
+
+        if not added_ids and not removed_ids and api_order == local_order:
+            return
+
+        # Rebuild cell list in API order, preserving MCP-local state
+        new_cells = []
+        for api_cell in api_cells_list:
+            cid = api_cell.get("id")
+            if cid in local_cells_by_id:
+                new_cells.append(local_cells_by_id[cid])
+            else:
+                new_cells.append(api_cell)
+
+        self.notebook["cells"] = new_cells
+
+        # Notify kernel of new cell order
+        if self.kernel_client:
+            new_order = [
+                c["id"] for c in new_cells if c.get("cell_type") == "code"
+            ]
+            KernelHelper.execute_code(
+                self.kernel_client, "", timeout=10, store_history=False,
+                flowbook_msg={
+                    "type": "notebook_structure", "cell_order": new_order
+                },
+            )
+
+        # Clean up tracking for removed cells
+        for rid in removed_ids:
+            self.executed_cells.discard(rid)
+            self.cell_flowbook_meta.pop(rid, None)
+            self.cell_status.pop(rid, None)
+            self._stale_cells.discard(rid)
 
     def refresh_from_jupyter(self) -> None:
         """Public API to refresh notebook from JupyterLab (via Contents API)."""
@@ -954,9 +998,14 @@ class NotebookSession:
         making MCP edits visible in JupyterLab. The server handles
         disk persistence.
 
+        Refreshes from the API first to incorporate any concurrent
+        JupyterLab edits, minimizing the race window.
+
         Returns:
             Status message on success, None on failure (caller falls back to disk).
         """
+        # Refresh first to minimize race with concurrent JupyterLab edits
+        self._refresh_from_contents_api()
         if not self._jupyter_server_url or not self._jupyter_contents_path:
             return None
         try:
