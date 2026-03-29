@@ -22,6 +22,9 @@ import pandas as pd
 import seaborn as sns
 from jupyter_client import KernelManager
 
+from jupyter_client.blocking import BlockingKernelClient
+
+from flowbook.cli.helpers import start_kernel
 from flowbook.testing.benchmark_checkpoint import (
     _MEMORY_SETUP_CODE,
     measure_memory,
@@ -37,66 +40,10 @@ def create_baseline_kernel() -> tuple[KernelManager, any]:
     Returns:
         Tuple of (KernelManager, BlockingKernelClient)
     """
-    from jupyter_client.blocking import BlockingKernelClient
-
-    max_attempts = 3
-    kernel_manager = None
-    kernel_client = None
-
-    for attempt in range(max_attempts):
-        try:
-            if kernel_client is not None:
-                try:
-                    kernel_client.stop_channels()
-                except Exception:
-                    pass
-            if kernel_manager is not None:
-                try:
-                    kernel_manager.shutdown_kernel(now=True)
-                except Exception:
-                    pass
-
-            kernel_manager = KernelManager(kernel_name="python3")
-            kernel_manager.start_kernel()
-
-            kernel_client = BlockingKernelClient()
-            kernel_client.load_connection_info(kernel_manager.get_connection_info())
-            kernel_client.start_channels()
-
-            time.sleep(2)
-            while True:
-                try:
-                    kernel_client.wait_for_ready(timeout=30)
-                    break
-                except Exception as e:
-                    log(f"Error waiting for kernel to be ready: {e}")
-                    time.sleep(0.5)
-
-            return kernel_manager, kernel_client
-
-        except Exception as e:
-            log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
-            if kernel_manager is not None and kernel_manager.is_alive():
-                kernel_manager.shutdown_kernel(now=True)
-                while kernel_manager.is_alive():
-                    time.sleep(1)
-
-            if attempt < max_attempts - 1:
-                time.sleep(2)
-            else:
-                if kernel_client is not None:
-                    try:
-                        kernel_client.stop_channels()
-                    except Exception:
-                        pass
-                if kernel_manager is not None:
-                    try:
-                        kernel_manager.shutdown_kernel(now=True)
-                    except Exception:
-                        pass
-                raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
-
-    raise Exception("Kernel failed to start")
+    return start_kernel(
+        "python3",
+        client_factory=lambda kid: BlockingKernelClient(),
+    )
 
 
 def cleanup_kernel(kernel_manager, kernel_client) -> None:

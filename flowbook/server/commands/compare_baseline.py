@@ -132,6 +132,7 @@ from jupyter_client import KernelManager
 from jupyter_client.blocking import BlockingKernelClient
 
 from flowbook import make_kernels
+from flowbook.cli.helpers import start_kernel
 from flowbook.kernel.flowbook_client import FlowbookKernelClient
 from flowbook.server.base import NotebookCommand, ProcessingResult
 from flowbook.server.config import FlowbookConfig
@@ -613,77 +614,16 @@ def create_baseline_kernel() -> Tuple[KernelManager, BlockingKernelClient]:
     Returns:
         Tuple of (KernelManager, BlockingKernelClient)
     """
-    # Import to ensure kernels are registered
-    from flowbook.baseline_kernel import (
-        install_baseline_kernel,
-    )
+    from flowbook.baseline_kernel import install_baseline_kernel
     try:
         install_baseline_kernel()
     except Exception:
         pass
 
-    kernel_name = "baseline_kernel"
-
-    max_attempts = 3
-    kernel_manager = None
-    kernel_client = None
-
-    for attempt in range(max_attempts):
-        try:
-            if kernel_client is not None:
-                try:
-                    kernel_client.stop_channels()
-                except Exception:
-                    pass
-            if kernel_manager is not None:
-                try:
-                    kernel_manager.shutdown_kernel(now=True)
-                except Exception:
-                    pass
-
-            kernel_manager = KernelManager(kernel_name=kernel_name)
-            kernel_manager.start_kernel()
-
-            kernel_client = BlockingKernelClient()
-            kernel_client.load_connection_info(kernel_manager.get_connection_info())
-            kernel_client.start_channels()
-
-            time.sleep(2)
-            while True:
-                try:
-                    kernel_client.wait_for_ready(timeout=30)
-                    break
-                except Exception as e:
-                    log(f"Error waiting for kernel to be ready: {e}")
-                    log(traceback.format_exc())
-                    time.sleep(0.5)
-
-            return kernel_manager, kernel_client
-
-        except Exception as e:
-            log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
-            log(traceback.format_exc())
-            if kernel_manager is not None and kernel_manager.is_alive():
-                kernel_manager.shutdown_kernel(now=True)
-                while kernel_manager.is_alive():
-                    time.sleep(1)
-
-            if attempt < max_attempts - 1:
-                time.sleep(2)
-            else:
-                if kernel_client is not None:
-                    try:
-                        kernel_client.stop_channels()
-                    except Exception:
-                        pass
-                if kernel_manager is not None:
-                    try:
-                        kernel_manager.shutdown_kernel(now=True)
-                    except Exception:
-                        pass
-                raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
-
-    raise Exception("Kernel failed to start")
+    return start_kernel(
+        "baseline_kernel",
+        client_factory=lambda kid: BlockingKernelClient(),
+    )
 
 
 def create_flowbook_kernel(
@@ -700,84 +640,11 @@ def create_flowbook_kernel(
     """
     make_kernels()
 
-    kernel_name = "flowbook_kernel"
-
-    max_attempts = 3
-    kernel_manager = None
-    kernel_client = None
-
-    # Set extra environment variables (kernel inherits from parent process)
-    old_env = {}
-    if extra_env:
-        for key, value in extra_env.items():
-            old_env[key] = os.environ.get(key)
-            os.environ[key] = value
-
-    try:
-        for attempt in range(max_attempts):
-            try:
-                if kernel_client is not None:
-                    try:
-                        kernel_client.stop_channels()
-                    except Exception:
-                        pass
-                if kernel_manager is not None:
-                    try:
-                        kernel_manager.shutdown_kernel(now=True)
-                    except Exception:
-                        pass
-
-                kernel_manager = KernelManager(kernel_name=kernel_name)
-                kernel_manager.start_kernel()
-
-                kernel_client = FlowbookKernelClient()
-                kernel_client.load_connection_info(kernel_manager.get_connection_info())
-                kernel_client.start_channels()
-
-                time.sleep(2)
-                while True:
-                    try:
-                        kernel_client.wait_for_ready(timeout=30)
-                        break
-                    except Exception as e:
-                        log(f"Error waiting for kernel to be ready: {e}")
-                        log(traceback.format_exc())
-                        time.sleep(0.5)
-
-                return kernel_manager, kernel_client
-
-            except Exception as e:
-                log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
-                log(traceback.format_exc())
-                if kernel_manager is not None and kernel_manager.is_alive():
-                    kernel_manager.shutdown_kernel(now=True)
-                    while kernel_manager.is_alive():
-                        time.sleep(1)
-
-                if attempt < max_attempts - 1:
-                    time.sleep(2)
-                else:
-                    if kernel_client is not None:
-                        try:
-                            kernel_client.stop_channels()
-                        except Exception:
-                            pass
-                    if kernel_manager is not None:
-                        try:
-                            kernel_manager.shutdown_kernel(now=True)
-                        except Exception:
-                            pass
-                    raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
-
-        raise Exception("Kernel failed to start")
-    finally:
-        # Restore original environment
-        if extra_env:
-            for key, old_value in old_env.items():
-                if old_value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = old_value
+    return start_kernel(
+        "flowbook_kernel",
+        client_factory=lambda kid: FlowbookKernelClient(),
+        extra_env=extra_env,
+    )
 
 
 def cleanup_kernel(kernel_manager, kernel_client) -> None:
