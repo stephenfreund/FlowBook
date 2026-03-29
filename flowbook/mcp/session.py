@@ -911,6 +911,9 @@ class NotebookSession:
                 flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
             )
 
+        # Push edit to JupyterLab via Contents API
+        self._put_contents_api()
+
         return {
             "cell_id": cell_id,
             "old_source_preview": old_source[:200],
@@ -923,12 +926,58 @@ class NotebookSession:
     # ------------------------------------------------------------------
 
     def save(self, path: Optional[str] = None) -> str:
-        """Save notebook to disk."""
+        """Save notebook via Contents API (if available) or to disk.
+
+        When a Jupyter server is running with jupyter-collaboration,
+        saves via the Contents API which updates the live Y.js document
+        and lets the server handle disk persistence. Falls back to
+        direct disk write when no server is available or a custom
+        path is specified.
+        """
         self._require_loaded()
         save_path = path or self.notebook_path
         if not save_path:
             raise ValueError("No path specified and no original path available")
+
+        # Use Contents API when available and saving to original path
+        if not path and self._jupyter_contents_path:
+            result = self._put_contents_api()
+            if result:
+                return result
+
         return cli_save_notebook(self.notebook, output_path=save_path)
+
+    def _put_contents_api(self) -> Optional[str]:
+        """Push the current notebook to JupyterLab via Contents API PUT.
+
+        With jupyter-collaboration, this updates the live Y.js document,
+        making MCP edits visible in JupyterLab. The server handles
+        disk persistence.
+
+        Returns:
+            Status message on success, None on failure (caller falls back to disk).
+        """
+        if not self._jupyter_server_url or not self._jupyter_contents_path:
+            return None
+        try:
+            url = (
+                f"{self._jupyter_server_url}/api/contents/"
+                f"{self._jupyter_contents_path}"
+            )
+            body = json.dumps({
+                "type": "notebook",
+                "format": "json",
+                "content": self.notebook,
+            }).encode()
+            headers = {"Content-Type": "application/json"}
+            if self._jupyter_token:
+                headers["Authorization"] = f"token {self._jupyter_token}"
+            req = urllib.request.Request(url, data=body, headers=headers, method="PUT")
+            urllib.request.urlopen(req, timeout=10)
+            return self.notebook_path
+        except Exception as e:
+            logger.debug(f"Contents API PUT failed: {e}")
+            return None
 
     # ------------------------------------------------------------------
     # Status
@@ -1117,6 +1166,10 @@ class NotebookSession:
                         flowbook_msg={"type": "cell_edited", "cell_id": cid},
                     )
 
+        # Push edits to JupyterLab
+        if modified_cells:
+            self._put_contents_api()
+
         return {
             "old_name": old_name,
             "new_name": new_name,
@@ -1150,6 +1203,7 @@ class NotebookSession:
                         store_history=False,
                         flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
                     )
+                self._put_contents_api()
                 return {
                     "cell_id": cell_id,
                     "variable": actual_var,
@@ -1177,6 +1231,7 @@ class NotebookSession:
                     store_history=False,
                     flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
                 )
+            self._put_contents_api()
             return {
                 "cell_id": cell_id,
                 "variable": actual_var,
@@ -1249,6 +1304,8 @@ class NotebookSession:
                         flowbook_msg={"type": "cell_edited", "cell_id": cid},
                     )
 
+        self._put_contents_api()
+
         return {
             "cell_id": cell_id,
             "variable": actual_var,
@@ -1279,6 +1336,7 @@ class NotebookSession:
                 flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
             )
 
+        self._put_contents_api()
         return {"cell_id": cell_id, "new_source_preview": new_source[:200]}
 
     def merge_cells(self, cell_ids: List[str]) -> Dict[str, Any]:
@@ -1338,6 +1396,8 @@ class NotebookSession:
             flowbook_msg={"type": "notebook_structure", "cell_order": order_str.split()},
         )
 
+        self._put_contents_api()
+
         return {
             "merged_cell_id": first_id,
             "cells_removed": list(ids_to_remove),
@@ -1378,6 +1438,8 @@ class NotebookSession:
             store_history=False,
             flowbook_msg={"type": "notebook_structure", "cell_order": order_str.split()},
         )
+
+        self._put_contents_api()
 
         return {
             "cell_id": cell_id,
