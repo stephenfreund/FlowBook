@@ -128,7 +128,8 @@ def load_notebook(path: str, ctx: Context) -> str:
     abs_path = os.path.abspath(path)
     result = session.load(abs_path)
     ids = ", ".join(result["cell_ids"])
-    return f"Loaded {result['code_cells']} code cells ({result['total_cells']} total): {ids}"
+    joined = " [joined existing kernel]" if result.get("joined_existing") else ""
+    return f"Loaded {result['code_cells']} code cells ({result['total_cells']} total){joined}: {ids}"
 
 
 @mcp.tool()

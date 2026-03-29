@@ -18,6 +18,7 @@ from flowbook.server.kernel_manager import (
     KernelConnectionManager,
 )
 from flowbook.server.message_broadcaster import get_broadcaster, get_broadcast_stream
+from flowbook.kernel_discovery import read_discovery, write_discovery
 from flowbook.util.output import error, log, stream_output
 
 
@@ -224,6 +225,61 @@ class MessageStreamHandler(JupyterHandler):
             self.broadcaster.unregister_client(self.client_id)
 
 
+class KernelDiscoveryHandler(APIHandler):
+    """Handler for kernel discovery — check if MCP has a kernel running for a notebook."""
+
+    @tornado.web.authenticated
+    async def get(self, path):
+        """Check for an existing kernel discovery file.
+
+        Args:
+            path: Notebook path (relative to server root or absolute).
+        """
+        import os
+
+        # Try both absolute and relative to server root
+        abs_path = os.path.abspath(path)
+        disc = read_discovery(abs_path)
+
+        if disc is None:
+            # Try relative to Jupyter root
+            root = self.settings.get("server_root_dir", "")
+            if root:
+                alt_path = os.path.abspath(os.path.join(root, path))
+                disc = read_discovery(alt_path)
+
+        if disc:
+            self.finish(json.dumps(disc))
+        else:
+            self.set_status(404)
+            self.finish(json.dumps({"error": "No kernel found for this notebook"}))
+
+    @tornado.web.authenticated
+    async def put(self, path):
+        """Write a kernel discovery file (called by JupyterLab when it starts a kernel).
+
+        Request body: {"connection_file": "...", "kernel_name": "...", "pid": 123}
+        """
+        import os
+
+        data = self.get_json_body()
+        abs_path = os.path.abspath(path)
+
+        # Try relative to server root
+        root = self.settings.get("server_root_dir", "")
+        if root and not os.path.isabs(path):
+            abs_path = os.path.abspath(os.path.join(root, path))
+
+        disc_path = write_discovery(
+            notebook_path=abs_path,
+            connection_file=data.get("connection_file", ""),
+            kernel_name=data.get("kernel_name", "flowbook_kernel"),
+            pid=data.get("pid", 0),
+            started_by="jupyterlab",
+        )
+        self.finish(json.dumps({"discovery_file": disc_path}))
+
+
 def setup_handlers(web_app):
     """Set up the extension handlers."""
     global _kernel_manager
@@ -255,6 +311,11 @@ def setup_handlers(web_app):
         (
             url_path_join(base_url, "flowbook", "stream"),
             MessageStreamHandler,
+            {},
+        ),
+        (
+            url_path_join(base_url, "flowbook", "kernel-discovery", "(.+)"),
+            KernelDiscoveryHandler,
             {},
         ),
     ]

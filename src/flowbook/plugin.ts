@@ -17,6 +17,7 @@ import { CellIndexManager } from '../cellindex';
 import { IPredicateViolation } from './types';
 import { FlowbookToolbarExtension } from './toolbar';
 import { getCodeCellOrder } from '../cellindexutils';
+import { requestAPI } from '../handler';
 
 /**
  * Register the flowbook:exec-restore command at plugin startup.
@@ -249,10 +250,12 @@ class FlowbookActivationManager {
 
       // Sync initial staleness state from kernel
       this._syncInitialState(widget);
+
+      // Write kernel discovery file so MCP can find this kernel
+      this._writeKernelDiscovery(widget);
     }
 
     this._isActive = true;
-    console.log('FlowBook Plugin: Activated');
   }
 
   /**
@@ -279,6 +282,32 @@ class FlowbookActivationManager {
     this._executionHook.sendCommand({ type: 'sync' });
 
     console.log('FlowBook Plugin: Sent initial sync via comm');
+  }
+
+  /**
+   * Write a kernel discovery file so MCP can find this kernel.
+   * Best-effort — does not block activation on failure.
+   */
+  private _writeKernelDiscovery(panel: NotebookPanel): void {
+    const session = panel.sessionContext.session;
+    if (!session || !session.kernel) {
+      return;
+    }
+
+    const notebookPath = panel.context.path;
+    const kernelId = session.kernel.id;
+
+    requestAPI(`kernel-discovery/${encodeURIComponent(notebookPath)}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        kernel_name: session.kernel.name,
+        // The server-side handler will look up the connection file from the kernel ID
+        connection_file: `kernel-${kernelId}.json`,
+        pid: 0 // Server will fill in actual PID
+      })
+    }).catch(() => {
+      // Best-effort — MCP can still work without discovery
+    });
   }
 
   private _deactivate(): void {

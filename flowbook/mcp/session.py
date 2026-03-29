@@ -8,6 +8,7 @@ kernel, and accumulated reproducibility metadata from cell executions.
 import ast
 import copy
 import json
+import os
 import re
 import time
 import uuid
@@ -18,6 +19,9 @@ from flowbook.cli.helpers import (
     save_notebook as cli_save_notebook,
     setup_kernel,
 )
+from flowbook.kernel_discovery import read_discovery, write_discovery, remove_discovery
+from flowbook.mcp.jupyter_config import discover_jupyter_server
+from flowbook.mcp.ydoc_sync import YDocSync
 from flowbook.util.cell_ids import normalize_notebook_alpha, next_insertion_id
 from flowbook.server.kernel_helper import KernelHelper
 from flowbook.server.kernel_manager import FlowbookKernelClient
@@ -200,6 +204,8 @@ class NotebookSession:
         self.notebook_path: Optional[str] = None
         self.kernel_manager = None
         self.kernel_client: Optional[FlowbookKernelClient] = None
+        self._owns_kernel: bool = False  # True if we started the kernel
+        self._ydoc_sync: Optional[YDocSync] = None  # Y.js sync (when Jupyter Server available)
         self.executed_cells: Set[str] = set()
         self.cell_flowbook_meta: Dict[str, Dict] = {}
         self.cell_status: Dict[str, str] = {}  # cell_id -> "ok" | "error"
@@ -280,15 +286,29 @@ class NotebookSession:
     # ------------------------------------------------------------------
 
     def load(self, path: str) -> Dict[str, Any]:
-        """Load notebook from disk, start kernel, assign alpha cell IDs."""
+        """Load notebook from disk, start or join kernel, assign alpha cell IDs.
+
+        Kernel discovery: checks the Jupyter runtime directory for an existing
+        kernel (started by JupyterLab or another MCP session). If found and
+        alive, connects as a second client. Otherwise starts a fresh kernel
+        and writes a discovery file for others to find.
+
+        Cell ID normalization is skipped when joining an existing session
+        to avoid clobbering IDs that JupyterLab is already using.
+        """
         # Close any previous session
         if self.is_loaded:
             self.close()
 
+        abs_path = os.path.abspath(path)
+
         with open(path, "r", encoding="utf-8") as f:
             raw_notebook = json.load(f)
-        self.notebook = normalize_notebook_alpha(raw_notebook)
-        self.notebook_path = path
+
+        # Check for existing kernel via discovery file
+        discovery = read_discovery(abs_path)
+
+        self.notebook_path = abs_path
         self.executed_cells = set()
         self.cell_flowbook_meta = {}
         self.cell_status = {}
@@ -297,38 +317,130 @@ class NotebookSession:
         self._event_log = []
         self._session_start = time.time()
 
-        # Start FlowBook kernel with cwd set to the notebook's directory
-        # so relative paths (pd.read_csv("data.csv")) resolve correctly
-        import os
-        notebook_dir = os.path.dirname(os.path.abspath(path))
-        self.kernel_manager, self.kernel_client = setup_kernel(
-            connection_file=None,
-            kernel_name="flowbook_kernel",
-            cwd=notebook_dir,
-        )
+        if discovery:
+            # Join existing kernel — skip ID normalization to preserve
+            # the cell IDs that the other client is already using
+            self.notebook = raw_notebook
+            self._owns_kernel = False
+            self.kernel_manager, self.kernel_client = setup_kernel(
+                connection_file=discovery["connection_file"],
+                kernel_name="flowbook_kernel",
+            )
+        else:
+            # Start fresh — normalize IDs and start our own kernel
+            self.notebook = normalize_notebook_alpha(raw_notebook)
+            notebook_dir = os.path.dirname(abs_path)
+            self.kernel_manager, self.kernel_client = setup_kernel(
+                connection_file=None,
+                kernel_name="flowbook_kernel",
+                cwd=notebook_dir,
+            )
+            self._owns_kernel = True
+
+            # Write discovery file so JupyterLab (or another MCP) can find us
+            if self.kernel_manager is not None:
+                kernel_pid = getattr(
+                    self.kernel_manager.provisioner, "pid", None
+                ) or 0
+                write_discovery(
+                    notebook_path=abs_path,
+                    connection_file=self.kernel_manager.connection_file,
+                    kernel_name="flowbook_kernel",
+                    pid=kernel_pid,
+                    started_by="mcp",
+                )
 
         cells = self.notebook.get("cells", [])
         code_cells = [c for c in cells if c.get("cell_type") == "code"]
+        joined = " (joined existing kernel)" if discovery else ""
+
+        # Attempt Y.js sync connection (non-blocking, best-effort)
+        ydoc_status = self._try_connect_ydoc(abs_path)
 
         return {
             "path": path,
             "total_cells": len(cells),
             "code_cells": len(code_cells),
             "cell_ids": [c["id"] for c in code_cells],
+            "joined_existing": discovery is not None,
+            "ydoc_connected": self._ydoc_sync is not None and self._ydoc_sync.connected,
+            "info": f"Loaded{joined}{ydoc_status}",
         }
 
+    def _try_connect_ydoc(self, notebook_abs_path: str) -> str:
+        """Best-effort connection to Y.js room for real-time sync.
+
+        Returns a status string for the load result message.
+        """
+        server_url, token = discover_jupyter_server()
+        if not server_url:
+            return ""
+
+        try:
+            import asyncio
+
+            self._ydoc_sync = YDocSync(server_url, token)
+
+            # Compute the relative path as Jupyter Server sees it
+            # (relative to Jupyter Server's root directory)
+            # For now, use the filename — this may need refinement
+            # based on server root configuration
+            notebook_rel_path = os.path.basename(notebook_abs_path)
+
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(self._ydoc_sync.connect(notebook_rel_path))
+            # Keep the event loop for future sync operations
+            self._ydoc_loop = loop
+
+            if self._ydoc_sync.connected:
+                return " [Y.js sync active]"
+            else:
+                self._ydoc_sync = None
+                return " [Y.js sync failed to connect]"
+        except Exception as e:
+            self._ydoc_sync = None
+            return f" [Y.js sync unavailable: {e}]"
+
     def close(self):
-        """Shutdown kernel, auto-save log, and clear state."""
+        """Shutdown kernel (if we own it), auto-save log, and clear state.
+
+        If we started the kernel, shuts it down and removes the discovery file.
+        If we joined an existing kernel, just disconnects (leaves kernel running).
+        """
         # Auto-save event log if there were any events
         if self._event_log and self.notebook_path:
             try:
                 self.save_event_log()
             except Exception:
                 pass  # best-effort log save on close
-        if self.kernel_client or self.kernel_manager:
-            cleanup_kernel(self.kernel_client, self.kernel_manager)
+
+        # Disconnect Y.js sync
+        if self._ydoc_sync:
+            try:
+                import asyncio
+                loop = getattr(self, '_ydoc_loop', None) or asyncio.new_event_loop()
+                loop.run_until_complete(self._ydoc_sync.disconnect())
+            except Exception:
+                pass
+            self._ydoc_sync = None
+
+        if self._owns_kernel:
+            # We started the kernel — shut it down and remove discovery file
+            if self.kernel_client or self.kernel_manager:
+                cleanup_kernel(self.kernel_client, self.kernel_manager)
+            if self.notebook_path:
+                remove_discovery(self.notebook_path)
+        else:
+            # We joined an existing kernel — just disconnect, don't kill it
+            if self.kernel_client:
+                try:
+                    self.kernel_client.stop_channels()
+                except Exception:
+                    pass
+
         self.kernel_client = None
         self.kernel_manager = None
+        self._owns_kernel = False
         self.notebook = None
         self.notebook_path = None
         self.executed_cells = set()
@@ -336,6 +448,32 @@ class NotebookSession:
         self.cell_status = {}
         self._stale_cells = set()
         self._checkpoints = {}
+
+    def _sync_cell_to_ydoc(self, cell_id: str, cell: Dict[str, Any]) -> None:
+        """Push a cell update to Y.js (if connected). Best-effort, no-throw."""
+        if not self._ydoc_sync or not self._ydoc_sync.connected:
+            return
+        try:
+            idx = self._ydoc_sync.find_cell_index(cell_id)
+            if idx is not None:
+                self._ydoc_sync.set_cell_source(idx, get_cell_source(cell))
+        except Exception:
+            pass  # Y.js sync is best-effort
+
+    def _sync_outputs_to_ydoc(
+        self, cell_id: str, outputs: list, execution_count: Optional[int] = None
+    ) -> None:
+        """Push cell outputs to Y.js (if connected). Best-effort, no-throw."""
+        if not self._ydoc_sync or not self._ydoc_sync.connected:
+            return
+        try:
+            idx = self._ydoc_sync.find_cell_index(cell_id)
+            if idx is not None:
+                self._ydoc_sync.set_cell_outputs(idx, outputs)
+                if execution_count is not None:
+                    self._ydoc_sync.set_cell_execution_count(idx, execution_count)
+        except Exception:
+            pass  # Y.js sync is best-effort
 
     def set_continue_after_violation(self, enabled: bool) -> None:
         """Configure whether violations reject execution or just report.
@@ -354,6 +492,40 @@ class NotebookSession:
             store_history=False,
             flowbook_msg={"type": "continue_after_violation", "enabled": enabled},
         )
+
+    # ------------------------------------------------------------------
+    # IOPub polling (catch JupyterLab-initiated executions)
+    # ------------------------------------------------------------------
+
+    def _poll_iopub(self) -> None:
+        """Drain pending IOPub messages to catch external executions.
+
+        When JupyterLab runs a cell on the shared kernel, the flowbook_update
+        messages appear on IOPub. This method processes them to keep MCP's
+        staleness and metadata state current.
+
+        Called automatically at the start of get_cell, list_cells, get_status, etc.
+        """
+        if not self.kernel_client:
+            return
+        try:
+            while True:
+                msg = self.kernel_client.get_iopub_msg(timeout=0)
+                msg_type = msg.get("msg_type", "")
+                if msg_type == "flowbook_update":
+                    content = msg.get("content", {})
+                    data = content.get("data", content)
+                    if isinstance(data, dict) and data.get("type") == "metadata":
+                        cell_id = data.get("cell_id")
+                        if cell_id:
+                            self.cell_flowbook_meta[cell_id] = data
+                            self.executed_cells.add(cell_id)
+                            stale = set(data.get("stale_cells", []))
+                            self._stale_cells = (self._stale_cells | stale) - {cell_id}
+                            # Update cell outputs if we have them
+                            # (outputs come via separate IOPub messages, not flowbook_update)
+        except Exception:
+            pass  # No more messages or channel issue — both OK
 
     # ------------------------------------------------------------------
     # Cell access
@@ -393,6 +565,7 @@ class NotebookSession:
 
     def get_cell(self, cell_id: str) -> Dict[str, Any]:
         """Get a cell's source, outputs, and flowbook metadata."""
+        self._poll_iopub()
         _, cell = self._find_cell(cell_id)
         source = get_cell_source(cell)
         outputs = cell.get("outputs", [])
@@ -425,6 +598,7 @@ class NotebookSession:
         Priority: error > violation > stale > unexecuted.
         """
         self._require_loaded()
+        self._poll_iopub()
         code_cell_ids = self.get_cell_order()
 
         # 1. Runtime errors
@@ -510,6 +684,11 @@ class NotebookSession:
         cell["outputs"] = result["outputs"]
         cell["execution_count"] = result["execution_count"]
         self.executed_cells.add(cell_id)
+
+        # Sync outputs to Y.js (appears in JupyterLab instantly)
+        self._sync_outputs_to_ydoc(
+            cell_id, result["outputs"], result["execution_count"]
+        )
 
         # Extract flowbook metadata
         fb_meta = self._extract_flowbook_meta(
@@ -679,7 +858,8 @@ class NotebookSession:
         old_source = get_cell_source(cell)
         set_cell_source(cell, new_source)
 
-        newly_stale = []
+        # Sync source change to Y.js (appears in JupyterLab instantly)
+        self._sync_cell_to_ydoc(cell_id, cell)
 
         # Notify kernel if this cell was previously executed
         if cell_id in self.executed_cells:
@@ -718,6 +898,7 @@ class NotebookSession:
     def get_status(self) -> Dict[str, Any]:
         """Get current notebook reproducibility status."""
         self._require_loaded()
+        self._poll_iopub()
         cell_order = self.get_cell_order()
 
         violations = []
