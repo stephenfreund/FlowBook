@@ -4,7 +4,6 @@ Tests for kernel/models.py - Pydantic models for kernel execution.
 Tests cover:
 - TrackingData: Variable access pattern tracking
 - ExecutionProfile: Profiling and timing data
-- ExecutionMetadata: Complete execution metadata
 - MonotonicityViolation: Monotonicity constraint violations
 - ExecutionContext: Pre-execution state and configuration
 """
@@ -13,7 +12,6 @@ import pytest
 from flowbook.kernel_support.models import (
     TrackingData,
     ExecutionProfile,
-    ExecutionMetadata,
     MonotonicityViolation,
     ExecutionContext,
 )
@@ -135,59 +133,6 @@ class TestExecutionProfile:
         serialized = profile.model_dump()
         assert serialized["duration"] == 1.0
         assert serialized["profile"] == "test"
-
-
-class TestExecutionMetadata:
-    """Tests for ExecutionMetadata model."""
-
-    def test_execution_metadata_required_fields(self):
-        """ExecutionMetadata requires profile."""
-        with pytest.raises(Exception):  # ValidationError
-            ExecutionMetadata()
-
-    def test_execution_metadata_with_profile_only(self):
-        """ExecutionMetadata works with just profile."""
-        profile = ExecutionProfile(duration=1.0)
-        metadata = ExecutionMetadata(profile=profile)
-        assert metadata.profile == profile
-        assert metadata.dynamic_dependencies is None
-
-    def test_execution_metadata_with_tracking(self):
-        """ExecutionMetadata stores tracking data."""
-        profile = ExecutionProfile(duration=1.0)
-        tracking = TrackingData(reads_before_writes=["x"])
-        metadata = ExecutionMetadata(
-            profile=profile,
-            dynamic_dependencies=tracking,
-        )
-        assert metadata.profile == profile
-        assert metadata.dynamic_dependencies == tracking
-
-    def test_to_display_metadata_without_tracking(self):
-        """to_display_metadata works without tracking data."""
-        profile = ExecutionProfile(duration=1.5, profile="test")
-        metadata = ExecutionMetadata(profile=profile)
-        display = metadata.to_display_metadata()
-
-        assert "profile" in display
-        assert display["profile"]["duration"] == 1.5
-        assert display["profile"]["profile"] == "test"
-        assert "dynamic_dependencies" not in display
-
-    def test_to_display_metadata_with_tracking(self):
-        """to_display_metadata includes tracking data when present."""
-        profile = ExecutionProfile(duration=1.0)
-        tracking = TrackingData(reads_before_writes=["x"], writes=["y"])
-        metadata = ExecutionMetadata(
-            profile=profile,
-            dynamic_dependencies=tracking,
-        )
-        display = metadata.to_display_metadata()
-
-        assert "profile" in display
-        assert "dynamic_dependencies" in display
-        assert display["dynamic_dependencies"]["reads_before_writes"] == {"x"}
-        assert display["dynamic_dependencies"]["writes"] == {"y"}
 
 
 class TestMonotonicityViolation:

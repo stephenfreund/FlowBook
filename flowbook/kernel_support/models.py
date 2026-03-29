@@ -6,7 +6,6 @@ during cell execution, including:
 
 - TrackingData: Variable access patterns (reads, writes, column-level tracking)
 - ExecutionProfile: Timing and profiling information
-- ExecutionMetadata: Complete metadata for cell execution results
 - MonotonicityViolation: Details when monotonicity constraints are violated
 - ExecutionContext: Pre-execution state and configuration
 
@@ -284,32 +283,6 @@ class ExecutionProfile(BaseModel):
     env_after: Dict[str, str] = Field(
         default_factory=dict, description="Variable types after execution"
     )
-
-
-class ExecutionMetadata(BaseModel):
-    """
-    Complete metadata for a cell execution result.
-
-    This is the top-level metadata structure attached to cell execution
-    results, containing profiling information and optional dynamic
-    dependency tracking data.
-
-    Attributes:
-        profile: Profiling and timing information
-        dynamic_dependencies: Variable access patterns (if tracking enabled)
-    """
-
-    profile: ExecutionProfile = Field(..., description="Profiling data")
-    dynamic_dependencies: Optional[TrackingData] = Field(
-        None, description="Dynamic dependency tracking data (if enabled)"
-    )
-
-    def to_display_metadata(self) -> dict:
-        """Convert to dict format expected by display helpers."""
-        result = {"profile": self.profile.model_dump()}
-        if self.dynamic_dependencies is not None:
-            result["dynamic_dependencies"] = self.dynamic_dependencies.model_dump()
-        return result
 
 
 class MonotonicityViolation(BaseModel):
