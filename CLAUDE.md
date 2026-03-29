@@ -85,62 +85,51 @@ jupyter labextension list
 
 ## Architecture
 
-### Three-Tier Structure
+### Four-Tier Structure
 
-1. **Frontend (TypeScript)**: `src/` - JupyterLab UI components with two kernel-specific plugins
+1. **Frontend (TypeScript)**: `src/` - JupyterLab UI plugin for reproducibility visualization
 2. **Server Extension (Python)**: `flowbook/server/` - HTTP handlers and command processing
-3. **Custom Kernels**: Three IPython kernels for different use cases
+3. **MCP Server (Python)**: `flowbook/mcp/` - MCP tools for AI-driven notebook analysis, with real-time collaboration with JupyterLab
+4. **Custom Kernels**: IPython kernels for different use cases
    - `flowbook/kernel/` - FlowBook kernel with always-on reproducibility tracking
-   - `flowbook/kernel_support/` - Experimental kernel with AI commands, profiling, checkpointing
+   - `flowbook/kernel_support/` - Experimental kernel (archived, see `src/_archived/`)
    - `flowbook/checkpoint_kernel/` - Checkpoint kernel for timing/benchmarking
 
 ### Frontend Components (`src/`)
 
-The frontend exports **two JupyterLab plugins** that activate based on the kernel in use:
+The frontend exports a single JupyterLab plugin that activates for `flowbook_kernel`:
 
 ```
 src/
-├── index.ts                 # Exports [flowbookPlugin, experimentalPlugin]
-├── api.ts                   # Shared FlowbookAPI for HTTP communication
-├── kernel.ts                # Shared KernelUtils
-├── handler.ts               # Request handler
-├── cellindex.ts             # Cell index management
-├── cellindexutils.ts        # Cell index utilities
-├── executiondialog.tsx       # Execution dialog component
-├── logpanel.tsx             # Log panel UI component
-├── messagecomponents.tsx    # Message UI components
-├── shared/                  # Shared utilities
-│   ├── kerneldetection.ts   # KernelDetector class for kernel type detection
-│   └── types.ts             # Shared type definitions
-├── experimental/            # Experimental kernel plugin (AI commands)
-│   ├── plugin.ts            # Plugin activation with kernel gating
-│   ├── manager.ts           # FlowbookCommandsManager orchestrates commands
-│   ├── types.ts             # TypeScript interfaces
-│   ├── toolbar.ts           # Notebook toolbar buttons
-│   ├── celltoolbar.ts       # Cell-level toolbar buttons
-│   ├── metadatapanel.tsx    # Metadata panel (profile, dependencies, etc.)
-│   ├── cellhighlighter.ts   # Visual indicators for optimization potential
-│   ├── executionhook.ts     # Auto-generation and metadata extraction
-│   ├── history.ts           # Undo/redo history manager
-│   ├── historypanel.tsx     # History panel UI
-│   ├── unittestpanel.tsx    # Unit test panel
-│   └── unittesttracker.ts   # Unit test cell tracking
-└── flowbook/                # FlowBook kernel plugin (reproducibility tracking)
-    ├── plugin.ts            # Plugin activation with kernel gating
-    ├── types.ts             # IReproducibilityMetadata, IReproducibilityViolation, IReproducibilityCellState
-    ├── stalenessmanager.ts  # Tracks stale cells per notebook
-    ├── metadatapanel.tsx    # Reproducibility metadata panel (reads, writes, stale cells)
-    ├── cellhighlighter.ts   # Red highlighting for stale cells
-    ├── protocol.ts          # FlowBook comm protocol types (shared with kernel)
-    └── executionhook.ts     # Comm-based kernel communication + cell edit detection
+├── index.ts                 # Exports [flowbookPlugin]
+├── api.ts                   # FlowbookAPI for HTTP communication
+├── kernel.ts                # KernelUtils (startup, info)
+├── handler.ts               # Request handler (ServerConnection wrapper)
+├── cellindex.ts             # Cell index DOM overlay manager (@A notation)
+├── cellindexutils.ts        # indexToAlpha/alphaToIndex + getCodeCellOrder utility
+├── shared/
+│   ├── kerneldetection.ts   # KernelDetector class
+│   └── types.ts             # IKernelInfo, ICommandResult, IExecuteCommandRequest
+├── flowbook/                # FlowBook kernel plugin (reproducibility tracking)
+│   ├── plugin.ts            # Plugin activation, kernel discovery, activation manager
+│   ├── types.ts             # IReproducibilityMetadata, IPredicateViolation, IStalenessReason
+│   ├── protocol.ts          # FlowBook comm protocol types (shared with kernel)
+│   ├── stalenessmanager.ts  # Tracks stale cells per notebook with signals
+│   ├── stalenessnotice.ts   # Manages staleness notice outputs in cell output areas
+│   ├── violationnotice.ts   # Manages violation notice outputs in cell output areas
+│   ├── cellhighlighter.ts   # CSS highlighting + coordination (delegates to notice managers)
+│   ├── executionhook.ts     # Comm-based kernel communication + cell edit detection
+│   ├── toolbar.ts           # "Run Next Stale/Unrun" button
+│   ├── metadatapanel.tsx    # Reproducibility metadata panel (reads, writes, stale cells)
+│   └── dependenciespanel.tsx # ReactFlow dependency DAG visualization
+└── _archived/               # Mothballed experimental plugin (excluded from build)
+    ├── experimental/        # AI commands plugin (11 files)
+    ├── logpanel.tsx         # SSE event stream display
+    ├── executiondialog.tsx  # Modal dialog with real-time command output
+    └── messagecomponents.tsx # Shared React message formatting
 ```
 
-**Plugin Activation**:
-
-- `flowbook:plugin` - Activates UI only when kernel is `flowbook_kernel`
-- `flowbook:experimental` - Activates UI only when kernel is `experimental_kernel`
-
-**Data Flow**: User clicks button → `executeCommand()` → `FlowbookAPI.executeCommand()` → POST to `/flowbook/execute` → Backend processes → Notebook updated
+**Plugin Activation**: `flowbook:plugin` activates UI only when kernel is `flowbook_kernel`. On activation, writes a kernel discovery file so MCP can find and share the kernel.
 
 ### Server Extension (`flowbook/server/`)
 
@@ -150,6 +139,7 @@ The server uses the modern **ExtensionApp** pattern (not legacy extension points
 - `handlers.py` - HTTP request handlers:
   - `POST /flowbook/execute` - Execute a command (FlowbookCommandHandler)
   - `GET /flowbook/list` - List available commands (CommandListHandler)
+  - `GET/PUT /flowbook/kernel-discovery/{path}` - Kernel discovery for MCP↔JupyterLab sharing (KernelDiscoveryHandler)
 - `base.py` - `NotebookCommand` abstract base class
 - `registry.py` - `CommandRegistry` singleton managing available commands
 - `commands.py` - Built-in command implementations:
@@ -263,24 +253,11 @@ Uses typed `ReadLoc`/`WriteLoc` dicts matching the loc grammars from `CONFLICT_R
 }
 ```
 
-### Experimental Kernel (`flowbook/kernel_support/`)
+### Experimental Kernel (`flowbook/kernel_support/`) — Archived
 
-Full-featured kernel extending IPython with advanced features:
+The experimental kernel and its JupyterLab plugin (`src/_archived/experimental/`) are no longer active. The Python backend remains in `flowbook/kernel_support/` for reference but the frontend plugin is excluded from the build.
 
-- `experimental_kernel.py` - Main `ExperimentalKernel` implementation
-- `experimental_client.py` - Enhanced `BlockingKernelClient` that includes `cell_id` and `cell_metadata` in execution messages
-- `checkpoint.py` - State snapshots (save/restore kernel state)
-- `diff.py` - Namespace diffing to track variable changes between executions
-- `tracking.py` - `TrackingDict` for optional variable access tracking
-- `magics.py` - IPython magic commands (`%enable_scalene`, `%checkpoint`, etc.)
-- `flowbook_pdb.py` - Debugger integration
-
-**Features** (all optional, toggled via magic commands):
-
-- Scalene profiling for CPU/memory analysis
-- Checkpointing for save/restore kernel state
-- Variable tracking for read-before-write analysis
-- Monotonicity enforcement
+Key modules (for reference): `experimental_kernel.py`, `checkpoint.py`, `tracking.py`, `magics.py`.
 
 ### Checkpoint Kernel (`flowbook/checkpoint_kernel/`)
 
@@ -319,6 +296,74 @@ Register in `flowbook/server/__init__.py` or `commands.py`.
 - `agent.py` - `FlowbookAgent` uses `openai-agents` framework with litellm backend
 - `llm_cost.py` - Tracks API costs for LLM usage
 - Configured with OpenAI API for AI-powered notebook analysis
+
+### MCP Server (`flowbook/mcp/`)
+
+Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Claude Code). 23 tools organized into core, algorithmic refactoring, and logging categories.
+
+- `server.py` - FastMCP server with `@_logged_tool` decorator for automatic event logging
+- `session.py` - `NotebookSession` manages a single (notebook, kernel) pair with reproducibility metadata
+- `ydoc_sync.py` - Y.js document sync via `jupyter-collaboration` for real-time JupyterLab collaboration
+- `jupyter_config.py` - Auto-discovers running Jupyter Server from runtime directory or environment variables
+
+**Key MCP Tools:**
+
+| Tool | Purpose |
+| ---- | ------- |
+| `load_notebook` | Load notebook, start/join kernel, connect Y.js |
+| `run_cell` | Execute cell, update outputs + Y.js |
+| `edit_cell` | Edit source, sync to Y.js, notify kernel |
+| `list_cells` / `get_cell` | Read cell state (polls IOPub for external updates) |
+| `get_status` | Reproducibility status (violations, staleness) |
+| `get_next_actionable_cell` | First cell needing attention |
+| `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring |
+| `checkpoint` / `restore` | Save/restore notebook state |
+| `save_notebook` | Write to disk |
+
+### MCP ↔ JupyterLab Collaboration
+
+The MCP server and JupyterLab can share a single kernel and notebook document for real-time collaboration. Either can start first.
+
+**Architecture:**
+
+```
+MCP Server ──── ZMQ ────► Shared Kernel ◄──── ZMQ ──── JupyterLab
+     │                                                       │
+     └──── WebSocket ──► Y.js Room (jupyter-collaboration) ◄─┘
+```
+
+**Kernel Discovery** (`flowbook/kernel_discovery.py`):
+
+Discovery files in `~/.jupyter/runtime/flowbook-{sha256[:12]}.json` enable kernel sharing:
+- Whoever starts a kernel writes the discovery file (contains connection file path, PID, etc.)
+- The second participant reads it and connects as a second ZMQ client
+- PID liveness validation auto-cleans stale files
+- `read_discovery()` / `write_discovery()` / `remove_discovery()` are the public API
+
+**Y.js Document Sync** (`flowbook/mcp/ydoc_sync.py`):
+
+When a Jupyter Server with `jupyter-collaboration` is available:
+1. MCP connects to the Y.js room via WebSocket (`/api/collaboration/room/{room_id}`)
+2. Cell edits from MCP propagate to JupyterLab instantly via Y.js CRDT operations
+3. Cell outputs from MCP execution propagate via Y.js (not IOPub — avoids "foreign message" problem)
+4. JupyterLab edits propagate to MCP via Y.js observers
+
+**Cell ID Normalization in Shared Mode:**
+- MCP only normalizes cell IDs when starting fresh (no existing kernel/session)
+- When joining an existing session, MCP uses IDs as-is to avoid clobbering JupyterLab's IDs
+
+**Protocol Reconciliation:**
+- Both clients send `notebook_structure` and `cell_edited` to the kernel independently
+- This is safe because kernel handlers are idempotent and Y.js keeps documents in sync
+- MCP polls IOPub on read operations (`get_cell`, `get_status`) to catch JupyterLab-initiated executions
+
+**Graceful Degradation:**
+- If no Jupyter Server is running, MCP works standalone (own kernel, file-based notebook)
+- Y.js sync is best-effort — connection failures don't block MCP operations
+
+**Dependencies:** `jupyter-collaboration`, `pycrdt`, `jupyter-ydoc`, `websockets`
+
+**Tests:** `flowbook/mcp/tests/` — 31 tests covering kernel discovery, Jupyter config, and shared-kernel integration
 
 ## Cell ID Normalization
 
@@ -395,10 +440,13 @@ This normalization happens transparently at entry points:
 - Conflict detection pipeline: `change_detector.py` → `locations.py` (ReadLoc/WriteLoc with ▷)
 - Formal specification: `FORMAL_DEVELOPMENT.md`
 
-**Experimental Kernel** (AI commands, profiling):
+**MCP Server**:
 
-- Kernel spec: `flowbook/kernel_support/kernelspec/`
-- Main kernel class: `flowbook/kernel_support/experimental_kernel.py`
+- Server entry point: `flowbook/mcp/server.py` (23 tools)
+- Session management: `flowbook/mcp/session.py`
+- Y.js sync: `flowbook/mcp/ydoc_sync.py`
+- Kernel discovery: `flowbook/kernel_discovery.py`
+- Tests: `flowbook/mcp/tests/`
 
 **Checkpoint Kernel** (benchmarking):
 
@@ -416,11 +464,12 @@ This normalization happens transparently at entry points:
 
 - `jupyter_server>=2.4.0` - Server extension base
 - `jupyterlab>=4.0.0` - Lab integration
+- `jupyter-collaboration` - Y.js real-time collaboration (required for MCP↔JupyterLab sync)
+- `pycrdt`, `jupyter-ydoc`, `websockets` - Y.js CRDT and WebSocket client
+- `mcp` (FastMCP) - MCP server framework
 - `openai` + `openai-agents[litellm]` - AI capabilities
-- `scalene` - Memory profiling (custom git version)
 - Data science stack: `pandas`, `numpy`, `scikit-learn`, `scipy`, `seaborn`, `matplotlib`
 - Testing: `pytest`, `hypothesis`
-- LSP: `jedi-language-server`, `python-lsp-jsonrpc`
 
 ### TypeScript (Key)
 
@@ -468,6 +517,8 @@ jupyter labextension develop . --overwrite
 - Cell metadata tracking requires `FlowbookKernelClient` for proper `cell_id` propagation
 - Formal specification of reproducibility rules is in `FORMAL_DEVELOPMENT.md` with an Implementation Map linking formal definitions to code locations
 - The frontend `executionhook.ts` sends `notebook_structure` via comm before each cell execution and `cell_edited` (debounced 1s) when a previously-executed cell's source changes
+- The experimental plugin is archived in `src/_archived/` — excluded from TypeScript compilation (`tsconfig.json` exclude) and ESLint (`package.json` eslintIgnore)
+- MCP and JupyterLab can share a kernel via discovery files in `~/.jupyter/runtime/`. Either can start first. Y.js sync requires `jupyter-collaboration`
 
 ## Formal Specification Sync
 
