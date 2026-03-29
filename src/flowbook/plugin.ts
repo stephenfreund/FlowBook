@@ -203,6 +203,10 @@ class FlowbookActivationManager {
 
     if (isFlowbook && !this._isActive) {
       this._activate();
+    } else if (isFlowbook && this._isActive) {
+      // Kernel may have restarted (new kernel ID) — rewrite discovery file
+      // so MCP can find the new connection. PUT is idempotent.
+      this._writeKernelDiscovery(notebook);
     } else if (!isFlowbook && this._isActive) {
       this._deactivate();
     }

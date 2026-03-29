@@ -338,6 +338,19 @@ export class ReproducibilityExecutionHookManager {
           const cell = this._findCell(panel, reproMeta.cell_id);
           if (cell) {
             cell.model.setMetadata('flowbook', reproMeta);
+
+            // Refresh cell UI — needed for external executions (e.g. MCP)
+            // where _onCellExecuted doesn't fire on this client.
+            const cellOrder = this._getCurrentCellOrder(panel);
+            const stalenessManager =
+              this._highlighter.getStalenessManager(panel);
+            this._highlighter.updateCell(
+              cell,
+              stalenessManager,
+              cellOrder,
+              panel.context.path
+            );
+            this._highlighter.refreshDependencies();
           }
         }
 
@@ -354,8 +367,33 @@ export class ReproducibilityExecutionHookManager {
       case 'violation': {
         const { type: _type, ...violation } = data;
         const pv = violation as unknown as IPredicateViolation;
-        // Buffer violation — _onCellExecuted will pick it up and store on cell
+        // Buffer violation for _onCellExecuted (local execution)
         this._pendingViolations.push(pv);
+
+        // Also apply directly to cell — needed for external executions
+        // (e.g. MCP) where _onCellExecuted doesn't fire on this client.
+        if (pv.cell_id) {
+          const cell = this._findCell(panel, pv.cell_id);
+          if (cell) {
+            const existing =
+              (cell.model.getMetadata(
+                'flowbook_violations'
+              ) as IPredicateViolation[]) || [];
+            const updated = [...existing, pv];
+            cell.model.setMetadata('flowbook_violations', updated);
+            cell.model.setMetadata('flowbook_violation', updated[0]);
+
+            const cellOrder = this._getCurrentCellOrder(panel);
+            const stalenessManager =
+              this._highlighter.getStalenessManager(panel);
+            this._highlighter.updateCell(
+              cell,
+              stalenessManager,
+              cellOrder,
+              panel.context.path
+            );
+          }
+        }
         console.log(
           `ReproducibilityExecutionHook: Comm violation received for cell ${pv.cell_id}, predicate=${pv.predicate}`
         );

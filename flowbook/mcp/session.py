@@ -300,7 +300,7 @@ class NotebookSession:
         if self.is_loaded:
             self.close()
 
-        abs_path = os.path.abspath(path)
+        abs_path = os.path.abspath(os.path.expanduser(path))
 
         with open(path, "r", encoding="utf-8") as f:
             raw_notebook = json.load(f)
