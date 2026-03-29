@@ -200,17 +200,19 @@ All conflict checks use the typed `▷` relation (`write_conflicts_read`) from `
 
 The kernel communicates with clients via a unified JSON protocol with a `"type"` discriminator:
 
-| Transport | Frontend (TypeScript) | Python clients |
-|---|---|---|
-| Client → Kernel | Comm channel (`comm.send()`) | Execute request metadata (`cell_meta.flowbook`) |
-| Kernel → Client | Comm channel + custom IOPub `flowbook_update` | Custom IOPub `flowbook_update` |
+| Transport       | Frontend (TypeScript)                         | Python clients                                  |
+| --------------- | --------------------------------------------- | ----------------------------------------------- |
+| Client → Kernel | Comm channel (`comm.send()`)                  | Execute request metadata (`cell_meta.flowbook`) |
+| Kernel → Client | Comm channel + custom IOPub `flowbook_update` | Custom IOPub `flowbook_update`                  |
 
 Kernel → Client message types:
+
 - `"metadata"` — post-execution reproducibility data (read/write locs, stale cells, timing, errors)
 - `"violation"` — predicate violation (NO_READ_AND_WRITE, etc.)
 - `"status"` — status line (icon + text, displayed in panel header)
 
 Client → Kernel message types:
+
 - `"notebook_structure"` — set cell order
 - `"cell_edited"` — mark cell stale ([Inst-Edit])
 - `"continue_after_violation"` — toggle violation handling
@@ -218,13 +220,13 @@ Client → Kernel message types:
 
 **User-facing magic commands** (typed by users in code cells, produce visible output):
 
-| Command                              | Description                                    |
-| ------------------------------------ | ---------------------------------------------- |
-| `%flowbook_status`                   | Display current reproducibility state          |
-| `%flowbook_stale`                    | Show stale cells                               |
-| `%continue_after_violation <on/off>` | Control whether violations reject or warn      |
-| `%notebook_structure <ids...>`       | Set notebook cell order (thin wrapper)         |
-| `%cell_edited <cell_id>`             | Mark edited cell stale (thin wrapper)          |
+| Command                              | Description                               |
+| ------------------------------------ | ----------------------------------------- |
+| `%flowbook_status`                   | Display current reproducibility state     |
+| `%flowbook_stale`                    | Show stale cells                          |
+| `%continue_after_violation <on/off>` | Control whether violations reject or warn |
+| `%notebook_structure <ids...>`       | Set notebook cell order (thin wrapper)    |
+| `%cell_edited <cell_id>`             | Mark edited cell stale (thin wrapper)     |
 
 **Features** (always enabled):
 
