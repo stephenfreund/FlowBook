@@ -11,6 +11,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from jupyter_client import BlockingKernelClient, KernelManager
+from jupyter_client.kernelspec import NoSuchKernel
 
 from flowbook import make_kernels
 from flowbook.server.kernel_manager import FlowbookKernelClient
@@ -116,6 +117,19 @@ def start_kernel(
                 wait_for_kernel_ready(kernel_client)
 
                 return kernel_manager, kernel_client
+
+            except NoSuchKernel:
+                log(f"Kernel spec '{kernel_name}' not found "
+                    f"(attempt {attempt + 1}/{max_attempts}), reinstalling...")
+                try:
+                    make_kernels()
+                except Exception:
+                    pass
+                if attempt == max_attempts - 1:
+                    raise Exception(
+                        f"Kernel spec '{kernel_name}' not found "
+                        f"after {max_attempts} attempts"
+                    )
 
             except Exception as e:
                 log(f"Kernel start attempt {attempt + 1}/{max_attempts} failed: {e}")
