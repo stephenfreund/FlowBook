@@ -2,7 +2,24 @@
  * Cell index conversion utilities.
  *
  * Converts between 0-based numeric indices and Excel-style alphabetic notation.
+ * Also provides shared notebook cell-order helpers.
  */
+
+import { NotebookPanel } from '@jupyterlab/notebook';
+
+/**
+ * Get the ordered list of code cell IDs from a notebook.
+ */
+export function getCodeCellOrder(notebook: NotebookPanel): string[] {
+  const cellOrder: string[] = [];
+  const cells = notebook.content.widgets;
+  for (let i = 0; i < cells.length; i++) {
+    if (cells[i].model.type === 'code') {
+      cellOrder.push(cells[i].model.id);
+    }
+  }
+  return cellOrder;
+}
 
 /**
  * Convert 0-based index to Excel-style alpha notation.

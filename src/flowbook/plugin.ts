@@ -7,7 +7,6 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
-import { Cell } from '@jupyterlab/cells';
 
 import { KernelDetector } from '../shared/kerneldetection';
 import { ReproducibilityMetadataPanel } from './metadatapanel';
@@ -17,6 +16,7 @@ import { ReproducibilityExecutionHookManager } from './executionhook';
 import { CellIndexManager } from '../cellindex';
 import { IPredicateViolation } from './types';
 import { FlowbookToolbarExtension } from './toolbar';
+import { getCodeCellOrder } from '../cellindexutils';
 
 /**
  * Register the flowbook:exec-restore command at plugin startup.
@@ -119,15 +119,17 @@ class FlowbookActivationManager {
   private _toolbarExtension: FlowbookToolbarExtension;
   private _isActive = false;
   private _activeNotebookPath: string | null = null;
+  private _statusListenerNotebook: NotebookPanel | null = null;
 
   constructor(
     app: JupyterFrontEnd,
     tracker: INotebookTracker,
+    kernelDetector: KernelDetector,
     toolbarExtension: FlowbookToolbarExtension
   ) {
     this._app = app;
     this._tracker = tracker;
-    this._kernelDetector = new KernelDetector(tracker);
+    this._kernelDetector = kernelDetector;
     this._cellIndexManager = new CellIndexManager();
     this._toolbarExtension = toolbarExtension;
 
@@ -159,16 +161,9 @@ class FlowbookActivationManager {
   private _checkCurrentNotebook(): void {
     const notebook = this._tracker.currentWidget;
     if (notebook) {
-      const kernelName = notebook.sessionContext.session?.kernel?.name;
-      console.log(`FlowBook Plugin: Checking notebook, kernel = ${kernelName}`);
-
       // Wait for session to be ready
       notebook.sessionContext.ready.then(() => {
         const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
-        const currentKernelName = notebook.sessionContext.session?.kernel?.name;
-        console.log(
-          `FlowBook Plugin: Session ready, kernel = ${currentKernelName}, isFlowbook = ${isFlowbook}`
-        );
 
         if (isFlowbook) {
           this._activate();
@@ -177,20 +172,38 @@ class FlowbookActivationManager {
         }
       });
 
-      // Also listen for status changes in case kernel starts after ready
-      notebook.sessionContext.statusChanged.connect(() => {
-        const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
-        const currentKernelName = notebook.sessionContext.session?.kernel?.name;
-        console.log(
-          `FlowBook Plugin: Status changed, kernel = ${currentKernelName}, isFlowbook = ${isFlowbook}`
+      // Disconnect previous statusChanged listener before connecting new one
+      if (
+        this._statusListenerNotebook &&
+        this._statusListenerNotebook !== notebook
+      ) {
+        this._statusListenerNotebook.sessionContext.statusChanged.disconnect(
+          this._onStatusChanged,
+          this
         );
+      }
 
-        if (isFlowbook && !this._isActive) {
-          this._activate();
-        } else if (!isFlowbook && this._isActive) {
-          this._deactivate();
-        }
-      });
+      if (this._statusListenerNotebook !== notebook) {
+        notebook.sessionContext.statusChanged.connect(
+          this._onStatusChanged,
+          this
+        );
+        this._statusListenerNotebook = notebook;
+      }
+    }
+  }
+
+  private _onStatusChanged(): void {
+    const notebook = this._statusListenerNotebook;
+    if (!notebook) {
+      return;
+    }
+    const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
+
+    if (isFlowbook && !this._isActive) {
+      this._activate();
+    } else if (!isFlowbook && this._isActive) {
+      this._deactivate();
     }
   }
 
@@ -220,7 +233,6 @@ class FlowbookActivationManager {
 
     // Create execution hook (store reference for sendCommand access)
     this._executionHook = new ReproducibilityExecutionHookManager(
-      this._app,
       this._tracker,
       this._highlighter
     );
@@ -253,11 +265,7 @@ class FlowbookActivationManager {
       return;
     }
 
-    // Get cell order
-    const cells = panel.content.widgets;
-    const cellOrder = cells
-      .filter((cell: Cell) => cell.model.type === 'code')
-      .map((cell: Cell) => cell.model.id);
+    const cellOrder = getCodeCellOrder(panel);
 
     if (cellOrder.length === 0) {
       return;
@@ -278,8 +286,6 @@ class FlowbookActivationManager {
       return;
     }
 
-    console.log('FlowBook Plugin: Deactivating');
-
     // Stop cell index overlays
     if (this._activeNotebookPath) {
       this._cellIndexManager.stopMonitoring(this._activeNotebookPath);
@@ -296,11 +302,17 @@ class FlowbookActivationManager {
       this._dependenciesPanel = null;
     }
 
-    // Highlighter cleanup
-    this._highlighter = null;
+    // Dispose highlighter and execution hook (disconnect signal listeners)
+    if (this._highlighter) {
+      this._highlighter.dispose();
+      this._highlighter = null;
+    }
+    if (this._executionHook) {
+      this._executionHook.dispose();
+      this._executionHook = null;
+    }
 
     this._isActive = false;
-    console.log('FlowBook Plugin: Deactivated');
   }
 }
 
@@ -325,6 +337,11 @@ export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
     const toolbarExtension = new FlowbookToolbarExtension(kernelDetector);
     app.docRegistry.addWidgetExtension('Notebook', toolbarExtension);
 
-    new FlowbookActivationManager(app, tracker, toolbarExtension);
+    new FlowbookActivationManager(
+      app,
+      tracker,
+      kernelDetector,
+      toolbarExtension
+    );
   }
 };

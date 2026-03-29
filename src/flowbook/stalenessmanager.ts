@@ -53,14 +53,14 @@ export class StalenessManager {
   }
 
   /**
-   * @deprecated Use setReasons instead. Single reason is wrapped in array.
+   * Store a single reason a cell is stale (wraps in array internally).
    */
   setReason(cellId: string, reason: IStalenessReason): void {
     this._stalenessReasons.set(cellId, [reason]);
   }
 
   /**
-   * @deprecated Use getReasons instead. Returns first reason or undefined.
+   * Get the primary reason a cell is stale, or undefined if none.
    */
   getReason(cellId: string): IStalenessReason | undefined {
     const reasons = this._stalenessReasons.get(cellId);

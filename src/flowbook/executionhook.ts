@@ -6,7 +6,6 @@
  * metadata and magic command approach.
  */
 
-import { JupyterFrontEnd } from '@jupyterlab/application';
 import {
   INotebookTracker,
   Notebook,
@@ -33,7 +32,7 @@ import {
   FlowbookKernelMessage,
   FlowbookClientMessage
 } from './protocol';
-import { indexToAlpha } from '../cellindexutils';
+import { indexToAlpha, getCodeCellOrder } from '../cellindexutils';
 
 export class ReproducibilityExecutionHookManager {
   private _tracker: INotebookTracker;
@@ -43,19 +42,54 @@ export class ReproducibilityExecutionHookManager {
   private _attachedKernel: Kernel.IKernelConnection | null = null;
   private _listenedCellIds: Set<string> = new Set();
   private _comm: Kernel.IComm | null = null;
+  private _isDisposed = false;
 
   // Pending violations received via comm before _onCellExecuted fires.
   // _onCellExecuted picks these up and stores them on the cell.
   private _pendingViolations: IPredicateViolation[] = [];
 
   constructor(
-    _app: JupyterFrontEnd,
     tracker: INotebookTracker,
     highlighter: ReproducibilityCellHighlighter
   ) {
     this._tracker = tracker;
     this._highlighter = highlighter;
     this._setupHooks();
+  }
+
+  /**
+   * Disconnect all signal listeners and clean up.
+   */
+  dispose(): void {
+    if (this._isDisposed) {
+      return;
+    }
+    this._isDisposed = true;
+
+    NotebookActions.executed.disconnect(this._onCellExecuted, this);
+    NotebookActions.executionScheduled.disconnect(
+      this._onExecutionScheduled,
+      this
+    );
+    this._tracker.currentChanged.disconnect(this._setupCellEditListener, this);
+    this._tracker.currentChanged.disconnect(this._setupComm, this);
+
+    // Clear pending edit timers
+    for (const timer of this._editTimers.values()) {
+      clearTimeout(timer);
+    }
+    this._editTimers.clear();
+
+    // Close comm channel
+    if (this._comm) {
+      try {
+        this._comm.close();
+      } catch {
+        // Ignore errors closing comm
+      }
+      this._comm = null;
+    }
+    this._attachedKernel = null;
   }
 
   /**
@@ -152,16 +186,7 @@ export class ReproducibilityExecutionHookManager {
    * Called when cells are added/removed to update staleness immediately.
    */
   private _sendNotebookStructure(panel: NotebookPanel): void {
-    const notebook = panel.content;
-
-    // Build cell order array (only code cells)
-    const cellOrder: string[] = [];
-    for (let i = 0; i < notebook.widgets.length; i++) {
-      const c = notebook.widgets[i];
-      if (c.model.type === 'code') {
-        cellOrder.push(c.model.id);
-      }
-    }
+    const cellOrder = getCodeCellOrder(panel);
 
     if (cellOrder.length > 0) {
       this.sendCommand({ type: 'notebook_structure', cell_order: cellOrder });
@@ -376,21 +401,11 @@ export class ReproducibilityExecutionHookManager {
       );
     }
 
-    // Build cell order array (only code cells)
-    const cellOrder: string[] = [];
-    for (let i = 0; i < notebook.widgets.length; i++) {
-      const c = notebook.widgets[i];
-      if (c.model.type === 'code') {
-        cellOrder.push(c.model.id);
-      }
-    }
+    const cellOrder = getCodeCellOrder(panel);
 
     // Send notebook_structure via comm
     if (cellOrder.length > 0) {
       this.sendCommand({ type: 'notebook_structure', cell_order: cellOrder });
-      console.log(
-        `ReproducibilityExecutionHook: Sent notebook_structure via comm with ${cellOrder.length} cells`
-      );
     }
   }
 
@@ -459,17 +474,10 @@ export class ReproducibilityExecutionHookManager {
   // _extractPredicateViolations removed — violations now arrive via comm
 
   /**
-   * Get current cell order from notebook (only code cells)
+   * Get current cell order from notebook (only code cells).
    */
   private _getCurrentCellOrder(panel: NotebookPanel): string[] {
-    const cellOrder: string[] = [];
-    const cells = panel.content.widgets;
-    for (let i = 0; i < cells.length; i++) {
-      if (cells[i].model.type === 'code') {
-        cellOrder.push(cells[i].model.id);
-      }
-    }
-    return cellOrder;
+    return getCodeCellOrder(panel);
   }
 
   /**

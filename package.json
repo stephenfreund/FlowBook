@@ -122,7 +122,8 @@
         "node_modules",
         "dist",
         "coverage",
-        "**/*.d.ts"
+        "**/*.d.ts",
+        "src/_archived"
     ],
     "eslintConfig": {
         "extends": [

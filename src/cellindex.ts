@@ -150,8 +150,6 @@ export class CellIndexManager {
         // Check if overlay already exists for this cell
         const existingOverlay = overlays.get(cellId);
         if (existingOverlay && existingOverlay.parentNode) {
-          // Update text in case index changed
-          // To show cell ID suffix, use: indexToAlpha(index, cellId)
           existingOverlay.textContent = indexToAlpha(index);
           return;
         }
@@ -164,7 +162,7 @@ export class CellIndexManager {
             existingOverlay.remove();
           }
 
-          const overlay = this.createOverlay(index, cellId);
+          const overlay = this.createOverlay(index);
           (editorNode as HTMLElement).style.position = 'relative';
           editorNode.appendChild(overlay);
           overlays.set(cellId, overlay);
@@ -176,10 +174,9 @@ export class CellIndexManager {
   /**
    * Create an overlay element with the cell index
    */
-  private createOverlay(index: number, _cellId: string): HTMLElement {
+  private createOverlay(index: number): HTMLElement {
     const overlay = document.createElement('div');
     overlay.className = 'flowbook-cell-index-overlay';
-    // To show cell ID suffix, use: indexToAlpha(index, _cellId)
     overlay.textContent = indexToAlpha(index);
     return overlay;
   }
