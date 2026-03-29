@@ -129,7 +129,8 @@ def load_notebook(path: str, ctx: Context) -> str:
     result = session.load(abs_path)
     ids = ", ".join(result["cell_ids"])
     joined = " [joined existing kernel]" if result.get("joined_existing") else ""
-    return f"Loaded {result['code_cells']} code cells ({result['total_cells']} total){joined}: {ids}"
+    live = " [live sync]" if result.get("contents_api_connected") else ""
+    return f"Loaded {result['code_cells']} code cells ({result['total_cells']} total){joined}{live}: {ids}"
 
 
 @mcp.tool()
@@ -175,6 +176,7 @@ def list_cells(ctx: Context) -> str:
     """
     session = _get_session(ctx)
     session._require_loaded()
+    session.refresh_from_jupyter()
     lines = []
     code_idx = 0
     for cell in session.notebook["cells"]:

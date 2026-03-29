@@ -23,16 +23,46 @@ def discover_jupyter_server() -> Tuple[Optional[str], Optional[str]]:
     Returns:
         (server_url, token) or (None, None) if no server found.
     """
+    info = _discover_jupyter_server_info()
+    if info:
+        return info["url"], info.get("token")
+    return None, None
+
+
+def discover_jupyter_server_root() -> Optional[str]:
+    """Find the running Jupyter Server's root directory.
+
+    Returns:
+        Absolute path to the server root directory, or None.
+    """
+    info = _discover_jupyter_server_info()
+    if info:
+        root = info.get("root_dir", "")
+        if root:
+            return os.path.abspath(os.path.expanduser(root))
+    return None
+
+
+def _discover_jupyter_server_info() -> Optional[dict]:
+    """Find a running Jupyter Server and return its info dict.
+
+    Discovery order:
+    1. Environment variables JUPYTER_SERVER_URL and JUPYTER_TOKEN
+    2. Server info files in Jupyter runtime directory
+
+    Returns:
+        Server info dict with url, token, root_dir, etc., or None.
+    """
     # 1. Environment variables
     url = os.environ.get("JUPYTER_SERVER_URL")
     token = os.environ.get("JUPYTER_TOKEN")
     if url:
-        return url.rstrip("/"), token
+        return {"url": url.rstrip("/"), "token": token or None}
 
     # 2. Server info files in runtime directory
     runtime_dir = jupyter_runtime_dir()
     if not os.path.isdir(runtime_dir):
-        return None, None
+        return None
 
     # Find server info files (e.g., jpserver-12345.json, nbserver-12345.json)
     server_files = []
@@ -60,8 +90,13 @@ def discover_jupyter_server() -> Tuple[Optional[str], Optional[str]]:
                     continue  # Server is dead, skip
 
             if server_url:
-                return server_url, server_token or None
+                return {
+                    "url": server_url,
+                    "token": server_token or None,
+                    "root_dir": info.get("root_dir", ""),
+                    "pid": pid,
+                }
         except (json.JSONDecodeError, IOError):
             continue
 
-    return None, None
+    return None
