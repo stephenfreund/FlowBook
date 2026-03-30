@@ -19,7 +19,7 @@ import { IOutput } from '@jupyterlab/nbformat';
 import { StalenessManager } from './stalenessmanager';
 import { ReproducibilityMetadataPanel } from './metadatapanel';
 import { DependenciesPanel, ICellGraphData } from './dependenciespanel';
-import { IReproducibilityMetadata, IPredicateViolation } from './types';
+import { IReproducibilityMetadata } from './types';
 import { StalenessNoticeManager } from './stalenessnotice';
 import { ViolationNoticeManager } from './violationnotice';
 import { getCodeCellOrder } from '../cellindexutils';
@@ -376,10 +376,7 @@ export class ReproducibilityCellHighlighter {
       const flowbook = cell.model.getMetadata('flowbook') as
         | IReproducibilityMetadata
         | undefined;
-      const violations =
-        (cell.model.getMetadata('flowbook_violations') as
-          | IPredicateViolation[]
-          | undefined) || [];
+      const violations = flowbook?.errors || [];
 
       let label: string;
       try {
@@ -420,8 +417,6 @@ export class ReproducibilityCellHighlighter {
 
       cell.model.deleteMetadata('flowbook');
       cell.model.deleteMetadata('flowbook_staleness');
-      cell.model.deleteMetadata('flowbook_violation');
-      cell.model.deleteMetadata('flowbook_violations');
 
       const codeModel = cell.model as ICodeCellModel;
       const outputs = codeModel.outputs;

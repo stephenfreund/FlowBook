@@ -14,7 +14,7 @@ import { DependenciesPanel } from './dependenciespanel';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { CellIndexManager } from '../cellindex';
-import { IPredicateViolation } from './types';
+import { IReproducibilityMetadata } from './types';
 import { FlowbookToolbarExtension } from './toolbar';
 import { getCodeCellOrder } from '../cellindexutils';
 import { requestAPI } from '../handler';
@@ -24,7 +24,7 @@ import { requestAPI } from '../handler';
  *
  * The command is registered once, but its isEnabled check gates on:
  * 1. Current kernel is flowbook_kernel
- * 2. Active cell has a no_read_before_write predicate violation in flowbook_violations
+ * 2. Active cell has a no_read_before_write error in flowbook.errors
  *
  * The context menu item is defined declaratively in schema/plugin.json.
  */
@@ -51,12 +51,13 @@ function registerExecRestoreCommand(
         if (!activeCell || activeCell.model.type !== 'code') {
           return false;
         }
-        const violations = activeCell.model.getMetadata(
-          'flowbook_violations'
-        ) as IPredicateViolation[] | undefined;
+        const flowbookMeta = activeCell.model.getMetadata(
+          'flowbook'
+        ) as IReproducibilityMetadata | undefined;
+        const errors = flowbookMeta?.errors;
         return (
-          violations !== undefined &&
-          violations.some(v => v.predicate === 'no_read_before_write')
+          errors !== undefined &&
+          errors.some(e => e.error_type === 'no_read_before_write')
         );
       } catch (e) {
         console.error('FlowBook exec-restore isEnabled error:', e);

@@ -52,12 +52,15 @@ class TestFixCommand:
             source="df['new_col'] = 1"
         )
         cell2.id = "efgh"
-        cell2.metadata["flowbook_violation"] = {
-            "type": "backward_mutation",
-            "mutating_cell": "efgh",
-            "affected_cell": "abcd",
-            "variables": ["df"],
-            "message": "Cell @B modified `df` read by earlier cell @A"
+        cell2.metadata["flowbook"] = {
+            "errors": [{
+                "error_type": "no_write_after_read",
+                "cell_id": "efgh",
+                "locations": ["df"],
+                "message": "Cell @B modified `df` read by earlier cell @A",
+                "accepted": False,
+                "causer_cell": "abcd",
+            }]
         }
 
         nb.cells = [cell1, cell2]
@@ -93,10 +96,10 @@ class TestFixCommand:
 
         violation = self.command._get_violation_from_cell(dict(cell))
         assert violation is not None
-        assert violation["type"] == "backward_mutation"
-        assert violation["mutating_cell"] == "efgh"
-        assert violation["affected_cell"] == "abcd"
-        assert "df" in violation["variables"]
+        assert violation["error_type"] == "no_write_after_read"
+        assert violation["cell_id"] == "efgh"
+        assert violation["causer_cell"] == "abcd"
+        assert "df" in violation["locations"]
 
     def test_get_proposed_fix_from_cell(self):
         """Test extracting proposed fix from cell metadata."""

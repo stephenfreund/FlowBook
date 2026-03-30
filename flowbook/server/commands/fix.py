@@ -114,15 +114,12 @@ class FixCommand(NotebookCommand):
         """Extract violation info from cell metadata."""
         metadata = cell.get("metadata", {})
 
-        # Check flowbook_violation metadata (set by frontend)
-        violation = metadata.get("flowbook_violation")
-        if violation and violation.get("mutating_cell"):
-            return violation
-
-        # Check flowbook metadata (from kernel)
+        # Check flowbook.errors (canonical source from kernel metadata)
         flowbook = metadata.get("flowbook", {})
-        if isinstance(flowbook, dict) and flowbook.get("violation"):
-            return flowbook["violation"]
+        if isinstance(flowbook, dict):
+            errors = flowbook.get("errors", [])
+            if errors:
+                return errors[0]
 
         return None
 
