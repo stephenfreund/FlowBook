@@ -62,6 +62,7 @@ export interface IReproducibilityError {
   cell_id: string;
   locations: string[];
   message: string;
+  accepted?: boolean;
   causer_cell?: string;
   detail?: Record<string, unknown>;
 }

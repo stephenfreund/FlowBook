@@ -1444,6 +1444,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                                 tracking=tracking,
                                 sdc_result=sdc_result,
                                 stale_before=stale_before,
+                                violations_accepted=False,
                             )
 
                             # Return error status (use first error for exception message)
@@ -1485,6 +1486,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             tracking=tracking,
                             sdc_result=sdc_result,
                             stale_before=stale_before,
+                            violations_accepted=self._continue_after_violation,
                         )
 
                 return result
@@ -1734,6 +1736,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         tracking,
         sdc_result,
         stale_before: Optional[Set[str]] = None,
+        violations_accepted: bool = False,
     ) -> None:
         """Display execution timing and Reproducibility metadata."""
         # Build metadata for display
@@ -1753,7 +1756,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             state_duration_ms=state_duration_ms,
             check_duration_ms=check_duration_ms,
             staleness_reasons=sdc_result.staleness_reasons if sdc_result else {},
-            errors=[e.to_dict() for e in sdc_result.errors] if sdc_result else [],
+            errors=[e.to_dict(accepted=violations_accepted) for e in sdc_result.errors] if sdc_result else [],
         )
 
         # Log and display structural warnings

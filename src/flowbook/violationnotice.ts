@@ -7,7 +7,10 @@
 
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { IOutput } from '@jupyterlab/nbformat';
-import { IPredicateViolation } from './types';
+import {
+  IReproducibilityError,
+  IReproducibilityMetadata
+} from './types';
 import { indexToAlpha } from '../cellindexutils';
 
 /**
@@ -16,7 +19,7 @@ import { indexToAlpha } from '../cellindexutils';
 export class ViolationNoticeManager {
   /**
    * Add or remove the violation notice display_data output.
-   * Handles IPredicateViolation[] format (multiple violations shown in a single error box).
+   * Reads errors from flowbook metadata (the canonical source of violation data).
    *
    * Returns true if the cell has violations (so caller can add error CSS class).
    */
@@ -27,9 +30,10 @@ export class ViolationNoticeManager {
     const codeModel = cell.model as ICodeCellModel;
     const outputs = codeModel.outputs;
 
-    const violations = cell.model.getMetadata('flowbook_violations') as
-      | IPredicateViolation[]
-      | undefined;
+    const flowbookMeta = cell.model.getMetadata(
+      'flowbook'
+    ) as IReproducibilityMetadata | undefined;
+    const violations = flowbookMeta?.errors;
 
     // Check if we already have a violation notice
     let hasViolationNotice = false;
@@ -102,16 +106,16 @@ export class ViolationNoticeManager {
    * Build the violation notice output, grouping violations by (predicate, locations).
    */
   private _buildViolationNotice(
-    violations: IPredicateViolation[],
+    violations: IReproducibilityError[],
     cellOrder: string[]
   ): { noticeOutput: IOutput; plainText: string } {
     const icon = '\u274c';
     const cssClass = 'flowbook-error-notice';
 
-    // Group violations by (predicate, locations) to merge common ones
+    // Group violations by (error_type, locations) to merge common ones
     const grouped = new Map<
       string,
-      { predicate: string; locs: string[]; causers: string[] }
+      { errorType: string; locs: string[]; causers: string[] }
     >();
 
     for (const violation of violations) {
@@ -125,11 +129,11 @@ export class ViolationNoticeManager {
       }
 
       const locsKey = [...violation.locations].sort().join(',');
-      const groupKey = `${violation.predicate}:${locsKey}`;
+      const groupKey = `${violation.error_type}:${locsKey}`;
 
       if (!grouped.has(groupKey)) {
         grouped.set(groupKey, {
-          predicate: violation.predicate,
+          errorType: violation.error_type,
           locs: violation.locations,
           causers: []
         });
@@ -150,7 +154,7 @@ export class ViolationNoticeManager {
       const causersStr = group.causers.join(', ');
 
       let message: string;
-      switch (group.predicate) {
+      switch (group.errorType) {
         case 'no_write_after_read': {
           message = causersStr
             ? `Writes ${htmlLocs} already read by ${causersStr}`

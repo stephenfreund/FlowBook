@@ -367,33 +367,9 @@ export class ReproducibilityExecutionHookManager {
       case 'violation': {
         const { type: _type, ...violation } = data;
         const pv = violation as unknown as IPredicateViolation;
-        // Buffer violation for _onCellExecuted (local execution)
+        // Buffer violation — the metadata message (which follows) carries
+        // the canonical errors in flowbook.errors and triggers updateCell.
         this._pendingViolations.push(pv);
-
-        // Also apply directly to cell — needed for external executions
-        // (e.g. MCP) where _onCellExecuted doesn't fire on this client.
-        if (pv.cell_id) {
-          const cell = this._findCell(panel, pv.cell_id);
-          if (cell) {
-            const existing =
-              (cell.model.getMetadata(
-                'flowbook_violations'
-              ) as IPredicateViolation[]) || [];
-            const updated = [...existing, pv];
-            cell.model.setMetadata('flowbook_violations', updated);
-            cell.model.setMetadata('flowbook_violation', updated[0]);
-
-            const cellOrder = this._getCurrentCellOrder(panel);
-            const stalenessManager =
-              this._highlighter.getStalenessManager(panel);
-            this._highlighter.updateCell(
-              cell,
-              stalenessManager,
-              cellOrder,
-              panel.context.path
-            );
-          }
-        }
         console.log(
           `ReproducibilityExecutionHook: Comm violation received for cell ${pv.cell_id}, predicate=${pv.predicate}`
         );
@@ -468,32 +444,17 @@ export class ReproducibilityExecutionHookManager {
       return;
     }
 
-    // Collect pending violations that arrived via comm during execution.
-    // Filter to violations for this cell (comm may deliver violations for
-    // other cells in rare race conditions).
+    // Clear pending violations for this cell (they were buffered from the
+    // violation comm message; the canonical data is in flowbook.errors
+    // from the metadata comm message).
     const cellId = cell.model.id;
-    const cellViolations = this._pendingViolations.filter(
-      v => v.cell_id === cellId
-    );
-    // Keep violations for other cells (if any) for their _onCellExecuted call
     this._pendingViolations = this._pendingViolations.filter(
       v => v.cell_id !== cellId
     );
 
-    if (cellViolations.length > 0) {
-      cell.model.setMetadata('flowbook_violations', cellViolations);
-      cell.model.setMetadata('flowbook_violation', cellViolations[0]);
-      console.log(
-        `ReproducibilityExecutionHook: Applied ${cellViolations.length} violation(s) from comm to cell ${cellId}`
-      );
-    } else {
-      // Clear any previous violation metadata
-      cell.model.deleteMetadata('flowbook_violations');
-      cell.model.deleteMetadata('flowbook_violation');
-    }
-
-    // Metadata is now stored on cell by _onCommMessage when it arrives.
-    // No need to scan cell outputs.
+    // Metadata (including errors) is stored on cell by _onCommMessage
+    // when the metadata message arrives. No need to write violation
+    // metadata separately.
 
     // Let cellhighlighter handle all cell rendering (staleness + violations).
     const cellOrder = this._getCurrentCellOrder(panel);

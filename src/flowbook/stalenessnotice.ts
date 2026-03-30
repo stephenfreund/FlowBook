@@ -41,8 +41,9 @@ export class StalenessNoticeManager {
 
     // Check if there's a violation (either in metadata or existing notice)
     // Violation implies specific issue, so skip staleness notice
+    const flowbookMeta = cell.model.getMetadata('flowbook') as any;
     const hasViolationMetadata =
-      cell.model.getMetadata('flowbook_violation') !== undefined;
+      flowbookMeta?.errors && flowbookMeta.errors.length > 0;
     let hasViolationNotice = false;
     for (let i = 0; i < outputs.length; i++) {
       const out = outputs.get(i).toJSON() as any;
