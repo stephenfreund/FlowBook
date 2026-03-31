@@ -121,7 +121,7 @@ def extract_errors_from_notebook(notebook_path: str) -> dict:
                     "error_num": 1,
                     "cell_id": "abcd",
                     "cell_index": 5,  # CODE cell index
-                    "summary": "Cell @X reads and writes the same locations: var",
+                    "summary": "Cell @A reads and writes the same locations: var",
                     "predicate": "no_read_and_write",
                     "locations": ["var"],
                     "accepted": True
@@ -255,10 +255,10 @@ First, determine which mode to use:
 
 ```
 [1/23] backpack-pred-baseline-ensemble-eda.ipynb (4 errors)
-  - Error 1 (cell tpje): Diagnostic inspection before mutation → train_data
-  - Error 2 (cell fdke): Sequential transformation chain → test_data
-  - Error 3 (cell gdch): Visualization before mutation → train_data
-  - Error 4 (cell sozj): Sequential transformation chain → train_data
+  - Error 1 (@E [tpje]): Diagnostic inspection before mutation → train_data
+  - Error 2 (@H [fdke]): Sequential transformation chain → test_data
+  - Error 3 (@J [gdch]): Visualization before mutation → train_data
+  - Error 4 (@L [sozj]): Sequential transformation chain → train_data
 ```
 
 When applying fixes (with `--fix`):
@@ -266,11 +266,11 @@ When applying fixes (with `--fix`):
 ```
 [1/23] backpack-pred-baseline-ensemble-eda.ipynb
   Initializing: backpack-pred-baseline-ensemble-eda-fixed.ipynb
-  - Fixing cell tpje: diagnostic-split
-  - Fixing cell fdke: sequential-chain --variable test_data
-  - Fixing cell gdch: visualization-split
-  - Fixing cell sozj: sequential-chain --variable train_data
-  ✓ Fixed 4 errors → backpack-pred-baseline-ensemble-eda-fixed.ipynb
+  - Fixing @E [tpje]: diagnostic-split
+  - Fixing @H [fdke]: sequential-chain --variable test_data
+  - Fixing @J [gdch]: visualization-split
+  - Fixing @L [sozj]: sequential-chain --variable train_data
+  Fixed 4 errors → backpack-pred-baseline-ensemble-eda-fixed.ipynb
 ```
 
 At the end, print a summary:

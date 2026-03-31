@@ -217,6 +217,7 @@ class NotebookSession:
         self.cell_flowbook_meta: Dict[str, Dict] = {}
         self.cell_status: Dict[str, str] = {}  # cell_id -> "ok" | "error"
         self._stale_cells: Set[str] = set()
+        self._continue_after_violation: bool = False
         self._checkpoints: Dict[str, Dict[str, Any]] = {}
         self._event_log: List[Dict[str, Any]] = []
         self._session_start: float = time.time()
@@ -569,6 +570,7 @@ class NotebookSession:
         is rejected. Good for /fix-notebook where you want a clean namespace.
         """
         self._require_loaded()
+        self._continue_after_violation = enabled
         KernelHelper.execute_code(
             self.kernel_client,
             "",
@@ -724,6 +726,13 @@ class NotebookSession:
 
         return None  # all clean
 
+    def get_next_actionable_cell_id(self) -> Optional[str]:
+        """Return the cell_id of the next actionable cell, or None if all clean."""
+        result = self.get_next_actionable()
+        if result is None:
+            return None
+        return result["cell_id"]
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -770,6 +779,7 @@ class NotebookSession:
         # Update cell in notebook
         cell["outputs"] = result["outputs"]
         cell["execution_count"] = result["execution_count"]
+        self._put_contents_api()  # Push outputs to JupyterLab via Y.js
         self.executed_cells.add(cell_id)
 
         # Extract flowbook metadata

@@ -1,7 +1,8 @@
 """
 FlowBook MCP Server — exposes notebook reproducibility analysis as MCP tools.
 
-23 tools: 14 core (load/close, list/get/edit cells, run, status, save,
+26 tools: 17 core (load/close, list/read/edit cells, run, run_actionable,
+run_actionable_cells, get_flowbook_metadata, status, save,
 checkpoint/restore, get_next_actionable) + 6 algorithmic refactoring
 (alpha_rename, remove_inplace, insert_deepcopy, mark_diagnostic,
 merge_cells, move_cell) + 3 log tools (get_log, save_log, print_log).
@@ -27,11 +28,22 @@ from flowbook.mcp.session import (
     format_loc,
     format_outputs_text,
 )
+from flowbook.nbi.cell_addressing import index_to_alpha
 
 
 def _get_session(ctx: Context) -> NotebookSession:
     """Extract the NotebookSession from the MCP lifespan context."""
     return ctx.request_context.lifespan_context["session"]
+
+
+def _cell_label(session: NotebookSession, cell_id: str) -> str:
+    """Convert cell_id to @A label using code cell order."""
+    order = session.get_cell_order()
+    try:
+        idx = order.index(cell_id)
+        return index_to_alpha(idx)
+    except ValueError:
+        return cell_id
 
 
 def _logged_tool(fn):
@@ -188,6 +200,7 @@ def list_cells(ctx: Context) -> str:
         first_line = source.split("\n")[0][:60] if source.strip() else "(empty)"
 
         if ctype == "code":
+            label = index_to_alpha(code_idx)
             if cid in session._stale_cells:
                 status = "stale"
             elif session.cell_status.get(cid) == "error":
@@ -200,7 +213,7 @@ def list_cells(ctx: Context) -> str:
             fb_meta = session.cell_flowbook_meta.get(cid, {})
             viol = " !" if fb_meta.get("errors") else ""
 
-            lines.append(f"[{code_idx}] {cid} {status}{viol}: {first_line}")
+            lines.append(f"{label} [{cid}] {status}{viol}: {first_line}")
             code_idx += 1
         else:
             lines.append(f"[ ] {cid} ({ctype}): {first_line}")
@@ -210,16 +223,17 @@ def list_cells(ctx: Context) -> str:
 
 @mcp.tool()
 @_logged_tool
-def get_cell(cell_id: str, ctx: Context) -> str:
-    """Get a cell's full source code, outputs, and flowbook metadata.
+def read_cell(cell_id: str, ctx: Context) -> str:
+    """Read a cell's full source code, outputs, and flowbook metadata.
 
     Args:
         cell_id: The 4-character cell ID.
     """
     session = _get_session(ctx)
     result = session.get_cell(cell_id)
+    label = _cell_label(session, cell_id)
 
-    line = f"{result['cell_id']} ({result.get('status', '?')})"
+    line = f"{label} [{result['cell_id']}] ({result.get('status', '?')})"
     line += f"\n>>> {result['source']}"
 
     output_text = result.get("outputs_text", "").strip()
@@ -249,7 +263,8 @@ def get_next_actionable_cell(ctx: Context) -> str:
     if result is None:
         return "All clean."
 
-    line = f"{result['cell_id']}: {result['reason']}"
+    label = _cell_label(session, result['cell_id'])
+    line = f"{label} [{result['cell_id']}]: {result['reason']}"
     if "violation_summary" in result:
         line += f" — {result['violation_summary']}"
     line += f"\n>>> {result['source']}"
@@ -259,7 +274,7 @@ def get_next_actionable_cell(ctx: Context) -> str:
 
 @mcp.tool()
 @_logged_tool
-def edit_cell(cell_id: str, new_source: str, ctx: Context) -> str:
+def edit_cell_source(cell_id: str, new_source: str, ctx: Context) -> str:
     """Replace a cell's source code.
 
     If the cell was previously executed, it is automatically marked stale
@@ -271,9 +286,10 @@ def edit_cell(cell_id: str, new_source: str, ctx: Context) -> str:
     """
     session = _get_session(ctx)
     result = session.edit_cell(cell_id, new_source)
+    label = _cell_label(session, cell_id)
     stale_note = " (marked stale)" if result["marked_stale"] else ""
     return (
-        f"Updated cell {result['cell_id']}{stale_note}\n"
+        f"Updated cell {label} [{result['cell_id']}]{stale_note}\n"
         f"New source preview: {result['new_source_preview']}"
     )
 
@@ -288,8 +304,9 @@ def run_cell(cell_id: str, ctx: Context = None) -> str:
     """
     session = _get_session(ctx)
     result = session.run_cell(cell_id)
+    label = _cell_label(session, cell_id)
 
-    line = f"{result['cell_id']}: {result['status']}"
+    line = f"{label} [{result['cell_id']}]: {result['status']}"
     if result.get("error_message"):
         line += f" — {result['error_message']}"
 
@@ -331,9 +348,10 @@ def run_all_cells(ctx: Context) -> str:
         for e in violations:
             etype = e.get("error_type", "?")
             cid = e.get("cell_id", "?")
+            label = _cell_label(session, cid)
             locs = e.get("locations", [])
             loc_str = ", ".join(format_loc(l) for l in locs) if locs else ""
-            line += f"\n  {cid}: {etype}"
+            line += f"\n  {label} [{cid}]: {etype}"
             if loc_str:
                 line += f" [{loc_str}]"
 
@@ -353,25 +371,155 @@ def run_from(cell_id: str, ctx: Context = None) -> str:
     """
     session = _get_session(ctx)
     result = session.run_from(cell_id)
+    start_label = _cell_label(session, cell_id)
     n = len(result["executed"])
     v = len(result["violations"])
     s = result["stale_remaining"]
     sk = result["skipped"]
-    line = f"Ran {n} cells from {cell_id}"
+    line = f"Ran {n} cells from {start_label} [{cell_id}]"
     if sk:
         line += f" ({sk} clean skipped)"
     if result["error_cell"]:
-        line += f" | error at {result['error_cell']}"
+        err_label = _cell_label(session, result['error_cell'])
+        line += f" | error at {err_label} [{result['error_cell']}]"
     line += f" | {v} violations | {s} stale"
     if result["violations"]:
         for e in result["violations"]:
             etype = e.get("error_type", "?")
             cid = e.get("cell_id", "?")
+            label = _cell_label(session, cid)
             locs = e.get("locations", [])
             loc_str = ", ".join(format_loc(l) for l in locs) if locs else ""
-            line += f"\n  {cid}: {etype}"
+            line += f"\n  {label} [{cid}]: {etype}"
             if loc_str:
                 line += f" [{loc_str}]"
+    return line
+
+
+@mcp.tool()
+@_logged_tool
+def get_flowbook_metadata(cell_id: str, ctx: Context) -> str:
+    """Return reproducibility metadata for a specific cell.
+
+    Shows read/write locations, errors, staleness, and timing information
+    from the cell's most recent execution.
+
+    Args:
+        cell_id: The 4-character cell ID.
+    """
+    session = _get_session(ctx)
+    session._require_loaded()
+    label = _cell_label(session, cell_id)
+    meta = session.cell_flowbook_meta.get(cell_id)
+    if meta is None:
+        return f"Cell {label} [{cell_id}] has not been executed yet — no metadata available."
+    return f"{label} [{cell_id}]:\n{format_flowbook_meta(meta)}"
+
+
+@mcp.tool()
+@_logged_tool
+def run_actionable_cell(ctx: Context) -> str:
+    """Find and run the next actionable cell.
+
+    Finds the first cell needing attention (error > violation > stale >
+    unexecuted), runs it, and returns the result. Returns "All clean" if
+    no cells need attention.
+    """
+    session = _get_session(ctx)
+    next_id = session.get_next_actionable_cell_id()
+    if next_id is None:
+        return "All clean — no actionable cells."
+    label = _cell_label(session, next_id)
+    result = session.run_cell(next_id)
+
+    line = f"Ran {label} [{result['cell_id']}]: {result['status']}"
+    if result.get("error_message"):
+        line += f" — {result['error_message']}"
+
+    output_text = result.get("outputs_text", "").strip()
+    if output_text:
+        preview = output_text[:200]
+        if len(output_text) > 200:
+            preview += "..."
+        line += f"\nOutput: {preview}"
+
+    if "flowbook" in result:
+        line += f"\n{result['flowbook']}"
+
+    return line
+
+
+@mcp.tool()
+@_logged_tool
+def run_actionable_cells(ctx: Context) -> str:
+    """Run all actionable cells in sequence until the notebook is clean.
+
+    Loops: find next actionable cell, run it, check for errors/violations,
+    repeat. Stops on:
+    - Hard errors (execution exceptions): always stops
+    - Violations: stops only if continue_after_violation is False
+
+    Returns a summary with the number of cells run and the final status.
+    """
+    session = _get_session(ctx)
+    session._require_loaded()
+
+    cells_ran = []
+    violations_seen = []
+    error_cell = None
+
+    while True:
+        next_id = session.get_next_actionable_cell_id()
+        if next_id is None:
+            break
+
+        result = session.run_cell(next_id)
+        label = _cell_label(session, next_id)
+        cells_ran.append(f"{label} [{next_id}]")
+
+        # Check for hard error — always stop
+        if result.get("status") == "error":
+            error_cell = next_id
+            break
+
+        # Check for violations — stop if continue_after_violation is False
+        fb_meta = session.cell_flowbook_meta.get(next_id, {})
+        errors = fb_meta.get("errors", [])
+        if errors:
+            for e in errors:
+                violations_seen.append({"cell_id": next_id, **e})
+            if not session._continue_after_violation:
+                break
+
+    # Build summary
+    n = len(cells_ran)
+    line = f"Ran {n} cells"
+    if error_cell:
+        err_label = _cell_label(session, error_cell)
+        line += f" | error at {err_label} [{error_cell}]"
+    line += f" | {len(violations_seen)} violations"
+
+    # Final status from get_status
+    status = session.get_status()
+    stale_count = len(status["stale_cells"])
+    line += f" | {stale_count} stale"
+
+    if error_cell is None and not violations_seen and stale_count == 0:
+        line += "\nAll clean!"
+    elif violations_seen:
+        for e in violations_seen:
+            cid = e.get("cell_id", "?")
+            vlabel = _cell_label(session, cid)
+            etype = e.get("error_type", "?")
+            locs = e.get("locations", [])
+            loc_str = ", ".join(format_loc(l) for l in locs) if locs else ""
+            line += f"\n  {vlabel} [{cid}]: {etype}"
+            if loc_str:
+                line += f" [{loc_str}]"
+
+    if cells_ran:
+        line += f"\nCells: {', '.join(cells_ran)}"
+
     return line
 
 
@@ -396,14 +544,16 @@ def get_status(ctx: Context) -> str:
         for v in violations:
             etype = v.get("error_type", "?")
             cid = v.get("cell_id", "?")
+            label = _cell_label(session, cid)
             locs = v.get("locations", [])
             loc_str = ", ".join(format_loc(l) for l in locs) if locs else ""
-            line += f"\n  {cid}: {etype}"
+            line += f"\n  {label} [{cid}]: {etype}"
             if loc_str:
                 line += f" [{loc_str}]"
 
     if stale:
         for cid, reasons in stale.items():
+            label = _cell_label(session, cid)
             reason_strs = []
             for r in reasons:
                 rtype = r.get("type", "?")
@@ -412,7 +562,7 @@ def get_status(ctx: Context) -> str:
                 if loc:
                     s += f": {loc}"
                 reason_strs.append(s)
-            line += f"\n  {cid} stale: {', '.join(reason_strs)}"
+            line += f"\n  {label} [{cid}] stale: {', '.join(reason_strs)}"
 
     return line
 
@@ -507,11 +657,13 @@ def alpha_rename(cell_id: str, old_name: str, new_name: str, ctx: Context) -> st
     """
     session = _get_session(ctx)
     result = session.alpha_rename(cell_id, old_name, new_name)
+    label = _cell_label(session, cell_id)
     if result["total_modified"] == 0:
-        return f"No occurrences of '{old_name}' found from cell {cell_id} onwards."
+        return f"No occurrences of '{old_name}' found from cell {label} [{cell_id}] onwards."
+    mod_labels = [f"{_cell_label(session, c)} [{c}]" for c in result['modified_cells']]
     return (
         f"Renamed '{result['old_name']}' → '{result['new_name']}'\n"
-        f"Modified {result['total_modified']} cells: {', '.join(result['modified_cells'])}"
+        f"Modified {result['total_modified']} cells: {', '.join(mod_labels)}"
     )
 
 
@@ -531,8 +683,9 @@ def remove_inplace(cell_id: str, variable: str, ctx: Context) -> str:
     result = session.remove_inplace(cell_id, variable)
     if "error" in result:
         return f"Error: {result['error']}"
+    label = _cell_label(session, result['cell_id'])
     return (
-        f"Removed inplace=True for '{result['variable']}' in cell {result['cell_id']}\n"
+        f"Removed inplace=True for '{result['variable']}' in cell {label} [{result['cell_id']}]\n"
         f"Methods fixed: {', '.join(result['methods_fixed'])}\n"
         f"New source:\n{result['new_source']}"
     )
@@ -553,10 +706,12 @@ def insert_deepcopy(cell_id: str, variable: str, ctx: Context) -> str:
     """
     session = _get_session(ctx)
     result = session.insert_deepcopy(cell_id, variable)
+    label = _cell_label(session, result['cell_id'])
     downstream = result.get("modified_downstream", [])
+    ds_labels = [f"{_cell_label(session, c)} [{c}]" for c in downstream] if downstream else []
     return (
-        f"Inserted deepcopy: {result['variable']} → {result['new_name']} in cell {result['cell_id']}\n"
-        f"Downstream cells renamed: {', '.join(downstream) if downstream else 'none'}"
+        f"Inserted deepcopy: {result['variable']} → {result['new_name']} in cell {label} [{result['cell_id']}]\n"
+        f"Downstream cells renamed: {', '.join(ds_labels) if ds_labels else 'none'}"
     )
 
 
@@ -574,9 +729,10 @@ def mark_diagnostic(cell_id: str, ctx: Context) -> str:
     """
     session = _get_session(ctx)
     result = session.mark_diagnostic(cell_id)
+    label = _cell_label(session, cell_id)
     if result.get("already_diagnostic"):
-        return f"Cell {cell_id} is already marked as diagnostic."
-    return f"Marked cell {cell_id} as diagnostic.\nPreview: {result['new_source_preview']}"
+        return f"Cell {label} [{cell_id}] is already marked as diagnostic."
+    return f"Marked cell {label} [{cell_id}] as diagnostic.\nPreview: {result['new_source_preview']}"
 
 
 @mcp.tool()
@@ -593,9 +749,11 @@ def merge_cells(cell_ids: list[str], ctx: Context) -> str:
     """
     session = _get_session(ctx)
     result = session.merge_cells(cell_ids)
+    merged_label = _cell_label(session, result['merged_cell_id'])
+    removed_labels = [f"{_cell_label(session, c)} [{c}]" for c in result['cells_removed']]
     return (
-        f"Merged into cell {result['merged_cell_id']}\n"
-        f"Removed cells: {', '.join(result['cells_removed'])}\n"
+        f"Merged into cell {merged_label} [{result['merged_cell_id']}]\n"
+        f"Removed cells: {', '.join(removed_labels)}\n"
         f"New source preview:\n{result['new_source_preview']}"
     )
 
@@ -614,9 +772,12 @@ def move_cell(cell_id: str, after_cell_id: str, ctx: Context) -> str:
     """
     session = _get_session(ctx)
     result = session.move_cell(cell_id, after_cell_id)
+    moved_label = _cell_label(session, result['cell_id'])
+    after_label = _cell_label(session, result['moved_after'])
+    order_labels = [f"{_cell_label(session, c)}" for c in result['new_cell_order']]
     return (
-        f"Moved cell {result['cell_id']} to after {result['moved_after']}\n"
-        f"New cell order: {', '.join(result['new_cell_order'])}"
+        f"Moved cell {moved_label} [{result['cell_id']}] to after {after_label} [{result['moved_after']}]\n"
+        f"New cell order: {', '.join(order_labels)}"
     )
 
 
