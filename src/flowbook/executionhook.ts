@@ -284,9 +284,7 @@ export class ReproducibilityExecutionHookManager {
     this._comm.onMsg = this._onCommMessage.bind(this);
     this._comm.open();
 
-    console.log(
-      'ReproducibilityExecutionHook: Comm channel opened to kernel'
-    );
+    console.log('ReproducibilityExecutionHook: Comm channel opened to kernel');
   }
 
   /**

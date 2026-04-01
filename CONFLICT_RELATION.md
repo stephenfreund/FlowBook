@@ -278,24 +278,24 @@ FlowBook stores structural provenance as a single `DataFrameProvenance` object i
 
 **DataFrameProvenance fields:**
 
-| Field | Type | Tracks |
-| --- | --- | --- |
-| `col_origins` | `{column: cell_id}` | Which cell first created each column |
-| `col_deletions` | `{column: cell_id}` | Which cell first deleted each column |
-| `dtype_origins` | `{column: cell_id}` | Which cell first changed each column's dtype |
-| `row_mutators` | `set[cell_id]` | Cells that mutated the row count |
-| `index_mutators` | `set[cell_id]` | Cells that mutated the index |
+| Field            | Type                | Tracks                                       |
+| ---------------- | ------------------- | -------------------------------------------- |
+| `col_origins`    | `{column: cell_id}` | Which cell first created each column         |
+| `col_deletions`  | `{column: cell_id}` | Which cell first deleted each column         |
+| `dtype_origins`  | `{column: cell_id}` | Which cell first changed each column's dtype |
+| `row_mutators`   | `set[cell_id]`      | Cells that mutated the row count             |
+| `index_mutators` | `set[cell_id]`      | Cells that mutated the index                 |
 
 **Provenance hooks:**
 
-| Hook | Trigger | Provenance effect |
-| --- | --- | --- |
-| `record_var_write(df, cell_id)` | DataFrame assigned to variable | Create fresh provenance, all columns → cell_id |
-| `record_column_write(df, col, cell_id)` | `df[col] = val` or `df.insert(...)` | First writer wins (no overwrite) |
-| `record_column_delete(df, col, cell_id)` | `del df[col]`, `df.drop(columns=...)` | First deleter wins |
-| `record_dtype_change(df, col, cell_id)` | `df[col] = val` (dtype changed) | First changer wins |
-| `record_row_mutation(df, cell_id)` | `.loc` row add, `drop(inplace)`, `dropna`, etc. | Add to row_mutators set |
-| `record_index_mutation(df, cell_id)` | `df.index = ...`, `reset_index`, `set_index`, etc. | Add to index_mutators set |
+| Hook                                     | Trigger                                            | Provenance effect                              |
+| ---------------------------------------- | -------------------------------------------------- | ---------------------------------------------- |
+| `record_var_write(df, cell_id)`          | DataFrame assigned to variable                     | Create fresh provenance, all columns → cell_id |
+| `record_column_write(df, col, cell_id)`  | `df[col] = val` or `df.insert(...)`                | First writer wins (no overwrite)               |
+| `record_column_delete(df, col, cell_id)` | `del df[col]`, `df.drop(columns=...)`              | First deleter wins                             |
+| `record_dtype_change(df, col, cell_id)`  | `df[col] = val` (dtype changed)                    | First changer wins                             |
+| `record_row_mutation(df, cell_id)`       | `.loc` row add, `drop(inplace)`, `dropna`, etc.    | Add to row_mutators set                        |
+| `record_index_mutation(df, cell_id)`     | `df.index = ...`, `reset_index`, `set_index`, etc. | Add to index_mutators set                      |
 
 **First writer/deleter/changer wins** means re-executing a structural operation preserves the original cell's provenance. All provenance is reset only by full DataFrame replacement (`record_var_write`).
 
@@ -312,7 +312,7 @@ InjectStructuralWrites(W, cell_id, Σ):
   5. Inject Attr(d, dtypes/values/T) if ∃c: dtype_origins(Σ(d), c) = cell_id
 ```
 
-The injection scans ALL DataFrames in namespace (not just those already in W), because on re-execution W may be empty while provenance persists. It is applied *before* emptiness checks in each predicate:
+The injection scans ALL DataFrames in namespace (not just those already in W), because on re-execution W may be empty while provenance persists. It is applied _before_ emptiness checks in each predicate:
 
 - **NoReadBeforeWrite** (`_check_forward_contamination`): injects for each later cell's writes
 - **NoWriteAfterRead** (`_check_backward_mutation_new`): injects for the current cell's writes

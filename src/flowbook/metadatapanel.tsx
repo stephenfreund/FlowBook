@@ -463,10 +463,23 @@ const StatusHeader: React.FC<{
   }
   return (
     <div className="flowbook-status-header">
-      <div style={{ fontSize: '0.7em', color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>
+      <div
+        style={{
+          fontSize: '0.7em',
+          color: '#888',
+          textTransform: 'uppercase',
+          letterSpacing: '0.05em',
+          marginBottom: '2px'
+        }}
+      >
         Last Execution
       </div>
-      <div style={{ fontSize: '0.85em', fontFamily: 'var(--jp-code-font-family, monospace)' }}>
+      <div
+        style={{
+          fontSize: '0.85em',
+          fontFamily: 'var(--jp-code-font-family, monospace)'
+        }}
+      >
         {cellRef && <strong style={{ marginRight: '6px' }}>{cellRef}</strong>}
         {icon} {text}
       </div>

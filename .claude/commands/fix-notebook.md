@@ -1,5 +1,5 @@
 ---
-description: "Fix reproducibility violations in a Jupyter notebook using FlowBook MCP tools. Creates a -fixed copy, runs cells incrementally, fixes violations, and produces a clean reproducible notebook."
+description: 'Fix reproducibility violations in a Jupyter notebook using FlowBook MCP tools. Creates a -fixed copy, runs cells incrementally, fixes violations, and produces a clean reproducible notebook.'
 ---
 
 # Fix Notebook for Reproducibility
@@ -14,8 +14,8 @@ You are fixing reproducibility violations in a Jupyter notebook using FlowBook's
 
 1. **NoReadAndWrite**: A cell must not read and write the same variable (re-runs would accumulate changes). Example: `train = pd.concat([train, extra])` — each re-run appends more rows.
 2. **WriteBeforeRead**: Every variable a cell reads must have been written by an earlier cell (no dangling references).
-3. **NoReadBeforeWrite** (forward contamination): A cell must not read a variable that is written by a *later* cell (execution order dependency).
-4. **NoWriteAfterRead** (backward mutation): A cell must not write a variable that was read by an *earlier* cell (re-running the writer would change the reader's inputs).
+3. **NoReadBeforeWrite** (forward contamination): A cell must not read a variable that is written by a _later_ cell (execution order dependency).
+4. **NoWriteAfterRead** (backward mutation): A cell must not write a variable that was read by an _earlier_ cell (re-running the writer would change the reader's inputs).
 
 Additionally, **UNRECOVERABLE_MUTATION** detects in-place modifications (like `df.drop(inplace=True)` or `model.fit()`) that FlowBook cannot roll back.
 
@@ -49,31 +49,39 @@ Note the violations reported — these are what we need to fix.
 For each iteration:
 
 1. **Checkpoint** before attempting any fix:
+
    ```
    checkpoint()
    ```
 
 2. **Find the next problem**:
+
    ```
    get_next_actionable_cell()
    ```
+
    If it returns "All clean", you're done — go to Step 4.
 
 3. **If the actionable cell has a violation or error**, read it and fix:
+
    ```
    get_cell(cell_id)
    ```
+
    Categorize and fix using the taxonomy below.
 
 4. **After fixing, run from the fixed cell** to re-run it and all downstream cells:
+
    ```
    run_from(cell_id)
    ```
 
 5. **If things got worse**, undo:
+
    ```
    restore(checkpoint_id)
    ```
+
    Then try a different strategy. After restore, `run_from` the earliest restored cell.
 
 6. **If no progress** after 2 attempts on the same violation, skip it and move on.
@@ -85,16 +93,17 @@ save_notebook()
 ```
 
 Print a summary:
+
 - Original violation count
 - Fixes applied table, always in this format:
 
-| Cell | Strategy | Change |
-|---|---|---|
-| D | `insert_deepcopy` | `df` → `df_copy` |
+| Cell | Strategy          | Change           |
+| ---- | ----------------- | ---------------- |
+| D    | `insert_deepcopy` | `df` → `df_copy` |
 
-  Followed by a diagnosis blockquote for each fix:
+Followed by a diagnosis blockquote for each fix:
 
-  > **D**: `no_read_and_write` + `no_write_after_read` on `df['age']` — reads and writes same column, and C already read it
+> **D**: `no_read_and_write` + `no_write_after_read` on `df['age']` — reads and writes same column, and C already read it
 
 - Remaining violations (if any)
 - Path to the fixed notebook
@@ -108,6 +117,7 @@ Print a summary:
 **Example**: `train = pd.concat([train, extra_data])`
 
 **Fix**: Alpha-rename the variable.
+
 ```
 checkpoint()
 get_cell("B")
@@ -121,6 +131,7 @@ run_from(cell_id)
 **Error type**: `UNRECOVERABLE_MUTATION`
 
 **Fix A** — For `inplace=True` (most common):
+
 ```
 checkpoint()
 remove_inplace("C", "df")
@@ -128,6 +139,7 @@ run_from(cell_id)
 ```
 
 **Fix B** — For `.fit()` or object mutation:
+
 ```
 checkpoint()
 insert_deepcopy("C", "model")
@@ -135,6 +147,7 @@ run_from(cell_id)
 ```
 
 **Fix C** — If allocation and mutation are in adjacent cells:
+
 ```
 checkpoint()
 merge_cells(["B", "C"])
@@ -148,6 +161,7 @@ run_from(cell_id)
 **Example**: Cell B does `df = df.fillna(0)`, Cell C does `df = df.assign(feature=...)`.
 
 **Fix A** — Merge tightly coupled steps:
+
 ```
 checkpoint()
 merge_cells(["B", "C"])
@@ -155,6 +169,7 @@ run_from(cell_id)
 ```
 
 **Fix B** — Give each step its own output name:
+
 ```
 checkpoint()
 alpha_rename("C", "df", "df_featured")
@@ -168,6 +183,7 @@ run_from(cell_id)
 **Example**: `model` used for LogisticRegression in cell B, reassigned to RandomForest in cell D.
 
 **Fix**: Rename from the point of reuse onwards.
+
 ```
 checkpoint()
 alpha_rename("D", "model", "rf_model")
@@ -182,6 +198,7 @@ Choose semantically meaningful names when possible (e.g., `lr_model` / `rf_model
 **Error type**: `NO_WRITE_AFTER_READ`
 
 **Fix A** — Mark the inspection cell as diagnostic (preferred for pure inspection):
+
 ```
 checkpoint()
 mark_diagnostic("C")
@@ -189,6 +206,7 @@ run_from(cell_id)
 ```
 
 **Fix B** — Move the inspection after the mutation:
+
 ```
 checkpoint()
 move_cell("C", after_cell_id="D")
@@ -198,6 +216,7 @@ run_from(cell_id)
 ### Undoing a Failed Fix
 
 If a fix makes things worse (more violations, or introduces runtime errors):
+
 ```
 restore("ckpt_abc12345")
 # Now try a different strategy...
@@ -211,4 +230,4 @@ restore("ckpt_abc12345")
 4. **Use `edit_cell` for complex cases**: When the algorithmic tools don't fit (e.g., restructuring logic, adding parameters to functions), fall back to reading the cell, modifying the source manually, and using `edit_cell`.
 5. **Always checkpoint before fixing**: This lets you safely undo if things go wrong.
 6. **Use `run_from(cell_id)`** after each fix to re-run from the fixed cell onwards. It skips clean cells and stops on the first error or violation.
-7. **Don't fix staleness directly**: Staleness is a *symptom* of violations. Fix the violation and staleness resolves automatically. But stale cells DO need to be re-run to update the kernel state.
+7. **Don't fix staleness directly**: Staleness is a _symptom_ of violations. Fix the violation and staleness resolves automatically. But stale cells DO need to be re-run to update the kernel state.

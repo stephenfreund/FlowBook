@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 from jupyter_client import KernelManager
 
 from flowbook import make_kernels
+from flowbook.cli.helpers import start_kernel
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.testing.notebook_loader import Cell
 from flowbook.util.output import log, timer
@@ -57,9 +58,6 @@ def create_kernel(kernel_name: str) -> Tuple[KernelManager, FlowbookKernelClient
     """
     Start a kernel using jupyter_client.KernelManager.
 
-    Follows pattern from flowbook/cli/helpers.py setup_kernel() with
-    retry logic and wait_for_ready.
-
     Args:
         kernel_name: Name of kernel to start (e.g., 'python3', 'flowbook_kernel')
 
@@ -71,69 +69,7 @@ def create_kernel(kernel_name: str) -> Tuple[KernelManager, FlowbookKernelClient
     """
     make_kernels()
 
-    max_attempts = 3
-    kernel_manager = None
-    kernel_client = None
-
-    for attempt in range(max_attempts):
-        try:
-            # Clean up any previous failed attempt
-            if kernel_client is not None:
-                try:
-                    kernel_client.stop_channels()
-                except Exception:
-                    pass
-            if kernel_manager is not None:
-                try:
-                    kernel_manager.shutdown_kernel(now=True)
-                except Exception:
-                    pass
-
-            # Start fresh kernel
-            kernel_manager = KernelManager(kernel_name=kernel_name)
-            kernel_manager.start_kernel()
-
-            kernel_client = FlowbookKernelClient(kernel_id=kernel_manager.kernel_id)
-            kernel_client.load_connection_info(kernel_manager.get_connection_info())
-            kernel_client.start_channels()
-
-            # Race condition workaround
-            time.sleep(2)
-            while True:
-                try:
-                    kernel_client.wait_for_ready(timeout=30)
-                    break
-                except Exception as e:
-                    log(f"Error waiting for kernel to be ready: {e}")
-                    time.sleep(0.5)
-
-            return kernel_manager, kernel_client
-
-        except Exception as e:
-            log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
-            if kernel_manager is not None and kernel_manager.is_alive():
-                kernel_manager.shutdown_kernel(now=True)
-                while kernel_manager.is_alive():
-                    time.sleep(1)
-
-            if attempt < max_attempts - 1:
-                time.sleep(2)
-            else:
-                # Clean up before raising
-                if kernel_client is not None:
-                    try:
-                        kernel_client.stop_channels()
-                    except Exception:
-                        pass
-                if kernel_manager is not None:
-                    try:
-                        kernel_manager.shutdown_kernel(now=True)
-                    except Exception:
-                        pass
-                raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
-
-    # This should never be reached
-    raise Exception("Kernel failed to start")
+    return start_kernel(kernel_name)
 
 
 def cleanup_kernel(
