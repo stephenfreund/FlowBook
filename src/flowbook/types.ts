@@ -309,12 +309,12 @@ export function writeConflictsRead(w: IWriteLoc, r: IReadLoc): boolean {
       return _varTargetsRef(w.name, r);
 
     case 'col':
-      // Col(d,c) conflicts with Col(d,c) AND Attr(d, a) for a ∈ COL_VALUE_ATTRS
+      // Col(d,c) conflicts with Col(d,c) AND Attr(d, a) for a ∈ COL_ATTRS
       if (r.type === 'col') {
         return _sameDataframe(w, r) && w.name === r.name;
       }
       if (r.type === 'attr') {
-        return _sameDataframe(w, r) && COL_VALUE_ATTRS.has(r.name);
+        return _sameDataframe(w, r) && COL_ATTRS.has(r.name);
       }
       return false;
 

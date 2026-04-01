@@ -1467,16 +1467,19 @@ class ReproducibilityEnforcer:
         """Inject structural WriteLocs from df.attrs provenance.
 
         On re-execution, checkpoint diffs miss idempotent structural changes:
-        ColumnAdded degrades to ColumnModified, RowsAdded/IndexChanged/DtypeChanged
-        vanish entirely. Provenance recorded during execution (via monkey patches)
-        remembers the original structural effects.
+        RowsAdded/IndexChanged/DtypeChanged vanish entirely. Provenance
+        recorded during execution (via monkey patches) remembers the original
+        structural effects.
 
-        Upgrades/injections performed:
-        1. Col → ColAdd: if provenance says this cell added the column
-        2. Inject ColDel: if provenance says this cell deleted a column
-        3. Inject Rows: if provenance says this cell mutated rows
-        4. Inject Attr(index) + Attr(axes): if provenance says this cell mutated the index
-        5. Inject Attr(dtypes) + Attr(values) + Attr(T): if provenance says this cell changed a dtype
+        Note: Col → ColAdd upgrade is no longer needed because Col's ▷ behavior
+        was widened to conflict with all COL_ATTRS (not just COL_VALUE_ATTRS),
+        making Col and ColAdd equivalent for conflict detection purposes.
+
+        Injections performed:
+        1. Inject ColDel: if provenance says this cell deleted a column
+        2. Inject Rows: if provenance says this cell mutated rows
+        3. Inject Attr(index) + Attr(axes): if provenance says this cell mutated the index
+        4. Inject Attr(dtypes) + Attr(values) + Attr(T): if provenance says this cell changed a dtype
 
         This is idempotent — applying it to already-correct WriteLocs is harmless.
         """
@@ -1485,22 +1488,13 @@ class ReproducibilityEnforcer:
 
         from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
 
-        upgraded: Set[WriteLoc] = set()
+        upgraded: Set[WriteLoc] = set(W)
         seen_vars: Set[str] = set()
 
         for w in W:
             var_name = w.var_name()
             if var_name:
                 seen_vars.add(var_name)
-
-            # 1. Col → ColAdd upgrade
-            if w.type == WriteLocType.COL:
-                df = namespace.get(var_name) if var_name else None
-                if df is not None and isinstance(df, pd.DataFrame):
-                    if DataFrameProvenanceTracker.is_column_added_by(df, w.name, cell_id):
-                        upgraded.add(WriteLoc.col_add(w.qualifier, w.name))
-                        continue
-            upgraded.add(w)
 
         # Inject structural WriteLocs from provenance for each DataFrame variable.
         # We must scan ALL DataFrames in namespace, not just those in W —
@@ -1520,21 +1514,21 @@ class ReproducibilityEnforcer:
             if prov is None:
                 continue
 
-            # 2. Inject ColDel for columns this cell deleted
+            # 1. Inject ColDel for columns this cell deleted
             for col, deleter_id in prov.col_deletions.items():
                 if deleter_id == cell_id:
                     upgraded.add(WriteLoc.col_del(var_name, col))
 
-            # 3. Inject Rows if this cell mutated rows
+            # 2. Inject Rows if this cell mutated rows
             if cell_id in prov.row_mutators:
                 upgraded.add(WriteLoc.rows(var_name))
 
-            # 4. Inject Attr(index) + Attr(axes) if this cell mutated the index
+            # 3. Inject Attr(index) + Attr(axes) if this cell mutated the index
             if cell_id in prov.index_mutators:
                 upgraded.add(WriteLoc.attr(var_name, "index"))
                 upgraded.add(WriteLoc.attr(var_name, "axes"))
 
-            # 5. Inject Attr(dtypes) + Attr(values) + Attr(T) for dtype changes
+            # 4. Inject Attr(dtypes) + Attr(values) + Attr(T) for dtype changes
             for col, changer_id in prov.dtype_origins.items():
                 if changer_id == cell_id:
                     upgraded.add(WriteLoc.attr(var_name, "dtypes"))

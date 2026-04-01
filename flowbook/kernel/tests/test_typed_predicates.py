@@ -102,11 +102,15 @@ class TestNoReadAndWrite:
         W = _wset(WriteLoc.col(LR_DF, "price"))
         assert no_read_and_write(R, W)
 
-    def test_col_write_structural_attr_no_overlap(self):
-        """Col(df, price) write does NOT conflict with Attr(df, shape) read."""
+    def test_col_write_structural_attr_overlap(self):
+        """Col(df, price) write DOES conflict with Attr(df, shape) read.
+
+        Col now conflicts with ALL COL_ATTRS (not just COL_VALUE_ATTRS),
+        because modifying a column can affect structural attributes like shape.
+        """
         R = _rset(ReadLoc.attr(LR_DF, "shape"))
         W = _wset(WriteLoc.col(LR_DF, "price"))
-        assert not no_read_and_write(R, W)
+        assert no_read_and_write(R, W)
 
 
 # ============================================================================
@@ -214,11 +218,15 @@ class TestNoWriteAfterRead:
         R_before = _rset(ReadLoc.attr(LR_DF, "values"))
         assert no_write_after_read(W_i, R_before)
 
-    def test_col_write_no_mutation_structural_attr(self):
-        """Cell i writes Col(df, price), earlier cell read Attr(df, shape) → no mutation."""
+    def test_col_write_mutation_structural_attr(self):
+        """Cell i writes Col(df, price), earlier cell read Attr(df, shape) → mutation.
+
+        Col now conflicts with ALL COL_ATTRS (not just COL_VALUE_ATTRS),
+        because modifying a column can affect structural attributes like shape.
+        """
         W_i = _wset(WriteLoc.col(LR_DF, "price"))
         R_before = _rset(ReadLoc.attr(LR_DF, "shape"))
-        assert not no_write_after_read(W_i, R_before)
+        assert no_write_after_read(W_i, R_before)
 
 
 # ============================================================================
@@ -286,11 +294,15 @@ class TestForwardStaleReads:
         R_j = _rset(ReadLoc.attr(LR_DF, "values"))
         assert forward_stale_reads(W_i, R_j)
 
-    def test_col_does_not_stale_structural_attrs(self):
-        """Col(df, price) does NOT stale Attr(df, shape) reads."""
+    def test_col_stales_structural_attrs(self):
+        """Col(df, price) DOES stale Attr(df, shape) reads.
+
+        Col now conflicts with ALL COL_ATTRS (not just COL_VALUE_ATTRS),
+        because modifying a column can affect structural attributes like shape.
+        """
         W_i = _wset(WriteLoc.col(LR_DF, "price"))
         R_j = _rset(ReadLoc.attr(LR_DF, "shape"))
-        assert not forward_stale_reads(W_i, R_j)
+        assert forward_stale_reads(W_i, R_j)
 
 
 # ============================================================================
@@ -492,14 +504,17 @@ class TestColValueAttrs:
             r = ReadLoc.attr(LR_DF, attr)
             assert wlocs_conflict_rlocs(frozenset({w}), frozenset({r}))
 
-    def test_col_does_not_conflict_with_non_value_attrs(self):
-        """Col(df, c) ▷ Attr(df, a) = False for structural-only attrs."""
+    def test_col_conflicts_with_all_col_attrs(self):
+        """Col(df, c) ▷ Attr(df, a) = True for ALL COL_ATTRS, not just value attrs.
+
+        Col now conflicts with ALL COL_ATTRS (including structural attrs like
+        shape, columns, dtypes) because modifying a column can affect these.
+        """
         w = WriteLoc.col(LR_DF, "price")
-        structural_only = COL_ATTRS - COL_VALUE_ATTRS
-        for attr in structural_only:
+        for attr in COL_ATTRS:
             r = ReadLoc.attr(LR_DF, attr)
-            assert not wlocs_conflict_rlocs(frozenset({w}), frozenset({r})), \
-                f"Col should not conflict with structural attr '{attr}'"
+            assert wlocs_conflict_rlocs(frozenset({w}), frozenset({r})), \
+                f"Col should conflict with COL_ATTR '{attr}'"
 
 
 # ============================================================================
@@ -509,8 +524,12 @@ class TestColValueAttrs:
 class TestNotebookStateWriteStorage:
     """Verify that NotebookState.writes includes diff-derived WriteLocs."""
 
-    def test_writes_include_col_add(self):
-        """record_execution with ColumnAdded typed_change stores ColAdd WriteLoc."""
+    def test_writes_include_col_for_column_added(self):
+        """record_execution with ColumnAdded typed_change stores Col WriteLoc.
+
+        ColumnAdded now maps to WriteLoc.col() (not col_add) in
+        changes_to_write_locs(), so the stored write type is 'col'.
+        """
         from flowbook.kernel.notebook_state import NotebookState
         from flowbook.kernel.changes import ColumnAdded
         from flowbook.kernel_support.models import TrackingData
@@ -529,7 +548,7 @@ class TestNotebookStateWriteStorage:
 
         writes = state.writes["a"]
         write_types = {w.type.value for w in writes}
-        assert "col_add" in write_types, f"Expected col_add in {write_types}"
+        assert "col" in write_types, f"Expected col in {write_types}"
         assert "var" in write_types  # From tracking.writes
 
     def test_writes_include_rows(self):
