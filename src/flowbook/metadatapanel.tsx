@@ -106,8 +106,6 @@ function groupWriteLocs(
   const typeLabels: Record<string, string> = {
     var: 'Var',
     col: 'Col',
-    col_add: 'ColAdd',
-    col_del: 'ColDel',
     rows: 'Rows',
     attr: 'Attr',
     file: 'File'

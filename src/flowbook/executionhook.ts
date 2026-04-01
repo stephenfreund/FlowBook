@@ -24,8 +24,7 @@ import {
   IWriteLoc,
   findConflictingReads,
   formatReadLoc,
-  writeLocOutputs,
-  readLocsMatchQualifier
+  writeConflictsRead
 } from './types';
 import {
   COMM_TARGET,
@@ -768,25 +767,17 @@ export class ReproducibilityExecutionHookManager {
     const staleCellWriteLocs: IWriteLoc[] = storedFlowbook?.write_locs || [];
     const causingCellReadLocs: IReadLoc[] = metadata.read_locs || [];
 
-    // Project stale cell's writes to reads via output(), then intersect
-    const staleOutputs: IReadLoc[] = staleCellWriteLocs.flatMap(w =>
-      writeLocOutputs(w)
-    );
-    // Check which of the stale cell's output reads match the causing cell's reads
+    // Find which causing cell reads are invalidated by the stale cell's writes
     const writerConflicts: string[] = [];
     const seen = new Set<string>();
-    for (const output of staleOutputs) {
-      const key = `${output.type}:${output.qualifier || ''}:${output.name}`;
+    for (const r of causingCellReadLocs) {
+      const key = `${r.type}:${r.qualifier || ''}:${r.name}`;
       if (seen.has(key)) {
         continue;
       }
-      for (const r of causingCellReadLocs) {
-        if (
-          output.type === r.type &&
-          output.name === r.name &&
-          readLocsMatchQualifier(output, r)
-        ) {
-          writerConflicts.push(formatReadLoc(output));
+      for (const w of staleCellWriteLocs) {
+        if (writeConflictsRead(w, r)) {
+          writerConflicts.push(formatReadLoc(r));
           seen.add(key);
           break;
         }

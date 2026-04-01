@@ -162,7 +162,7 @@ The primary kernel with always-on reproducibility enforcement:
 - `changes.py` - Typed records of what changed between checkpoints (`ValueChanged`, `ColumnAdded`, etc.)
 - `access_events.py` - Typed records of variable/column/structural access during cell execution
 - `change_detector.py` - Converts `MemoryCheckpointDiffResult` to typed `Change` list and `WriteLocSet`
-- `locations.py` - Typed `ReadLoc`/`WriteLoc` with `write_conflicts_read()` (▷) and set operations
+- `locations.py` - Typed `ReadLoc` (4 types: Var, Col, Attr, File) / `WriteLoc` (5 types: Var, Col, Rows, Attr, File) with `write_conflicts_read()` (▷) and set operations
 
 **Formal Transition Rules** (from `FORMAL_DEVELOPMENT.md`):
 
@@ -227,11 +227,11 @@ Client → Kernel message types:
 - Backward mutation detection with automatic rollback
 - Unrecoverable mutation detection (in-place mutation without rebinding)
 - Edit-triggered staleness via frontend notification
-- Structural attribute tracking (always ENFORCE mode)
+- Structural mutation tracking at operation time via `TrackingData` fields (`row_mutations`, `index_mutations`, `dtype_changes`, `column_deletions`)
 
 **Metadata Format** (sent via `flowbook_update` IOPub / comm):
 
-Uses typed `ReadLoc`/`WriteLoc` dicts matching the loc grammars from `CONFLICT_RELATION.md`:
+Uses typed `ReadLoc`/`WriteLoc` dicts. ReadLoc types: `var`, `col`, `attr`, `file`. WriteLoc types: `var`, `col`, `rows`, `attr`, `file`. (The former `col_add` and `col_del` types were removed; column additions and deletions are now tracked as `col` writes, with structural effects captured at operation time.)
 
 ```python
 {
@@ -441,7 +441,7 @@ This normalization happens transparently at entry points:
 - Kernel spec: `flowbook/kernel/kernelspec/`
 - Main kernel class: `flowbook/kernel/flowbook_kernel.py`
 - Reproducibility logic: `flowbook/kernel/reproducibility_enforcer.py`
-- Conflict detection pipeline: `change_detector.py` → `locations.py` (ReadLoc/WriteLoc with ▷)
+- Conflict detection pipeline: `change_detector.py` → `locations.py` (ReadLoc/WriteLoc with ▷). WriteLoc has 5 types: Var, Col, Rows, Attr, File. Structural mutations (rows, index, dtype, column deletion) are tracked at operation time via `TrackingData` fields and converted to WriteLocs in `tracking_to_write_locs()`.
 - Formal specification: `FORMAL_DEVELOPMENT.md`
 
 **MCP Server**:

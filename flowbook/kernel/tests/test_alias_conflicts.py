@@ -4,7 +4,7 @@ Tests for ▷ conflict relation with LocRef aliasing.
 Covers every scenario from ALIAS_CONFLICT_ANALYSIS.md:
 - Same-object aliases (X = df) → same loc_id
 - User copies (df2 = df.copy()) → different loc_id
-- All 7 write types × 4 read types with alias/copy/self combinations
+- All 5 write types × 4 read types with alias/copy/self combinations
 - Var(x) only conflicts with Var(x) reads (no cross-domain bridge)
 
 See ALIAS_CONFLICT_ANALYSIS.md for the full correctness analysis.
@@ -260,105 +260,6 @@ class TestColColConflicts:
 
 
 # ============================================================================
-# ColAdd(d, c) ▷ Attr(d', a') — structural impact of adding a column
-# ============================================================================
-
-class TestColAddConflicts:
-    """Adding a column invalidates COL_ATTRS reads on the same object."""
-
-    def test_coladd_invalidates_own_col_attrs(self):
-        """ColAdd(LR(1,"df"), "new") ▷ Attr(LR(1,"df"), "columns") → True"""
-        w = WriteLoc.col_add(LR_DF, "new")
-        r = ReadLoc.attr(LR_DF, "columns")
-        assert write_conflicts_read(w, r)
-
-    def test_coladd_invalidates_alias_col_attrs(self):
-        """ColAdd(LR(1,"df"), "new") ▷ Attr(LR(1,"X"), "columns") → True
-
-        Alias: X.columns also changed because X IS df.
-        """
-        w = WriteLoc.col_add(LR_DF, "new")
-        r = ReadLoc.attr(LR_X, "columns")
-        assert write_conflicts_read(w, r)
-
-    def test_coladd_does_not_invalidate_copy_col_attrs(self):
-        """ColAdd(LR(1,"df"), "new") ▷ Attr(LR(2,"df2"), "columns") → False"""
-        w = WriteLoc.col_add(LR_DF, "new")
-        r = ReadLoc.attr(LR_DF2, "columns")
-        assert not write_conflicts_read(w, r)
-
-    def test_coladd_does_not_invalidate_non_col_attrs(self):
-        """ColAdd doesn't affect row-structural attrs like index."""
-        w = WriteLoc.col_add(LR_DF, "new")
-        r = ReadLoc.attr(LR_DF, "index")
-        assert not write_conflicts_read(w, r)
-
-    def test_coladd_does_not_invalidate_col_reads(self):
-        """ColAdd(d,c) ▷ Col(d',c') → False — existing columns unaffected."""
-        w = WriteLoc.col_add(LR_DF, "new")
-        assert not write_conflicts_read(w, ReadLoc.col(LR_DF, "price"))
-        assert not write_conflicts_read(w, ReadLoc.col(LR_X, "price"))
-
-    def test_coladd_does_not_invalidate_var(self):
-        """ColAdd(d,c) ▷ Var(x') → False."""
-        w = WriteLoc.col_add(LR_DF, "new")
-        assert not write_conflicts_read(w, ReadLoc.var("df"))
-
-
-# ============================================================================
-# ColDel(d, c) ▷ Col(d', c') and Attr(d', a')
-# ============================================================================
-
-class TestColDelConflicts:
-    """Deleting a column invalidates reads of that column AND COL_ATTRS."""
-
-    def test_coldel_invalidates_own_col_read(self):
-        """ColDel(LR(1,"df"), "price") ▷ Col(LR(1,"df"), "price") → True"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.col(LR_DF, "price")
-        assert write_conflicts_read(w, r)
-
-    def test_coldel_invalidates_alias_col_read(self):
-        """ColDel(LR(1,"df"), "price") ▷ Col(LR(1,"X"), "price") → True
-
-        Alias: column deleted from same object.
-        """
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.col(LR_X, "price")
-        assert write_conflicts_read(w, r)
-
-    def test_coldel_does_not_invalidate_copy_col_read(self):
-        """ColDel(LR(1,"df"), "price") ▷ Col(LR(2,"df2"), "price") → False"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.col(LR_DF2, "price")
-        assert not write_conflicts_read(w, r)
-
-    def test_coldel_does_not_invalidate_different_col(self):
-        """ColDel(LR(1,"df"), "price") ▷ Col(LR(1,"df"), "qty") → False"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.col(LR_DF, "qty")
-        assert not write_conflicts_read(w, r)
-
-    def test_coldel_invalidates_own_col_attrs(self):
-        """ColDel(LR(1,"df"), "price") ▷ Attr(LR(1,"df"), "columns") → True"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.attr(LR_DF, "columns")
-        assert write_conflicts_read(w, r)
-
-    def test_coldel_invalidates_alias_col_attrs(self):
-        """ColDel(LR(1,"df"), "price") ▷ Attr(LR(1,"X"), "columns") → True"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.attr(LR_X, "columns")
-        assert write_conflicts_read(w, r)
-
-    def test_coldel_does_not_invalidate_copy_col_attrs(self):
-        """ColDel(LR(1,"df"), "price") ▷ Attr(LR(2,"df2"), "columns") → False"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.attr(LR_DF2, "columns")
-        assert not write_conflicts_read(w, r)
-
-
-# ============================================================================
 # Rows(d) ▷ Col(d', c') and Attr(d', a')
 # ============================================================================
 
@@ -594,8 +495,9 @@ class TestIndependentDataFrames:
         r = ReadLoc.col(self.LR_B, "price")
         assert not write_conflicts_read(w, r)
 
-    def test_coladd_independent(self):
-        w = WriteLoc.col_add(self.LR_A, "new")
+    def test_col_independent_attrs(self):
+        """Col write on one DataFrame does not affect attrs of another."""
+        w = WriteLoc.col(self.LR_A, "new")
         r = ReadLoc.attr(self.LR_B, "columns")
         assert not write_conflicts_read(w, r)
 

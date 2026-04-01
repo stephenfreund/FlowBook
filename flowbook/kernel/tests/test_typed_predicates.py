@@ -17,7 +17,8 @@ from flowbook.kernel.locations import (
     no_write_after_read,
     forward_stale_reads,
     forward_stale_writes,
-    output_set,
+    write_conflicts_write,
+    wlocs_conflict_wlocs,
     wlocs_conflict_rlocs,
     COL_ATTRS,
     COL_VALUE_ATTRS,
@@ -156,17 +157,15 @@ class TestNoReadBeforeWrite:
         W_after = _wset(WriteLoc.rows("df", qualifier=LR_DF))
         assert no_read_before_write(R_i, W_after)
 
-    def test_coladd_contaminates_structural_attrs(self):
-        """Cell i reads Attr(df, columns), later cell writes ColAdd → contamination."""
-        R_i = _rset(ReadLoc.attr(LR_DF, "columns"))
-        W_after = _wset(WriteLoc.col_add(LR_DF, "new"))
-        assert no_read_before_write(R_i, W_after)
+    def test_col_contaminates_structural_attrs(self):
+        """Cell i reads Attr(df, columns), later cell writes Col(df, new) → contamination.
 
-    def test_coladd_does_not_contaminate_col_reads(self):
-        """Cell i reads Col(df, price), later cell adds new col → no contamination."""
-        R_i = _rset(ReadLoc.col(LR_DF, "price"))
-        W_after = _wset(WriteLoc.col_add(LR_DF, "new"))
-        assert not no_read_before_write(R_i, W_after)
+        Col now conflicts with ALL COL_ATTRS, so writing any column
+        invalidates structural attribute reads like 'columns'.
+        """
+        R_i = _rset(ReadLoc.attr(LR_DF, "columns"))
+        W_after = _wset(WriteLoc.col(LR_DF, "new"))
+        assert no_read_before_write(R_i, W_after)
 
 
 # ============================================================================
@@ -282,12 +281,6 @@ class TestForwardStaleReads:
         result = forward_stale_reads(W_i, R_j)
         assert len(result) == 1  # Rows(df) is the one conflicting write
 
-    def test_coladd_stales_structural_attrs(self):
-        """ColAdd stales Attr(df, columns) reads."""
-        W_i = _wset(WriteLoc.col_add(LR_DF, "new"))
-        R_j = _rset(ReadLoc.attr(LR_DF, "columns"))
-        assert forward_stale_reads(W_i, R_j)
-
     def test_col_stales_value_attrs(self):
         """Col(df, price) stales Attr(df, values) reads (Gap 2 fix)."""
         W_i = _wset(WriteLoc.col(LR_DF, "price"))
@@ -380,15 +373,6 @@ class TestForwardStaleWrites:
         W_j = _wset(WriteLoc.rows("df", qualifier=LR_DF))
         assert forward_stale_writes(W_i, W_j)
 
-    def test_coladd_vs_coldel_overlap(self):
-        """Cell i writes ColAdd(df, x), cell j writes ColDel(df, y) → overlap.
-
-        ColAdd(df, x) ▷ output(ColDel(df, y)) includes Attr overlaps via COL_ATTRS.
-        """
-        W_i = _wset(WriteLoc.col_add(LR_DF, "x"))
-        W_j = _wset(WriteLoc.col_del(LR_DF, "y"))
-        assert forward_stale_writes(W_i, W_j)
-
     def test_attr_vs_attr_same(self):
         """Both write Attr(df, index) → overlap."""
         W_i = _wset(WriteLoc.attr(LR_DF, "index"))
@@ -443,43 +427,55 @@ class TestForwardStaleWrites:
 
 
 # ============================================================================
-# output() function
+# ▷▷ write_conflicts_write relation
 # ============================================================================
 
-class TestOutputFunction:
-    """Verify output() for each write type."""
+class TestWriteConflictsWrite:
+    """Verify the ▷▷ write-write conflict relation with LocRef qualifiers."""
 
-    def test_var_output(self):
-        assert WriteLoc.var("x").output() == frozenset({ReadLoc.var("x")})
+    def test_var_same(self):
+        assert write_conflicts_write(WriteLoc.var("x"), WriteLoc.var("x"))
 
-    def test_col_output_is_minimal(self):
-        """Col(df, price) output is just {Col(df, price)} — no attr inflation."""
-        result = WriteLoc.col(LR_DF, "price").output()
-        assert result == frozenset({ReadLoc.col(LR_DF, "price")})
+    def test_var_different(self):
+        assert not write_conflicts_write(WriteLoc.var("x"), WriteLoc.var("y"))
 
-    def test_coladd_output(self):
-        """ColAdd output is Attr(df, a) for all COL_ATTRS."""
-        result = WriteLoc.col_add(LR_DF, "new").output()
-        assert all(r.type.value == "attr" for r in result)
-        assert {r.name for r in result} == COL_ATTRS
+    def test_col_same(self):
+        """Col(df, price) ▷▷ Col(df, price) = True."""
+        assert write_conflicts_write(WriteLoc.col(LR_DF, "price"), WriteLoc.col(LR_DF, "price"))
 
-    def test_coldel_output(self):
-        """ColDel output is Col(df, c) + Attr(df, a) for all COL_ATTRS."""
-        result = WriteLoc.col_del(LR_DF, "old").output()
-        assert ReadLoc.col(LR_DF, "old") in result
-        for a in COL_ATTRS:
-            assert ReadLoc.attr(LR_DF, a) in result
+    def test_col_different_column(self):
+        """Col(df, price) ▷▷ Col(df, qty) = False (independent columns)."""
+        assert not write_conflicts_write(WriteLoc.col(LR_DF, "price"), WriteLoc.col(LR_DF, "qty"))
 
-    def test_rows_output(self):
-        """Rows output is Attr(df, a) for all ROW_ATTRS."""
-        result = WriteLoc.rows("df", qualifier=LR_DF).output()
-        assert {r.name for r in result} == ROW_ATTRS
+    def test_col_vs_rows(self):
+        """Col(df, price) ▷▷ Rows(df) = True."""
+        assert write_conflicts_write(WriteLoc.col(LR_DF, "price"), WriteLoc.rows("df", qualifier=LR_DF))
 
-    def test_attr_output(self):
-        assert WriteLoc.attr(LR_DF, "index").output() == frozenset({ReadLoc.attr(LR_DF, "index")})
+    def test_rows_vs_col(self):
+        """Rows(df) ▷▷ Col(df, any) = True."""
+        assert write_conflicts_write(WriteLoc.rows("df", qualifier=LR_DF), WriteLoc.col(LR_DF, "any"))
 
-    def test_file_output(self):
-        assert WriteLoc.file("data.csv").output() == frozenset({ReadLoc.file("data.csv")})
+    def test_attr_same(self):
+        """Attr(df, index) ▷▷ Attr(df, index) = True."""
+        assert write_conflicts_write(WriteLoc.attr(LR_DF, "index"), WriteLoc.attr(LR_DF, "index"))
+
+    def test_attr_different(self):
+        """Attr(df, index) ▷▷ Attr(df, shape) = False."""
+        assert not write_conflicts_write(WriteLoc.attr(LR_DF, "index"), WriteLoc.attr(LR_DF, "shape"))
+
+    def test_file_same(self):
+        assert write_conflicts_write(WriteLoc.file("data.csv"), WriteLoc.file("data.csv"))
+
+    def test_file_different(self):
+        assert not write_conflicts_write(WriteLoc.file("data.csv"), WriteLoc.file("other.csv"))
+
+    def test_col_alias_overlap(self):
+        """Col(df, price) ▷▷ Col(X, price) = True via shared loc_id."""
+        assert write_conflicts_write(WriteLoc.col(LR_DF, "price"), WriteLoc.col(LR_X, "price"))
+
+    def test_col_copy_no_overlap(self):
+        """Col(df, price) ▷▷ Col(df2, price) = False (different objects)."""
+        assert not write_conflicts_write(WriteLoc.col(LR_DF, "price"), WriteLoc.col(LR_DF2, "price"))
 
 
 # ============================================================================

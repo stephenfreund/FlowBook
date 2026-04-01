@@ -2,7 +2,7 @@
 Tests for Var(x) = binding-only semantics.
 
 Var(x) means "read the namespace binding" — the pointer from name x to an object.
-Sub-variable writes (Col, ColAdd, ColDel, Rows, Attr) do NOT conflict with
+Sub-variable writes (Col, Rows, Attr) do NOT conflict with
 Var reads because they don't change the binding.
 
 This file tests:
@@ -50,12 +50,6 @@ class TestSubVariableWritesDontConflictWithVar:
     def test_col_vs_var(self):
         assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.var("df"))
 
-    def test_col_add_vs_var(self):
-        assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.var("df"))
-
-    def test_col_del_vs_var(self):
-        assert not write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.var("df"))
-
     def test_rows_vs_var(self):
         assert not write_conflicts_read(WriteLoc.rows("df"), ReadLoc.var("df"))
 
@@ -91,7 +85,7 @@ class TestVarWriteDoesNotConflictWithSubVariableReads:
 
 
 class TestSubVariableWritesDoConflictWithColReads:
-    """Col/ColAdd/Rows writes DO conflict with Col reads (at column level)."""
+    """Col/Rows writes DO conflict with Col reads (at column level)."""
 
     def test_col_vs_col_same(self):
         assert write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.col("df", "price"))
@@ -101,16 +95,6 @@ class TestSubVariableWritesDoConflictWithColReads:
 
     def test_rows_vs_col(self):
         assert write_conflicts_read(WriteLoc.rows("df"), ReadLoc.col("df", "price"))
-
-    def test_col_add_vs_col(self):
-        """ColAdd doesn't conflict with existing column reads."""
-        assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.col("df", "price"))
-
-    def test_col_del_vs_col_same(self):
-        assert write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.col("df", "old"))
-
-    def test_col_del_vs_col_different(self):
-        assert not write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.col("df", "price"))
 
 
 # =============================================================================

@@ -99,12 +99,12 @@ class TestForwardStalenessColumnPrecision:
         # The diff detects only Col(df, qty) changed, and B's read is Col(df, price)
         assert "b" not in result.stale_cells
 
-    def test_col_add_doesnt_stale_existing_column_reader(self):
-        """ColAdd(df, new) does NOT stale cell reading Col(df, price).
+    def test_col_write_doesnt_stale_existing_column_reader(self):
+        """Col(df, new) does NOT stale cell reading Col(df, price).
 
         Adding a new column to df should not stale downstream cells that only
         read existing, unchanged columns.  The diff must see the original df
-        in pre_namespace to detect a ColAdd (rather than a whole-variable
+        in pre_namespace to detect a Col (rather than a whole-variable
         ValueChanged).
         """
         df = pd.DataFrame({"price": [1, 2]})
@@ -118,7 +118,7 @@ class TestForwardStalenessColumnPrecision:
         )
 
         # Edit A to add a new column.
-        # Use df as pre_namespace so the diff detects ColAdd(df, new) rather
+        # Use df as pre_namespace so the diff detects Col(df, new) rather
         # than ValueChanged(df).
         self.helper.sdc._notebook_state.handle_edit("a")
         df_with_new = df.copy()
@@ -127,8 +127,8 @@ class TestForwardStalenessColumnPrecision:
             "a", {"df": df.copy()}, {"df": df_with_new},
             writes={"df"}, column_writes={"df": {"price", "new"}},
         )
-        # The diff detects ColAdd(df, new). B reads Col(df, price).
-        # ColAdd(df, new) does NOT conflict with Col(df, price) per the otimes table.
+        # The diff detects Col(df, new). B reads Col(df, price).
+        # Col(df, new) does NOT conflict with Col(df, price) per the otimes table.
         # B has no writes={"df"}, so no write-write overlap either.
         assert "b" not in result.stale_cells
 
@@ -274,10 +274,10 @@ class TestIndependentColumnAdditions:
         self.helper = ReproducibilityTestHelper()
         self.helper.set_cell_order(["a", "b", "c"])
 
-    def test_two_col_adds_no_write_write_overlap(self):
+    def test_two_col_writes_no_write_write_overlap(self):
         """B adds df["price"], C adds df["qty"]. Editing B does NOT stale C
-        because ColumnAdded now maps to Col (not ColAdd), giving column-level
-        precision in write-write overlap.
+        because ColumnAdded maps to Col, giving column-level precision in
+        write-write overlap.
 
         B's changed write locs are Col(df, price). C's write locs include
         Col(df, qty). Col(df, price) does not conflict with Col(df, qty),
@@ -610,22 +610,23 @@ class TestCommentOnlyCellClearsRW:
 
 
 # =============================================================================
-# ColAdd vs Col on first vs subsequent runs
+# Col on first vs subsequent runs
 # =============================================================================
 
 
-class TestColAddVsColStaleness:
+class TestColStaleness:
     """
-    When a cell adds a column on first run, it produces ColAdd in the diff.
-    On subsequent runs (column already exists), it produces Col (modify).
-    ColAdd conflicts with attribute reads (shape, columns); Col does not.
+    Column writes (whether adding a new column or modifying an existing one)
+    both produce Col in the diff. Col conflicts with all COL_ATTRS attribute
+    reads (shape, columns, dtypes, etc.), so behavior is consistent across
+    first and subsequent runs.
     """
 
     def setup_method(self):
         self.helper = ReproducibilityTestHelper()
         self.helper.set_cell_order(["a", "b", "c"])
 
-    def test_col_add_stales_shape_reader(self):
+    def test_col_write_stales_shape_reader(self):
         """Adding a new column stales cells reading df.shape."""
         df = pd.DataFrame({"x": [1, 2, 3]})
         self.helper.execute_cell("a", {}, {"df": df.copy()}, writes={"df"}, column_writes={"df": {"x"}})
@@ -645,9 +646,9 @@ class TestColAddVsColStaleness:
             reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y", "z"}},
             continue_on_violation=True)
 
-        # C reads shape/columns → stale because z was added (ColAdd ▷ Attr = true)
+        # C reads shape/columns → stale because z was added (Col ▷ Attr = true)
         assert "c" in result.stale_cells, \
-            "C should be stale: ColAdd(df, z) conflicts with Attr(df, shape)"
+            "C should be stale: Col(df, z) conflicts with Attr(df, shape)"
 
     def test_col_modify_stales_shape_reader(self):
         """Modifying an existing column stales cells reading df.shape.

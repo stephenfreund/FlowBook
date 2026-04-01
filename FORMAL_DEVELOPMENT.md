@@ -206,7 +206,7 @@ ForwardStale(R, W, W', i, j)       ≝  j > i ∧ (Wᵢ ∪ W'ᵢ) ∩ (Rⱼ ∪
 BackwardStale(W, W', i, j)     ≝  j < i ∧ j = LastWriter(W, i, y) for some y ∈ Wᵢ \ W'ᵢ
 ```
 
-- **ForwardStale**: Cell j (after i) becomes stale if i wrote to a location that j reads or writes. Note: only **recoverable** writes (rebound variables and tracked column writes) participate in staleness propagation. In-place mutations that are not recoverable do not propagate staleness. **Typed implementation:** Since ReadLoc ≠ WriteLoc, the implementation decomposes the `∩` into two ▷ checks: `(Wᵢ ∪ W'ᵢ) ▷ Rⱼ ≠ ∅` (read overlap) and `(Wᵢ ∪ W'ᵢ) ▷ output*(Wⱼ) ≠ ∅` (write-write overlap). See §10 for details.
+- **ForwardStale**: Cell j (after i) becomes stale if i wrote to a location that j reads or writes. Note: only **recoverable** writes (rebound variables and tracked column writes) participate in staleness propagation. In-place mutations that are not recoverable do not propagate staleness. **Typed implementation:** Since ReadLoc ≠ WriteLoc, the implementation uses two checks: `(Wᵢ ∪ W'ᵢ) ▷ Rⱼ ≠ ∅` (read overlap) and `(Wᵢ ∪ W'ᵢ) ▷▷ Wⱼ ≠ ∅` (write-write overlap). See §10 for details.
 - **BackwardStale**: Cell j (before i) becomes stale if it was the last writer of a location that i no longer writes.
 
 ### 3.4 Instrumented Transition Rules
@@ -421,7 +421,7 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 | RecoverableMutation check  | STEP 2: `_check_unrecoverable_mutation()`                                                      |
 | `T'ᵢ = CLEAN`              | STEP 4: `set_clean(cell_id)`                                                                   |
 | ForwardStale loop (reads)  | STEP 5: `_compute_forward_staleness()` — `wlocs_conflict_rlocs(change_wlocs, R_j)`             |
-| ForwardStale loop (writes) | STEP 5: `_compute_forward_staleness()` — `wlocs_conflict_rlocs(change_wlocs, output_set(W_j))` |
+| ForwardStale loop (writes) | STEP 5: `_compute_forward_staleness()` — `wlocs_conflict_wlocs(change_wlocs, W_j)` |
 | BackwardStale loop         | STEP 5: LastWriter via `NotebookState.last_writer_for()` (variable level — coverage check)     |
 
 ### 7.5 Invariant and Checks
@@ -471,30 +471,27 @@ r ∈ ReadLoc ::= Var(x) | Col(d, c) | Attr(d, a) | File(p)
 Write locations describe what changed and _how_:
 
 ```
-w ∈ WriteLoc ::= Var(x) | Col(d, c) | ColAdd(d, c) | ColDel(d, c)
-               | Rows(d) | Attr(d, a) | File(p)
+w ∈ WriteLoc ::= Var(x) | Col(d, c) | Rows(d) | Attr(d, a) | File(p)
 ```
 
 | Constructor  | Meaning                      | Example               |
 | ------------ | ---------------------------- | --------------------- |
-| Var(x)       | Variable completely replaced | x = 42                |
-| Col(d, c)    | Column values modified       | df["price"] = [1,2,3] |
-| ColAdd(d, c) | New column added             | df["new"] = [4,5,6]   |
-| ColDel(d, c) | Column removed               | df.drop("old")        |
-| Rows(d)      | Rows added/removed           | df.append(...)        |
+| Var(x)       | Variable completely replaced       | x = 42                |
+| Col(d, c)    | Column written (add, modify, or delete) | df["price"] = [1,2,3] |
+| Rows(d)      | Rows added/removed                 | df.append(...)        |
 | Attr(d, a)   | Attribute changed            | df.reset_index()      |
 | File(p)      | File written                 | df.to_csv("out.csv")  |
 
 **Code:** `WriteLoc` in `kernel/locations.py`, `changes_to_write_locs()` converts Change objects
 
-**Storage:** `NotebookState.writes[cell_id]` stores the union of tracking-derived WriteLocs (Var, Col) and diff-derived WriteLocs (ColAdd, ColDel, Rows, Attr), filtered to only include diff-derived locs for variables that tracking also considers writes (recoverable mutations). See `record_execution()` in `kernel/notebook_state.py`.
+**Storage:** `NotebookState.writes[cell_id]` stores the union of tracking-derived WriteLocs (Var, Col, Rows, Attr, File — from `tracking_to_writelocset()`, which converts structural mutations recorded at operation time by TrackingData) and diff-derived WriteLocs (Col, Rows, Attr — from `changes_to_write_locs()`), filtered to only include diff-derived locs for variables that tracking also considers writes (recoverable mutations). See `record_execution()` in `kernel/notebook_state.py`.
 
 ### 8.3 The ▷ Conflict Relation
 
 `w ▷ r` means "writing w invalidates reading r".
 
 **Var(x) semantics**: `Var(x)` as a read means "read the namespace binding" —
-the pointer from name `x` to an object. Sub-variable writes (Col, ColAdd, ColDel,
+the pointer from name `x` to an object. Sub-variable writes (Col,
 Rows, Attr) do NOT change the binding, so they do NOT conflict with `Var(x)`.
 Only `Var(x)` writes (replacing the entire variable) conflict with `Var(x)` reads.
 
@@ -510,10 +507,7 @@ Key rules:
 | Var(x)       | Col(d, c)  | **No** (rebinding caught via Var(x) read always in read set)           |
 | Col(d, c)    | Var(x)     | **No** (column write doesn't change binding)                           |
 | Col(d, c)    | Col(d, c') | Only if c = c' (column-level precision)                                |
-| Col(d, c)    | Attr(d, a) | Yes if a ∈ COL_ATTRS (column write may add or modify, affecting structure) |
-| ColAdd(d, c) | Var(x)     | **No** (column add doesn't change binding)                             |
-| ColAdd(d, c) | Col(d, c') | **No** (adding column ≠ changing existing columns)                     |
-| ColAdd(d, c) | Attr(d, a) | Yes if a ∈ COL_ATTRS (adding changes structure)                        |
+| Col(d, c)    | Attr(d, a) | Yes if a ∈ COL_ATTRS (column write may add, modify, or delete, affecting structure) |
 | Rows(d)      | Var(x)     | **No** (row change doesn't change binding)                             |
 | Rows(d)      | Col(d, c)  | **Yes** (row change affects all column data)                           |
 | Attr(d, a)   | Var(x)     | **No** (attr change doesn't change binding)                            |
@@ -527,7 +521,7 @@ Set-level operations:
 
 - `wlocs_conflict_rlocs(W, R)` — return writes in W that conflict with some read in R
 - `has_conflict(W, R)` — boolean W ▷ R ≠ ∅
-- `output_set(W)` — convert writes to reads for write-write overlap
+- `wlocs_conflict_wlocs(W₁, W₂)` — return writes in W₁ that overlap with some write in W₂
 
 Typed predicate helpers (pure functions for unit testing):
 
@@ -535,28 +529,32 @@ Typed predicate helpers (pure functions for unit testing):
 - `no_read_before_write(R_i, W_after)` — forward contamination W\_{i+1..n} ▷ Rᵢ
 - `no_write_after_read(W_i, R_before)` — backward mutation Wᵢ ▷ R\_{1..i-1}
 - `forward_stale_reads(W_i, R_j)` — read-based forward staleness
-- `forward_stale_writes(W_i, W_j)` — write-write overlap via output\*
+- `forward_stale_writes(W_i, W_j)` — write-write overlap Wᵢ ▷▷ Wⱼ
 
 **Code:** `kernel/locations.py`
 
-### 8.4 The output Function
+### 8.4 The ▷▷ Write-Write Conflict Relation
 
-For ForwardStale's write-write overlap, `output : WriteLoc → P(ReadLoc)` maps a write
-to the set of reads that would observe its effect:
+For ForwardStale's write-write overlap, `▷▷ : WriteLoc × WriteLoc → Bool` determines
+whether two writes overlap. This is a self-contained 5×5 matrix:
 
 ```
-output(Var(x))       = { Var(x) }
-output(Col(d, c))    = { Col(d, c) }
-output(ColAdd(d, c)) = { Attr(d, a) | a ∈ COL_ATTRS }
-output(ColDel(d, c)) = { Col(d, c) } ∪ { Attr(d, a) | a ∈ COL_ATTRS }
-output(Rows(d))      = { Attr(d, a) | a ∈ ROW_ATTRS }
-output(Attr(d, a))   = { Attr(d, a) }
-output(File(p))      = { File(p) }
+w₁ ▷▷ w₂ — do writes w₁ and w₂ overlap?
+
+| w₁ ↓ \ w₂ →   | Var(x') | Col(d',c')      | Rows(d') | Attr(d',a')       | File(p') |
+|----------------|---------|-----------------|----------|-------------------|----------|
+| Var(x)         | x = x'  | —               | —        | —                 | —        |
+| Col(d, c)      | —       | d ≡ d' ∧ c = c' | d ≡ d'   | d ≡ d' ∧ a' ∈ CA | —        |
+| Rows(d)        | —       | d ≡ d'          | d ≡ d'   | d ≡ d' ∧ a' ∈ RA | —        |
+| Attr(d, a)     | —       | —               | d ≡ d' ∧ a ∈ RA | d ≡ d' ∧ a = a' | —  |
+| File(p)        | —       | —               | —        | —                 | p = p'   |
 ```
 
-This lifts to sets: `output*(W) = ⋃ { output(w) | w ∈ W }`.
+(CA = COL_ATTRS, RA = ROW_ATTRS)
 
-**Code:** `WriteLoc.output()` method in `kernel/locations.py`
+This lifts to sets: `W₁ ▷▷ W₂ = { w₁ ∈ W₁ | ∃ w₂ ∈ W₂ . w₁ ▷▷ w₂ }`.
+
+**Code:** `write_conflicts_write()` and `wlocs_conflict_wlocs()` in `kernel/locations.py`
 
 ### 8.5 Staleness Reasons
 
@@ -736,7 +734,7 @@ with some read in R, using `write_conflicts_read()` as the per-element check.
 With `LocRef` qualifiers (§9.1), the ▷ relation uses two distinct comparison
 modes:
 
-- **Intra-DataFrame** (`Col ▷ Col`, `Rows ▷ Col`, `ColDel ▷ Col`, etc.):
+- **Intra-DataFrame** (`Col ▷ Col`, `Rows ▷ Col`, `Col ▷ Attr`, etc.):
   Uses `_same_dataframe()` to compare `loc_id` values. Aliased DataFrames
   (`X = df`) share the same `loc_id`, so cross-alias conflicts are detected
   natively without additional alias expansion.
@@ -766,7 +764,7 @@ then evaluates all predicates using pure set operations on R and W.
 
 ```
 R[i] : ReadLocSet     — locations read before write (Var, Col, Attr, File)
-W[i] : WriteLocSet    — locations that actually changed (Var, Col, ColAdd, ColDel, Rows, Attr, File)
+W[i] : WriteLocSet    — locations that actually changed (Var, Col, Rows, Attr, File)
 ```
 
 **Predicates** (using ▷ conflict relation for column-level precision):
@@ -779,13 +777,13 @@ NoWriteAfterRead(R, W, i)  ≝  Wᵢ ▷ R_{1..i-1} = ∅  (clean cells only)
 
 ForwardStale(R, W, W', i, j) ≝  j > i ∧ (
     (Wᵢ ∪ W'ᵢ) ▷ Rⱼ ≠ ∅                   — write-read conflict
-    ∨ (Wᵢ ∪ W'ᵢ) ▷ output*(Wⱼ) ≠ ∅        — write-write overlap
+    ∨ (Wᵢ ∪ W'ᵢ) ▷▷ Wⱼ ≠ ∅               — write-write overlap
 )
 ```
 
 Note: The paper uses `∩` (set intersection) because R and W share a single Loc type.
 The implementation uses `▷` because ReadLoc and WriteLoc are different types.
-The `output*` function converts WriteLoc → ReadLoc for write-write overlap checks.
+The `▷▷` relation handles write-write overlap directly (no conversion needed).
 
 **Properties**:
 
@@ -806,7 +804,7 @@ The ForwardStale formula marks cell j stale when cell i's writes overlap with j'
 ```
 ForwardStale(R, W, W', i, j) ≝ j > i ∧ (
     (Wᵢ ∪ W'ᵢ) ▷ Rⱼ ≠ ∅                   — read overlap
-    ∨ (Wᵢ ∪ W'ᵢ) ▷ output*(Wⱼ) ≠ ∅        — write-write overlap
+    ∨ (Wᵢ ∪ W'ᵢ) ▷▷ Wⱼ ≠ ∅               — write-write overlap
 )
 ```
 
@@ -820,7 +818,7 @@ This formula has two distinct overlap cases that require different handling:
 - The value may or may not have changed
 - Reason type: `FORWARD_STALE`
 
-**Write Overlap**: `(Wᵢ ∪ W'ᵢ) ▷ output*(Wⱼ) ≠ ∅`
+**Write Overlap**: `(Wᵢ ∪ W'ᵢ) ▷▷ Wⱼ ≠ ∅`
 
 - Cell j _writes_ to a location that cell i also writes
 - Both cells modify the same location
@@ -874,9 +872,9 @@ x's value (from some prior state) hasn't changed.
 | WRITE_OVERLAP enum      | `ReasonType.WRITE_OVERLAP` in `models.py` |
 | Write overlap detection | `_compute_forward_staleness_syntactic()`  |
 
-## 12. Structural Provenance: Injecting Structural WriteLocs on Re-execution
+## 12. Structural Mutation Tracking
 
-### 12.1 The Problem
+### 12.1 The Re-execution Problem and Solution
 
 Write locations are determined by diffing memory checkpoints. On first execution of
 `df['x'] = 5`, column `x` is absent in the pre-checkpoint and present in the
@@ -886,49 +884,44 @@ checkpoints (from the prior run), so the diff produces `ColumnModified` instead.
 Both `ColumnAdded` and `ColumnModified` now map to `Col(d, x)` in `changes_to_write_locs()`.
 Since `Col ▷ Attr(d, a)` for `a ∈ COL_ATTRS`, the conflict with structural reads is
 detected regardless of whether the column was added or modified. This eliminates the
-re-execution inconsistency that previously required provenance-based `Col → ColAdd` upgrades.
+re-execution inconsistency that previously required provenance-based write type upgrades.
 
-The remaining re-execution issue is that other structural changes (row mutations, index
-changes, dtype changes, column deletions) can still produce empty diffs on re-execution.
+Other structural changes (row mutations, index changes, dtype changes, column deletions)
+are tracked at operation time in `TrackingData`, so their WriteLocs are always
+present regardless of whether the diff produces a change on re-execution.
 
-### 12.2 Solution: df.attrs Structural Provenance
+### 12.2 Structural Mutation Tracking via TrackingData
 
-Structural provenance records which cell first caused each structural effect on a
-DataFrame, stored as a single `DataFrameProvenance` object in
-`df.attrs['_flowbook_provenance']`.
+Structural mutations are recorded at operation time by monkey-patched DataFrame hooks.
+These hooks write directly into `TrackingData` fields, which are then converted to
+WriteLocs by `tracking_to_writelocset()`. This eliminates the need for a separate
+post-hoc injection step.
 
-**DataFrameProvenance fields:**
+**TrackingData structural fields:**
 
-| Field            | Type                | Tracks                                       |
-| ---------------- | ------------------- | -------------------------------------------- |
-| `col_origins`    | `{column: cell_id}` | Which cell first created each column         |
-| `col_deletions`  | `{column: cell_id}` | Which cell first deleted each column         |
-| `dtype_origins`  | `{column: cell_id}` | Which cell first changed each column's dtype |
-| `row_mutators`   | `set[cell_id]`      | Cells that mutated the row count             |
-| `index_mutators` | `set[cell_id]`      | Cells that mutated the index                 |
+| Field                | Type                    | Tracks                                       |
+| -------------------- | ----------------------- | -------------------------------------------- |
+| `column_writes`      | `{var: set[col]}`       | Columns written (add, modify, or delete)     |
+| `column_deletions`   | `{var: set[col]}`       | Columns deleted                              |
+| `row_mutations`      | `set[var]`              | DataFrames with row count changes            |
+| `index_mutations`    | `set[var]`              | DataFrames with index changes                |
+| `dtype_changes`      | `{var: set[col]}`       | Columns with dtype changes                   |
 
-**Semantics:**
+**Conversion to WriteLocs** (`tracking_to_writelocset()`):
 
-| Operation                                | Effect on provenance                                                   |
-| ---------------------------------------- | ---------------------------------------------------------------------- |
-| `record_var_write(df, cell_id)`          | Create fresh `DataFrameProvenance()`, set ALL column origins → cell_id |
-| `record_column_write(df, col, cell_id)`  | First writer wins — no overwrite if col_origin exists                  |
-| `record_column_delete(df, col, cell_id)` | Record first deleter of column; remove col_origin                      |
-| `record_dtype_change(df, col, cell_id)`  | Record first dtype changer for column                                  |
-| `record_row_mutation(df, cell_id)`       | Add cell to row_mutators set                                           |
-| `record_index_mutation(df, cell_id)`     | Add cell to index_mutators set                                         |
+| TrackingData field   | WriteLoc(s) produced                                  |
+| -------------------- | ----------------------------------------------------- |
+| `column_writes`      | `Col(d, c)` for each column                           |
+| `column_deletions`   | `Col(d, c)` for each deleted column                   |
+| `row_mutations`      | `Rows(d)`                                             |
+| `index_mutations`    | `Attr(d, index)`, `Attr(d, axes)`                     |
+| `dtype_changes`      | `Attr(d, dtypes)`, `Attr(d, values)`, `Attr(d, T)`   |
 
-**First writer/deleter/changer wins** ensures that re-executing a structural operation
-does not change the provenance from the cell that first caused the effect. Provenance
-is cleared only by `record_var_write` (full DataFrame replacement).
+Since these WriteLocs come from tracking (not from diffing), they are always present
+on re-execution. This solves the empty-diff re-execution problem without requiring
+provenance-based injection.
 
-**record_var_write is called when:**
-
-- A DataFrame is assigned to a variable (`df = pd.read_csv(...)`, `df = pd.DataFrame(...)`,
-  `merged = df1.merge(df2)`, `result = pd.concat([df1, df2])`)
-- This covers all operations that create a new DataFrame object
-
-**Monkey-patched hooks recording provenance:**
+**Monkey-patched hooks recording structural mutations:**
 
 - `__setitem__`: records column write + dtype change detection
 - `insert`: records column write
@@ -940,67 +933,49 @@ is cleared only by `record_var_write` (full DataFrame replacement).
   `reset_index`, `set_index`, `sort_index`, `sort_values`, `rename`, `fillna`, `replace` —
   checks row count, index identity, and dtypes before/after, records mutations as appropriate
 
+### 12.3 DataFrameProvenance (Reporting Only)
+
+`DataFrameProvenance` still exists in `df.attrs['_flowbook_provenance']` for reporting
+which cell first caused each structural effect, but it is no longer used for conflict
+detection. Structural conflicts are fully handled by the TrackingData-based WriteLocs
+described above.
+
+**DataFrameProvenance fields:**
+
+| Field            | Type                | Tracks                                       |
+| ---------------- | ------------------- | -------------------------------------------- |
+| `col_origins`    | `{column: cell_id}` | Which cell first created each column         |
+| `col_deletions`  | `{column: cell_id}` | Which cell first deleted each column         |
+| `dtype_origins`  | `{column: cell_id}` | Which cell first changed each column's dtype |
+| `row_mutators`   | `set[cell_id]`      | Cells that mutated the row count             |
+| `index_mutators` | `set[cell_id]`      | Cells that mutated the index                 |
+
 **Storage:** Provenance lives in `df.attrs`, which is automatically preserved by
 `df.copy(deep=False)` (used by the checkpoint system's deepcopy), `df.copy()`, and
 aliasing. Each copy gets an independent `DataFrameProvenance` via `__copy__`/`__deepcopy__`,
 so mutations to one do not affect others.
 
-### 12.3 Structural Write Injection
-
-The enforcer applies `_inject_structural_writes(W, cell_id, Σ)` to augment diff-derived
-write sets with provenance-recorded structural effects:
-
-```
-InjectStructuralWrites(W, cell_id, Σ) ≝ W' where:
-  Note: Col → ColAdd upgrade is no longer needed (Col now conflicts with all COL_ATTRS).
-  1. For each d ∈ DataFrames(Σ):
-     a. For each (c, id) ∈ col_deletions(Σ(d)):  if id = cell_id → add ColDel(d, c)
-     b. If cell_id ∈ row_mutators(Σ(d)):  add Rows(d)
-     c. If cell_id ∈ index_mutators(Σ(d)):  add Attr(d, index), Attr(d, axes)
-     d. If ∃c: dtype_origins(Σ(d), c) = cell_id:  add Attr(d, dtypes), Attr(d, values), Attr(d, T)
-```
-
-The injection scans ALL DataFrames in namespace (not just those in W), because on
-re-execution W may be empty while provenance persists. This is critical for detecting
-forward contamination from idempotent structural changes.
-
-**Example — column deletion:**
-
-```
-Re-execute C:  W_C = {} (diff sees no change — column already deleted)
-Inject:        provenance says C deleted column 'b'
-               → W_C injected to {ColDel(df, b)}
-Check:         ColDel(df, b) ▷ Attr(df, shape)?  → Yes (shape ∈ COL_ATTRS)
-               → NoReadBeforeWrite violation detected correctly
-```
-
 ### 12.4 Formal Integration
 
-The injection is applied in three predicates:
-
-- **NoReadBeforeWrite** (`_check_forward_contamination`): injects structural writes
-  for each later cell before checking `W_{i+1..n} ▷ Rᵢ = ∅`. Injection happens
-  _before_ the emptiness check, so cells with empty diff-writes but structural
-  provenance are still checked.
-- **NoWriteAfterRead** (`_check_backward_mutation_new`): injects structural writes
-  for the current cell before checking `Wᵢ ▷ R_{1..i-1} = ∅`. Same pre-emptiness
-  ordering applies.
-- **ForwardStale** (`_compute_forward_staleness_syntactic`): injects structural writes
-  into the executing cell's change-derived write set for staleness propagation.
-
-The modified predicates:
+Because structural mutations are tracked at operation time, the stored write sets W[i]
+already contain all structural WriteLocs. The predicates use W directly without any
+injection step:
 
 ```
-NoReadBeforeWrite(R, W, i, Σ) ≝  InjectStructuralWrites(W_j, j, Σ) ▷ Rᵢ = ∅  ∀j > i
-NoWriteAfterRead(R, W, i, Σ) ≝  InjectStructuralWrites(Wᵢ, i, Σ) ▷ R_j = ∅  ∀j < i
-ForwardStale(R, W, W', i, j, Σ) uses InjectStructuralWrites(W'ᵢ, i, Σ) for conflict checks
+NoReadBeforeWrite(R, W, i) ≝  W_{i+1..n} ▷ Rᵢ = ∅
+NoWriteAfterRead(R, W, i)  ≝  Wᵢ ▷ R_{1..i-1} = ∅  (clean cells only)
+ForwardStale(R, W, W', i, j) ≝  j > i ∧ (
+    (Wᵢ ∪ W'ᵢ) ▷ Rⱼ ≠ ∅  ∨  (Wᵢ ∪ W'ᵢ) ▷▷ Wⱼ ≠ ∅
+)
 ```
+
+These are the same predicates from §10 — no additional `Σ` parameter is needed.
 
 ### 12.5 Edge Cases
 
 | Case                              | Handling                                                                                                                                                    |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pd.read_csv()` → `df['x'] = 5`   | `record_var_write` sets all CSV columns to cell A. `record_column_write` sets `x` to cell C. Injection correctly applies to `x` only.                       |
+| `pd.read_csv()` → `df['x'] = 5`   | `record_var_write` sets all CSV columns to cell A. `record_column_write` sets `x` to cell C. WriteLoc for `x` correctly attributed to cell C only.          |
 | `df = df.merge(...)`              | New DataFrame → `record_var_write` creates fresh provenance. Prior provenance discarded.                                                                    |
 | Checkpoint restore                | `df.copy(deep=False)` preserves `.attrs`. `DataFrameProvenance.__copy__` creates isolated copy. Provenance survives rollback.                               |
 | Cell movement/deletion            | Origin references cell_id of a moved/deleted cell. Predicates look up cell position — if not found, cell is skipped. Provenance becomes stale but harmless. |
@@ -1028,9 +1003,7 @@ ForwardStale(R, W, W', i, j, Σ) uses InjectStructuralWrites(W'ᵢ, i, Σ) for c
 | Inplace wrapper                | `_wrap_inplace_for_provenance()` in `kernel_support/column_tracking.py`                                                            |
 | Var write hook                 | `TrackingDict.__setitem__` in `kernel_support/tracking.py`                                                                         |
 | cell_id threading              | `track_execution(cell_id=...)` in `kernel_support/tracking.py`                                                                     |
-| Structural write injection     | `_inject_structural_writes()` in `kernel/reproducibility_enforcer.py`                                                              |
-| Injection in NoReadBeforeWrite | `_check_forward_contamination()` in `kernel/reproducibility_enforcer.py`                                                           |
-| Injection in NoWriteAfterRead  | `_check_backward_mutation_new()` in `kernel/reproducibility_enforcer.py`                                                           |
-| Injection in ForwardStale      | `_compute_forward_staleness_syntactic()` in `kernel/reproducibility_enforcer.py`                                                   |
+| Tracking → WriteLoc conversion | `tracking_to_writelocset()` in `kernel/locations.py`                                                                               |
+| Write set storage              | `record_execution()` in `kernel/notebook_state.py`                                                                                 |
 | Unit tests                     | `kernel_support/tests/test_column_provenance.py`                                                                                   |
 | Integration tests              | `TestForwardContaminationStructuralRead`, `TestStructuralProvenanceIntegration` in `kernel/tests/test_reproducibility_enforcer.py` |

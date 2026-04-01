@@ -77,7 +77,7 @@ class TestColumnRemoved:
         result = changes_to_write_locs([
             ColumnRemoved(variable="df", column="old_col"),
         ])
-        assert result == frozenset({WriteLoc.col_del("df", "old_col")})
+        assert result == frozenset({WriteLoc.col("df", "old_col")})
 
 
 class TestRowsAdded:
