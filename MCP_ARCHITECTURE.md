@@ -58,6 +58,7 @@ and connects as a second client.
 Stale files are auto-cleaned.
 
 **Key files:**
+
 - `flowbook/kernel_discovery.py` — `read_discovery()`, `write_discovery()`, `remove_discovery()`
 - `flowbook/server/handlers.py` — `KernelDiscoveryHandler` (GET/PUT for frontend)
 - `src/flowbook/plugin.ts` — `_writeKernelDiscovery()` (writes on activation + kernel restart)
@@ -69,6 +70,7 @@ With `jupyter-collaboration`, the API returns/accepts the live Y.js document sta
 (not the disk file), enabling real-time edit propagation.
 
 **Reading (JupyterLab → MCP):**
+
 ```
 GET /api/contents/{path}?content=1&type=notebook
 → Returns live Y.js notebook with all cell sources reflecting JupyterLab edits
@@ -77,6 +79,7 @@ GET /api/contents/{path}?content=1&type=notebook
 ```
 
 **Writing (MCP → JupyterLab):**
+
 ```
 PUT /api/contents/{path}
 Body: {"type": "notebook", "format": "json", "content": notebook}
@@ -86,6 +89,7 @@ Body: {"type": "notebook", "format": "json", "content": notebook}
 ```
 
 **Key files:**
+
 - `flowbook/mcp/session.py` — `_setup_contents_api()`, `_refresh_from_contents_api()`, `_put_contents_api()`
 - `flowbook/mcp/jupyter_config.py` — `discover_jupyter_server()`, `discover_jupyter_server_root()`
 
@@ -97,22 +101,23 @@ and status updates.
 
 **Kernel → Frontend:**
 
-| Message Type | Purpose |
-|---|---|
-| `metadata` | Post-execution: read/write locs, stale cells, timing, staleness_reasons |
-| `violation` | Predicate violation: which predicate, locations, message, accepted flag |
-| `status` | Status line: icon + text (displayed in metadata panel header) |
+| Message Type | Purpose                                                                 |
+| ------------ | ----------------------------------------------------------------------- |
+| `metadata`   | Post-execution: read/write locs, stale cells, timing, staleness_reasons |
+| `violation`  | Predicate violation: which predicate, locations, message, accepted flag |
+| `status`     | Status line: icon + text (displayed in metadata panel header)           |
 
 **Frontend → Kernel:**
 
-| Message Type | Purpose |
-|---|---|
-| `notebook_structure` | Set cell order (sent before each execution) |
-| `cell_edited` | Mark cell stale (sent on source change, debounced 1s) |
-| `continue_after_violation` | Toggle violation rejection vs. reporting |
-| `sync` | Request full current state |
+| Message Type               | Purpose                                               |
+| -------------------------- | ----------------------------------------------------- |
+| `notebook_structure`       | Set cell order (sent before each execution)           |
+| `cell_edited`              | Mark cell stale (sent on source change, debounced 1s) |
+| `continue_after_violation` | Toggle violation rejection vs. reporting              |
+| `sync`                     | Request full current state                            |
 
 **Key files:**
+
 - `flowbook/kernel/flowbook_kernel.py` — `_send_flowbook_message()` (dual: comm + IOPub)
 - `flowbook/kernel/protocol.py` — Message builders and types (Python)
 - `src/flowbook/protocol.ts` — Message types (TypeScript)
@@ -136,16 +141,16 @@ Called automatically at the start of: `get_cell`, `list_cells`, `get_status`,
 
 ### Tool Categories (23 tools)
 
-| Category | Tools |
-|---|---|
-| **Lifecycle** | `load_notebook`, `close_notebook`, `get_notebook_path`, `continue_after_violation` |
-| **Cell Access** | `list_cells`, `get_cell`, `get_next_actionable_cell` |
-| **Execution** | `run_cell`, `run_all_cells`, `run_from`, `get_status` |
-| **Editing** | `edit_cell` |
-| **Save** | `save_notebook` |
-| **Checkpoints** | `checkpoint`, `restore`, `list_checkpoints` |
+| Category        | Tools                                                                                              |
+| --------------- | -------------------------------------------------------------------------------------------------- |
+| **Lifecycle**   | `load_notebook`, `close_notebook`, `get_notebook_path`, `continue_after_violation`                 |
+| **Cell Access** | `list_cells`, `get_cell`, `get_next_actionable_cell`                                               |
+| **Execution**   | `run_cell`, `run_all_cells`, `run_from`, `get_status`                                              |
+| **Editing**     | `edit_cell`                                                                                        |
+| **Save**        | `save_notebook`                                                                                    |
+| **Checkpoints** | `checkpoint`, `restore`, `list_checkpoints`                                                        |
 | **Refactoring** | `alpha_rename`, `remove_inplace`, `insert_deepcopy`, `mark_diagnostic`, `merge_cells`, `move_cell` |
-| **Logging** | `get_log`, `save_log`, `print_log` |
+| **Logging**     | `get_log`, `save_log`, `print_log`                                                                 |
 
 All tools are **synchronous** functions wrapped by `@_logged_tool` (captures name,
 args, result, duration, errors into `session._event_log`).
@@ -205,6 +210,7 @@ only fires for locally-initiated executions.
 ### Discovery File Rewrite
 
 `_writeKernelDiscovery()` is called:
+
 - On plugin activation (initial kernel detection)
 - On `_onStatusChanged()` when kernel is active (catches kernel restarts)
 
@@ -217,11 +223,13 @@ from the Jupyter kernel manager.
 ### KernelDiscoveryHandler
 
 **Path resolution** (`_resolve_notebook_path`):
+
 - Expands `~` in both the path and `server_root_dir` setting
 - Resolves relative paths against the server root
 - Returns canonical absolute path
 
 **PID lookup** (`_get_kernel_pid`):
+
 - Extracts kernel UUID from connection filename
 - Queries `serverapp.kernel_manager.get_kernel(uuid)`
 - Returns `(pid, abs_connection_file)` — the frontend sends `pid=0` and the
@@ -229,14 +237,14 @@ from the Jupyter kernel manager.
 
 ## Graceful Degradation
 
-| Scenario | Behavior |
-|---|---|
-| No Jupyter server running | MCP works standalone: own kernel, disk I/O, no live sync |
-| jupyter-collaboration not installed | Contents API returns disk state, not live edits |
-| JupyterLab not open | MCP starts own kernel, writes discovery for later |
-| MCP not running | JupyterLab works normally, writes discovery for later |
-| Comm channel fails | Metadata still arrives via IOPub fallback |
-| Contents API fails | Best-effort: failures logged, never thrown |
+| Scenario                            | Behavior                                                 |
+| ----------------------------------- | -------------------------------------------------------- |
+| No Jupyter server running           | MCP works standalone: own kernel, disk I/O, no live sync |
+| jupyter-collaboration not installed | Contents API returns disk state, not live edits          |
+| JupyterLab not open                 | MCP starts own kernel, writes discovery for later        |
+| MCP not running                     | JupyterLab works normally, writes discovery for later    |
+| Comm channel fails                  | Metadata still arrives via IOPub fallback                |
+| Contents API fails                  | Best-effort: failures logged, never thrown               |
 
 ## Known Issues and Plan
 
@@ -271,6 +279,7 @@ Jupyter server). There are no tests for Contents API refresh/push, kernel
 discovery handler path resolution, or PID lookup.
 
 **Plan:** Add integration tests:
+
 - `test_contents_api.py`: Mock Contents API responses, verify source merge
   behavior, rate limiting, graceful failure
 - `test_discovery_handler.py`: Test `_resolve_notebook_path` with tilde paths,

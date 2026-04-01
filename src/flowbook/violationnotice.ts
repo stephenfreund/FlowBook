@@ -7,10 +7,7 @@
 
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { IOutput } from '@jupyterlab/nbformat';
-import {
-  IReproducibilityError,
-  IReproducibilityMetadata
-} from './types';
+import { IReproducibilityError, IReproducibilityMetadata } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
 /**
@@ -30,9 +27,9 @@ export class ViolationNoticeManager {
     const codeModel = cell.model as ICodeCellModel;
     const outputs = codeModel.outputs;
 
-    const flowbookMeta = cell.model.getMetadata(
-      'flowbook'
-    ) as IReproducibilityMetadata | undefined;
+    const flowbookMeta = cell.model.getMetadata('flowbook') as
+      | IReproducibilityMetadata
+      | undefined;
     const violations = flowbookMeta?.errors;
 
     // Check if we already have a violation notice

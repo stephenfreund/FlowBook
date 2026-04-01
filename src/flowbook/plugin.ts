@@ -18,6 +18,7 @@ import { IReproducibilityMetadata } from './types';
 import { FlowbookToolbarExtension } from './toolbar';
 import { getCodeCellOrder } from '../cellindexutils';
 import { requestAPI } from '../handler';
+import { registerBridgeCommands, setBridgeContext } from './nbibridge';
 
 /**
  * Register the flowbook:exec-restore command at plugin startup.
@@ -51,9 +52,9 @@ function registerExecRestoreCommand(
         if (!activeCell || activeCell.model.type !== 'code') {
           return false;
         }
-        const flowbookMeta = activeCell.model.getMetadata(
-          'flowbook'
-        ) as IReproducibilityMetadata | undefined;
+        const flowbookMeta = activeCell.model.getMetadata('flowbook') as
+          | IReproducibilityMetadata
+          | undefined;
         const errors = flowbookMeta?.errors;
         return (
           errors !== undefined &&
@@ -247,6 +248,14 @@ class FlowbookActivationManager {
     // have called _updateAllCells before the dependencies panel was set)
     this._highlighter.refreshDependencies();
 
+    // Set bridge context so NBI bridge commands can access FlowBook internals
+    setBridgeContext(
+      this._highlighter,
+      this._executionHook,
+      this._kernelDetector,
+      this._tracker
+    );
+
     // Start cell index overlays for current notebook
     const widget = this._tracker.currentWidget;
     if (widget) {
@@ -346,6 +355,9 @@ class FlowbookActivationManager {
       this._executionHook = null;
     }
 
+    // Clear bridge context
+    setBridgeContext(null, null, null, null);
+
     this._isActive = false;
   }
 }
@@ -362,10 +374,16 @@ export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
       'FlowBook Plugin: Extension registered (will activate when flowbook_kernel is used)'
     );
 
+    // Expose app for console testing (e.g., app.commands.execute('flowbook:get-status'))
+    (window as any).app = app;
+
     const kernelDetector = new KernelDetector(tracker);
 
     // Register exec-restore command at startup (context menu item in schema)
     registerExecRestoreCommand(app, tracker, kernelDetector);
+
+    // Register NBI bridge commands (callable via run_ui_command from NBI extension)
+    registerBridgeCommands(app, tracker, kernelDetector);
 
     // Create and register toolbar extension
     const toolbarExtension = new FlowbookToolbarExtension(kernelDetector);

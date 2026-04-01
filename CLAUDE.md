@@ -307,17 +307,17 @@ Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Cla
 
 **Key MCP Tools:**
 
-| Tool | Purpose |
-| ---- | ------- |
-| `load_notebook` | Load notebook, start/join kernel, set up Contents API sync |
-| `run_cell` | Execute cell, return outputs + flowbook metadata |
-| `edit_cell` | Edit source, sync to Y.js, notify kernel |
-| `list_cells` / `get_cell` | Read cell state (polls IOPub for external updates) |
-| `get_status` | Reproducibility status (violations, staleness) |
-| `get_next_actionable_cell` | First cell needing attention |
-| `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring |
-| `checkpoint` / `restore` | Save/restore notebook state |
-| `save_notebook` | Write to disk |
+| Tool                                                  | Purpose                                                    |
+| ----------------------------------------------------- | ---------------------------------------------------------- |
+| `load_notebook`                                       | Load notebook, start/join kernel, set up Contents API sync |
+| `run_cell`                                            | Execute cell, return outputs + flowbook metadata           |
+| `edit_cell`                                           | Edit source, sync to Y.js, notify kernel                   |
+| `list_cells` / `get_cell`                             | Read cell state (polls IOPub for external updates)         |
+| `get_status`                                          | Reproducibility status (violations, staleness)             |
+| `get_next_actionable_cell`                            | First cell needing attention                               |
+| `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring                                    |
+| `checkpoint` / `restore`                              | Save/restore notebook state                                |
+| `save_notebook`                                       | Write to disk                                              |
 
 ### MCP ↔ JupyterLab Collaboration
 
@@ -334,6 +334,7 @@ MCP ──── ZMQ ────────────────► Shared 
 **Kernel Discovery** (`flowbook/kernel_discovery.py`):
 
 Discovery files in `~/.jupyter/runtime/flowbook-{sha256[:12]}.json` enable kernel sharing:
+
 - Whoever starts a kernel writes the discovery file (contains connection file path, PID, etc.)
 - The second participant reads it and connects as a second ZMQ client
 - PID liveness validation auto-cleans stale files
@@ -342,21 +343,25 @@ Discovery files in `~/.jupyter/runtime/flowbook-{sha256[:12]}.json` enable kerne
 **Contents API Sync** (in `session.py`):
 
 MCP syncs notebook state with JupyterLab via the Jupyter Contents API. With `jupyter-collaboration` installed, the API returns/accepts the live Y.js document state:
+
 1. **JupyterLab → MCP** (reading edits): `GET /api/contents/{path}` returns live cell sources; MCP merges into in-memory notebook preserving local outputs/metadata
 2. **MCP → JupyterLab** (pushing edits): `PUT /api/contents/{path}` updates the Y.js document; called after `edit_cell`, refactoring tools, and `save_notebook`
 3. **MCP → JupyterLab** (outputs): Shared kernel IOPub broadcasts execution results to both clients; FlowBook metadata propagates via comm channel
 4. Structural changes (cell add/delete/reorder in JupyterLab) are detected and synced
 
 **Cell ID Normalization in Shared Mode:**
+
 - MCP only normalizes cell IDs when starting fresh (no existing kernel/session)
 - When joining an existing session, MCP uses IDs as-is to avoid clobbering JupyterLab's IDs
 
 **Protocol Reconciliation:**
+
 - Both clients send `notebook_structure` and `cell_edited` to the kernel independently
 - This is safe because kernel handlers are idempotent
 - MCP polls IOPub on read operations (`get_cell`, `get_status`) to catch JupyterLab-initiated executions
 
 **Graceful Degradation:**
+
 - If no Jupyter Server is running, MCP works standalone (own kernel, file-based notebook)
 - Contents API sync is best-effort — connection failures don't block MCP operations
 
