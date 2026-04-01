@@ -112,7 +112,7 @@ Two sets define which DataFrame attributes are sensitive to which kind of struct
 | Write `w` ↓ \ Read `r` → | **Var(x')** | **Col(d', c')**        | **Attr(d', a')**                    | **File(p')** |
 | ------------------------ | ----------- | ---------------------- | ----------------------------------- | ------------ |
 | **Var(x)**               | `x = x'`    | —                      | —                                   | —            |
-| **Col(d, c)**            | —           | `d ≡ d'` AND `c = c'`  | `d ≡ d'` AND `a' ∈ COL_VALUE_ATTRS` | —            |
+| **Col(d, c)**            | —           | `d ≡ d'` AND `c = c'`  | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
 | **ColAdd(d, c)**         | —           | —                      | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
 | **ColDel(d, c)**         | —           | `d ≡ d'` AND `c = c'`  | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
 | **Rows(d)**              | —           | `d ≡ d'` (all columns) | `d ≡ d'` AND `a' ∈ ROW_ATTRS`       | —            |
@@ -129,7 +129,7 @@ Two sets define which DataFrame attributes are sensitive to which kind of struct
 Key observations:
 
 - **`Var(x)` only conflicts with `Var(x)` reads.** Rebinding detection for column/attribute readers works because `Var(x)` is always present in read sets alongside `Col`/`Attr` reads (see `tracking_to_readlocset`). When `df = new_value`, the read set `{Var("df"), Col(df, "price"), ...}` ensures `Var("df") ▷ Var("df") = true` catches the rebinding. No cross-domain bridge rule is needed.
-- **`Col(d, c)` is maximally precise.** Modifying column values invalidates reads of that _exact_ column, plus value-dependent attributes (`values`, `T`, `describe`) that expose the raw data. It does not touch structural attributes or other columns. This is what enables _column independence_: cell A reads `df["qty"]`, cell B writes `df["price"]` → no conflict (unless A also reads `df.values`).
+- **`Col(d, c)` is conservative for structural safety.** Writing a column invalidates reads of that _exact_ column, plus _all_ column-related structural attributes (`shape`, `columns`, `dtypes`, `values`, `T`, etc.). This is because `df['col'] = val` may add a new column (changing structure) or modify an existing one — the write type doesn't distinguish these cases, ensuring consistent conflict detection regardless of execution history. _Column independence_ is preserved: cell A reads `df["qty"]`, cell B writes `df["price"]` → no conflict.
 - **`ColAdd(d, c)` does not invalidate existing column reads.** The old columns' data is untouched. It only invalidates structural attributes like `columns` and `shape` that would now reflect the extra column.
 - **`ColDel(d, c)` is stricter than `ColAdd`.** It invalidates reads of the deleted column (it no longer exists) _plus_ the same structural attributes.
 - **`Rows(d)` is column-wide.** Every column's data changed (more or fewer values), so all column reads conflict. Row-structural attributes (`index`, `shape`, `len`, `empty`) and shared attributes (`axes`, `values`, `T`) are also affected — but `df.columns` and `df.dtypes` are unchanged by adding a row.
@@ -177,7 +177,7 @@ Composing `output()` with ▷ yields the effective write-write table. An entry s
 | `wᵢ` ↓ \ `wⱼ` →  | **Var(x')** | **Col(d', c')**       | **ColAdd(d', c')**           | **ColDel(d', c')**           | **Rows(d')**                 | **Attr(d', a')**                    | **File(p')** |
 | ---------------- | ----------- | --------------------- | ---------------------------- | ---------------------------- | ---------------------------- | ----------------------------------- | ------------ |
 | **Var(x)**       | `x = x'`    | —                     | —                            | —                            | —                            | —                                   | —            |
-| **Col(d, c)**    | —           | `d ≡ d'` AND `c = c'` | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ COL_VALUE_ATTRS` | —            |
+| **Col(d, c)**    | —           | `d ≡ d'` AND `c = c'` | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
 | **ColAdd(d, c)** | —           | —                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
 | **ColDel(d, c)** | —           | `d ≡ d'` AND `c = c'` | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
 | **Rows(d)**      | —           | `d ≡ d'`              | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ ROW_ATTRS`       | —            |
@@ -262,15 +262,15 @@ See `FORMAL_DEVELOPMENT.md` §9.1 for the full design analysis.
 - Memo transfer: `_apply_restore_memo()` in `kernel/flowbook_kernel.py`
 - Alias detection (Phase 1 safety net): `_expand_with_deep_aliases()` in `kernel/reproducibility_enforcer.py`
 
-## Column Provenance: Col vs ColAdd on Re-execution
+## Column Provenance: Structural Write Recovery on Re-execution
 
-The distinction between `Col(d, c)` and `ColAdd(d, c)` is critical for correct conflict detection. Adding a column changes structural attributes (`shape`, `columns`, etc.) while modifying an existing column's values does not. The ▷ matrix encodes this: `ColAdd ▷ Attr(d, a)` for `a ∈ COL_ATTRS`, but `Col ▷ Attr(d, a)` only for `a ∈ COL_VALUE_ATTRS`.
+`Col(d, c)` now conflicts with all `COL_ATTRS` (not just `COL_VALUE_ATTRS`), making `Col` and `ColAdd` equivalent for conflict detection. This eliminates the re-execution inconsistency where `df['col'] = val` produced different conflict behavior on first vs. subsequent runs. Both `ColumnAdded` and `ColumnModified` diff results now map to `Col` in `changes_to_write_locs()`.
 
-### The re-execution problem
+`ColAdd` remains in the type system but is no longer generated for `__setitem__` column writes.
 
-Write locations are determined by checkpoint diffs. On first execution of `df['x'] = 5`, column `x` is absent in the pre-checkpoint → `ColAdd(d, x)`. On re-execution, `x` exists in both checkpoints (from the prior run) → `Col(d, x)`. The diff cannot distinguish "modified existing column" from "re-added a column this cell originally created."
+### Remaining re-execution issues
 
-This causes the `NoReadBeforeWrite` predicate to miss forward contamination when an earlier cell reads a structural attribute like `df.shape`.
+Other structural changes (row mutations, index changes, dtype changes, column deletions) can still be missed by checkpoint diffs on re-execution because the diff is idempotent. These are recovered by provenance-based injection.
 
 ### Structural provenance tracking
 
@@ -305,12 +305,13 @@ The enforcer applies `_inject_structural_writes(W, cell_id, namespace)` to augme
 
 ```
 InjectStructuralWrites(W, cell_id, Σ):
-  1. Col(d, c) → ColAdd(d, c)       if col_origins(Σ(d), c) = cell_id
-  2. Inject ColDel(d, c)             if col_deletions(Σ(d), c) = cell_id
-  3. Inject Rows(d)                  if cell_id ∈ row_mutators(Σ(d))
-  4. Inject Attr(d, index/axes)      if cell_id ∈ index_mutators(Σ(d))
-  5. Inject Attr(d, dtypes/values/T) if ∃c: dtype_origins(Σ(d), c) = cell_id
+  1. Inject ColDel(d, c)             if col_deletions(Σ(d), c) = cell_id
+  2. Inject Rows(d)                  if cell_id ∈ row_mutators(Σ(d))
+  3. Inject Attr(d, index/axes)      if cell_id ∈ index_mutators(Σ(d))
+  4. Inject Attr(d, dtypes/values/T) if ∃c: dtype_origins(Σ(d), c) = cell_id
 ```
+
+Note: The `Col → ColAdd` upgrade (previously item 1) was removed because `Col` now conflicts with all `COL_ATTRS`, making the upgrade unnecessary.
 
 The injection scans ALL DataFrames in namespace (not just those already in W), because on re-execution W may be empty while provenance persists. It is applied _before_ emptiness checks in each predicate:
 

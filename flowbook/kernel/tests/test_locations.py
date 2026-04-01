@@ -242,7 +242,7 @@ class TestConflictMatrix_Var:
 
 
 class TestConflictMatrix_Col:
-    """Col(d, c) writes: column values modified."""
+    """Col(d, c) writes: column values modified. Conflicts with all COL_ATTRS."""
 
     def test_col_vs_var_same_df(self):
         """Column write does NOT conflict with Var read (binding unchanged)."""
@@ -262,9 +262,20 @@ class TestConflictMatrix_Col:
         assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.col("other", "price"))
 
     def test_col_vs_attr(self):
-        """Key: modifying column values does NOT change structure."""
-        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", "shape"))
-        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", "columns"))
+        """Col conflicts with ALL COL_ATTRS on the same DataFrame."""
+        for a in COL_ATTRS:
+            assert write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", a)), (
+                f"Col(df, price) should conflict with Attr(df, {a})"
+            )
+
+    def test_col_vs_attr_non_col_attr(self):
+        """Col does NOT conflict with attrs outside COL_ATTRS."""
+        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", "index"))
+        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", "len"))
+
+    def test_col_vs_attr_different_df(self):
+        """Col does NOT conflict with attrs on a different DataFrame."""
+        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("other", "shape"))
 
     def test_col_vs_file(self):
         assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.file("data.csv"))
@@ -505,15 +516,15 @@ class TestWorkedExamples:
         R_C = frozenset({ReadLoc.var("df")})
         assert not has_conflict(W_B, R_C)
 
-    def test_column_modify_doesnt_affect_structural_attrs(self):
+    def test_column_modify_affects_structural_attrs(self):
         """
-        Modifying column values doesn't conflict with structural attribute reads.
-        Col(df, price) ▷ Attr(df, shape) = false.
-        Col(df, price) ▷ Attr(df, columns) = false.
+        Modifying column values DOES conflict with structural attribute reads.
+        Col(df, price) ▷ Attr(df, shape) = true.
+        Col(df, price) ▷ Attr(df, columns) = true.
         """
         W = frozenset({WriteLoc.col("df", "price")})
         R = frozenset({ReadLoc.attr("df", "shape"), ReadLoc.attr("df", "columns")})
-        assert not has_conflict(W, R)
+        assert has_conflict(W, R)
 
     def test_column_modify_affects_value_attrs(self):
         """

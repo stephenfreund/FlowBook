@@ -424,15 +424,15 @@ def write_conflicts_read(w: WriteLoc, r: ReadLoc) -> bool:
     if w.type == WriteLocType.VAR:
         return r.type == ReadLocType.VAR and w.name == r.name
 
-    # --- Col(d, c) writes: column values modified ---
+    # --- Col(d, c) writes: column written (may add or modify) ---
     # Invalidates: same-column reads on same DataFrame,
-    #              value-dependent attrs (values, T, describe) on same DataFrame
-    # Does NOT invalidate: Var reads (binding unchanged), structural attrs (shape, columns)
+    #              all column-related attrs on same DataFrame (shape, columns, dtypes, etc.)
+    # Does NOT invalidate: Var reads (binding unchanged)
     elif w.type == WriteLocType.COL:
         if r.type == ReadLocType.COLUMN:
             return _same_dataframe(w.qualifier, r.qualifier) and w.name == r.name
         if r.type == ReadLocType.ATTR:
-            return _same_dataframe(w.qualifier, r.qualifier) and r.name in COL_VALUE_ATTRS
+            return _same_dataframe(w.qualifier, r.qualifier) and r.name in COL_ATTRS
         return False
 
     # --- ColAdd(d, c) writes: new column added ---

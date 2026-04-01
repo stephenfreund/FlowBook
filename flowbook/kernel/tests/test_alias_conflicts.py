@@ -208,12 +208,23 @@ class TestColColConflicts:
         assert not write_conflicts_read(w, ReadLoc.var("df"))
         assert not write_conflicts_read(w, ReadLoc.var("X"))
 
-    def test_col_does_not_conflict_with_structural_attr(self):
-        """Col(d,c) ▷ Attr(d',a') → False for structural attrs (shape, columns)."""
+    def test_col_conflicts_with_structural_attr(self):
+        """Col(d,c) ▷ Attr(d',a') → True for COL_ATTRS (shape, columns, dtypes).
+
+        Col now conflicts with ALL COL_ATTRS, not just COL_VALUE_ATTRS.
+        Modifying a column can change shape, columns, and dtypes.
+        """
         w = WriteLoc.col(LR_DF, "price")
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "shape"))
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_X, "columns"))
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "dtypes"))
+        assert write_conflicts_read(w, ReadLoc.attr(LR_DF, "shape"))
+        assert write_conflicts_read(w, ReadLoc.attr(LR_X, "columns"))
+        assert write_conflicts_read(w, ReadLoc.attr(LR_DF, "dtypes"))
+
+    def test_col_does_not_conflict_with_row_attr(self):
+        """Col(d,c) ▷ Attr(d',a') → False for ROW_ATTRS (index).
+
+        index is a row attribute, not a column attribute.
+        """
+        w = WriteLoc.col(LR_DF, "price")
         assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "index"))
 
     def test_col_conflicts_with_value_attrs(self):

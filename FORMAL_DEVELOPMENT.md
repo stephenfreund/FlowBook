@@ -510,7 +510,7 @@ Key rules:
 | Var(x)       | Col(d, c)  | **No** (rebinding caught via Var(x) read always in read set)           |
 | Col(d, c)    | Var(x)     | **No** (column write doesn't change binding)                           |
 | Col(d, c)    | Col(d, c') | Only if c = c' (column-level precision)                                |
-| Col(d, c)    | Attr(d, a) | Yes if a ∈ COL_VALUE_ATTRS (values, T, describe depend on column data) |
+| Col(d, c)    | Attr(d, a) | Yes if a ∈ COL_ATTRS (column write may add or modify, affecting structure) |
 | ColAdd(d, c) | Var(x)     | **No** (column add doesn't change binding)                             |
 | ColAdd(d, c) | Col(d, c') | **No** (adding column ≠ changing existing columns)                     |
 | ColAdd(d, c) | Attr(d, a) | Yes if a ∈ COL_ATTRS (adding changes structure)                        |
@@ -880,25 +880,16 @@ x's value (from some prior state) hasn't changed.
 
 Write locations are determined by diffing memory checkpoints. On first execution of
 `df['x'] = 5`, column `x` is absent in the pre-checkpoint and present in the
-post-checkpoint, producing `ColAdd(d, x)`. On re-execution, `x` exists in both
-checkpoints (from the prior run), so the diff produces `Col(d, x)` instead.
+post-checkpoint, producing `ColumnAdded`. On re-execution, `x` exists in both
+checkpoints (from the prior run), so the diff produces `ColumnModified` instead.
 
-This matters because `ColAdd ▷ Attr(d, a)` for `a ∈ COL_ATTRS` (shape, columns, etc.)
-but `Col ▷ Attr(d, a)` only for `a ∈ COL_VALUE_ATTRS` (values, T, describe). If an
-earlier cell reads `df.shape`, the `NoReadBeforeWrite` predicate misses the forward
-contamination:
+Both `ColumnAdded` and `ColumnModified` now map to `Col(d, x)` in `changes_to_write_locs()`.
+Since `Col ▷ Attr(d, a)` for `a ∈ COL_ATTRS`, the conflict with structural reads is
+detected regardless of whether the column was added or modified. This eliminates the
+re-execution inconsistency that previously required provenance-based `Col → ColAdd` upgrades.
 
-```
-Cell A:  df = pd.DataFrame({"y": [1,2,3]})   # W_A = {Var(df)}
-Cell C:  df['x'] = 5                          # First run: W_C = {ColAdd(df, x)}
-Cell B:  df.shape                             # R_B = {Attr(df, shape)}
-
-Execute A → C → B.  All clean.
-Re-execute C:                                 # W_C = {Col(df, x)}  ← diff sees modify, not add
-Check NoReadBeforeWrite(R_B, W_{B+1..n}, B):
-  Col(df, x) ▷ Attr(df, shape)?  → No (shape ∉ COL_VALUE_ATTRS)
-  → Passes incorrectly.  B would see different shape in a clean rerun.
-```
+The remaining re-execution issue is that other structural changes (row mutations, index
+changes, dtype changes, column deletions) can still produce empty diffs on re-execution.
 
 ### 12.2 Solution: df.attrs Structural Provenance
 
@@ -961,8 +952,8 @@ write sets with provenance-recorded structural effects:
 
 ```
 InjectStructuralWrites(W, cell_id, Σ) ≝ W' where:
-  1. For each Col(d, c) ∈ W:  if col_origins(Σ(d), c) = cell_id → replace with ColAdd(d, c)
-  2. For each d ∈ DataFrames(Σ):
+  Note: Col → ColAdd upgrade is no longer needed (Col now conflicts with all COL_ATTRS).
+  1. For each d ∈ DataFrames(Σ):
      a. For each (c, id) ∈ col_deletions(Σ(d)):  if id = cell_id → add ColDel(d, c)
      b. If cell_id ∈ row_mutators(Σ(d)):  add Rows(d)
      c. If cell_id ∈ index_mutators(Σ(d)):  add Attr(d, index), Attr(d, axes)

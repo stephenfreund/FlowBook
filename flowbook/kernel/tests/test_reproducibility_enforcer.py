@@ -6367,12 +6367,12 @@ class TestStructuralProvenanceIntegration:
         )
         assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE
 
-    # ── Negative test: existing column modification ─────────────────
+    # ── Forward contamination: existing column modification ─────────
 
-    def test_column_value_modify_does_not_contaminate_shape_read(self):
+    def test_column_value_modify_contaminates_shape_read(self):
         """A creates df, C modifies existing column value, B reads df.shape.
 
-        Col ▷ Attr(shape) = false — modifying a column value doesn't change shape.
+        Col ▷ Attr(shape) = true — Col conflicts with all COL_ATTRS including shape.
         """
         import pandas as pd
         from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
@@ -6393,7 +6393,8 @@ class TestStructuralProvenanceIntegration:
         result_b = self._run_cell("b", {"df": df_after_c}, {"df": df_after_c},
                                    make_tracking(reads={"df"}, writes=set(), structural_reads={"df": {"shape"}}))
 
-        assert not result_b.has_errors(), (
-            f"B should NOT error: Col(df, a) ▷ Attr(df, shape) = false. "
-            f"errors={result_b.errors}"
+        assert result_b.has_errors(), (
+            f"B should have NoReadBeforeWrite: Col(df, a) ▷ Attr(df, shape). "
+            f"errors={result_b.errors}, C_writes={self.sdc._notebook_state.writes.get('c', frozenset())}"
         )
+        assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE
