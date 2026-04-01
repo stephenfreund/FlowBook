@@ -1,5 +1,5 @@
 ---
-description: 'Fix reproducibility violations in the currently open notebook using FlowBook NBI tools. Works on the active JupyterLab notebook — no file path needed.'
+description: 'Fix reproducibility violations in the currently open notebook using FlowBook NBI tools. Works on the active JupyterLab notebook — no file path needed.  Do not use outside of JupyterLab with NotebookIntelligence extension installed.'
 ---
 
 # Fix Notebook for Reproducibility (NBI)

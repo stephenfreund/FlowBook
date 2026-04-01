@@ -93,6 +93,8 @@ exclude = [".github", "binder"]
 "jupyter-config/server-config" = "etc/jupyter/jupyter_server_config.d"
 "flowbook/nbi/extension_data" = "share/jupyter/nbi_extensions/flowbook"
 
+[tool.hatch.build.hooks.custom]
+
 [tool.hatch.build.hooks.version]
 path = "flowbook/_version.py"
 
