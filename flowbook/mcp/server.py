@@ -1,7 +1,7 @@
 """
 FlowBook MCP Server — exposes notebook reproducibility analysis as MCP tools.
 
-26 tools: 17 core (load/close, list/read/edit cells, run, run_actionable,
+27 tools: 18 core (load/close, list/read/read_all/edit cells, run, run_actionable,
 run_actionable_cells, get_flowbook_metadata, status, save,
 checkpoint/restore, get_next_actionable) + 6 algorithmic refactoring
 (alpha_rename, remove_inplace, insert_deepcopy, mark_diagnostic,
@@ -219,6 +219,44 @@ def list_cells(ctx: Context) -> str:
             lines.append(f"[ ] {cid} ({ctype}): {first_line}")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+@_logged_tool
+def get_all_cell_sources(ctx: Context) -> str:
+    """Return the source code of all code cells in one response.
+
+    Each cell is shown with its @-label, 4-char ID, and status, separated
+    by clear boundary markers. This is much cheaper than calling get_cell
+    for each cell individually when you need to see the full notebook.
+    """
+    session = _get_session(ctx)
+    session._require_loaded()
+    session.refresh_from_jupyter()
+    cell_order = session.get_cell_order()
+    if not cell_order:
+        return "No code cells in notebook."
+
+    parts = []
+    for idx, cid in enumerate(cell_order):
+        label = index_to_alpha(idx)
+        _, cell = session._find_cell(cid)
+        source = cell.get("source", "")
+        if isinstance(source, list):
+            source = "".join(source)
+
+        if cid in session._stale_cells:
+            status = "stale"
+        elif session.cell_status.get(cid) == "error":
+            status = "error"
+        elif cid in session.executed_cells:
+            status = "ok"
+        else:
+            status = "—"
+
+        parts.append(f"── {label} [{cid}] ({status}) ──\n{source}")
+
+    return "\n\n".join(parts)
 
 
 @mcp.tool()

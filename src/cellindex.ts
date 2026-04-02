@@ -14,6 +14,7 @@ export class CellIndexManager {
   private _observers: Map<string, MutationObserver> = new Map();
   private _notebooks: Map<string, NotebookPanel> = new Map();
   private _listeners: Map<string, any[]> = new Map();
+  private _domListeners: Map<string, { node: HTMLElement; handlers: { event: string; handler: EventListener }[] }> = new Map();
 
   constructor() {
     // Notebooks are passed directly to methods
@@ -74,6 +75,33 @@ export class CellIndexManager {
     });
 
     this._listeners.set(notebookPath, listeners);
+
+    // Listen for clipboard and undo/redo operations that can detach overlays
+    const contentNode = notebook.content.node;
+    const deferredRefresh = () => {
+      // Wait for the DOM to settle after the operation
+      requestAnimationFrame(() => {
+        this.updateAllOverlays(notebookPath, notebook);
+      });
+    };
+    const domHandlers: { event: string; handler: EventListener }[] = [];
+
+    for (const event of ['cut', 'paste'] as const) {
+      contentNode.addEventListener(event, deferredRefresh, true);
+      domHandlers.push({ event, handler: deferredRefresh });
+    }
+
+    // Catch undo/redo (Cmd+Z / Ctrl+Z / Ctrl+Shift+Z / Cmd+Shift+Z)
+    const keyHandler = (e: Event) => {
+      const ke = e as KeyboardEvent;
+      if ((ke.metaKey || ke.ctrlKey) && ke.key === 'z') {
+        deferredRefresh();
+      }
+    };
+    contentNode.addEventListener('keydown', keyHandler, true);
+    domHandlers.push({ event: 'keydown', handler: keyHandler });
+
+    this._domListeners.set(notebookPath, { node: contentNode, handlers: domHandlers });
   }
 
   /**
@@ -101,7 +129,7 @@ export class CellIndexManager {
     // Remove notebook reference
     this._notebooks.delete(notebookPath);
 
-    // Disconnect listeners
+    // Disconnect signal listeners
     const listeners = this._listeners.get(notebookPath);
     if (listeners) {
       listeners.forEach(({ signal, callback }) => {
@@ -112,6 +140,15 @@ export class CellIndexManager {
         }
       });
       this._listeners.delete(notebookPath);
+    }
+
+    // Remove DOM event listeners
+    const domEntry = this._domListeners.get(notebookPath);
+    if (domEntry) {
+      for (const { event, handler } of domEntry.handlers) {
+        domEntry.node.removeEventListener(event, handler, true);
+      }
+      this._domListeners.delete(notebookPath);
     }
   }
 
