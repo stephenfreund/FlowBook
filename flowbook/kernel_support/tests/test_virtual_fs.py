@@ -2015,3 +2015,183 @@ class TestOverlayScoping:
 
         orig_exists = vfs._originals["os.path.exists"]
         assert not orig_exists(outside_tree)
+
+
+class TestLowLevelFDFullVFS:
+    """Tests for os.open / os.read / os.write / os.close in full VFS mode."""
+
+    def test_write_via_os_open_goes_to_overlay(self, vfs, tmpdir):
+        vfs.enable()
+        real_file = os.path.join(tmpdir, "fd_test.txt")
+        fd = os.open(real_file, os.O_WRONLY | os.O_CREAT, 0o644)
+        os.write(fd, b"hello fd")
+        os.close(fd)
+
+        # Real file should NOT exist
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(real_file)
+
+        # Patched exists should find it (via overlay)
+        assert os.path.exists(real_file)
+
+    def test_read_via_os_open_resolves_overlay(self, vfs, tmpdir):
+        vfs.enable()
+        real_file = os.path.join(tmpdir, "fd_read.txt")
+
+        # Write to overlay via os.open
+        fd = os.open(real_file, os.O_WRONLY | os.O_CREAT, 0o644)
+        os.write(fd, b"overlay content")
+        os.close(fd)
+
+        # Read back via os.open — should resolve from overlay
+        fd = os.open(real_file, os.O_RDONLY)
+        data = os.read(fd, 1024)
+        os.close(fd)
+        assert data == b"overlay content"
+
+    def test_read_via_os_open_falls_through_to_real_fs(self, vfs, tmpdir):
+        real_file = os.path.join(tmpdir, "real_fd.txt")
+        with open(real_file, "wb") as f:
+            f.write(b"real data")
+
+        vfs.enable()
+        fd = os.open(real_file, os.O_RDONLY)
+        data = os.read(fd, 1024)
+        os.close(fd)
+        assert data == b"real data"
+
+    def test_rdwr_tracked_as_both(self, vfs, tmpdir):
+        vfs.enable()
+        real_file = os.path.join(tmpdir, "rdwr.txt")
+        # Create via overlay first
+        fd = os.open(real_file, os.O_WRONLY | os.O_CREAT, 0o644)
+        os.write(fd, b"init")
+        os.close(fd)
+
+        vfs.reset_cell_tracking()
+        fd = os.open(real_file, os.O_RDWR)
+        os.close(fd)
+        abs_path = os.path.abspath(real_file)
+        assert abs_path in vfs._read_paths
+        assert abs_path in vfs._write_paths
+
+    def test_fdopen_wrapping_works(self, vfs, tmpdir):
+        vfs.enable()
+        real_file = os.path.join(tmpdir, "fdopen_test.txt")
+        fd = os.open(real_file, os.O_WRONLY | os.O_CREAT, 0o644)
+        with os.fdopen(fd, "w") as f:
+            f.write("via fdopen")
+
+        # Read back
+        with open(real_file, "r") as f:
+            assert f.read() == "via fdopen"
+
+    def test_fd_to_path_cleaned_on_close(self, vfs, tmpdir):
+        vfs.enable()
+        real_file = os.path.join(tmpdir, "cleanup.txt")
+        fd = os.open(real_file, os.O_WRONLY | os.O_CREAT, 0o644)
+        assert fd in vfs._fd_to_path
+        os.close(fd)
+        assert fd not in vfs._fd_to_path
+
+    def test_commit_includes_os_open_writes(self, vfs, tmpdir):
+        vfs.enable()
+        real_file = os.path.join(tmpdir, "commit_fd.txt")
+        fd = os.open(real_file, os.O_WRONLY | os.O_CREAT, 0o644)
+        os.write(fd, b"committed")
+        os.close(fd)
+
+        orig_exists = vfs._originals["os.path.exists"]
+        assert not orig_exists(real_file)
+
+        vfs.commit()
+        assert orig_exists(real_file)
+        with open(real_file, "rb") as f:
+            assert f.read() == b"committed"
+
+    def test_bytes_path_passes_through(self, vfs, tmpdir):
+        vfs.enable()
+        real_file = os.path.join(tmpdir, "bytes_fd.txt")
+        fd = os.open(real_file.encode(), os.O_WRONLY | os.O_CREAT, 0o644)
+        os.write(fd, b"bytes path")
+        os.close(fd)
+
+        # Bytes paths bypass overlay — real file should exist
+        orig_exists = vfs._originals["os.path.exists"]
+        assert orig_exists(real_file)
+
+
+class TestLowLevelFDTrackingOnly:
+    """Tests for os.open / os.read / os.write / os.close in tracking-only mode."""
+
+    def test_write_flags_tracked(self, vfs, tmpdir):
+        vfs.enable_tracking_only()
+        real_file = os.path.join(tmpdir, "track_w.txt")
+        fd = os.open(real_file, os.O_WRONLY | os.O_CREAT, 0o644)
+        os.close(fd)
+        abs_path = os.path.abspath(real_file)
+        assert abs_path in vfs._write_paths
+        # Clean up real file
+        os.remove(real_file)
+
+    def test_read_flags_tracked(self, vfs, tmpdir):
+        real_file = os.path.join(tmpdir, "track_r.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        fd = os.open(real_file, os.O_RDONLY)
+        os.close(fd)
+        abs_path = os.path.abspath(real_file)
+        assert abs_path in vfs._read_paths
+
+    def test_rdwr_tracked_in_both(self, vfs, tmpdir):
+        real_file = os.path.join(tmpdir, "track_rw.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        fd = os.open(real_file, os.O_RDWR)
+        os.close(fd)
+        abs_path = os.path.abspath(real_file)
+        assert abs_path in vfs._read_paths
+        assert abs_path in vfs._write_paths
+
+    def test_os_write_tracked_in_cell_writes(self, vfs, tmpdir):
+        real_file = os.path.join(tmpdir, "cell_w.txt")
+        vfs.enable_tracking_only()
+        fd = os.open(real_file, os.O_WRONLY | os.O_CREAT, 0o644)
+        vfs.reset_cell_tracking()
+        os.write(fd, b"data")
+        os.close(fd)
+        abs_path = os.path.abspath(real_file)
+        assert abs_path in vfs._cell_writes
+        # Clean up
+        os.remove(real_file)
+
+    def test_os_read_tracked_in_cell_reads(self, vfs, tmpdir):
+        real_file = os.path.join(tmpdir, "cell_r.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        fd = os.open(real_file, os.O_RDONLY)
+        vfs.reset_cell_tracking()
+        os.read(fd, 1024)
+        os.close(fd)
+        tracking = vfs.get_cell_file_tracking()
+        abs_path = os.path.abspath(real_file)
+        assert abs_path in tracking.file_reads_before_writes
+
+    def test_fd_to_path_cleared_on_disable(self, vfs, tmpdir):
+        real_file = os.path.join(tmpdir, "disable_fd.txt")
+        with open(real_file, "w") as f:
+            f.write("data")
+
+        vfs.enable_tracking_only()
+        fd = os.open(real_file, os.O_RDONLY)
+        assert fd in vfs._fd_to_path
+        # Don't close fd before disable — test that disable clears the map
+        os.close(fd)
+        vfs.disable()
+        assert len(vfs._fd_to_path) == 0
