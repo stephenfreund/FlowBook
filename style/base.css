@@ -36,6 +36,13 @@
   background-color: var(--jp-layout-color1);
 }
 
+.flowbook-status-header {
+  padding: 6px 10px;
+  background-color: var(--jp-layout-color2);
+  border-bottom: 1px solid var(--jp-border-color1);
+  flex-shrink: 0;
+}
+
 .flowbook-metadata-content {
   padding: 16px;
   font-family: var(--jp-ui-font-family);

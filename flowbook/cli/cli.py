@@ -122,9 +122,9 @@ def cli_main():
     )
 
     parser.add_argument(
-        "--vfs",
+        "--no-vfs",
         action="store_true",
-        help="Enable virtual filesystem (writes go to overlay, preserving real FS)",
+        help="Disable virtual filesystem (writes go directly to real FS)",
     )
 
     parser.add_argument(
@@ -217,17 +217,17 @@ def cli_main():
                 connection_file=connection_file, kernel_name=kernel_to_use
             )
 
-            # Enable virtual filesystem if requested
-            if args.vfs:
-                log("Enabling virtual filesystem...")
-                kernel_client.execute("%virtual_fs on", silent=True)
+            # Disable virtual filesystem if requested (VFS is on by default)
+            if args.no_vfs:
+                log("Disabling virtual filesystem...")
+                kernel_client.execute("%virtual_fs off", silent=True)
                 kernel_client.get_shell_msg(timeout=10)
-                log("Virtual filesystem enabled")
+                log("Virtual filesystem disabled")
 
         # Extract command-specific kwargs (those not in common CLI args)
         common_args = {
             'command', 'paths', 'kernel_name', 'output', 'model', 'fast_model',
-            'cell_ids', 'timings_file', 'metadata_file', 'vfs', 'verbose'
+            'cell_ids', 'timings_file', 'metadata_file', 'no_vfs', 'verbose'
         }
         command_kwargs = {
             k: v for k, v in vars(args).items()

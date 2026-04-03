@@ -160,15 +160,12 @@ def format_outputs_text(outputs: List[Dict[str, Any]]) -> str:
                 parts.append(_to_str(data["text/plain"]))
         elif otype == "display_data":
             data = output.get("data", {})
-            meta = output.get("metadata", {})
-            # Skip flowbook metadata display_data
-            if "flowbook" not in meta:
-                if "text/plain" in data:
-                    parts.append(_to_str(data["text/plain"]))
-                elif "text/html" in data:
-                    parts.append("[HTML output]")
-                elif "image/png" in data:
-                    parts.append("[Image output]")
+            if "text/plain" in data:
+                parts.append(_to_str(data["text/plain"]))
+            elif "text/html" in data:
+                parts.append("[HTML output]")
+            elif "image/png" in data:
+                parts.append("[Image output]")
         elif otype == "error":
             ename = output.get("ename", "Error")
             evalue = output.get("evalue", "")
@@ -350,12 +347,12 @@ class NotebookSession:
         is rejected. Good for /fix-notebook where you want a clean namespace.
         """
         self._require_loaded()
-        flag = "on" if enabled else "off"
         KernelHelper.execute_code(
             self.kernel_client,
-            f"%continue_after_violation {flag}",
+            "",
             timeout=10,
             store_history=False,
+            flowbook_msg={"type": "continue_after_violation", "enabled": enabled},
         )
 
     # ------------------------------------------------------------------
@@ -472,14 +469,16 @@ class NotebookSession:
     # ------------------------------------------------------------------
 
     def _extract_flowbook_meta(
-        self, outputs: List[Dict[str, Any]]
+        self, flowbook_messages: List[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        """Extract flowbook metadata from display_data outputs."""
-        for output in outputs:
-            if output.get("output_type") == "display_data":
-                output_meta = output.get("metadata", {})
-                if "flowbook" in output_meta:
-                    return output_meta["flowbook"]
+        """Extract flowbook metadata from protocol messages.
+
+        Args:
+            flowbook_messages: Protocol messages from KernelHelper.execute_code()
+        """
+        for msg in flowbook_messages:
+            if msg.get("type") == "metadata":
+                return msg
         return None
 
     def run_cell(self, cell_id: str, timeout: float = 300) -> Dict[str, Any]:
@@ -513,7 +512,9 @@ class NotebookSession:
         self.executed_cells.add(cell_id)
 
         # Extract flowbook metadata
-        fb_meta = self._extract_flowbook_meta(result["outputs"])
+        fb_meta = self._extract_flowbook_meta(
+            result.get("flowbook_messages", [])
+        )
         if fb_meta:
             self.cell_flowbook_meta[cell_id] = fb_meta
             # Update stale cell tracking
@@ -685,9 +686,10 @@ class NotebookSession:
             self._stale_cells.add(cell_id)
             KernelHelper.execute_code(
                 self.kernel_client,
-                f"%cell_edited {cell_id}",
+                "",
                 timeout=10,
                 store_history=False,
+                flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
             )
 
         return {
@@ -836,9 +838,10 @@ class NotebookSession:
                         self._stale_cells.add(cid)
                         KernelHelper.execute_code(
                             self.kernel_client,
-                            f"%cell_edited {cid}",
+                            "",
                             timeout=10,
                             store_history=False,
+                            flowbook_msg={"type": "cell_edited", "cell_id": cid},
                         )
                     # Clear old violation metadata for changed cells
                     self.cell_flowbook_meta.pop(cid, None)
@@ -886,9 +889,10 @@ class NotebookSession:
                     self._stale_cells.add(cid)
                     KernelHelper.execute_code(
                         self.kernel_client,
-                        f"%cell_edited {cid}",
+                        "",
                         timeout=10,
                         store_history=False,
+                        flowbook_msg={"type": "cell_edited", "cell_id": cid},
                     )
 
         return {
@@ -918,9 +922,10 @@ class NotebookSession:
                     self._stale_cells.add(cell_id)
                     KernelHelper.execute_code(
                         self.kernel_client,
-                        f"%cell_edited {cell_id}",
+                        "",
                         timeout=10,
                         store_history=False,
+                        flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
                     )
                 return {
                     "cell_id": cell_id,
@@ -944,9 +949,10 @@ class NotebookSession:
                 self._stale_cells.add(cell_id)
                 KernelHelper.execute_code(
                     self.kernel_client,
-                    f"%cell_edited {cell_id}",
+                    "",
                     timeout=10,
                     store_history=False,
+                    flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
                 )
             return {
                 "cell_id": cell_id,
@@ -992,9 +998,10 @@ class NotebookSession:
             self._stale_cells.add(cell_id)
             KernelHelper.execute_code(
                 self.kernel_client,
-                f"%cell_edited {cell_id}",
+                "",
                 timeout=10,
                 store_history=False,
+                flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
             )
 
         # Rename in all downstream cells
@@ -1012,9 +1019,10 @@ class NotebookSession:
                     self._stale_cells.add(cid)
                     KernelHelper.execute_code(
                         self.kernel_client,
-                        f"%cell_edited {cid}",
+                        "",
                         timeout=10,
                         store_history=False,
+                        flowbook_msg={"type": "cell_edited", "cell_id": cid},
                     )
 
         return {
@@ -1040,9 +1048,10 @@ class NotebookSession:
             self._stale_cells.add(cell_id)
             KernelHelper.execute_code(
                 self.kernel_client,
-                f"%cell_edited {cell_id}",
+                "",
                 timeout=10,
                 store_history=False,
+                flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
             )
 
         return {"cell_id": cell_id, "new_source_preview": new_source[:200]}
@@ -1079,9 +1088,10 @@ class NotebookSession:
             self._stale_cells.add(first_id)
             KernelHelper.execute_code(
                 self.kernel_client,
-                f"%cell_edited {first_id}",
+                "",
                 timeout=10,
                 store_history=False,
+                flowbook_msg={"type": "cell_edited", "cell_id": first_id},
             )
 
         # Clean up tracking for removed cells
@@ -1096,9 +1106,10 @@ class NotebookSession:
         order_str = " ".join(new_order)
         KernelHelper.execute_code(
             self.kernel_client,
-            f"%notebook_structure {order_str}",
+            "",
             timeout=10,
             store_history=False,
+            flowbook_msg={"type": "notebook_structure", "cell_order": order_str.split()},
         )
 
         return {
@@ -1135,9 +1146,10 @@ class NotebookSession:
         order_str = " ".join(new_order)
         KernelHelper.execute_code(
             self.kernel_client,
-            f"%notebook_structure {order_str}",
+            "",
             timeout=10,
             store_history=False,
+            flowbook_msg={"type": "notebook_structure", "cell_order": order_str.split()},
         )
 
         return {

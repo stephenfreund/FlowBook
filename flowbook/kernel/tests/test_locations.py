@@ -31,11 +31,14 @@ from flowbook.kernel.locations import (
     readlocset_to_attr_map,
     readlocset_to_file_list,
     writelocset_to_file_list,
+    readlocset_to_list,
+    writelocset_to_list,
     tracking_to_readlocset,
     tracking_to_writelocset,
     COL_ATTRS,
     ROW_ATTRS,
 )
+from flowbook.kernel.loc_ids import LocRef
 from flowbook.kernel_support.models import TrackingData
 
 
@@ -720,3 +723,95 @@ class TestAttrConstants:
         """index is in ROW_ATTRS but not COL_ATTRS."""
         assert "index" in ROW_ATTRS
         assert "index" not in COL_ATTRS
+
+
+# =============================================================================
+# Serialization: readlocset_to_list / writelocset_to_list
+# =============================================================================
+
+
+class TestLocsetToList:
+    """Tests for serialization functions that sort locs into JSON-friendly dicts."""
+
+    def test_readlocset_to_list_basic(self):
+        locs = frozenset({ReadLoc.var("x"), ReadLoc.var("a")})
+        result = readlocset_to_list(locs)
+        assert len(result) == 2
+        assert result[0]["name"] == "a"  # sorted by name
+        assert result[1]["name"] == "x"
+
+    def test_writelocset_to_list_basic(self):
+        locs = frozenset({WriteLoc.var("y"), WriteLoc.var("b")})
+        result = writelocset_to_list(locs)
+        assert len(result) == 2
+        assert result[0]["name"] == "b"
+        assert result[1]["name"] == "y"
+
+    def test_readlocset_mixed_locref_and_string_qualifier(self):
+        """Sorting col locs where one has LocRef (int) and another has string qualifier.
+
+        Regression: LocRef.loc_id is int, so to_dict() produces qualifier=int.
+        A col loc with a plain string qualifier produces qualifier=str.
+        When both locs have type="col", sorted() compares qualifiers directly,
+        raising TypeError: '<' not supported between instances of 'str' and 'int'.
+        """
+        locref = LocRef(loc_id=42, var_name="df")
+        locs = frozenset({
+            ReadLoc.col(locref, "price"),          # LocRef qualifier → int in dict
+            ReadLoc.col("other_df", "qty"),         # string qualifier
+        })
+        result = readlocset_to_list(locs)
+        assert len(result) == 2
+
+    def test_writelocset_mixed_locref_and_string_qualifier(self):
+        """Same regression test for writelocset_to_list."""
+        locref = LocRef(loc_id=7, var_name="df")
+        locs = frozenset({
+            WriteLoc.col(locref, "amount"),         # LocRef qualifier → int in dict
+            WriteLoc.col("other", "total"),          # string qualifier
+        })
+        result = writelocset_to_list(locs)
+        assert len(result) == 2
+
+    def test_readlocset_integer_column_names(self):
+        """DataFrames with integer column names (e.g., df[0], df[1]).
+
+        Regression test: column name becomes loc.name which can be int.
+        """
+        locref = LocRef(loc_id=1, var_name="df")
+        locs = frozenset({
+            ReadLoc.col(locref, 0),
+            ReadLoc.col(locref, 1),
+            ReadLoc.col(locref, "label"),
+        })
+        result = readlocset_to_list(locs)
+        assert len(result) == 3
+        # All names should be sortable (str coercion in sort key)
+
+    def test_writelocset_integer_column_names(self):
+        """Same regression test for writelocset_to_list with int column names."""
+        locref = LocRef(loc_id=1, var_name="df")
+        locs = frozenset({
+            WriteLoc.col(locref, 0),
+            WriteLoc.col(locref, "price"),
+        })
+        result = writelocset_to_list(locs)
+        assert len(result) == 2
+
+    def test_readlocset_mixed_qualifier_types_sorted(self):
+        """Multiple LocRef qualifiers with different loc_ids sort correctly."""
+        ref1 = LocRef(loc_id=1, var_name="df1")
+        ref2 = LocRef(loc_id=2, var_name="df2")
+        locs = frozenset({
+            ReadLoc.col(ref2, "b"),
+            ReadLoc.col(ref1, "a"),
+            ReadLoc.var("x"),
+        })
+        result = readlocset_to_list(locs)
+        assert len(result) == 3
+        # str(1) < str(2) < "" doesn't hold, but type comes first in sort key
+        # col < var alphabetically, so col entries come first
+        col_results = [d for d in result if d["type"] == "col"]
+        var_results = [d for d in result if d["type"] == "var"]
+        assert len(col_results) == 2
+        assert len(var_results) == 1

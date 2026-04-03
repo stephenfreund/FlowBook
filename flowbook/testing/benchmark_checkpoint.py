@@ -19,6 +19,7 @@ from jupyter_client import KernelManager
 
 from flowbook import make_kernels
 from flowbook.checkpoint_kernel import CheckpointKernelClient
+from flowbook.cli.helpers import start_kernel
 from flowbook.testing.notebook_loader import Cell, load_notebook
 from flowbook.util.output import log
 
@@ -32,68 +33,10 @@ def create_checkpoint_kernel() -> tuple[KernelManager, CheckpointKernelClient]:
     """
     make_kernels()
 
-    max_attempts = 3
-    kernel_manager = None
-    kernel_client = None
-
-    for attempt in range(max_attempts):
-        try:
-            # Clean up any previous failed attempt
-            if kernel_client is not None:
-                try:
-                    kernel_client.stop_channels()
-                except Exception:
-                    pass
-            if kernel_manager is not None:
-                try:
-                    kernel_manager.shutdown_kernel(now=True)
-                except Exception:
-                    pass
-
-            # Start fresh kernel
-            kernel_manager = KernelManager(kernel_name="checkpoint_kernel")
-            kernel_manager.start_kernel()
-
-            kernel_client = CheckpointKernelClient()
-            kernel_client.load_connection_info(kernel_manager.get_connection_info())
-            kernel_client.start_channels()
-
-            # Race condition workaround
-            time.sleep(2)
-            while True:
-                try:
-                    kernel_client.wait_for_ready(timeout=30)
-                    break
-                except Exception as e:
-                    log(f"Error waiting for kernel to be ready: {e}")
-                    time.sleep(0.5)
-
-            return kernel_manager, kernel_client
-
-        except Exception as e:
-            log(f"Error on attempt {attempt + 1}/{max_attempts}: {e}")
-            if kernel_manager is not None and kernel_manager.is_alive():
-                kernel_manager.shutdown_kernel(now=True)
-                while kernel_manager.is_alive():
-                    time.sleep(1)
-
-            if attempt < max_attempts - 1:
-                time.sleep(2)
-            else:
-                # Clean up before raising
-                if kernel_client is not None:
-                    try:
-                        kernel_client.stop_channels()
-                    except Exception:
-                        pass
-                if kernel_manager is not None:
-                    try:
-                        kernel_manager.shutdown_kernel(now=True)
-                    except Exception:
-                        pass
-                raise Exception(f"Kernel failed to start after {max_attempts} attempts: {e}")
-
-    raise Exception("Kernel failed to start")
+    return start_kernel(
+        "checkpoint_kernel",
+        client_factory=lambda kid: CheckpointKernelClient(),
+    )
 
 
 def cleanup_kernel(
@@ -155,11 +98,11 @@ def execute_cell_and_extract_timing(
 
         msg_type = msg["header"]["msg_type"]
 
-        # Look for display_data with flowbook_checkpoint metadata
-        if msg_type == "display_data":
-            metadata = msg.get("content", {}).get("metadata", {})
-            if "flowbook_checkpoint" in metadata:
-                timing_data = metadata["flowbook_checkpoint"]
+        # Look for flowbook_update with checkpoint_timing data
+        if msg_type == "flowbook_update":
+            fb_data = msg.get("content", {}).get("flowbook", msg.get("content", {}))
+            if fb_data.get("type") == "checkpoint_timing":
+                timing_data = fb_data
 
         # Check for errors
         if msg_type == "error":

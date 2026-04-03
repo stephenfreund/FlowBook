@@ -293,37 +293,6 @@ class TestErrorResultFormat:
         assert result["execution_count"] == 10
 
 
-class TestDisplayMetadataFormat:
-    """Tests for display metadata format."""
-
-    def test_execution_metadata_format(self):
-        """Execution metadata has expected structure."""
-        from flowbook.kernel_support.models import ExecutionProfile, ExecutionMetadata, TrackingData
-
-        profile = ExecutionProfile(
-            duration=1.5,
-            profile="cpu: 50%",
-            env={"x": "int"},
-            env_after={"x": "int", "y": "str"},
-        )
-        tracking = TrackingData(
-            reads_before_writes=["x"],
-            writes=["y"],
-        )
-        metadata = ExecutionMetadata(
-            profile=profile,
-            dynamic_dependencies=tracking,
-        )
-
-        display = metadata.to_display_metadata()
-
-        assert "profile" in display
-        assert display["profile"]["duration"] == 1.5
-        assert display["profile"]["profile"] == "cpu: 50%"
-        assert "dynamic_dependencies" in display
-        assert display["dynamic_dependencies"]["reads_before_writes"] == {"x"}
-
-
 class TestCheckpointSaveResultFormat:
     """Tests for checkpoint save result display."""
 

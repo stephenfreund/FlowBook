@@ -280,26 +280,13 @@ class ReproducibilityMetadata:
     # Reproducibility errors (formal predicate violations)
     errors: List[Dict[str, Any]] = field(default_factory=list)
 
-    def to_display_metadata(self) -> dict:
-        """Format for display in output metadata."""
-        return {
-            "flowbook": {
-                "cell_id": self.cell_id,
-                "execution_seq": self.execution_seq,
-                "read_locs": self.read_locs,
-                "write_locs": self.write_locs,
-                "changed_locs": self.changed_locs,
-                "stale_cells": self.stale_cells,
-                "cell_order": self.cell_order,
-                "structural_warnings": self.structural_warnings,
-                "execute_duration_ms": self.execute_duration_ms,
-                "code_duration_ms": self.code_duration_ms,
-                "state_duration_ms": self.state_duration_ms,
-                "check_duration_ms": self.check_duration_ms,
-                "staleness_reasons": self.staleness_reasons,
-                "errors": self.errors,
-            }
-        }
+    def to_protocol_message(self) -> dict:
+        """Build a protocol message dict for this metadata.
+
+        Convenience wrapper around protocol.build_metadata_message().
+        """
+        from flowbook.kernel.protocol import build_metadata_message
+        return build_metadata_message(self)
 
 
 @dataclass

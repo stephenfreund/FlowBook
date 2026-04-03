@@ -8,13 +8,13 @@ from contextlib import contextmanager
 import argparse
 import time
 
-from agents import Usage
 from pydantic import BaseModel, Field
 from flowbook.agent.agent import FlowbookStats
+from flowbook.kernel.protocol import format_message_for_cli
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.server.config import FlowbookConfig
 from jupyter_server.serverapp import ServerApp
-
+from flowbook.util.output import print
 
 class ProcessingResult(BaseModel):
     """Result of a notebook processing command."""
@@ -146,6 +146,45 @@ class NotebookCommand(ABC):
             model=serverapp.web_app.settings["flowbook"].model,
             fast_model=serverapp.web_app.settings["flowbook"].fast_model,
         )
+
+    @staticmethod
+    def print_flowbook_messages(
+        result: Dict[str, Any],
+        cell_order: Optional[List[str]] = None,
+    ) -> None:
+        """Print flowbook protocol messages from an execution result.
+
+        Call this after KernelHelper.execute_code() to display status and
+        violation messages on the CLI.
+
+        Args:
+            result: Return value from KernelHelper.execute_code()
+            cell_order: Current notebook cell order (for @A notation)
+        """
+        for fb_msg in result.get("flowbook_messages", []):
+            line = format_message_for_cli(fb_msg, cell_order)
+            if line:
+                print(line)
+
+    @staticmethod
+    def extract_flowbook_metadata(
+        result: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Extract flowbook metadata from an execution result.
+
+        Looks for a message with type="metadata" in the flowbook_messages
+        list returned by KernelHelper.execute_code().
+
+        Args:
+            result: Return value from KernelHelper.execute_code()
+
+        Returns:
+            The metadata dict, or None if not found.
+        """
+        for msg in result.get("flowbook_messages", []):
+            if msg.get("type") == "metadata":
+                return msg
+        return None
 
     def make_subparser(
         self, subparsers: argparse._SubParsersAction

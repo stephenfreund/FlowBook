@@ -2,10 +2,11 @@
 FlowbookKernelClient - Client that sends cell order with executions.
 
 Extends BaseFlowbookClient to inject cell_id and cell_order
-into execution requests.
+into execution requests. Supports the FlowBook protocol for sending
+structured commands via execute request metadata.
 """
 
-from typing import List
+from typing import Dict, List, Optional
 
 from flowbook.kernel_support.base_client import BaseFlowbookClient
 
@@ -18,6 +19,9 @@ class FlowbookKernelClient(BaseFlowbookClient):
         client = FlowbookKernelClient()
         client.set_cell_order(['cell1', 'cell2', 'cell3'])
         client.execute(code, cell_id='cell2')
+
+        # Send a protocol command:
+        client.send_flowbook_command({"type": "cell_edited", "cell_id": "abc"})
     """
 
     def __init__(self, **kwargs):
@@ -32,6 +36,22 @@ class FlowbookKernelClient(BaseFlowbookClient):
         """Add cell_order to metadata for Reproducibility enforcement."""
         if self._cell_order:
             metadata["cell_order"] = self._cell_order
+
+    def send_flowbook_command(self, msg: dict) -> str:
+        """Send a FlowBook protocol command to the kernel.
+
+        Sends an empty code execution with the protocol message in metadata.
+        The kernel's _handle_flowbook_message() dispatches it.
+
+        Args:
+            msg: Protocol message dict, e.g. {"type": "cell_edited", "cell_id": "abc"}
+
+        Returns:
+            Message ID
+        """
+        return self.execute(
+            "", cell_metadata={"flowbook": msg}, store_history=False
+        )
 
     def execute_with_structure(
         self,

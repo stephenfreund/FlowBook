@@ -100,7 +100,8 @@ class ProfileCommand(NotebookCommand):
                                     cell["execution_count"] = result["execution_count"]
                                     cell["outputs"] = result["outputs"]
 
-                                    # print(f"result: {result.status}")
+                                    # Print flowbook protocol messages
+                                    self.print_flowbook_messages(result)
 
                                     if result["status"] == "error":
                                         status = "error"

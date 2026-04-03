@@ -10,7 +10,6 @@ TrackingDict for variables). This feeds into the reproducibility enforcer
 for file-level backward mutation detection and staleness propagation.
 
 Known limitations:
-- os.open() (low-level fd) not intercepted
 - Not thread-safe (consistent with existing kernel)
 """
 
@@ -31,6 +30,27 @@ class FileTrackingData:
 
 # Sentinel value for namespace patching
 _NOT_PRESENT = object()
+
+
+# --- Low-level fd flag helpers ---
+
+# Access mode is stored in the lowest 2 bits of flags
+_O_ACCMODE = os.O_RDONLY | os.O_WRONLY | os.O_RDWR
+
+
+def _is_write_flags(flags: int) -> bool:
+    """True if flags indicate a write-capable open."""
+    access = flags & _O_ACCMODE
+    if access in (os.O_WRONLY, os.O_RDWR):
+        return True
+    # O_CREAT, O_APPEND, O_TRUNC also imply write intent
+    return bool(flags & (os.O_CREAT | os.O_APPEND | os.O_TRUNC))
+
+
+def _is_read_flags(flags: int) -> bool:
+    """True if flags indicate a read-capable open."""
+    access = flags & _O_ACCMODE
+    return access in (os.O_RDONLY, os.O_RDWR)
 
 
 class VirtualFileSystem:
@@ -72,6 +92,9 @@ class VirtualFileSystem:
 
         # The current patched_open function (created during enable)
         self._patched_open = None
+
+        # Low-level fd tracking: maps open fd -> original abs path
+        self._fd_to_path: dict = {}
 
     @property
     def enabled(self) -> bool:
@@ -122,6 +145,7 @@ class VirtualFileSystem:
         self._deleted_paths.clear()
         self._cell_reads_before_writes.clear()
         self._cell_writes.clear()
+        self._fd_to_path.clear()
 
     def commit(self) -> None:
         """Apply overlay to real FS, then clear overlay state."""
@@ -296,6 +320,12 @@ class VirtualFileSystem:
             "shutil.copy2": shutil.copy2,
             "shutil.move": shutil.move,
             "shutil.rmtree": shutil.rmtree,
+            # Low-level fd operations
+            "os.open": os.open,
+            "os.close": os.close,
+            "os.read": os.read,
+            "os.write": os.write,
+            "os.fdopen": os.fdopen,
         }
 
         vfs = self
@@ -533,6 +563,61 @@ class VirtualFileSystem:
             if _orig_exists(overlay):
                 _orig_rmtree(overlay, *args, **kwargs)
 
+        # --- Low-level fd patches ---
+        _orig_os_open = self._originals["os.open"]
+        _orig_os_close = self._originals["os.close"]
+        _orig_os_read = self._originals["os.read"]
+        _orig_os_write = self._originals["os.write"]
+        _orig_os_fdopen = self._originals["os.fdopen"]
+
+        def patched_os_open(path, flags, mode=0o777, *, dir_fd=None):
+            if isinstance(path, bytes):
+                return _orig_os_open(path, flags, mode, dir_fd=dir_fd)
+            str_path = str(path)
+            abs_path = os.path.abspath(str_path)
+            is_write = _is_write_flags(flags)
+            is_read = _is_read_flags(flags)
+            if not vfs._should_overlay(abs_path):
+                if is_write:
+                    vfs._track_write(str_path)
+                if is_read:
+                    vfs._track_read(str_path)
+                fd = _orig_os_open(path, flags, mode, dir_fd=dir_fd)
+                vfs._fd_to_path[fd] = abs_path
+                return fd
+            if is_write:
+                vfs._track_write(str_path)
+                if is_read:
+                    vfs._track_read(str_path)
+                overlay = vfs._to_overlay_path(str_path)
+                _ensure_overlay_dir(overlay)
+                fd = _orig_os_open(overlay, flags, mode, dir_fd=dir_fd)
+            else:
+                vfs._track_read(str_path)
+                resolved = vfs._resolve_read_path(str_path)
+                fd = _orig_os_open(resolved, flags, mode, dir_fd=dir_fd)
+            vfs._fd_to_path[fd] = abs_path
+            return fd
+
+        def patched_os_close(fd):
+            vfs._fd_to_path.pop(fd, None)
+            return _orig_os_close(fd)
+
+        def patched_os_read(fd, n):
+            path = vfs._fd_to_path.get(fd)
+            if path is not None:
+                vfs._track_read(path)
+            return _orig_os_read(fd, n)
+
+        def patched_os_write(fd, data):
+            path = vfs._fd_to_path.get(fd)
+            if path is not None:
+                vfs._track_write(path)
+            return _orig_os_write(fd, data)
+
+        def patched_os_fdopen(fd, *args, **kwargs):
+            return _orig_os_fdopen(fd, *args, **kwargs)
+
         builtins.open = patched_open
         self._patched_open = patched_open
         os.remove = patched_remove
@@ -547,6 +632,11 @@ class VirtualFileSystem:
         shutil.copy2 = patched_shutil_copy2
         shutil.move = patched_shutil_move
         shutil.rmtree = patched_shutil_rmtree
+        os.open = patched_os_open
+        os.close = patched_os_close
+        os.read = patched_os_read
+        os.write = patched_os_write
+        os.fdopen = patched_os_fdopen
 
     # =========================================================================
     # Patches — Tracking-Only Mode
@@ -576,6 +666,12 @@ class VirtualFileSystem:
             "os.path.isdir": os.path.isdir,
             "os.path.getsize": os.path.getsize,
             "os.path.getmtime": os.path.getmtime,
+            # Low-level fd operations
+            "os.open": os.open,
+            "os.close": os.close,
+            "os.read": os.read,
+            "os.write": os.write,
+            "os.fdopen": os.fdopen,
         }
 
         vfs = self
@@ -684,6 +780,45 @@ class VirtualFileSystem:
             vfs._track_read(filename)
             return _orig_getmtime(filename)
 
+        # --- Low-level fd patches ---
+        _orig_os_open = self._originals["os.open"]
+        _orig_os_close = self._originals["os.close"]
+        _orig_os_read = self._originals["os.read"]
+        _orig_os_write = self._originals["os.write"]
+        _orig_os_fdopen = self._originals["os.fdopen"]
+
+        def patched_os_open(path, flags, mode=0o777, *, dir_fd=None):
+            if isinstance(path, bytes):
+                return _orig_os_open(path, flags, mode, dir_fd=dir_fd)
+            str_path = str(path)
+            if _is_write_flags(flags):
+                vfs._track_write(str_path)
+            if _is_read_flags(flags):
+                vfs._track_read(str_path)
+            fd = _orig_os_open(path, flags, mode, dir_fd=dir_fd)
+            abs_path = os.path.abspath(str_path)
+            vfs._fd_to_path[fd] = abs_path
+            return fd
+
+        def patched_os_close(fd):
+            vfs._fd_to_path.pop(fd, None)
+            return _orig_os_close(fd)
+
+        def patched_os_read(fd, n):
+            path = vfs._fd_to_path.get(fd)
+            if path is not None:
+                vfs._track_read(path)
+            return _orig_os_read(fd, n)
+
+        def patched_os_write(fd, data):
+            path = vfs._fd_to_path.get(fd)
+            if path is not None:
+                vfs._track_write(path)
+            return _orig_os_write(fd, data)
+
+        def patched_os_fdopen(fd, *args, **kwargs):
+            return _orig_os_fdopen(fd, *args, **kwargs)
+
         # Install patches
         builtins.open = patched_open
         self._patched_open = patched_open
@@ -704,6 +839,11 @@ class VirtualFileSystem:
         os.path.isdir = patched_isdir
         os.path.getsize = patched_getsize
         os.path.getmtime = patched_getmtime
+        os.open = patched_os_open
+        os.close = patched_os_close
+        os.read = patched_os_read
+        os.write = patched_os_write
+        os.fdopen = patched_os_fdopen
 
     def patch_namespace(self, namespace: dict) -> None:
         """
@@ -785,4 +925,14 @@ class VirtualFileSystem:
             os.path.getsize = self._originals["os.path.getsize"]
         if "os.path.getmtime" in self._originals:
             os.path.getmtime = self._originals["os.path.getmtime"]
+        if "os.open" in self._originals:
+            os.open = self._originals["os.open"]
+        if "os.close" in self._originals:
+            os.close = self._originals["os.close"]
+        if "os.read" in self._originals:
+            os.read = self._originals["os.read"]
+        if "os.write" in self._originals:
+            os.write = self._originals["os.write"]
+        if "os.fdopen" in self._originals:
+            os.fdopen = self._originals["os.fdopen"]
         self._originals.clear()

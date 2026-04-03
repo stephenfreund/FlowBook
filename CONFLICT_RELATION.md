@@ -272,30 +272,51 @@ Write locations are determined by checkpoint diffs. On first execution of `df['x
 
 This causes the `NoReadBeforeWrite` predicate to miss forward contamination when an earlier cell reads a structural attribute like `df.shape`.
 
-### Column provenance tracking
+### Structural provenance tracking
 
-FlowBook stores provenance metadata in `df.attrs['_flowbook_col_origins']` — a dict mapping `{column_name: cell_id}` recording which cell first created each column.
+FlowBook stores structural provenance as a single `DataFrameProvenance` object in `df.attrs['_flowbook_provenance']`, recording which cell first caused each structural effect on a DataFrame.
 
-| Hook | Trigger | Provenance effect |
-| --- | --- | --- |
-| `record_var_write(df, cell_id)` | DataFrame assigned to variable | All columns → cell_id (reset) |
-| `record_column_write(df, col, cell_id)` | `df[col] = val` or `df.insert(...)` | First writer wins (no overwrite) |
-| `record_column_delete(df, col)` | `del df[col]` | Remove origin entry |
+**DataFrameProvenance fields:**
 
-**First writer wins** means re-executing `df['x'] = 5` preserves the original creator. The origin is only reset by full DataFrame replacement (`record_var_write`).
+| Field            | Type                | Tracks                                       |
+| ---------------- | ------------------- | -------------------------------------------- |
+| `col_origins`    | `{column: cell_id}` | Which cell first created each column         |
+| `col_deletions`  | `{column: cell_id}` | Which cell first deleted each column         |
+| `dtype_origins`  | `{column: cell_id}` | Which cell first changed each column's dtype |
+| `row_mutators`   | `set[cell_id]`      | Cells that mutated the row count             |
+| `index_mutators` | `set[cell_id]`      | Cells that mutated the index                 |
 
-### Provenance-based write upgrade
+**Provenance hooks:**
 
-In `_check_forward_contamination`, the enforcer upgrades `Col` writes to `ColAdd` where provenance shows the column was first created by that cell:
+| Hook                                     | Trigger                                            | Provenance effect                              |
+| ---------------------------------------- | -------------------------------------------------- | ---------------------------------------------- |
+| `record_var_write(df, cell_id)`          | DataFrame assigned to variable                     | Create fresh provenance, all columns → cell_id |
+| `record_column_write(df, col, cell_id)`  | `df[col] = val` or `df.insert(...)`                | First writer wins (no overwrite)               |
+| `record_column_delete(df, col, cell_id)` | `del df[col]`, `df.drop(columns=...)`              | First deleter wins                             |
+| `record_dtype_change(df, col, cell_id)`  | `df[col] = val` (dtype changed)                    | First changer wins                             |
+| `record_row_mutation(df, cell_id)`       | `.loc` row add, `drop(inplace)`, `dropna`, etc.    | Add to row_mutators set                        |
+| `record_index_mutation(df, cell_id)`     | `df.index = ...`, `reset_index`, `set_index`, etc. | Add to index_mutators set                      |
+
+**First writer/deleter/changer wins** means re-executing a structural operation preserves the original cell's provenance. All provenance is reset only by full DataFrame replacement (`record_var_write`).
+
+### Provenance-based structural write injection
+
+The enforcer applies `_inject_structural_writes(W, cell_id, namespace)` to augment diff-derived write sets with provenance-recorded structural effects. On re-execution, checkpoint diffs miss idempotent structural changes (e.g., deleting an already-deleted column produces no diff). Provenance persists in `df.attrs` and restores the correct write types:
 
 ```
-For each later cell j with write Col(d, c):
-  If provenance(d, c) = j  →  upgrade to ColAdd(d, c)
+InjectStructuralWrites(W, cell_id, Σ):
+  1. Col(d, c) → ColAdd(d, c)       if col_origins(Σ(d), c) = cell_id
+  2. Inject ColDel(d, c)             if col_deletions(Σ(d), c) = cell_id
+  3. Inject Rows(d)                  if cell_id ∈ row_mutators(Σ(d))
+  4. Inject Attr(d, index/axes)      if cell_id ∈ index_mutators(Σ(d))
+  5. Inject Attr(d, dtypes/values/T) if ∃c: dtype_origins(Σ(d), c) = cell_id
 ```
 
-After upgrade, `ColAdd(d, c) ▷ Attr(d, shape) = True`, correctly detecting forward contamination.
+The injection scans ALL DataFrames in namespace (not just those already in W), because on re-execution W may be empty while provenance persists. It is applied _before_ emptiness checks in each predicate:
 
-The injection is applied in `NoReadBeforeWrite`, `NoWriteAfterRead`, and `ForwardStale` — all predicates that need structural write precision on re-execution. The `DataFrameProvenance` class (stored in `df.attrs['_flowbook_provenance']`) tracks five structural effect types: column origins, column deletions, dtype changes, row mutations, and index mutations.
+- **NoReadBeforeWrite** (`_check_forward_contamination`): injects for each later cell's writes
+- **NoWriteAfterRead** (`_check_backward_mutation_new`): injects for the current cell's writes
+- **ForwardStale** (`_compute_forward_staleness_syntactic`): injects for staleness propagation
 
 **Code:**
 

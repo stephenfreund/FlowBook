@@ -8,13 +8,167 @@ used by both cli.py and optimize_cli.py.
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from jupyter_client import KernelManager
+from jupyter_client import BlockingKernelClient, KernelManager
+from jupyter_client.kernelspec import NoSuchKernel
 
 from flowbook import make_kernels
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.util.output import error, log, timer
+
+
+def wait_for_kernel_ready(
+    kernel_client: BlockingKernelClient,
+    timeout: float = 30,
+    max_attempts: int = 3,
+) -> None:
+    """Wait for a kernel to be ready with bounded retries.
+
+    Args:
+        kernel_client: The kernel client to wait on.
+        timeout: Seconds to wait per attempt for heartbeat response.
+        max_attempts: Maximum number of retry attempts before raising.
+
+    Raises:
+        RuntimeError: If the kernel doesn't respond after all attempts.
+    """
+    for attempt in range(max_attempts):
+        try:
+            kernel_client.wait_for_ready(timeout=timeout)
+            return
+        except Exception as e:
+            log(f"Error waiting for kernel to be ready "
+                f"(attempt {attempt + 1}/{max_attempts}): {e}")
+            if attempt < max_attempts - 1:
+                time.sleep(0.5)
+            else:
+                raise
+
+
+def start_kernel(
+    kernel_name: str,
+    client_factory: Optional[Callable[..., BlockingKernelClient]] = None,
+    max_attempts: int = 3,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> Tuple[KernelManager, BlockingKernelClient]:
+    """Start a kernel with retry logic.
+
+    Handles the full lifecycle: create KernelManager, start kernel, create
+    client, connect channels, and wait for ready. On failure, cleans up
+    and retries.
+
+    Args:
+        kernel_name: Kernel spec name (e.g., "flowbook_kernel").
+        client_factory: Callable that creates the client given a kernel_id.
+            Defaults to FlowbookKernelClient.
+        max_attempts: Number of startup attempts before giving up.
+        extra_env: Optional environment variables to set during startup.
+
+    Returns:
+        Tuple of (KernelManager, client).
+
+    Raises:
+        Exception: If kernel fails to start after all attempts.
+    """
+    if client_factory is None:
+        client_factory = lambda kid: FlowbookKernelClient(kernel_id=kid)
+
+    old_env = {}
+    if extra_env:
+        for key, value in extra_env.items():
+            old_env[key] = os.environ.get(key)
+            os.environ[key] = value
+
+    kernel_manager = None
+    kernel_client = None
+    try:
+        for attempt in range(max_attempts):
+            try:
+                # Clean up previous failed attempt — release ports and
+                # delete connection file so the next manager picks fresh ports.
+                if kernel_client is not None:
+                    try:
+                        kernel_client.stop_channels()
+                    except Exception:
+                        pass
+                    kernel_client = None
+                if kernel_manager is not None:
+                    try:
+                        kernel_manager.shutdown_kernel(now=True)
+                    except Exception:
+                        pass
+                    try:
+                        kernel_manager.cleanup_resources()
+                    except Exception:
+                        pass
+                    kernel_manager = None
+
+                kernel_manager = KernelManager(kernel_name=kernel_name)
+                kernel_manager.start_kernel()
+
+                kernel_client = client_factory(kernel_manager.kernel_id)
+                kernel_client.load_connection_info(
+                    kernel_manager.get_connection_info()
+                )
+                kernel_client.start_channels()
+
+                time.sleep(2)
+                wait_for_kernel_ready(kernel_client)
+
+                return kernel_manager, kernel_client
+
+            except NoSuchKernel:
+                log(f"Kernel spec '{kernel_name}' not found "
+                    f"(attempt {attempt + 1}/{max_attempts}), reinstalling...")
+                try:
+                    make_kernels()
+                except Exception:
+                    pass
+                if attempt == max_attempts - 1:
+                    raise Exception(
+                        f"Kernel spec '{kernel_name}' not found "
+                        f"after {max_attempts} attempts"
+                    )
+
+            except Exception as e:
+                log(f"Kernel start attempt {attempt + 1}/{max_attempts} failed: {e}")
+                # Ensure full cleanup so next attempt gets fresh ports
+                if kernel_client is not None:
+                    try:
+                        kernel_client.stop_channels()
+                    except Exception:
+                        pass
+                    kernel_client = None
+                if kernel_manager is not None:
+                    try:
+                        if kernel_manager.is_alive():
+                            kernel_manager.shutdown_kernel(now=True)
+                            while kernel_manager.is_alive():
+                                time.sleep(1)
+                    except Exception:
+                        pass
+                    try:
+                        kernel_manager.cleanup_resources()
+                    except Exception:
+                        pass
+                    kernel_manager = None
+                if attempt < max_attempts - 1:
+                    time.sleep(2)
+                else:
+                    raise Exception(
+                        f"Kernel '{kernel_name}' failed to start "
+                        f"after {max_attempts} attempts: {e}"
+                    )
+
+        raise Exception(f"Kernel '{kernel_name}' failed to start")
+    finally:
+        if extra_env:
+            for key, old_value in old_env.items():
+                if old_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_value
 
 
 def detect_file_type(filepath: str) -> str:

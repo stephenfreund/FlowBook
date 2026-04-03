@@ -361,6 +361,13 @@ from flowbook.util.cell_index import index_to_alpha
 from flowbook.util.output import error, log, timer, output
 
 from flowbook.kernel.models import ReproducibilityMetadata
+from flowbook.kernel.protocol import (
+    COMM_TARGET,
+    IOPUB_MSG_TYPE,
+    build_metadata_message,
+    build_violation_message,
+    build_status_message,
+)
 from flowbook.kernel.reproducibility_enforcer import (
     ReproducibilityEnforcer,
     PRE_CHECKPOINT_PREFIX,
@@ -447,6 +454,14 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         # Continue after violation flag (default: stop on violation)
         self._continue_after_violation: bool = False
 
+        # Comm channel for frontend communication (set when frontend opens comm)
+        self._flowbook_comm = None
+
+        # Register comm target for frontend communication
+        self.comm_manager.register_target(
+            COMM_TARGET, self._on_flowbook_comm_open
+        )
+
         # Ensure filesystem magics are registered
         self._ensure_fs_magics()
 
@@ -462,35 +477,88 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         has_cudf()
 
     # =========================================================================
-    # Magic Commands
+    # Comm Channel — FlowBook Protocol
     # =========================================================================
 
-    @line_magic
-    def notebook_structure(self, line: str) -> None:
+    def _on_flowbook_comm_open(self, comm, open_msg) -> None:
+        """Handle frontend opening a comm to the 'flowbook' target."""
+        self._flowbook_comm = comm
+        comm.on_msg(self._on_flowbook_comm_msg)
+        log("[comm] Frontend comm opened")
+
+    def _on_flowbook_comm_msg(self, msg) -> None:
+        """Handle incoming comm message from frontend."""
+        data = msg["content"]["data"]
+        self._handle_flowbook_message(data)
+
+    def _send_flowbook_message(self, msg: dict) -> None:
+        """Send a FlowBook protocol message to all clients.
+
+        Always emits a custom IOPub message (msg_type='flowbook_update') for
+        Python clients that poll IOPub. Also sends on the comm channel if a
+        frontend has opened one.
+
+        This dual-send is intentional: the frontend uses the comm, Python
+        clients use IOPub, and both see the same payload.
         """
-        Set the notebook cell order for Reproducibility enforcement.
-
-        If cells become stale due to order changes (e.g., deletion),
-        sends updated staleness metadata to the frontend.
-
-        Usage:
-            %notebook_structure cell1 cell2 cell3 ...
-        """
-        cell_order = line.split()
-        result = self._enforcer.set_cell_order(cell_order)
-
-        # If cells became stale due to order changes, send metadata to frontend
-        from flowbook.util.output import log
-        log(f"[notebook_structure] result.newly_stale={result.newly_stale}")
-        if result.newly_stale:
+        # Always send on IOPub for Python clients
+        self.send_response(
+            self.iopub_socket,
+            IOPUB_MSG_TYPE,
+            {"flowbook": msg},
+        )
+        # Also send on comm if frontend is connected
+        if self._flowbook_comm is not None:
             try:
-                log(f"[notebook_structure] Sending metadata to frontend...")
+                self._flowbook_comm.send(msg)
+            except Exception:
+                # Comm may be closed; clear reference
+                self._flowbook_comm = None
+
+    def _handle_flowbook_message(self, msg: dict) -> None:
+        """Dispatch an incoming FlowBook protocol message.
+
+        Called from both comm messages (frontend) and execute request
+        metadata (Python clients).
+        """
+        msg_type = msg.get("type")
+        if msg_type == "notebook_structure":
+            self._process_structure_update(msg["cell_order"])
+        elif msg_type == "cell_edited":
+            self._process_cell_edit(msg["cell_id"])
+        elif msg_type == "continue_after_violation":
+            self._set_continue_after_violation(msg["enabled"])
+        elif msg_type == "sync":
+            self._process_sync()
+        elif msg_type == "exec_restore":
+            # Deprecated but handle gracefully
+            self._display.display_icon_and_text(
+                "❌",
+                "EXEC-RESTORE is deprecated. Run upstream cells in document order."
+            )
+        else:
+            log(f"[comm] Unknown message type: {msg_type}")
+
+    # =========================================================================
+    # Structured message handlers (called by _handle_flowbook_message and
+    # by magic command wrappers)
+    # =========================================================================
+
+    def _process_structure_update(self, cell_order: list) -> None:
+        """Process a notebook_structure command with a structured cell order list.
+
+        Updates the enforcer's cell order and, if cells become stale due to
+        order changes (e.g., deletion), sends updated metadata to clients.
+        """
+        result = self._enforcer.set_cell_order(cell_order)
+        if result.newly_stale:
+            log(f"[structure_update] newly_stale={result.newly_stale}")
+            try:
                 state = self._enforcer._notebook_state
                 stale_cells = state.get_stale_cells()
                 staleness_reasons = state.get_all_reasons()
-                log(f"[notebook_structure] stale_cells={stale_cells}")
                 metadata = ReproducibilityMetadata(
-                    cell_id="",  # No specific cell (order change)
+                    cell_id="",
                     execution_seq=self._enforcer.seq_counter,
                     read_locs=[],
                     write_locs=[],
@@ -499,33 +567,49 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                     cell_order=self._enforcer.cell_order,
                     staleness_reasons=staleness_reasons,
                 )
-                self._display.display_icon_and_text(
-                    "📋",
-                    f"Order updated: {len(result.newly_stale)} cell(s) stale",
-                    metadata=metadata.to_display_metadata(),
+                self._send_flowbook_message(build_metadata_message(metadata))
+                self._send_flowbook_message(
+                    build_status_message(
+                        "📋",
+                        f"Order updated: {len(result.newly_stale)} cell(s) stale",
+                        cell_id="",
+                    )
                 )
-                log(f"[notebook_structure] display_icon_and_text completed")
             except Exception as e:
-                log(f"[notebook_structure] ERROR: {e}")
-                import traceback
-                log(f"[notebook_structure] Traceback: {traceback.format_exc()}")
+                log(f"[structure_update] ERROR: {e}")
+                log(f"[structure_update] Traceback: {traceback.format_exc()}")
 
-    @line_magic
-    def flowbook_sync(self, line: str) -> None:
-        """
-        Sync current staleness state to frontend.
+    def _process_cell_edit(self, cell_id: str) -> None:
+        """Process a cell_edited command. Marks the cell stale ([Inst-Edit])."""
+        if not cell_id:
+            return
+        stale_cells = self._enforcer.mark_cell_edited(cell_id)
+        if cell_id in stale_cells:
+            staleness_reasons = self._enforcer._notebook_state.get_all_reasons()
+            metadata = ReproducibilityMetadata(
+                cell_id=cell_id,
+                execution_seq=self._enforcer.seq_counter,
+                read_locs=[],
+                write_locs=[],
+                changed_locs=[],
+                stale_cells=stale_cells,
+                cell_order=self._enforcer.cell_order,
+                staleness_reasons=staleness_reasons,
+            )
+            self._send_flowbook_message(build_metadata_message(metadata))
+            self._send_flowbook_message(
+                build_status_message("✏️", "Cell edited, marked stale", cell_id=cell_id)
+            )
 
-        Sends reproducibility metadata for all cells, including never_executed cells.
-        Called by frontend on notebook load to initialize staleness display.
+    def _set_continue_after_violation(self, enabled: bool) -> None:
+        """Set the continue_after_violation flag."""
+        self._continue_after_violation = enabled
 
-        Usage:
-            %flowbook_sync
-        """
+    def _process_sync(self) -> None:
+        """Send full current staleness state to clients."""
         state = self._enforcer._notebook_state
-
-        # Build metadata with current staleness state
         metadata = ReproducibilityMetadata(
-            cell_id="",  # No specific cell
+            cell_id="",
             execution_seq=self._enforcer.seq_counter,
             read_locs=[],
             write_locs=[],
@@ -534,13 +618,34 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             cell_order=self._enforcer.cell_order,
             staleness_reasons=state.get_all_reasons(),
         )
+        self._send_flowbook_message(build_metadata_message(metadata))
+        self._send_flowbook_message(build_status_message("🔄", "Synced"))
 
-        # Send to frontend via display_data (same format as execution metadata)
-        self._display.display_icon_and_text(
-            "🔄",
-            "Synced",
-            metadata=metadata.to_display_metadata(),
-        )
+    # =========================================================================
+    # Magic Commands
+    # =========================================================================
+
+    @line_magic
+    def notebook_structure(self, line: str) -> None:
+        """Set the notebook cell order for Reproducibility enforcement.
+
+        Thin wrapper around _process_structure_update() for user-typed magic.
+
+        Usage:
+            %notebook_structure cell1 cell2 cell3 ...
+        """
+        self._process_structure_update(line.split())
+
+    @line_magic
+    def flowbook_sync(self, line: str) -> None:
+        """Sync current staleness state to frontend.
+
+        Thin wrapper around _process_sync() for user-typed magic.
+
+        Usage:
+            %flowbook_sync
+        """
+        self._process_sync()
 
     @line_magic
     def flowbook_status(self, line: str) -> None:
@@ -594,12 +699,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             return
 
         if not arg or arg in ("on", "true", "1", "enable"):
-            self._continue_after_violation = True
+            self._set_continue_after_violation(True)
             self._display.display_icon_and_text(
                 "ℹ️", "Continue after violation: enabled"
             )
         elif arg in ("off", "false", "0", "disable"):
-            self._continue_after_violation = False
+            self._set_continue_after_violation(False)
             self._display.display_icon_and_text(
                 "ℹ️", "Continue after violation: disabled"
             )
@@ -638,32 +743,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
     def cell_edited(self, line: str) -> None:
         """[EDIT transition] Mark a cell as edited (stale) (§2.3).
 
+        Thin wrapper around _process_cell_edit() for user-typed magic.
+
         Usage:
             %cell_edited <cell_id>
         """
-        cell_id = line.strip()
-        if not cell_id:
-            return
-
-        stale_cells = self._enforcer.mark_cell_edited(cell_id)
-        if cell_id in [c for c in stale_cells]:
-            # Send updated staleness info to frontend
-            staleness_reasons = self._enforcer._notebook_state.get_all_reasons()
-            metadata = ReproducibilityMetadata(
-                cell_id=cell_id,
-                execution_seq=self._enforcer.seq_counter,
-                read_locs=[],
-                write_locs=[],
-                changed_locs=[],
-                stale_cells=stale_cells,
-                cell_order=self._enforcer.cell_order,
-                staleness_reasons=staleness_reasons,
-            )
-            self._display.display_icon_and_text(
-                "✏️",
-                f"Cell edited, marked stale",
-                metadata=metadata.to_display_metadata(),
-            )
+        self._process_cell_edit(line.strip())
 
     @line_magic
     def diagnostic(self, line: str) -> None:
@@ -980,7 +1065,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         2. Full diff against the checkpoint (timed - will be empty)
         3. Full check using the cell's original R/W (timed)
 
-        Returns timing data via display_data output with flowbook metadata.
+        Returns timing data via flowbook_update IOPub message.
 
         Usage:
             %measure_rerun_overhead <cell_id>
@@ -998,18 +1083,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             namespace=self.shell.user_ns,
         )
 
-        # Send the result as flowbook metadata (same format as execution metadata)
-        from IPython.display import display
-
-        display(
-            {"text/plain": ""},
-            raw=True,
-            metadata={
-                "flowbook": {
-                    "rerun_overhead": result,
-                }
-            },
-        )
+        # Send the result via the flowbook protocol
+        self._send_flowbook_message({
+            "type": "rerun_overhead",
+            "rerun_overhead": result,
+        })
 
     @line_magic
     def df_subset_checkpoints(self, line: str) -> None:
@@ -1176,7 +1254,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
         with timer(message=f"do_execute: {self._cell_id}"):
             try:
-                # Update cell order if provided in metadata
+                # Process FlowBook protocol messages from execute metadata
+                # (sent by Python clients via execute request metadata)
+                if cell_meta and "flowbook" in cell_meta:
+                    self._handle_flowbook_message(cell_meta["flowbook"])
+
+                # Update cell order if provided in metadata (legacy path)
                 if cell_meta and "cell_order" in cell_meta:
                     self._enforcer.set_cell_order(cell_meta["cell_order"])
 
@@ -1447,40 +1530,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
         lines = code.split("\n")
         if lines and lines[0].strip().startswith("%notebook_structure"):
-            # Extract cell order from magic line
+            # Extract cell order from magic line and delegate to structured handler
             magic_line = lines[0].strip()
             parts = magic_line.split()[1:]  # Skip the magic name
             if parts:
-                result = self._enforcer.set_cell_order(parts)
-
-                # If cells became stale (e.g., due to cell deletion), notify frontend
-                if result.newly_stale:
-                    log(f"[_process_structure_magic] newly_stale={result.newly_stale}")
-                    try:
-                        state = self._enforcer._notebook_state
-                        stale_cells = state.get_stale_cells()
-                        staleness_reasons = state.get_all_reasons()
-                        metadata = ReproducibilityMetadata(
-                            cell_id="",  # No specific cell (order change)
-                            execution_seq=self._enforcer.seq_counter,
-                            read_locs=[],
-                            write_locs=[],
-                            changed_locs=[],
-                            stale_cells=stale_cells,
-                                    cell_order=self._enforcer.cell_order,
-                            staleness_reasons=staleness_reasons,
-                        )
-                        self._display.display_icon_and_text(
-                            "📋",
-                            f"Order updated: {len(result.newly_stale)} cell(s) stale",
-                            metadata=metadata.to_display_metadata(),
-                        )
-                        log(f"[_process_structure_magic] metadata sent")
-                    except Exception as e:
-                        log(f"[_process_structure_magic] ERROR: {e}")
-                        import traceback
-                        log(f"[_process_structure_magic] Traceback: {traceback.format_exc()}")
-
+                self._process_structure_update(parts)
             return "\n".join(lines[1:])
         return code
 
@@ -1664,10 +1718,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 cell_order=self._enforcer.cell_order,
                 staleness_reasons=self._enforcer._notebook_state.get_all_reasons(),
             )
-            self._display.display_icon_and_text(
-                "✓",
-                "Magic cell",
-                metadata=empty_metadata.to_display_metadata(),
+            self._send_flowbook_message(build_metadata_message(empty_metadata))
+            self._send_flowbook_message(
+                build_status_message("✓", "Magic cell", cell_id=self._cell_id or "")
             )
 
         return result
@@ -1746,10 +1799,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
         icon = "✓" if not (sdc_result and sdc_result.has_errors()) else "✗"
 
-        self._display.display_icon_and_text(
-            icon,
-            " | ".join(parts),
-            metadata=metadata.to_display_metadata(),
+        # Send metadata and status via protocol messages
+        self._send_flowbook_message(build_metadata_message(metadata))
+        self._send_flowbook_message(
+            build_status_message(icon, " | ".join(parts), cell_id=self._cell_id or "")
         )
 
     def _send_truncation_details(self, truncation_details: str) -> None:
@@ -1780,7 +1833,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         accepted: bool = False,
     ) -> None:
         """
-        Send a predicate violation to the frontend.
+        Send a predicate violation to clients via the FlowBook protocol.
 
         This is the unified method for all four formal predicate violations:
         - NO_READ_AND_WRITE: Cell reads and writes same location
@@ -1795,35 +1848,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                      If False, violation causes rejection (rollback) and
                      notice is an error (red).
         """
-        # Build the unified predicate_violation structure
-        violation_dict = {
-            "predicate": error.error_type.value,
-            "cell_id": error.cell_id,
-            "locations": error.locations,
-            "message": error.message,
-            "accepted": accepted,
-        }
-
-        # Add causer cell if available
-        if error.causer_cell:
-            violation_dict["causer_cell"] = error.causer_cell
-
-        # Add detail info if available
-        if error.detail:
-            violation_dict["detail"] = error.detail
-
-        # Send via display_data with structured metadata
-        # The frontend will render this appropriately based on 'accepted'
-        self.send_response(
-            self.iopub_socket,
-            "display_data",
-            {
-                "data": {"text/plain": ""},  # Empty - frontend renders from metadata
-                "metadata": {
-                    "predicate_violation": violation_dict,
-                },
-            },
-        )
+        self._send_flowbook_message(build_violation_message(error, accepted))
 
     # =========================================================================
     # Lifecycle

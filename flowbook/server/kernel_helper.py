@@ -101,7 +101,16 @@ class KernelHelper:
         return result
 
     @staticmethod
-    def execute_code(kernel_client: FlowbookKernelClient, code: str, timeout: float = 30.0, *, cell_id: str = None, cell_metadata: dict = None, store_history: bool = True) -> Dict[str, Any]:
+    def execute_code(
+        kernel_client: FlowbookKernelClient,
+        code: str,
+        timeout: float = 30.0,
+        *,
+        cell_id: str = None,
+        cell_metadata: dict = None,
+        store_history: bool = True,
+        flowbook_msg: dict = None,
+    ) -> Dict[str, Any]:
         """
         Execute code in the kernel and return results.
 
@@ -112,16 +121,22 @@ class KernelHelper:
             cell_id: Cell ID
             cell_metadata: Cell metadata
             store_history: Whether to store the code in the kernel's history (default: True)
+            flowbook_msg: Optional FlowBook protocol message to send via execute metadata.
+                e.g. {"type": "cell_edited", "cell_id": "abc"}
         Returns:
-            Dictionary with execution results including outputs and status
+            Dictionary with execution results including outputs, status, and
+            flowbook_messages (list of protocol messages received from kernel).
         """
-        # Merge timeout into cell_metadata so the kernel can use it
+        # Merge timeout and flowbook message into cell_metadata
         meta_with_timeout = dict(cell_metadata) if cell_metadata else {}
         meta_with_timeout['timeout'] = timeout
+        if flowbook_msg is not None:
+            meta_with_timeout['flowbook'] = flowbook_msg
 
         msg_id = kernel_client.execute(code, cell_id=cell_id, cell_metadata=meta_with_timeout, store_history=store_history)
 
         outputs = []
+        flowbook_messages = []
         execution_count = None
         status = 'ok'
         error_message = None
@@ -170,6 +185,11 @@ class KernelHelper:
                     'metadata': content.get('metadata', {})
                 })
 
+            elif msg_type == 'flowbook_update':
+                # FlowBook protocol message from kernel
+                fb_data = content.get('flowbook', content)
+                flowbook_messages.append(fb_data)
+
             elif msg_type == 'error':
                 status = 'error'
                 outputs.append({
@@ -208,5 +228,6 @@ class KernelHelper:
             'status': status,
             'execution_count': execution_count,
             'outputs': outputs,
+            'flowbook_messages': flowbook_messages,
             'error_message': error_message
         }
