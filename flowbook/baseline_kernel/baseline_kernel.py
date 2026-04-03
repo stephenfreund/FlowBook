@@ -17,11 +17,13 @@ Does NOT include:
 - Any FlowBook-specific features
 """
 
+import os
 import time
 import types
 from typing import Any, Dict, Optional
 
 from ipykernel.ipkernel import IPythonKernel
+from flowbook.kernel_support.virtual_fs import VirtualFileSystem
 from IPython.core.magic import line_magic, magics_class, Magics
 
 
@@ -136,6 +138,16 @@ class BaselineKernel(IPythonKernel):
         super().__init__(**kwargs)
         self._memory_metadata: Optional[Dict[str, Any]] = None
 
+        # Virtual filesystem: redirect writes to overlay to preserve real FS
+        self._vfs = VirtualFileSystem()
+        self._vfs.set_notebook_dir(os.getcwd())
+        if os.environ.get("FLOWBOOK_NO_VIRTUAL_FS", "0") == "1" or \
+                os.environ.get("FLOWBOOK_VIRTUAL_FS") == "0":
+            pass  # VFS disabled — writes go to real FS
+        else:
+            self._vfs.enable()
+        self._vfs_namespace_patched = False
+
     def start(self) -> None:
         """Start the kernel and register magic commands."""
         super().start()
@@ -143,6 +155,7 @@ class BaselineKernel(IPythonKernel):
         # Register memory magics
         if self.shell:
             self.shell.register_magics(MemoryMagics)
+            self._ensure_vfs_namespace_patched()
 
             # Pre-import pandas and enable same options as FlowBook kernel
             # These are set in memory_checkpoint.py for FlowBook - we need them
@@ -161,6 +174,22 @@ class BaselineKernel(IPythonKernel):
                     pd.options.future.infer_string = True
             except ImportError:
                 pass
+
+    def _ensure_vfs_namespace_patched(self) -> None:
+        """Patch VFS open into the user namespace if VFS is active."""
+        if self._vfs_namespace_patched:
+            return
+        if self.shell is None:
+            return
+        if self._vfs.enabled:
+            self._vfs.patch_namespace(self.shell.user_global_ns)
+        self._vfs_namespace_patched = True
+
+    def do_shutdown(self, restart: bool) -> dict:
+        """Clean up VFS overlay on shutdown."""
+        if self._vfs.enabled:
+            self._vfs.disable()
+        return super().do_shutdown(restart)
 
     async def do_execute(
         self,
