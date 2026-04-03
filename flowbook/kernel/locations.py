@@ -438,14 +438,14 @@ def write_conflicts_write(w1: WriteLoc, w2: WriteLoc) -> bool:
     stale if cell i's writes overlap with cell j's writes:
       ∃ w1 ∈ W_i, w2 ∈ W_j . w1 ▷▷ w2
 
-    The 5×5 matrix:
+    The 5×5 symmetric matrix:
 
     | w1 ↓ \\ w2 →  | Var(x') | Col(d',c') | Rows(d') | Attr(d',a') | File(p') |
     |----------------|---------|------------|----------|-------------|----------|
     | Var(x)         | x=x'   | —          | —        | —           | —        |
     | Col(d,c)       | —       | d≡d' ∧ c=c'| d≡d'    | d≡d' ∧ a'∈CA| —       |
     | Rows(d)        | —       | d≡d'       | d≡d'     | d≡d' ∧ a'∈RA| —       |
-    | Attr(d,a)      | —       | —          | d≡d' ∧ a∈RA| d≡d' ∧ a=a'| —       |
+    | Attr(d,a)      | —       | d≡d' ∧ a∈CA| d≡d' ∧ a∈RA| d≡d' ∧ a=a'| —       |
     | File(p)        | —       | —          | —        | —           | p=p'     |
 
     (CA = COL_ATTRS, RA = ROW_ATTRS)
@@ -476,6 +476,8 @@ def write_conflicts_write(w1: WriteLoc, w2: WriteLoc) -> bool:
 
     # --- Attr(d, a) ---
     elif w1.type == WriteLocType.ATTR:
+        if w2.type == WriteLocType.COL:
+            return _same_dataframe(w1.qualifier, w2.qualifier) and w1.name in COL_ATTRS
         if w2.type == WriteLocType.ROWS:
             return _same_dataframe(w1.qualifier, w2.qualifier) and w1.name in ROW_ATTRS
         if w2.type == WriteLocType.ATTR:
