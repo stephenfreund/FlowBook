@@ -1812,8 +1812,8 @@ class ReproducibilityEnforcer:
         or writes, using the ▷ relation for column-level precision.
 
         Uses typed Change objects (when available) for precise WriteLoc types:
-        Col conflicts with same-column reads AND Attr reads in COL_ATTRS
-        (shape, columns) while Col does not.
+        Col conflicts with same-column reads and Cols reads.
+        Rows conflicts with all column reads and Rows reads.
 
         Formal ref: FORMAL_DEVELOPMENT.md §3.3, §10.1
         """

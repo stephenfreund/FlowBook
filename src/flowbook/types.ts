@@ -4,7 +4,7 @@
 
 /**
  * A typed read location from the ReadLoc grammar:
- *   Var(x) | Col(d, c) | Attr(d, a) | File(p)
+ *   Var(x) | Col(d, c) | Cols(d) | Rows(d) | File(p)
  *
  * The qualifier identifies the DataFrame:
  * - string: variable name (legacy, or when StableIdMap is not available)
@@ -15,7 +15,7 @@
  * same DataFrame even if accessed through different variable names (aliases).
  */
 export interface IReadLoc {
-  type: 'var' | 'col' | 'attr' | 'file';
+  type: 'var' | 'col' | 'cols' | 'rows' | 'file';
   name: string;
   qualifier?: string | number;
   var_name?: string; // Present when qualifier is a loc_id (number)
@@ -23,12 +23,12 @@ export interface IReadLoc {
 
 /**
  * A typed write location from the WriteLoc grammar:
- *   Var(x) | Col(d, c) | Rows(d) | Attr(d, a) | File(p)
+ *   Var(x) | Col(d, c) | Cols(d) | Rows(d) | File(p)
  *
  * Same qualifier semantics as IReadLoc.
  */
 export interface IWriteLoc {
-  type: 'var' | 'col' | 'rows' | 'attr' | 'file';
+  type: 'var' | 'col' | 'cols' | 'rows' | 'file';
   name: string;
   qualifier?: string | number;
   var_name?: string; // Present when qualifier is a loc_id (number)
@@ -199,39 +199,6 @@ export interface IPredicateViolation {
 // ============================================================================
 
 /**
- * Attributes that reveal column structure.
- */
-const COL_ATTRS = new Set([
-  'columns',
-  'keys',
-  'dtypes',
-  'axes',
-  'T',
-  'values',
-  'iter',
-  'describe',
-  'shape',
-  'size'
-]);
-
-// COL_VALUE_ATTRS (values, T, describe) was removed — Col now conflicts
-// with all COL_ATTRS, making the value-only subset unnecessary.
-
-/**
- * Attributes that reveal row structure.
- */
-const ROW_ATTRS = new Set([
-  'index',
-  'shape',
-  'size',
-  'len',
-  'empty',
-  'axes',
-  'values',
-  'T'
-]);
-
-/**
  * Get the display variable name from a qualifier.
  * If qualifier is a loc_id (number), use var_name. Otherwise use qualifier directly.
  */
@@ -268,66 +235,57 @@ function _sameDataframe(
 }
 
 /**
- * Does Var(x) target the DataFrame accessed through ref?
- * Var rebinding uses variable name matching, not object identity.
- */
-function _varTargetsRef(
-  varName: string,
-  ref: { qualifier?: string | number; var_name?: string }
-): boolean {
-  const refName = _displayQualifier(ref);
-  return varName === refName;
-}
-
-/**
  * Does write `w` invalidate read `r`?
  *
- * This is the ▷ conflict relation — the single 7×4 function that determines
+ * This is the ▷ conflict relation — the single 5×5 function that determines
  * all staleness in the system. Port of Python write_conflicts_read().
  *
- * Uses _sameDataframe() for DataFrame-to-DataFrame qualifier comparison
- * (compares loc_ids when available) and _varTargetsRef() for Var-to-DataFrame
- * comparison (compares variable names).
+ * 5×5 matrix with no lookup tables:
+ *
+ *            Var(x')  Col(d',c')  Cols(d')  Rows(d')  File(p')
+ * Var(x)      x=x'      —          —         —         —
+ * Col(d,c)     —      d≡d'∧c=c'   d≡d'       —         —
+ * Cols(d)      —        d≡d'       d≡d'       —         —
+ * Rows(d)      —        d≡d'        —        d≡d'       —
+ * File(p)      —         —          —         —        p=p'
  */
 export function writeConflictsRead(w: IWriteLoc, r: IReadLoc): boolean {
   switch (w.type) {
     case 'var':
-      // Var(x) write conflicts with any read on the same variable
-      if (r.type === 'var') {
-        return w.name === r.name;
-      }
-      if (r.type === 'file') {
-        return false;
-      }
-      // Col(d,c) or Attr(d,a): conflicts if x targets same DataFrame via var name
-      return _varTargetsRef(w.name, r);
+      // Var(x) only conflicts with Var(x) reads
+      return r.type === 'var' && w.name === r.name;
 
     case 'col':
-      // Col(d,c) conflicts with Col(d,c) AND Attr(d, a) for a ∈ COL_ATTRS
+      // Col(d,c) conflicts with Col(d,c) and Cols(d)
       if (r.type === 'col') {
         return _sameDataframe(w, r) && w.name === r.name;
       }
-      if (r.type === 'attr') {
-        return _sameDataframe(w, r) && COL_ATTRS.has(r.name);
+      if (r.type === 'cols') {
+        return _sameDataframe(w, r);
+      }
+      return false;
+
+    case 'cols':
+      // Cols(d) conflicts with Col(d,*) and Cols(d)
+      if (r.type === 'col') {
+        return _sameDataframe(w, r);
+      }
+      if (r.type === 'cols') {
+        return _sameDataframe(w, r);
       }
       return false;
 
     case 'rows':
-      // Rows(d) conflicts with all Col(d,*) AND Attr(d, ROW_ATTRS)
+      // Rows(d) conflicts with Col(d,*) and Rows(d)
       if (r.type === 'col') {
         return _sameDataframe(w, r);
       }
-      if (r.type === 'attr') {
-        return _sameDataframe(w, r) && ROW_ATTRS.has(r.name);
+      if (r.type === 'rows') {
+        return _sameDataframe(w, r);
       }
       return false;
 
-    case 'attr':
-      // Attr(d,a) only conflicts with Attr(d,a) — same dataframe AND same attr
-      return r.type === 'attr' && _sameDataframe(w, r) && w.name === r.name;
-
     case 'file':
-      // File(p) only conflicts with File(p)
       return r.type === 'file' && w.name === r.name;
 
     default:
@@ -408,7 +366,14 @@ export function readLocsMatchQualifier(a: IReadLoc, b: IReadLoc): boolean {
 
 /**
  * w1 ▷▷ w2 — does writing w1 overlap with writing w2?
- * Direct write-write conflict relation (5×5 matrix).
+ * Direct write-write conflict relation (5×5 symmetric matrix).
+ *
+ *            Var(x')  Col(d',c')  Cols(d')  Rows(d')  File(p')
+ * Var(x)      x=x'      —          —         —         —
+ * Col(d,c)     —      d≡d'∧c=c'   d≡d'      d≡d'       —
+ * Cols(d)      —        d≡d'       d≡d'       —         —
+ * Rows(d)      —        d≡d'        —        d≡d'       —
+ * File(p)      —         —          —         —        p=p'
  */
 export function writeConflictsWrite(w1: IWriteLoc, w2: IWriteLoc): boolean {
   switch (w1.type) {
@@ -419,11 +384,20 @@ export function writeConflictsWrite(w1: IWriteLoc, w2: IWriteLoc): boolean {
       if (w2.type === 'col') {
         return _sameDataframe(w1, w2) && w1.name === w2.name;
       }
+      if (w2.type === 'cols') {
+        return _sameDataframe(w1, w2);
+      }
       if (w2.type === 'rows') {
         return _sameDataframe(w1, w2);
       }
-      if (w2.type === 'attr') {
-        return _sameDataframe(w1, w2) && COL_ATTRS.has(w2.name);
+      return false;
+
+    case 'cols':
+      if (w2.type === 'col') {
+        return _sameDataframe(w1, w2);
+      }
+      if (w2.type === 'cols') {
+        return _sameDataframe(w1, w2);
       }
       return false;
 
@@ -433,18 +407,6 @@ export function writeConflictsWrite(w1: IWriteLoc, w2: IWriteLoc): boolean {
       }
       if (w2.type === 'rows') {
         return _sameDataframe(w1, w2);
-      }
-      if (w2.type === 'attr') {
-        return _sameDataframe(w1, w2) && ROW_ATTRS.has(w2.name);
-      }
-      return false;
-
-    case 'attr':
-      if (w2.type === 'rows') {
-        return _sameDataframe(w1, w2) && ROW_ATTRS.has(w1.name);
-      }
-      if (w2.type === 'attr') {
-        return _sameDataframe(w1, w2) && w1.name === w2.name;
       }
       return false;
 

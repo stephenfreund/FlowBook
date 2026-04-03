@@ -55,29 +55,40 @@ function displayQualifier(loc: {
 
 /**
  * Group read locs by variable, producing a map from variable name to its sub-locs.
- * Var(x) locs appear as standalone entries. Col/Attr locs are grouped under their qualifier.
+ * Var(x) locs appear as standalone entries. Col/Cols/Rows locs are grouped under their qualifier.
  */
 function groupReadLocs(
   locs: IReadLoc[]
 ): Map<string, { types: Map<string, string[]> }> {
   const groups = new Map<string, { types: Map<string, string[]> }>();
 
+  const typeLabels: Record<string, string> = {
+    var: 'Var',
+    col: 'Col',
+    cols: 'Cols',
+    rows: 'Rows',
+    file: 'File'
+  };
+
   for (const loc of locs) {
+    const label = typeLabels[loc.type] || loc.type;
     const q = displayQualifier(loc);
     if (q) {
-      // Col(d,c) or Attr(d,a) — group under variable name
+      // Col(d,c), Cols(d), or Rows(d) — group under variable name
       let group = groups.get(q);
       if (!group) {
         group = { types: new Map() };
         groups.set(q, group);
       }
-      const typeLabel = loc.type === 'col' ? 'Col' : 'Attr';
-      let names = group.types.get(typeLabel);
+      let names = group.types.get(label);
       if (!names) {
         names = [];
-        group.types.set(typeLabel, names);
+        group.types.set(label, names);
       }
-      names.push(loc.name);
+      // Cols and Rows have no sub-names; Col has column name
+      if (loc.type === 'col') {
+        names.push(loc.name);
+      }
     } else {
       // Var(x) or File(p) — standalone
       let group = groups.get(loc.name);
@@ -85,9 +96,8 @@ function groupReadLocs(
         group = { types: new Map() };
         groups.set(loc.name, group);
       }
-      const typeLabel = loc.type === 'file' ? 'File' : 'Var';
-      if (!group.types.has(typeLabel)) {
-        group.types.set(typeLabel, []);
+      if (!group.types.has(label)) {
+        group.types.set(label, []);
       }
     }
   }
@@ -106,8 +116,8 @@ function groupWriteLocs(
   const typeLabels: Record<string, string> = {
     var: 'Var',
     col: 'Col',
+    cols: 'Cols',
     rows: 'Rows',
-    attr: 'Attr',
     file: 'File'
   };
 
@@ -125,7 +135,8 @@ function groupWriteLocs(
         names = [];
         group.types.set(label, names);
       }
-      if (loc.type !== 'rows') {
+      // Col has column name; Cols and Rows have no sub-names
+      if (loc.type === 'col') {
         names.push(loc.name);
       }
     } else {

@@ -479,14 +479,14 @@ class TestIntegration:
         Full pipeline with structural changes via LocSet ▷.
 
         Scenario:
-        - Prior cell read df.columns
-        - Current cell added a column
-        - Should detect conflict (Col conflicts with Attr(df, columns))
+        - Prior cell read df.columns (→ Cols(df))
+        - Current cell added a column (→ Col(df, new_col))
+        - Should detect conflict (Col conflicts with Cols)
         """
         from flowbook.kernel.change_detector import changes_to_write_locs
         from flowbook.kernel.locations import tracking_to_readlocset, wlocs_conflict_rlocs
 
-        # Prior cell's tracking
+        # Prior cell's tracking — "columns" is a COLS_READ_ATTR → Cols(df)
         prior_tracking = TrackingData(structural_reads={"df": {"columns"}})
         R_prior = tracking_to_readlocset(prior_tracking)
 
@@ -509,7 +509,7 @@ class TestIntegration:
         changes = detect_changes(diff)
         W_i = changes_to_write_locs(changes)
 
-        # Should detect conflict: Col(df, new_col) vs Attr(df, columns)
+        # Should detect conflict: Col(df, new_col) ▷ Cols(df) = True
         conflicting = wlocs_conflict_rlocs(W_i, R_prior)
         assert len(conflicting) == 1
         conflict = next(iter(conflicting))
