@@ -90,7 +90,7 @@ Print a summary:
 
 | Cell | Strategy | Change |
 |---|---|---|
-| D | `insert_deepcopy` | `df` → `df_copy` |
+| D | `insert_deepcopy` | `df` → `df_D` |
 
   Followed by a diagnosis blockquote for each fix:
 
@@ -131,6 +131,7 @@ run_from(cell_id)
 ```
 checkpoint()
 insert_deepcopy("C", "model")
+alpha_rename("C", "model_copy", "model_C")  # Use cell ID in name
 run_from(cell_id)
 ```
 
@@ -140,6 +141,14 @@ checkpoint()
 merge_cells(["B", "C"])
 run_from(cell_id)
 ```
+
+**Proactive repair**: Even when `inplace=True` doesn't immediately trigger a violation, it can cause staleness tracking issues later. When you see `inplace=True` in any cell (e.g., `df.drop(..., inplace=True)`, `df.fillna(..., inplace=True)`, `df.reset_index(inplace=True)`), proactively convert it:
+```
+checkpoint()
+remove_inplace("J", "store_data")
+run_from(cell_id)
+```
+This converts `df.method(inplace=True)` to `df = df.method()`, making the mutation explicit and trackable.
 
 ### 3. Sequential Transformation Chain
 
@@ -212,3 +221,10 @@ restore("ckpt_abc12345")
 5. **Always checkpoint before fixing**: This lets you safely undo if things go wrong.
 6. **Use `run_from(cell_id)`** after each fix to re-run from the fixed cell onwards. It skips clean cells and stops on the first error or violation.
 7. **Don't fix staleness directly**: Staleness is a *symptom* of violations. Fix the violation and staleness resolves automatically. But stale cells DO need to be re-run to update the kernel state.
+8. **Naming convention for deepcopies**: When `insert_deepcopy` creates a copy, rename it to `{var}_{cell_id}` format (e.g., `df_G` for a copy of `df` introduced in cell G). This is clearer than `df_copy_copy_copy`. After `insert_deepcopy`, use `alpha_rename` to fix the generated name:
+   ```
+   insert_deepcopy("G", "df")      # Creates df_copy
+   alpha_rename("G", "df_copy", "df_G")  # Rename to df_G
+   run_from("G")
+   ```
+9. **Proactively fix inplace operations**: Scan for `inplace=True` in cells and convert them with `remove_inplace` even before they cause violations. In-place operations can cause subtle staleness tracking issues.
