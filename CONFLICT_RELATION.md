@@ -141,7 +141,7 @@ The system uses a direct write-write conflict relation — **▷▷** (`write_co
 | **Var(x)**     | `x = x'`     | —                      | —                       | —                                   | —            |
 | **Col(d, c)**  | —            | `d ≡ d'` AND `c = c'`  | `d ≡ d'`                | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
 | **Rows(d)**    | —            | `d ≡ d'`               | `d ≡ d'`                | `d ≡ d'` AND `a' ∈ ROW_ATTRS`       | —            |
-| **Attr(d, a)** | —            | —                      | `d ≡ d'` AND `a ∈ RA`  | `d ≡ d'` AND `a = a'`               | —            |
+| **Attr(d, a)** | —            | `d ≡ d'` AND `a ∈ CA`  | `d ≡ d'` AND `a ∈ RA`  | `d ≡ d'` AND `a = a'`               | —            |
 | **File(p)**    | —            | —                      | —                       | —                                   | `p = p'`     |
 
 (**—** = no write-write conflict; CA = COL_ATTRS, RA = ROW_ATTRS)
@@ -159,12 +159,13 @@ The first check uses ▷ (write-read); the second uses ▷▷ (write-write). The
 
 ### Key Observations
 
-**Column independence is preserved.** Two writes to distinct columns of the same DataFrame do NOT conflict: `Col(d, "price") ▷▷ Col(d', "qty")` requires `c = c'`, which fails. `Attr ▷▷ Col` is also `—` because attribute changes do not overlap with column data writes.
+**Column independence is preserved.** Two writes to distinct columns of the same DataFrame do NOT conflict: `Col(d, "price") ▷▷ Col(d', "qty")` requires `c = c'`, which fails.
 
+- **The ▷▷ relation is symmetric.** If `w₁ ▷▷ w₂` then `w₂ ▷▷ w₁`. This follows from the semantics: if two writes touch overlapping state, both cells' results depend on execution order, so staleness propagates in both directions.
 - **`Var(x)` only overlaps with `Var(x')`** when `x = x'`. Write-write overlap between `Var("df")` and `Col(df, c)` is not detected by the write-write path; instead, it is caught by the read overlap path because the read set always contains `Var("df")` alongside `Col` reads.
 - **`Col` vs `Col`** requires exact column match (`c = c'`) — column independence at the write-write level.
 - **`Col` vs `Rows` overlap** is detected bidirectionally: `Col(d, c) ▷▷ Rows(d')` and `Rows(d) ▷▷ Col(d', c')` both hold when `d ≡ d'`, because row changes affect all column data and vice versa.
-- **`Col` vs `Attr` overlap** is asymmetric: `Col(d, c) ▷▷ Attr(d', a')` holds when `a' ∈ COL_ATTRS` (a column write affects column-structural attributes), but `Attr(d, a) ▷▷ Col(d', c')` is `—` (an attribute change does not overlap with column data).
+- **`Col` vs `Attr` overlap** is symmetric: `Col(d, c) ▷▷ Attr(d', a')` holds when `a' ∈ COL_ATTRS`, and `Attr(d, a) ▷▷ Col(d', c')` holds when `a ∈ COL_ATTRS`. Both hold because a column-structural attribute write (e.g., `.columns`) and a column value write touch overlapping state.
 
 ## Stable Object Identity via StableIdMap
 
