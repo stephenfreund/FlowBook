@@ -53,8 +53,8 @@ class TestSubVariableWritesDontConflictWithVar:
     def test_rows_vs_var(self):
         assert not write_conflicts_read(WriteLoc.rows("df"), ReadLoc.var("df"))
 
-    def test_attr_vs_var(self):
-        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.var("df"))
+    def test_cols_vs_var(self):
+        assert not write_conflicts_read(WriteLoc.cols("df"), ReadLoc.var("df"))
 
     def test_file_vs_var(self):
         assert not write_conflicts_read(WriteLoc.file("data.csv"), ReadLoc.var("df"))
@@ -71,17 +71,20 @@ class TestVarWriteDoesConflictWithVar:
 
 
 class TestVarWriteDoesNotConflictWithSubVariableReads:
-    """Var(x) write does NOT directly conflict with Col/Attr reads.
+    """Var(x) write does NOT directly conflict with Col/Cols/Rows reads.
 
     Rebinding detection works because Var(x) is always present in read
-    sets alongside Col/Attr reads, so Var(x) ▷ Var(x) catches it.
+    sets alongside Col/Cols/Rows reads, so Var(x) ▷ Var(x) catches it.
     """
 
     def test_var_vs_col(self):
         assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.col("df", "price"))
 
-    def test_var_vs_attr(self):
-        assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.attr("df", "shape"))
+    def test_var_vs_cols(self):
+        assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.cols("df"))
+
+    def test_var_vs_rows(self):
+        assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.rows("df"))
 
 
 class TestSubVariableWritesDoConflictWithColReads:
@@ -350,7 +353,7 @@ class TestTrackingReadLocConversion:
         assert ReadLoc.var("df") in locs
 
     def test_structural_reads_include_var(self):
-        """Structural reads include Var alongside Attr."""
+        """Structural reads include Var alongside Cols/Rows."""
         td = TrackingData(
             reads_before_writes={"df"},
             writes=set(),
@@ -359,7 +362,9 @@ class TestTrackingReadLocConversion:
             structural_reads={"df": {"shape"}},
         )
         locs = tracking_to_readlocset(td)
-        assert ReadLoc.attr("df", "shape") in locs
+        # shape is in BOTH_READ_ATTRS → emits both Cols and Rows
+        assert ReadLoc.cols("df") in locs
+        assert ReadLoc.rows("df") in locs
         assert ReadLoc.var("df") in locs  # always emitted
 
     def test_mixed_vars_all_have_var(self):

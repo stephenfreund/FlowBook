@@ -454,15 +454,18 @@ The implementation uses typed read and write locations with a conflict relation
 Read locations describe what a cell accessed:
 
 ```
-r ∈ ReadLoc ::= Var(x) | Col(d, c) | Attr(d, a) | File(p)
+r ∈ ReadLoc ::= Var(x) | Col(d, c) | Cols(d) | Rows(d) | File(p)
 ```
 
-| Constructor | Meaning                    | Example              |
-| ----------- | -------------------------- | -------------------- |
-| Var(x)      | Whole variable x           | df, config           |
-| Col(d, c)   | Column c of DataFrame d    | df["price"]          |
-| Attr(d, a)  | Attribute a of DataFrame d | df.shape, df.columns |
-| File(p)     | File at path p             | data.csv             |
+| Constructor | Meaning                        | Example                    |
+| ----------- | ------------------------------ | -------------------------- |
+| Var(x)      | Whole variable x               | df, config                 |
+| Col(d, c)   | Column c of DataFrame d        | df["price"]                |
+| Cols(d)     | Column structure of DataFrame d | df.columns, df.dtypes      |
+| Rows(d)     | Row structure of DataFrame d   | df.index, len(df)          |
+| File(p)     | File at path p                 | data.csv                   |
+
+Note: Cross-cutting attributes (shape, values, etc.) emit both Cols and Rows reads.
 
 **Code:** `ReadLoc` in `kernel/locations.py`, `tracking_to_readlocset()` converts TrackingData
 
@@ -471,20 +474,20 @@ r ∈ ReadLoc ::= Var(x) | Col(d, c) | Attr(d, a) | File(p)
 Write locations describe what changed and _how_:
 
 ```
-w ∈ WriteLoc ::= Var(x) | Col(d, c) | Rows(d) | Attr(d, a) | File(p)
+w ∈ WriteLoc ::= Var(x) | Col(d, c) | Cols(d) | Rows(d) | File(p)
 ```
 
-| Constructor | Meaning                                 | Example               |
-| ----------- | --------------------------------------- | --------------------- |
-| Var(x)      | Variable completely replaced            | x = 42                |
-| Col(d, c)   | Column written (add, modify, or delete) | df["price"] = [1,2,3] |
-| Rows(d)     | Rows added/removed                      | df.append(...)        |
-| Attr(d, a)  | Attribute changed                       | df.reset_index()      |
-| File(p)     | File written                            | df.to_csv("out.csv")  |
+| Constructor  | Meaning                             | Example               |
+| ------------ | ----------------------------------- | --------------------- |
+| Var(x)       | Variable completely replaced        | x = 42                |
+| Col(d, c)    | Column written (add, modify, or delete) | df["price"] = [1,2,3] |
+| Cols(d)      | Column structure changed            | dtype changes         |
+| Rows(d)      | Rows added/removed                  | df.append(...)        |
+| File(p)      | File written                        | df.to_csv("out.csv")  |
 
 **Code:** `WriteLoc` in `kernel/locations.py`, `changes_to_write_locs()` converts Change objects
 
-**Storage:** `NotebookState.writes[cell_id]` stores the union of tracking-derived WriteLocs (Var, Col, Rows, Attr, File — from `tracking_to_writelocset()`, which converts structural mutations recorded at operation time by TrackingData) and diff-derived WriteLocs (Col, Rows, Attr — from `changes_to_write_locs()`), filtered to only include diff-derived locs for variables that tracking also considers writes (recoverable mutations). See `record_execution()` in `kernel/notebook_state.py`.
+**Storage:** `NotebookState.writes[cell_id]` stores the union of tracking-derived WriteLocs (Var, Col, Cols, Rows, File — from `tracking_to_writelocset()`, which converts structural mutations recorded at operation time by TrackingData) and diff-derived WriteLocs (Col, Rows — from `changes_to_write_locs()`), filtered to only include diff-derived locs for variables that tracking also considers writes (recoverable mutations). See `record_execution()` in `kernel/notebook_state.py`.
 
 ### 8.3 The ▷ Conflict Relation
 
@@ -492,7 +495,7 @@ w ∈ WriteLoc ::= Var(x) | Col(d, c) | Rows(d) | Attr(d, a) | File(p)
 
 **Var(x) semantics**: `Var(x)` as a read means "read the namespace binding" —
 the pointer from name `x` to an object. Sub-variable writes (Col,
-Rows, Attr) do NOT change the binding, so they do NOT conflict with `Var(x)`.
+Rows, Cols) do NOT change the binding, so they do NOT conflict with `Var(x)`.
 Only `Var(x)` writes (replacing the entire variable) conflict with `Var(x)` reads.
 
 DataFrame methods like `df.sum()` that read column data are intercepted to produce
@@ -501,19 +504,20 @@ precision.
 
 Key rules:
 
-| Write      | Read       | Conflicts?                                                                          |
-| ---------- | ---------- | ----------------------------------------------------------------------------------- |
-| Var(x)     | Var(x)     | **Yes** (replacing variable invalidates binding read)                               |
-| Var(x)     | Col(d, c)  | **No** (rebinding caught via Var(x) read always in read set)                        |
-| Col(d, c)  | Var(x)     | **No** (column write doesn't change binding)                                        |
-| Col(d, c)  | Col(d, c') | Only if c = c' (column-level precision)                                             |
-| Col(d, c)  | Attr(d, a) | Yes if a ∈ COL_ATTRS (column write may add, modify, or delete, affecting structure) |
-| Rows(d)    | Var(x)     | **No** (row change doesn't change binding)                                          |
-| Rows(d)    | Col(d, c)  | **Yes** (row change affects all column data)                                        |
-| Attr(d, a) | Var(x)     | **No** (attr change doesn't change binding)                                         |
-| Attr(d, a) | Col(d, c)  | **No** (attr change ≠ data change)                                                  |
+| Write        | Read        | Conflicts?                                                    |
+| ------------ | ----------- | ------------------------------------------------------------- |
+| Var(x)       | Var(x)      | **Yes** (replacing variable invalidates binding read)         |
+| Var(x)       | Col(d, c)   | **No** (rebinding caught via Var(x) read always in read set)  |
+| Col(d, c)    | Var(x)      | **No** (column write doesn't change binding)                  |
+| Col(d, c)    | Col(d, c')  | Only if c = c' (column-level precision)                       |
+| Col(d, c)    | Cols(d)     | **Yes** if d ≡ d' (column write affects column structure)     |
+| Cols(d)      | Col(d, c)   | **Yes** if d ≡ d' (structure change affects column readers)   |
+| Cols(d)      | Cols(d)     | **Yes** if d ≡ d'                                             |
+| Rows(d)      | Var(x)      | **No** (row change doesn't change binding)                    |
+| Rows(d)      | Col(d, c)   | **Yes** (row change affects all column data)                  |
+| Rows(d)      | Rows(d)     | **Yes** if d ≡ d'                                             |
 
-Attribute conflicts are always enforced (no OFF/WARN mode).
+Note: Cols ▷ Rows = false and Rows ▷ Cols = false (column structure and row structure are independent dimensions).
 
 **Code:** `write_conflicts_read()` in `kernel/locations.py`
 
@@ -541,16 +545,14 @@ whether two writes overlap. This is a self-contained 5×5 matrix:
 ```
 w₁ ▷▷ w₂ — do writes w₁ and w₂ overlap?
 
-| w₁ ↓ \ w₂ →   | Var(x') | Col(d',c')      | Rows(d') | Attr(d',a')       | File(p') |
-|----------------|---------|-----------------|----------|-------------------|----------|
-| Var(x)         | x = x'  | —               | —        | —                 | —        |
-| Col(d, c)      | —       | d ≡ d' ∧ c = c' | d ≡ d'   | d ≡ d' ∧ a' ∈ CA | —        |
-| Rows(d)        | —       | d ≡ d'          | d ≡ d'   | d ≡ d' ∧ a' ∈ RA | —        |
-| Attr(d, a)     | —       | —               | d ≡ d' ∧ a ∈ RA | d ≡ d' ∧ a = a' | —  |
-| File(p)        | —       | —               | —        | —                 | p = p'   |
+| w₁ ↓ \ w₂ →   | Var(x') | Col(d',c')      | Cols(d') | Rows(d') | File(p') |
+|----------------|---------|-----------------|----------|----------|----------|
+| Var(x)         | x = x'  | —               | —        | —        | —        |
+| Col(d, c)      | —       | d ≡ d' ∧ c = c' | d ≡ d'   | d ≡ d'   | —        |
+| Cols(d)        | —       | d ≡ d'          | d ≡ d'   | —        | —        |
+| Rows(d)        | —       | d ≡ d'          | —        | d ≡ d'   | —        |
+| File(p)        | —       | —               | —        | —        | p = p'   |
 ```
-
-(CA = COL_ATTRS, RA = ROW_ATTRS)
 
 This lifts to sets: `W₁ ▷▷ W₂ = { w₁ ∈ W₁ | ∃ w₂ ∈ W₂ . w₁ ▷▷ w₂ }`.
 
@@ -671,7 +673,7 @@ relation:
 
 - **`Var(x)` only conflicts with `Var(x)` reads** (simple name equality).
   Rebinding detection for column/attribute readers works because `Var(x)` is
-  always present in read sets alongside `Col`/`Attr` reads — see
+  always present in read sets alongside `Col`/`Cols`/`Rows` reads — see
   `tracking_to_readlocset()`. No cross-domain bridge rule is needed.
 
 #### Relationship with deep alias detection
@@ -734,17 +736,17 @@ with some read in R, using `write_conflicts_read()` as the per-element check.
 With `LocRef` qualifiers (§9.1), the ▷ relation uses two distinct comparison
 modes:
 
-- **Intra-DataFrame** (`Col ▷ Col`, `Rows ▷ Col`, `Col ▷ Attr`, etc.):
+- **Intra-DataFrame** (`Col ▷ Col`, `Rows ▷ Col`, `Col ▷ Cols`, etc.):
   Uses `_same_dataframe()` to compare `loc_id` values. Aliased DataFrames
   (`X = df`) share the same `loc_id`, so cross-alias conflicts are detected
   natively without additional alias expansion.
 
 - **Var(x)** only conflicts with `Var(x)` reads (simple name equality).
   No cross-domain bridge is needed because `Var(x)` is always present in
-  read sets alongside `Col`/`Attr` reads (see `tracking_to_readlocset()`).
+  read sets alongside `Col`/`Cols`/`Rows` reads (see `tracking_to_readlocset()`).
   When `df = new_value`, the read set `{Var("df"), Col(df, "price"), ...}`
   ensures `Var("df") ▷ Var("df") = true` catches the rebinding. Column
-  independence is preserved because `Col/Rows/Attr ▷ Var = false`.
+  independence is preserved because `Col/Rows/Cols ▷ Var = false`.
 
 **Code:** `write_conflicts_read()`, `wlocs_conflict_rlocs()` in `kernel/locations.py`
 
@@ -763,8 +765,8 @@ then evaluates all predicates using pure set operations on R and W.
 **Stored state**:
 
 ```
-R[i] : ReadLocSet     — locations read before write (Var, Col, Attr, File)
-W[i] : WriteLocSet    — locations that actually changed (Var, Col, Rows, Attr, File)
+R[i] : ReadLocSet     — locations read before write (Var, Col, Cols, Rows, File)
+W[i] : WriteLocSet    — locations that actually changed (Var, Col, Cols, Rows, File)
 ```
 
 **Predicates** (using ▷ conflict relation for column-level precision):
@@ -882,7 +884,7 @@ post-checkpoint, producing `ColumnAdded`. On re-execution, `x` exists in both
 checkpoints (from the prior run), so the diff produces `ColumnModified` instead.
 
 Both `ColumnAdded` and `ColumnModified` now map to `Col(d, x)` in `changes_to_write_locs()`.
-Since `Col ▷ Attr(d, a)` for `a ∈ COL_ATTRS`, the conflict with structural reads is
+Since `Col(d, c) ▷ Cols(d)`, the conflict with structural reads is
 detected regardless of whether the column was added or modified. This eliminates the
 re-execution inconsistency that previously required provenance-based write type upgrades.
 
@@ -909,13 +911,13 @@ post-hoc injection step.
 
 **Conversion to WriteLocs** (`tracking_to_writelocset()`):
 
-| TrackingData field | WriteLoc(s) produced                               |
-| ------------------ | -------------------------------------------------- |
-| `column_writes`    | `Col(d, c)` for each column                        |
-| `column_deletions` | `Col(d, c)` for each deleted column                |
-| `row_mutations`    | `Rows(d)`                                          |
-| `index_mutations`  | `Attr(d, index)`, `Attr(d, axes)`                  |
-| `dtype_changes`    | `Attr(d, dtypes)`, `Attr(d, values)`, `Attr(d, T)` |
+| TrackingData field   | WriteLoc(s) produced                                  |
+| -------------------- | ----------------------------------------------------- |
+| `column_writes`      | `Col(d, c)` for each column                           |
+| `column_deletions`   | `Col(d, c)` for each deleted column                   |
+| `row_mutations`      | `Rows(d)`                                             |
+| `index_mutations`    | `Rows(d)`                                              |
+| `dtype_changes`      | `Cols(d)`                                              |
 
 Since these WriteLocs come from tracking (not from diffing), they are always present
 on re-execution. This solves the empty-diff re-execution problem without requiring
