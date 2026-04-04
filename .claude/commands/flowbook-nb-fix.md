@@ -4,7 +4,7 @@ description: 'Fix reproducibility violations in the currently open notebook usin
 
 # Fix Notebook for Reproducibility (NBI)
 
-You are fixing reproducibility violations in the currently open Jupyter notebook using FlowBook's NBI tools. The notebook is already open in JupyterLab with `flowbook_kernel`.  Do not search for the path.  Use the active notebook.
+You are fixing reproducibility violations in the currently open Jupyter notebook using FlowBook's NBI tools. The notebook is already open in JupyterLab with `flowbook_kernel`. Do not search for the path. Use the active notebook.
 
 **Input**:
 

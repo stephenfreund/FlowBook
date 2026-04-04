@@ -36,14 +36,14 @@ Analyze reproducibility errors from a FlowBook error report or directly from a p
 
 ### Error Categories
 
-| Category | Description | Example | Fix Strategy |
-|----------|-------------|---------|--------------|
-| **In-place variable reassignment** | Cell reads and overwrites same variable | `train = pd.concat([train, extra])` | Deep-copy + alpha-rename |
-| **Sequential transformation chain** | Downstream depends on upstream transformation | Imputation then feature engineering | Deep-copy + alpha-rename |
-| **Diagnostic inspection before mutation** | Read-only cell captures pre-transformation state | `df.info()` before `df["col"] = ...` | Cell split + `%diagnostic` |
-| **Visualization before mutation** | Plot accesses all columns before column added | `sns.heatmap(df.corr())` before new col | Cell split + `%diagnostic` |
-| **Reusing variable for different purposes** | Variable reused for different purposes in disjoint regions of the code | `model` reused for different model | Alpha-rename downstream |
-| **Unrecoverable in-place mutation** | Cell mutates object without rebinding | `model.fit()`, `df.drop(inplace=True)` | See sub-types below |
+| Category                                    | Description                                                            | Example                                 | Fix Strategy               |
+| ------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------- | -------------------------- |
+| **In-place variable reassignment**          | Cell reads and overwrites same variable                                | `train = pd.concat([train, extra])`     | Deep-copy + alpha-rename   |
+| **Sequential transformation chain**         | Downstream depends on upstream transformation                          | Imputation then feature engineering     | Deep-copy + alpha-rename   |
+| **Diagnostic inspection before mutation**   | Read-only cell captures pre-transformation state                       | `df.info()` before `df["col"] = ...`    | Cell split + `%diagnostic` |
+| **Visualization before mutation**           | Plot accesses all columns before column added                          | `sns.heatmap(df.corr())` before new col | Cell split + `%diagnostic` |
+| **Reusing variable for different purposes** | Variable reused for different purposes in disjoint regions of the code | `model` reused for different model      | Alpha-rename downstream    |
+| **Unrecoverable in-place mutation**         | Cell mutates object without rebinding                                  | `model.fit()`, `df.drop(inplace=True)`  | See sub-types below        |
 
 ### Unrecoverable Mutation Sub-types
 

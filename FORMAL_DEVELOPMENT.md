@@ -411,18 +411,18 @@ The `check()` method implements [Inst-Run] exactly, with formal citations in com
 
 **[Inst-Run] Implementation Structure:**
 
-| Formal Line                | Code Location                                                                                  |
-| -------------------------- | ---------------------------------------------------------------------------------------------- |
-| `R' = R[i := r]`           | STEP 3: `record_execution()` call                                                              |
-| `W' = W[i := w]`           | STEP 3: `record_execution()` call                                                              |
-| NoReadAndWrite check       | STEP 2: `_check_no_read_and_write()`                                                           |
-| NoReadBeforeWrite check    | STEP 2: `_check_forward_contamination()`                                                       |
-| NoWriteAfterRead check     | STEP 2: `_check_backward_mutation_new()`                                                       |
-| RecoverableMutation check  | STEP 2: `_check_unrecoverable_mutation()`                                                      |
-| `T'ᵢ = CLEAN`              | STEP 4: `set_clean(cell_id)`                                                                   |
-| ForwardStale loop (reads)  | STEP 5: `_compute_forward_staleness()` — `wlocs_conflict_rlocs(change_wlocs, R_j)`             |
-| ForwardStale loop (writes) | STEP 5: `_compute_forward_staleness()` — `wlocs_conflict_wlocs(change_wlocs, W_j)` |
-| BackwardStale loop         | STEP 5: LastWriter via `NotebookState.last_writer_for()` (variable level — coverage check)     |
+| Formal Line                | Code Location                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------------------ |
+| `R' = R[i := r]`           | STEP 3: `record_execution()` call                                                          |
+| `W' = W[i := w]`           | STEP 3: `record_execution()` call                                                          |
+| NoReadAndWrite check       | STEP 2: `_check_no_read_and_write()`                                                       |
+| NoReadBeforeWrite check    | STEP 2: `_check_forward_contamination()`                                                   |
+| NoWriteAfterRead check     | STEP 2: `_check_backward_mutation_new()`                                                   |
+| RecoverableMutation check  | STEP 2: `_check_unrecoverable_mutation()`                                                  |
+| `T'ᵢ = CLEAN`              | STEP 4: `set_clean(cell_id)`                                                               |
+| ForwardStale loop (reads)  | STEP 5: `_compute_forward_staleness()` — `wlocs_conflict_rlocs(change_wlocs, R_j)`         |
+| ForwardStale loop (writes) | STEP 5: `_compute_forward_staleness()` — `wlocs_conflict_wlocs(change_wlocs, W_j)`         |
+| BackwardStale loop         | STEP 5: LastWriter via `NotebookState.last_writer_for()` (variable level — coverage check) |
 
 ### 7.5 Invariant and Checks
 
@@ -474,13 +474,13 @@ Write locations describe what changed and _how_:
 w ∈ WriteLoc ::= Var(x) | Col(d, c) | Rows(d) | Attr(d, a) | File(p)
 ```
 
-| Constructor  | Meaning                      | Example               |
-| ------------ | ---------------------------- | --------------------- |
-| Var(x)       | Variable completely replaced       | x = 42                |
-| Col(d, c)    | Column written (add, modify, or delete) | df["price"] = [1,2,3] |
-| Rows(d)      | Rows added/removed                 | df.append(...)        |
-| Attr(d, a)   | Attribute changed            | df.reset_index()      |
-| File(p)      | File written                 | df.to_csv("out.csv")  |
+| Constructor | Meaning                                 | Example               |
+| ----------- | --------------------------------------- | --------------------- |
+| Var(x)      | Variable completely replaced            | x = 42                |
+| Col(d, c)   | Column written (add, modify, or delete) | df["price"] = [1,2,3] |
+| Rows(d)     | Rows added/removed                      | df.append(...)        |
+| Attr(d, a)  | Attribute changed                       | df.reset_index()      |
+| File(p)     | File written                            | df.to_csv("out.csv")  |
 
 **Code:** `WriteLoc` in `kernel/locations.py`, `changes_to_write_locs()` converts Change objects
 
@@ -501,17 +501,17 @@ precision.
 
 Key rules:
 
-| Write        | Read       | Conflicts?                                                             |
-| ------------ | ---------- | ---------------------------------------------------------------------- |
-| Var(x)       | Var(x)     | **Yes** (replacing variable invalidates binding read)                  |
-| Var(x)       | Col(d, c)  | **No** (rebinding caught via Var(x) read always in read set)           |
-| Col(d, c)    | Var(x)     | **No** (column write doesn't change binding)                           |
-| Col(d, c)    | Col(d, c') | Only if c = c' (column-level precision)                                |
-| Col(d, c)    | Attr(d, a) | Yes if a ∈ COL_ATTRS (column write may add, modify, or delete, affecting structure) |
-| Rows(d)      | Var(x)     | **No** (row change doesn't change binding)                             |
-| Rows(d)      | Col(d, c)  | **Yes** (row change affects all column data)                           |
-| Attr(d, a)   | Var(x)     | **No** (attr change doesn't change binding)                            |
-| Attr(d, a)   | Col(d, c)  | **No** (attr change ≠ data change)                                     |
+| Write      | Read       | Conflicts?                                                                          |
+| ---------- | ---------- | ----------------------------------------------------------------------------------- |
+| Var(x)     | Var(x)     | **Yes** (replacing variable invalidates binding read)                               |
+| Var(x)     | Col(d, c)  | **No** (rebinding caught via Var(x) read always in read set)                        |
+| Col(d, c)  | Var(x)     | **No** (column write doesn't change binding)                                        |
+| Col(d, c)  | Col(d, c') | Only if c = c' (column-level precision)                                             |
+| Col(d, c)  | Attr(d, a) | Yes if a ∈ COL_ATTRS (column write may add, modify, or delete, affecting structure) |
+| Rows(d)    | Var(x)     | **No** (row change doesn't change binding)                                          |
+| Rows(d)    | Col(d, c)  | **Yes** (row change affects all column data)                                        |
+| Attr(d, a) | Var(x)     | **No** (attr change doesn't change binding)                                         |
+| Attr(d, a) | Col(d, c)  | **No** (attr change ≠ data change)                                                  |
 
 Attribute conflicts are always enforced (no OFF/WARN mode).
 
@@ -899,23 +899,23 @@ post-hoc injection step.
 
 **TrackingData structural fields:**
 
-| Field                | Type                    | Tracks                                       |
-| -------------------- | ----------------------- | -------------------------------------------- |
-| `column_writes`      | `{var: set[col]}`       | Columns written (add, modify, or delete)     |
-| `column_deletions`   | `{var: set[col]}`       | Columns deleted                              |
-| `row_mutations`      | `set[var]`              | DataFrames with row count changes            |
-| `index_mutations`    | `set[var]`              | DataFrames with index changes                |
-| `dtype_changes`      | `{var: set[col]}`       | Columns with dtype changes                   |
+| Field              | Type              | Tracks                                   |
+| ------------------ | ----------------- | ---------------------------------------- |
+| `column_writes`    | `{var: set[col]}` | Columns written (add, modify, or delete) |
+| `column_deletions` | `{var: set[col]}` | Columns deleted                          |
+| `row_mutations`    | `set[var]`        | DataFrames with row count changes        |
+| `index_mutations`  | `set[var]`        | DataFrames with index changes            |
+| `dtype_changes`    | `{var: set[col]}` | Columns with dtype changes               |
 
 **Conversion to WriteLocs** (`tracking_to_writelocset()`):
 
-| TrackingData field   | WriteLoc(s) produced                                  |
-| -------------------- | ----------------------------------------------------- |
-| `column_writes`      | `Col(d, c)` for each column                           |
-| `column_deletions`   | `Col(d, c)` for each deleted column                   |
-| `row_mutations`      | `Rows(d)`                                             |
-| `index_mutations`    | `Attr(d, index)`, `Attr(d, axes)`                     |
-| `dtype_changes`      | `Attr(d, dtypes)`, `Attr(d, values)`, `Attr(d, T)`   |
+| TrackingData field | WriteLoc(s) produced                               |
+| ------------------ | -------------------------------------------------- |
+| `column_writes`    | `Col(d, c)` for each column                        |
+| `column_deletions` | `Col(d, c)` for each deleted column                |
+| `row_mutations`    | `Rows(d)`                                          |
+| `index_mutations`  | `Attr(d, index)`, `Attr(d, axes)`                  |
+| `dtype_changes`    | `Attr(d, dtypes)`, `Attr(d, values)`, `Attr(d, T)` |
 
 Since these WriteLocs come from tracking (not from diffing), they are always present
 on re-execution. This solves the empty-diff re-execution problem without requiring

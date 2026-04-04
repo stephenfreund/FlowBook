@@ -14,7 +14,10 @@ export class CellIndexManager {
   private _observers: Map<string, MutationObserver> = new Map();
   private _notebooks: Map<string, NotebookPanel> = new Map();
   private _listeners: Map<string, any[]> = new Map();
-  private _domListeners: Map<string, { node: HTMLElement; handlers: { event: string; handler: EventListener }[] }> = new Map();
+  private _domListeners: Map<
+    string,
+    { node: HTMLElement; handlers: { event: string; handler: EventListener }[] }
+  > = new Map();
 
   constructor() {
     // Notebooks are passed directly to methods
@@ -101,7 +104,10 @@ export class CellIndexManager {
     contentNode.addEventListener('keydown', keyHandler, true);
     domHandlers.push({ event: 'keydown', handler: keyHandler });
 
-    this._domListeners.set(notebookPath, { node: contentNode, handlers: domHandlers });
+    this._domListeners.set(notebookPath, {
+      node: contentNode,
+      handlers: domHandlers
+    });
   }
 
   /**

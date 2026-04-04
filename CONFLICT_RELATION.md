@@ -44,13 +44,13 @@ WriteLoc ::= Var(x)            -- variable completely replaced
            | File(p)           -- file at path p written
 ```
 
-| Constructor | Fields                  | Semantics                                                  |
-| ----------- | ----------------------- | ---------------------------------------------------------- |
-| `Var(x)`    | name = x                | Variable `x` was reassigned or is a non-DataFrame mutation |
-| `Col(d, c)` | qualifier = d, name = c | Column `c` of DataFrame `d` was written (add, modify, or delete) |
-| `Rows(d)`   | name = d                | Rows were added to or removed from DataFrame `d`           |
-| `Attr(d, a)` | qualifier = d, name = a | Attribute `a` of DataFrame `d` changed (e.g., index)       |
-| `File(p)`   | name = p                | File at path `p` was written                               |
+| Constructor  | Fields                  | Semantics                                                        |
+| ------------ | ----------------------- | ---------------------------------------------------------------- |
+| `Var(x)`     | name = x                | Variable `x` was reassigned or is a non-DataFrame mutation       |
+| `Col(d, c)`  | qualifier = d, name = c | Column `c` of DataFrame `d` was written (add, modify, or delete) |
+| `Rows(d)`    | name = d                | Rows were added to or removed from DataFrame `d`                 |
+| `Attr(d, a)` | qualifier = d, name = a | Attribute `a` of DataFrame `d` changed (e.g., index)             |
+| `File(p)`    | name = p                | File at path `p` was written                                     |
 
 ## When Each Location Is Generated
 
@@ -73,13 +73,13 @@ Write locations come from two sources: (1) diffing memory checkpoints taken befo
 
 The `change_detector` module parses the structured diff tree into typed `Change` objects, which are then converted to `WriteLoc` values. Structural mutations (row changes, index changes, dtype changes, column deletions) are recorded at operation time by monkey patches in `column_tracking.py` and flow through `TrackingData` into `tracking_to_writelocset()`.
 
-| WriteLoc    | Detected when                                                           | Examples                                                       |
-| ----------- | ----------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `Var(x)`    | Variable `x` was reassigned, or a non-DataFrame object mutated          | `x = 10`, `config['key'] = val`, `df = pd.DataFrame(...)`      |
-| `Col(d, c)` | Column `c` was added, modified, or deleted                              | `df['price'] *= 1.1`, `df['new'] = vals`, `del df['old']`      |
-| `Rows(d)`   | Row count of DataFrame `d` changed (diff or monkey patch)               | `df.loc[len(df)] = row`, `pd.concat(...)`, `df.dropna(...)`    |
-| `Attr(d, a)` | Attribute value differs, or structural change recorded by monkey patch  | `df.reset_index(inplace=True)`, `df.index = new_labels`        |
-| `File(p)`   | File at path `p` was written during execution                           | `df.to_csv('out.csv')`, `open('result.json', 'w').write(...)`  |
+| WriteLoc     | Detected when                                                          | Examples                                                      |
+| ------------ | ---------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `Var(x)`     | Variable `x` was reassigned, or a non-DataFrame object mutated         | `x = 10`, `config['key'] = val`, `df = pd.DataFrame(...)`     |
+| `Col(d, c)`  | Column `c` was added, modified, or deleted                             | `df['price'] *= 1.1`, `df['new'] = vals`, `del df['old']`     |
+| `Rows(d)`    | Row count of DataFrame `d` changed (diff or monkey patch)              | `df.loc[len(df)] = row`, `pd.concat(...)`, `df.dropna(...)`   |
+| `Attr(d, a)` | Attribute value differs, or structural change recorded by monkey patch | `df.reset_index(inplace=True)`, `df.index = new_labels`       |
+| `File(p)`    | File at path `p` was written during execution                          | `df.to_csv('out.csv')`, `open('result.json', 'w').write(...)` |
 
 `DtypeChanged(d, c)` produces _two_ write locs: `Col(d, c)` (the column's data is now a different type) and `Attr(d, "dtypes")` (the dtype metadata changed).
 
@@ -95,10 +95,10 @@ This is a 5 × 4 matrix — 5 write types against 4 read types — and it is the
 
 Two sets define which DataFrame attributes are sensitive to which kind of structural change:
 
-| Group        | Members                                                                                 | Meaning                                 |
-| ------------ | --------------------------------------------------------------------------------------- | --------------------------------------- |
-| `COL_ATTRS`  | `columns`, `keys`, `dtypes`, `axes`, `T`, `values`, `iter`, `describe`, `shape`, `size` | Attributes that reveal column structure |
-| `ROW_ATTRS`  | `index`, `axes`, `values`, `T`, `shape`, `size`, `len`, `empty`                         | Attributes that reveal row structure    |
+| Group       | Members                                                                                 | Meaning                                 |
+| ----------- | --------------------------------------------------------------------------------------- | --------------------------------------- |
+| `COL_ATTRS` | `columns`, `keys`, `dtypes`, `axes`, `T`, `values`, `iter`, `describe`, `shape`, `size` | Attributes that reveal column structure |
+| `ROW_ATTRS` | `index`, `axes`, `values`, `T`, `shape`, `size`, `len`, `empty`                         | Attributes that reveal row structure    |
 
 `shape`, `size`, `axes`, `values`, and `T` appear in both — they expose both dimensions. For example, `axes = [index, columns]` is affected by both row and column structural changes.
 
@@ -106,13 +106,13 @@ Two sets define which DataFrame attributes are sensitive to which kind of struct
 
 > **`True`** means the write invalidates the read (the cell that did the read is now stale).
 
-| Write `w` ↓ \ Read `r` → | **Var(x')** | **Col(d', c')**        | **Attr(d', a')**                    | **File(p')** |
-| ------------------------ | ----------- | ---------------------- | ----------------------------------- | ------------ |
-| **Var(x)**               | `x = x'`    | —                      | —                                   | —            |
-| **Col(d, c)**            | —           | `d ≡ d'` AND `c = c'`  | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
-| **Rows(d)**              | —           | `d ≡ d'` (all columns) | `d ≡ d'` AND `a' ∈ ROW_ATTRS`       | —            |
-| **Attr(d, a)**           | —           | —                      | `d ≡ d'` AND `a = a'`               | —            |
-| **File(p)**              | —           | —                      | —                                   | `p = p'`     |
+| Write `w` ↓ \ Read `r` → | **Var(x')** | **Col(d', c')**        | **Attr(d', a')**              | **File(p')** |
+| ------------------------ | ----------- | ---------------------- | ----------------------------- | ------------ |
+| **Var(x)**               | `x = x'`    | —                      | —                             | —            |
+| **Col(d, c)**            | —           | `d ≡ d'` AND `c = c'`  | `d ≡ d'` AND `a' ∈ COL_ATTRS` | —            |
+| **Rows(d)**              | —           | `d ≡ d'` (all columns) | `d ≡ d'` AND `a' ∈ ROW_ATTRS` | —            |
+| **Attr(d, a)**           | —           | —                      | `d ≡ d'` AND `a = a'`         | —            |
+| **File(p)**              | —           | —                      | —                             | `p = p'`     |
 
 (**—** = never conflicts)
 
@@ -136,13 +136,13 @@ The system uses a direct write-write conflict relation — **▷▷** (`write_co
 
 `write_conflicts_write(w1, w2)` answers: **do writes `w1` and `w2` overlap?** An entry shows the condition under which `w₁ ▷▷ w₂` holds — i.e., executing cell `i` (row) makes cell `j`'s write (column) stale. Comparison operators are the same as in the read-write matrix above: `≡` for DataFrame identity, `=` for string equality.
 
-| w₁ ↓ \ w₂ →   | **Var(x')**  | **Col(d', c')**        | **Rows(d')**            | **Attr(d', a')**                    | **File(p')** |
-| -------------- | ------------ | ---------------------- | ----------------------- | ----------------------------------- | ------------ |
-| **Var(x)**     | `x = x'`     | —                      | —                       | —                                   | —            |
-| **Col(d, c)**  | —            | `d ≡ d'` AND `c = c'`  | `d ≡ d'`                | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
-| **Rows(d)**    | —            | `d ≡ d'`               | `d ≡ d'`                | `d ≡ d'` AND `a' ∈ ROW_ATTRS`       | —            |
-| **Attr(d, a)** | —            | `d ≡ d'` AND `a ∈ CA`  | `d ≡ d'` AND `a ∈ RA`  | `d ≡ d'` AND `a = a'`               | —            |
-| **File(p)**    | —            | —                      | —                       | —                                   | `p = p'`     |
+| w₁ ↓ \ w₂ →    | **Var(x')** | **Col(d', c')**       | **Rows(d')**          | **Attr(d', a')**              | **File(p')** |
+| -------------- | ----------- | --------------------- | --------------------- | ----------------------------- | ------------ |
+| **Var(x)**     | `x = x'`    | —                     | —                     | —                             | —            |
+| **Col(d, c)**  | —           | `d ≡ d'` AND `c = c'` | `d ≡ d'`              | `d ≡ d'` AND `a' ∈ COL_ATTRS` | —            |
+| **Rows(d)**    | —           | `d ≡ d'`              | `d ≡ d'`              | `d ≡ d'` AND `a' ∈ ROW_ATTRS` | —            |
+| **Attr(d, a)** | —           | `d ≡ d'` AND `a ∈ CA` | `d ≡ d'` AND `a ∈ RA` | `d ≡ d'` AND `a = a'`         | —            |
+| **File(p)**    | —           | —                     | —                     | —                             | `p = p'`     |
 
 (**—** = no write-write conflict; CA = COL_ATTRS, RA = ROW_ATTRS)
 
