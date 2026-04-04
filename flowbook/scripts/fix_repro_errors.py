@@ -6,23 +6,37 @@ This script modifies notebooks to fix reproducibility errors detected by FlowBoo
 It creates/modifies a -fixed.ipynb copy, never touching the original.
 
 Usage:
-    python fix_repro_errors.py NOTEBOOK CELL_ID --fix-type TYPE [--variable VAR]
+    python fix_repro_errors.py NOTEBOOK @CODE_INDEX --fix-type TYPE [--variable VAR]
 
-Fix types:
+IMPORTANT: Always use @N notation (code cell index) to reference cells, since cell
+IDs in processed notebooks may not match the original notebooks.
+
+Fix types (high-level):
     inplace-reassign    - Deep-copy variable and alpha-rename downstream
     sequential-chain    - Same as inplace-reassign
-    diagnostic-split    - Add %diagnostic magic to inspection code
-    visualization-split - Same as diagnostic-split
     variable-reuse      - Alpha-rename reused variable downstream
     model-copy          - Copy ML model before mutation (fit/predict)
     inplace-to-copy     - Convert df.method(inplace=True) to df = df.method()
     struct-copy         - Insert df.copy() before structural assignment
 
+Primitive operations (for agent-driven cell splitting):
+    set-source          - Replace a cell's source code (reads from --source-file)
+    insert-cell-after   - Insert a new code cell after target (reads from --source-file)
+    add-diagnostic      - Prepend %diagnostic magic to a cell
+
+Index safety: insert-cell-after shifts all subsequent code cell indices by 1.
+When applying multiple fixes, process from highest code cell index to lowest
+to avoid index invalidation.
+
 Examples:
-    python fix_repro_errors.py nb.ipynb abcd --fix-type inplace-reassign --variable train
-    python fix_repro_errors.py nb.ipynb efgh --fix-type diagnostic-split
-    python fix_repro_errors.py nb.ipynb ijkl --fix-type model-copy --variable model
-    python fix_repro_errors.py nb.ipynb mnop --fix-type inplace-to-copy --variable df
+    python fix_repro_errors.py nb.ipynb @3 --fix-type inplace-reassign --variable train
+    python fix_repro_errors.py nb.ipynb @5 --fix-type model-copy --variable model
+    python fix_repro_errors.py nb.ipynb @7 --fix-type inplace-to-copy --variable df
+
+    # Agent-driven diagnostic split (3 steps):
+    python fix_repro_errors.py nb.ipynb @5 --fix-type set-source --source-file /tmp/mutation.py
+    python fix_repro_errors.py nb.ipynb @5 --fix-type insert-cell-after --source-file /tmp/diag.py
+    python fix_repro_errors.py nb.ipynb @6 --fix-type add-diagnostic
 """
 
 import argparse
@@ -378,37 +392,84 @@ def add_deepcopy_and_rename(
                 set_cell_source(cell, new_cell_source)
 
 
-def split_diagnostic_cell(
+def set_cell_source_op(
     notebook: dict,
     cell_idx: int,
-    diagnostic_lines: Optional[list[int]] = None,
+    new_source: str,
 ) -> None:
     """
-    Add %diagnostic magic to a cell that does inspection/visualization.
-
-    For simple cases, just adds %diagnostic to the entire cell.
-    For complex cases where the cell mixes inspection and mutation,
-    this would need to split the cell (not implemented here - that requires
-    more sophisticated analysis).
+    Primitive: Replace a cell's source code entirely.
 
     Args:
         notebook: The notebook dict
-        cell_idx: Index of the cell to fix
-        diagnostic_lines: Optional list of line indices that are diagnostic
+        cell_idx: Notebook-level index of the cell to modify
+        new_source: New source code for the cell
     """
     cells = notebook.get("cells", [])
     if cell_idx >= len(cells):
-        return
+        raise ValueError(f"Cell index {cell_idx} out of range (notebook has {len(cells)} cells)")
+    set_cell_source(cells[cell_idx], new_source)
+
+
+def insert_cell_after_op(
+    notebook: dict,
+    cell_idx: int,
+    source: str,
+) -> None:
+    """
+    Primitive: Insert a new code cell after the given cell.
+
+    WARNING: This shifts all subsequent cell indices by 1. When applying
+    multiple fixes to the same notebook, process from bottom to top (highest
+    code cell index first) to avoid index invalidation.
+
+    Args:
+        notebook: The notebook dict
+        cell_idx: Notebook-level index of the cell to insert after
+        source: Source code for the new cell
+    """
+    cells = notebook.get("cells", [])
+    if cell_idx >= len(cells):
+        raise ValueError(f"Cell index {cell_idx} out of range (notebook has {len(cells)} cells)")
+
+    template_cell = cells[cell_idx]
+    new_cell = {
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {},
+        "outputs": [],
+        "source": [],
+    }
+    # Generate a unique-ish id if the template has one
+    if "id" in template_cell:
+        import hashlib
+        h = hashlib.md5(source.encode()).hexdigest()[:8]
+        new_cell["id"] = h
+    set_cell_source(new_cell, source)
+    cells.insert(cell_idx + 1, new_cell)
+
+
+def add_diagnostic_magic_op(
+    notebook: dict,
+    cell_idx: int,
+) -> None:
+    """
+    Primitive: Prepend %diagnostic magic to a cell.
+
+    This tells the FlowBook kernel to skip reproducibility tracking for this cell.
+    Only use on cells that are truly read-only (no assignments, no mutations).
+
+    Args:
+        notebook: The notebook dict
+        cell_idx: Notebook-level index of the cell
+    """
+    cells = notebook.get("cells", [])
+    if cell_idx >= len(cells):
+        raise ValueError(f"Cell index {cell_idx} out of range (notebook has {len(cells)} cells)")
 
     target_cell = cells[cell_idx]
     source = get_cell_source(target_cell)
-
-    # Add %diagnostic magic and comment, preserving cell magics (%%time, etc.)
-    fix_comment = f"""{FLOWBOOK_FIX_MARKER} Original error: Diagnostic inspection before mutation
-{FLOWBOOK_FIX_MARKER} Fix: Added %diagnostic to skip reproducibility tracking for this inspection cell
-"""
-
-    new_source = prepend_to_cell_source(source, fix_comment + "%diagnostic\n")
+    new_source = prepend_to_cell_source(source, "%diagnostic\n")
     set_cell_source(target_cell, new_source)
 
 
@@ -730,15 +791,18 @@ def apply_fix(
     cell_id: str,
     fix_type: str,
     variable: Optional[str] = None,
+    source_file: Optional[Path] = None,
 ) -> Path:
     """
     Apply a reproducibility fix to a notebook.
 
     Args:
         notebook_path: Path to the original notebook
-        cell_id: ID of the cell to fix
+        cell_id: ID of the cell to fix (use @N for code cell index)
         fix_type: Type of fix to apply
         variable: Variable name (required for some fix types)
+        source_file: Path to file containing source code (for set-source,
+                     insert-cell-after)
 
     Returns:
         Path to the fixed notebook
@@ -767,9 +831,6 @@ def apply_fix(
             raise ValueError(f"--variable required for {fix_type}")
         add_deepcopy_and_rename(notebook, cell_idx, variable, suffix)
 
-    elif fix_type in ("diagnostic-split", "visualization-split"):
-        split_diagnostic_cell(notebook, cell_idx)
-
     elif fix_type == "variable-reuse":
         if not variable:
             raise ValueError(f"--variable required for {fix_type}")
@@ -790,6 +851,23 @@ def apply_fix(
             raise ValueError(f"--variable required for {fix_type}")
         add_copy_before_structural_assign(notebook, cell_idx, variable, suffix)
 
+    # --- Primitive operations for agent-driven cell splitting ---
+
+    elif fix_type == "set-source":
+        if not source_file:
+            raise ValueError("--source-file required for set-source")
+        new_source = source_file.read_text(encoding="utf-8")
+        set_cell_source_op(notebook, cell_idx, new_source)
+
+    elif fix_type == "insert-cell-after":
+        if not source_file:
+            raise ValueError("--source-file required for insert-cell-after")
+        new_source = source_file.read_text(encoding="utf-8")
+        insert_cell_after_op(notebook, cell_idx, new_source)
+
+    elif fix_type == "add-diagnostic":
+        add_diagnostic_magic_op(notebook, cell_idx)
+
     else:
         raise ValueError(f"Unknown fix type: {fix_type}")
 
@@ -805,24 +883,31 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("notebook", type=Path, help="Path to the notebook")
-    parser.add_argument("cell_id", nargs="?", help="ID of the cell to fix")
+    parser.add_argument("cell_id", nargs="?", help="ID or code cell index (@N) of the cell to fix")
     parser.add_argument(
         "--fix-type",
         choices=[
             "inplace-reassign",
             "sequential-chain",
-            "diagnostic-split",
-            "visualization-split",
             "variable-reuse",
             "model-copy",
             "inplace-to-copy",
             "struct-copy",
+            # Primitive operations for agent-driven fixes
+            "set-source",
+            "insert-cell-after",
+            "add-diagnostic",
         ],
         help="Type of fix to apply",
     )
     parser.add_argument(
         "--variable",
-        help="Variable name (required for most fix types except diagnostic-split)",
+        help="Variable name (required for most fix types)",
+    )
+    parser.add_argument(
+        "--source-file",
+        type=Path,
+        help="Path to file containing source code (for set-source, insert-cell-after)",
     )
     parser.add_argument(
         "--init",
@@ -866,6 +951,7 @@ def main():
             args.cell_id,
             args.fix_type,
             args.variable,
+            args.source_file,
         )
         print(f"Fixed notebook saved to: {fixed_path}")
     except Exception as e:

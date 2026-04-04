@@ -52,10 +52,12 @@ class BaseFlowbookKernel(IPythonKernel):
         self._vfs = VirtualFileSystem()
         # Only track files under the notebook's working directory
         self._vfs.set_notebook_dir(os.getcwd())
-        # Enable tracking-only mode by default (tracks reads/writes without snapshots)
-        self._vfs.enable_tracking_only()
-        # Full VFS mode (with file snapshots) can be enabled via environment variable
-        if os.environ.get("FLOWBOOK_VIRTUAL_FS", "0") == "1":
+        # Full VFS mode by default (writes go to overlay, preserving real FS)
+        # Opt out via FLOWBOOK_NO_VIRTUAL_FS=1 or FLOWBOOK_VIRTUAL_FS=0
+        if os.environ.get("FLOWBOOK_NO_VIRTUAL_FS", "0") == "1" or \
+                os.environ.get("FLOWBOOK_VIRTUAL_FS") == "0":
+            self._vfs.enable_tracking_only()
+        else:
             self._vfs.enable()
 
         # Unified checkpointing (memory + files) - always enabled
