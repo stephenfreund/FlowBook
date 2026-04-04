@@ -2,13 +2,13 @@
 Tests for ReadLoc, WriteLoc, and the ▷ conflict relation.
 
 Tests cover:
-1. All 20 cells of the ▷ matrix (5 write types × 4 read types)
+1. All 25 cells of the ▷ matrix (5 write types × 5 read types)
 2. The ▷▷ write-write conflict relation (write_conflicts_write, wlocs_conflict_wlocs)
 3. Set-level operations (wlocs_conflict_rlocs, has_conflict)
 4. Extraction helpers (var_names, column_map, file_list)
 5. Conversion from TrackingData
 6. display_name() for all types
-7. Worked examples from the plan (independent column writes, etc.)
+7. Worked examples (independent column writes, etc.)
 """
 
 import pytest
@@ -29,15 +29,15 @@ from flowbook.kernel.locations import (
     writelocset_var_names,
     readlocset_to_column_map,
     writelocset_to_column_map,
-    readlocset_to_attr_map,
     readlocset_to_file_list,
     writelocset_to_file_list,
     readlocset_to_list,
     writelocset_to_list,
     tracking_to_readlocset,
     tracking_to_writelocset,
-    COL_ATTRS,
-    ROW_ATTRS,
+    COLS_READ_ATTRS,
+    ROWS_READ_ATTRS,
+    BOTH_READ_ATTRS,
 )
 from flowbook.kernel.loc_ids import LocRef
 from flowbook.kernel_support.models import TrackingData
@@ -63,11 +63,34 @@ class TestReadLoc:
         assert r.qualifier == "df"
         assert r.var_name() == "df"
 
-    def test_attr(self):
-        r = ReadLoc.attr("df", "shape")
-        assert r.type == ReadLocType.ATTR
-        assert r.name == "shape"
+    def test_cols(self):
+        r = ReadLoc.cols("df")
+        assert r.type == ReadLocType.COLS
+        assert r.name == "df"
         assert r.qualifier == "df"
+        assert r.var_name() == "df"
+
+    def test_cols_with_qualifier(self):
+        ref = LocRef(42, "df")
+        r = ReadLoc.cols("df", qualifier=ref)
+        assert r.type == ReadLocType.COLS
+        assert r.name == "df"
+        assert r.qualifier == ref
+        assert r.var_name() == "df"
+
+    def test_rows(self):
+        r = ReadLoc.rows("df")
+        assert r.type == ReadLocType.ROWS
+        assert r.name == "df"
+        assert r.qualifier == "df"
+        assert r.var_name() == "df"
+
+    def test_rows_with_qualifier(self):
+        ref = LocRef(42, "df")
+        r = ReadLoc.rows("df", qualifier=ref)
+        assert r.type == ReadLocType.ROWS
+        assert r.name == "df"
+        assert r.qualifier == ref
         assert r.var_name() == "df"
 
     def test_file(self):
@@ -89,7 +112,8 @@ class TestReadLoc:
     def test_display_name(self):
         assert ReadLoc.var("x").display_name() == "x"
         assert ReadLoc.col("df", "price").display_name() == "df['price']"
-        assert ReadLoc.attr("df", "shape").display_name() == "df.shape"
+        assert ReadLoc.cols("df").display_name() == "df (cols structure)"
+        assert ReadLoc.rows("df").display_name() == "df (rows structure)"
         assert ReadLoc.file("data.csv").display_name() == "File(data.csv)"
 
 
@@ -112,17 +136,16 @@ class TestWriteLoc:
         assert w.qualifier == "df"
         assert w.var_name() == "df"
 
+    def test_cols(self):
+        w = WriteLoc.cols("df")
+        assert w.type == WriteLocType.COLS
+        assert w.name == "df"
+        assert w.var_name() == "df"
+
     def test_rows(self):
         w = WriteLoc.rows("df")
         assert w.type == WriteLocType.ROWS
         assert w.name == "df"
-        assert w.var_name() == "df"
-
-    def test_attr(self):
-        w = WriteLoc.attr("df", "index")
-        assert w.type == WriteLocType.ATTR
-        assert w.name == "index"
-        assert w.qualifier == "df"
         assert w.var_name() == "df"
 
     def test_file(self):
@@ -133,8 +156,8 @@ class TestWriteLoc:
     def test_display_name(self):
         assert WriteLoc.var("x").display_name() == "x"
         assert WriteLoc.col("df", "price").display_name() == "df['price']"
+        assert WriteLoc.cols("df").display_name() == "df (cols changed)"
         assert WriteLoc.rows("df").display_name() == "df (rows changed)"
-        assert WriteLoc.attr("df", "index").display_name() == "df.index"
         assert WriteLoc.file("out.csv").display_name() == "File(out.csv)"
 
 
@@ -162,6 +185,14 @@ class TestWriteConflictsWrite:
     def test_col_different_df(self):
         assert not write_conflicts_write(WriteLoc.col("df", "price"), WriteLoc.col("other", "price"))
 
+    def test_col_vs_cols(self):
+        """Col(df, price) ▷▷ Cols(df) = True."""
+        assert write_conflicts_write(WriteLoc.col("df", "price"), WriteLoc.cols("df"))
+
+    def test_cols_vs_col(self):
+        """Cols(df) ▷▷ Col(df, price) = True."""
+        assert write_conflicts_write(WriteLoc.cols("df"), WriteLoc.col("df", "price"))
+
     def test_col_vs_rows(self):
         """Col(df, price) ▷▷ Rows(df) = True."""
         assert write_conflicts_write(WriteLoc.col("df", "price"), WriteLoc.rows("df"))
@@ -170,17 +201,25 @@ class TestWriteConflictsWrite:
         """Rows(df) ▷▷ Col(df, price) = True."""
         assert write_conflicts_write(WriteLoc.rows("df"), WriteLoc.col("df", "price"))
 
+    def test_cols_same(self):
+        assert write_conflicts_write(WriteLoc.cols("df"), WriteLoc.cols("df"))
+
+    def test_cols_different_df(self):
+        assert not write_conflicts_write(WriteLoc.cols("df"), WriteLoc.cols("other"))
+
     def test_rows_same(self):
         assert write_conflicts_write(WriteLoc.rows("df"), WriteLoc.rows("df"))
 
     def test_rows_different_df(self):
         assert not write_conflicts_write(WriteLoc.rows("df"), WriteLoc.rows("other"))
 
-    def test_attr_same(self):
-        assert write_conflicts_write(WriteLoc.attr("df", "index"), WriteLoc.attr("df", "index"))
+    def test_cols_vs_rows_no_conflict(self):
+        """Cols(df) ▷▷ Rows(df) = False — independent structural domains."""
+        assert not write_conflicts_write(WriteLoc.cols("df"), WriteLoc.rows("df"))
 
-    def test_attr_different(self):
-        assert not write_conflicts_write(WriteLoc.attr("df", "index"), WriteLoc.attr("df", "shape"))
+    def test_rows_vs_cols_no_conflict(self):
+        """Rows(df) ▷▷ Cols(df) = False — symmetric."""
+        assert not write_conflicts_write(WriteLoc.rows("df"), WriteLoc.cols("df"))
 
     def test_file_same(self):
         assert write_conflicts_write(WriteLoc.file("out.csv"), WriteLoc.file("out.csv"))
@@ -193,18 +232,13 @@ class TestWriteConflictsWrite:
         assert not write_conflicts_write(WriteLoc.var("df"), WriteLoc.col("df", "price"))
 
 
-
 # =============================================================================
-# ▷ Conflict Matrix — All 28 cells
+# ▷ Conflict Matrix — All 25 cells (5×5)
 # =============================================================================
 
 
 class TestConflictMatrix_Var:
-    """Var(x) writes: only conflict with Var(x) reads.
-
-    Rebinding detection for Col/Attr readers is handled by always
-    including Var(x) in read sets alongside Col/Attr reads.
-    """
+    """Var(x) writes: only conflict with Var(x) reads."""
 
     def test_var_vs_var_same(self):
         assert write_conflicts_read(WriteLoc.var("x"), ReadLoc.var("x"))
@@ -219,19 +253,20 @@ class TestConflictMatrix_Var:
     def test_var_vs_col_different_df(self):
         assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.col("other", "price"))
 
-    def test_var_vs_attr_no_conflict(self):
-        """Var(x) does NOT directly conflict with Attr reads."""
-        assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.attr("df", "shape"))
+    def test_var_vs_cols_no_conflict(self):
+        """Var(x) does NOT directly conflict with Cols reads."""
+        assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.cols("df"))
 
-    def test_var_vs_attr_different_df(self):
-        assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.attr("other", "shape"))
+    def test_var_vs_rows_no_conflict(self):
+        """Var(x) does NOT directly conflict with Rows reads."""
+        assert not write_conflicts_read(WriteLoc.var("df"), ReadLoc.rows("df"))
 
     def test_var_vs_file(self):
         assert not write_conflicts_read(WriteLoc.var("x"), ReadLoc.file("data.csv"))
 
 
 class TestConflictMatrix_Col:
-    """Col(d, c) writes: column values modified. Conflicts with all COL_ATTRS."""
+    """Col(d, c) writes: column values modified."""
 
     def test_col_vs_var_same_df(self):
         """Column write does NOT conflict with Var read (binding unchanged)."""
@@ -250,24 +285,47 @@ class TestConflictMatrix_Col:
     def test_col_vs_col_different_df(self):
         assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.col("other", "price"))
 
-    def test_col_vs_attr(self):
-        """Col conflicts with ALL COL_ATTRS on the same DataFrame."""
-        for a in COL_ATTRS:
-            assert write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", a)), (
-                f"Col(df, price) should conflict with Attr(df, {a})"
-            )
+    def test_col_vs_cols(self):
+        """Col(df, price) ▷ Cols(df) = d≡d'."""
+        assert write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.cols("df"))
 
-    def test_col_vs_attr_non_col_attr(self):
-        """Col does NOT conflict with attrs outside COL_ATTRS."""
-        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", "index"))
-        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", "len"))
+    def test_col_vs_cols_different_df(self):
+        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.cols("other"))
 
-    def test_col_vs_attr_different_df(self):
-        """Col does NOT conflict with attrs on a different DataFrame."""
-        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("other", "shape"))
+    def test_col_vs_rows_no_conflict(self):
+        """Col(df, price) ▷ Rows(df) = False."""
+        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.rows("df"))
 
     def test_col_vs_file(self):
         assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.file("data.csv"))
+
+
+class TestConflictMatrix_Cols:
+    """Cols(d) writes: column structure changed."""
+
+    def test_cols_vs_var(self):
+        assert not write_conflicts_read(WriteLoc.cols("df"), ReadLoc.var("df"))
+
+    def test_cols_vs_col(self):
+        """Cols(df) ▷ Col(df, price) = d≡d'."""
+        assert write_conflicts_read(WriteLoc.cols("df"), ReadLoc.col("df", "price"))
+
+    def test_cols_vs_col_different_df(self):
+        assert not write_conflicts_read(WriteLoc.cols("df"), ReadLoc.col("other", "price"))
+
+    def test_cols_vs_cols(self):
+        """Cols(df) ▷ Cols(df) = d≡d'."""
+        assert write_conflicts_read(WriteLoc.cols("df"), ReadLoc.cols("df"))
+
+    def test_cols_vs_cols_different_df(self):
+        assert not write_conflicts_read(WriteLoc.cols("df"), ReadLoc.cols("other"))
+
+    def test_cols_vs_rows_no_conflict(self):
+        """Cols(df) ▷ Rows(df) = False — cross-domain independence."""
+        assert not write_conflicts_read(WriteLoc.cols("df"), ReadLoc.rows("df"))
+
+    def test_cols_vs_file(self):
+        assert not write_conflicts_read(WriteLoc.cols("df"), ReadLoc.file("f"))
 
 
 class TestConflictMatrix_Rows:
@@ -288,49 +346,19 @@ class TestConflictMatrix_Rows:
     def test_rows_vs_col_different_df(self):
         assert not write_conflicts_read(WriteLoc.rows("df"), ReadLoc.col("other", "price"))
 
-    def test_rows_vs_attr_row_structure(self):
-        """Row change affects row-structure attributes."""
-        assert write_conflicts_read(WriteLoc.rows("df"), ReadLoc.attr("df", "index"))
-        assert write_conflicts_read(WriteLoc.rows("df"), ReadLoc.attr("df", "shape"))
-        assert write_conflicts_read(WriteLoc.rows("df"), ReadLoc.attr("df", "len"))
-        assert write_conflicts_read(WriteLoc.rows("df"), ReadLoc.attr("df", "empty"))
+    def test_rows_vs_cols_no_conflict(self):
+        """Rows(df) ▷ Cols(df) = False — cross-domain independence."""
+        assert not write_conflicts_read(WriteLoc.rows("df"), ReadLoc.cols("df"))
 
-    def test_rows_vs_attr_col_only(self):
-        """Row change does NOT affect column-only attributes (that aren't also row attrs)."""
-        # columns is COL_ATTRS but NOT ROW_ATTRS
-        assert not write_conflicts_read(WriteLoc.rows("df"), ReadLoc.attr("df", "columns"))
-        # dtypes is COL_ATTRS but NOT ROW_ATTRS
-        assert not write_conflicts_read(WriteLoc.rows("df"), ReadLoc.attr("df", "dtypes"))
+    def test_rows_vs_rows(self):
+        """Rows(df) ▷ Rows(df) = d≡d'."""
+        assert write_conflicts_read(WriteLoc.rows("df"), ReadLoc.rows("df"))
+
+    def test_rows_vs_rows_different_df(self):
+        assert not write_conflicts_read(WriteLoc.rows("df"), ReadLoc.rows("other"))
 
     def test_rows_vs_file(self):
         assert not write_conflicts_read(WriteLoc.rows("df"), ReadLoc.file("f"))
-
-
-class TestConflictMatrix_Attr:
-    """Attr(d, a) writes: attribute changed."""
-
-    def test_attr_vs_var(self):
-        """Attr does NOT conflict with Var read (binding unchanged)."""
-        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.var("df"))
-
-    def test_attr_vs_var_different(self):
-        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.var("other"))
-
-    def test_attr_vs_col(self):
-        """Attr change does NOT affect column value reads."""
-        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.col("df", "price"))
-
-    def test_attr_vs_attr_same(self):
-        assert write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.attr("df", "index"))
-
-    def test_attr_vs_attr_different(self):
-        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.attr("df", "shape"))
-
-    def test_attr_vs_attr_different_df(self):
-        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.attr("other", "index"))
-
-    def test_attr_vs_file(self):
-        assert not write_conflicts_read(WriteLoc.attr("df", "index"), ReadLoc.file("f"))
 
 
 class TestConflictMatrix_File:
@@ -342,8 +370,11 @@ class TestConflictMatrix_File:
     def test_file_vs_col(self):
         assert not write_conflicts_read(WriteLoc.file("out.csv"), ReadLoc.col("df", "price"))
 
-    def test_file_vs_attr(self):
-        assert not write_conflicts_read(WriteLoc.file("out.csv"), ReadLoc.attr("df", "shape"))
+    def test_file_vs_cols(self):
+        assert not write_conflicts_read(WriteLoc.file("out.csv"), ReadLoc.cols("df"))
+
+    def test_file_vs_rows(self):
+        assert not write_conflicts_read(WriteLoc.file("out.csv"), ReadLoc.rows("df"))
 
     def test_file_vs_file_same(self):
         assert write_conflicts_read(WriteLoc.file("data.csv"), ReadLoc.file("data.csv"))
@@ -407,7 +438,7 @@ class TestSetOperations:
 
 
 # =============================================================================
-# Worked Examples from Plan
+# Worked Examples
 # =============================================================================
 
 
@@ -416,21 +447,18 @@ class TestWorkedExamples:
         """
         B writes df["price"], C writes df["qty"].
         Col(df, price) ▷▷ Col(df, qty) = False (independent columns).
-        Write-write overlap is NOT detected for disjoint columns.
         """
         W_B = frozenset({WriteLoc.col("df", "price")})
         W_C = frozenset({WriteLoc.col("df", "qty")})
-
-        # No write-write overlap for disjoint columns
         assert not wlocs_conflict_wlocs(W_B, W_C)
 
-    def test_column_write_conflicts_with_structural_read(self):
+    def test_column_write_conflicts_with_cols_read(self):
         """
-        Col(df, price) ▷ Attr(df, columns) = True.
-        Column writes DO conflict with structural attribute reads directly.
+        Col(df, price) ▷ Cols(df) = True.
+        Column writes DO conflict with column-structure reads.
         """
         W_B = frozenset({WriteLoc.col("df", "price")})
-        R_C = frozenset({ReadLoc.attr("df", "columns")})
+        R_C = frozenset({ReadLoc.cols("df")})
         assert has_conflict(W_B, R_C)
 
     def test_col_write_doesnt_conflict_with_var_read(self):
@@ -442,36 +470,17 @@ class TestWorkedExamples:
         R_C = frozenset({ReadLoc.var("df")})
         assert not has_conflict(W_B, R_C)
 
-    def test_column_modify_affects_structural_attrs(self):
-        """
-        Modifying column values DOES conflict with structural attribute reads.
-        Col(df, price) ▷ Attr(df, shape) = true.
-        Col(df, price) ▷ Attr(df, columns) = true.
-        """
+    def test_column_modify_affects_cols(self):
+        """Col(df, price) ▷ Cols(df) = true."""
         W = frozenset({WriteLoc.col("df", "price")})
-        R = frozenset({ReadLoc.attr("df", "shape"), ReadLoc.attr("df", "columns")})
+        R = frozenset({ReadLoc.cols("df")})
         assert has_conflict(W, R)
 
-    def test_column_modify_affects_value_attrs(self):
-        """
-        Modifying column values DOES conflict with value-dependent attribute reads.
-        Col(df, price) ▷ Attr(df, values) = true.
-        Col(df, price) ▷ Attr(df, T) = true.
-        Col(df, price) ▷ Attr(df, describe) = true.
-        """
+    def test_column_write_does_not_affect_rows(self):
+        """Col(df, price) ▷ Rows(df) = false."""
         W = frozenset({WriteLoc.col("df", "price")})
-        assert has_conflict(W, frozenset({ReadLoc.attr("df", "values")}))
-        assert has_conflict(W, frozenset({ReadLoc.attr("df", "T")}))
-        assert has_conflict(W, frozenset({ReadLoc.attr("df", "describe")}))
-
-    def test_column_write_affects_structure(self):
-        """
-        Writing a column DOES conflict with column-structure attributes.
-        Col(df, new) ▷ Attr(df, columns) = true.
-        """
-        W = frozenset({WriteLoc.col("df", "new")})
-        R = frozenset({ReadLoc.attr("df", "columns")})
-        assert has_conflict(W, R)
+        R = frozenset({ReadLoc.rows("df")})
+        assert not has_conflict(W, R)
 
     def test_row_change_affects_all_columns(self):
         """
@@ -482,12 +491,16 @@ class TestWorkedExamples:
         conflicting = wlocs_conflict_rlocs(W, R)
         assert WriteLoc.rows("df") in conflicting
 
-    def test_index_change_doesnt_affect_columns(self):
-        """
-        Attr(df, index) ▷ Col(df, price) = false.
-        """
-        W = frozenset({WriteLoc.attr("df", "index")})
-        R = frozenset({ReadLoc.col("df", "price")})
+    def test_rows_change_does_not_affect_cols(self):
+        """Rows(df) ▷ Cols(df) = false — cross-domain independence."""
+        W = frozenset({WriteLoc.rows("df")})
+        R = frozenset({ReadLoc.cols("df")})
+        assert not has_conflict(W, R)
+
+    def test_cols_change_does_not_affect_rows(self):
+        """Cols(df) ▷ Rows(df) = false — cross-domain independence."""
+        W = frozenset({WriteLoc.cols("df")})
+        R = frozenset({ReadLoc.rows("df")})
         assert not has_conflict(W, R)
 
     def test_disjoint_column_modify_no_conflict(self):
@@ -510,16 +523,18 @@ class TestExtractionHelpers:
         locs = frozenset({
             ReadLoc.var("x"),
             ReadLoc.col("df", "price"),
-            ReadLoc.attr("df", "shape"),
+            ReadLoc.cols("df"),
+            ReadLoc.rows("df2"),
             ReadLoc.file("data.csv"),
         })
         names = readlocset_var_names(locs)
-        assert names == {"x", "df", "data.csv"}
+        assert names == {"x", "df", "df2", "data.csv"}
 
     def test_writelocset_var_names(self):
         locs = frozenset({
             WriteLoc.var("x"),
             WriteLoc.col("df", "new"),
+            WriteLoc.cols("df"),
             WriteLoc.rows("df2"),
             WriteLoc.file("out.csv"),
         })
@@ -545,16 +560,6 @@ class TestExtractionHelpers:
         })
         result = writelocset_to_column_map(locs)
         assert result == {"df": ["new", "old", "price"]}
-
-    def test_readlocset_to_attr_map(self):
-        locs = frozenset({
-            ReadLoc.attr("df", "shape"),
-            ReadLoc.attr("df", "columns"),
-            ReadLoc.attr("other", "index"),
-            ReadLoc.var("x"),
-        })
-        result = readlocset_to_attr_map(locs)
-        assert result == {"df": ["columns", "shape"], "other": ["index"]}
 
     def test_readlocset_to_file_list(self):
         locs = frozenset({
@@ -589,17 +594,69 @@ class TestTrackingConversion:
             file_writes=set(),
         )
         result = tracking_to_readlocset(td)
-        # Var(x) is always emitted for every variable in reads_before_writes,
-        # alongside any Col/Attr detail.
+        # shape is in BOTH_READ_ATTRS → emits both Cols(df) and Rows(df)
         expected = frozenset({
             ReadLoc.var("df"),
             ReadLoc.var("config"),
             ReadLoc.col("df", "price"),
             ReadLoc.col("df", "qty"),
-            ReadLoc.attr("df", "shape"),
+            ReadLoc.cols("df"),
+            ReadLoc.rows("df"),
             ReadLoc.file("data.csv"),
         })
         assert result == expected
+
+    def test_tracking_to_readlocset_cols_only_attr(self):
+        """Attribute in COLS_READ_ATTRS only produces Cols(d)."""
+        td = TrackingData(
+            reads_before_writes={"df"},
+            writes=set(),
+            column_reads_before_writes={},
+            column_writes={},
+            structural_reads={"df": {"columns"}},
+        )
+        result = tracking_to_readlocset(td)
+        assert ReadLoc.cols("df") in result
+        assert ReadLoc.rows("df") not in result
+
+    def test_tracking_to_readlocset_rows_only_attr(self):
+        """Attribute in ROWS_READ_ATTRS only produces Rows(d)."""
+        td = TrackingData(
+            reads_before_writes={"df"},
+            writes=set(),
+            column_reads_before_writes={},
+            column_writes={},
+            structural_reads={"df": {"index"}},
+        )
+        result = tracking_to_readlocset(td)
+        assert ReadLoc.rows("df") in result
+        assert ReadLoc.cols("df") not in result
+
+    def test_tracking_to_readlocset_both_attr(self):
+        """Attribute in BOTH_READ_ATTRS produces both Cols(d) and Rows(d)."""
+        td = TrackingData(
+            reads_before_writes={"df"},
+            writes=set(),
+            column_reads_before_writes={},
+            column_writes={},
+            structural_reads={"df": {"shape"}},
+        )
+        result = tracking_to_readlocset(td)
+        assert ReadLoc.cols("df") in result
+        assert ReadLoc.rows("df") in result
+
+    def test_tracking_to_readlocset_mixed_attrs(self):
+        """Multiple attrs from different domains."""
+        td = TrackingData(
+            reads_before_writes={"df"},
+            writes=set(),
+            column_reads_before_writes={},
+            column_writes={},
+            structural_reads={"df": {"columns", "index"}},
+        )
+        result = tracking_to_readlocset(td)
+        assert ReadLoc.cols("df") in result
+        assert ReadLoc.rows("df") in result
 
     def test_tracking_to_writelocset(self):
         td = TrackingData(
@@ -618,6 +675,30 @@ class TestTrackingConversion:
             WriteLoc.file("out.csv"),
         })
         assert result == expected
+
+    def test_tracking_to_writelocset_index_mutations(self):
+        """index_mutations produce Rows(d) write."""
+        td = TrackingData(
+            reads_before_writes=set(),
+            writes=set(),
+            column_reads_before_writes={},
+            column_writes={},
+            index_mutations={"df"},
+        )
+        result = tracking_to_writelocset(td)
+        assert WriteLoc.rows("df") in result
+
+    def test_tracking_to_writelocset_dtype_changes(self):
+        """dtype_changes produce Cols(d) write."""
+        td = TrackingData(
+            reads_before_writes=set(),
+            writes=set(),
+            column_reads_before_writes={},
+            column_writes={},
+            dtype_changes={"df": {"price"}},
+        )
+        result = tracking_to_writelocset(td)
+        assert WriteLoc.cols("df") in result
 
     def test_tracking_to_readlocset_empty(self):
         td = TrackingData(
@@ -639,27 +720,31 @@ class TestTrackingConversion:
 
 
 # =============================================================================
-# Attribute constant sanity checks
+# Attribute classification sanity checks
 # =============================================================================
 
 
-class TestAttrConstants:
+class TestAttrClassification:
     def test_shape_in_both(self):
-        """shape and size are in both COL_ATTRS and ROW_ATTRS."""
-        assert "shape" in COL_ATTRS
-        assert "shape" in ROW_ATTRS
-        assert "size" in COL_ATTRS
-        assert "size" in ROW_ATTRS
+        """shape is in BOTH_READ_ATTRS."""
+        assert "shape" in BOTH_READ_ATTRS
 
-    def test_columns_col_only(self):
-        """columns is in COL_ATTRS but not ROW_ATTRS."""
-        assert "columns" in COL_ATTRS
-        assert "columns" not in ROW_ATTRS
+    def test_columns_cols_only(self):
+        """columns is in COLS_READ_ATTRS."""
+        assert "columns" in COLS_READ_ATTRS
 
-    def test_index_row_only(self):
-        """index is in ROW_ATTRS but not COL_ATTRS."""
-        assert "index" in ROW_ATTRS
-        assert "index" not in COL_ATTRS
+    def test_index_rows_only(self):
+        """index is in ROWS_READ_ATTRS."""
+        assert "index" in ROWS_READ_ATTRS
+
+    def test_no_overlap_cols_rows(self):
+        """COLS_READ_ATTRS and ROWS_READ_ATTRS do not overlap."""
+        assert not COLS_READ_ATTRS & ROWS_READ_ATTRS
+
+    def test_no_overlap_with_both(self):
+        """BOTH_READ_ATTRS is disjoint from COLS and ROWS."""
+        assert not BOTH_READ_ATTRS & COLS_READ_ATTRS
+        assert not BOTH_READ_ATTRS & ROWS_READ_ATTRS
 
 
 # =============================================================================
@@ -685,17 +770,11 @@ class TestLocsetToList:
         assert result[1]["name"] == "y"
 
     def test_readlocset_mixed_locref_and_string_qualifier(self):
-        """Sorting col locs where one has LocRef (int) and another has string qualifier.
-
-        Regression: LocRef.loc_id is int, so to_dict() produces qualifier=int.
-        A col loc with a plain string qualifier produces qualifier=str.
-        When both locs have type="col", sorted() compares qualifiers directly,
-        raising TypeError: '<' not supported between instances of 'str' and 'int'.
-        """
+        """Sorting col locs where one has LocRef (int) and another has string qualifier."""
         locref = LocRef(loc_id=42, var_name="df")
         locs = frozenset({
-            ReadLoc.col(locref, "price"),          # LocRef qualifier → int in dict
-            ReadLoc.col("other_df", "qty"),         # string qualifier
+            ReadLoc.col(locref, "price"),
+            ReadLoc.col("other_df", "qty"),
         })
         result = readlocset_to_list(locs)
         assert len(result) == 2
@@ -704,17 +783,14 @@ class TestLocsetToList:
         """Same regression test for writelocset_to_list."""
         locref = LocRef(loc_id=7, var_name="df")
         locs = frozenset({
-            WriteLoc.col(locref, "amount"),         # LocRef qualifier → int in dict
-            WriteLoc.col("other", "total"),          # string qualifier
+            WriteLoc.col(locref, "amount"),
+            WriteLoc.col("other", "total"),
         })
         result = writelocset_to_list(locs)
         assert len(result) == 2
 
     def test_readlocset_integer_column_names(self):
-        """DataFrames with integer column names (e.g., df[0], df[1]).
-
-        Regression test: column name becomes loc.name which can be int.
-        """
+        """DataFrames with integer column names (e.g., df[0], df[1])."""
         locref = LocRef(loc_id=1, var_name="df")
         locs = frozenset({
             ReadLoc.col(locref, 0),
@@ -723,7 +799,6 @@ class TestLocsetToList:
         })
         result = readlocset_to_list(locs)
         assert len(result) == 3
-        # All names should be sortable (str coercion in sort key)
 
     def test_writelocset_integer_column_names(self):
         """Same regression test for writelocset_to_list with int column names."""
@@ -746,8 +821,6 @@ class TestLocsetToList:
         })
         result = readlocset_to_list(locs)
         assert len(result) == 3
-        # str(1) < str(2) < "" doesn't hold, but type comes first in sort key
-        # col < var alphabetically, so col entries come first
         col_results = [d for d in result if d["type"] == "col"]
         var_results = [d for d in result if d["type"] == "var"]
         assert len(col_results) == 2

@@ -5994,7 +5994,7 @@ class TestForwardContaminationStructuralRead:
     Run A→C→B. When B executes, it reads df.shape which includes the column
     added by C. This is not rerun-consistent: top-to-bottom A→B→C would give
     df.shape = (3,1) but A→C→B gives (3,2). NoReadBeforeWrite should catch this
-    because Col(df, x) ▷ Attr(df, shape) = true (shape ∈ COL_ATTRS).
+    because Col(df, x) ▷ Cols(df) = true (shape maps to Cols read).
     """
 
     def setup_method(self):
@@ -6059,7 +6059,7 @@ class TestForwardContaminationStructuralRead:
 
         # NoReadBeforeWrite should FAIL: C (pos 2) adds a column to df,
         # and B (pos 1) reads df.shape which is affected.
-        # Col(df, x) ▷ Attr(df, shape) = true because shape ∈ COL_ATTRS
+        # Col(df, x) ▷ Cols(df) = true (shape maps to Cols read)
         assert result_b.has_errors(), (
             f"B should have NoReadBeforeWrite error. "
             f"B reads Attr(df, shape), C wrote Col(df, x). "
@@ -6377,7 +6377,7 @@ class TestStructuralProvenanceIntegration:
     def test_column_value_modify_contaminates_shape_read(self):
         """A creates df, C modifies existing column value, B reads df.shape.
 
-        Col ▷ Attr(shape) = true — Col conflicts with all COL_ATTRS including shape.
+        Col ▷ Cols = true — column writes conflict with column-structure reads.
         """
         import pandas as pd
         from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker

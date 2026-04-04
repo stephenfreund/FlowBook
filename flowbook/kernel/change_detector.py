@@ -491,16 +491,11 @@ def changes_to_write_locs(
             locs.add(WriteLoc.rows(change.variable, qualifier=q))
         elif isinstance(change, IndexChanged):
             q = get_qualifier(change.variable, namespace, stable_map)
-            locs.add(WriteLoc.attr(q, "index"))
-            # Derived: axes = [index, columns], so index change affects axes
-            locs.add(WriteLoc.attr(q, "axes"))
+            locs.add(WriteLoc.rows(change.variable, qualifier=q))
         elif isinstance(change, DtypeChanged):
             q = get_qualifier(change.variable, namespace, stable_map)
             locs.add(WriteLoc.col(q, change.column))
-            locs.add(WriteLoc.attr(q, "dtypes"))
-            # Derived: dtype change affects array representation and transpose
-            locs.add(WriteLoc.attr(q, "values"))
-            locs.add(WriteLoc.attr(q, "T"))
+            locs.add(WriteLoc.cols(change.variable, qualifier=q))
     return frozenset(locs)
 
 

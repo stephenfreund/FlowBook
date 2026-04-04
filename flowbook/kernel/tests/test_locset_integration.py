@@ -536,8 +536,12 @@ class TestLocSetConversionIntegration:
         # Var(df) IS present alongside column reads
         assert has_var_loc, f"Expected Var(df) in reads alongside Col reads, got: {stored_reads}"
 
-    def test_structural_reads_produce_attr_locs(self):
-        """When structural_reads are provided, reads should include Attr locs."""
+    def test_structural_reads_produce_cols_and_rows_locs(self):
+        """When structural_reads are provided, reads should include Cols/Rows locs.
+
+        'columns' is a COLS_READ_ATTR → Cols(df).
+        'shape' is a BOTH_READ_ATTR → both Cols(df) and Rows(df).
+        """
         df = pd.DataFrame({"x": [1], "y": [2]})
         self.helper.execute_cell(
             "a", {"df": df.copy()}, {"df": df.copy()},
@@ -545,12 +549,16 @@ class TestLocSetConversionIntegration:
         )
 
         stored_reads = self.helper.sdc._notebook_state.reads.get("a", frozenset())
-        attr_names = {
-            r.name for r in stored_reads
-            if r.type.value == "attr" and r.qualifier == "df"
-        }
-        assert "columns" in attr_names
-        assert "shape" in attr_names
+        has_cols = any(
+            r.type.value == "cols" and r.var_name() == "df"
+            for r in stored_reads
+        )
+        has_rows = any(
+            r.type.value == "rows" and r.var_name() == "df"
+            for r in stored_reads
+        )
+        assert has_cols, f"Expected Cols(df) in reads, got: {stored_reads}"
+        assert has_rows, f"Expected Rows(df) in reads (from 'shape'), got: {stored_reads}"
 
     def test_var_only_read_produces_var_loc(self):
         """When no column/structural detail, reads should be Var locs."""
@@ -617,9 +625,9 @@ class TestCommentOnlyCellClearsRW:
 class TestColStaleness:
     """
     Column writes (whether adding a new column or modifying an existing one)
-    both produce Col in the diff. Col conflicts with all COL_ATTRS attribute
-    reads (shape, columns, dtypes, etc.), so behavior is consistent across
-    first and subsequent runs.
+    both produce Col in the diff. Col conflicts with Cols reads
+    (column structure), so behavior is consistent across first and
+    subsequent runs.
     """
 
     def setup_method(self):
@@ -646,16 +654,15 @@ class TestColStaleness:
             reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y", "z"}},
             continue_on_violation=True)
 
-        # C reads shape/columns → stale because z was added (Col ▷ Attr = true)
+        # C reads shape/columns → stale because z was added (Col ▷ Cols = true)
         assert "c" in result.stale_cells, \
-            "C should be stale: Col(df, z) conflicts with Attr(df, shape)"
+            "C should be stale: Col(df, z) conflicts with Cols(df)"
 
     def test_col_modify_stales_shape_reader(self):
         """Modifying an existing column stales cells reading df.shape.
 
-        Col now conflicts with all COL_ATTRS (shape, columns, dtypes, etc.),
-        so any column write -- whether add or modify -- invalidates structural
-        attribute readers on the same DataFrame.
+        Col conflicts with Cols reads, so any column write -- whether add
+        or modify -- invalidates column-structure readers on the same DataFrame.
         """
         df = pd.DataFrame({"x": [1, 2, 3]})
         self.helper.execute_cell("a", {}, {"df": df.copy()}, writes={"df"}, column_writes={"df": {"x"}})
@@ -675,16 +682,16 @@ class TestColStaleness:
             reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y"}},
             continue_on_violation=True)
 
-        # C reads shape/columns → stale because Col now conflicts with COL_ATTRS
+        # C reads shape/columns → stale because Col ▷ Cols = true
         assert "c" in result.stale_cells, \
-            "C should be stale: Col(df, y) conflicts with Attr(df, shape)"
+            "C should be stale: Col(df, y) conflicts with Cols(df)"
 
     def test_first_run_add_then_second_run_modify(self):
         """On first run B adds column → C stale. On second run B modifies → C still stale.
 
-        Col now conflicts with all COL_ATTRS, so the behavior is consistent
+        Col conflicts with Cols reads, so the behavior is consistent
         across first and subsequent runs: any column write (add or modify)
-        invalidates structural attribute readers.
+        invalidates column-structure readers.
         """
         df = pd.DataFrame({"x": [1, 2, 3]})
         self.helper.execute_cell("a", {}, {"df": df.copy()}, writes={"df"}, column_writes={"df": {"x"}})
@@ -708,9 +715,9 @@ class TestColStaleness:
             reads={"df"}, writes={"df"}, column_reads={"df": set()}, column_writes={"df": {"y"}},
             continue_on_violation=True)
 
-        # C IS stale: Col now conflicts with COL_ATTRS, consistent across runs
+        # C IS stale: Col ▷ Cols = true, consistent across runs
         assert "c" in result.stale_cells, \
-            "On second run, column modify should stale shape reader (Col ▷ Attr = true)"
+            "On second run, column modify should stale shape reader (Col ▷ Cols = true)"
 
         # B has column_reads={"df": set()} → empty column detail means Var(df) is
         # suppressed from read set. B has no recorded read locs for df, so
