@@ -457,13 +457,13 @@ Read locations describe what a cell accessed:
 r ∈ ReadLoc ::= Var(x) | Col(d, c) | Cols(d) | Rows(d) | File(p)
 ```
 
-| Constructor | Meaning                        | Example                    |
-| ----------- | ------------------------------ | -------------------------- |
-| Var(x)      | Whole variable x               | df, config                 |
-| Col(d, c)   | Column c of DataFrame d        | df["price"]                |
-| Cols(d)     | Column structure of DataFrame d | df.columns, df.dtypes      |
-| Rows(d)     | Row structure of DataFrame d   | df.index, len(df)          |
-| File(p)     | File at path p                 | data.csv                   |
+| Constructor | Meaning                         | Example               |
+| ----------- | ------------------------------- | --------------------- |
+| Var(x)      | Whole variable x                | df, config            |
+| Col(d, c)   | Column c of DataFrame d         | df["price"]           |
+| Cols(d)     | Column structure of DataFrame d | df.columns, df.dtypes |
+| Rows(d)     | Row structure of DataFrame d    | df.index, len(df)     |
+| File(p)     | File at path p                  | data.csv              |
 
 Note: Cross-cutting attributes (shape, values, etc.) emit both Cols and Rows reads.
 
@@ -477,13 +477,13 @@ Write locations describe what changed and _how_:
 w ∈ WriteLoc ::= Var(x) | Col(d, c) | Cols(d) | Rows(d) | File(p)
 ```
 
-| Constructor  | Meaning                             | Example               |
-| ------------ | ----------------------------------- | --------------------- |
-| Var(x)       | Variable completely replaced        | x = 42                |
-| Col(d, c)    | Column written (add, modify, or delete) | df["price"] = [1,2,3] |
-| Cols(d)      | Column structure changed            | dtype changes         |
-| Rows(d)      | Rows added/removed                  | df.append(...)        |
-| File(p)      | File written                        | df.to_csv("out.csv")  |
+| Constructor | Meaning                                 | Example               |
+| ----------- | --------------------------------------- | --------------------- |
+| Var(x)      | Variable completely replaced            | x = 42                |
+| Col(d, c)   | Column written (add, modify, or delete) | df["price"] = [1,2,3] |
+| Cols(d)     | Column structure changed                | dtype changes         |
+| Rows(d)     | Rows added/removed                      | df.append(...)        |
+| File(p)     | File written                            | df.to_csv("out.csv")  |
 
 **Code:** `WriteLoc` in `kernel/locations.py`, `changes_to_write_locs()` converts Change objects
 
@@ -504,18 +504,18 @@ precision.
 
 Key rules:
 
-| Write        | Read        | Conflicts?                                                    |
-| ------------ | ----------- | ------------------------------------------------------------- |
-| Var(x)       | Var(x)      | **Yes** (replacing variable invalidates binding read)         |
-| Var(x)       | Col(d, c)   | **No** (rebinding caught via Var(x) read always in read set)  |
-| Col(d, c)    | Var(x)      | **No** (column write doesn't change binding)                  |
-| Col(d, c)    | Col(d, c')  | Only if c = c' (column-level precision)                       |
-| Col(d, c)    | Cols(d)     | **Yes** if d ≡ d' (column write affects column structure)     |
-| Cols(d)      | Col(d, c)   | **Yes** if d ≡ d' (structure change affects column readers)   |
-| Cols(d)      | Cols(d)     | **Yes** if d ≡ d'                                             |
-| Rows(d)      | Var(x)      | **No** (row change doesn't change binding)                    |
-| Rows(d)      | Col(d, c)   | **Yes** (row change affects all column data)                  |
-| Rows(d)      | Rows(d)     | **Yes** if d ≡ d'                                             |
+| Write     | Read       | Conflicts?                                                   |
+| --------- | ---------- | ------------------------------------------------------------ |
+| Var(x)    | Var(x)     | **Yes** (replacing variable invalidates binding read)        |
+| Var(x)    | Col(d, c)  | **No** (rebinding caught via Var(x) read always in read set) |
+| Col(d, c) | Var(x)     | **No** (column write doesn't change binding)                 |
+| Col(d, c) | Col(d, c') | Only if c = c' (column-level precision)                      |
+| Col(d, c) | Cols(d)    | **Yes** if d ≡ d' (column write affects column structure)    |
+| Cols(d)   | Col(d, c)  | **Yes** if d ≡ d' (structure change affects column readers)  |
+| Cols(d)   | Cols(d)    | **Yes** if d ≡ d'                                            |
+| Rows(d)   | Var(x)     | **No** (row change doesn't change binding)                   |
+| Rows(d)   | Col(d, c)  | **Yes** (row change affects all column data)                 |
+| Rows(d)   | Rows(d)    | **Yes** if d ≡ d'                                            |
 
 Note: Cols ▷ Rows = false and Rows ▷ Cols = false (column structure and row structure are independent dimensions).
 
@@ -911,13 +911,13 @@ post-hoc injection step.
 
 **Conversion to WriteLocs** (`tracking_to_writelocset()`):
 
-| TrackingData field   | WriteLoc(s) produced                                  |
-| -------------------- | ----------------------------------------------------- |
-| `column_writes`      | `Col(d, c)` for each column                           |
-| `column_deletions`   | `Col(d, c)` for each deleted column                   |
-| `row_mutations`      | `Rows(d)`                                             |
-| `index_mutations`    | `Rows(d)`                                              |
-| `dtype_changes`      | `Cols(d)`                                              |
+| TrackingData field | WriteLoc(s) produced                |
+| ------------------ | ----------------------------------- |
+| `column_writes`    | `Col(d, c)` for each column         |
+| `column_deletions` | `Col(d, c)` for each deleted column |
+| `row_mutations`    | `Rows(d)`                           |
+| `index_mutations`  | `Rows(d)`                           |
+| `dtype_changes`    | `Cols(d)`                           |
 
 Since these WriteLocs come from tracking (not from diffing), they are always present
 on re-execution. This solves the empty-diff re-execution problem without requiring

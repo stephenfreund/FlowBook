@@ -23,13 +23,13 @@ ReadLoc ::= Var(x)        -- whole-variable read
           | File(p)       -- file at path p
 ```
 
-| Constructor | Fields                  | Semantics                                                |
-| ----------- | ----------------------- | -------------------------------------------------------- |
-| `Var(x)`    | name = x                | Cell read variable `x` as an opaque value                |
-| `Col(d, c)` | qualifier = d, name = c | Cell read column `c` of DataFrame `d`                    |
-| `Cols(d)`   | qualifier = d, name = d | Cell read column structure of DataFrame `d`              |
-| `Rows(d)`   | qualifier = d, name = d | Cell read row structure of DataFrame `d`                 |
-| `File(p)`   | name = p                | Cell read file at path `p`                               |
+| Constructor | Fields                  | Semantics                                   |
+| ----------- | ----------------------- | ------------------------------------------- |
+| `Var(x)`    | name = x                | Cell read variable `x` as an opaque value   |
+| `Col(d, c)` | qualifier = d, name = c | Cell read column `c` of DataFrame `d`       |
+| `Cols(d)`   | qualifier = d, name = d | Cell read column structure of DataFrame `d` |
+| `Rows(d)`   | qualifier = d, name = d | Cell read row structure of DataFrame `d`    |
+| `File(p)`   | name = p                | Cell read file at path `p`                  |
 
 **Granularity rule:** If a variable has column-level or structural-level read detail, it is represented _only_ by those finer-grained locs. `Var(x)` is emitted only for variables with no column/structural detail — plain scalars, lists, dicts, etc. This avoids double-counting: a cell that reads `df["price"]` produces `Col(df, price)`, not both `Var(df)` and `Col(df, price)`.
 
@@ -45,13 +45,13 @@ WriteLoc ::= Var(x)        -- variable completely replaced
            | File(p)       -- file at path p written
 ```
 
-| Constructor | Fields                  | Semantics                                                      |
-| ----------- | ----------------------- | -------------------------------------------------------------- |
-| `Var(x)`    | name = x                | Variable `x` was reassigned or is a non-DataFrame mutation     |
+| Constructor | Fields                  | Semantics                                                        |
+| ----------- | ----------------------- | ---------------------------------------------------------------- |
+| `Var(x)`    | name = x                | Variable `x` was reassigned or is a non-DataFrame mutation       |
 | `Col(d, c)` | qualifier = d, name = c | Column `c` of DataFrame `d` was written (add, modify, or delete) |
-| `Cols(d)`   | qualifier = d, name = d | Column structure of DataFrame `d` changed (dtypes, etc.)       |
-| `Rows(d)`   | qualifier = d, name = d | Rows were added to or removed from DataFrame `d`              |
-| `File(p)`   | name = p                | File at path `p` was written                                   |
+| `Cols(d)`   | qualifier = d, name = d | Column structure of DataFrame `d` changed (dtypes, etc.)         |
+| `Rows(d)`   | qualifier = d, name = d | Rows were added to or removed from DataFrame `d`                 |
+| `File(p)`   | name = p                | File at path `p` was written                                     |
 
 ## When Each Location Is Generated
 
@@ -59,13 +59,13 @@ WriteLoc ::= Var(x)        -- variable completely replaced
 
 Read locations are recorded by runtime instrumentation during cell execution. FlowBook wraps DataFrame/Series access to observe what each cell touches.
 
-| ReadLoc     | Generated when                                                                  | Examples                                                  |
-| ----------- | ------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `Var(x)`    | Variable `x` is read and has no column/structural detail (scalars, lists, etc.) | `y = x + 1`, `print(config)`, `len(my_list)`              |
-| `Col(d, c)` | Column `c` of DataFrame `d` is accessed for computation                         | `df['price'].sum()`, `df.price.mean()`, `df.loc[:, 'x']`  |
-| `Cols(d)`   | A column-structure attribute is explicitly accessed                              | `df.columns`, `df.dtypes`, `df.keys()`, `for col in df:`  |
-| `Rows(d)`   | A row-structure attribute is explicitly accessed                                 | `df.index`, `len(df)`, `df.empty`                          |
-| `File(p)`   | A file at path `p` is read before being written in the same cell                | `pd.read_csv('data.csv')`, `open('config.json').read()`   |
+| ReadLoc     | Generated when                                                                  | Examples                                                 |
+| ----------- | ------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `Var(x)`    | Variable `x` is read and has no column/structural detail (scalars, lists, etc.) | `y = x + 1`, `print(config)`, `len(my_list)`             |
+| `Col(d, c)` | Column `c` of DataFrame `d` is accessed for computation                         | `df['price'].sum()`, `df.price.mean()`, `df.loc[:, 'x']` |
+| `Cols(d)`   | A column-structure attribute is explicitly accessed                             | `df.columns`, `df.dtypes`, `df.keys()`, `for col in df:` |
+| `Rows(d)`   | A row-structure attribute is explicitly accessed                                | `df.index`, `len(df)`, `df.empty`                        |
+| `File(p)`   | A file at path `p` is read before being written in the same cell                | `pd.read_csv('data.csv')`, `open('config.json').read()`  |
 
 **Cross-cutting attributes.** Some attributes reveal both column and row structure — `df.shape`, `df.values`, `df.T`, `df.axes`, `df.size`. For these, the tracking layer emits _both_ `Cols(d)` and `Rows(d)`. This ensures the read is sensitive to structural changes on either dimension.
 
@@ -79,13 +79,13 @@ Write locations come from two sources: (1) diffing memory checkpoints taken befo
 
 The `change_detector` module parses the structured diff tree into typed `Change` objects, which are then converted to `WriteLoc` values. Structural mutations (row changes, index changes, dtype changes, column deletions) are recorded at operation time by monkey patches in `column_tracking.py` and flow through `TrackingData` into `tracking_to_writelocset()`.
 
-| WriteLoc    | Detected when                                                           | Examples                                                       |
-| ----------- | ----------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `Var(x)`    | Variable `x` was reassigned, or a non-DataFrame object mutated          | `x = 10`, `config['key'] = val`, `df = pd.DataFrame(...)`      |
-| `Col(d, c)` | Column `c` was added, modified, or deleted                              | `df['price'] *= 1.1`, `df['new'] = vals`, `del df['old']`      |
-| `Cols(d)`   | Column structure changed: dtype change recorded by monkey patch          | `df['x'] = df['x'].astype(float)`, `df.rename(columns=...)`   |
-| `Rows(d)`   | Row mutations or index changes recorded by monkey patch                  | `df.loc[len(df)] = row`, `pd.concat(...)`, `df.reset_index()` |
-| `File(p)`   | File at path `p` was written during execution                           | `df.to_csv('out.csv')`, `open('result.json', 'w').write(...)`  |
+| WriteLoc    | Detected when                                                   | Examples                                                      |
+| ----------- | --------------------------------------------------------------- | ------------------------------------------------------------- |
+| `Var(x)`    | Variable `x` was reassigned, or a non-DataFrame object mutated  | `x = 10`, `config['key'] = val`, `df = pd.DataFrame(...)`     |
+| `Col(d, c)` | Column `c` was added, modified, or deleted                      | `df['price'] *= 1.1`, `df['new'] = vals`, `del df['old']`     |
+| `Cols(d)`   | Column structure changed: dtype change recorded by monkey patch | `df['x'] = df['x'].astype(float)`, `df.rename(columns=...)`   |
+| `Rows(d)`   | Row mutations or index changes recorded by monkey patch         | `df.loc[len(df)] = row`, `pd.concat(...)`, `df.reset_index()` |
+| `File(p)`   | File at path `p` was written during execution                   | `df.to_csv('out.csv')`, `open('result.json', 'w').write(...)` |
 
 `DtypeChanged(d, c)` produces _two_ write locs: `Col(d, c)` (the column's data is now a different type) and `Cols(d)` (the dtype metadata changed).
 
@@ -102,12 +102,12 @@ This is a 5 x 5 matrix — 5 write types against 5 read types — and it is the 
 > **`True`** means the write invalidates the read (the cell that did the read is now stale).
 
 | Write `w` ↓ \ Read `r` → | **Var(x')** | **Col(d', c')**       | **Cols(d')** | **Rows(d')** | **File(p')** |
-| ------------------------- | ----------- | --------------------- | ------------ | ------------ | ------------ |
-| **Var(x)**                | `x = x'`    | —                     | —            | —            | —            |
-| **Col(d, c)**             | —           | `d ≡ d'` AND `c = c'` | `d ≡ d'`     | —            | —            |
-| **Cols(d)**               | —           | `d ≡ d'`              | `d ≡ d'`     | —            | —            |
-| **Rows(d)**               | —           | `d ≡ d'`              | —            | `d ≡ d'`     | —            |
-| **File(p)**               | —           | —                     | —            | —            | `p = p'`     |
+| ------------------------ | ----------- | --------------------- | ------------ | ------------ | ------------ |
+| **Var(x)**               | `x = x'`    | —                     | —            | —            | —            |
+| **Col(d, c)**            | —           | `d ≡ d'` AND `c = c'` | `d ≡ d'`     | —            | —            |
+| **Cols(d)**              | —           | `d ≡ d'`              | `d ≡ d'`     | —            | —            |
+| **Rows(d)**              | —           | `d ≡ d'`              | —            | `d ≡ d'`     | —            |
+| **File(p)**              | —           | —                     | —            | —            | `p = p'`     |
 
 (**—** = never conflicts)
 
@@ -133,13 +133,13 @@ The system uses a direct write-write conflict relation — **▷▷** (`write_co
 
 `write_conflicts_write(w1, w2)` answers: **do writes `w1` and `w2` overlap?** An entry shows the condition under which `w₁ ▷▷ w₂` holds — i.e., executing cell `i` (row) makes cell `j`'s write (column) stale. Comparison operators are the same as in the read-write matrix above: `≡` for DataFrame identity, `=` for string equality.
 
-| w₁ ↓ \ w₂ →  | **Var(x')**  | **Col(d', c')**       | **Cols(d')** | **Rows(d')** | **File(p')** |
-| ------------- | ------------ | --------------------- | ------------ | ------------ | ------------ |
-| **Var(x)**    | `x = x'`     | —                     | —            | —            | —            |
-| **Col(d, c)** | —            | `d ≡ d'` AND `c = c'` | `d ≡ d'`     | `d ≡ d'`     | —            |
-| **Cols(d)**   | —            | `d ≡ d'`              | `d ≡ d'`     | —            | —            |
-| **Rows(d)**   | —            | `d ≡ d'`              | —            | `d ≡ d'`     | —            |
-| **File(p)**   | —            | —                     | —            | —            | `p = p'`     |
+| w₁ ↓ \ w₂ →   | **Var(x')** | **Col(d', c')**       | **Cols(d')** | **Rows(d')** | **File(p')** |
+| ------------- | ----------- | --------------------- | ------------ | ------------ | ------------ |
+| **Var(x)**    | `x = x'`    | —                     | —            | —            | —            |
+| **Col(d, c)** | —           | `d ≡ d'` AND `c = c'` | `d ≡ d'`     | `d ≡ d'`     | —            |
+| **Cols(d)**   | —           | `d ≡ d'`              | `d ≡ d'`     | —            | —            |
+| **Rows(d)**   | —           | `d ≡ d'`              | —            | `d ≡ d'`     | —            |
+| **File(p)**   | —           | —                     | —            | —            | `p = p'`     |
 
 (**—** = no write-write conflict)
 
