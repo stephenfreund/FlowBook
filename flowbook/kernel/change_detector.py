@@ -479,10 +479,10 @@ def changes_to_write_locs(
             locs.add(WriteLoc.col(q, change.column))
         elif isinstance(change, ColumnAdded):
             q = get_qualifier(change.variable, namespace, stable_map)
-            locs.add(WriteLoc.col_add(q, change.column))
+            locs.add(WriteLoc.col(q, change.column))
         elif isinstance(change, ColumnRemoved):
             q = get_qualifier(change.variable, namespace, stable_map)
-            locs.add(WriteLoc.col_del(q, change.column))
+            locs.add(WriteLoc.col(q, change.column))
         elif isinstance(change, RowsAdded):
             q = get_qualifier(change.variable, namespace, stable_map)
             locs.add(WriteLoc.rows(change.variable, qualifier=q))

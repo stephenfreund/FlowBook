@@ -260,7 +260,7 @@ from flowbook.kernel.notebook_state import NotebookState
 from flowbook.kernel.change_detector import detect_changes, changes_to_write_locs
 from flowbook.kernel.locations import (
     WriteLoc, WriteLocType, WriteLocSet, ReadLocSet,
-    wlocs_conflict_rlocs, output_set,
+    wlocs_conflict_rlocs, wlocs_conflict_wlocs,
     tracking_to_readlocset, tracking_to_writelocset,
     readlocset_to_list, writelocset_to_list,
 )
@@ -633,7 +633,7 @@ class ReproducibilityEnforcer:
                     cell_write_locs = self._notebook_state.writes.get(cell_id, frozenset())
 
                     read_conflicting = wlocs_conflict_rlocs(deleted_wlocs, cell_read_locs)
-                    write_conflicting = wlocs_conflict_rlocs(deleted_wlocs, output_set(cell_write_locs))
+                    write_conflicting = wlocs_conflict_wlocs(deleted_wlocs, cell_write_locs)
 
                     if read_conflicting or write_conflicting:
                         if cell_id not in newly_stale:
@@ -978,6 +978,10 @@ class ReproducibilityEnforcer:
             column_reads_before_writes=expanded_column_reads,
             column_writes=expanded_column_writes,
             structural_reads=expanded_structural_reads,
+            row_mutations=tracking.row_mutations,
+            index_mutations=tracking.index_mutations,
+            dtype_changes=tracking.dtype_changes,
+            column_deletions=tracking.column_deletions,
             file_reads_before_writes=tracking.file_reads_before_writes,
             file_writes=tracking.file_writes,
         )
@@ -1299,7 +1303,7 @@ class ReproducibilityEnforcer:
         # W_i_current: current writes at variable-name granularity.
         # Must include DataFrame names from tracking.column_writes to be
         # consistent with how W_i_old is computed (via writelocset_var_names
-        # on the stored WriteLocSet, which extracts 'df' from Col/ColAdd locs).
+        # on the stored WriteLocSet, which extracts 'df' from Col locs).
         # tracking.column_writes records column mutations (df['col'] = ...)
         # even when the diff detects no change (same values re-written).
         # Without this, 'df' appears in W_i_old but not W_i_current, causing
@@ -1458,92 +1462,6 @@ class ReproducibilityEnforcer:
 
         return current_diff, typed_changes
 
-    def _inject_structural_writes(
-        self,
-        W: WriteLocSet,
-        cell_id: str,
-        namespace: Optional[dict],
-    ) -> WriteLocSet:
-        """Inject structural WriteLocs from df.attrs provenance.
-
-        On re-execution, checkpoint diffs miss idempotent structural changes:
-        ColumnAdded degrades to ColumnModified, RowsAdded/IndexChanged/DtypeChanged
-        vanish entirely. Provenance recorded during execution (via monkey patches)
-        remembers the original structural effects.
-
-        Upgrades/injections performed:
-        1. Col → ColAdd: if provenance says this cell added the column
-        2. Inject ColDel: if provenance says this cell deleted a column
-        3. Inject Rows: if provenance says this cell mutated rows
-        4. Inject Attr(index) + Attr(axes): if provenance says this cell mutated the index
-        5. Inject Attr(dtypes) + Attr(values) + Attr(T): if provenance says this cell changed a dtype
-
-        This is idempotent — applying it to already-correct WriteLocs is harmless.
-        """
-        if namespace is None or not isinstance(namespace, dict):
-            return W
-
-        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
-
-        upgraded: Set[WriteLoc] = set()
-        seen_vars: Set[str] = set()
-
-        for w in W:
-            var_name = w.var_name()
-            if var_name:
-                seen_vars.add(var_name)
-
-            # 1. Col → ColAdd upgrade
-            if w.type == WriteLocType.COL:
-                df = namespace.get(var_name) if var_name else None
-                if df is not None and isinstance(df, pd.DataFrame):
-                    if DataFrameProvenanceTracker.is_column_added_by(df, w.name, cell_id):
-                        upgraded.add(WriteLoc.col_add(w.qualifier, w.name))
-                        continue
-            upgraded.add(w)
-
-        # Inject structural WriteLocs from provenance for each DataFrame variable.
-        # We must scan ALL DataFrames in namespace, not just those in W —
-        # on re-execution, W may be empty (idempotent diff) but provenance persists.
-        df_vars = set()
-        for var_name, val in namespace.items():
-            if isinstance(val, pd.DataFrame):
-                df_vars.add(var_name)
-        df_vars.update(seen_vars)
-
-        for var_name in df_vars:
-            df = namespace.get(var_name)
-            if df is None or not isinstance(df, pd.DataFrame):
-                continue
-
-            prov = DataFrameProvenanceTracker.get_provenance(df)
-            if prov is None:
-                continue
-
-            # 2. Inject ColDel for columns this cell deleted
-            for col, deleter_id in prov.col_deletions.items():
-                if deleter_id == cell_id:
-                    upgraded.add(WriteLoc.col_del(var_name, col))
-
-            # 3. Inject Rows if this cell mutated rows
-            if cell_id in prov.row_mutators:
-                upgraded.add(WriteLoc.rows(var_name))
-
-            # 4. Inject Attr(index) + Attr(axes) if this cell mutated the index
-            if cell_id in prov.index_mutators:
-                upgraded.add(WriteLoc.attr(var_name, "index"))
-                upgraded.add(WriteLoc.attr(var_name, "axes"))
-
-            # 5. Inject Attr(dtypes) + Attr(values) + Attr(T) for dtype changes
-            for col, changer_id in prov.dtype_origins.items():
-                if changer_id == cell_id:
-                    upgraded.add(WriteLoc.attr(var_name, "dtypes"))
-                    upgraded.add(WriteLoc.attr(var_name, "values"))
-                    upgraded.add(WriteLoc.attr(var_name, "T"))
-                    break  # Only need to inject once per DataFrame
-
-        return frozenset(upgraded)
-
     def _check_forward_contamination(
         self,
         cell_id: str,
@@ -1561,8 +1479,8 @@ class ReproducibilityEnforcer:
         Prefers diff-based WriteLocSet (from typed_changes) when available
         for column-level precision, falls back to tracking-based writes.
 
-        Uses df.attrs provenance to inject structural WriteLocs (ColAdd,
-        ColDel, Rows, Attr(index), Attr(dtypes)) that checkpoint diffs
+        Uses df.attrs provenance to inject structural WriteLocs (Rows,
+        Attr(index), Attr(dtypes)) that checkpoint diffs
         miss on re-execution, ensuring structural conflicts are detected.
         """
         R_i = tracking_to_readlocset(tracking, namespace, self._stable_map)
@@ -1579,10 +1497,6 @@ class ReproducibilityEnforcer:
                 W_later = changes_to_write_locs(later_changes, namespace, self._stable_map)
             else:
                 W_later = self._notebook_state.writes.get(later_cell_id, frozenset())
-
-            # Inject structural WriteLocs from provenance BEFORE emptiness check —
-            # on re-execution, W_later may be empty but provenance persists.
-            W_later = self._inject_structural_writes(W_later, later_cell_id, namespace)
 
             if not W_later:
                 continue
@@ -1622,10 +1536,6 @@ class ReproducibilityEnforcer:
         Only checks against CLEAN cells per [Inst-Run] semantics.
         """
         W_i_diff = changes_to_write_locs(typed_changes, namespace, self._stable_map) if typed_changes else frozenset()
-
-        # Inject structural WriteLocs from provenance BEFORE emptiness check —
-        # on re-execution, typed_changes may be empty but provenance persists.
-        W_i_diff = self._inject_structural_writes(W_i_diff, cell_id, namespace)
 
         if not W_i_diff:
             return None
@@ -1902,7 +1812,7 @@ class ReproducibilityEnforcer:
         or writes, using the ▷ relation for column-level precision.
 
         Uses typed Change objects (when available) for precise WriteLoc types:
-        ColAdd vs Col vs ColDel matters because ColAdd conflicts with Attr reads
+        Col conflicts with same-column reads AND Attr reads in COL_ATTRS
         (shape, columns) while Col does not.
 
         Formal ref: FORMAL_DEVELOPMENT.md §3.3, §10.1
@@ -1914,28 +1824,9 @@ class ReproducibilityEnforcer:
 
         # Build WriteLocSet for ▷-based staleness checks.
         # Base: use tracking-based column info (column_changed) for column-level precision.
-        # Augment: add ColAdd/ColDel from typed changes (diff-based) when available,
+        # Augment: add Col from typed changes (diff-based) when available,
         # because these affect structural attributes (shape, columns) that Col does not.
         change_wlocs = _changes_to_writelocset(W_i_union, column_changed)
-
-        if typed_changes:
-            # Add structural-affecting WriteLocs from the diff (ColAdd, ColDel, Rows, Attr)
-            # that _changes_to_writelocset misses (it only produces Var and Col).
-            from flowbook.kernel.changes import ColumnAdded, ColumnRemoved, RowsAdded, RowsRemoved, IndexChanged, DtypeChanged
-            for change in typed_changes:
-                if isinstance(change, ColumnAdded):
-                    change_wlocs = change_wlocs | frozenset({WriteLoc.col_add(change.variable, change.column)})
-                elif isinstance(change, ColumnRemoved):
-                    change_wlocs = change_wlocs | frozenset({WriteLoc.col_del(change.variable, change.column)})
-                elif isinstance(change, (RowsAdded, RowsRemoved)):
-                    change_wlocs = change_wlocs | frozenset({WriteLoc.rows(change.variable)})
-                elif isinstance(change, IndexChanged):
-                    change_wlocs = change_wlocs | frozenset({WriteLoc.attr(change.variable, "index")})
-                elif isinstance(change, DtypeChanged):
-                    change_wlocs = change_wlocs | frozenset({WriteLoc.attr(change.variable, "dtypes")})
-
-        # Inject structural WriteLocs from provenance for precision on re-execution
-        change_wlocs = self._inject_structural_writes(change_wlocs, just_executed, namespace)
 
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:
@@ -1965,11 +1856,10 @@ class ReproducibilityEnforcer:
             cell_read_locs = self._notebook_state.reads.get(cell_id, frozenset())
             conflicting_wlocs = wlocs_conflict_rlocs(change_wlocs, cell_read_locs)
 
-            # Write-write overlap: W'_i ▷ output*(W_j) — typed column-level check.
-            # Uses stored WriteLocSet (includes diff-derived ColAdd/ColDel/Rows/Attr)
-            # and output_set() to convert j's writes to the reads they produce.
+            # Write-write overlap: W'_i ▷▷ W_j — direct write-write conflict check.
+            # Uses stored WriteLocSet (includes diff-derived Col/Rows/Attr).
             cell_write_locs = self._notebook_state.writes.get(cell_id, frozenset())
-            write_conflicting = wlocs_conflict_rlocs(change_wlocs, output_set(cell_write_locs))
+            write_conflicting = wlocs_conflict_wlocs(change_wlocs, cell_write_locs)
 
             if conflicting_wlocs or write_conflicting:
                 # Build staleness reasons from conflicting WriteLocs

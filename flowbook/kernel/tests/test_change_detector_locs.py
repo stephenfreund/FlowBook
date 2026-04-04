@@ -59,7 +59,7 @@ class TestColumnAdded:
         result = changes_to_write_locs([
             ColumnAdded(variable="df", column="new_col"),
         ])
-        assert result == frozenset({WriteLoc.col_add("df", "new_col")})
+        assert result == frozenset({WriteLoc.col("df", "new_col")})
 
     def test_multiple_columns_added(self):
         result = changes_to_write_locs([
@@ -67,8 +67,8 @@ class TestColumnAdded:
             ColumnAdded(variable="df", column="b"),
         ])
         assert result == frozenset({
-            WriteLoc.col_add("df", "a"),
-            WriteLoc.col_add("df", "b"),
+            WriteLoc.col("df", "a"),
+            WriteLoc.col("df", "b"),
         })
 
 
@@ -77,7 +77,7 @@ class TestColumnRemoved:
         result = changes_to_write_locs([
             ColumnRemoved(variable="df", column="old_col"),
         ])
-        assert result == frozenset({WriteLoc.col_del("df", "old_col")})
+        assert result == frozenset({WriteLoc.col("df", "old_col")})
 
 
 class TestRowsAdded:
@@ -159,7 +159,7 @@ class TestMixedChanges:
         assert result == frozenset({
             WriteLoc.var("x"),
             WriteLoc.col("df", "price"),
-            WriteLoc.col_add("df", "new"),
+            WriteLoc.col("df", "new"),
             WriteLoc.rows("df2"),
             WriteLoc.attr("df3", "index"),
             WriteLoc.attr("df3", "axes"),

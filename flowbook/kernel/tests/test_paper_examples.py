@@ -907,7 +907,7 @@ class TestIPyflowComparison:
         # Run B (after C): df.sum()
         # df.sum() aggregates across all columns, which is a structural read
         # on the column structure (Attr(df, columns)). C below added column 'b'
-        # (ColAdd(df, b)), which conflicts with Attr(df, columns).
+        # (Col(df, b)), which conflicts with Attr(df, columns).
         result_b = self.helper.execute_cell(
             cell_id="b",
             pre_namespace={"pd": pd, "df": df_with_b},
@@ -917,7 +917,7 @@ class TestIPyflowComparison:
             continue_on_violation=True,
         )
         # FlowBook detects forward contamination: B reads Attr(df, columns),
-        # C below wrote ColAdd(df, b) which conflicts with it
+        # C below wrote Col(df, b) which conflicts with it
         assert _has_error(result_b, ErrorType.NO_READ_BEFORE_WRITE), \
             f"Expected NO_READ_BEFORE_WRITE, got {[e.error_type for e in result_b.errors]}"
 

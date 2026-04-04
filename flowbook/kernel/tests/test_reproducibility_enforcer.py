@@ -5989,12 +5989,12 @@ class TestForwardContaminationStructuralRead:
     Scenario:
         A (pos 0): df = pd.DataFrame({"y": [1,2,3]})  → writes Var(df)
         B (pos 1): df.shape                            → reads Attr(df, shape), Var(df)
-        C (pos 2): df['x'] = 5                         → writes ColAdd(df, x)
+        C (pos 2): df['x'] = 5                         → writes Col(df, x)
 
     Run A→C→B. When B executes, it reads df.shape which includes the column
     added by C. This is not rerun-consistent: top-to-bottom A→B→C would give
     df.shape = (3,1) but A→C→B gives (3,2). NoReadBeforeWrite should catch this
-    because ColAdd(df, x) ▷ Attr(df, shape) = true (shape ∈ COL_ATTRS).
+    because Col(df, x) ▷ Attr(df, shape) = true (shape ∈ COL_ATTRS).
     """
 
     def setup_method(self):
@@ -6059,10 +6059,10 @@ class TestForwardContaminationStructuralRead:
 
         # NoReadBeforeWrite should FAIL: C (pos 2) adds a column to df,
         # and B (pos 1) reads df.shape which is affected.
-        # ColAdd(df, x) ▷ Attr(df, shape) = true because shape ∈ COL_ATTRS
+        # Col(df, x) ▷ Attr(df, shape) = true because shape ∈ COL_ATTRS
         assert result_b.has_errors(), (
             f"B should have NoReadBeforeWrite error. "
-            f"B reads Attr(df, shape), C wrote ColAdd(df, x). "
+            f"B reads Attr(df, shape), C wrote Col(df, x). "
             f"errors={result_b.errors}, "
             f"read_locs={result_b.read_locs}, "
             f"C_typed_changes={self.sdc._notebook_state.get_typed_changes('c')}, "
@@ -6073,12 +6073,12 @@ class TestForwardContaminationStructuralRead:
         )
 
     def test_shape_read_after_column_rewrite_is_forward_contamination(self):
-        """A→C→C→B: second run of C overwrites existing column (Col, not ColAdd).
+        """A→C→C→B: second run of C overwrites existing column.
 
         After C runs twice, its typed_changes no longer contain ColumnAdded
         (column already exists). But the stored writes from C's first run
-        included ColAdd(df, x). The NoReadBeforeWrite check should still
-        detect the conflict because C's stored WriteLocSet includes ColAdd.
+        included Col(df, x). The NoReadBeforeWrite check should still
+        detect the conflict because C's stored WriteLocSet includes Col.
         """
         import pandas as pd
 
@@ -6094,7 +6094,7 @@ class TestForwardContaminationStructuralRead:
             tracking=make_tracking(reads=set(), writes={"df"}),
         )
 
-        # C first run: df['x'] = 5 (ColAdd — new column)
+        # C first run: df['x'] = 5 (Col — new column)
         # Simulate provenance: A created {name, age, score}, C creates {x}
         from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
         df_after_c1 = df_orig.copy()
@@ -6145,7 +6145,7 @@ class TestForwardContaminationStructuralRead:
         )
 
         # Should STILL detect forward contamination. Even though C's second
-        # run detected Col (not ColAdd), C's stored writes should retain
+        # run detected Col (column already exists), C's stored writes should retain
         # the structural impact — df has a column 'x' that wouldn't exist
         # in a clean top-to-bottom run at B's position.
         assert result_b.has_errors(), (
@@ -6198,7 +6198,7 @@ class TestStructuralProvenanceIntegration:
         """A creates df(a,b,c), C deletes col b (re-exec), B reads df.shape.
 
         On re-execution, diff sees no change (col already deleted). But
-        provenance records C as first deleter of 'b'. ColDel ▷ Attr(shape) = true.
+        provenance records C as first deleter of 'b'. Col ▷ Attr(shape) = true.
         """
         import pandas as pd
         from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
@@ -6217,14 +6217,15 @@ class TestStructuralProvenanceIntegration:
                         make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}))
 
         # C re-execution: del df['b'] again — diff sees no ColumnRemoved this time
-        # But provenance persists: 'b' still recorded as deleted by 'c'
-        df_after_c2 = df_after_c.copy()  # provenance survives copy
+        # Tracking records the column deletion at operation time (no provenance needed)
+        df_after_c2 = df_after_c.copy()
         self._save_pre("c", {"df": df_after_c})
         result_c2 = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             namespace={"df": df_after_c2},
-            tracking=make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}),
+            tracking=make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()},
+                                   column_deletions={"df": {"b"}}),
         )
         assert not result_c2.has_errors(), f"C re-exec should pass: {result_c2.errors}"
 
@@ -6233,7 +6234,7 @@ class TestStructuralProvenanceIntegration:
                                    make_tracking(reads={"df"}, writes=set(), structural_reads={"df": {"shape"}}))
 
         assert result_b.has_errors(), (
-            f"B should have NoReadBeforeWrite: ColDel(df, b) ▷ Attr(df, shape). "
+            f"B should have NoReadBeforeWrite: Col(df, b) ▷ Attr(df, shape). "
             f"errors={result_b.errors}, C_writes={self.sdc._notebook_state.writes.get('c', frozenset())}"
         )
         assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE
@@ -6262,13 +6263,15 @@ class TestStructuralProvenanceIntegration:
                         make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}))
 
         # C re-execution: same row mutation — diff sees no change (already has 3 rows)
+        # Tracking records the row mutation at operation time (no provenance needed)
         df_after_c2 = df_after_c.copy()
         self._save_pre("c", {"df": df_after_c})
         self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             namespace={"df": df_after_c2},
-            tracking=make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}),
+            tracking=make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()},
+                                   row_mutations={"df"}),
         )
 
         # B: reads df.shape
@@ -6305,13 +6308,15 @@ class TestStructuralProvenanceIntegration:
                         make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}))
 
         # C re-execution: df.index = [10, 20, 30] again — diff sees no change
+        # Tracking records the index mutation at operation time (no provenance needed)
         df_after_c2 = df_after_c.copy()
         self._save_pre("c", {"df": df_after_c})
         self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             namespace={"df": df_after_c2},
-            tracking=make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()}),
+            tracking=make_tracking(reads={"df"}, writes=set(), column_reads={"df": set()}, column_writes={"df": set()},
+                                   index_mutations={"df"}),
         )
 
         # B: reads df.index
@@ -6367,12 +6372,12 @@ class TestStructuralProvenanceIntegration:
         )
         assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE
 
-    # ── Negative test: existing column modification ─────────────────
+    # ── Forward contamination: existing column modification ─────────
 
-    def test_column_value_modify_does_not_contaminate_shape_read(self):
+    def test_column_value_modify_contaminates_shape_read(self):
         """A creates df, C modifies existing column value, B reads df.shape.
 
-        Col ▷ Attr(shape) = false — modifying a column value doesn't change shape.
+        Col ▷ Attr(shape) = true — Col conflicts with all COL_ATTRS including shape.
         """
         import pandas as pd
         from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
@@ -6382,7 +6387,7 @@ class TestStructuralProvenanceIntegration:
         # A: creates df
         self._run_cell("a", {}, {"df": df_orig}, make_tracking(reads=set(), writes={"df"}))
 
-        # C: df['a'] = df['a'] * 2 — modifies existing column (Col, not ColAdd)
+        # C: df['a'] = df['a'] * 2 — modifies existing column (Col)
         df_after_c = df_orig.copy()
         DataFrameProvenanceTracker.record_var_write(df_after_c, "a")
         df_after_c["a"] = df_after_c["a"] * 2
@@ -6393,7 +6398,8 @@ class TestStructuralProvenanceIntegration:
         result_b = self._run_cell("b", {"df": df_after_c}, {"df": df_after_c},
                                    make_tracking(reads={"df"}, writes=set(), structural_reads={"df": {"shape"}}))
 
-        assert not result_b.has_errors(), (
-            f"B should NOT error: Col(df, a) ▷ Attr(df, shape) = false. "
-            f"errors={result_b.errors}"
+        assert result_b.has_errors(), (
+            f"B should have NoReadBeforeWrite: Col(df, a) ▷ Attr(df, shape). "
+            f"errors={result_b.errors}, C_writes={self.sdc._notebook_state.writes.get('c', frozenset())}"
         )
+        assert result_b.errors[0].error_type == ErrorType.NO_READ_BEFORE_WRITE

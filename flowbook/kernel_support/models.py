@@ -78,6 +78,22 @@ class TrackingData(BaseModel):
             "e.g., {'df': {'columns', 'shape'}, 'data[\"train\"]': {'describe'}}"
         ),
     )
+    row_mutations: Set[str] = Field(
+        default_factory=set,
+        description="Variable paths of DataFrames that had rows added or removed",
+    )
+    index_mutations: Set[str] = Field(
+        default_factory=set,
+        description="Variable paths of DataFrames that had their index mutated",
+    )
+    dtype_changes: Dict[str, Set[str]] = Field(
+        default_factory=dict,
+        description="Variable path → columns whose dtype changed",
+    )
+    column_deletions: Dict[str, Set[str]] = Field(
+        default_factory=dict,
+        description="Variable path → columns that were deleted",
+    )
     file_reads_before_writes: Set[str] = Field(
         default_factory=set,
         description="Absolute file paths read before being written in this cell",

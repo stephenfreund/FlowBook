@@ -21,5 +21,6 @@
     "target": "ES2020",
     "skipLibCheck": true
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*"],
+  "exclude": ["src/_archived/**/*"]
 }

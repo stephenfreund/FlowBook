@@ -406,6 +406,27 @@ class TrackingDict(dict):
             if k not in self._writes
         }
 
+        # Structural mutations: exclude variables that were wholly written
+        # (their mutations are subsumed by the Var(x) write)
+        row_muts = {
+            v for v in self._column_tracker.resolve_row_mutations_to_paths()
+            if v not in self._writes
+        } if self._column_tracker else set()
+        index_muts = {
+            v for v in self._column_tracker.resolve_index_mutations_to_paths()
+            if v not in self._writes
+        } if self._column_tracker else set()
+        dtype_chg = {
+            k: set(v)
+            for k, v in (self._column_tracker.resolve_dtype_changes_to_paths() if self._column_tracker else {}).items()
+            if k not in self._writes
+        }
+        col_dels = {
+            k: set(v)
+            for k, v in (self._column_tracker.resolve_column_deletions_to_paths() if self._column_tracker else {}).items()
+            if k not in self._writes
+        }
+
         return TrackingData(
             reads_before_writes=set(
                 k
@@ -420,4 +441,8 @@ class TrackingDict(dict):
             column_reads_before_writes=column_rbw,
             column_writes={k: set(v) for k, v in self.column_writes.items()},
             structural_reads=struct_reads,
+            row_mutations=row_muts,
+            index_mutations=index_muts,
+            dtype_changes=dtype_chg,
+            column_deletions=col_dels,
         )

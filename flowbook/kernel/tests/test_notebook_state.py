@@ -1093,9 +1093,9 @@ class TestLastWriterForLocSet:
         self.state.writes["a"] = frozenset({WriteLoc.col("df", "price")})
         assert self.state.last_writer_for("df", "c") == "a"
 
-    def test_col_add_found_by_var_name(self):
-        """Cell with ColAdd(df, new) write is found as last writer of 'df'."""
-        self.state.writes["b"] = frozenset({WriteLoc.col_add("df", "new")})
+    def test_col_found_by_var_name_new_column(self):
+        """Cell with Col(df, new) write is found as last writer of 'df'."""
+        self.state.writes["b"] = frozenset({WriteLoc.col("df", "new")})
         assert self.state.last_writer_for("df", "c") == "b"
 
 

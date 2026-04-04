@@ -2,13 +2,13 @@
 Tests for ReadLoc, WriteLoc, and the ▷ conflict relation.
 
 Tests cover:
-1. All 28 cells of the ▷ matrix (7 write types × 4 read types)
-2. The output() function for all 7 write types
-3. Set-level operations (wlocs_conflict_rlocs, has_conflict, output_set)
+1. All 20 cells of the ▷ matrix (5 write types × 4 read types)
+2. The ▷▷ write-write conflict relation (write_conflicts_write, wlocs_conflict_wlocs)
+3. Set-level operations (wlocs_conflict_rlocs, has_conflict)
 4. Extraction helpers (var_names, column_map, file_list)
 5. Conversion from TrackingData
 6. display_name() for all types
-7. Worked examples from the plan (independent column additions, etc.)
+7. Worked examples from the plan (independent column writes, etc.)
 """
 
 import pytest
@@ -21,9 +21,10 @@ from flowbook.kernel.locations import (
     WriteLocType,
     WriteLocSet,
     write_conflicts_read,
+    write_conflicts_write,
     wlocs_conflict_rlocs,
+    wlocs_conflict_wlocs,
     has_conflict,
-    output_set,
     readlocset_var_names,
     writelocset_var_names,
     readlocset_to_column_map,
@@ -111,18 +112,6 @@ class TestWriteLoc:
         assert w.qualifier == "df"
         assert w.var_name() == "df"
 
-    def test_col_add(self):
-        w = WriteLoc.col_add("df", "new")
-        assert w.type == WriteLocType.COL_ADD
-        assert w.name == "new"
-        assert w.qualifier == "df"
-        assert w.var_name() == "df"
-
-    def test_col_del(self):
-        w = WriteLoc.col_del("df", "old")
-        assert w.type == WriteLocType.COL_DEL
-        assert w.var_name() == "df"
-
     def test_rows(self):
         w = WriteLoc.rows("df")
         assert w.type == WriteLocType.ROWS
@@ -144,65 +133,65 @@ class TestWriteLoc:
     def test_display_name(self):
         assert WriteLoc.var("x").display_name() == "x"
         assert WriteLoc.col("df", "price").display_name() == "df['price']"
-        assert WriteLoc.col_add("df", "new").display_name() == "df['new'] (added)"
-        assert WriteLoc.col_del("df", "old").display_name() == "df['old'] (removed)"
         assert WriteLoc.rows("df").display_name() == "df (rows changed)"
         assert WriteLoc.attr("df", "index").display_name() == "df.index"
         assert WriteLoc.file("out.csv").display_name() == "File(out.csv)"
 
 
 # =============================================================================
-# output() function
+# ▷▷ Write-Write Conflict Relation
 # =============================================================================
 
 
-class TestOutput:
-    """output() now returns FrozenSet[ReadLoc] — the reads that observe the write."""
+class TestWriteConflictsWrite:
+    """write_conflicts_write() (▷▷) — direct write-write conflict relation."""
 
-    def test_var(self):
-        assert WriteLoc.var("x").output() == frozenset({ReadLoc.var("x")})
+    def test_var_same(self):
+        assert write_conflicts_write(WriteLoc.var("x"), WriteLoc.var("x"))
 
-    def test_col(self):
-        """Col produces just Col(d,c) — no attr inflation for column independence."""
-        result = WriteLoc.col("df", "price").output()
-        assert result == frozenset({ReadLoc.col("df", "price")})
+    def test_var_different(self):
+        assert not write_conflicts_write(WriteLoc.var("x"), WriteLoc.var("y"))
 
-    def test_col_add(self):
-        """ColAdd produces Attr reads for all COL_ATTRS."""
-        result = WriteLoc.col_add("df", "new").output()
-        # Should contain Attr(df, a) for each a in COL_ATTRS
-        assert all(r.type == ReadLocType.ATTR for r in result)
-        assert all(r.qualifier == "df" for r in result)
-        from flowbook.kernel.locations import COL_ATTRS
-        assert {r.name for r in result} == COL_ATTRS
+    def test_col_same(self):
+        assert write_conflicts_write(WriteLoc.col("df", "price"), WriteLoc.col("df", "price"))
 
-    def test_col_del(self):
-        """ColDel produces Col(d,c) plus Attr reads for all COL_ATTRS."""
-        result = WriteLoc.col_del("df", "old").output()
-        assert ReadLoc.col("df", "old") in result
-        from flowbook.kernel.locations import COL_ATTRS
-        for a in COL_ATTRS:
-            assert ReadLoc.attr("df", a) in result
+    def test_col_different_column(self):
+        """Independent columns do not conflict."""
+        assert not write_conflicts_write(WriteLoc.col("df", "price"), WriteLoc.col("df", "qty"))
 
-    def test_rows(self):
-        """Rows produces Attr reads for all ROW_ATTRS."""
-        result = WriteLoc.rows("df").output()
-        assert all(r.type == ReadLocType.ATTR for r in result)
-        assert all(r.qualifier == "df" for r in result)
-        from flowbook.kernel.locations import ROW_ATTRS
-        assert {r.name for r in result} == ROW_ATTRS
+    def test_col_different_df(self):
+        assert not write_conflicts_write(WriteLoc.col("df", "price"), WriteLoc.col("other", "price"))
 
-    def test_attr(self):
-        assert WriteLoc.attr("df", "index").output() == frozenset({ReadLoc.attr("df", "index")})
+    def test_col_vs_rows(self):
+        """Col(df, price) ▷▷ Rows(df) = True."""
+        assert write_conflicts_write(WriteLoc.col("df", "price"), WriteLoc.rows("df"))
 
-    def test_file(self):
-        assert WriteLoc.file("out.csv").output() == frozenset({ReadLoc.file("out.csv")})
+    def test_rows_vs_col(self):
+        """Rows(df) ▷▷ Col(df, price) = True."""
+        assert write_conflicts_write(WriteLoc.rows("df"), WriteLoc.col("df", "price"))
 
-    def test_col_add_same_df_same_output(self):
-        """ColAdd for same df produces same outputs (both affect COL_ATTRS)."""
-        o1 = WriteLoc.col_add("df", "price").output()
-        o2 = WriteLoc.col_add("df", "qty").output()
-        assert o1 == o2  # Both produce {Attr(df, a) | a ∈ COL_ATTRS}
+    def test_rows_same(self):
+        assert write_conflicts_write(WriteLoc.rows("df"), WriteLoc.rows("df"))
+
+    def test_rows_different_df(self):
+        assert not write_conflicts_write(WriteLoc.rows("df"), WriteLoc.rows("other"))
+
+    def test_attr_same(self):
+        assert write_conflicts_write(WriteLoc.attr("df", "index"), WriteLoc.attr("df", "index"))
+
+    def test_attr_different(self):
+        assert not write_conflicts_write(WriteLoc.attr("df", "index"), WriteLoc.attr("df", "shape"))
+
+    def test_file_same(self):
+        assert write_conflicts_write(WriteLoc.file("out.csv"), WriteLoc.file("out.csv"))
+
+    def test_file_different(self):
+        assert not write_conflicts_write(WriteLoc.file("out.csv"), WriteLoc.file("other.csv"))
+
+    def test_var_vs_col_no_conflict(self):
+        """Var(df) ▷▷ Col(df, price) = False."""
+        assert not write_conflicts_write(WriteLoc.var("df"), WriteLoc.col("df", "price"))
+
 
 
 # =============================================================================
@@ -242,7 +231,7 @@ class TestConflictMatrix_Var:
 
 
 class TestConflictMatrix_Col:
-    """Col(d, c) writes: column values modified."""
+    """Col(d, c) writes: column values modified. Conflicts with all COL_ATTRS."""
 
     def test_col_vs_var_same_df(self):
         """Column write does NOT conflict with Var read (binding unchanged)."""
@@ -262,78 +251,23 @@ class TestConflictMatrix_Col:
         assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.col("other", "price"))
 
     def test_col_vs_attr(self):
-        """Key: modifying column values does NOT change structure."""
-        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", "shape"))
-        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", "columns"))
+        """Col conflicts with ALL COL_ATTRS on the same DataFrame."""
+        for a in COL_ATTRS:
+            assert write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", a)), (
+                f"Col(df, price) should conflict with Attr(df, {a})"
+            )
+
+    def test_col_vs_attr_non_col_attr(self):
+        """Col does NOT conflict with attrs outside COL_ATTRS."""
+        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", "index"))
+        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("df", "len"))
+
+    def test_col_vs_attr_different_df(self):
+        """Col does NOT conflict with attrs on a different DataFrame."""
+        assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.attr("other", "shape"))
 
     def test_col_vs_file(self):
         assert not write_conflicts_read(WriteLoc.col("df", "price"), ReadLoc.file("data.csv"))
-
-
-class TestConflictMatrix_ColAdd:
-    """ColAdd(d, c) writes: new column added."""
-
-    def test_col_add_vs_var_same_df(self):
-        """ColAdd does NOT conflict with Var read (binding unchanged)."""
-        assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.var("df"))
-
-    def test_col_add_vs_var_different_df(self):
-        assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.var("other"))
-
-    def test_col_add_vs_col_existing(self):
-        """Key: adding new column does NOT affect existing column reads."""
-        assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.col("df", "price"))
-
-    def test_col_add_vs_col_same_name(self):
-        """Adding column 'new' doesn't conflict with reading 'new' (column didn't exist before)."""
-        assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.col("df", "new"))
-
-    def test_col_add_vs_attr_col_structure(self):
-        """Adding column changes column-structure attributes."""
-        assert write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.attr("df", "columns"))
-        assert write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.attr("df", "dtypes"))
-        assert write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.attr("df", "shape"))
-        assert write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.attr("df", "size"))
-
-    def test_col_add_vs_attr_row_only(self):
-        """Adding column does NOT affect row-only attributes (that aren't also col attrs)."""
-        # index is ROW_ATTRS but NOT COL_ATTRS
-        assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.attr("df", "index"))
-        # len is ROW_ATTRS but NOT COL_ATTRS
-        assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.attr("df", "len"))
-
-    def test_col_add_vs_attr_different_df(self):
-        assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.attr("other", "columns"))
-
-    def test_col_add_vs_file(self):
-        assert not write_conflicts_read(WriteLoc.col_add("df", "new"), ReadLoc.file("data.csv"))
-
-
-class TestConflictMatrix_ColDel:
-    """ColDel(d, c) writes: column removed."""
-
-    def test_col_del_vs_var_same_df(self):
-        """ColDel does NOT conflict with Var read (binding unchanged)."""
-        assert not write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.var("df"))
-
-    def test_col_del_vs_col_same(self):
-        """Removing column invalidates reads of that column."""
-        assert write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.col("df", "old"))
-
-    def test_col_del_vs_col_different(self):
-        """Removing column does NOT affect reads of other columns."""
-        assert not write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.col("df", "price"))
-
-    def test_col_del_vs_attr_col_structure(self):
-        """Removing column changes column-structure attributes."""
-        assert write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.attr("df", "columns"))
-        assert write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.attr("df", "shape"))
-
-    def test_col_del_vs_attr_row_only(self):
-        assert not write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.attr("df", "index"))
-
-    def test_col_del_vs_file(self):
-        assert not write_conflicts_read(WriteLoc.col_del("df", "old"), ReadLoc.file("f"))
 
 
 class TestConflictMatrix_Rows:
@@ -453,29 +387,23 @@ class TestSetOperations:
         reads = frozenset({ReadLoc.col("df", "qty")})
         assert not has_conflict(writes, reads)
 
-    def test_output_set(self):
-        writes = frozenset({
-            WriteLoc.var("x"),
-            WriteLoc.col("df", "price"),
-            WriteLoc.attr("df", "index"),
-        })
-        result = output_set(writes)
-        # Col output is just {Col(df, price)} — no CVA inflation
-        expected = frozenset({
-            ReadLoc.var("x"),
-            ReadLoc.col("df", "price"),
-            ReadLoc.attr("df", "index"),
-        })
-        assert result == expected
+    def test_wlocs_conflict_wlocs_basic(self):
+        """wlocs_conflict_wlocs returns writes from W1 that overlap with W2."""
+        W1 = frozenset({WriteLoc.var("x"), WriteLoc.var("y")})
+        W2 = frozenset({WriteLoc.var("x")})
+        result = wlocs_conflict_wlocs(W1, W2)
+        assert result == frozenset({WriteLoc.var("x")})
 
-    def test_output_set_structural_writes(self):
-        """Structural writes expand to multiple output reads."""
-        writes = frozenset({WriteLoc.rows("df")})
-        result = output_set(writes)
-        from flowbook.kernel.locations import ROW_ATTRS
-        # Should contain Attr(df, a) for each a in ROW_ATTRS
-        assert len(result) == len(ROW_ATTRS)
-        assert all(r.type == ReadLocType.ATTR for r in result)
+    def test_wlocs_conflict_wlocs_empty(self):
+        """Empty sets produce no conflicts."""
+        assert wlocs_conflict_wlocs(frozenset(), frozenset({WriteLoc.var("x")})) == frozenset()
+        assert wlocs_conflict_wlocs(frozenset({WriteLoc.var("x")}), frozenset()) == frozenset()
+
+    def test_wlocs_conflict_wlocs_col_precision(self):
+        """Independent columns do not conflict at write-write level."""
+        W1 = frozenset({WriteLoc.col("df", "price")})
+        W2 = frozenset({WriteLoc.col("df", "qty")})
+        assert not wlocs_conflict_wlocs(W1, W2)
 
 
 # =============================================================================
@@ -484,36 +412,45 @@ class TestSetOperations:
 
 
 class TestWorkedExamples:
-    def test_independent_column_additions_have_structural_overlap(self):
+    def test_independent_column_writes_no_write_write_overlap(self):
         """
-        B adds df["price"], C adds df["qty"].
-        Both affect df.columns, df.shape, etc. — so write-write overlap IS detected.
-        ColAdd(df, price) ▷ Attr(df, columns) = True.
+        B writes df["price"], C writes df["qty"].
+        Col(df, price) ▷▷ Col(df, qty) = False (independent columns).
+        Write-write overlap is NOT detected for disjoint columns.
         """
-        W_B = frozenset({WriteLoc.col_add("df", "price")})
-        W_C = frozenset({WriteLoc.col_add("df", "qty")})
+        W_B = frozenset({WriteLoc.col("df", "price")})
+        W_C = frozenset({WriteLoc.col("df", "qty")})
 
-        # Write-write overlap via output: W_B ▷ output*(W_C)
-        assert has_conflict(W_B, output_set(W_C))
+        # No write-write overlap for disjoint columns
+        assert not wlocs_conflict_wlocs(W_B, W_C)
 
-    def test_col_add_doesnt_conflict_with_var_read(self):
+    def test_column_write_conflicts_with_structural_read(self):
         """
-        ColAdd(df, price) ▷ Var(df) = false.
-        Column add doesn't change the variable binding.
+        Col(df, price) ▷ Attr(df, columns) = True.
+        Column writes DO conflict with structural attribute reads directly.
         """
-        W_B = frozenset({WriteLoc.col_add("df", "price")})
+        W_B = frozenset({WriteLoc.col("df", "price")})
+        R_C = frozenset({ReadLoc.attr("df", "columns")})
+        assert has_conflict(W_B, R_C)
+
+    def test_col_write_doesnt_conflict_with_var_read(self):
+        """
+        Col(df, price) ▷ Var(df) = false.
+        Column write doesn't change the variable binding.
+        """
+        W_B = frozenset({WriteLoc.col("df", "price")})
         R_C = frozenset({ReadLoc.var("df")})
         assert not has_conflict(W_B, R_C)
 
-    def test_column_modify_doesnt_affect_structural_attrs(self):
+    def test_column_modify_affects_structural_attrs(self):
         """
-        Modifying column values doesn't conflict with structural attribute reads.
-        Col(df, price) ▷ Attr(df, shape) = false.
-        Col(df, price) ▷ Attr(df, columns) = false.
+        Modifying column values DOES conflict with structural attribute reads.
+        Col(df, price) ▷ Attr(df, shape) = true.
+        Col(df, price) ▷ Attr(df, columns) = true.
         """
         W = frozenset({WriteLoc.col("df", "price")})
         R = frozenset({ReadLoc.attr("df", "shape"), ReadLoc.attr("df", "columns")})
-        assert not has_conflict(W, R)
+        assert has_conflict(W, R)
 
     def test_column_modify_affects_value_attrs(self):
         """
@@ -527,12 +464,12 @@ class TestWorkedExamples:
         assert has_conflict(W, frozenset({ReadLoc.attr("df", "T")}))
         assert has_conflict(W, frozenset({ReadLoc.attr("df", "describe")}))
 
-    def test_column_add_affects_structure(self):
+    def test_column_write_affects_structure(self):
         """
-        Adding a column DOES conflict with column-structure attributes.
-        ColAdd(df, new) ▷ Attr(df, columns) = true.
+        Writing a column DOES conflict with column-structure attributes.
+        Col(df, new) ▷ Attr(df, columns) = true.
         """
-        W = frozenset({WriteLoc.col_add("df", "new")})
+        W = frozenset({WriteLoc.col("df", "new")})
         R = frozenset({ReadLoc.attr("df", "columns")})
         assert has_conflict(W, R)
 
@@ -582,7 +519,7 @@ class TestExtractionHelpers:
     def test_writelocset_var_names(self):
         locs = frozenset({
             WriteLoc.var("x"),
-            WriteLoc.col_add("df", "new"),
+            WriteLoc.col("df", "new"),
             WriteLoc.rows("df2"),
             WriteLoc.file("out.csv"),
         })
@@ -602,8 +539,8 @@ class TestExtractionHelpers:
     def test_writelocset_to_column_map(self):
         locs = frozenset({
             WriteLoc.col("df", "price"),
-            WriteLoc.col_add("df", "new"),
-            WriteLoc.col_del("df", "old"),
+            WriteLoc.col("df", "new"),
+            WriteLoc.col("df", "old"),
             WriteLoc.var("x"),
         })
         result = writelocset_to_column_map(locs)

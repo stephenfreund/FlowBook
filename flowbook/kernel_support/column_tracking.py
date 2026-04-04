@@ -103,6 +103,11 @@ class ColumnAccessTracker:
         self._groupby_to_df: Dict[int, int] = {}
         # Current cell ID (set during activate, used for column provenance)
         self._cell_id: Optional[str] = None
+        # Structural mutation tracking (recorded at operation time)
+        self._row_mutations_by_id: Set[int] = set()
+        self._index_mutations_by_id: Set[int] = set()
+        self._dtype_changes_by_id: Dict[int, Set[str]] = defaultdict(set)
+        self._column_deletions_by_id: Dict[int, Set[str]] = defaultdict(set)
 
     def set_namespace_ref(self, namespace_ref: dict) -> None:
         """Set the namespace reference for lazy fallback walks."""
@@ -270,12 +275,66 @@ class ColumnAccessTracker:
 
         return result
 
+    # --- Structural mutation recording ---
+
+    def record_row_mutation(self, df_id: int) -> None:
+        """Record that a DataFrame had rows added or removed."""
+        self._row_mutations_by_id.add(df_id)
+
+    def record_index_mutation(self, df_id: int) -> None:
+        """Record that a DataFrame had its index mutated."""
+        self._index_mutations_by_id.add(df_id)
+
+    def record_dtype_change(self, df_id: int, column: str) -> None:
+        """Record that a DataFrame column's dtype changed."""
+        self._dtype_changes_by_id[df_id].add(column)
+
+    def record_column_deletion(self, df_id: int, column: str) -> None:
+        """Record that a column was deleted from a DataFrame."""
+        self._column_deletions_by_id[df_id].add(column)
+
+    def resolve_row_mutations_to_paths(self) -> Set[str]:
+        """Convert id-based row mutations to variable paths."""
+        result: Set[str] = set()
+        for df_id in self._row_mutations_by_id:
+            if df_id in self._id_to_path:
+                result.add(self._id_to_path[df_id])
+        return result
+
+    def resolve_index_mutations_to_paths(self) -> Set[str]:
+        """Convert id-based index mutations to variable paths."""
+        result: Set[str] = set()
+        for df_id in self._index_mutations_by_id:
+            if df_id in self._id_to_path:
+                result.add(self._id_to_path[df_id])
+        return result
+
+    def resolve_dtype_changes_to_paths(self) -> Dict[str, Set[str]]:
+        """Convert id-based dtype changes to variable path → column sets."""
+        result: Dict[str, Set[str]] = {}
+        for df_id, cols in self._dtype_changes_by_id.items():
+            if df_id in self._id_to_path and cols:
+                result[self._id_to_path[df_id]] = cols.copy()
+        return result
+
+    def resolve_column_deletions_to_paths(self) -> Dict[str, Set[str]]:
+        """Convert id-based column deletions to variable path → column sets."""
+        result: Dict[str, Set[str]] = {}
+        for df_id, cols in self._column_deletions_by_id.items():
+            if df_id in self._id_to_path and cols:
+                result[self._id_to_path[df_id]] = cols.copy()
+        return result
+
     def reset(self) -> None:
         """Reset tracking for new cell execution."""
         self._reads_by_id.clear()
         self._writes_by_id.clear()
         self._id_to_path.clear()
         self._groupby_to_df.clear()
+        self._row_mutations_by_id.clear()
+        self._index_mutations_by_id.clear()
+        self._dtype_changes_by_id.clear()
+        self._column_deletions_by_id.clear()
 
         # Reset cudf tracking state (all cudf logic in cudf_compat)
         from flowbook.kernel_support import cudf_compat
@@ -359,6 +418,7 @@ class ColumnAccessTracker:
                 for col, old_dt in old_dtypes.items():
                     if col in df.columns and new_dtypes[col] != old_dt:
                         DataFrameProvenanceTracker.record_dtype_change(df, col, tracker._cell_id)
+                        tracker.record_dtype_change(id(df), col)
             return result
 
         pd.DataFrame.__setitem__ = tracked_df_setitem
@@ -372,6 +432,7 @@ class ColumnAccessTracker:
             if tracker is not None and isinstance(key, str):
                 from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
                 DataFrameProvenanceTracker.record_column_delete(df, key, tracker._cell_id)
+                tracker.record_column_deletion(id(df), key)
             return original_df_delitem(df, key)
 
         pd.DataFrame.__delitem__ = tracked_df_delitem
@@ -431,10 +492,12 @@ class ColumnAccessTracker:
                 # Row drop provenance
                 if len(df) != pre_len:
                     DataFrameProvenanceTracker.record_row_mutation(df, cell_id)
+                    tracker.record_row_mutation(id(df))
                 # Column deletion provenance
                 post_cols = set(str(c) for c in df.columns)
                 for col in pre_cols - post_cols:
                     DataFrameProvenanceTracker.record_column_delete(df, col, cell_id)
+                    tracker.record_column_deletion(id(df), col)
 
             return result
 
@@ -506,6 +569,7 @@ class ColumnAccessTracker:
                     if len(df) != pre_len:
                         from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
                         DataFrameProvenanceTracker.record_row_mutation(df, tracker._cell_id)
+                        tracker.record_row_mutation(id(df))
 
             _LocIndexer.__setitem__ = tracked_loc_setitem
         except (ImportError, AttributeError):
@@ -724,6 +788,7 @@ class ColumnAccessTracker:
             if tracker is not None and tracker._cell_id is not None and axis == 0:
                 from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
                 DataFrameProvenanceTracker.record_index_mutation(df_self, tracker._cell_id)
+                tracker.record_index_mutation(id(df_self))
             return original_set_axis(df_self, axis, labels)
 
         pd.DataFrame._set_axis = patched_set_axis
@@ -748,14 +813,18 @@ class ColumnAccessTracker:
 
                 from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
                 cell_id = tracker._cell_id
+                df_id = id(df_self)
                 if len(df_self) != pre_len:
                     DataFrameProvenanceTracker.record_row_mutation(df_self, cell_id)
+                    tracker.record_row_mutation(df_id)
                 if not df_self.index.equals(pre_index):
                     DataFrameProvenanceTracker.record_index_mutation(df_self, cell_id)
+                    tracker.record_index_mutation(df_id)
                 post_dtypes = {str(c): df_self[c].dtype for c in df_self.columns}
                 for col in post_dtypes:
                     if col in pre_dtypes and pre_dtypes[col] != post_dtypes[col]:
                         DataFrameProvenanceTracker.record_dtype_change(df_self, col, cell_id)
+                        tracker.record_dtype_change(df_id, col)
 
                 return result
             return wrapper

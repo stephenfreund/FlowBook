@@ -157,7 +157,7 @@ def extract_errors_from_notebook(notebook_path: str) -> dict:
                     "error_num": 1,
                     "cell_id": "abcd",
                     "cell_index": 5,  # CODE cell index
-                    "summary": "Cell @X reads and writes the same locations: var",
+                    "summary": "Cell @A reads and writes the same locations: var",
                     "predicate": "no_read_and_write",
                     "locations": ["var"],
                     "accepted": True

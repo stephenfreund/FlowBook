@@ -3,19 +3,20 @@ Typed Read and Write Locations for Reproducibility Analysis.
 
 This module defines the core location types for FlowBook's reproducibility system:
 - ReadLoc: what a cell accessed during execution (4 constructors)
-- WriteLoc: what a cell changed and how (7 constructors)
+- WriteLoc: what a cell changed and how (5 constructors)
 - ▷ (write_conflicts_read): does a write invalidate a read?
 
 The key design insight: reads and writes are different types. Reads describe
 "what did I look at?" while writes describe "what did I change and how?"
-The "how" (modify vs add vs delete vs rows changed) determines which reads
-are invalidated.
+The "how" (modify vs rows changed) determines which reads are invalidated.
+
+WriteLoc ::= Var(x) | Col(d, c) | Rows(d) | Attr(d, a) | File(p)
 
 Formal ref: LOCSET_UNIFICATION_PLAN.md, FORMAL_DEVELOPMENT.md §8.1
 
 Usage:
     r = ReadLoc.var("x")
-    w = WriteLoc.col_add("df", "price")
+    w = WriteLoc.col("df", "price")
     assert not write_conflicts_read(w, ReadLoc.col("df", "qty"))  # independent columns
     assert write_conflicts_read(w, ReadLoc.attr("df", "columns")) # structure changed
 """
@@ -176,8 +177,6 @@ class WriteLocType(str, Enum):
     """Write location type — encodes HOW a location changed."""
     VAR = "var"              # Var(x): variable completely replaced
     COL = "col"              # Col(d, c): column values modified
-    COL_ADD = "col_add"      # ColAdd(d, c): new column added
-    COL_DEL = "col_del"      # ColDel(d, c): column removed
     ROWS = "rows"            # Rows(d): rows added or removed
     ATTR = "attr"            # Attr(d, a): attribute changed
     FILE = "file"            # File(p): file written
@@ -188,17 +187,16 @@ class WriteLoc:
     """
     A write location — identifies what a cell changed and how.
 
-    WriteLoc ::= Var(x) | Col(d, c) | ColAdd(d, c) | ColDel(d, c)
-               | Rows(d) | Attr(d, a) | File(p)
+    WriteLoc ::= Var(x) | Col(d, c) | Rows(d) | Attr(d, a) | File(p)
 
-    The "how" (modify vs add vs delete vs rows) determines which reads
-    are invalidated. This is what eliminates the need for a separate
+    The "how" (modify vs rows changed) determines which reads are
+    invalidated. This is what eliminates the need for a separate
     ConflictResolver — the conflict semantics are encoded in the type.
 
     The qualifier is either a variable name (str) or a LocRef(loc_id, var_name)
     for stable DataFrame identity. For Rows(d), the qualifier holds the
-    DataFrame identifier (same as Col/ColAdd/ColDel/Attr), and name holds
-    the display variable name.
+    DataFrame identifier (same as Col/Attr), and name holds the display
+    variable name.
 
     Formal ref: LOCSET_UNIFICATION_PLAN.md §Write Location Grammar
     """
@@ -215,16 +213,6 @@ class WriteLoc:
     def col(cls, qualifier: Qualifier, column: str) -> "WriteLoc":
         """Col(d, c) — column values modified."""
         return cls(WriteLocType.COL, column, qualifier=qualifier)
-
-    @classmethod
-    def col_add(cls, qualifier: Qualifier, column: str) -> "WriteLoc":
-        """ColAdd(d, c) — new column added."""
-        return cls(WriteLocType.COL_ADD, column, qualifier=qualifier)
-
-    @classmethod
-    def col_del(cls, qualifier: Qualifier, column: str) -> "WriteLoc":
-        """ColDel(d, c) — column removed."""
-        return cls(WriteLocType.COL_DEL, column, qualifier=qualifier)
 
     @classmethod
     def rows(cls, var: str, qualifier: Optional[Qualifier] = None) -> "WriteLoc":
@@ -255,54 +243,10 @@ class WriteLoc:
             return self.name
         if self.type == WriteLocType.ROWS:
             return self.name  # Rows stores display var name in name
-        # COL, COL_ADD, COL_DEL, ATTR
+        # COL, ATTR
         if isinstance(self.qualifier, LocRef):
             return self.qualifier.var_name
         return self.qualifier
-
-    def output(self) -> FrozenSet[ReadLoc]:
-        """Return the ReadLocs that would observe this write's effect.
-
-        Used for write-write overlap in ForwardStale:
-          (Wᵢ ∪ W'ᵢ) ▷ output*(Wⱼ) ≠ ∅
-
-        Each write type returns exactly the reads it would conflict with,
-        so W ▷ output(W') correctly detects write-write overlap.
-
-        Formal ref: CONFLICT_RELATION.md §The output Function
-        """
-        if self.type == WriteLocType.VAR:
-            return frozenset({ReadLoc.var(self.name)})
-        elif self.type == WriteLocType.COL:
-            # Just the column itself — no COL_VALUE_ATTRS inflation.
-            # Including attrs like 'values'/'T' would create false
-            # write-write overlap between independent column writes
-            # (Col(d,"price") vs Col(d,"qty")), breaking column independence.
-            # Rows↔Col overlap is unaffected: Rows ▷ Col is True in ▷,
-            # and Col ▷ output(Rows) works via ROW_ATTRS ∩ CVA.
-            return frozenset({ReadLoc.col(self.qualifier, self.name)})
-        elif self.type == WriteLocType.COL_ADD:
-            # ColAdd conflicts with Attr(d, a) for a ∈ COL_ATTRS
-            return frozenset(
-                ReadLoc.attr(self.qualifier, a) for a in COL_ATTRS
-            )
-        elif self.type == WriteLocType.COL_DEL:
-            # ColDel conflicts with Col(d, c) and Attr(d, a) for a ∈ COL_ATTRS
-            return frozenset(
-                {ReadLoc.col(self.qualifier, self.name)}
-                | {ReadLoc.attr(self.qualifier, a) for a in COL_ATTRS}
-            )
-        elif self.type == WriteLocType.ROWS:
-            # Rows conflicts with Attr(d, a) for a ∈ ROW_ATTRS
-            # qualifier holds the DataFrame identifier (LocRef or str)
-            return frozenset(
-                ReadLoc.attr(self.qualifier, a) for a in ROW_ATTRS
-            )
-        elif self.type == WriteLocType.ATTR:
-            return frozenset({ReadLoc.attr(self.qualifier, self.name)})
-        elif self.type == WriteLocType.FILE:
-            return frozenset({ReadLoc.file(self.name)})
-        raise ValueError(f"Unknown write type: {self.type}")
 
     def display_name(self) -> str:
         """Human-readable representation for UI display."""
@@ -311,10 +255,6 @@ class WriteLoc:
             return self.name
         elif self.type == WriteLocType.COL:
             return f"{q}['{self.name}']"
-        elif self.type == WriteLocType.COL_ADD:
-            return f"{q}['{self.name}'] (added)"
-        elif self.type == WriteLocType.COL_DEL:
-            return f"{q}['{self.name}'] (removed)"
         elif self.type == WriteLocType.ROWS:
             return f"{self.name} (rows changed)"
         elif self.type == WriteLocType.ATTR:
@@ -340,10 +280,6 @@ class WriteLoc:
             return f"Var({self.name})"
         elif self.type == WriteLocType.COL:
             return f"Col({q}, {self.name})"
-        elif self.type == WriteLocType.COL_ADD:
-            return f"ColAdd({q}, {self.name})"
-        elif self.type == WriteLocType.COL_DEL:
-            return f"ColDel({q}, {self.name})"
         elif self.type == WriteLocType.ROWS:
             return f"Rows({self.name})"
         elif self.type == WriteLocType.ATTR:
@@ -398,7 +334,7 @@ def _same_dataframe(a: Optional[Qualifier], b: Optional[Qualifier]) -> bool:
 # Supersedes the old ConflictResolver + CONFLICT_RULES table.
 #
 # The "how" is encoded in the WriteLoc type constructor.
-# The matrix has 7 write types × 4 read types = 28 cells.
+# The matrix has 5 write types × 4 read types = 20 cells.
 #
 # Var(x) only conflicts with Var(x) reads. Rebinding detection for
 # column/attr readers works because Var(x) is always present in the
@@ -424,32 +360,14 @@ def write_conflicts_read(w: WriteLoc, r: ReadLoc) -> bool:
     if w.type == WriteLocType.VAR:
         return r.type == ReadLocType.VAR and w.name == r.name
 
-    # --- Col(d, c) writes: column values modified ---
+    # --- Col(d, c) writes: column written (may add or modify) ---
     # Invalidates: same-column reads on same DataFrame,
-    #              value-dependent attrs (values, T, describe) on same DataFrame
-    # Does NOT invalidate: Var reads (binding unchanged), structural attrs (shape, columns)
+    #              all column-related attrs on same DataFrame (shape, columns, dtypes, etc.)
+    # Does NOT invalidate: Var reads (binding unchanged)
     elif w.type == WriteLocType.COL:
         if r.type == ReadLocType.COLUMN:
             return _same_dataframe(w.qualifier, r.qualifier) and w.name == r.name
         if r.type == ReadLocType.ATTR:
-            return _same_dataframe(w.qualifier, r.qualifier) and r.name in COL_VALUE_ATTRS
-        return False
-
-    # --- ColAdd(d, c) writes: new column added ---
-    # Invalidates: column-structure attribute reads on same DataFrame
-    # Does NOT invalidate: Var reads (binding unchanged), existing column reads
-    elif w.type == WriteLocType.COL_ADD:
-        if r.type == ReadLocType.ATTR:
-            return _same_dataframe(w.qualifier, r.qualifier) and r.name in COL_ATTRS
-        return False
-
-    # --- ColDel(d, c) writes: column removed ---
-    # Invalidates: that column's reads, column-structure attrs on same DataFrame
-    # Does NOT invalidate: Var reads (binding unchanged)
-    elif w.type == WriteLocType.COL_DEL:
-        if r.type == ReadLocType.COLUMN:
-            return _same_dataframe(w.qualifier, r.qualifier) and w.name == r.name
-        elif r.type == ReadLocType.ATTR:
             return _same_dataframe(w.qualifier, r.qualifier) and r.name in COL_ATTRS
         return False
 
@@ -512,17 +430,80 @@ def has_conflict(writes: WriteLocSet, reads: ReadLocSet) -> bool:
     )
 
 
-def output_set(writes: WriteLocSet) -> ReadLocSet:
+def write_conflicts_write(w1: WriteLoc, w2: WriteLoc) -> bool:
     """
-    output*(W) = ⋃ { output(w) | w ∈ W }
+    w1 ▷▷ w2 — does writing w1 overlap with writing w2?
 
-    Convert writes to the reads they produce.
-    Used for write-write overlap in ForwardStale.
+    This is the direct write-write conflict relation. Cell j should become
+    stale if cell i's writes overlap with cell j's writes:
+      ∃ w1 ∈ W_i, w2 ∈ W_j . w1 ▷▷ w2
+
+    The 5×5 symmetric matrix:
+
+    | w1 ↓ \\ w2 →  | Var(x') | Col(d',c') | Rows(d') | Attr(d',a') | File(p') |
+    |----------------|---------|------------|----------|-------------|----------|
+    | Var(x)         | x=x'   | —          | —        | —           | —        |
+    | Col(d,c)       | —       | d≡d' ∧ c=c'| d≡d'    | d≡d' ∧ a'∈CA| —       |
+    | Rows(d)        | —       | d≡d'       | d≡d'     | d≡d' ∧ a'∈RA| —       |
+    | Attr(d,a)      | —       | d≡d' ∧ a∈CA| d≡d' ∧ a∈RA| d≡d' ∧ a=a'| —       |
+    | File(p)        | —       | —          | —        | —           | p=p'     |
+
+    (CA = COL_ATTRS, RA = ROW_ATTRS)
     """
-    result: Set[ReadLoc] = set()
-    for w in writes:
-        result.update(w.output())
-    return frozenset(result)
+    # --- Var(x) ---
+    if w1.type == WriteLocType.VAR:
+        return w2.type == WriteLocType.VAR and w1.name == w2.name
+
+    # --- Col(d, c) ---
+    elif w1.type == WriteLocType.COL:
+        if w2.type == WriteLocType.COL:
+            return _same_dataframe(w1.qualifier, w2.qualifier) and w1.name == w2.name
+        if w2.type == WriteLocType.ROWS:
+            return _same_dataframe(w1.qualifier, w2.qualifier)
+        if w2.type == WriteLocType.ATTR:
+            return _same_dataframe(w1.qualifier, w2.qualifier) and w2.name in COL_ATTRS
+        return False
+
+    # --- Rows(d) ---
+    elif w1.type == WriteLocType.ROWS:
+        if w2.type == WriteLocType.COL:
+            return _same_dataframe(w1.qualifier, w2.qualifier)
+        if w2.type == WriteLocType.ROWS:
+            return _same_dataframe(w1.qualifier, w2.qualifier)
+        if w2.type == WriteLocType.ATTR:
+            return _same_dataframe(w1.qualifier, w2.qualifier) and w2.name in ROW_ATTRS
+        return False
+
+    # --- Attr(d, a) ---
+    elif w1.type == WriteLocType.ATTR:
+        if w2.type == WriteLocType.COL:
+            return _same_dataframe(w1.qualifier, w2.qualifier) and w1.name in COL_ATTRS
+        if w2.type == WriteLocType.ROWS:
+            return _same_dataframe(w1.qualifier, w2.qualifier) and w1.name in ROW_ATTRS
+        if w2.type == WriteLocType.ATTR:
+            return _same_dataframe(w1.qualifier, w2.qualifier) and w1.name == w2.name
+        return False
+
+    # --- File(p) ---
+    elif w1.type == WriteLocType.FILE:
+        return w2.type == WriteLocType.FILE and w1.name == w2.name
+
+    return False
+
+
+def wlocs_conflict_wlocs(writes1: WriteLocSet, writes2: WriteLocSet) -> WriteLocSet:
+    """
+    W1 ▷▷ W2 — return write locs in W1 that overlap with some write in W2.
+
+    Set-level extension of ▷▷:
+      A ▷▷ B = { w1 ∈ A | ∃ w2 ∈ B . w1 ▷▷ w2 }
+    """
+    if not writes1 or not writes2:
+        return frozenset()
+    return frozenset(
+        w1 for w1 in writes1
+        if any(write_conflicts_write(w1, w2) for w2 in writes2)
+    )
 
 
 # =============================================================================
@@ -589,15 +570,14 @@ def forward_stale_reads(W_i: WriteLocSet, R_j: ReadLocSet) -> WriteLocSet:
 
 def forward_stale_writes(W_i: WriteLocSet, W_j: WriteLocSet) -> WriteLocSet:
     """
-    ForwardStale write overlap: W'ᵢ ▷ output*(Wⱼ)
+    ForwardStale write overlap: W'ᵢ ▷▷ Wⱼ
 
-    Returns the WriteLocs from cell i that overlap with cell j's write effects.
+    Returns the WriteLocs from cell i that overlap with cell j's writes.
     Non-empty means cell j should become stale (write-write overlap).
-    Uses output() to convert j's writes to the reads they produce.
 
     Formal ref: FORMAL_DEVELOPMENT.md §3.3, CONFLICT_RELATION.md §Write-Write Conflict
     """
-    return wlocs_conflict_rlocs(W_i, output_set(W_j))
+    return wlocs_conflict_wlocs(W_i, W_j)
 
 
 # =============================================================================
@@ -626,10 +606,10 @@ def readlocset_to_column_map(locs: ReadLocSet) -> Dict[str, List[str]]:
 
 
 def writelocset_to_column_map(locs: WriteLocSet) -> Dict[str, List[str]]:
-    """Group Col/ColAdd/ColDel write locs by variable name → [column names]."""
+    """Group Col write locs by variable name → [column names]."""
     result: Dict[str, List[str]] = {}
     for loc in locs:
-        if loc.type in (WriteLocType.COL, WriteLocType.COL_ADD, WriteLocType.COL_DEL) and loc.qualifier:
+        if loc.type == WriteLocType.COL and loc.qualifier:
             key = _display_qualifier(loc.qualifier)
             result.setdefault(key, []).append(loc.name)
     return {k: sorted(v) for k, v in result.items()}
@@ -733,10 +713,6 @@ def tracking_to_writelocset(
     """
     Convert TrackingData writes to WriteLocSet.
 
-    Note: TrackingData doesn't distinguish ColAdd/ColDel/Rows/Attr.
-    All column writes are treated as Col (modification). The diff-based
-    detect_write_locs() function produces the full typed WriteLocs.
-
     This function is used when no diff is available (e.g., for the basic
     write set before diff refinement).
 
@@ -751,6 +727,27 @@ def tracking_to_writelocset(
         locs.add(WriteLoc.var(var))
 
     for var, cols in (tracking.column_writes or {}).items():
+        q = get_qualifier(var, namespace, stable_map)
+        for col in cols:
+            locs.add(WriteLoc.col(q, col))
+
+    # Structural mutations (recorded at operation time by monkey patches)
+    for var in (tracking.row_mutations or set()):
+        q = get_qualifier(var, namespace, stable_map)
+        locs.add(WriteLoc.rows(var, qualifier=q))
+
+    for var in (tracking.index_mutations or set()):
+        q = get_qualifier(var, namespace, stable_map)
+        locs.add(WriteLoc.attr(q, "index"))
+        locs.add(WriteLoc.attr(q, "axes"))
+
+    for var in (tracking.dtype_changes or {}):
+        q = get_qualifier(var, namespace, stable_map)
+        locs.add(WriteLoc.attr(q, "dtypes"))
+        locs.add(WriteLoc.attr(q, "values"))
+        locs.add(WriteLoc.attr(q, "T"))
+
+    for var, cols in (tracking.column_deletions or {}).items():
         q = get_qualifier(var, namespace, stable_map)
         for col in cols:
             locs.add(WriteLoc.col(q, col))

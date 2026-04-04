@@ -8,16 +8,24 @@ kernel, and accumulated reproducibility metadata from cell executions.
 import ast
 import copy
 import json
+import logging
+import os
 import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+logger = logging.getLogger(__name__)
 
 from flowbook.cli.helpers import (
     cleanup_kernel,
     save_notebook as cli_save_notebook,
     setup_kernel,
 )
+from flowbook.kernel_discovery import read_discovery, write_discovery, remove_discovery
+import urllib.request
+
+from flowbook.mcp.jupyter_config import discover_jupyter_server, discover_jupyter_server_root
 from flowbook.util.cell_ids import normalize_notebook_alpha, next_insertion_id
 from flowbook.server.kernel_helper import KernelHelper
 from flowbook.server.kernel_manager import FlowbookKernelClient
@@ -200,10 +208,16 @@ class NotebookSession:
         self.notebook_path: Optional[str] = None
         self.kernel_manager = None
         self.kernel_client: Optional[FlowbookKernelClient] = None
+        self._owns_kernel: bool = False  # True if we started the kernel
+        self._jupyter_server_url: Optional[str] = None
+        self._jupyter_token: Optional[str] = None
+        self._jupyter_contents_path: Optional[str] = None
+        self._last_contents_refresh: float = 0
         self.executed_cells: Set[str] = set()
         self.cell_flowbook_meta: Dict[str, Dict] = {}
         self.cell_status: Dict[str, str] = {}  # cell_id -> "ok" | "error"
         self._stale_cells: Set[str] = set()
+        self._continue_after_violation: bool = False
         self._checkpoints: Dict[str, Dict[str, Any]] = {}
         self._event_log: List[Dict[str, Any]] = []
         self._session_start: float = time.time()
@@ -280,15 +294,29 @@ class NotebookSession:
     # ------------------------------------------------------------------
 
     def load(self, path: str) -> Dict[str, Any]:
-        """Load notebook from disk, start kernel, assign alpha cell IDs."""
+        """Load notebook from disk, start or join kernel, assign alpha cell IDs.
+
+        Kernel discovery: checks the Jupyter runtime directory for an existing
+        kernel (started by JupyterLab or another MCP session). If found and
+        alive, connects as a second client. Otherwise starts a fresh kernel
+        and writes a discovery file for others to find.
+
+        Cell ID normalization is skipped when joining an existing session
+        to avoid clobbering IDs that JupyterLab is already using.
+        """
         # Close any previous session
         if self.is_loaded:
             self.close()
 
+        abs_path = os.path.abspath(os.path.expanduser(path))
+
         with open(path, "r", encoding="utf-8") as f:
             raw_notebook = json.load(f)
-        self.notebook = normalize_notebook_alpha(raw_notebook)
-        self.notebook_path = path
+
+        # Check for existing kernel via discovery file
+        discovery = read_discovery(abs_path)
+
+        self.notebook_path = abs_path
         self.executed_cells = set()
         self.cell_flowbook_meta = {}
         self.cell_status = {}
@@ -297,38 +325,121 @@ class NotebookSession:
         self._event_log = []
         self._session_start = time.time()
 
-        # Start FlowBook kernel with cwd set to the notebook's directory
-        # so relative paths (pd.read_csv("data.csv")) resolve correctly
-        import os
-        notebook_dir = os.path.dirname(os.path.abspath(path))
-        self.kernel_manager, self.kernel_client = setup_kernel(
-            connection_file=None,
-            kernel_name="flowbook_kernel",
-            cwd=notebook_dir,
-        )
+        if discovery:
+            # Join existing kernel — skip ID normalization to preserve
+            # the cell IDs that the other client is already using
+            self.notebook = raw_notebook
+            self._owns_kernel = False
+            self.kernel_manager, self.kernel_client = setup_kernel(
+                connection_file=discovery["connection_file"],
+                kernel_name="flowbook_kernel",
+            )
+        else:
+            # Start fresh — normalize IDs and start our own kernel
+            self.notebook = normalize_notebook_alpha(raw_notebook)
+            notebook_dir = os.path.dirname(abs_path)
+            self.kernel_manager, self.kernel_client = setup_kernel(
+                connection_file=None,
+                kernel_name="flowbook_kernel",
+                cwd=notebook_dir,
+            )
+            self._owns_kernel = True
+
+            # Write discovery file so JupyterLab (or another MCP) can find us
+            if self.kernel_manager is not None:
+                kernel_pid = getattr(
+                    self.kernel_manager.provisioner, "pid", None
+                ) or 0
+                write_discovery(
+                    notebook_path=abs_path,
+                    connection_file=self.kernel_manager.connection_file,
+                    kernel_name="flowbook_kernel",
+                    pid=kernel_pid,
+                    started_by="mcp",
+                )
 
         cells = self.notebook.get("cells", [])
         code_cells = [c for c in cells if c.get("cell_type") == "code"]
+        joined = " (joined existing kernel)" if discovery else ""
+
+        # Set up Contents API for live sync with JupyterLab
+        contents_status = self._setup_contents_api(abs_path)
 
         return {
             "path": path,
             "total_cells": len(cells),
             "code_cells": len(code_cells),
             "cell_ids": [c["id"] for c in code_cells],
+            "joined_existing": discovery is not None,
+            "contents_api_connected": self._jupyter_contents_path is not None,
+            "info": f"Loaded{joined}{contents_status}",
         }
 
+    def _setup_contents_api(self, notebook_abs_path: str) -> str:
+        """Configure Contents API for reading live notebook state from JupyterLab.
+
+        With jupyter-collaboration, the Contents API returns the live Y.js
+        document state, reflecting JupyterLab edits instantly.
+
+        Returns a status string for the load result message.
+        """
+        server_url, token = discover_jupyter_server()
+        if not server_url:
+            return ""
+
+        try:
+            server_root = discover_jupyter_server_root()
+            if server_root:
+                contents_path = os.path.relpath(notebook_abs_path, server_root)
+            else:
+                contents_path = os.path.basename(notebook_abs_path)
+
+            # Verify the Contents API works with a test request
+            url = f"{server_url}/api/contents/{contents_path}?content=0"
+            headers = {}
+            if token:
+                headers["Authorization"] = f"token {token}"
+            req = urllib.request.Request(url, headers=headers)
+            urllib.request.urlopen(req, timeout=3)
+
+            self._jupyter_server_url = server_url
+            self._jupyter_token = token
+            self._jupyter_contents_path = contents_path
+            return " [live sync]"
+        except Exception as e:
+            logger.debug(f"Contents API not available: {e}")
+            return ""
+
     def close(self):
-        """Shutdown kernel, auto-save log, and clear state."""
+        """Shutdown kernel (if we own it), auto-save log, and clear state.
+
+        If we started the kernel, shuts it down and removes the discovery file.
+        If we joined an existing kernel, just disconnects (leaves kernel running).
+        """
         # Auto-save event log if there were any events
         if self._event_log and self.notebook_path:
             try:
                 self.save_event_log()
             except Exception:
                 pass  # best-effort log save on close
-        if self.kernel_client or self.kernel_manager:
-            cleanup_kernel(self.kernel_client, self.kernel_manager)
+
+        if self._owns_kernel:
+            # We started the kernel — shut it down and remove discovery file
+            if self.kernel_client or self.kernel_manager:
+                cleanup_kernel(self.kernel_client, self.kernel_manager)
+            if self.notebook_path:
+                remove_discovery(self.notebook_path)
+        else:
+            # We joined an existing kernel — just disconnect, don't kill it
+            if self.kernel_client:
+                try:
+                    self.kernel_client.stop_channels()
+                except Exception:
+                    pass
+
         self.kernel_client = None
         self.kernel_manager = None
+        self._owns_kernel = False
         self.notebook = None
         self.notebook_path = None
         self.executed_cells = set()
@@ -336,6 +447,118 @@ class NotebookSession:
         self.cell_status = {}
         self._stale_cells = set()
         self._checkpoints = {}
+
+    # ------------------------------------------------------------------
+    # Contents API sync (read live JupyterLab edits)
+    # ------------------------------------------------------------------
+
+    def _fetch_contents_api(self) -> Optional[Dict[str, Any]]:
+        """Fetch the live notebook from Jupyter Contents API.
+
+        With jupyter-collaboration, this returns the live Y.js document
+        state, reflecting JupyterLab edits instantly (not the disk file).
+
+        Returns:
+            Notebook dict (nbformat structure), or None on failure.
+        """
+        if not self._jupyter_server_url or not self._jupyter_contents_path:
+            return None
+        try:
+            url = (
+                f"{self._jupyter_server_url}/api/contents/"
+                f"{self._jupyter_contents_path}?content=1&type=notebook"
+            )
+            headers = {}
+            if self._jupyter_token:
+                headers["Authorization"] = f"token {self._jupyter_token}"
+            req = urllib.request.Request(url, headers=headers)
+            resp = urllib.request.urlopen(req, timeout=5)
+            data = json.loads(resp.read())
+            return data.get("content")
+        except Exception as e:
+            logger.debug(f"Contents API fetch failed: {e}")
+            return None
+
+    def _refresh_from_contents_api(self) -> None:
+        """Refresh in-memory notebook from the Jupyter Contents API.
+
+        Merges cell sources from the API response into self.notebook["cells"],
+        preserving MCP-local state (outputs, execution_count, flowbook metadata).
+        Also handles structural changes (cells added/deleted in JupyterLab).
+        Rate-limited to avoid excessive API calls.
+        """
+        if not self._jupyter_contents_path:
+            return
+        now = time.time()
+        if now - self._last_contents_refresh < 0.2:
+            return
+        self._last_contents_refresh = now
+
+        api_notebook = self._fetch_contents_api()
+        if not api_notebook:
+            return
+
+        api_cells_list = api_notebook.get("cells", [])
+        api_cells_by_id = {
+            c.get("id"): c for c in api_cells_list if c.get("id")
+        }
+
+        # Snapshot local cells by ID for lookup during rebuild
+        local_cells_by_id = {
+            c.get("id"): c for c in self.notebook.get("cells", []) if c.get("id")
+        }
+        local_ids = set(local_cells_by_id.keys())
+        api_ids = set(api_cells_by_id.keys())
+
+        # Update sources for existing cells
+        for cell_id in local_ids & api_ids:
+            local_cell = local_cells_by_id[cell_id]
+            api_source = api_cells_by_id[cell_id].get("source", "")
+            if api_source != get_cell_source(local_cell):
+                set_cell_source(local_cell, api_source)
+
+        # Handle structural changes (cells added, deleted, or reordered)
+        added_ids = api_ids - local_ids
+        removed_ids = local_ids - api_ids
+        api_order = [c.get("id") for c in api_cells_list if c.get("id")]
+        local_order = [c.get("id") for c in self.notebook.get("cells", []) if c.get("id")]
+
+        if not added_ids and not removed_ids and api_order == local_order:
+            return
+
+        # Rebuild cell list in API order, preserving MCP-local state
+        new_cells = []
+        for api_cell in api_cells_list:
+            cid = api_cell.get("id")
+            if cid in local_cells_by_id:
+                new_cells.append(local_cells_by_id[cid])
+            else:
+                new_cells.append(api_cell)
+
+        self.notebook["cells"] = new_cells
+
+        # Notify kernel of new cell order
+        if self.kernel_client:
+            new_order = [
+                c["id"] for c in new_cells if c.get("cell_type") == "code"
+            ]
+            KernelHelper.execute_code(
+                self.kernel_client, "", timeout=10, store_history=False,
+                flowbook_msg={
+                    "type": "notebook_structure", "cell_order": new_order
+                },
+            )
+
+        # Clean up tracking for removed cells
+        for rid in removed_ids:
+            self.executed_cells.discard(rid)
+            self.cell_flowbook_meta.pop(rid, None)
+            self.cell_status.pop(rid, None)
+            self._stale_cells.discard(rid)
+
+    def refresh_from_jupyter(self) -> None:
+        """Public API to refresh notebook from JupyterLab (via Contents API)."""
+        self._refresh_from_contents_api()
 
     def set_continue_after_violation(self, enabled: bool) -> None:
         """Configure whether violations reject execution or just report.
@@ -347,6 +570,7 @@ class NotebookSession:
         is rejected. Good for /fix-notebook where you want a clean namespace.
         """
         self._require_loaded()
+        self._continue_after_violation = enabled
         KernelHelper.execute_code(
             self.kernel_client,
             "",
@@ -354,6 +578,40 @@ class NotebookSession:
             store_history=False,
             flowbook_msg={"type": "continue_after_violation", "enabled": enabled},
         )
+
+    # ------------------------------------------------------------------
+    # IOPub polling (catch JupyterLab-initiated executions)
+    # ------------------------------------------------------------------
+
+    def _poll_iopub(self) -> None:
+        """Drain pending IOPub messages to catch external executions.
+
+        When JupyterLab runs a cell on the shared kernel, the flowbook_update
+        messages appear on IOPub. This method processes them to keep MCP's
+        staleness and metadata state current.
+
+        Called automatically at the start of get_cell, list_cells, get_status, etc.
+        """
+        if not self.kernel_client:
+            return
+        try:
+            while True:
+                msg = self.kernel_client.get_iopub_msg(timeout=0)
+                msg_type = msg.get("msg_type", "")
+                if msg_type == "flowbook_update":
+                    content = msg.get("content", {})
+                    data = content.get("data", content)
+                    if isinstance(data, dict) and data.get("type") == "metadata":
+                        cell_id = data.get("cell_id")
+                        if cell_id:
+                            self.cell_flowbook_meta[cell_id] = data
+                            self.executed_cells.add(cell_id)
+                            stale = set(data.get("stale_cells", []))
+                            self._stale_cells = (self._stale_cells | stale) - {cell_id}
+                            # Update cell outputs if we have them
+                            # (outputs come via separate IOPub messages, not flowbook_update)
+        except Exception:
+            pass  # No more messages or channel issue — both OK
 
     # ------------------------------------------------------------------
     # Cell access
@@ -393,6 +651,8 @@ class NotebookSession:
 
     def get_cell(self, cell_id: str) -> Dict[str, Any]:
         """Get a cell's source, outputs, and flowbook metadata."""
+        self._refresh_from_contents_api()
+        self._poll_iopub()
         _, cell = self._find_cell(cell_id)
         source = get_cell_source(cell)
         outputs = cell.get("outputs", [])
@@ -425,6 +685,8 @@ class NotebookSession:
         Priority: error > violation > stale > unexecuted.
         """
         self._require_loaded()
+        self._refresh_from_contents_api()
+        self._poll_iopub()
         code_cell_ids = self.get_cell_order()
 
         # 1. Runtime errors
@@ -464,6 +726,13 @@ class NotebookSession:
 
         return None  # all clean
 
+    def get_next_actionable_cell_id(self) -> Optional[str]:
+        """Return the cell_id of the next actionable cell, or None if all clean."""
+        result = self.get_next_actionable()
+        if result is None:
+            return None
+        return result["cell_id"]
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -484,6 +753,7 @@ class NotebookSession:
     def run_cell(self, cell_id: str, timeout: float = 300) -> Dict[str, Any]:
         """Execute a single cell and return outputs + flowbook metadata."""
         self._require_loaded()
+        self._refresh_from_contents_api()
         _, cell = self._find_cell(cell_id)
         if cell.get("cell_type") != "code":
             return {"cell_id": cell_id, "error": "Not a code cell"}
@@ -509,6 +779,7 @@ class NotebookSession:
         # Update cell in notebook
         cell["outputs"] = result["outputs"]
         cell["execution_count"] = result["execution_count"]
+        self._put_contents_api()  # Push outputs to JupyterLab via Y.js
         self.executed_cells.add(cell_id)
 
         # Extract flowbook metadata
@@ -545,6 +816,7 @@ class NotebookSession:
     def run_all(self, timeout: float = 300) -> Dict[str, Any]:
         """Execute all code cells top-to-bottom."""
         self._require_loaded()
+        self._refresh_from_contents_api()
         cell_order = self.get_cell_order()
 
         results = []
@@ -607,7 +879,8 @@ class NotebookSession:
     def run_from(self, cell_id: str, timeout: float = 300) -> Dict[str, Any]:
         """Run cell_id and subsequent cells that need execution, stopping on error.
 
-        Skips cells that are already clean. Only runs cells that are
+        Refreshes from JupyterLab first to pick up any edits. Skips cells
+        that are already clean. Only runs cells that are
         unexecuted, stale, or have violations.
 
         Args:
@@ -619,6 +892,7 @@ class NotebookSession:
             (if any), and violation/stale counts.
         """
         self._require_loaded()
+        self._refresh_from_contents_api()
         cell_order = self.get_cell_order()
         try:
             start = cell_order.index(cell_id)
@@ -675,11 +949,10 @@ class NotebookSession:
     def edit_cell(self, cell_id: str, new_source: str) -> Dict[str, Any]:
         """Update a cell's source and mark it stale if previously executed."""
         self._require_loaded()
+        self._refresh_from_contents_api()
         _, cell = self._find_cell(cell_id)
         old_source = get_cell_source(cell)
         set_cell_source(cell, new_source)
-
-        newly_stale = []
 
         # Notify kernel if this cell was previously executed
         if cell_id in self.executed_cells:
@@ -691,6 +964,9 @@ class NotebookSession:
                 store_history=False,
                 flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
             )
+
+        # Push edit to JupyterLab via Contents API
+        self._put_contents_api()
 
         return {
             "cell_id": cell_id,
@@ -704,12 +980,63 @@ class NotebookSession:
     # ------------------------------------------------------------------
 
     def save(self, path: Optional[str] = None) -> str:
-        """Save notebook to disk."""
+        """Save notebook via Contents API (if available) or to disk.
+
+        When a Jupyter server is running with jupyter-collaboration,
+        saves via the Contents API which updates the live Y.js document
+        and lets the server handle disk persistence. Falls back to
+        direct disk write when no server is available or a custom
+        path is specified.
+        """
         self._require_loaded()
         save_path = path or self.notebook_path
         if not save_path:
             raise ValueError("No path specified and no original path available")
+
+        # Use Contents API when available and saving to original path
+        if not path and self._jupyter_contents_path:
+            result = self._put_contents_api()
+            if result:
+                return result
+
         return cli_save_notebook(self.notebook, output_path=save_path)
+
+    def _put_contents_api(self) -> Optional[str]:
+        """Push the current notebook to JupyterLab via Contents API PUT.
+
+        With jupyter-collaboration, this updates the live Y.js document,
+        making MCP edits visible in JupyterLab. The server handles
+        disk persistence.
+
+        Refreshes from the API first to incorporate any concurrent
+        JupyterLab edits, minimizing the race window.
+
+        Returns:
+            Status message on success, None on failure (caller falls back to disk).
+        """
+        # Refresh first to minimize race with concurrent JupyterLab edits
+        self._refresh_from_contents_api()
+        if not self._jupyter_server_url or not self._jupyter_contents_path:
+            return None
+        try:
+            url = (
+                f"{self._jupyter_server_url}/api/contents/"
+                f"{self._jupyter_contents_path}"
+            )
+            body = json.dumps({
+                "type": "notebook",
+                "format": "json",
+                "content": self.notebook,
+            }).encode()
+            headers = {"Content-Type": "application/json"}
+            if self._jupyter_token:
+                headers["Authorization"] = f"token {self._jupyter_token}"
+            req = urllib.request.Request(url, data=body, headers=headers, method="PUT")
+            urllib.request.urlopen(req, timeout=10)
+            return self.notebook_path
+        except Exception as e:
+            logger.debug(f"Contents API PUT failed: {e}")
+            return None
 
     # ------------------------------------------------------------------
     # Status
@@ -718,6 +1045,8 @@ class NotebookSession:
     def get_status(self) -> Dict[str, Any]:
         """Get current notebook reproducibility status."""
         self._require_loaded()
+        self._refresh_from_contents_api()
+        self._poll_iopub()
         cell_order = self.get_cell_order()
 
         violations = []
@@ -873,6 +1202,7 @@ class NotebookSession:
     ) -> Dict[str, Any]:
         """Rename a variable from cell_id onwards using AST-based rename."""
         self._require_loaded()
+        self._refresh_from_contents_api()
         code_order = self.get_cell_order()
         start_idx = code_order.index(cell_id)
 
@@ -895,6 +1225,10 @@ class NotebookSession:
                         flowbook_msg={"type": "cell_edited", "cell_id": cid},
                     )
 
+        # Push edits to JupyterLab
+        if modified_cells:
+            self._put_contents_api()
+
         return {
             "old_name": old_name,
             "new_name": new_name,
@@ -905,6 +1239,7 @@ class NotebookSession:
     def remove_inplace(self, cell_id: str, variable: str) -> Dict[str, Any]:
         """Convert df.method(inplace=True) to df = df.method() in a cell."""
         self._require_loaded()
+        self._refresh_from_contents_api()
         _, cell = self._find_cell(cell_id)
         source = get_cell_source(cell)
 
@@ -927,6 +1262,7 @@ class NotebookSession:
                         store_history=False,
                         flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
                     )
+                self._put_contents_api()
                 return {
                     "cell_id": cell_id,
                     "variable": actual_var,
@@ -954,6 +1290,7 @@ class NotebookSession:
                     store_history=False,
                     flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
                 )
+            self._put_contents_api()
             return {
                 "cell_id": cell_id,
                 "variable": actual_var,
@@ -969,6 +1306,7 @@ class NotebookSession:
     def insert_deepcopy(self, cell_id: str, variable: str) -> Dict[str, Any]:
         """Insert deepcopy of variable at top of cell, rename downstream."""
         self._require_loaded()
+        self._refresh_from_contents_api()
         _, cell = self._find_cell(cell_id)
         source = get_cell_source(cell)
 
@@ -1025,6 +1363,8 @@ class NotebookSession:
                         flowbook_msg={"type": "cell_edited", "cell_id": cid},
                     )
 
+        self._put_contents_api()
+
         return {
             "cell_id": cell_id,
             "variable": actual_var,
@@ -1035,6 +1375,7 @@ class NotebookSession:
     def mark_diagnostic(self, cell_id: str) -> Dict[str, Any]:
         """Add %diagnostic magic to a cell."""
         self._require_loaded()
+        self._refresh_from_contents_api()
         _, cell = self._find_cell(cell_id)
         source = get_cell_source(cell)
 
@@ -1054,11 +1395,13 @@ class NotebookSession:
                 flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
             )
 
+        self._put_contents_api()
         return {"cell_id": cell_id, "new_source_preview": new_source[:200]}
 
     def merge_cells(self, cell_ids: List[str]) -> Dict[str, Any]:
         """Merge multiple cells into the first one."""
         self._require_loaded()
+        self._refresh_from_contents_api()
         if len(cell_ids) < 2:
             raise ValueError("Need at least 2 cell IDs to merge")
 
@@ -1112,6 +1455,8 @@ class NotebookSession:
             flowbook_msg={"type": "notebook_structure", "cell_order": order_str.split()},
         )
 
+        self._put_contents_api()
+
         return {
             "merged_cell_id": first_id,
             "cells_removed": list(ids_to_remove),
@@ -1122,6 +1467,7 @@ class NotebookSession:
     def move_cell(self, cell_id: str, after_cell_id: str) -> Dict[str, Any]:
         """Move a cell to after another cell in the notebook."""
         self._require_loaded()
+        self._refresh_from_contents_api()
         cells = self.notebook["cells"]
 
         # Find and remove the cell to move
@@ -1151,6 +1497,8 @@ class NotebookSession:
             store_history=False,
             flowbook_msg={"type": "notebook_structure", "cell_order": order_str.split()},
         )
+
+        self._put_contents_api()
 
         return {
             "cell_id": cell_id,

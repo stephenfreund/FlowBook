@@ -18,6 +18,7 @@ from flowbook.server.kernel_manager import (
     KernelConnectionManager,
 )
 from flowbook.server.message_broadcaster import get_broadcaster, get_broadcast_stream
+from flowbook.kernel_discovery import read_discovery, write_discovery
 from flowbook.util.output import error, log, stream_output
 
 
@@ -224,6 +225,94 @@ class MessageStreamHandler(JupyterHandler):
             self.broadcaster.unregister_client(self.client_id)
 
 
+class KernelDiscoveryHandler(APIHandler):
+    """Handler for kernel discovery — check if MCP has a kernel running for a notebook."""
+
+    def _resolve_notebook_path(self, path: str) -> str:
+        """Resolve a notebook path to an absolute canonical path.
+
+        Handles tilde expansion in both the path and the server root directory,
+        then resolves relative paths against the server root.
+        """
+        import os
+
+        path = os.path.expanduser(path)
+        if not os.path.isabs(path):
+            root = self.settings.get("server_root_dir", "")
+            if root:
+                root = os.path.expanduser(root)
+                path = os.path.join(root, path)
+        return os.path.abspath(path)
+
+    @tornado.web.authenticated
+    async def get(self, path):
+        """Check for an existing kernel discovery file.
+
+        Args:
+            path: Notebook path (relative to server root or absolute).
+        """
+        abs_path = self._resolve_notebook_path(path)
+        disc = read_discovery(abs_path)
+
+        if disc:
+            self.finish(json.dumps(disc))
+        else:
+            self.set_status(404)
+            self.finish(json.dumps({"error": "No kernel found for this notebook"}))
+
+    def _get_kernel_pid(self, connection_file: str):
+        """Look up the kernel process PID and absolute connection file path.
+
+        Extracts the kernel UUID from the connection file name (kernel-{UUID}.json)
+        and queries the Jupyter kernel manager for the actual process PID and
+        the full path to the connection file.
+
+        Returns:
+            (pid, connection_file) tuple. Falls back to (0, original) on failure.
+        """
+        import os
+        import re
+
+        # Extract kernel UUID from connection file name
+        match = re.match(r"kernel-([0-9a-f-]+)\.json", os.path.basename(connection_file))
+        if not match:
+            return 0, connection_file
+
+        kernel_id = match.group(1)
+        try:
+            km = self.settings["serverapp"].kernel_manager
+            kernel = km.get_kernel(kernel_id)
+            pid = getattr(kernel.provisioner, "pid", 0) or 0
+            # Use the kernel manager's full connection file path
+            abs_conn = getattr(kernel, "connection_file", connection_file)
+            return pid, abs_conn
+        except Exception:
+            return 0, connection_file
+
+    @tornado.web.authenticated
+    async def put(self, path):
+        """Write a kernel discovery file (called by JupyterLab when it starts a kernel).
+
+        Request body: {"connection_file": "...", "kernel_name": "...", "pid": 123}
+        """
+        data = self.get_json_body()
+        abs_path = self._resolve_notebook_path(path)
+        connection_file = data.get("connection_file", "")
+
+        # Look up actual kernel PID and full connection file path
+        # (frontend sends pid=0 and a bare filename)
+        pid, connection_file = self._get_kernel_pid(connection_file)
+
+        disc_path = write_discovery(
+            notebook_path=abs_path,
+            connection_file=connection_file,
+            kernel_name=data.get("kernel_name", "flowbook_kernel"),
+            pid=pid,
+            started_by="jupyterlab",
+        )
+        self.finish(json.dumps({"discovery_file": disc_path}))
+
+
 def setup_handlers(web_app):
     """Set up the extension handlers."""
     global _kernel_manager
@@ -255,6 +344,11 @@ def setup_handlers(web_app):
         (
             url_path_join(base_url, "flowbook", "stream"),
             MessageStreamHandler,
+            {},
+        ),
+        (
+            url_path_join(base_url, "flowbook", "kernel-discovery", "(.+)"),
+            KernelDiscoveryHandler,
             {},
         ),
     ]

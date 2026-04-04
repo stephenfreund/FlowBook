@@ -7,7 +7,6 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
-import { Cell } from '@jupyterlab/cells';
 
 import { KernelDetector } from '../shared/kerneldetection';
 import { ReproducibilityMetadataPanel } from './metadatapanel';
@@ -15,15 +14,18 @@ import { DependenciesPanel } from './dependenciespanel';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { CellIndexManager } from '../cellindex';
-import { IPredicateViolation } from './types';
+import { IReproducibilityMetadata } from './types';
 import { FlowbookToolbarExtension } from './toolbar';
+import { getCodeCellOrder } from '../cellindexutils';
+import { requestAPI } from '../handler';
+import { registerBridgeCommands, setBridgeContext } from './nbibridge';
 
 /**
  * Register the flowbook:exec-restore command at plugin startup.
  *
  * The command is registered once, but its isEnabled check gates on:
  * 1. Current kernel is flowbook_kernel
- * 2. Active cell has a no_read_before_write predicate violation in flowbook_violations
+ * 2. Active cell has a no_read_before_write error in flowbook.errors
  *
  * The context menu item is defined declaratively in schema/plugin.json.
  */
@@ -50,12 +52,13 @@ function registerExecRestoreCommand(
         if (!activeCell || activeCell.model.type !== 'code') {
           return false;
         }
-        const violations = activeCell.model.getMetadata(
-          'flowbook_violations'
-        ) as IPredicateViolation[] | undefined;
+        const flowbookMeta = activeCell.model.getMetadata('flowbook') as
+          | IReproducibilityMetadata
+          | undefined;
+        const errors = flowbookMeta?.errors;
         return (
-          violations !== undefined &&
-          violations.some(v => v.predicate === 'no_read_before_write')
+          errors !== undefined &&
+          errors.some(e => e.error_type === 'no_read_before_write')
         );
       } catch (e) {
         console.error('FlowBook exec-restore isEnabled error:', e);
@@ -119,15 +122,17 @@ class FlowbookActivationManager {
   private _toolbarExtension: FlowbookToolbarExtension;
   private _isActive = false;
   private _activeNotebookPath: string | null = null;
+  private _statusListenerNotebook: NotebookPanel | null = null;
 
   constructor(
     app: JupyterFrontEnd,
     tracker: INotebookTracker,
+    kernelDetector: KernelDetector,
     toolbarExtension: FlowbookToolbarExtension
   ) {
     this._app = app;
     this._tracker = tracker;
-    this._kernelDetector = new KernelDetector(tracker);
+    this._kernelDetector = kernelDetector;
     this._cellIndexManager = new CellIndexManager();
     this._toolbarExtension = toolbarExtension;
 
@@ -159,16 +164,9 @@ class FlowbookActivationManager {
   private _checkCurrentNotebook(): void {
     const notebook = this._tracker.currentWidget;
     if (notebook) {
-      const kernelName = notebook.sessionContext.session?.kernel?.name;
-      console.log(`FlowBook Plugin: Checking notebook, kernel = ${kernelName}`);
-
       // Wait for session to be ready
       notebook.sessionContext.ready.then(() => {
         const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
-        const currentKernelName = notebook.sessionContext.session?.kernel?.name;
-        console.log(
-          `FlowBook Plugin: Session ready, kernel = ${currentKernelName}, isFlowbook = ${isFlowbook}`
-        );
 
         if (isFlowbook) {
           this._activate();
@@ -177,20 +175,42 @@ class FlowbookActivationManager {
         }
       });
 
-      // Also listen for status changes in case kernel starts after ready
-      notebook.sessionContext.statusChanged.connect(() => {
-        const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
-        const currentKernelName = notebook.sessionContext.session?.kernel?.name;
-        console.log(
-          `FlowBook Plugin: Status changed, kernel = ${currentKernelName}, isFlowbook = ${isFlowbook}`
+      // Disconnect previous statusChanged listener before connecting new one
+      if (
+        this._statusListenerNotebook &&
+        this._statusListenerNotebook !== notebook
+      ) {
+        this._statusListenerNotebook.sessionContext.statusChanged.disconnect(
+          this._onStatusChanged,
+          this
         );
+      }
 
-        if (isFlowbook && !this._isActive) {
-          this._activate();
-        } else if (!isFlowbook && this._isActive) {
-          this._deactivate();
-        }
-      });
+      if (this._statusListenerNotebook !== notebook) {
+        notebook.sessionContext.statusChanged.connect(
+          this._onStatusChanged,
+          this
+        );
+        this._statusListenerNotebook = notebook;
+      }
+    }
+  }
+
+  private _onStatusChanged(): void {
+    const notebook = this._statusListenerNotebook;
+    if (!notebook) {
+      return;
+    }
+    const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
+
+    if (isFlowbook && !this._isActive) {
+      this._activate();
+    } else if (isFlowbook && this._isActive) {
+      // Kernel may have restarted (new kernel ID) — rewrite discovery file
+      // so MCP can find the new connection. PUT is idempotent.
+      this._writeKernelDiscovery(notebook);
+    } else if (!isFlowbook && this._isActive) {
+      this._deactivate();
     }
   }
 
@@ -220,7 +240,6 @@ class FlowbookActivationManager {
 
     // Create execution hook (store reference for sendCommand access)
     this._executionHook = new ReproducibilityExecutionHookManager(
-      this._app,
       this._tracker,
       this._highlighter
     );
@@ -228,6 +247,14 @@ class FlowbookActivationManager {
     // Trigger initial dependency graph update (highlighter's constructor may
     // have called _updateAllCells before the dependencies panel was set)
     this._highlighter.refreshDependencies();
+
+    // Set bridge context so NBI bridge commands can access FlowBook internals
+    setBridgeContext(
+      this._highlighter,
+      this._executionHook,
+      this._kernelDetector,
+      this._tracker
+    );
 
     // Start cell index overlays for current notebook
     const widget = this._tracker.currentWidget;
@@ -237,10 +264,12 @@ class FlowbookActivationManager {
 
       // Sync initial staleness state from kernel
       this._syncInitialState(widget);
+
+      // Write kernel discovery file so MCP can find this kernel
+      this._writeKernelDiscovery(widget);
     }
 
     this._isActive = true;
-    console.log('FlowBook Plugin: Activated');
   }
 
   /**
@@ -253,11 +282,7 @@ class FlowbookActivationManager {
       return;
     }
 
-    // Get cell order
-    const cells = panel.content.widgets;
-    const cellOrder = cells
-      .filter((cell: Cell) => cell.model.type === 'code')
-      .map((cell: Cell) => cell.model.id);
+    const cellOrder = getCodeCellOrder(panel);
 
     if (cellOrder.length === 0) {
       return;
@@ -273,12 +298,36 @@ class FlowbookActivationManager {
     console.log('FlowBook Plugin: Sent initial sync via comm');
   }
 
+  /**
+   * Write a kernel discovery file so MCP can find this kernel.
+   * Best-effort — does not block activation on failure.
+   */
+  private _writeKernelDiscovery(panel: NotebookPanel): void {
+    const session = panel.sessionContext.session;
+    if (!session || !session.kernel) {
+      return;
+    }
+
+    const notebookPath = panel.context.path;
+    const kernelId = session.kernel.id;
+
+    requestAPI(`kernel-discovery/${encodeURIComponent(notebookPath)}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        kernel_name: session.kernel.name,
+        // The server-side handler will look up the connection file from the kernel ID
+        connection_file: `kernel-${kernelId}.json`,
+        pid: 0 // Server will fill in actual PID
+      })
+    }).catch(() => {
+      // Best-effort — MCP can still work without discovery
+    });
+  }
+
   private _deactivate(): void {
     if (!this._isActive) {
       return;
     }
-
-    console.log('FlowBook Plugin: Deactivating');
 
     // Stop cell index overlays
     if (this._activeNotebookPath) {
@@ -296,11 +345,20 @@ class FlowbookActivationManager {
       this._dependenciesPanel = null;
     }
 
-    // Highlighter cleanup
-    this._highlighter = null;
+    // Dispose highlighter and execution hook (disconnect signal listeners)
+    if (this._highlighter) {
+      this._highlighter.dispose();
+      this._highlighter = null;
+    }
+    if (this._executionHook) {
+      this._executionHook.dispose();
+      this._executionHook = null;
+    }
+
+    // Clear bridge context
+    setBridgeContext(null, null, null, null);
 
     this._isActive = false;
-    console.log('FlowBook Plugin: Deactivated');
   }
 }
 
@@ -316,15 +374,26 @@ export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
       'FlowBook Plugin: Extension registered (will activate when flowbook_kernel is used)'
     );
 
+    // Expose app for console testing (e.g., app.commands.execute('flowbook:get-status'))
+    (window as any).app = app;
+
     const kernelDetector = new KernelDetector(tracker);
 
     // Register exec-restore command at startup (context menu item in schema)
     registerExecRestoreCommand(app, tracker, kernelDetector);
 
+    // Register NBI bridge commands (callable via run_ui_command from NBI extension)
+    registerBridgeCommands(app, tracker, kernelDetector);
+
     // Create and register toolbar extension
     const toolbarExtension = new FlowbookToolbarExtension(kernelDetector);
     app.docRegistry.addWidgetExtension('Notebook', toolbarExtension);
 
-    new FlowbookActivationManager(app, tracker, toolbarExtension);
+    new FlowbookActivationManager(
+      app,
+      tracker,
+      kernelDetector,
+      toolbarExtension
+    );
   }
 };

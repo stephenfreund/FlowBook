@@ -481,7 +481,7 @@ class TestIntegration:
         Scenario:
         - Prior cell read df.columns
         - Current cell added a column
-        - Should detect conflict (col_add conflicts with Attr(df, columns))
+        - Should detect conflict (Col conflicts with Attr(df, columns))
         """
         from flowbook.kernel.change_detector import changes_to_write_locs
         from flowbook.kernel.locations import tracking_to_readlocset, wlocs_conflict_rlocs
@@ -509,7 +509,7 @@ class TestIntegration:
         changes = detect_changes(diff)
         W_i = changes_to_write_locs(changes)
 
-        # Should detect conflict: ColAdd(df, new_col) vs Attr(df, columns)
+        # Should detect conflict: Col(df, new_col) vs Attr(df, columns)
         conflicting = wlocs_conflict_rlocs(W_i, R_prior)
         assert len(conflicting) == 1
         conflict = next(iter(conflicting))

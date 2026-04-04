@@ -16,6 +16,10 @@ def make_tracking(
     column_reads: dict = None,
     column_writes: dict = None,
     structural_reads: dict = None,
+    row_mutations: set = None,
+    index_mutations: set = None,
+    dtype_changes: dict = None,
+    column_deletions: dict = None,
 ) -> TrackingData:
     """
     Helper to create TrackingData with optional column tracking.
@@ -26,6 +30,10 @@ def make_tracking(
         column_reads: Dict mapping var names to sets of read column names
         column_writes: Dict mapping var names to sets of written column names
         structural_reads: Dict mapping var names to sets of structural attrs read
+        row_mutations: Set of var names where rows were added/removed
+        index_mutations: Set of var names where index was mutated
+        dtype_changes: Dict mapping var names to sets of columns with dtype changes
+        column_deletions: Dict mapping var names to sets of deleted column names
 
     Returns:
         TrackingData instance
@@ -36,6 +44,10 @@ def make_tracking(
         column_reads_before_writes=column_reads or {},
         column_writes=column_writes or {},
         structural_reads=structural_reads or {},
+        row_mutations=row_mutations or set(),
+        index_mutations=index_mutations or set(),
+        dtype_changes=dtype_changes or {},
+        column_deletions=column_deletions or {},
     )
 
 
@@ -76,6 +88,10 @@ class ReproducibilityTestHelper:
         column_reads: dict = None,
         column_writes: dict = None,
         structural_reads: dict = None,
+        row_mutations: set = None,
+        index_mutations: set = None,
+        dtype_changes: dict = None,
+        column_deletions: dict = None,
         continue_on_violation: bool = False,
     ):
         """
@@ -95,6 +111,10 @@ class ReproducibilityTestHelper:
             column_reads: Dict of var -> set of read columns
             column_writes: Dict of var -> set of written columns
             structural_reads: Dict of var -> set of structural attrs read
+            row_mutations: Set of var names where rows were added/removed
+            index_mutations: Set of var names where index was mutated
+            dtype_changes: Dict of var -> set of columns with dtype changes
+            column_deletions: Dict of var -> set of deleted column names
             continue_on_violation: Whether to continue after violations
 
         Returns:
@@ -108,6 +128,10 @@ class ReproducibilityTestHelper:
             column_reads=column_reads,
             column_writes=column_writes,
             structural_reads=structural_reads,
+            row_mutations=row_mutations,
+            index_mutations=index_mutations,
+            dtype_changes=dtype_changes,
+            column_deletions=column_deletions,
         )
 
         return self.sdc.check(

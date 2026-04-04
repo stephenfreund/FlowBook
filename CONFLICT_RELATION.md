@@ -6,7 +6,7 @@ FlowBook's reproducibility system tracks what each notebook cell _reads_ and _wr
 
 ## Location Grammars
 
-Reads and writes are different types. Reads describe _what a cell looked at_; writes describe _what a cell changed and how_. The "how" is what makes column-granular conflict resolution possible: modifying a column's values is a different kind of write than adding a new column, and each invalidates a different set of reads.
+Reads and writes are different types. Reads describe _what a cell looked at_; writes describe _what a cell changed_. Column-granular conflict resolution comes from distinguishing column writes from row/attribute writes — each invalidates a different set of reads.
 
 ### ReadLoc
 
@@ -38,23 +38,19 @@ Using the same metavariables as ReadLoc:
 
 ```
 WriteLoc ::= Var(x)            -- variable completely replaced
-           | Col(d, c)         -- column c values modified in place
-           | ColAdd(d, c)      -- new column c added to DataFrame d
-           | ColDel(d, c)      -- column c removed from DataFrame d
+           | Col(d, c)         -- column written (may add, modify, or delete)
            | Rows(d)           -- rows added or removed from DataFrame d
            | Attr(d, a)        -- structural attribute a changed
            | File(p)           -- file at path p written
 ```
 
-| Constructor    | Fields                  | Semantics                                                  |
-| -------------- | ----------------------- | ---------------------------------------------------------- |
-| `Var(x)`       | name = x                | Variable `x` was reassigned or is a non-DataFrame mutation |
-| `Col(d, c)`    | qualifier = d, name = c | Column `c` of DataFrame `d` had its values modified        |
-| `ColAdd(d, c)` | qualifier = d, name = c | Column `c` was added to DataFrame `d`                      |
-| `ColDel(d, c)` | qualifier = d, name = c | Column `c` was removed from DataFrame `d`                  |
-| `Rows(d)`      | name = d                | Rows were added to or removed from DataFrame `d`           |
-| `Attr(d, a)`   | qualifier = d, name = a | Attribute `a` of DataFrame `d` changed (e.g., index)       |
-| `File(p)`      | name = p                | File at path `p` was written                               |
+| Constructor | Fields                  | Semantics                                                  |
+| ----------- | ----------------------- | ---------------------------------------------------------- |
+| `Var(x)`    | name = x                | Variable `x` was reassigned or is a non-DataFrame mutation |
+| `Col(d, c)` | qualifier = d, name = c | Column `c` of DataFrame `d` was written (add, modify, or delete) |
+| `Rows(d)`   | name = d                | Rows were added to or removed from DataFrame `d`           |
+| `Attr(d, a)` | qualifier = d, name = a | Attribute `a` of DataFrame `d` changed (e.g., index)       |
+| `File(p)`   | name = p                | File at path `p` was written                               |
 
 ## When Each Location Is Generated
 
@@ -73,35 +69,36 @@ Read locations are recorded by runtime instrumentation during cell execution. Fl
 
 ### Write Locations
 
-Write locations are determined by diffing memory checkpoints taken before and after cell execution. The `change_detector` module parses the structured diff tree into typed `Change` objects, which are then converted to `WriteLoc` values.
+Write locations come from two sources: (1) diffing memory checkpoints taken before and after cell execution, and (2) runtime monkey patches that record structural mutations as they happen.
 
-| WriteLoc       | Detected when (checkpoint diff)                                      | Examples                                                       |
-| -------------- | -------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `Var(x)`       | Variable `x` was reassigned, or a non-DataFrame object mutated       | `x = 10`, `config['key'] = val`, `df = pd.DataFrame(...)`      |
-| `Col(d, c)`    | Column `c` exists in both pre- and post-checkpoint but values differ | `df['price'] *= 1.1`, `df.loc[:, 'x'] = 0`                     |
-| `ColAdd(d, c)` | Column `c` exists in post-checkpoint but not in pre-checkpoint       | `df['new'] = vals`, `df.insert(0, 'col', v)`, `df.assign(...)` |
-| `ColDel(d, c)` | Column `c` exists in pre-checkpoint but not in post-checkpoint       | `del df['old']`, `df.drop(columns=['x'], inplace=True)`        |
-| `Rows(d)`      | Row count of DataFrame `d` changed between checkpoints               | `df.loc[len(df)] = row`, `pd.concat(...)`, `df.dropna(...)`    |
-| `Attr(d, a)`   | Attribute value differs (e.g., index labels changed, same length)    | `df.reset_index(inplace=True)`, `df.index = new_labels`        |
-| `File(p)`      | File at path `p` was written during execution                        | `df.to_csv('out.csv')`, `open('result.json', 'w').write(...)`  |
+The `change_detector` module parses the structured diff tree into typed `Change` objects, which are then converted to `WriteLoc` values. Structural mutations (row changes, index changes, dtype changes, column deletions) are recorded at operation time by monkey patches in `column_tracking.py` and flow through `TrackingData` into `tracking_to_writelocset()`.
+
+| WriteLoc    | Detected when                                                           | Examples                                                       |
+| ----------- | ----------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `Var(x)`    | Variable `x` was reassigned, or a non-DataFrame object mutated          | `x = 10`, `config['key'] = val`, `df = pd.DataFrame(...)`      |
+| `Col(d, c)` | Column `c` was added, modified, or deleted                              | `df['price'] *= 1.1`, `df['new'] = vals`, `del df['old']`      |
+| `Rows(d)`   | Row count of DataFrame `d` changed (diff or monkey patch)               | `df.loc[len(df)] = row`, `pd.concat(...)`, `df.dropna(...)`    |
+| `Attr(d, a)` | Attribute value differs, or structural change recorded by monkey patch  | `df.reset_index(inplace=True)`, `df.index = new_labels`        |
+| `File(p)`   | File at path `p` was written during execution                           | `df.to_csv('out.csv')`, `open('result.json', 'w').write(...)`  |
 
 `DtypeChanged(d, c)` produces _two_ write locs: `Col(d, c)` (the column's data is now a different type) and `Attr(d, "dtypes")` (the dtype metadata changed).
+
+**Structural mutation tracking.** Row mutations, index changes, dtype changes, and column deletions are recorded at operation time by monkey patches (e.g., on `__delitem__`, `drop`, `reset_index`, etc.) in `column_tracking.py`. These events are stored in `TrackingData` and converted to `WriteLoc` values by `tracking_to_writelocset()`. This ensures structural writes are correctly detected even on re-execution, where checkpoint diffs would be idempotent.
 
 ## The ▷ Conflict Relation
 
 The function `write_conflicts_read(w, r)` answers: **does writing `w` invalidate reading `r`?**
 
-This is a 7 × 4 matrix — 7 write types against 4 read types — and it is the _only_ conflict check in the entire system. All staleness predicates, backward conflict detection, and forward contamination checks are defined in terms of ▷.
+This is a 5 × 4 matrix — 5 write types against 4 read types — and it is the _only_ conflict check in the entire system. All staleness predicates, backward conflict detection, and forward contamination checks are defined in terms of ▷.
 
 ### Attribute Groups
 
 Two sets define which DataFrame attributes are sensitive to which kind of structural change:
 
-| Group             | Members                                                                                 | Meaning                                      |
-| ----------------- | --------------------------------------------------------------------------------------- | -------------------------------------------- |
-| `COL_ATTRS`       | `columns`, `keys`, `dtypes`, `axes`, `T`, `values`, `iter`, `describe`, `shape`, `size` | Attributes that reveal column structure      |
-| `COL_VALUE_ATTRS` | `values`, `T`, `describe`                                                               | Attributes that depend on column data values |
-| `ROW_ATTRS`       | `index`, `axes`, `values`, `T`, `shape`, `size`, `len`, `empty`                         | Attributes that reveal row structure         |
+| Group        | Members                                                                                 | Meaning                                 |
+| ------------ | --------------------------------------------------------------------------------------- | --------------------------------------- |
+| `COL_ATTRS`  | `columns`, `keys`, `dtypes`, `axes`, `T`, `values`, `iter`, `describe`, `shape`, `size` | Attributes that reveal column structure |
+| `ROW_ATTRS`  | `index`, `axes`, `values`, `T`, `shape`, `size`, `len`, `empty`                         | Attributes that reveal row structure    |
 
 `shape`, `size`, `axes`, `values`, and `T` appear in both — they expose both dimensions. For example, `axes = [index, columns]` is affected by both row and column structural changes.
 
@@ -112,9 +109,7 @@ Two sets define which DataFrame attributes are sensitive to which kind of struct
 | Write `w` ↓ \ Read `r` → | **Var(x')** | **Col(d', c')**        | **Attr(d', a')**                    | **File(p')** |
 | ------------------------ | ----------- | ---------------------- | ----------------------------------- | ------------ |
 | **Var(x)**               | `x = x'`    | —                      | —                                   | —            |
-| **Col(d, c)**            | —           | `d ≡ d'` AND `c = c'`  | `d ≡ d'` AND `a' ∈ COL_VALUE_ATTRS` | —            |
-| **ColAdd(d, c)**         | —           | —                      | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
-| **ColDel(d, c)**         | —           | `d ≡ d'` AND `c = c'`  | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
+| **Col(d, c)**            | —           | `d ≡ d'` AND `c = c'`  | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
 | **Rows(d)**              | —           | `d ≡ d'` (all columns) | `d ≡ d'` AND `a' ∈ ROW_ATTRS`       | —            |
 | **Attr(d, a)**           | —           | —                      | `d ≡ d'` AND `a = a'`               | —            |
 | **File(p)**              | —           | —                      | —                                   | `p = p'`     |
@@ -129,72 +124,48 @@ Two sets define which DataFrame attributes are sensitive to which kind of struct
 Key observations:
 
 - **`Var(x)` only conflicts with `Var(x)` reads.** Rebinding detection for column/attribute readers works because `Var(x)` is always present in read sets alongside `Col`/`Attr` reads (see `tracking_to_readlocset`). When `df = new_value`, the read set `{Var("df"), Col(df, "price"), ...}` ensures `Var("df") ▷ Var("df") = true` catches the rebinding. No cross-domain bridge rule is needed.
-- **`Col(d, c)` is maximally precise.** Modifying column values invalidates reads of that _exact_ column, plus value-dependent attributes (`values`, `T`, `describe`) that expose the raw data. It does not touch structural attributes or other columns. This is what enables _column independence_: cell A reads `df["qty"]`, cell B writes `df["price"]` → no conflict (unless A also reads `df.values`).
-- **`ColAdd(d, c)` does not invalidate existing column reads.** The old columns' data is untouched. It only invalidates structural attributes like `columns` and `shape` that would now reflect the extra column.
-- **`ColDel(d, c)` is stricter than `ColAdd`.** It invalidates reads of the deleted column (it no longer exists) _plus_ the same structural attributes.
+- **`Col(d, c)` is conservative.** Writing a column invalidates reads of that _exact_ column, plus _all_ column-related structural attributes (`shape`, `columns`, `dtypes`, `values`, `T`, etc.). This covers add, modify, and delete scenarios uniformly — the write type does not distinguish between them, ensuring consistent conflict detection regardless of execution history. _Column independence_ is preserved: cell A reads `df["qty"]`, cell B writes `df["price"]` → no conflict.
 - **`Rows(d)` is column-wide.** Every column's data changed (more or fewer values), so all column reads conflict. Row-structural attributes (`index`, `shape`, `len`, `empty`) and shared attributes (`axes`, `values`, `T`) are also affected — but `df.columns` and `df.dtypes` are unchanged by adding a row.
 - **`Attr(d, a)` is point-to-point in ▷.** Only the exact same attribute conflicts. Changing the index does not _directly_ invalidate reading `dtypes`. However, some attribute changes have _derived effects_ — for example, changing the index also changes `axes` (since `axes = [index, columns]`). The change detector handles this by emitting `Attr` writes for all affected derived attributes, not just the root cause. This keeps ▷ simple (point-to-point) while ensuring derived attributes are correctly invalidated.
 
 ## Write-Write Conflict (Forward Staleness)
 
-There is no separate write-write conflict function. Instead, the system converts one side's writes into reads via the **output function**, then reuses ▷.
+The system uses a direct write-write conflict relation — **▷▷** (`write_conflicts_write`) — to determine whether two writes overlap. This is a self-contained 5×5 function, analogous to the 5×4 ▷ relation but operating on two `WriteLoc` operands.
 
-### The Output Function
+### The ▷▷ Relation
 
-`output(w)` maps a `WriteLoc` to the set of `ReadLoc`s that would _observe_ the effect that `w` produced. Each write type returns exactly the reads it would conflict with in ▷, ensuring `W ▷ output(W')` correctly detects write-write overlap:
+`write_conflicts_write(w1, w2)` answers: **do writes `w1` and `w2` overlap?** An entry shows the condition under which `w₁ ▷▷ w₂` holds — i.e., executing cell `i` (row) makes cell `j`'s write (column) stale. Comparison operators are the same as in the read-write matrix above: `≡` for DataFrame identity, `=` for string equality.
 
-| WriteLoc       | `output()` → ReadLoc set                          |
-| -------------- | ------------------------------------------------- |
-| `Var(x)`       | `{ Var(x) }`                                      |
-| `Col(d, c)`    | `{ Col(d, c) }`                                   |
-| `ColAdd(d, c)` | `{ Attr(d, a) \| a ∈ COL_ATTRS }`                 |
-| `ColDel(d, c)` | `{ Col(d, c) } ∪ { Attr(d, a) \| a ∈ COL_ATTRS }` |
-| `Rows(d)`      | `{ Attr(d, a) \| a ∈ ROW_ATTRS }`                 |
-| `Attr(d, a)`   | `{ Attr(d, a) }`                                  |
-| `File(p)`      | `{ File(p) }`                                     |
+| w₁ ↓ \ w₂ →   | **Var(x')**  | **Col(d', c')**        | **Rows(d')**            | **Attr(d', a')**                    | **File(p')** |
+| -------------- | ------------ | ---------------------- | ----------------------- | ----------------------------------- | ------------ |
+| **Var(x)**     | `x = x'`     | —                      | —                       | —                                   | —            |
+| **Col(d, c)**  | —            | `d ≡ d'` AND `c = c'`  | `d ≡ d'`                | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
+| **Rows(d)**    | —            | `d ≡ d'`               | `d ≡ d'`                | `d ≡ d'` AND `a' ∈ ROW_ATTRS`       | —            |
+| **Attr(d, a)** | —            | `d ≡ d'` AND `a ∈ CA`  | `d ≡ d'` AND `a ∈ RA`  | `d ≡ d'` AND `a = a'`               | —            |
+| **File(p)**    | —            | —                      | —                       | —                                   | `p = p'`     |
 
-This lifts to sets: `output*(W) = ⋃ { output(w) | w ∈ W }`.
+(**—** = no write-write conflict; CA = COL_ATTRS, RA = ROW_ATTRS)
 
-**Key insight:** Structural writes (`ColAdd`, `ColDel`, `Rows`) expand to multiple output reads because they affect shared structural attributes. For example, `output(Rows(d))` = `{Attr(d, a) | a ∈ ROW_ATTRS}` rather than `Var(d)`, because row changes affect shape, index, etc. — not the variable binding itself.
-
-**Why `output(Col)` is minimal.** `output(Col(d, c))` = `{Col(d, c)}` — just the column itself, with no attribute inflation. Including `COL_VALUE_ATTRS` (`values`, `T`, `describe`) would create false write-write overlap between independent column writes: `Col(d, "price") ▷ Attr(d', "values")` would fire, making any two column writes on the same DataFrame appear to conflict. Column independence is preserved because ▷ already handles cross-level conflicts directly (e.g., `Rows ▷ Col`).
-
-**Rows ↔ Col bidirectional detection.** `Rows(d) ▷ Col(d, *)` in ▷, but `output(Rows(d))` does not include column reads because we cannot enumerate column names at the loc level. Write-write overlap between `Rows(d)` and `Col(d, c)` is detected via `Rows(d) ▷ output(Col(d, c))`: since `output(Col(d, c))` contains `Col(d, c)` and `Rows(d) ▷ Col(d, c) = True`, overlap is always detected. The reverse direction (`Col(d,c) ▷ output(Rows(d))`) also works because `output(Rows(d))` contains `Attr(d, values)` and `Attr(d, T)`, both in `COL_VALUE_ATTRS`.
+**Code:** `write_conflicts_write()` in `kernel/locations.py`
 
 ### Forward Staleness Check
 
 When cell `i` executes, for each later cell `j`:
 
 1. **Read-based staleness:** `W'ᵢ ▷ Rⱼ ≠ ∅` — did `i`'s writes invalidate what `j` previously read?
-2. **Write-based staleness:** `W'ᵢ ▷ output*(Wⱼ) ≠ ∅` — did `i`'s writes overlap with what `j` writes?
+2. **Write-based staleness:** `W'ᵢ ▷▷ Wⱼ ≠ ∅` — do `i`'s writes overlap with what `j` writes?
 
-Both checks use the same ▷ relation. The second catches cases like: cell A and cell B both write `df["price"]`. If cell A re-executes with a new value, cell B is stale — its write was computed from outdated inputs.
+The first check uses ▷ (write-read); the second uses ▷▷ (write-write). The second catches cases like: cell A and cell B both write `df["price"]`. If cell A re-executes with a new value, cell B is stale — its write was computed from outdated inputs.
 
-### Effective Write-Write Conflict Matrix
+### Key Observations
 
-Composing `output()` with ▷ yields the effective write-write table. An entry shows the condition under which `wᵢ ▷ output(wⱼ)` holds — i.e., executing cell `i` (row) makes cell `j`'s write (column) stale. Comparison operators are the same as in the read-write matrix above: `≡` for DataFrame identity, `name()` for Address → VarName extraction, `=` for string equality.
+**Column independence is preserved.** Two writes to distinct columns of the same DataFrame do NOT conflict: `Col(d, "price") ▷▷ Col(d', "qty")` requires `c = c'`, which fails.
 
-| `wᵢ` ↓ \ `wⱼ` →  | **Var(x')** | **Col(d', c')**       | **ColAdd(d', c')**           | **ColDel(d', c')**           | **Rows(d')**                 | **Attr(d', a')**                    | **File(p')** |
-| ---------------- | ----------- | --------------------- | ---------------------------- | ---------------------------- | ---------------------------- | ----------------------------------- | ------------ |
-| **Var(x)**       | `x = x'`    | —                     | —                            | —                            | —                            | —                                   | —            |
-| **Col(d, c)**    | —           | `d ≡ d'` AND `c = c'` | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ COL_VALUE_ATTRS` | —            |
-| **ColAdd(d, c)** | —           | —                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
-| **ColDel(d, c)** | —           | `d ≡ d'` AND `c = c'` | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ COL_ATTRS`       | —            |
-| **Rows(d)**      | —           | `d ≡ d'`              | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'`                     | `d ≡ d'` AND `a' ∈ ROW_ATTRS`       | —            |
-| **Attr(d, a)**   | —           | —                     | `d ≡ d'` AND `a ∈ COL_ATTRS` | `d ≡ d'` AND `a ∈ COL_ATTRS` | `d ≡ d'` AND `a ∈ ROW_ATTRS` | `d ≡ d'` AND `a = a'`               | —            |
-| **File(p)**      | —           | —                     | —                            | —                            | —                            | —                                   | `p = p'`     |
-
-(**—** = no write-write staleness)
-
-**Column independence is preserved.** Because `output(Col(d, c)) = {Col(d, c)}` (no attribute inflation), two writes to distinct columns of the same DataFrame do NOT conflict: `Col(d, "price") ▷ output(Col(d', "qty"))` requires `c = c'`, which fails. The same applies to `ColAdd ▷ output(Col)` and `Attr ▷ output(Col)` — both are `—` because `ColAdd` and `Attr` don't conflict with `Col` reads in the base ▷ matrix.
-
-Key observations:
-
-- **`Var(x)` only overlaps with `Var(x')`** via `output(Var(x')) = {Var(x')}`. Write-write overlap between `Var("df")` and `Col(df, c)` is not detected by the write-write path; instead, it is caught by the read overlap path because the read set always contains `Var("df")` alongside `Col` reads.
+- **The ▷▷ relation is symmetric.** If `w₁ ▷▷ w₂` then `w₂ ▷▷ w₁`. This follows from the semantics: if two writes touch overlapping state, both cells' results depend on execution order, so staleness propagates in both directions.
+- **`Var(x)` only overlaps with `Var(x')`** when `x = x'`. Write-write overlap between `Var("df")` and `Col(df, c)` is not detected by the write-write path; instead, it is caught by the read overlap path because the read set always contains `Var("df")` alongside `Col` reads.
 - **`Col` vs `Col`** requires exact column match (`c = c'`) — column independence at the write-write level.
-- **`Col` vs `Rows` overlap** is detected in both directions without attribute inflation: `Rows(d) ▷ {Col(d',c')}` succeeds directly (Rows ▷ Col in base ▷), and `Col(d,c) ▷ output(Rows(d'))` succeeds because `output(Rows)` contains `Attr(d', values)` and `Attr(d', T)`, both in `COL_VALUE_ATTRS`.
-- **`ColDel` vs `Col`** requires `c = c'` — deleting column "price" only overlaps with writing column "price", not other columns.
-- **Structural writes** (`ColAdd`, `ColDel`, `Rows`) still detect broad overlap with each other because their `output()` includes `COL_ATTRS` or `ROW_ATTRS`, which intersect across structural write types.
+- **`Col` vs `Rows` overlap** is detected bidirectionally: `Col(d, c) ▷▷ Rows(d')` and `Rows(d) ▷▷ Col(d', c')` both hold when `d ≡ d'`, because row changes affect all column data and vice versa.
+- **`Col` vs `Attr` overlap** is symmetric: `Col(d, c) ▷▷ Attr(d', a')` holds when `a' ∈ COL_ATTRS`, and `Attr(d, a) ▷▷ Col(d', c')` holds when `a ∈ COL_ATTRS`. Both hold because a column-structural attribute write (e.g., `.columns`) and a column value write touch overlapping state.
 
 ## Stable Object Identity via StableIdMap
 
@@ -240,7 +211,7 @@ side-table:
 The ▷ relation uses one comparison mode for DataFrame-level checks:
 
 - **`_same_dataframe(w.qualifier, r.qualifier)`** — for DataFrame-to-DataFrame checks
-  (Col, ColAdd, ColDel, Rows, Attr). Compares `loc_id`s when both are LocRef.
+  (Col, Rows, Attr). Compares `loc_id`s when both are LocRef.
   Aliased DataFrames match automatically.
 
 `Var(x)` writes only conflict with `Var(x)` reads (simple name equality). Rebinding
@@ -262,81 +233,38 @@ See `FORMAL_DEVELOPMENT.md` §9.1 for the full design analysis.
 - Memo transfer: `_apply_restore_memo()` in `kernel/flowbook_kernel.py`
 - Alias detection (Phase 1 safety net): `_expand_with_deep_aliases()` in `kernel/reproducibility_enforcer.py`
 
-## Column Provenance: Col vs ColAdd on Re-execution
+## Structural Mutation Tracking
 
-The distinction between `Col(d, c)` and `ColAdd(d, c)` is critical for correct conflict detection. Adding a column changes structural attributes (`shape`, `columns`, etc.) while modifying an existing column's values does not. The ▷ matrix encodes this: `ColAdd ▷ Attr(d, a)` for `a ∈ COL_ATTRS`, but `Col ▷ Attr(d, a)` only for `a ∈ COL_VALUE_ATTRS`.
+Checkpoint diffs are idempotent: re-executing a structural operation (e.g., deleting an already-deleted column) produces no diff. To ensure structural writes are always correctly detected, FlowBook records structural mutations at operation time via monkey patches in `column_tracking.py`.
 
-### The re-execution problem
+### How structural writes flow
 
-Write locations are determined by checkpoint diffs. On first execution of `df['x'] = 5`, column `x` is absent in the pre-checkpoint → `ColAdd(d, x)`. On re-execution, `x` exists in both checkpoints (from the prior run) → `Col(d, x)`. The diff cannot distinguish "modified existing column" from "re-added a column this cell originally created."
+1. **At operation time:** Monkey patches on DataFrame methods (e.g., `__delitem__`, `drop`, `reset_index`, `.loc` row assignment) record structural events into `TrackingData` during cell execution.
+2. **After execution:** `tracking_to_writelocset()` converts `TrackingData` events into typed `WriteLoc` values (`Col`, `Rows`, `Attr`), which are merged with diff-derived writes.
+3. **Result:** The enforcer always sees the correct write set, even on re-execution.
 
-This causes the `NoReadBeforeWrite` predicate to miss forward contamination when an earlier cell reads a structural attribute like `df.shape`.
+This replaces the previous `_inject_structural_writes()` approach, which used `DataFrameProvenance` stored in `df.attrs` to retroactively augment write sets. That method was removed because operation-time tracking is simpler and more reliable.
 
-### Structural provenance tracking
+### DataFrameProvenance (reporting only)
 
-FlowBook stores structural provenance as a single `DataFrameProvenance` object in `df.attrs['_flowbook_provenance']`, recording which cell first caused each structural effect on a DataFrame.
-
-**DataFrameProvenance fields:**
-
-| Field            | Type                | Tracks                                       |
-| ---------------- | ------------------- | -------------------------------------------- |
-| `col_origins`    | `{column: cell_id}` | Which cell first created each column         |
-| `col_deletions`  | `{column: cell_id}` | Which cell first deleted each column         |
-| `dtype_origins`  | `{column: cell_id}` | Which cell first changed each column's dtype |
-| `row_mutators`   | `set[cell_id]`      | Cells that mutated the row count             |
-| `index_mutators` | `set[cell_id]`      | Cells that mutated the index                 |
-
-**Provenance hooks:**
-
-| Hook                                     | Trigger                                            | Provenance effect                              |
-| ---------------------------------------- | -------------------------------------------------- | ---------------------------------------------- |
-| `record_var_write(df, cell_id)`          | DataFrame assigned to variable                     | Create fresh provenance, all columns → cell_id |
-| `record_column_write(df, col, cell_id)`  | `df[col] = val` or `df.insert(...)`                | First writer wins (no overwrite)               |
-| `record_column_delete(df, col, cell_id)` | `del df[col]`, `df.drop(columns=...)`              | First deleter wins                             |
-| `record_dtype_change(df, col, cell_id)`  | `df[col] = val` (dtype changed)                    | First changer wins                             |
-| `record_row_mutation(df, cell_id)`       | `.loc` row add, `drop(inplace)`, `dropna`, etc.    | Add to row_mutators set                        |
-| `record_index_mutation(df, cell_id)`     | `df.index = ...`, `reset_index`, `set_index`, etc. | Add to index_mutators set                      |
-
-**First writer/deleter/changer wins** means re-executing a structural operation preserves the original cell's provenance. All provenance is reset only by full DataFrame replacement (`record_var_write`).
-
-### Provenance-based structural write injection
-
-The enforcer applies `_inject_structural_writes(W, cell_id, namespace)` to augment diff-derived write sets with provenance-recorded structural effects. On re-execution, checkpoint diffs miss idempotent structural changes (e.g., deleting an already-deleted column produces no diff). Provenance persists in `df.attrs` and restores the correct write types:
-
-```
-InjectStructuralWrites(W, cell_id, Σ):
-  1. Col(d, c) → ColAdd(d, c)       if col_origins(Σ(d), c) = cell_id
-  2. Inject ColDel(d, c)             if col_deletions(Σ(d), c) = cell_id
-  3. Inject Rows(d)                  if cell_id ∈ row_mutators(Σ(d))
-  4. Inject Attr(d, index/axes)      if cell_id ∈ index_mutators(Σ(d))
-  5. Inject Attr(d, dtypes/values/T) if ∃c: dtype_origins(Σ(d), c) = cell_id
-```
-
-The injection scans ALL DataFrames in namespace (not just those already in W), because on re-execution W may be empty while provenance persists. It is applied _before_ emptiness checks in each predicate:
-
-- **NoReadBeforeWrite** (`_check_forward_contamination`): injects for each later cell's writes
-- **NoWriteAfterRead** (`_check_backward_mutation_new`): injects for the current cell's writes
-- **ForwardStale** (`_compute_forward_staleness_syntactic`): injects for staleness propagation
+`DataFrameProvenance` still exists in `df.attrs['_flowbook_provenance']` for reporting purposes (e.g., showing which cell first created a column). However, it is **no longer used by the enforcer for conflict detection** — all conflict-relevant structural writes come from `TrackingData`.
 
 **Code:**
 
-- Provenance class: `DataFrameProvenance` in `kernel_support/column_provenance.py`
-- Provenance tracker: `DataFrameProvenanceTracker` in `kernel_support/column_provenance.py`
-- Structural write injection: `_inject_structural_writes()` in `kernel/reproducibility_enforcer.py`
-- Integration points: `_check_forward_contamination()`, `_check_backward_mutation_new()`, `_compute_forward_staleness_syntactic()` in `kernel/reproducibility_enforcer.py`
-
-See `FORMAL_DEVELOPMENT.md` §12 for the full formal treatment.
+- Structural mutation recording: monkey patches in `kernel_support/column_tracking.py`
+- TrackingData → WriteLoc conversion: `tracking_to_writelocset()` in `kernel/change_detector.py`
+- Provenance class (reporting only): `DataFrameProvenance` in `kernel_support/column_provenance.py`
 
 ## Design Summary
 
 The entire conflict system rests on three primitives:
 
-1. **`ReadLoc` / `WriteLoc`** — typed locations that encode _what_ was accessed and _how_ it changed.
-2. **`▷` (`write_conflicts_read`)** — a single 7×4 function that answers "does this write invalidate this read?"
-3. **`output()`** — a projection from writes to reads, enabling write-write overlap to be expressed as `▷` over projected reads.
+1. **`ReadLoc` (4 types) / `WriteLoc` (5 types)** — typed locations that encode _what_ was accessed and _how_ it changed.
+2. **`▷` (`write_conflicts_read`)** — a 5×4 function: "does this write invalidate this read?"
+3. **`▷▷` (`write_conflicts_write`)** — a 5×5 function: "do these two writes overlap?"
 
-All higher-level predicates — `BackConflict`, `FwdContaminated`, `StaleFwd` — are defined compositionally from these three primitives. There is no separate conflict rules table, no ad-hoc special cases. Adding a new write type (e.g., `DtypeChanged`) requires only:
+All higher-level predicates — `BackConflict`, `FwdContaminated`, `StaleFwd` — are defined compositionally from these primitives. There is no separate conflict rules table, no ad-hoc special cases. Adding a new write type requires only:
 
-- A new arm in `write_conflicts_read()` (which reads invalidate)
-- A new arm in `output()` (which read observes the new value)
-- A mapping in `changes_to_write_locs()` (how to detect it from diffs)
+- A new arm in `write_conflicts_read()` (which reads it invalidates)
+- A new arm in `write_conflicts_write()` (which writes it overlaps with)
+- A mapping in `changes_to_write_locs()` or `tracking_to_writelocset()` (how to detect it)

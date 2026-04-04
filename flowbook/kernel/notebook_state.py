@@ -28,7 +28,7 @@ from flowbook.kernel.loc_ids import StableIdMap
 from flowbook.kernel.models import CellStateSnapshot, CellStatus, Reason, ReasonType
 from flowbook.kernel.locations import (
     ReadLoc, ReadLocSet, WriteLoc, WriteLocSet,
-    has_conflict, wlocs_conflict_rlocs, output_set,
+    has_conflict, wlocs_conflict_rlocs, wlocs_conflict_wlocs,
     writelocset_var_names, readlocset_var_names,
     tracking_to_readlocset, tracking_to_writelocset,
 )
@@ -224,7 +224,7 @@ class NotebookState:
         # Core R, W tracking (derived from TrackingData) — typed LocSets
         self.reads[cell_id] = tracking_to_readlocset(tracking, namespace, stable_map)
         tracking_wlocs = tracking_to_writelocset(tracking, namespace, stable_map)
-        # Merge diff-derived WriteLocs (ColAdd, ColDel, Rows, Attr) when available.
+        # Merge diff-derived WriteLocs (Col, Rows, Attr) when available.
         # tracking_to_writelocset only produces Var + Col + File; the diff provides
         # the full typed set needed for column-level write-write overlap via output().
         # Only include diff-derived locs for variables that tracking also considers
@@ -406,9 +406,8 @@ class NotebookState:
                     ReasonType.FORWARD_STALE, loc=w.display_name(), cell_id=writer_cell
                 ))
 
-            # BackwardStale: W' ▷ output*(W_j)
-            later_output = output_set(later_writes)
-            write_conflicting = wlocs_conflict_rlocs(written_locs, later_output)
+            # BackwardStale: W' ▷▷ W_j (direct write-write conflict)
+            write_conflicting = wlocs_conflict_wlocs(written_locs, later_writes)
             for w in write_conflicting - conflicting_writes:
                 self.add_reason(later_cell, Reason(
                     ReasonType.BACKWARD_STALE, loc=w.display_name(), cell_id=writer_cell
@@ -450,7 +449,7 @@ class NotebookState:
                 cell_reads = self.reads.get(cell_id, frozenset())
                 cell_writes = self.writes.get(cell_id, frozenset())
                 read_conflicting = wlocs_conflict_rlocs(deleted_writes, cell_reads)
-                write_conflicting = wlocs_conflict_rlocs(deleted_writes, output_set(cell_writes))
+                write_conflicting = wlocs_conflict_wlocs(deleted_writes, cell_writes)
 
                 for w in read_conflicting:
                     self.add_reason(cell_id, Reason(

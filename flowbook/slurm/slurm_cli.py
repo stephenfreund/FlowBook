@@ -936,6 +936,7 @@ def build_command_tokens(
         "flowbook",
         f"--timings-file={context['log_dir']}/{context['job_id']}.timers.json",
         f"--metadata-file={context['log_dir']}/{context['job_id']}.metadata.json",
+        "--vfs",
     ]
     # Add user-provided command tokens
     cmd_tokens.extend([token.format(**context) for token in args.command_template])

@@ -9,38 +9,7 @@
     ]
   },
   "jupyter.lab.shortcuts": [],
-  "jupyter.lab.toolbars": {
-    "Cell": [
-      {
-        "name": "flowbook-profile",
-        "rank": 0
-      },
-      {
-        "name": "flowbook-inspect",
-        "rank": 1
-      },
-      {
-        "name": "flowbook-document",
-        "rank": 2
-      },
-      {
-        "name": "flowbook-cleanup",
-        "rank": 3
-      },
-      {
-        "name": "flowbook-optimize",
-        "rank": 4
-      },
-      {
-        "name": "flowbook-generate",
-        "rank": 5
-      },
-      {
-        "name": "flowbook-test",
-        "rank": 6
-      }
-    ]
-  },
+  "jupyter.lab.toolbars": {},
   "title": "flowbook",
   "description": "flowbook settings.",
   "type": "object",
