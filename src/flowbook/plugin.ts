@@ -142,9 +142,6 @@ class FlowbookActivationManager {
 
   private _setupKernelChangeListener(): void {
     this._kernelDetector.kernelChanged.connect((_, info) => {
-      console.log(
-        `FlowBook Plugin: Kernel changed from ${info.previousKernel} to ${info.currentKernel}`
-      );
       if (info.currentKernel === 'flowbook_kernel') {
         this._activate();
       } else if (info.previousKernel === 'flowbook_kernel') {
@@ -154,9 +151,6 @@ class FlowbookActivationManager {
 
     // Also check when current widget changes
     this._tracker.currentChanged.connect(() => {
-      console.log(
-        'FlowBook Plugin: Current notebook changed, checking kernel...'
-      );
       this._checkCurrentNotebook();
     });
   }
@@ -219,8 +213,6 @@ class FlowbookActivationManager {
       return;
     }
 
-    console.log('FlowBook Plugin: Activating for flowbook_kernel');
-
     // Create panels
     this._panel = new ReproducibilityMetadataPanel();
     this._app.shell.add(this._panel, 'right', { rank: 510 });
@@ -278,7 +270,6 @@ class FlowbookActivationManager {
    */
   private _syncInitialState(panel: NotebookPanel): void {
     if (!this._executionHook) {
-      console.log('FlowBook Plugin: No execution hook available for sync');
       return;
     }
 
@@ -294,8 +285,6 @@ class FlowbookActivationManager {
       cell_order: cellOrder
     });
     this._executionHook.sendCommand({ type: 'sync' });
-
-    console.log('FlowBook Plugin: Sent initial sync via comm');
   }
 
   /**
@@ -370,10 +359,6 @@ export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
   autoStart: true,
   requires: [INotebookTracker],
   activate: (app: JupyterFrontEnd, tracker: INotebookTracker) => {
-    console.log(
-      'FlowBook Plugin: Extension registered (will activate when flowbook_kernel is used)'
-    );
-
     // Expose app for console testing (e.g., app.commands.execute('flowbook:get-status'))
     (window as any).app = app;
 

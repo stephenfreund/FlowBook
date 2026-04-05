@@ -71,7 +71,6 @@ class ExecuteCommand(NotebookCommand):
         notebook_content: Dict[str, Any],
         kernel_client: Optional[FlowbookKernelClient] = None,
         selected_cell_ids: Optional[List[str]] = None,
-        config: Optional[Any] = None,
         **kwargs,
     ) -> ProcessingResult:
         """
@@ -97,7 +96,7 @@ class ExecuteCommand(NotebookCommand):
                     "command": self.command_name,
                     "error": "Kernel client required but not provided",
                 },
-                total_cost=0.0,
+
                 total_time=0.0,
             )
 
@@ -304,7 +303,6 @@ class ExecuteCommand(NotebookCommand):
         return ProcessingResult(
             notebook=new_notebook,
             metadata=metadata,
-            total_cost=0.0,
             total_time=total_time,
         )
 

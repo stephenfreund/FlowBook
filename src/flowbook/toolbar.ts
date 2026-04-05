@@ -10,6 +10,7 @@ import { ToolbarButton } from '@jupyterlab/apputils';
 import { stepIntoIcon } from '@jupyterlab/ui-components';
 
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
+import { IReproducibilityMetadata } from './types';
 import { KernelDetector } from '../shared/kerneldetection';
 
 /**
@@ -120,7 +121,6 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
       }
 
       if (targetWidgetIdx < 0) {
-        console.log('FlowBook: All cells are clean');
         break;
       }
 
@@ -143,14 +143,12 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
         }
       }
       if (hasError) {
-        console.log('FlowBook: Stopped on error');
         break;
       }
 
       // Check for violation
-      const meta = cell.model.getMetadata('flowbook') as any;
+      const meta = cell.model.getMetadata('flowbook') as IReproducibilityMetadata | undefined;
       if (meta?.errors && meta.errors.length > 0) {
-        console.log('FlowBook: Stopped on violation');
         break;
       }
     }

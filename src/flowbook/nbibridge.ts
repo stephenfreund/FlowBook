@@ -22,6 +22,27 @@ import { indexToAlpha, getCodeCellOrder } from '../cellindexutils';
 import { StalenessManager } from './stalenessmanager';
 
 // ---------------------------------------------------------------------------
+// Command result types (returned by the commands defined below)
+// ---------------------------------------------------------------------------
+
+interface IActionableResult {
+  done: boolean;
+  index?: number;
+  label?: string;
+  cell_id?: string;
+  reason?: string;
+}
+
+interface IRunCellResult {
+  status: 'ok' | 'error' | 'violation';
+  outputs_text?: string;
+  label?: string;
+  cell_id?: string;
+  flowbook_meta?: IReproducibilityMetadata | null;
+  errors?: IReproducibilityError[];
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -608,43 +629,48 @@ export function registerBridgeCommands(
       const maxIterations = 500; // safety limit
 
       while (totalRun < maxIterations) {
-        // Find next actionable
-        const actionable = (await app.commands.execute(
-          'flowbook:get-next-actionable'
-        )) as any;
-        if (actionable.done) {
-          break;
-        }
+        try {
+          // Find next actionable
+          const actionable = (await app.commands.execute(
+            'flowbook:get-next-actionable'
+          )) as IActionableResult;
+          if (actionable.done) {
+            break;
+          }
 
-        const codeCellIndex = actionable.index as number;
-        const label = actionable.label as string;
+          const codeCellIndex = actionable.index as number;
+          const label = actionable.label as string;
 
-        // Run the cell
-        const runResult = (await app.commands.execute('flowbook:run-cell', {
-          cellIndex: codeCellIndex
-        })) as any;
+          // Run the cell
+          const runResult = (await app.commands.execute('flowbook:run-cell', {
+            cellIndex: codeCellIndex
+          })) as IRunCellResult;
 
-        totalRun++;
-        results.push({
-          label,
-          status: runResult.status,
-          outputs_preview: (runResult.outputs_text || '').slice(0, 200)
-        });
+          totalRun++;
+          results.push({
+            label,
+            status: runResult.status,
+            outputs_preview: (runResult.outputs_text || '').slice(0, 200)
+          });
 
-        // Stop on hard error (exception/syntax)
-        if (runResult.status === 'error') {
-          break;
-        }
+          // Stop on hard error (exception/syntax)
+          if (runResult.status === 'error') {
+            break;
+          }
 
-        // Stop on violation if continue_after_violation is false
-        // (when it's true, violations are accepted and the cell still becomes "ok")
-        if (runResult.status === 'violation') {
+          // Stop on violation if continue_after_violation is false
+          // (when it's true, violations are accepted and the cell still becomes "ok")
+          if (runResult.status === 'violation') {
+            break;
+          }
+        } catch (error) {
+          console.error('Error in run-actionable-cells:', error);
           break;
         }
       }
 
       // Get final status
-      const status = (await app.commands.execute('flowbook:get-status')) as any;
+      const status = await app.commands.execute('flowbook:get-status');
 
       return {
         results,

@@ -15,7 +15,7 @@
 
 import { Widget } from '@lumino/widgets';
 import * as React from 'react';
-import * as ReactDOM from 'react-dom';
+import { createRoot, Root } from 'react-dom/client';
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -532,6 +532,7 @@ const DependenciesDisplay: React.FC<IDependenciesDisplayProps> = ({
 
 export class DependenciesPanel extends Widget {
   private _cellData: ICellGraphData[] = [];
+  private _root: Root | null = null;
 
   constructor() {
     super();
@@ -544,9 +545,11 @@ export class DependenciesPanel extends Widget {
   }
 
   private render(): void {
-    ReactDOM.render(
-      <DependenciesDisplay cellData={this._cellData} />,
-      this.node
+    if (!this._root) {
+      this._root = createRoot(this.node);
+    }
+    this._root.render(
+      <DependenciesDisplay cellData={this._cellData} />
     );
   }
 
@@ -564,7 +567,8 @@ export class DependenciesPanel extends Widget {
     if (this.isDisposed) {
       return;
     }
-    ReactDOM.unmountComponentAtNode(this.node);
+    this._root?.unmount();
+    this._root = null;
     super.dispose();
   }
 }

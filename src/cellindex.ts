@@ -27,8 +27,6 @@ export class CellIndexManager {
    * Start monitoring a notebook for cell index overlays
    */
   startMonitoring(notebookPath: string, notebook: NotebookPanel): void {
-    console.log(`[CellIndex] Start monitoring: ${notebookPath}`);
-
     // Initialize overlay map for this notebook
     this._overlays.set(notebookPath, new Map());
     this._notebooks.set(notebookPath, notebook);
@@ -114,8 +112,6 @@ export class CellIndexManager {
    * Stop monitoring a notebook
    */
   stopMonitoring(notebookPath: string): void {
-    console.log(`[CellIndex] Stop monitoring: ${notebookPath}`);
-
     // Stop MutationObserver
     const observer = this._observers.get(notebookPath);
     if (observer) {

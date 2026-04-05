@@ -11,9 +11,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -24,16 +24,6 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install hatchling hatch-nodejs-version hatch-jupyter-builder editables "jupyterlab>=4.0.0,<5"
-
       - name: Install Node dependencies
         run: jlpm install --no-immutable
 
@@ -42,6 +32,36 @@ jobs:
 
       - name: Build TypeScript
         run: jlpm run build:lib
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.11', '3.13']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install hatchling hatch-nodejs-version hatch-jupyter-builder editables "jupyterlab>=4.0.0,<5"
+
+      - name: Install Node dependencies
+        run: jlpm install --no-immutable
 
       - name: Build extension
         run: |

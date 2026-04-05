@@ -7,7 +7,7 @@
 
 import { Widget } from '@lumino/widgets';
 import * as React from 'react';
-import * as ReactDOM from 'react-dom';
+import { createRoot, Root } from 'react-dom/client';
 import {
   IReproducibilityMetadata,
   IReproducibilityError,
@@ -503,6 +503,7 @@ export class ReproducibilityMetadataPanel extends Widget {
   private _statusIcon: string | null = null;
   private _statusText: string | null = null;
   private _statusCellRef: string | null = null;
+  private _root: Root | null = null;
 
   constructor() {
     super();
@@ -515,7 +516,10 @@ export class ReproducibilityMetadataPanel extends Widget {
   }
 
   private render(): void {
-    ReactDOM.render(
+    if (!this._root) {
+      this._root = createRoot(this.node);
+    }
+    this._root.render(
       <>
         <StatusHeader
           icon={this._statusIcon}
@@ -527,8 +531,7 @@ export class ReproducibilityMetadataPanel extends Widget {
           cellId={this._cellId}
           currentCellOrder={this._currentCellOrder}
         />
-      </>,
-      this.node
+      </>
     );
   }
 
@@ -571,7 +574,8 @@ export class ReproducibilityMetadataPanel extends Widget {
     if (this.isDisposed) {
       return;
     }
-    ReactDOM.unmountComponentAtNode(this.node);
+    this._root?.unmount();
+    this._root = null;
     super.dispose();
   }
 }

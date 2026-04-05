@@ -697,7 +697,6 @@ def format_metadata_value(value: Any, indent: int = 0) -> str:
 def save_metadata_file(
     metadata: Dict[str, Any],
     command: str,
-    total_cost: float,
     total_time: float,
     output_path: str = "metadata.json",
     notebook_path: Optional[str] = None
@@ -705,19 +704,9 @@ def save_metadata_file(
     """
     Save command metadata to a JSON file.
 
-    This function creates a comprehensive metadata file that includes:
-    - Command that was executed
-    - Notebook path (full path to the notebook file)
-    - Status from the command's metadata
-    - Timing information (total_time)
-    - Cost information (total_cost)
-    - All metadata from the command execution
-    - Timestamp of when the command was executed
-
     Args:
         metadata: The metadata dictionary returned by the command
         command: The name of the command that was executed
-        total_cost: Total cost in USD
         total_time: Total execution time in seconds
         output_path: Path where the metadata file should be saved
         notebook_path: Full path to the notebook file (optional)
@@ -736,7 +725,6 @@ def save_metadata_file(
         "command": command,
         "notebook": notebook_path,
         "status": metadata.get("status", "unknown") if metadata else "unknown",
-        "total_cost": total_cost,
         "total_time": total_time,
         "command_metadata": metadata or {}
     }

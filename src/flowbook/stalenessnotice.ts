@@ -8,7 +8,7 @@
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { IOutput } from '@jupyterlab/nbformat';
 import { StalenessManager } from './stalenessmanager';
-import { IStalenessReason, IFrontendStalenessReason } from './types';
+import { IStalenessReason, IFrontendStalenessReason, IReproducibilityMetadata, asFlowbookOutput } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
 /**
@@ -41,12 +41,12 @@ export class StalenessNoticeManager {
 
     // Check if there's a violation (either in metadata or existing notice)
     // Violation implies specific issue, so skip staleness notice
-    const flowbookMeta = cell.model.getMetadata('flowbook') as any;
+    const flowbookMeta = cell.model.getMetadata('flowbook') as IReproducibilityMetadata | undefined;
     const hasViolationMetadata =
       flowbookMeta?.errors && flowbookMeta.errors.length > 0;
     let hasViolationNotice = false;
     for (let i = 0; i < outputs.length; i++) {
-      const out = outputs.get(i).toJSON() as any;
+      const out = asFlowbookOutput(outputs.get(i).toJSON());
       if (out.metadata?.flowbook_violation_notice === true) {
         hasViolationNotice = true;
         break;
@@ -62,7 +62,7 @@ export class StalenessNoticeManager {
     // Check if first output is already a staleness notice
     const hasNotice =
       outputs.length > 0 &&
-      (outputs.get(0).toJSON() as any).metadata?.flowbook_staleness_notice ===
+      asFlowbookOutput(outputs.get(0).toJSON()).metadata?.flowbook_staleness_notice ===
         true;
 
     if (isStale) {
@@ -108,7 +108,7 @@ export class StalenessNoticeManager {
 
       if (hasNotice) {
         // Check if message matches current notice
-        const existingPlain = (outputs.get(0).toJSON() as any).data?.[
+        const existingPlain = asFlowbookOutput(outputs.get(0).toJSON()).data?.[
           'text/plain'
         ];
         if (existingPlain === plainText) {
@@ -120,7 +120,7 @@ export class StalenessNoticeManager {
       const allOutputs: IOutput[] = [stalenessOutput];
       for (let i = 0; i < outputs.length; i++) {
         const out = outputs.get(i).toJSON() as IOutput;
-        if (!(out as any).metadata?.flowbook_staleness_notice) {
+        if (!asFlowbookOutput(out).metadata?.flowbook_staleness_notice) {
           allOutputs.push(out);
         }
       }
@@ -302,7 +302,7 @@ export class StalenessNoticeManager {
     let removed = false;
     for (let i = 0; i < outputs.length; i++) {
       const out = outputs.get(i).toJSON() as IOutput;
-      if ((out as any).metadata?.[key]) {
+      if (asFlowbookOutput(out).metadata?.[key]) {
         removed = true;
       } else {
         allOutputs.push(out);

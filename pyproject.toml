@@ -27,11 +27,8 @@ classifiers = [
 ]
 dependencies = [
     "jupyter_server>=2.4.0,<3",
-    "openai==2.29.0",
-    "litellm==1.81.12",
     "jupyterlab>=4.0.0",
     "nbformat>=5.0.0",
-    "openai-agents[litellm]==0.6.5",
     "jupyter",
     "termcolor",
     "dill",
@@ -51,13 +48,9 @@ dependencies = [
     "filelock>=3.0",
     "pympler",
 
-    # LSP
-    "jedi-language-server",
-    "python-lsp-jsonrpc",
     "nbconvert",
 
     # Server Extension
-    "jupyter-server>=1.0",
     "jupyter-client>=7.0",
     "tornado",
 ]
@@ -65,8 +58,6 @@ dynamic = ["version", "description", "authors", "urls", "keywords"]
 
 [project.scripts]
 flowbook = "flowbook.cli.cli:cli_main"
-flowbook_optimize = "flowbook.cli.optimize_cli:optimize_cli_main"
-flowbook_split = "flowbook.cli.split_cli:split_cli_main"
 flowbook_stats = "flowbook.cli.stats_cli:stats_cli_main"
 flowbook_timers = "flowbook.cli.flowbook_timers:main"
 flowbook_metadata = "flowbook.cli.metadata_cli:metadata_cli_main"
@@ -74,6 +65,8 @@ flowbook_slurm = "flowbook.slurm.slurm_cli:main"
 flowbook_compare_overhead = "flowbook.cli.compare_overhead:main"
 flowbook_show_errors = "flowbook.cli.show_errors:main"
 flowbook_slurm_logs = "flowbook.cli.slurm_logs:main"
+flowbook_nb_diff = "flowbook.util.nb_diff:main"
+flowbook_compare_fixed_overhead = "flowbook.cli.compare_fixed_overhead:main"
 flowlab = "flowbook.cli.lab_cli:lab_main"
 flowbook_mcp = "flowbook.mcp.server:main"
 
@@ -92,8 +85,6 @@ exclude = [".github", "binder"]
 "install.json" = "share/jupyter/labextensions/flowbook/install.json"
 "jupyter-config/server-config" = "etc/jupyter/jupyter_server_config.d"
 "flowbook/nbi/extension_data" = "share/jupyter/nbi_extensions/flowbook"
-
-[tool.hatch.build.hooks.custom]
 
 [tool.hatch.build.hooks.version]
 path = "flowbook/_version.py"

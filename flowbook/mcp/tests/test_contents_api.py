@@ -288,3 +288,130 @@ class TestSaveWithContentsApi:
             result = session.save()
             mock_disk.assert_called_once()
             assert result == "/tmp/test.ipynb"
+
+
+class TestConflictDetection:
+    """Tests for concurrent edit conflict detection in _put_contents_api."""
+
+    def _urlopen_get_put(self, get_notebook):
+        """Return a urlopen side_effect that serves GET (contents) and PUT."""
+        mock_get = _mock_urlopen_response(get_notebook)
+        mock_put = MagicMock()
+        mock_put.read.return_value = b"{}"
+
+        def side_effect(req, **kwargs):
+            if hasattr(req, 'method') and req.method == "PUT":
+                return mock_put
+            return mock_get
+
+        return side_effect
+
+    def test_no_conflict_when_only_mcp_edits(self):
+        """No warnings when JupyterLab hasn't changed anything."""
+        session = _setup_session_with_api([_make_code_cell("A", "x = MCP")])
+        session._last_known_api_sources = {"A": "x = ORIGINAL"}
+
+        # API still has the original (no JupyterLab edit)
+        api_nb = _make_notebook([_make_code_cell("A", "x = ORIGINAL")])
+        with patch("urllib.request.urlopen", side_effect=self._urlopen_get_put(api_nb)):
+            session._put_contents_api()
+
+        assert session._conflict_warnings == []
+
+    def test_conflict_detected_when_both_edit_same_cell(self):
+        """Warning issued when JupyterLab and MCP both edited the same cell."""
+        session = _setup_session_with_api([_make_code_cell("A", "x = MCP_VERSION")])
+        session._last_known_api_sources = {"A": "x = ORIGINAL"}
+
+        # JupyterLab changed the cell to something different from both
+        api_nb = _make_notebook([_make_code_cell("A", "x = JUPYTERLAB_VERSION")])
+        with patch("urllib.request.urlopen", side_effect=self._urlopen_get_put(api_nb)):
+            session._put_contents_api()
+
+        assert len(session._conflict_warnings) == 1
+        assert "A" in session._conflict_warnings[0]
+        assert "JupyterLab" in session._conflict_warnings[0]
+
+    def test_no_conflict_when_api_unchanged(self):
+        """No conflict if JupyterLab hasn't changed anything since last refresh."""
+        session = _setup_session_with_api([_make_code_cell("A", "x = MCP_EDIT")])
+        session._last_known_api_sources = {"A": "x = ORIGINAL"}
+
+        # API still has original — JupyterLab didn't touch it
+        api_nb = _make_notebook([_make_code_cell("A", "x = ORIGINAL")])
+        with patch("urllib.request.urlopen", side_effect=self._urlopen_get_put(api_nb)):
+            session._put_contents_api()
+
+        # API unchanged from last_known, so MCP's edit is safe to push
+        assert session._conflict_warnings == []
+
+    def test_conflict_when_jupyterlab_edits_and_mcp_has_stale_version(self):
+        """Warning when JupyterLab edited a cell and MCP would overwrite it."""
+        session = _setup_session_with_api([_make_code_cell("A", "x = ORIGINAL")])
+        session._last_known_api_sources = {"A": "x = ORIGINAL"}
+
+        # JupyterLab changed the cell; MCP still has original — PUT would revert it
+        api_nb = _make_notebook([_make_code_cell("A", "x = JUPYTERLAB_VERSION")])
+        with patch("urllib.request.urlopen", side_effect=self._urlopen_get_put(api_nb)):
+            session._put_contents_api()
+
+        assert len(session._conflict_warnings) == 1
+        assert "A" in session._conflict_warnings[0]
+
+    def test_no_conflict_for_new_cells(self):
+        """No conflict for cells not seen in previous API refresh."""
+        session = _setup_session_with_api([
+            _make_code_cell("A", "x = 1"),
+            _make_code_cell("B", "y = 2"),
+        ])
+        session._last_known_api_sources = {"A": "x = 1"}  # B not tracked
+
+        api_nb = _make_notebook([
+            _make_code_cell("A", "x = 1"),
+            _make_code_cell("B", "y = CHANGED"),
+        ])
+        with patch("urllib.request.urlopen", side_effect=self._urlopen_get_put(api_nb)):
+            session._put_contents_api()
+
+        assert session._conflict_warnings == []
+
+    def test_conflict_on_multiple_cells(self):
+        """Detects conflicts on multiple cells independently."""
+        session = _setup_session_with_api([
+            _make_code_cell("A", "x = MCP_A"),
+            _make_code_cell("B", "y = MCP_B"),
+        ])
+        session._last_known_api_sources = {"A": "x = ORIG_A", "B": "y = ORIG_B"}
+
+        api_nb = _make_notebook([
+            _make_code_cell("A", "x = JLAB_A"),
+            _make_code_cell("B", "y = JLAB_B"),
+        ])
+        with patch("urllib.request.urlopen", side_effect=self._urlopen_get_put(api_nb)):
+            session._put_contents_api()
+
+        assert len(session._conflict_warnings) == 2
+
+    def test_no_conflict_when_no_prior_refresh(self):
+        """No conflict check when _last_known_api_sources is empty."""
+        session = _setup_session_with_api([_make_code_cell("A", "x = 1")])
+        # No prior refresh — _last_known_api_sources is empty
+        assert session._last_known_api_sources == {}
+
+        mock_put = MagicMock()
+        mock_put.read.return_value = b"{}"
+        with patch("urllib.request.urlopen", return_value=mock_put):
+            session._put_contents_api()
+
+        assert session._conflict_warnings == []
+
+    def test_refresh_updates_last_known_sources(self):
+        """_refresh_from_contents_api updates _last_known_api_sources."""
+        session = _setup_session_with_api([_make_code_cell("A", "x = 1")])
+        assert session._last_known_api_sources == {}
+
+        api_notebook = _make_notebook([_make_code_cell("A", "x = 42")])
+        with patch("urllib.request.urlopen", return_value=_mock_urlopen_response(api_notebook)):
+            session._refresh_from_contents_api()
+
+        assert session._last_known_api_sources == {"A": "x = 42"}

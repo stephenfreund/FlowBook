@@ -13,7 +13,6 @@ import asyncio
 from typing import Optional
 
 from flowbook.server.registry import CommandRegistry
-from flowbook.server.config import FlowbookConfig
 from flowbook.util.output import error, log, output, timer
 from flowbook.util.socket_receiver import setup_socket_receiver
 
@@ -92,18 +91,6 @@ def cli_main():
     )
 
     parser.add_argument(
-        "--model",
-        default="claude-opus-4-5",
-        help="AI model to use for commands (default: claude-opus-4-5)",
-    )
-
-    parser.add_argument(
-        "--fast-model",
-        default="claude-sonnet-4-5",
-        help="Fast AI model to use for lightweight operations (default: claude-sonnet-4-5)",
-    )
-
-    parser.add_argument(
         "--cell-ids",
         nargs="+",
         help="Optional list of cell IDs to process. Can use @A notation for 0-based code cell indexing (e.g., --cell-ids @A @C for cells 0 and 2), or mix with actual cell IDs (default: process all cells)",
@@ -170,9 +157,6 @@ def cli_main():
     # Parse file paths
     notebook_path, connection_file = parse_file_paths(args.paths)
 
-    # Create config from CLI arguments
-    config = FlowbookConfig(model=args.model, fast_model=args.fast_model)
-
     kernel_manager = None
     kernel_client = None
     socket_receiver = None
@@ -226,7 +210,7 @@ def cli_main():
 
         # Extract command-specific kwargs (those not in common CLI args)
         common_args = {
-            'command', 'paths', 'kernel_name', 'output', 'model', 'fast_model',
+            'command', 'paths', 'kernel_name', 'output',
             'cell_ids', 'timings_file', 'metadata_file', 'no_vfs', 'verbose'
         }
         command_kwargs = {
@@ -240,7 +224,6 @@ def cli_main():
                 notebook_content,
                 kernel_client=kernel_client,
                 selected_cell_ids=selected_cell_ids,
-                config=config,
                 notebook_path=os.path.abspath(notebook_path),
                 **command_kwargs,
             )
@@ -253,11 +236,6 @@ def cli_main():
         )
         metadata_data = (
             result.get("metadata") if isinstance(result, dict) else result.metadata
-        )
-        total_cost = (
-            result.get("total_cost", 0.0)
-            if isinstance(result, dict)
-            else result.total_cost
         )
         total_time = (
             result.get("total_time", 0.0)
@@ -282,7 +260,6 @@ def cli_main():
         if error_msg:
             print(f"Cell ID:     {error_cell_id}")
             print(f"Error:       {error_msg}")
-        print(f"Total Cost:  ${total_cost:.4f}")
         print(f"Total Time:  {total_time:.2f}s")
         print("=" * 60)
 
@@ -299,7 +276,6 @@ def cli_main():
             metadata_file_path = save_metadata_file(
                 metadata=metadata_data,
                 command=args.command,
-                total_cost=total_cost,
                 total_time=total_time,
                 output_path=args.metadata_file,
                 notebook_path=os.path.abspath(notebook_path)

@@ -92,7 +92,6 @@ jupyter labextension list
 3. **MCP Server (Python)**: `flowbook/mcp/` - MCP tools for AI-driven notebook analysis, with real-time collaboration with JupyterLab
 4. **Custom Kernels**: IPython kernels for different use cases
    - `flowbook/kernel/` - FlowBook kernel with always-on reproducibility tracking
-   - `flowbook/kernel_support/` - Experimental kernel (archived, see `src/_archived/`)
    - `flowbook/checkpoint_kernel/` - Checkpoint kernel for timing/benchmarking
 
 ### Frontend Components (`src/`)
@@ -142,11 +141,10 @@ The server uses the modern **ExtensionApp** pattern (not legacy extension points
   - `GET/PUT /flowbook/kernel-discovery/{path}` - Kernel discovery for MCP↔JupyterLab sharing (KernelDiscoveryHandler)
 - `base.py` - `NotebookCommand` abstract base class
 - `registry.py` - `CommandRegistry` singleton managing available commands
-- `commands.py` - Built-in command implementations:
-  - `AnalyzeNotebookCommand` - Notebook structure analysis
-  - `ValidateNotebookCommand` - Syntax validation
+- `commands/` - Built-in command implementations:
+  - `CompareBaselineCommand` - Compare baseline vs FlowBook execution with timing/memory metrics
+  - `ExecuteCommand` - Execute cells with reproducibility enforcement
   - `ExecuteBaseCommand` - Run all cells (requires kernel)
-  - `InspectVariablesCommand` - Kernel namespace inspection
 - `kernel_manager.py` - `KernelConnectionManager` and `FlowbookKernelClient` for kernel communication
 - `cli.py` - Command-line interface entry point
 
@@ -289,13 +287,7 @@ class SomeCommand(NotebookCommand):
         return {"notebook": modified_notebook, "metadata": {...}}
 ```
 
-Register in `flowbook/server/__init__.py` or `commands.py`.
-
-### Agent Integration (`flowbook/agent/`)
-
-- `agent.py` - `FlowbookAgent` uses `openai-agents` framework with litellm backend
-- `llm_cost.py` - Tracks API costs for LLM usage
-- Configured with OpenAI API for AI-powered notebook analysis
+Commands are auto-discovered by the registry from `flowbook/server/commands/`.
 
 ### MCP Server (`flowbook/mcp/`)
 
@@ -470,7 +462,6 @@ This normalization happens transparently at entry points:
 - `jupyterlab>=4.0.0` - Lab integration
 - `jupyter-collaboration` - Real-time collaboration (Contents API returns live Y.js state for MCP↔JupyterLab sync)
 - `mcp` (FastMCP) - MCP server framework
-- `openai` + `openai-agents[litellm]` - AI capabilities
 - Data science stack: `pandas`, `numpy`, `scikit-learn`, `scipy`, `seaborn`, `matplotlib`
 - Testing: `pytest`, `hypothesis`
 

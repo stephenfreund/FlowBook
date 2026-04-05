@@ -7,7 +7,7 @@
 
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { IOutput } from '@jupyterlab/nbformat';
-import { IReproducibilityError, IReproducibilityMetadata } from './types';
+import { IReproducibilityError, IReproducibilityMetadata, asFlowbookOutput } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
 /**
@@ -36,7 +36,7 @@ export class ViolationNoticeManager {
     let hasViolationNotice = false;
     let existingPlainText = '';
     for (let i = 0; i < outputs.length; i++) {
-      const out = outputs.get(i).toJSON() as any;
+      const out = asFlowbookOutput(outputs.get(i).toJSON());
       if (out.metadata?.flowbook_violation_notice === true) {
         hasViolationNotice = true;
         existingPlainText = out.data?.['text/plain'] || '';
@@ -59,17 +59,18 @@ export class ViolationNoticeManager {
       const allOutputs: IOutput[] = [noticeOutput];
       for (let i = 0; i < outputs.length; i++) {
         const out = outputs.get(i).toJSON() as IOutput;
+        const fbOut = asFlowbookOutput(out);
         const isViolationNotice =
-          (out as any).metadata?.flowbook_violation_notice === true;
+          fbOut.metadata?.flowbook_violation_notice === true;
         const isStalenessNotice =
-          (out as any).metadata?.flowbook_staleness_notice === true;
+          fbOut.metadata?.flowbook_staleness_notice === true;
         const isKernelError =
           out.output_type === 'error' &&
-          ((out as any).ename === 'ReproducibilityError' ||
-            (out as any).ename === 'ReproducibilityViolation');
+          (fbOut.ename === 'ReproducibilityError' ||
+            fbOut.ename === 'ReproducibilityViolation');
         const isKernelPredicateViolation =
           out.output_type === 'display_data' &&
-          (out as any).metadata?.predicate_violation;
+          fbOut.metadata?.predicate_violation;
 
         if (
           !isViolationNotice &&
@@ -89,8 +90,8 @@ export class ViolationNoticeManager {
       const allOutputs: IOutput[] = [];
       for (let i = 0; i < outputs.length; i++) {
         const out = outputs.get(i).toJSON() as IOutput;
-        const meta = (out as any).metadata || {};
-        if (!meta.flowbook_violation_notice) {
+        const fbOut = asFlowbookOutput(out);
+        if (!fbOut.metadata?.flowbook_violation_notice) {
           allOutputs.push(out);
         }
       }

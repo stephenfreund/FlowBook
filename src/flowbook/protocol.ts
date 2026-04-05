@@ -16,7 +16,6 @@ import { IReproducibilityMetadata, IPredicateViolation } from './types';
 // ===========================================================================
 
 export const COMM_TARGET = 'flowbook';
-export const IOPUB_MSG_TYPE = 'flowbook_update';
 
 // ===========================================================================
 // Kernel -> Client messages

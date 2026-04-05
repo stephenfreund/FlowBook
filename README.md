@@ -1,21 +1,36 @@
-# flowbook
+# FlowBook
 
-## TL;DR
+**Automatic reproducibility tracking for Jupyter notebooks.**
 
-- Clone repository
-- Install: `pip install -e .`
-- Run: `flowlab examples`
+FlowBook is a JupyterLab 4.0+ extension that tracks how data flows
+between cells and tells you exactly which cells are stale after an
+edit or out-of-order execution. When every cell is clean, your
+notebook's outputs are guaranteed to match a fresh top-to-bottom run.
+
+### Key Features
+
+- **Always-on staleness tracking** — cells that need to be (re-)run
+  are highlighted in yellow, automatically, as you work.
+- **Violation detection** — cells whose execution would break
+  reproducibility (e.g., overwriting a variable read by an earlier
+  cell) are flagged in red and optionally rejected.
+- **Variable- and column-level precision** — FlowBook tracks
+  individual DataFrame columns, row sets, and file accesses, not just
+  top-level variable names.
+- **Metadata panel** — a sidebar showing read/write sets, staleness
+  reasons, dependency graphs, and timing information.
+
+## Quick Start
+
+```bash
+pip install -e .
+flowlab examples
+```
 
 Once JupyterLab opens, create or open a notebook and select the
-**FlowBook** kernel from the kernel picker. As you execute cells,
-FlowBook automatically highlights stale cells that must be run or
-re-run in yellow. It marks cells whose execution would violate rerun
-consistency in red. The metadata panel (right sidebar) shows a bunch
-of analysis state. When no cells are stale, the notebook's outputs
-will match a top-to-bottom run in a newly-created kernel.
-
-Start with the `GettingStarted.ipynb` notebook, and the maybe the
-other ones `demos` or `litmus` directories.
+**FlowBook** kernel from the kernel picker. Start with
+`GettingStarted.ipynb`, then explore the `demos/` and `litmus/`
+directories.
 
 ## Requirements
 
@@ -33,8 +48,7 @@ pip install flowbook
 
 FlowBook provides several command line tools for notebook processing,
 optimization, and analysis. See [CLI.md](CLI.md) for complete
-documentation. These were not intended for public consumption. Your
-mileage may vary.
+documentation.
 
 - `flowbook` - Main CLI for notebook processing commands
 - `flowlab` - Launch JupyterLab with FlowBook extensions

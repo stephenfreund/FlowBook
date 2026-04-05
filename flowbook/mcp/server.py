@@ -334,7 +334,7 @@ def edit_cell_source(cell_id: str, new_source: str, ctx: Context) -> str:
 
 @mcp.tool()
 @_logged_tool
-def run_cell(cell_id: str, ctx: Context = None) -> str:
+def run_cell(cell_id: str, ctx: Context) -> str:
     """Execute a single cell and return outputs + flowbook metadata.
 
     Args:
@@ -398,7 +398,7 @@ def run_all_cells(ctx: Context) -> str:
 
 @mcp.tool()
 @_logged_tool
-def run_from(cell_id: str, ctx: Context = None) -> str:
+def run_from(cell_id: str, ctx: Context) -> str:
     """Run from a cell through the end of the notebook, stopping on error.
 
     Executes cell_id and all subsequent non-empty code cells in order.
@@ -607,7 +607,7 @@ def get_status(ctx: Context) -> str:
 
 @mcp.tool()
 @_logged_tool
-def save_notebook(path: str = "", ctx: Context = None) -> str:
+def save_notebook(ctx: Context, path: str = "") -> str:
     """Save the notebook to disk.
 
     Args:
@@ -842,7 +842,7 @@ def get_log(ctx: Context) -> str:
 
 @mcp.tool()
 @_logged_tool
-def save_log(path: str = "", ctx: Context = None) -> str:
+def save_log(ctx: Context, path: str = "") -> str:
     """Save the session event log to a JSON file.
 
     Args:

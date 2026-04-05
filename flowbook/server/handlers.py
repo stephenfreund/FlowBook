@@ -60,13 +60,6 @@ class FlowbookCommandHandler(APIHandler):
 
             command = self.registry.get_command(command_name)
 
-            # Create config from server settings
-            from flowbook.server.config import FlowbookConfig
-            config = FlowbookConfig(
-                model=self.serverapp.web_app.settings["flowbook"].model,  
-                fast_model=self.serverapp.web_app.settings["flowbook"].fast_model,
-            )
-
             kernel_client = None
             if command.requires_kernel:
                 if not kernel_id:
@@ -105,7 +98,6 @@ class FlowbookCommandHandler(APIHandler):
                             notebook_content,
                             kernel_client=kernel_client,
                             selected_cell_ids=selected_cell_ids,
-                            config=config,
                             **params
                         ))
                         return result
@@ -115,7 +107,7 @@ class FlowbookCommandHandler(APIHandler):
             # Run in thread executor
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             result = await asyncio.get_event_loop().run_in_executor(executor, run_command)
-            executor.shutdown(wait=False)
+            executor.shutdown(wait=True)
 
             # Send END message to signal command completion
             get_broadcaster().end()
@@ -233,16 +225,25 @@ class KernelDiscoveryHandler(APIHandler):
 
         Handles tilde expansion in both the path and the server root directory,
         then resolves relative paths against the server root.
+
+        Raises:
+            ValueError: If the resolved path escapes the server root directory.
         """
         import os
 
         path = os.path.expanduser(path)
+        root = self.settings.get("server_root_dir", "")
+        if root:
+            root = os.path.expanduser(root)
         if not os.path.isabs(path):
-            root = self.settings.get("server_root_dir", "")
             if root:
-                root = os.path.expanduser(root)
                 path = os.path.join(root, path)
-        return os.path.abspath(path)
+        resolved = os.path.abspath(path)
+        if root:
+            abs_root = os.path.abspath(root)
+            if resolved != abs_root and not resolved.startswith(abs_root + os.sep):
+                raise ValueError(f"Path escapes server root directory")
+        return resolved
 
     @tornado.web.authenticated
     async def get(self, path):

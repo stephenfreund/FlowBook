@@ -19,7 +19,7 @@ import { IOutput } from '@jupyterlab/nbformat';
 import { StalenessManager } from './stalenessmanager';
 import { ReproducibilityMetadataPanel } from './metadatapanel';
 import { DependenciesPanel, ICellGraphData } from './dependenciespanel';
-import { IReproducibilityMetadata } from './types';
+import { IReproducibilityMetadata, asFlowbookOutput } from './types';
 import { StalenessNoticeManager } from './stalenessnotice';
 import { ViolationNoticeManager } from './violationnotice';
 import { getCodeCellOrder } from '../cellindexutils';
@@ -423,10 +423,10 @@ export class ReproducibilityCellHighlighter {
       const cleanOutputs: IOutput[] = [];
       for (let i = 0; i < outputs.length; i++) {
         const out = outputs.get(i).toJSON() as IOutput;
-        const meta = (out as any).metadata || {};
+        const fbOut = asFlowbookOutput(out);
         if (
-          !meta.flowbook_staleness_notice &&
-          !meta.flowbook_violation_notice
+          !fbOut.metadata?.flowbook_staleness_notice &&
+          !fbOut.metadata?.flowbook_violation_notice
         ) {
           cleanOutputs.push(out);
         }

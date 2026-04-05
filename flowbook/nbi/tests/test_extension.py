@@ -53,7 +53,7 @@ class TestFlowBookNBIExtension:
         # Verify all expected tools are present
         expected = [
             "get_flowbook_metadata", "get_next_actionable_cell", "get_flowbook_status",
-            "read_cell", "read_cell_output", "edit_cell_source",
+            "read_cell", "read_cell_output", "edit_cell_source", "get_all_cell_sources",
             "add_code_cell", "add_markdown_cell", "insert_cell", "delete_cell", "get_cell_count",
             "run_cell", "run_actionable_cell", "run_actionable_cells", "continue_after_violation",
             "alpha_rename", "remove_inplace", "insert_deepcopy", "mark_diagnostic", "merge_cells", "move_cell",
@@ -61,7 +61,7 @@ class TestFlowBookNBIExtension:
             "checkpoint", "restore", "list_checkpoints", "get_log", "save_log", "print_log",
         ]
         assert set(tool_names) == set(expected)
-        assert len(tool_names) == 29
+        assert len(tool_names) == 30
 
     def test_activate_order(self):
         """Verify disable happens before register (tools shouldn't be visible while conflicting ones exist)."""

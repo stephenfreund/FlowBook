@@ -4,16 +4,6 @@ Command registry for managing available notebook processing commands.
 from typing import Dict, List
 
 from flowbook.server.base import NotebookCommand
-from flowbook.server.commands import (
-    AnalyzeNotebookCommand,
-    ValidateNotebookCommand,
-    ProfileCommand,
-    InspectVariablesCommand,
-    InspectCommand,
-    OptimizeCommand,
-    CleanupCommand,
-    ExampleMessageCommand,
-)
 from flowbook.util.output import log, timer
 
 class CommandRegistry:

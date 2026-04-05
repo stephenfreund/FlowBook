@@ -8,7 +8,7 @@ from flowbook.scripts.fix_repro_errors import (
     get_cell_source,
     set_cell_source,
     add_deepcopy_and_rename,
-    split_diagnostic_cell,
+    add_diagnostic_magic_op,
     alpha_rename_reused_variable,
     add_model_copy_and_rename,
     convert_inplace_to_assignment,
@@ -183,7 +183,7 @@ class TestAddDeepcopyAndRenameWithMagic:
 
 
 class TestSplitDiagnosticCellWithMagic:
-    """Tests that split_diagnostic_cell preserves cell magics."""
+    """Tests that add_diagnostic_magic_op preserves cell magics."""
 
     def _make_notebook(self, cells_source: list[str]) -> dict:
         """Create a minimal notebook structure."""
@@ -202,15 +202,14 @@ class TestSplitDiagnosticCellWithMagic:
             "%%time\ndf.head()\n",
         ])
 
-        split_diagnostic_cell(notebook, 0)
+        add_diagnostic_magic_op(notebook, 0)
 
         result = get_cell_source(notebook["cells"][0])
         lines = result.split("\n")
 
         # %%time must be first
         assert lines[0] == "%%time"
-        # Fix comments and %diagnostic come after
-        assert FLOWBOOK_FIX_MARKER in result
+        # %diagnostic comes after the magic
         assert "%diagnostic" in result
 
     def test_diagnostic_without_magic(self):
@@ -219,13 +218,13 @@ class TestSplitDiagnosticCellWithMagic:
             "df.head()\n",
         ])
 
-        split_diagnostic_cell(notebook, 0)
+        add_diagnostic_magic_op(notebook, 0)
 
         result = get_cell_source(notebook["cells"][0])
         lines = result.split("\n")
 
-        # Fix comment should be first
-        assert lines[0].startswith(FLOWBOOK_FIX_MARKER)
+        # %diagnostic should be first
+        assert lines[0] == "%diagnostic"
 
 
 class TestAlphaRenameWithMagic:

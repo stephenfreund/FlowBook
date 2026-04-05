@@ -11,8 +11,10 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import uuid
+from queue import Empty
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
@@ -221,6 +223,8 @@ class NotebookSession:
         self._checkpoints: Dict[str, Dict[str, Any]] = {}
         self._event_log: List[Dict[str, Any]] = []
         self._session_start: float = time.time()
+        self._last_known_api_sources: Dict[str, str] = {}  # cell_id -> source from last API refresh
+        self._conflict_warnings: List[str] = []  # populated by _put_contents_api
 
     @property
     def is_loaded(self) -> bool:
@@ -517,6 +521,12 @@ class NotebookSession:
             if api_source != get_cell_source(local_cell):
                 set_cell_source(local_cell, api_source)
 
+        # Snapshot API sources for conflict detection on next PUT
+        self._last_known_api_sources = {
+            c.get("id"): c.get("source", "")
+            for c in api_cells_list if c.get("id")
+        }
+
         # Handle structural changes (cells added, deleted, or reordered)
         added_ids = api_ids - local_ids
         removed_ids = local_ids - api_ids
@@ -610,8 +620,10 @@ class NotebookSession:
                             self._stale_cells = (self._stale_cells | stale) - {cell_id}
                             # Update cell outputs if we have them
                             # (outputs come via separate IOPub messages, not flowbook_update)
-        except Exception:
-            pass  # No more messages or channel issue — both OK
+        except Empty:
+            pass  # No more messages — normal
+        except Exception as e:
+            print(f"IOPub poll error: {e}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Cell access
@@ -946,15 +958,8 @@ class NotebookSession:
     # Editing
     # ------------------------------------------------------------------
 
-    def edit_cell(self, cell_id: str, new_source: str) -> Dict[str, Any]:
-        """Update a cell's source and mark it stale if previously executed."""
-        self._require_loaded()
-        self._refresh_from_contents_api()
-        _, cell = self._find_cell(cell_id)
-        old_source = get_cell_source(cell)
-        set_cell_source(cell, new_source)
-
-        # Notify kernel if this cell was previously executed
+    def _mark_cell_edited(self, cell_id: str) -> None:
+        """Mark a cell as stale and notify the kernel, if previously executed."""
         if cell_id in self.executed_cells:
             self._stale_cells.add(cell_id)
             KernelHelper.execute_code(
@@ -965,7 +970,15 @@ class NotebookSession:
                 flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
             )
 
-        # Push edit to JupyterLab via Contents API
+    def edit_cell(self, cell_id: str, new_source: str) -> Dict[str, Any]:
+        """Update a cell's source and mark it stale if previously executed."""
+        self._require_loaded()
+        self._refresh_from_contents_api()
+        _, cell = self._find_cell(cell_id)
+        old_source = get_cell_source(cell)
+        set_cell_source(cell, new_source)
+
+        self._mark_cell_edited(cell_id)
         self._put_contents_api()
 
         return {
@@ -1008,16 +1021,55 @@ class NotebookSession:
         making MCP edits visible in JupyterLab. The server handles
         disk persistence.
 
-        Refreshes from the API first to incorporate any concurrent
-        JupyterLab edits, minimizing the race window.
+        Before the PUT, checks whether JupyterLab has modified any cells
+        since the last API refresh. If a cell was changed by JupyterLab AND
+        differs from what MCP is about to send, a warning is logged and
+        stored in ``_conflict_warnings``.
+
+        Note: This is best-effort conflict detection, not true conflict
+        resolution. A small race window remains between the check and the
+        PUT. Full conflict-free editing would require a Y.js client.
 
         Returns:
             Status message on success, None on failure (caller falls back to disk).
         """
-        # Refresh first to minimize race with concurrent JupyterLab edits
-        self._refresh_from_contents_api()
         if not self._jupyter_server_url or not self._jupyter_contents_path:
             return None
+
+        # Check for concurrent JupyterLab edits by comparing what the API
+        # has now against what we last saw from it.
+        self._conflict_warnings = []
+        if self._last_known_api_sources:
+            api_notebook = self._fetch_contents_api()
+            if api_notebook:
+                local_sources = {
+                    c["id"]: get_cell_source(c)
+                    for c in self.notebook.get("cells", [])
+                    if c.get("id") and c.get("cell_type") == "code"
+                }
+                for api_cell in api_notebook.get("cells", []):
+                    cid = api_cell.get("id")
+                    if not cid or api_cell.get("cell_type") != "code":
+                        continue
+                    last_known = self._last_known_api_sources.get(cid)
+                    if last_known is None:
+                        continue
+                    api_source = api_cell.get("source", "")
+                    local_source = local_sources.get(cid)
+                    if local_source is None:
+                        continue
+                    # JupyterLab changed this cell AND MCP has something different
+                    if api_source != last_known and api_source != local_source:
+                        self._conflict_warnings.append(
+                            f"Cell {cid}: JupyterLab edited this cell concurrently; "
+                            f"MCP's version will overwrite the JupyterLab edit"
+                        )
+                        logger.warning(
+                            "Contents API conflict on cell %s: JupyterLab source "
+                            "changed since last refresh, MCP edit may overwrite it",
+                            cid,
+                        )
+
         try:
             url = (
                 f"{self._jupyter_server_url}/api/contents/"
@@ -1163,15 +1215,7 @@ class NotebookSession:
                     set_cell_source(cell, cell_sources[cid])
                     changed_cells.append(cid)
                     # Mark as stale and notify kernel
-                    if cid in self.executed_cells:
-                        self._stale_cells.add(cid)
-                        KernelHelper.execute_code(
-                            self.kernel_client,
-                            "",
-                            timeout=10,
-                            store_history=False,
-                            flowbook_msg={"type": "cell_edited", "cell_id": cid},
-                        )
+                    self._mark_cell_edited(cid)
                     # Clear old violation metadata for changed cells
                     self.cell_flowbook_meta.pop(cid, None)
                     self.cell_status.pop(cid, None)
@@ -1204,6 +1248,11 @@ class NotebookSession:
         self._require_loaded()
         self._refresh_from_contents_api()
         code_order = self.get_cell_order()
+        if cell_id not in code_order:
+            raise ValueError(
+                f"Cell '{cell_id}' not found in notebook. "
+                f"Available code cells: {code_order}"
+            )
         start_idx = code_order.index(cell_id)
 
         modified_cells = []
@@ -1214,18 +1263,8 @@ class NotebookSession:
             if renamed:
                 set_cell_source(cell, new_source)
                 modified_cells.append(cid)
-                # Mark stale if previously executed
-                if cid in self.executed_cells:
-                    self._stale_cells.add(cid)
-                    KernelHelper.execute_code(
-                        self.kernel_client,
-                        "",
-                        timeout=10,
-                        store_history=False,
-                        flowbook_msg={"type": "cell_edited", "cell_id": cid},
-                    )
+                self._mark_cell_edited(cid)
 
-        # Push edits to JupyterLab
         if modified_cells:
             self._put_contents_api()
 
@@ -1253,15 +1292,7 @@ class NotebookSession:
             if remover.modified:
                 new_source = ast.unparse(new_tree)
                 set_cell_source(cell, new_source)
-                if cell_id in self.executed_cells:
-                    self._stale_cells.add(cell_id)
-                    KernelHelper.execute_code(
-                        self.kernel_client,
-                        "",
-                        timeout=10,
-                        store_history=False,
-                        flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
-                    )
+                self._mark_cell_edited(cell_id)
                 self._put_contents_api()
                 return {
                     "cell_id": cell_id,
@@ -1281,15 +1312,7 @@ class NotebookSession:
         )
         if count > 0:
             set_cell_source(cell, new_source)
-            if cell_id in self.executed_cells:
-                self._stale_cells.add(cell_id)
-                KernelHelper.execute_code(
-                    self.kernel_client,
-                    "",
-                    timeout=10,
-                    store_history=False,
-                    flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
-                )
+            self._mark_cell_edited(cell_id)
             self._put_contents_api()
             return {
                 "cell_id": cell_id,
@@ -1330,20 +1353,15 @@ class NotebookSession:
         new_source = magic_prefix + copy_line + renamed_rest
 
         set_cell_source(cell, new_source)
-
-        # Mark stale
-        if cell_id in self.executed_cells:
-            self._stale_cells.add(cell_id)
-            KernelHelper.execute_code(
-                self.kernel_client,
-                "",
-                timeout=10,
-                store_history=False,
-                flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
-            )
+        self._mark_cell_edited(cell_id)
 
         # Rename in all downstream cells
         code_order = self.get_cell_order()
+        if cell_id not in code_order:
+            raise ValueError(
+                f"Cell '{cell_id}' not found in notebook. "
+                f"Available code cells: {code_order}"
+            )
         start_idx = code_order.index(cell_id)
         modified_downstream = []
         for cid in code_order[start_idx + 1:]:
@@ -1353,15 +1371,7 @@ class NotebookSession:
             if renamed:
                 set_cell_source(dcell, dnew)
                 modified_downstream.append(cid)
-                if cid in self.executed_cells:
-                    self._stale_cells.add(cid)
-                    KernelHelper.execute_code(
-                        self.kernel_client,
-                        "",
-                        timeout=10,
-                        store_history=False,
-                        flowbook_msg={"type": "cell_edited", "cell_id": cid},
-                    )
+                self._mark_cell_edited(cid)
 
         self._put_contents_api()
 
@@ -1385,16 +1395,7 @@ class NotebookSession:
         new_source = prepend_to_cell_source(source, "%diagnostic\n")
         set_cell_source(cell, new_source)
 
-        if cell_id in self.executed_cells:
-            self._stale_cells.add(cell_id)
-            KernelHelper.execute_code(
-                self.kernel_client,
-                "",
-                timeout=10,
-                store_history=False,
-                flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
-            )
-
+        self._mark_cell_edited(cell_id)
         self._put_contents_api()
         return {"cell_id": cell_id, "new_source_preview": new_source[:200]}
 
@@ -1426,16 +1427,7 @@ class NotebookSession:
             if c.get("id") not in ids_to_remove
         ]
 
-        # Mark stale and notify kernel
-        if first_id in self.executed_cells:
-            self._stale_cells.add(first_id)
-            KernelHelper.execute_code(
-                self.kernel_client,
-                "",
-                timeout=10,
-                store_history=False,
-                flowbook_msg={"type": "cell_edited", "cell_id": first_id},
-            )
+        self._mark_cell_edited(first_id)
 
         # Clean up tracking for removed cells
         for cid in ids_to_remove:

@@ -123,18 +123,11 @@ export class ReproducibilityExecutionHookManager {
     this._tracker.currentChanged.connect(this._setupComm, this);
 
     // Also set up listeners for already-open notebook (signal may have fired before we subscribed)
-    console.log(
-      'ReproducibilityExecutionHookManager: currentWidget =',
-      this._tracker.currentWidget?.context?.path
-    );
     if (this._tracker.currentWidget) {
       this._setupCellEditListener();
       this._setupComm();
     }
 
-    console.log(
-      'ReproducibilityExecutionHookManager: Execution hooks installed'
-    );
   }
 
   /**
@@ -146,18 +139,11 @@ export class ReproducibilityExecutionHookManager {
    */
   private _setupCellEditListener(): void {
     const panel = this._tracker.currentWidget;
-    console.log(
-      'ReproducibilityExecutionHook: _setupCellEditListener called, panel =',
-      panel?.context?.path
-    );
     if (!panel) {
       return;
     }
 
     const notebook = panel.content;
-    console.log(
-      `ReproducibilityExecutionHook: Setting up edit listeners for ${notebook.widgets.length} cells`
-    );
 
     // Attach listeners to all existing code cells
     for (let i = 0; i < notebook.widgets.length; i++) {
@@ -189,9 +175,6 @@ export class ReproducibilityExecutionHookManager {
 
     if (cellOrder.length > 0) {
       this.sendCommand({ type: 'notebook_structure', cell_order: cellOrder });
-      console.log(
-        `ReproducibilityExecutionHook: Sent notebook_structure via comm with ${cellOrder.length} cells`
-      );
     }
   }
 
@@ -207,15 +190,9 @@ export class ReproducibilityExecutionHookManager {
       return;
     }
     this._listenedCellIds.add(cellId);
-    console.log(
-      `ReproducibilityExecutionHook: Attached edit listener to cell ${cellId}`
-    );
 
     const model = cell.model as ICodeCellModel;
     model.sharedModel.changed.connect((_sender: any, change: CellChange) => {
-      console.log(
-        `ReproducibilityExecutionHook: Cell ${cellId} changed, sourceChange=${!!change.sourceChange}`
-      );
       // Only react to source text edits, not output/metadata/executionCount changes
       if (change.sourceChange) {
         this._onCellContentChanged(cellId);
@@ -227,9 +204,6 @@ export class ReproducibilityExecutionHookManager {
    * [EDIT transition (§2.3)] Handle cell content change with debouncing.
    */
   private _onCellContentChanged(cellId: string): void {
-    console.log(
-      `ReproducibilityExecutionHook: _onCellContentChanged(${cellId}), inExecutedCells=${this._executedCells.has(cellId)}`
-    );
     // Only notify kernel about cells that have been previously executed
     if (!this._executedCells.has(cellId)) {
       return;
@@ -243,9 +217,6 @@ export class ReproducibilityExecutionHookManager {
 
     // Set new timer (1s debounce)
     const timer = setTimeout(() => {
-      console.log(
-        `ReproducibilityExecutionHook: Debounce complete for ${cellId}, sending cell_edited`
-      );
       this._sendCellEdited(cellId);
       this._editTimers.delete(cellId);
     }, 1000);
@@ -258,9 +229,6 @@ export class ReproducibilityExecutionHookManager {
    */
   private _sendCellEdited(cellId: string): void {
     this.sendCommand({ type: 'cell_edited', cell_id: cellId });
-    console.log(
-      `ReproducibilityExecutionHook: Sent cell_edited via comm for ${cellId}`
-    );
   }
 
   /**
@@ -308,7 +276,6 @@ export class ReproducibilityExecutionHookManager {
     this._comm.onMsg = this._onCommMessage.bind(this);
     this._comm.open();
 
-    console.log('ReproducibilityExecutionHook: Comm channel opened to kernel');
   }
 
   /**
@@ -355,11 +322,6 @@ export class ReproducibilityExecutionHookManager {
 
         // Process staleness
         this._processMetadataUpdate(panel, reproMeta);
-
-        console.log(
-          'ReproducibilityExecutionHook: Comm metadata received, stale_cells =',
-          reproMeta.stale_cells
-        );
         break;
       }
 
@@ -369,18 +331,12 @@ export class ReproducibilityExecutionHookManager {
         // Buffer violation — the metadata message (which follows) carries
         // the canonical errors in flowbook.errors and triggers updateCell.
         this._pendingViolations.push(pv);
-        console.log(
-          `ReproducibilityExecutionHook: Comm violation received for cell ${pv.cell_id}, predicate=${pv.predicate}`
-        );
         break;
       }
 
       case 'status': {
         // Update the metadata panel status header
         this._highlighter.updateStatus(data.icon, data.text, data.cell_id);
-        console.log(
-          `ReproducibilityExecutionHook: Comm status: ${data.icon} ${data.text}`
-        );
         break;
       }
     }
@@ -409,9 +365,6 @@ export class ReproducibilityExecutionHookManager {
     if (pendingTimer) {
       clearTimeout(pendingTimer);
       this._editTimers.delete(cellId);
-      console.log(
-        `ReproducibilityExecutionHook: Cancelled pending cell_edited for ${cellId} (cell is executing)`
-      );
     }
 
     const cellOrder = getCodeCellOrder(panel);
@@ -498,15 +451,6 @@ export class ReproducibilityExecutionHookManager {
       // Compute newly-stale cells
       const newlyStale = [...newStaleSet].filter(id => !oldStale.has(id));
 
-      console.log(
-        'ReproducibilityExecutionHook: staleness_reasons from backend:',
-        metadata.staleness_reasons
-      );
-      console.log(
-        'ReproducibilityExecutionHook: newlyStale cells:',
-        newlyStale
-      );
-
       // Compute reason for each newly-stale cell
       // Prefer backend-provided staleness_reasons, fall back to local computation
       for (const staleCellId of newlyStale) {
@@ -517,9 +461,6 @@ export class ReproducibilityExecutionHookManager {
           const source = codeModel.sharedModel.getSource();
           const isEmpty = !source || source.trim() === '';
           if (isEmpty) {
-            console.log(
-              `ReproducibilityExecutionHook: cell ${staleCellId} is empty, skipping staleness reason`
-            );
             continue;
           }
         }
@@ -527,18 +468,9 @@ export class ReproducibilityExecutionHookManager {
         const backendReasons = metadata.staleness_reasons?.[staleCellId];
         let reason: IFrontendStalenessReason;
 
-        console.log(
-          `ReproducibilityExecutionHook: cell ${staleCellId} backendReasons:`,
-          backendReasons
-        );
-
         if (backendReasons && backendReasons.length > 0) {
           // Use backend reason - convert to frontend format for cell metadata
           reason = this._backendReasonToFrontend(backendReasons[0], cellOrder);
-          console.log(
-            `ReproducibilityExecutionHook: cell ${staleCellId} using backend reason:`,
-            reason
-          );
         } else {
           // Fall back to local computation
           reason = this._computeStalenessReason(
@@ -546,10 +478,6 @@ export class ReproducibilityExecutionHookManager {
             staleCellId,
             metadata,
             cellOrder
-          );
-          console.log(
-            `ReproducibilityExecutionHook: cell ${staleCellId} using local reason:`,
-            reason
           );
         }
 

@@ -1,32 +1,13 @@
 /*
-    See the JupyterLab Developer Guide for useful CSS Patterns:
+    FlowBook JupyterLab Extension — Active Styles
 
+    See the JupyterLab Developer Guide for useful CSS Patterns:
     https://jupyterlab.readthedocs.io/en/stable/developer/css.html
 */
 
-/* Ferret extension styles */
-
-.flowbook-button {
-  margin: 0 2px;
-}
-
-.flowbook-cell-toolbar {
-  display: flex;
-  gap: 4px;
-}
-
-/* Cell highlighting based on Ferret metadata */
-.jp-Cell.flowbook-cell-warning {
-  border-left: 4px solid #f5f543;
-  background-color: rgb(245 245 67 / 5%);
-}
-
-.jp-Cell.flowbook-cell-danger {
-  border-left: 4px solid #f14c4c;
-  background-color: rgb(241 76 76 / 5%);
-}
-
-/* Ferret Metadata Panel Styles */
+/* ========================================
+   Metadata Panel
+   ======================================== */
 
 .flowbook-metadata-panel {
   display: flex;
@@ -87,341 +68,29 @@
   line-height: 1.6;
 }
 
-.flowbook-metadata-list {
-  margin: 8px 0 0;
-  padding-left: 20px;
-  list-style-type: disc;
+/* ========================================
+   Cell Highlighting (Reproducibility)
+   ======================================== */
+
+/* Stale cell — subtle left border */
+.jp-Cell.flowbook-cell-stale .jp-InputArea-editor {
+  border-left: 3px solid #ffc107;
 }
 
-.flowbook-metadata-list li {
-  margin: 4px 0;
-  line-height: 1.4;
+/* Unexecuted cell — same as stale but no notice message */
+.jp-Cell.flowbook-cell-unexecuted .jp-InputArea-editor {
+  border-left: 3px solid #ffc107;
 }
 
-.flowbook-metadata-profile-toggle {
-  cursor: pointer;
-  user-select: none;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 4px 0;
-  margin-bottom: 8px;
-  transition: color 0.2s;
+/* Error cell — red left border for violations */
+.jp-Cell.flowbook-cell-error .jp-InputArea-editor {
+  border-left: 3px solid #dc3545;
 }
 
-.flowbook-metadata-profile-toggle:hover {
-  color: var(--jp-brand-color1);
-}
+/* ========================================
+   Cell Index Overlay (@A notation)
+   ======================================== */
 
-.flowbook-metadata-toggle-icon {
-  font-size: 0.8em;
-  margin-left: 8px;
-  color: var(--jp-ui-font-color2);
-}
-
-.flowbook-metadata-profile-output {
-  margin: 8px 0 0;
-  padding: 12px;
-  background-color: var(--jp-layout-color0);
-  border: 1px solid var(--jp-border-color2);
-  border-radius: 4px;
-  font-family: var(--jp-code-font-family);
-  font-size: var(--jp-code-font-size);
-  line-height: 1.4;
-  overflow: auto auto;
-  max-height: 400px;
-  white-space: pre;
-  color: var(--jp-content-font-color1);
-}
-
-.flowbook-metadata-profile-output::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.flowbook-metadata-profile-output::-webkit-scrollbar-track {
-  background: var(--jp-layout-color1);
-}
-
-.flowbook-metadata-profile-output::-webkit-scrollbar-thumb {
-  background: var(--jp-border-color2);
-  border-radius: 4px;
-}
-
-.flowbook-metadata-profile-output::-webkit-scrollbar-thumb:hover {
-  background: var(--jp-border-color3);
-}
-
-/* Optimization Plan Styles */
-
-.flowbook-metadata-optimization-plan {
-  margin-top: 8px;
-}
-
-.flowbook-metadata-optimization-step {
-  margin-bottom: 16px;
-  padding: 12px;
-  background-color: var(--jp-layout-color0);
-  border: 1px solid var(--jp-border-color2);
-  border-radius: 4px;
-}
-
-.flowbook-metadata-optimization-step:last-child {
-  margin-bottom: 0;
-}
-
-.flowbook-metadata-optimization-step-header {
-  margin-bottom: 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--jp-border-color1);
-  font-size: var(--jp-ui-font-size1);
-}
-
-.flowbook-metadata-optimization-step-header code {
-  background-color: var(--jp-layout-color2);
-  padding: 2px 6px;
-  border-radius: 3px;
-  font-family: var(--jp-code-font-family);
-  font-size: 0.9em;
-  color: var(--jp-content-font-color1);
-}
-
-.flowbook-metadata-optimization-step-descriptions {
-  margin-top: 8px;
-}
-
-.flowbook-metadata-optimization-step-descriptions strong {
-  display: block;
-  margin-bottom: 4px;
-  color: var(--jp-ui-font-color0);
-}
-
-.flowbook-metadata-optimization-step-descriptions ul {
-  margin: 4px 0 0;
-  padding-left: 20px;
-  list-style-type: disc;
-}
-
-.flowbook-metadata-optimization-step-descriptions li {
-  margin: 4px 0;
-  line-height: 1.5;
-  color: var(--jp-ui-font-color1);
-}
-
-.jp-chat-panel {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow: hidden;
-}
-
-.chat-container {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  padding: 10px;
-  box-sizing: border-box;
-}
-
-.chat-messages {
-  flex: 1;
-  overflow-y: auto;
-  margin-bottom: 10px;
-  padding: 10px;
-  border: 1px solid var(--jp-border-color1);
-  border-radius: 4px;
-  background-color: var(--jp-layout-color1);
-}
-
-.message {
-  margin-bottom: 15px;
-  padding: 10px;
-  border-radius: 8px;
-  animation: fade-in 0.3s ease-in;
-}
-
-@keyframes fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.message-user {
-  background-color: var(--jp-brand-color1);
-  color: white;
-  margin-left: 20%;
-}
-
-.message-assistant {
-  background-color: var(--jp-layout-color2);
-  margin-right: 20%;
-}
-
-.message-role {
-  font-weight: bold;
-  margin-bottom: 5px;
-  font-size: 0.9em;
-  opacity: 0.8;
-}
-
-.message-content {
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  line-height: 1.5;
-}
-
-.chat-input-container {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.chat-input {
-  width: 100%;
-  padding: 10px;
-  border: 1px solid var(--jp-border-color1);
-  border-radius: 4px;
-  font-family: var(--jp-code-font-family);
-  font-size: var(--jp-ui-font-size1);
-  resize: vertical;
-  min-height: 60px;
-  background-color: var(--jp-layout-color1);
-  color: var(--jp-ui-font-color1);
-}
-
-.chat-input:focus {
-  outline: none;
-  border-color: var(--jp-brand-color1);
-  box-shadow: 0 0 0 1px var(--jp-brand-color1);
-}
-
-.chat-input:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.chat-send-button {
-  align-self: flex-end;
-  padding: 8px 20px;
-  background-color: var(--jp-brand-color1);
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: var(--jp-ui-font-size1);
-  transition: background-color 0.2s;
-}
-
-.chat-send-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.chat-send-button:hover:not(:disabled) {
-  background-color: var(--jp-brand-color0);
-}
-
-/* Scrollbar styling */
-.chat-messages::-webkit-scrollbar {
-  width: 8px;
-}
-
-.chat-messages::-webkit-scrollbar-track {
-  background: var(--jp-layout-color1);
-}
-
-.chat-messages::-webkit-scrollbar-thumb {
-  background: var(--jp-border-color2);
-  border-radius: 4px;
-}
-
-.chat-messages::-webkit-scrollbar-thumb:hover {
-  background: var(--jp-border-color3);
-}
-
-/* Ferret Message Panel Styles */
-
-.flowbook-message-panel {
-  display: flex;
-  flex-direction: column;
-  min-width: 300px;
-  height: 100%;
-  background-color: var(--jp-layout-color1);
-
-  /* ANSI color mappings */
-  --flowbook-color-black: #000;
-  --flowbook-color-red: #cd3131;
-  --flowbook-color-green: #0dbc79;
-  --flowbook-color-yellow: #e5e510;
-  --flowbook-color-blue: #2472c8;
-  --flowbook-color-magenta: #bc3fbc;
-  --flowbook-color-cyan: #11a8cd;
-  --flowbook-color-white: #e5e5e5;
-  --flowbook-color-bright-black: #666;
-  --flowbook-color-bright-red: #f14c4c;
-  --flowbook-color-bright-green: #23d18b;
-  --flowbook-color-bright-yellow: #f5f543;
-  --flowbook-color-bright-blue: #3b8eea;
-  --flowbook-color-bright-magenta: #d670d6;
-  --flowbook-color-bright-cyan: #29b8db;
-  --flowbook-color-bright-white: #e5e5e5;
-}
-
-.flowbook-message-display {
-  flex: 1;
-  overflow: auto auto;
-  height: 100%;
-}
-
-.flowbook-message-content {
-  padding: 10px;
-  margin: 0;
-  font-family: var(--jp-code-font-family);
-  font-size: var(--jp-code-font-size);
-  line-height: 1.5;
-  color: var(--jp-ui-font-color1);
-  background-color: var(--jp-layout-color0);
-  white-space: pre;
-  overflow-x: auto;
-}
-
-.flowbook-message-line {
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  margin-bottom: 2px;
-  min-height: 1em;
-}
-
-.flowbook-message-line:empty::before {
-  content: '\200b'; /* Zero-width space to maintain line height */
-}
-
-/* Scrollbar styling for message display */
-.flowbook-message-display::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.flowbook-message-display::-webkit-scrollbar-track {
-  background: var(--jp-layout-color1);
-}
-
-.flowbook-message-display::-webkit-scrollbar-thumb {
-  background: var(--jp-border-color2);
-  border-radius: 4px;
-}
-
-.flowbook-message-display::-webkit-scrollbar-thumb:hover {
-  background: var(--jp-border-color3);
-}
-
-/* Cell Index Overlay */
 .flowbook-cell-index-overlay {
   position: absolute;
   bottom: 4px;
@@ -439,390 +108,9 @@
   opacity: 0.8;
 }
 
-/* Unit Test Panel Styles */
-
-.flowbook-unittest-panel {
-  display: flex;
-  flex-direction: column;
-  min-width: 300px;
-  height: 100%;
-  background-color: var(--jp-layout-color1);
-  overflow: hidden;
-}
-
-.flowbook-unittest-empty {
-  padding: 20px;
-  text-align: center;
-  color: var(--jp-ui-font-color2);
-  font-family: var(--jp-ui-font-family);
-  font-size: var(--jp-ui-font-size1);
-}
-
-.flowbook-unittest-empty p {
-  margin: 8px 0;
-}
-
-.flowbook-unittest-content {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow: hidden;
-}
-
-.flowbook-unittest-header {
-  padding: 10px;
-  border-bottom: 1px solid var(--jp-border-color1);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background-color: var(--jp-layout-color1);
-}
-
-.flowbook-unittest-cell-id {
-  font-weight: bold;
-  font-family: var(--jp-code-font-family);
-  font-size: var(--jp-ui-font-size1);
-  color: var(--jp-ui-font-color0);
-}
-
-.flowbook-unittest-saving {
-  font-size: 0.85em;
-  color: var(--jp-warn-color1);
-  font-style: italic;
-}
-
-.flowbook-unittest-actions {
-  padding: 10px;
-  display: flex;
-  gap: 10px;
-  border-bottom: 1px solid var(--jp-border-color1);
-  background-color: var(--jp-layout-color1);
-}
-
-.flowbook-unittest-btn-add,
-.flowbook-unittest-btn-generate {
-  padding: 6px 12px;
-  border: 1px solid var(--jp-border-color1);
-  background: var(--jp-layout-color2);
-  color: var(--jp-ui-font-color1);
-  cursor: pointer;
-  border-radius: 3px;
-  font-size: 0.9em;
-  font-family: var(--jp-ui-font-family);
-  transition: background-color 0.2s;
-}
-
-.flowbook-unittest-btn-generate:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.flowbook-unittest-btn-add:hover,
-.flowbook-unittest-btn-generate:hover:not(:disabled) {
-  background: var(--jp-layout-color3);
-}
-
-.flowbook-unittest-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 10px;
-  background-color: var(--jp-layout-color0);
-}
-
-.flowbook-unittest-empty-list {
-  padding: 20px;
-  text-align: center;
-  color: var(--jp-ui-font-color2);
-  font-style: italic;
-}
-
-.flowbook-unittest-item {
-  border: 1px solid var(--jp-border-color1);
-  border-radius: 4px;
-  padding: 12px;
-  margin-bottom: 12px;
-  background: var(--jp-layout-color1);
-}
-
-.flowbook-unittest-item-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
-  gap: 8px;
-}
-
-.flowbook-unittest-title-input {
-  flex: 1;
-  padding: 6px;
-  border: 1px solid var(--jp-border-color1);
-  background: var(--jp-input-background);
-  color: var(--jp-ui-font-color1);
-  font-size: 1em;
-  font-weight: bold;
-  border-radius: 3px;
-  font-family: var(--jp-ui-font-family);
-}
-
-.flowbook-unittest-title-input:focus {
-  outline: none;
-  border-color: var(--jp-brand-color1);
-}
-
-.flowbook-unittest-btn-delete {
-  padding: 4px 8px;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-size: 1.2em;
-  opacity: 0.7;
-  transition: opacity 0.2s;
-}
-
-.flowbook-unittest-btn-delete:hover {
-  opacity: 1;
-}
-
-.flowbook-unittest-field {
-  margin-bottom: 10px;
-}
-
-.flowbook-unittest-field label {
-  display: block;
-  font-weight: bold;
-  margin-bottom: 4px;
-  font-size: 0.9em;
-  color: var(--jp-ui-font-color1);
-  font-family: var(--jp-ui-font-family);
-}
-
-.flowbook-unittest-textarea,
-.flowbook-unittest-code-editor {
-  width: 100%;
-  padding: 6px;
-  border: 1px solid var(--jp-border-color1);
-  background: var(--jp-input-background);
-  color: var(--jp-ui-font-color1);
-  font-size: 0.9em;
-  border-radius: 3px;
-  resize: vertical;
-  box-sizing: border-box;
-}
-
-.flowbook-unittest-textarea {
-  font-family: var(--jp-ui-font-family);
-}
-
-.flowbook-unittest-code-editor {
-  font-family: var(--jp-code-font-family);
-}
-
-.flowbook-unittest-textarea:focus,
-.flowbook-unittest-code-editor:focus {
-  outline: none;
-  border-color: var(--jp-brand-color1);
-}
-
-/* CodeMirror wrapper for syntax-highlighted code editors */
-.flowbook-code-editor-wrapper {
-  border: 1px solid var(--jp-border-color1);
-  border-radius: 3px;
-  overflow: hidden;
-  background: var(--jp-layout-color0);
-}
-
-.flowbook-code-editor-wrapper .jp-CodeMirrorEditor {
-  font-size: 0.9em;
-}
-
-/* stylelint-disable-next-line selector-class-pattern */
-.flowbook-code-editor-wrapper .CodeMirror {
-  height: auto;
-  min-height: 100px;
-}
-
-/* stylelint-disable-next-line selector-class-pattern */
-.flowbook-code-editor-wrapper .CodeMirror-scroll {
-  min-height: 100px;
-}
-
-/* Command Execution Dialog Styles */
-
-/* Modal overlay backdrop */
-.flowbook-execution-dialog-overlay {
-  position: fixed;
-  inset: 0;
-  background-color: rgb(0 0 0 / 50%);
-  z-index: 10000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-/* Dialog container */
-.flowbook-execution-dialog {
-  background-color: var(--jp-layout-color1);
-  border: 1px solid var(--jp-border-color1);
-  border-radius: 4px;
-  box-shadow: 0 4px 12px rgb(0 0 0 / 30%);
-  width: 90vw;
-  max-width: 1400px;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
-
-  /* Inherit ANSI color variables from message panel */
-  --flowbook-color-black: #000;
-  --flowbook-color-red: #cd3131;
-  --flowbook-color-green: #0dbc79;
-  --flowbook-color-yellow: #e5e510;
-  --flowbook-color-blue: #2472c8;
-  --flowbook-color-magenta: #bc3fbc;
-  --flowbook-color-cyan: #11a8cd;
-  --flowbook-color-white: #e5e5e5;
-  --flowbook-color-bright-black: #666;
-  --flowbook-color-bright-red: #f14c4c;
-  --flowbook-color-bright-green: #23d18b;
-  --flowbook-color-bright-yellow: #f5f543;
-  --flowbook-color-bright-blue: #3b8eea;
-  --flowbook-color-bright-magenta: #d670d6;
-  --flowbook-color-bright-cyan: #29b8db;
-  --flowbook-color-bright-white: #e5e5e5;
-}
-
-/* Dialog content wrapper */
-.flowbook-execution-dialog-content {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow: hidden;
-}
-
-/* Dialog header */
-.flowbook-execution-dialog-header {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--jp-border-color1);
-  background-color: var(--jp-layout-color1);
-  flex-shrink: 0;
-}
-
-.flowbook-execution-dialog-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--jp-ui-font-color1);
-  font-family: var(--jp-ui-font-family);
-}
-
-/* Dialog body - message display area */
-.flowbook-execution-dialog-body {
-  flex: 1;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  min-height: 200px;
-  max-height: 400px;
-}
-
-.flowbook-execution-dialog-body .flowbook-message-display {
-  flex: 1;
-  overflow: auto auto;
-  height: 100%;
-}
-
-.flowbook-execution-dialog-body .flowbook-message-content {
-  padding: 10px;
-  margin: 0;
-  font-family: var(--jp-code-font-family);
-  font-size: var(--jp-code-font-size);
-  line-height: 1.5;
-  color: var(--jp-ui-font-color1);
-  background-color: var(--jp-layout-color0);
-  white-space: pre;
-  overflow-x: auto;
-}
-
-/* Dialog footer - button area */
-.flowbook-execution-dialog-footer {
-  padding: 12px 16px;
-  border-top: 1px solid var(--jp-border-color1);
-  background-color: var(--jp-layout-color1);
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-shrink: 0;
-  min-height: 48px;
-}
-
-/* Button styles (reuse JupyterLab's dialog button styles) */
-.flowbook-execution-dialog-footer .jp-Dialog-button {
-  padding: 6px 12px;
-  font-size: 13px;
-  font-family: var(--jp-ui-font-family);
-  border: 1px solid var(--jp-border-color1);
-  border-radius: 3px;
-  background-color: var(--jp-layout-color2);
-  color: var(--jp-ui-font-color1);
-  cursor: pointer;
-  transition: all 0.1s ease;
-}
-
-.flowbook-execution-dialog-footer .jp-Dialog-button:hover {
-  background-color: var(--jp-layout-color3);
-}
-
-.flowbook-execution-dialog-footer .jp-Dialog-button.jp-mod-accept {
-  background-color: var(--jp-brand-color1);
-  color: white;
-  border-color: var(--jp-brand-color1);
-}
-
-.flowbook-execution-dialog-footer .jp-Dialog-button.jp-mod-accept:hover {
-  background-color: var(--jp-brand-color2);
-  border-color: var(--jp-brand-color2);
-}
-
-/* Scrollbar styling for dialog message display */
-.flowbook-execution-dialog-body .flowbook-message-display::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.flowbook-execution-dialog-body
-  .flowbook-message-display::-webkit-scrollbar-track {
-  background: var(--jp-layout-color1);
-}
-
-.flowbook-execution-dialog-body
-  .flowbook-message-display::-webkit-scrollbar-thumb {
-  background: var(--jp-border-color2);
-  border-radius: 4px;
-}
-
-.flowbook-execution-dialog-body
-  .flowbook-message-display::-webkit-scrollbar-thumb:hover {
-  background: var(--jp-border-color3);
-}
-
 /* ========================================
-   FlowBook Reproducibility Styles
+   Variable / Cell Lists
    ======================================== */
-
-/* Stale cell highlighting - subtle left border only */
-.jp-Cell.flowbook-cell-stale .jp-InputArea-editor {
-  border-left: 3px solid #ffc107;
-}
-
-/* Unexecuted cell highlighting - same as stale but no notice message */
-.jp-Cell.flowbook-cell-unexecuted .jp-InputArea-editor {
-  border-left: 3px solid #ffc107;
-}
-
-/* Error cell highlighting - red left border for violations */
-.jp-Cell.flowbook-cell-error .jp-InputArea-editor {
-  border-left: 3px solid #dc3545;
-}
-
-/* FlowBook Reproducibility Variable/Cell Lists */
 
 .flowbook-variable-list {
   margin: 8px 0 0;
@@ -864,10 +152,6 @@
   font-style: italic;
 }
 
-.flowbook-changed code {
-  color: var(--jp-warn-color1);
-}
-
 .flowbook-cell-list {
   margin: 8px 0 0;
   padding-left: 20px;
@@ -877,6 +161,10 @@
 .flowbook-cell-list li {
   margin: 4px 0;
 }
+
+/* ========================================
+   Staleness Section
+   ======================================== */
 
 .flowbook-stale-section {
   background-color: rgb(255 193 7 / 15%);
@@ -889,53 +177,126 @@
   color: #f57c00;
 }
 
+/* ========================================
+   Error Section (metadata panel)
+   ======================================== */
+
+.flowbook-error-section {
+  background-color: rgb(220 53 69 / 8%);
+  padding: 8px;
+  border-radius: 4px;
+  margin: 8px -8px;
+}
+
+.flowbook-error-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  list-style-type: disc;
+}
+
+.flowbook-error-list li {
+  margin: 4px 0;
+}
+
+/* ========================================
+   Timing Section (metadata panel)
+   ======================================== */
+
+.flowbook-timing-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  list-style-type: disc;
+}
+
+.flowbook-timing-list li {
+  margin: 4px 0;
+}
+
+/* ========================================
+   Staleness Notice (inline cell output)
+   ======================================== */
+
+.flowbook-staleness-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 33%;
+  min-width: 300px;
+  background-color: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 3px;
+  padding: 3px 8px;
+  font-size: 0.85em;
+  color: #664d03;
+}
+
+.flowbook-staleness-notice code {
+  background-color: rgb(255 193 7 / 18%);
+  padding: 1px 4px;
+  border-radius: 2px;
+  margin-right: -2px;
+}
+
+/* ========================================
+   Violation / Error Notice (inline cell output)
+   ======================================== */
+
+.flowbook-violation-notice {
+  background-color: #f8d7da;
+  border: 1px solid #f5c2c7;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 0.88em;
+  color: #842029;
+}
+
+.flowbook-violation-notice code {
+  background-color: rgb(220 53 69 / 15%);
+  padding: 1px 4px;
+  border-radius: 2px;
+  margin-right: -2px;
+}
+
+.flowbook-error-notice {
+  background-color: #f8d7da;
+  border: 1px solid #f5c2c7;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 0.88em;
+  color: #842029;
+}
+
+.flowbook-error-notice code {
+  background-color: rgb(220 53 69 / 15%);
+  padding: 1px 4px;
+  border-radius: 2px;
+  margin-right: -2px;
+}
+
+/* ========================================
+   Violation Details (metadata panel)
+   ======================================== */
+
 .flowbook-violation-section {
   margin-top: 4px;
   border: none;
   background: none;
 }
 
-.flowbook-violation-header {
-  margin-bottom: 4px;
+.flowbook-violation-section ul {
+  margin: 2px 0 0 20px;
+  padding: 0;
+  list-style-type: disc;
 }
 
-.flowbook-violation-content {
-  font-size: var(--jp-ui-font-size1);
+.flowbook-violation-section li {
+  margin: 0;
 }
 
-.flowbook-violation-content p {
-  margin: 0 0 8px;
-}
+/* ========================================
+   Structural Warning Section
+   ======================================== */
 
-.flowbook-violation-details {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--jp-border-color1);
-}
-
-.flowbook-violation-details code {
-  background-color: var(--jp-layout-color2);
-  padding: 2px 6px;
-  border-radius: 3px;
-  font-family: var(--jp-code-font-family);
-}
-
-/* Forward Dependency Styles */
-.flowbook-forward-dep-section {
-  background-color: rgb(255 152 0 / 15%);
-  padding: 12px;
-  border-radius: 4px;
-  margin: 8px -8px;
-  border: 1px solid #ff9800;
-}
-
-.flowbook-forward-dep-header {
-  font-weight: bold;
-  color: #e65100;
-  margin-bottom: 8px;
-}
-
-/* Structural Warning Styles */
 .flowbook-warning-section {
   background-color: rgb(255 193 7 / 10%);
   border-left: 3px solid #ffc107;
@@ -962,82 +323,4 @@
 .flowbook-warning-list li {
   margin: 4px 0;
   color: #856404;
-}
-
-/* Staleness notice output - compact with width limit */
-.flowbook-staleness-notice {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 33%;
-  min-width: 300px;
-  background-color: #fff3cd;
-  border: 1px solid #ffc107;
-  border-radius: 3px;
-  padding: 3px 8px;
-  font-size: 0.85em;
-  color: #664d03;
-}
-
-.flowbook-staleness-notice code {
-  background-color: rgb(255 193 7 / 18%);
-  padding: 1px 4px;
-  border-radius: 2px;
-  margin-right: -2px; /* Tighten spacing before punctuation */
-}
-
-.flowbook-staleness-info-icon {
-  cursor: help;
-  opacity: 0.7;
-  flex-shrink: 0;
-}
-
-.flowbook-staleness-info-icon:hover {
-  opacity: 1;
-}
-
-/* Violation notice output (matches staleness notice pattern) */
-.flowbook-violation-notice {
-  background-color: #f8d7da;
-  border: 1px solid #f5c2c7;
-  border-radius: 4px;
-  padding: 6px 10px;
-  font-size: 0.88em;
-  color: #842029;
-}
-
-.flowbook-violation-notice code {
-  background-color: rgb(220 53 69 / 15%);
-  padding: 1px 4px;
-  border-radius: 2px;
-  margin-right: -2px; /* Tighten spacing before punctuation */
-}
-
-/* Error notice output (rejected violations) */
-.flowbook-error-notice {
-  background-color: #f8d7da;
-  border: 1px solid #f5c2c7;
-  border-radius: 4px;
-  padding: 6px 10px;
-  font-size: 0.88em;
-  color: #842029;
-}
-
-.flowbook-error-notice code {
-  background-color: rgb(220 53 69 / 15%);
-  padding: 1px 4px;
-  border-radius: 2px;
-  margin-right: -2px; /* Tighten spacing before punctuation */
-}
-
-/* Contamination notice - DEPRECATED, now uses flowbook-violation-notice */
-
-.flowbook-violation-section ul {
-  margin: 2px 0 0 20px;
-  padding: 0;
-  list-style-type: disc;
-}
-
-.flowbook-violation-section li {
-  margin: 0;
 }

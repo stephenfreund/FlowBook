@@ -67,14 +67,6 @@ export interface IReproducibilityError {
   detail?: Record<string, unknown>;
 }
 
-export interface IReproducibilityCellState {
-  cellId: string;
-  executionSeq: number;
-  readLocs: IReadLoc[];
-  writeLocs: IWriteLoc[];
-  isStale: boolean;
-}
-
 /**
  * Reason types from the formal model (§1.2).
  * Maps to ReasonType enum in flowbook/kernel/models.py
@@ -141,21 +133,6 @@ export interface IFrontendStalenessReason {
 export type IStalenessReason =
   | IBackendStalenessReason
   | IFrontendStalenessReason;
-
-export interface IProposedFixEntry {
-  cell_ids: string[];
-  modified_source: string;
-  explanation: string;
-}
-
-export interface IProposedFix {
-  violation_type: string;
-  mutating_cell: string;
-  affected_cell: string;
-  strategy: string; // "alpha_rename" | "copy_value" | "merge_cells" | "reorder"
-  fix_entries: IProposedFixEntry[];
-  explanation: string;
-}
 
 /**
  * Predicate types for formal predicate violations.
@@ -294,20 +271,6 @@ export function writeConflictsRead(w: IWriteLoc, r: IReadLoc): boolean {
 }
 
 /**
- * Check if any write loc in `wlocs` conflicts with any read loc in `rlocs`.
- */
-export function hasConflict(wlocs: IWriteLoc[], rlocs: IReadLoc[]): boolean {
-  for (const w of wlocs) {
-    for (const r of rlocs) {
-      if (writeConflictsRead(w, r)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-/**
  * Find all read locs from `rlocs` that are invalidated by any write in `wlocs`.
  * Returns the conflicting read locs.
  */
@@ -338,82 +301,42 @@ export function formatReadLoc(loc: IReadLoc): string {
   return loc.name;
 }
 
-/**
- * Format a WriteLoc for display with type annotation.
- */
-export function formatWriteLoc(loc: IWriteLoc): string {
-  const q = _displayQualifier(loc);
-  if (q) {
-    return `${q}.${loc.name}`;
-  }
-  return loc.name;
-}
+// ============================================================================
+// Output metadata helpers — eliminate `as any` for cell output access
+// ============================================================================
 
 /**
- * Compare two ReadLoc qualifiers for equality.
- * Uses _sameDataframe() logic for proper loc_id comparison.
- */
-export function readLocsMatchQualifier(a: IReadLoc, b: IReadLoc): boolean {
-  // Both have numeric qualifiers → compare loc_ids
-  if (typeof a.qualifier === 'number' && typeof b.qualifier === 'number') {
-    return a.qualifier === b.qualifier;
-  }
-  // Fall back to display name comparison
-  const aName = _displayQualifier(a);
-  const bName = _displayQualifier(b);
-  return aName === bName;
-}
-
-/**
- * w1 ▷▷ w2 — does writing w1 overlap with writing w2?
- * Direct write-write conflict relation (5×5 symmetric matrix).
+ * FlowBook-specific metadata fields that may appear on cell outputs.
  *
- *            Var(x')  Col(d',c')  Cols(d')  Rows(d')  File(p')
- * Var(x)      x=x'      —          —         —         —
- * Col(d,c)     —      d≡d'∧c=c'   d≡d'      d≡d'       —
- * Cols(d)      —        d≡d'       d≡d'       —         —
- * Rows(d)      —        d≡d'        —        d≡d'       —
- * File(p)      —         —          —         —        p=p'
+ * These are set by the kernel (predicate_violation, ename) or by the
+ * frontend notice managers (flowbook_staleness_notice, flowbook_violation_notice).
  */
-export function writeConflictsWrite(w1: IWriteLoc, w2: IWriteLoc): boolean {
-  switch (w1.type) {
-    case 'var':
-      return w2.type === 'var' && w1.name === w2.name;
-
-    case 'col':
-      if (w2.type === 'col') {
-        return _sameDataframe(w1, w2) && w1.name === w2.name;
-      }
-      if (w2.type === 'cols') {
-        return _sameDataframe(w1, w2);
-      }
-      if (w2.type === 'rows') {
-        return _sameDataframe(w1, w2);
-      }
-      return false;
-
-    case 'cols':
-      if (w2.type === 'col') {
-        return _sameDataframe(w1, w2);
-      }
-      if (w2.type === 'cols') {
-        return _sameDataframe(w1, w2);
-      }
-      return false;
-
-    case 'rows':
-      if (w2.type === 'col') {
-        return _sameDataframe(w1, w2);
-      }
-      if (w2.type === 'rows') {
-        return _sameDataframe(w1, w2);
-      }
-      return false;
-
-    case 'file':
-      return w2.type === 'file' && w1.name === w2.name;
-
-    default:
-      return false;
-  }
+export interface IFlowbookOutputMeta {
+  flowbook_staleness_notice?: boolean;
+  flowbook_violation_notice?: boolean;
+  predicate_violation?: Record<string, unknown>;
+  [key: string]: unknown;
 }
+
+/**
+ * Extended output type with optional FlowBook metadata and error fields.
+ *
+ * JupyterLab's IOutput uses PartialJSONObject which doesn't know about
+ * our custom metadata keys. This interface adds them so callers can avoid
+ * `as any` when checking FlowBook-specific fields.
+ */
+export interface IFlowbookOutput {
+  output_type: string;
+  data?: Record<string, string>;
+  metadata?: IFlowbookOutputMeta;
+  ename?: string;  // Present on error outputs
+  [key: string]: unknown;
+}
+
+/**
+ * Cast an IOutput (from toJSON()) to IFlowbookOutput for safe metadata access.
+ */
+export function asFlowbookOutput(out: unknown): IFlowbookOutput {
+  return out as IFlowbookOutput;
+}
+

@@ -77,14 +77,6 @@ export class StalenessManager {
    * to an array of reasons WHY it is stale (§1.2 in formal spec).
    */
   updateFromMetadata(reproducibilityMetadata: IReproducibilityMetadata): void {
-    console.log('StalenessManager: Before update, stale cells =', [
-      ...this._staleCells
-    ]);
-    console.log(
-      'StalenessManager: Metadata stale_cells =',
-      reproducibilityMetadata.stale_cells
-    );
-
     // Track previous state for diff
     const previousStale = new Set(this._staleCells);
 
@@ -95,10 +87,6 @@ export class StalenessManager {
     const currentStale = new Set(reproducibilityMetadata.stale_cells);
     const added = [...currentStale].filter(id => !previousStale.has(id));
     const removed = [...previousStale].filter(id => !currentStale.has(id));
-
-    console.log('StalenessManager: After update, stale cells =', [
-      ...this._staleCells
-    ]);
 
     // Clear reasons for cells that are no longer stale
     for (const id of removed) {
@@ -121,19 +109,6 @@ export class StalenessManager {
         this._stalenessReasons.set(cellId, reasons);
       }
     }
-
-    console.log(
-      'StalenessManager: Added =',
-      added,
-      ', Removed =',
-      removed,
-      ', ReasonsChanged =',
-      reasonsChanged
-    );
-    console.log(
-      'StalenessManager: Reasons =',
-      Object.fromEntries(this._stalenessReasons)
-    );
 
     // Emit signal if cells changed OR reasons changed (e.g., reason type updated)
     if (added.length > 0 || removed.length > 0 || reasonsChanged) {
