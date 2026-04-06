@@ -3540,10 +3540,9 @@ class Diff:
             # _compare_values returns DiffNode now, extract message for legacy
             if isinstance(obj_diff, ValueComparison):
                 return obj_diff.message
-            elif isinstance(obj_diff, dict):
-                # Compound diff - just indicate there's a difference
+            else:
+                # CompoundDiff, dict, or other non-string — summarize
                 return f"GroupBy data mismatch at {path}.obj"
-            return obj_diff
 
         # Compare the grouper (excluding cache)
         if not hasattr(val_a, "_grouper") or not hasattr(val_b, "_grouper"):

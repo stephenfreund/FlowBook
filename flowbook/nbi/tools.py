@@ -33,6 +33,26 @@ log = logging.getLogger(__name__)
 _session: FlowBookSession = None
 
 
+import functools
+import traceback
+
+
+def _safe_tool(fn):
+    """Decorator that catches exceptions and returns error text instead of raising.
+
+    Ensures Claude always gets a response from NBI tools, even on internal errors.
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except Exception as exc:
+            tb = traceback.format_exc()
+            log.error("Tool %s failed: %s\n%s", fn.__name__, exc, tb)
+            return f"ERROR in {fn.__name__}: {type(exc).__name__}: {exc}"
+    return wrapper
+
+
 def _logged(tool_name, args_dict, fn):
     """Decorator-like helper for event logging."""
     t0 = time.time()
@@ -62,6 +82,7 @@ def _logged(tool_name, args_dict, fn):
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def get_flowbook_metadata(cell: str, **args) -> str:
     """Get FlowBook reproducibility metadata for a code cell. Returns read/write locations, errors, timing, and staleness info.
 
@@ -79,6 +100,7 @@ async def get_flowbook_metadata(cell: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def get_next_actionable_cell(**args) -> str:
     """Get the next cell that needs attention. Priority: error > stale > unexecuted. Returns cell label and reason, or 'All clean.' if all cells are clean.
     """
@@ -99,6 +121,7 @@ async def get_next_actionable_cell(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def get_status(**args) -> str:
     """Get the notebook's current reproducibility status. Shows execution counts, violations, and stale cells.
     """
@@ -123,6 +146,7 @@ async def get_status(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def read_cell(cell: str = "", **args) -> str:
     """Read cell source, outputs, and FlowBook metadata.
 
@@ -186,6 +210,7 @@ async def read_cell(cell: str = "", **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def edit_cell_source(cell: str, new_source: str, **args) -> str:
     """Edit a code cell's source. Uses identity-safe in-place modification that preserves cell ID and triggers FlowBook's edit detection.
 
@@ -203,6 +228,7 @@ async def edit_cell_source(cell: str, new_source: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def add_cell(source: str, cell_type: str = "code",
                    after_cell: str = "", **args) -> str:
     """Add a new cell to the notebook.
@@ -230,6 +256,7 @@ async def add_cell(source: str, cell_type: str = "code",
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def delete_cell(cell: str, **args) -> str:
     """Delete a cell from the notebook.
 
@@ -324,6 +351,7 @@ def _format_run_actionable_cells_result(result: dict) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def run_cell(cell: str, **args) -> str:
     """Execute a code cell and return outputs + FlowBook reproducibility metadata.
 
@@ -338,6 +366,7 @@ async def run_cell(cell: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def run_actionable_cell(**args) -> str:
     """Find and run the next actionable cell. Priority: error > violation > stale > unexecuted.
     """
@@ -352,6 +381,7 @@ async def run_actionable_cell(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def run_actionable_cells(**args) -> str:
     """Run all stale and unexecuted cells until the notebook is reproducible or an error occurs. Stops on hard errors always. Stops on violations if continue_after_violation is disabled.
     """
@@ -362,6 +392,7 @@ async def run_actionable_cells(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def run_all_cells(**args) -> str:
     """Execute all code cells top-to-bottom with reproducibility tracking. Stops on the first runtime error.
     """
@@ -372,6 +403,7 @@ async def run_all_cells(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def continue_after_violation(enabled: bool, **args) -> str:
     """Set whether to continue execution after a predicate violation (True = report only, False = reject and rollback).
 
@@ -390,6 +422,7 @@ async def continue_after_violation(enabled: bool, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def alpha_rename(cell: str, old_name: str, new_name: str, **args) -> str:
     """Rename a variable from a cell onward using AST-based transformation. Renames all occurrences in the specified cell and all subsequent code cells.
 
@@ -421,6 +454,7 @@ async def alpha_rename(cell: str, old_name: str, new_name: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def remove_inplace(cell: str, variable: str, **args) -> str:
     """Convert df.method(inplace=True) to df = df.method() in a cell. Fixes unrecoverable mutation violations from pandas inplace operations.
 
@@ -452,6 +486,7 @@ async def remove_inplace(cell: str, variable: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def insert_deepcopy(cell: str, variable: str, **args) -> str:
     """Insert copy.deepcopy() at the top of a cell and rename the variable downstream. Fixes aliasing violations.
 
@@ -496,6 +531,7 @@ async def insert_deepcopy(cell: str, variable: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def mark_diagnostic(cell: str, **args) -> str:
     """Add %diagnostic magic to a cell to exclude it from reproducibility tracking. Use for inspection cells (df.info(), df.head(), plots) that don't affect computation.
 
@@ -518,6 +554,7 @@ async def mark_diagnostic(cell: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def merge_cells(cell_ids: list[str], **args) -> str:
     """Merge multiple code cells into the first one. Concatenates sources with blank line separators. Removes the other cells.
 
@@ -551,6 +588,7 @@ async def merge_cells(cell_ids: list[str], **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def move_cell(cell: str, after_cell: str, **args) -> str:
     """Move a code cell to a new position (after another cell).
 
@@ -572,6 +610,7 @@ async def move_cell(cell: str, after_cell: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def save_notebook(**args) -> str:
     """Save the active notebook to disk.
     """
@@ -586,6 +625,7 @@ async def save_notebook(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def checkpoint(**args) -> str:
     """Create a checkpoint (snapshot) of all cell sources and reproducibility state. Use before making refactoring changes so you can restore if needed.
     """
@@ -616,6 +656,7 @@ async def checkpoint(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def restore(checkpoint_id: str, **args) -> str:
     """Restore cell sources and reproducibility state from a checkpoint.
 
@@ -648,6 +689,7 @@ async def restore(checkpoint_id: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def list_checkpoints(**args) -> str:
     """List all saved checkpoints with their IDs and cell counts.
     """
@@ -660,6 +702,7 @@ async def list_checkpoints(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def get_log(**args) -> str:
     """Get the FlowBook session event log as a human-readable timeline.
     """
@@ -668,6 +711,7 @@ async def get_log(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def save_log(path: str = "", **args) -> str:
     """Save the session event log to a JSON file.
 
@@ -682,6 +726,7 @@ async def save_log(path: str = "", **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
+@_safe_tool
 async def print_log(**args) -> str:
     """Print the full session event log as a human-readable timeline.
     """

@@ -58,7 +58,9 @@ def _logged_tool(fn):
             return result
         except Exception as exc:
             error_str = f"{type(exc).__name__}: {exc}"
-            raise
+            # Return error as text so Claude always gets a response
+            result = f"ERROR: {error_str}"
+            return result
         finally:
             duration_ms = (_time.time() - t0) * 1000
             session = _get_session(ctx) if ctx else None

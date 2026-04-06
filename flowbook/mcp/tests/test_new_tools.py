@@ -275,14 +275,15 @@ class TestGetFlowbookMetadata:
         assert "not been executed" in result
         assert "@A" in result
 
-    def test_unknown_cell_raises(self):
+    def test_unknown_cell_returns_error(self):
         session = _make_mock_session(
             cell_order=["abc1"],
             cell_flowbook_meta={},
         )
         ctx = _make_ctx(session)
-        with pytest.raises(ValueError, match="Cannot resolve"):
-            get_flowbook_metadata(cell="zzzz", ctx=ctx)
+        result = get_flowbook_metadata(cell="zzzz", ctx=ctx)
+        assert "ERROR" in result
+        assert "Cannot resolve" in result
 
 
 # ==================================================================

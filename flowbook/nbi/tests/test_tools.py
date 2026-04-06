@@ -663,12 +663,13 @@ class TestRestore:
         assert edit_calls[1][0][1] == {'cellIndex': 1, 'source': 'original_b'}
 
     @pytest.mark.asyncio
-    async def test_missing_checkpoint_raises(self, mock_response, mock_request, session):
-        with pytest.raises(KeyError, match='not found'):
-            await _call(
-                tools.restore, mock_response, mock_request,
-                checkpoint_id='nonexistent'
-            )
+    async def test_missing_checkpoint_returns_error(self, mock_response, mock_request, session):
+        result = await _call(
+            tools.restore, mock_response, mock_request,
+            checkpoint_id='nonexistent'
+        )
+        assert 'ERROR' in result
+        assert 'not found' in result
 
 
 class TestListCheckpoints:
