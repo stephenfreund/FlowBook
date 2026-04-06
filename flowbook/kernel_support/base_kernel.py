@@ -208,13 +208,22 @@ class BaseFlowbookKernel(IPythonKernel):
         with timer(key="checkpoint:dict_ns", message="Convert namespace to dict"):
             ns_dict = dict(self.shell.user_ns)
 
-        total, removed = self._checkpoints.save(
-            checkpoint_name,
-            ns_dict,
-            write_paths=write_paths,
-            vfs=self._vfs if self._vfs.enabled else None,
-            max_size_mb=None,
-        )
+        try:
+            total, removed = self._checkpoints.save(
+                checkpoint_name,
+                ns_dict,
+                write_paths=write_paths,
+                vfs=self._vfs if self._vfs.enabled else None,
+                max_size_mb=None,
+            )
+        except Exception as e:
+            # Checkpoint save can fail due to race conditions (OSError),
+            # user variable shadowing stdlib modules (UnboundLocalError),
+            # or other issues. Log and continue — the cell can still execute,
+            # just without checkpoint protection.
+            from flowbook.util.output import error as log_error
+            log_error(f"Checkpoint save failed (continuing without checkpoint): {e}")
+            total, removed = 0, {}
 
         uncopyable_vars: Set[str] = set()
         for k, v in removed.items():

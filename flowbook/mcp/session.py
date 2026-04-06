@@ -17,6 +17,8 @@ import uuid
 from queue import Empty
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from flowbook.util.output import log
+
 logger = logging.getLogger(__name__)
 
 from flowbook.cli.helpers import (
@@ -638,66 +640,71 @@ class NotebookSession:
 
     def run_cell(self, cell_id: str, timeout: float = 300) -> Dict[str, Any]:
         """Execute a single cell and return outputs + flowbook metadata."""
-        self._require_loaded()
-        self._refresh_from_contents_api()
-        _, cell = self._find_cell(cell_id)
-        if cell.get("cell_type") != "code":
-            return {"cell_id": cell_id, "error": "Not a code cell"}
+        try:
+            self._require_loaded()
+            self._refresh_from_contents_api()
+            _, cell = self._find_cell(cell_id)
+            if cell.get("cell_type") != "code":
+                return {"cell_id": cell_id, "error": "Not a code cell"}
 
-        source = get_cell_source(cell)
-        if not source.strip():
-            return {"cell_id": cell_id, "status": "skipped", "reason": "empty cell"}
+            source = get_cell_source(cell)
 
-        cell_order = self.get_cell_order()
-        cell_metadata = {
-            "cell_id": cell_id,
-            "cell_order": cell_order,
-        }
+            cell_order = self.get_cell_order()
+            cell_metadata = {
+                "cell_id": cell_id,
+                "cell_order": cell_order,
+            }
 
-        result = KernelHelper.execute_code(
-            self.kernel_client,
-            source,
-            timeout,
-            cell_id=cell_id,
-            cell_metadata=cell_metadata,
-        )
+            log("Running cell: ", cell_id)
 
-        # Update cell in notebook
-        cell["outputs"] = result["outputs"]
-        cell["execution_count"] = result["execution_count"]
-        self._put_contents_api()  # Push outputs to JupyterLab via Y.js
-        self.executed_cells.add(cell_id)
+            result = KernelHelper.execute_code(
+                self.kernel_client,
+                source,
+                timeout,
+                cell_id=cell_id,
+                cell_metadata=cell_metadata,
+            )
+            log("Result:", result)
 
-        # Extract flowbook metadata
-        fb_meta = self._extract_flowbook_meta(
-            result.get("flowbook_messages", [])
-        )
-        if fb_meta:
-            self.cell_flowbook_meta[cell_id] = fb_meta
-            # Update stale cell tracking
-            stale = set(fb_meta.get("stale_cells", []))
-            self._stale_cells = (self._stale_cells | stale) - {cell_id}
-            if cell_id in self._stale_cells:
-                self._stale_cells.discard(cell_id)
+            # Update cell in notebook
+            cell["outputs"] = result["outputs"]
+            cell["execution_count"] = result["execution_count"]
+            self._put_contents_api()  # Push outputs to JupyterLab via Y.js
+            self.executed_cells.add(cell_id)
 
-        # Track execution status
-        if result["status"] == "error":
-            self.cell_status[cell_id] = "error"
-        else:
-            self.cell_status[cell_id] = "ok"
+            # Extract flowbook metadata
+            fb_meta = self._extract_flowbook_meta(
+                result.get("flowbook_messages", [])
+            )
+            if fb_meta:
+                self.cell_flowbook_meta[cell_id] = fb_meta
+                # Update stale cell tracking
+                stale = set(fb_meta.get("stale_cells", []))
+                self._stale_cells = (self._stale_cells | stale) - {cell_id}
+                if cell_id in self._stale_cells:
+                    self._stale_cells.discard(cell_id)
 
-        # Build response
-        response = {
-            "cell_id": cell_id,
-            "status": result["status"],
-            "outputs_text": format_outputs_text(result["outputs"]),
-        }
-        if result.get("error_message"):
-            response["error_message"] = result["error_message"]
-        if fb_meta:
-            response["flowbook"] = format_flowbook_meta(fb_meta)
+            # Track execution status
+            if result["status"] == "error":
+                self.cell_status[cell_id] = "error"
+            else:
+                self.cell_status[cell_id] = "ok"
 
-        return response
+            # Build response
+            response = {
+                "cell_id": cell_id,
+                "status": result["status"],
+                "outputs_text": format_outputs_text(result["outputs"]),
+            }
+            if result.get("error_message"):
+                response["error_message"] = result["error_message"]
+            if fb_meta:
+                response["flowbook"] = format_flowbook_meta(fb_meta)
+
+            return response
+        except Exception as e:
+            log("Error running cell: ", e)
+            return "buffer" + str(e)
 
     def run_all(self, timeout: float = 300) -> Dict[str, Any]:
         """Execute all code cells top-to-bottom."""

@@ -50,6 +50,11 @@ def _logged_tool(fn):
             else:
                 safe_args[k] = str(v)
 
+        from flowbook.util.output import log as _log
+
+        arg_str = ", ".join(f"{k}={v!r}" for k, v in safe_args.items())
+        _log(f"[MCP] {fn.__name__}({arg_str})")
+
         t0 = _time.time()
         error_str = None
         result = None
@@ -58,11 +63,17 @@ def _logged_tool(fn):
             return result
         except Exception as exc:
             error_str = f"{type(exc).__name__}: {exc}"
-            # Return error as text so Claude always gets a response
             result = f"ERROR: {error_str}"
             return result
         finally:
             duration_ms = (_time.time() - t0) * 1000
+            # Log to mcp.log
+            preview = str(result)[:200] if result else ""
+            if error_str:
+                _log(f"[MCP]   ERROR {duration_ms:.0f}ms: {error_str}")
+            else:
+                _log(f"[MCP]   -> {duration_ms:.0f}ms: {preview}")
+            # Log to session event log
             session = _get_session(ctx) if ctx else None
             if session:
                 session.log_event(

@@ -289,19 +289,25 @@ class FlowBookTools:
 
     def run_actionable_cells(self) -> str:
         """Run all actionable cells until clean or error."""
+        from flowbook.util.output import log as _log
         self.session._require_loaded()
 
         cells_ran = []
         violations_seen = []
         error_cell = None
+        max_iterations = 500
 
-        while True:
+        while len(cells_ran) < max_iterations:
             next_id = self.session.get_next_actionable_cell_id()
             if next_id is None:
+                _log(f"[run_actionable_cells] No more actionable cells")
                 break
 
-            result = self.session.run_cell(next_id)
             label = self._label(next_id)
+            _log(f"[run_actionable_cells] Running cell: {label} [{next_id}]")
+            result = self.session.run_cell(next_id)
+            _log(f"[run_actionable_cells] Cell {label} done: {result.get('status', '?')}")
+
             cells_ran.append(f"{label} [{next_id}]")
 
             if result.get("status") == "error":

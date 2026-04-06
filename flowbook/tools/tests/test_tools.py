@@ -327,6 +327,44 @@ class TestRunActionableCells:
         assert "error at @A" in result
 
 
+    def test_empty_cells_dont_cause_infinite_loop(self, tools, session):
+        """Empty cells should be executed by the kernel (not skipped) and marked clean."""
+        call_count = [0]
+        def next_actionable():
+            call_count[0] += 1
+            if call_count[0] <= 3:
+                # Return cells: aa (normal), bb (normal), cc (empty but kernel handles it)
+                return ["aa", "bb", "cc"][call_count[0] - 1]
+            return None
+        session.get_next_actionable_cell_id.side_effect = next_actionable
+        session.run_cell.return_value = {
+            "cell_id": "aa", "status": "ok", "outputs_text": "",
+        }
+        session.get_status.return_value = {
+            "executed": 3, "total_code_cells": 3,
+            "violations": [], "stale_cells": {},
+        }
+        result = tools.run_actionable_cells()
+        # All 3 cells should be run (including the empty one)
+        assert "Ran 3 cells" in result
+        assert session.run_cell.call_count == 3
+
+    def test_safety_limit_prevents_infinite_loop(self, tools, session):
+        """If get_next_actionable keeps returning the same cell, the loop stops at 500."""
+        session.get_next_actionable_cell_id.return_value = "aa"
+        session.run_cell.return_value = {
+            "cell_id": "aa", "status": "ok", "outputs_text": "",
+        }
+        session.cell_flowbook_meta = {}
+        session.get_status.return_value = {
+            "executed": 1, "total_code_cells": 3,
+            "violations": [], "stale_cells": {"bb": [], "cc": []},
+        }
+        result = tools.run_actionable_cells()
+        # Should stop at 500 iterations, not run forever
+        assert session.run_cell.call_count == 500
+
+
 class TestContinueAfterViolation:
     def test_enable(self, tools, session):
         result = tools.continue_after_violation(True)

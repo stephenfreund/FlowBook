@@ -9,7 +9,7 @@ import hashlib
 import os
 import shutil
 import tempfile
-import time
+import time as _time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
@@ -127,7 +127,16 @@ class FileCheckpoints:
         """
         cp_dir = os.path.join(self._storage_dir, name)
         if os.path.exists(cp_dir):
-            shutil.rmtree(cp_dir)
+            try:
+                shutil.rmtree(cp_dir)
+            except OSError:
+                # "Directory not empty" can happen due to race conditions
+                # or VFS overlay interaction. Retry after brief pause.
+                _time.sleep(0.05)
+                try:
+                    shutil.rmtree(cp_dir)
+                except OSError:
+                    pass  # Proceed anyway — makedirs will work on the existing dir
         os.makedirs(cp_dir, exist_ok=True)
 
         files = {}
@@ -152,11 +161,11 @@ class FileCheckpoints:
             saved_path = os.path.join(cp_dir, safe_name)
 
             try:
-                file_start = time.perf_counter()
+                file_start = _time.perf_counter()
                 shutil.copy2(source, saved_path)
                 file_hash = _hash_file(saved_path)
                 size = os.path.getsize(saved_path)
-                file_duration_ms = (time.perf_counter() - file_start) * 1000
+                file_duration_ms = (_time.perf_counter() - file_start) * 1000
                 files[real_path] = FileSnapshot(
                     real_path=real_path,
                     saved_copy=saved_path,
