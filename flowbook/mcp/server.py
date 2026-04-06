@@ -405,7 +405,7 @@ def remove_inplace(cell: str, variable: str, ctx: Context) -> str:
 def insert_deepcopy(cell: str, variable: str, ctx: Context) -> str:
     """Insert a deepcopy of a variable at the top of a cell and rename downstream.
 
-    Inserts `import copy; {var}_copy = copy.deepcopy({var})` and renames
+    Inserts `from copy import deepcopy; {var}_copy = deepcopy({var})` and renames
     all uses in the target cell and downstream cells.
 
     Args:

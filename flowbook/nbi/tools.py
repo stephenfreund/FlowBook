@@ -471,7 +471,7 @@ async def insert_deepcopy(cell: str, variable: str, **args) -> str:
     # Modify the target cell: insert deepcopy and rename
     magic_prefix, rest = split_cell_magic(source)
     new_rest, _ = rename_variable_in_code(rest, actual_var, new_name)
-    copy_line = f"import copy; {new_name} = copy.deepcopy({actual_var})\n"
+    copy_line = f"from copy import deepcopy; {new_name} = deepcopy({actual_var})\n"
     new_source = magic_prefix + copy_line + new_rest
     await response.run_ui_command('flowbook:edit-cell-source', {"cellIndex": start_idx, "source": new_source})
 

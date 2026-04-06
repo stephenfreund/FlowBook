@@ -424,8 +424,8 @@ class TestInsertDeepcopy:
         ]
         start_edit = edit_calls[0]
         new_source = start_edit[0][1]['source']
-        assert 'import copy' in new_source
-        assert 'copy.deepcopy(df)' in new_source
+        assert 'from copy import deepcopy' in new_source
+        assert 'deepcopy(df)' in new_source
 
     @pytest.mark.asyncio
     async def test_no_downstream_renames(self, mock_response, mock_request):

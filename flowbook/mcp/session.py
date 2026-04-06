@@ -1260,7 +1260,7 @@ class NotebookSession:
         new_name = f"{variable}_copy"
 
         # Insert deepcopy at top of cell
-        copy_line = f"import copy; {new_name} = copy.deepcopy({actual_var})\n"
+        copy_line = f"from copy import deepcopy; {new_name} = deepcopy({actual_var})\n"
         new_source = prepend_to_cell_source(source, copy_line)
 
         # Rename variable in this cell (after the copy line)
@@ -1268,7 +1268,7 @@ class NotebookSession:
         # But the deepcopy line itself should keep the original name on RHS
         # Fix: the copy line uses actual_var on RHS which is correct since
         # rename_variable_in_code would rename it. We need to be smarter here.
-        # Actually, we want: import copy; new_name = copy.deepcopy(actual_var)
+        # Actually, we want: from copy import deepcopy; new_name = deepcopy(actual_var)
         # then rename actual_var -> new_name in the REST of the cell.
         # Let's do this more carefully:
         magic_prefix, rest = split_cell_magic(source)
