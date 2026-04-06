@@ -625,21 +625,25 @@ async def restore(checkpoint_id: str, **args) -> str:
     response = args["response"]
     cells = _session.get_checkpoint(checkpoint_id)
 
-    # Restore cell sources
+    # Only edit cells whose source actually changed
+    changed = 0
     for i, cell_data in enumerate(cells):
-        await response.run_ui_command('flowbook:edit-cell-source', {
-            "cellIndex": i,
-            "source": cell_data['source'],
-        })
+        current = await response.run_ui_command('flowbook:get-cell', {"cellIndex": i})
+        if current.get('source', '') != cell_data['source']:
+            await response.run_ui_command('flowbook:edit-cell-source', {
+                "cellIndex": i,
+                "source": cell_data['source'],
+            })
+            changed += 1
 
-    # Restore kernel enforcer state
+    # Restore kernel enforcer state (overwrites any staleness from edits above)
     enforcer_snapshot_id = _session.get_enforcer_snapshot_id(checkpoint_id)
     if enforcer_snapshot_id:
         await response.run_ui_command('flowbook:enforcer-restore', {
             "checkpointId": enforcer_snapshot_id,
         })
 
-    return f"Restored {len(cells)} cells from checkpoint '{checkpoint_id}'"
+    return f"Restored {changed} cells from checkpoint '{checkpoint_id}'"
 
 
 @nbapi.auto_approve
