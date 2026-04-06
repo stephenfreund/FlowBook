@@ -43,10 +43,16 @@ Qualifier = Union[str, LocRef]
 
 # Attributes that map to Cols(d) read — column structure
 COLS_READ_ATTRS: FrozenSet[str] = frozenset({
-    "columns",   # Column names Index
-    "keys",      # Same as columns
-    "dtypes",    # Column dtypes
-    "iter",      # Iteration over DataFrame yields columns
+    "columns",       # Column names Index
+    "keys",          # Same as columns
+    "dtypes",        # Column dtypes
+    "iter",          # Iteration over DataFrame yields columns
+    "head",          # Exposes column structure
+    "tail",          # Exposes column structure
+    "sample",        # Exposes column structure
+    "info",          # Prints column/row structure
+    "select_dtypes", # Returns subset of columns
+    "memory_usage",  # Series with one entry per column
 })
 
 # Attributes that map to Rows(d) read — row structure
@@ -58,12 +64,21 @@ ROWS_READ_ATTRS: FrozenSet[str] = frozenset({
 
 # Attributes that map to BOTH Cols(d) AND Rows(d) — cross-cutting
 BOTH_READ_ATTRS: FrozenSet[str] = frozenset({
-    "shape",     # (rows, cols)
-    "size",      # rows * cols
-    "axes",      # [index, columns]
-    "values",    # Full array (both dimensions)
-    "T",         # Transpose (both dimensions)
-    "describe",  # describe() — statistics over all columns
+    "shape",      # (rows, cols)
+    "size",       # rows * cols
+    "axes",       # [index, columns]
+    "values",     # Full array (both dimensions)
+    "T",          # Transpose (both dimensions)
+    "describe",   # describe() — statistics over all columns
+    "to_dict",    # Dict with column names as keys
+    "to_records", # RecArray based on columns
+    "to_numpy",   # Array with shape (rows, cols)
+})
+
+# Structural attributes tracked but that don't generate reads.
+# These are operations that don't reveal or depend on structure.
+IGNORED_STRUCTURAL_ATTRS: FrozenSet[str] = frozenset({
+    "copy",      # Just duplicates — doesn't read structure
 })
 
 
@@ -708,7 +723,9 @@ def tracking_to_readlocset(
         needs_cols = False
         needs_rows = False
         for attr in attrs:
-            if attr in COLS_READ_ATTRS:
+            if attr in IGNORED_STRUCTURAL_ATTRS:
+                pass  # Doesn't generate a structural read
+            elif attr in COLS_READ_ATTRS:
                 needs_cols = True
             elif attr in ROWS_READ_ATTRS:
                 needs_rows = True

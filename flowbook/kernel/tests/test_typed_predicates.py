@@ -483,16 +483,23 @@ class TestReadAttrClassification:
     """Verify attribute classification constants are correct."""
 
     def test_cols_read_attrs_contents(self):
-        """COLS_READ_ATTRS contains columns, keys, dtypes, iter."""
-        assert COLS_READ_ATTRS == frozenset({"columns", "keys", "dtypes", "iter"})
+        """COLS_READ_ATTRS contains column-structure-revealing attributes."""
+        assert COLS_READ_ATTRS == frozenset({
+            "columns", "keys", "dtypes", "iter",
+            "head", "tail", "sample", "info",
+            "select_dtypes", "memory_usage",
+        })
 
     def test_rows_read_attrs_contents(self):
         """ROWS_READ_ATTRS contains index, len, empty."""
         assert ROWS_READ_ATTRS == frozenset({"index", "len", "empty"})
 
     def test_both_read_attrs_contents(self):
-        """BOTH_READ_ATTRS contains shape, size, axes, values, T, describe."""
-        assert BOTH_READ_ATTRS == frozenset({"shape", "size", "axes", "values", "T", "describe"})
+        """BOTH_READ_ATTRS contains cross-cutting structural attributes."""
+        assert BOTH_READ_ATTRS == frozenset({
+            "shape", "size", "axes", "values", "T", "describe",
+            "to_dict", "to_records", "to_numpy",
+        })
 
     def test_col_conflicts_with_cols_read(self):
         """Col(df, c) ▷ Cols(df) = True."""
