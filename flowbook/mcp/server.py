@@ -175,22 +175,15 @@ def list_cells(ctx: Context) -> str:
 
 @mcp.tool()
 @_logged_tool
-def get_all_cell_sources(ctx: Context) -> str:
-    """Return the source code of all code cells in one response.
-
-    Each cell is shown with its @-label, 4-char ID, and status, separated
-    by clear boundary markers. Much cheaper than calling read_cell for each.
-    """
-    return _get_tools(ctx).get_all_cell_sources()
-
-
-@mcp.tool()
-@_logged_tool
 def read_cell(cell: str, ctx: Context) -> str:
-    """Read a cell's full source code, outputs, and flowbook metadata.
+    """Read cell source, outputs, and flowbook metadata.
+
+    If cell is provided, reads that single cell. If cell is empty,
+    returns all code cells with @-labels, status, and source — much
+    cheaper than calling read_cell for each cell individually.
 
     Args:
-        cell: Cell reference (@A notation or 4-char cell ID).
+        cell: Cell reference (@A notation or 4-char cell ID). Empty string for all cells.
     """
     return _get_tools(ctx).read_cell(cell)
 

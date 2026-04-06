@@ -53,7 +53,7 @@ class TestFlowBookNBIExtension:
         # Verify all expected tools are present (unified API)
         expected = [
             "get_flowbook_metadata", "get_next_actionable_cell", "get_status",
-            "read_cell", "edit_cell_source", "get_all_cell_sources",
+            "read_cell", "edit_cell_source",
             "add_cell", "delete_cell",
             "run_cell", "run_actionable_cell", "run_actionable_cells", "run_all_cells",
             "continue_after_violation",

@@ -99,49 +99,47 @@ async def get_status(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
-async def get_all_cell_sources(**args) -> str:
-    """Return the source code of all code cells in one response. Each cell is shown with its @-label, separated by clear boundary markers. Much cheaper than calling read_cell for each cell individually.
-    """
-    response = args["response"]
-    counts = await response.run_ui_command('flowbook:get-cell-count', {})
-    num_code = counts['code_cells']
-    if num_code == 0:
-        return "No code cells in notebook."
+async def read_cell(cell: str = "", **args) -> str:
+    """Read cell source, outputs, and FlowBook metadata.
 
-    parts = []
-    for i in range(num_code):
-        cell_data = await response.run_ui_command('flowbook:get-cell', {"cellIndex": i})
-        label = index_to_alpha(i)
-        source = cell_data.get('source', '')
-        ec = cell_data.get('execution_count')
-        meta = cell_data.get('flowbook_meta') or {}
-        errors = meta.get('errors', [])
-        stale = meta.get('stale_cells', [])
-        cell_id = cell_data.get('cell_id', '?')
-
-        if errors:
-            status = 'error'
-        elif cell_id in stale:
-            status = 'stale'
-        elif ec is not None:
-            status = 'ok'
-        else:
-            status = '\u2014'
-
-        parts.append(f"\u2500\u2500 {label} [{cell_id}] ({status}) \u2500\u2500\n{source}")
-
-    return "\n\n".join(parts)
-
-
-@nbapi.auto_approve
-@nbapi.tool
-async def read_cell(cell: str, **args) -> str:
-    """Read a code cell's source, outputs, and FlowBook metadata.
+    If cell is provided, reads that single cell. If cell is empty,
+    returns all code cells with @-labels, status, and source.
 
     Args:
-        cell: Cell reference in @A notation (code cells only)
+        cell: Cell reference in @A notation (code cells only). Empty for all cells.
     """
     response = args["response"]
+    if not cell:
+        # Return all cells
+        counts = await response.run_ui_command('flowbook:get-cell-count', {})
+        num_code = counts['code_cells']
+        if num_code == 0:
+            return "No code cells in notebook."
+
+        parts = []
+        for i in range(num_code):
+            cell_data = await response.run_ui_command('flowbook:get-cell', {"cellIndex": i})
+            label = index_to_alpha(i)
+            source = cell_data.get('source', '')
+            ec = cell_data.get('execution_count')
+            meta = cell_data.get('flowbook_meta') or {}
+            errors = meta.get('errors', [])
+            stale = meta.get('stale_cells', [])
+            cell_id = cell_data.get('cell_id', '?')
+
+            if errors:
+                status = 'error'
+            elif cell_id in stale:
+                status = 'stale'
+            elif ec is not None:
+                status = 'ok'
+            else:
+                status = '\u2014'
+
+            parts.append(f"\u2500\u2500 {label} [{cell_id}] ({status}) \u2500\u2500\n{source}")
+
+        return "\n\n".join(parts)
+
     idx = parse_cell_ref(cell)
     result = await response.run_ui_command('flowbook:get-cell', {"cellIndex": idx})
     return str(result)
@@ -613,7 +611,6 @@ def create_tools(session: FlowBookSession) -> list:
         get_next_actionable_cell,
         get_status,
         # Cell Operations
-        get_all_cell_sources,
         read_cell,
         edit_cell_source,
         add_cell,

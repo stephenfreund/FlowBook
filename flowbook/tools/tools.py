@@ -114,8 +114,15 @@ class FlowBookTools:
 
         return "\n\n".join(parts)
 
-    def read_cell(self, cell: str) -> str:
-        """Read a cell's source, outputs, and flowbook metadata."""
+    def read_cell(self, cell: str = "") -> str:
+        """Read cell source, outputs, and flowbook metadata.
+
+        If cell is provided, reads that single cell.
+        If cell is empty/omitted, returns all code cells with labels and status.
+        """
+        if not cell:
+            return self.get_all_cell_sources()
+
         cell_id = self._resolve_ref(cell)
         result = self.session.get_cell(cell_id)
         label = self._label(cell_id)

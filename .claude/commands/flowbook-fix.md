@@ -1,4 +1,3 @@
-<!-- Running command created at: 2026-04-06 05:38:33 -->
 ---
 description: 'Fix reproducibility violations in the currently open notebook using FlowBook tools. Works on the active JupyterLab notebook — no file path needed.'
 ---
@@ -9,7 +8,7 @@ You are fixing reproducibility violations in the currently open Jupyter notebook
 
 **IMPORTANT**: Use ONLY `mcp__nbi__*` tools (e.g., `mcp__nbi__run_actionable_cells`, `mcp__nbi__checkpoint`, `mcp__nbi__read_cell`). Do NOT use `mcp__flowbook__*` tools — those are for CLI mode and will not update the notebook UI.
 
-**To read the notebook**, always use `mcp__nbi__get_all_cell_sources` (one call for the entire notebook). Do NOT call `mcp__nbi__read_cell` in a loop — it's slow and wasteful.
+**To read the full notebook**, call `mcp__nbi__read_cell` with no arguments (returns all cells in one call). To read a single cell, pass its @-label (e.g., `mcp__nbi__read_cell("@C")`).
 
 **Report every tool call**: Before each `mcp__nbi__*` call, print a one-line status message describing what you're doing (e.g., "Running all actionable cells...", "Checkpointing before fix...", "Renaming 'df' → 'df_clean' from @C...").
 
