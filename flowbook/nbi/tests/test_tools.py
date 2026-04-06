@@ -1,8 +1,7 @@
 """Tests for FlowBook NBI tool implementations."""
 
-import ast
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock
 
 from flowbook.nbi import tools
 from flowbook.nbi.session import FlowBookSession
@@ -86,14 +85,14 @@ class TestGetNextActionableCell:
         assert 'stale' in result
 
 
-class TestGetFlowbookStatus:
+class TestGetStatus:
     @pytest.mark.asyncio
     async def test_calls_bridge(self, mock_response, mock_request):
         mock_response.run_ui_command.return_value = {
             'total': 5, 'executed': 3, 'stale': 1, 'clean': 2
         }
         result = await _call(
-            tools.get_flowbook_status, mock_response, mock_request
+            tools.get_status, mock_response, mock_request
         )
         mock_response.run_ui_command.assert_awaited_once_with(
             'flowbook:get-status', {}
@@ -118,26 +117,13 @@ class TestReadCell:
         assert 'x = 1' in result
 
 
-class TestReadCellOutput:
-    @pytest.mark.asyncio
-    async def test_calls_bridge(self, mock_response, mock_request):
-        mock_response.run_ui_command.return_value = {'output': '42'}
-        result = await _call(
-            tools.read_cell_output, mock_response, mock_request, cell='@B'
-        )
-        mock_response.run_ui_command.assert_awaited_once_with(
-            'flowbook:get-cell-output', {'cellIndex': 1}
-        )
-        assert '42' in result
-
-
 class TestEditCellSource:
     @pytest.mark.asyncio
     async def test_calls_bridge(self, mock_response, mock_request):
         mock_response.run_ui_command.return_value = {'ok': True}
         result = await _call(
             tools.edit_cell_source, mock_response, mock_request,
-            cell='@C', source='y = 2'
+            cell='@C', new_source='y = 2'
         )
         mock_response.run_ui_command.assert_awaited_once_with(
             'flowbook:edit-cell-source', {'cellIndex': 2, 'source': 'y = 2'}
@@ -145,49 +131,11 @@ class TestEditCellSource:
         assert 'ok' in result
 
 
-class TestAddCodeCell:
-    @pytest.mark.asyncio
-    async def test_calls_nbi_and_notifies(self, mock_response, mock_request):
-        mock_response.run_ui_command.return_value = {}
-        result = await _call(
-            tools.add_code_cell, mock_response, mock_request, source='z = 3'
-        )
-        assert mock_response.run_ui_command.await_count == 2
-        mock_response.run_ui_command.assert_any_await(
-            'notebook-intelligence:add-code-cell-to-active-notebook',
-            {'source': 'z = 3'}
-        )
-        mock_response.run_ui_command.assert_any_await(
-            'flowbook:notify-structure', {}
-        )
-        assert 'Added code cell' in result
-
-
-class TestAddMarkdownCell:
-    @pytest.mark.asyncio
-    async def test_calls_nbi_and_notifies(self, mock_response, mock_request):
-        mock_response.run_ui_command.return_value = {}
-        result = await _call(
-            tools.add_markdown_cell, mock_response, mock_request,
-            source='# Title'
-        )
-        assert mock_response.run_ui_command.await_count == 2
-        mock_response.run_ui_command.assert_any_await(
-            'notebook-intelligence:add-markdown-cell-to-active-notebook',
-            {'source': '# Title'}
-        )
-        mock_response.run_ui_command.assert_any_await(
-            'flowbook:notify-structure', {}
-        )
-        assert 'Added markdown cell' in result
-
-
 class TestDeleteCell:
     @pytest.mark.asyncio
     async def test_calls_bridge(self, mock_response, mock_request):
         mock_response.run_ui_command.side_effect = [
             _make_cell('x = 1'),     # flowbook:get-cell
-            {'code_cells': 5},       # flowbook:get-cell-count
             {},                      # delete-cell-at-index
             {},                      # flowbook:notify-structure
         ]
@@ -198,21 +146,9 @@ class TestDeleteCell:
         mock_response.run_ui_command.assert_any_await(
             'notebook-intelligence:delete-cell-at-index', {'cellIndex': 1}
         )
-
-
-class TestGetCellCount:
-    @pytest.mark.asyncio
-    async def test_calls_bridge(self, mock_response, mock_request):
-        mock_response.run_ui_command.return_value = {
-            'code_cells': 5, 'markdown_cells': 2, 'total': 7
-        }
-        result = await _call(
-            tools.get_cell_count, mock_response, mock_request
+        mock_response.run_ui_command.assert_any_await(
+            'flowbook:notify-structure', {}
         )
-        mock_response.run_ui_command.assert_awaited_once_with(
-            'flowbook:get-cell-count', {}
-        )
-        assert 'code_cells' in result
 
 
 # ==================================================================
@@ -255,7 +191,7 @@ class TestRunActionableCell:
         result = await _call(
             tools.run_actionable_cell, mock_response, mock_request
         )
-        assert 'All cells are clean' in result
+        assert 'All clean' in result
         # Should NOT have called run-cell
         assert mock_response.run_ui_command.await_count == 1
 
@@ -283,7 +219,7 @@ class TestContinueAfterViolation:
         mock_response.run_ui_command.assert_awaited_once_with(
             'flowbook:set-continue-after-violation', {'enabled': True}
         )
-        assert 'True' in result
+        assert 'continue' in result
 
     @pytest.mark.asyncio
     async def test_calls_bridge_false(self, mock_response, mock_request):
@@ -295,7 +231,7 @@ class TestContinueAfterViolation:
         mock_response.run_ui_command.assert_awaited_once_with(
             'flowbook:set-continue-after-violation', {'enabled': False}
         )
-        assert 'False' in result
+        assert 'reject' in result
 
 
 # ==================================================================
@@ -330,7 +266,8 @@ class TestAlphaRename:
         assert '@B' in result
         # @C should NOT appear since z=42 doesn't contain 'x'
         assert '@C' not in result
-        assert "'x' -> 'y'" in result
+        assert "'x'" in result
+        assert "'y'" in result
         assert '2 cells' in result
 
     @pytest.mark.asyncio
@@ -563,7 +500,7 @@ class TestMergeCells:
         ]
         result = await _call(
             tools.merge_cells, mock_response, mock_request,
-            cells='@A,@B,@C'
+            cell_ids=['@A', '@B', '@C']
         )
         assert 'Merged cells @A, @B, @C into @A' in result
         # Verify merged source
@@ -579,7 +516,7 @@ class TestMergeCells:
     @pytest.mark.asyncio
     async def test_needs_at_least_two_cells(self, mock_response, mock_request):
         result = await _call(
-            tools.merge_cells, mock_response, mock_request, cells='@A'
+            tools.merge_cells, mock_response, mock_request, cell_ids=['@A']
         )
         assert 'Need at least 2 cells' in result
 
@@ -594,7 +531,7 @@ class TestMergeCells:
             {},                      # notify-structure
         ]
         result = await _call(
-            tools.merge_cells, mock_response, mock_request, cells='@C,@B'
+            tools.merge_cells, mock_response, mock_request, cell_ids=['@C', '@B']
         )
         # Should merge into the lower-indexed cell (@B)
         assert '@B' in result
@@ -611,7 +548,7 @@ class TestMergeCells:
             {},              # notify
         ]
         await _call(
-            tools.merge_cells, mock_response, mock_request, cells='@A,@B,@C'
+            tools.merge_cells, mock_response, mock_request, cell_ids=['@A', '@B', '@C']
         )
         delete_calls = [
             c for c in mock_response.run_ui_command.call_args_list
@@ -647,19 +584,6 @@ class TestMoveCell:
 # Category 5: Notebook Lifecycle
 # ==================================================================
 
-class TestCreateNotebook:
-    @pytest.mark.asyncio
-    async def test_calls_bridge(self, mock_response, mock_request):
-        mock_response.run_ui_command.return_value = {'path': 'Untitled.ipynb'}
-        result = await _call(
-            tools.create_notebook, mock_response, mock_request
-        )
-        mock_response.run_ui_command.assert_awaited_once_with(
-            'notebook-intelligence:create-new-notebook-from-py', {'code': ''}
-        )
-        assert 'Untitled.ipynb' in result
-
-
 class TestSaveNotebook:
     @pytest.mark.asyncio
     async def test_calls_bridge(self, mock_response, mock_request):
@@ -687,7 +611,6 @@ class TestCheckpoint:
             tools.checkpoint, mock_response, mock_request
         )
         assert 'ckpt_0' in result
-        assert '2 code cells' in result
         # Verify checkpoint was stored in session
         cells = session.get_checkpoint('ckpt_0')
         assert len(cells) == 2
@@ -786,16 +709,3 @@ class TestPrintLog:
         assert 'edit_cell' in result
 
 
-class TestInsertCell:
-    @pytest.mark.asyncio
-    async def test_calls_bridge(self, mock_response, mock_request):
-        mock_response.run_ui_command.side_effect = [
-            _make_cell('x = 1'),  # get-cell for @A
-            {},                   # add-code-cell
-            {},                   # notify-structure
-        ]
-        result = await _call(
-            tools.insert_cell, mock_response, mock_request,
-            after_cell='@A', cell_type='code', source='y = 2'
-        )
-        assert 'Inserted code cell after @A' in result

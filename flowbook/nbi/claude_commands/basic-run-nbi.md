@@ -25,7 +25,7 @@ Run the currently open notebook through FlowBook using NBI tools. Execute all ce
 3. Show the reproducibility status:
 
    ```
-   get_flowbook_status()
+   get_status()
    ```
 
 4. If there were errors or violations, show the first problem:

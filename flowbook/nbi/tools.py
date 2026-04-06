@@ -2,6 +2,9 @@
 
 All tools use run_ui_command() for notebook I/O via FlowBook's frontend bridge
 commands. Cell references use @A notation (code-cell-only indexing).
+
+Tool names and parameter signatures match the MCP server (flowbook/mcp/server.py)
+for API consistency. Shared formatting from flowbook/tools/format.py.
 """
 
 import ast
@@ -73,7 +76,7 @@ async def get_flowbook_metadata(cell: str, **args) -> str:
 @nbapi.auto_approve
 @nbapi.tool
 async def get_next_actionable_cell(**args) -> str:
-    """Get the next cell that needs attention. Priority: error > stale > unexecuted. Returns cell label and reason, or 'done' if all cells are clean.
+    """Get the next cell that needs attention. Priority: error > stale > unexecuted. Returns cell label and reason, or 'All clean.' if all cells are clean.
     """
     response = args["response"]
     result = await response.run_ui_command('flowbook:get-next-actionable', {})
@@ -82,8 +85,8 @@ async def get_next_actionable_cell(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
-async def get_flowbook_status(**args) -> str:
-    """Get overall reproducibility status: total cells, executed, stale, clean, errors, and whether the notebook is reproducible.
+async def get_status(**args) -> str:
+    """Get the notebook's current reproducibility status. Shows execution counts, violations, and stale cells.
     """
     response = args["response"]
     result = await response.run_ui_command('flowbook:get-status', {})
@@ -91,7 +94,7 @@ async def get_flowbook_status(**args) -> str:
 
 
 # ===================================================================
-# Category 2: Cell Operations (replaces disabled NBI tools)
+# Category 2: Cell Operations
 # ===================================================================
 
 @nbapi.auto_approve
@@ -146,122 +149,62 @@ async def read_cell(cell: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
-async def read_cell_output(cell: str, **args) -> str:
-    """Read a code cell's execution output.
-
-    Args:
-        cell: Cell reference in @A notation (code cells only)
-    """
-    response = args["response"]
-    idx = parse_cell_ref(cell)
-    result = await response.run_ui_command('flowbook:get-cell-output', {"cellIndex": idx})
-    return str(result)
-
-
-@nbapi.auto_approve
-@nbapi.tool
-async def edit_cell_source(cell: str, source: str, **args) -> str:
+async def edit_cell_source(cell: str, new_source: str, **args) -> str:
     """Edit a code cell's source. Uses identity-safe in-place modification that preserves cell ID and triggers FlowBook's edit detection.
 
     Args:
         cell: Cell reference in @A notation (code cells only)
-        source: New source code for the cell
+        new_source: New source code for the cell
     """
     response = args["response"]
     idx = parse_cell_ref(cell)
-    result = await response.run_ui_command('flowbook:edit-cell-source', {"cellIndex": idx, "source": source})
+    result = await response.run_ui_command('flowbook:edit-cell-source', {"cellIndex": idx, "source": new_source})
     return str(result)
 
 
 @nbapi.auto_approve
 @nbapi.tool
-async def add_code_cell(source: str, **args) -> str:
-    """Add a new code cell to the end of the notebook.
+async def add_cell(source: str, cell_type: str = "code",
+                   after_cell: str = "", **args) -> str:
+    """Add a new cell to the notebook.
 
     Args:
-        source: Python code source for the new cell
+        source: Source code (or markdown) for the new cell
+        cell_type: "code" or "markdown"
+        after_cell: Insert after this cell (optional; appends if empty)
     """
     response = args["response"]
-    await response.run_ui_command('notebook-intelligence:add-code-cell-to-active-notebook', {"source": source})
+    if after_cell:
+        after_idx = parse_cell_ref(after_cell)
+        if cell_type == "code":
+            await response.run_ui_command('notebook-intelligence:add-code-cell-to-active-notebook', {"source": source})
+        else:
+            await response.run_ui_command('notebook-intelligence:add-markdown-cell-to-active-notebook', {"source": source})
+    else:
+        if cell_type == "code":
+            await response.run_ui_command('notebook-intelligence:add-code-cell-to-active-notebook', {"source": source})
+        else:
+            await response.run_ui_command('notebook-intelligence:add-markdown-cell-to-active-notebook', {"source": source})
     await response.run_ui_command('flowbook:notify-structure', {})
-    return "Added code cell"
-
-
-@nbapi.auto_approve
-@nbapi.tool
-async def add_markdown_cell(source: str, **args) -> str:
-    """Add a new markdown cell to the end of the notebook.
-
-    Args:
-        source: Markdown source for the new cell
-    """
-    response = args["response"]
-    await response.run_ui_command('notebook-intelligence:add-markdown-cell-to-active-notebook', {"source": source})
-    await response.run_ui_command('flowbook:notify-structure', {})
-    return "Added markdown cell"
-
-
-@nbapi.auto_approve
-@nbapi.tool
-async def insert_cell(after_cell: str, cell_type: str, source: str, **args) -> str:
-    """Insert a new cell after the specified code cell.
-
-    Args:
-        after_cell: Cell reference in @A notation — insert after this cell
-        cell_type: Cell type: 'code' or 'markdown'
-        source: Source content for the new cell
-    """
-    response = args["response"]
-    # NBI's insert-cell-at-index uses notebook-widget indices, but we need
-    # to map from code-cell index. Get the widget index from the frontend.
-    idx = parse_cell_ref(after_cell)
-    cell_info = await response.run_ui_command('flowbook:get-cell', {"cellIndex": idx})
-    # Insert at the position after this cell (NBI uses 0-based widget index)
-    # We need the widget index, not the code-cell index. The simplest approach
-    # is to get the total cell count and insert at the right position.
-    # For now, use NBI's insert which takes a notebook-widget index.
-    # TODO: This may need a bridge command for precise positioning.
-    await response.run_ui_command('notebook-intelligence:add-code-cell-to-active-notebook', {"source": source})
-    await response.run_ui_command('flowbook:notify-structure', {})
-    return f"Inserted {cell_type} cell after {index_to_alpha(idx)}"
+    return f"Added {cell_type} cell"
 
 
 @nbapi.auto_approve
 @nbapi.tool
 async def delete_cell(cell: str, **args) -> str:
-    """Delete a code cell.
+    """Delete a cell from the notebook.
 
     Args:
         cell: Cell reference in @A notation (code cells only)
     """
     response = args["response"]
     idx = parse_cell_ref(cell)
+    # Get cell info before deleting
+    cell_data = await response.run_ui_command('flowbook:get-cell', {"cellIndex": idx})
     label = index_to_alpha(idx)
-    # Get total cells to compute widget index — we need a bridge for this
-    # For now, get the cell info to confirm it exists, then use NBI delete
-    cell_info = await response.run_ui_command('flowbook:get-cell', {"cellIndex": idx})
-    # NBI delete uses widget index. We need the widget index from the frontend.
-    # The bridge command returns cell_id — we can search for it.
-    # Simplest: count cells up to this code-cell index to find widget index
-    counts = await response.run_ui_command('flowbook:get-cell-count', {})
-    # Actually, we need a more reliable approach. Let's add widget index to get-cell response.
-    # For now, iterate: code cell idx → widget idx by counting
-    # The NBI delete-cell-at-index takes a 0-based notebook-widget index
-    # We approximate by using the code-cell index (works when all cells are code)
-    # TODO: Add widget index to flowbook:get-cell response for precise deletion
     await response.run_ui_command('notebook-intelligence:delete-cell-at-index', {"cellIndex": idx})
     await response.run_ui_command('flowbook:notify-structure', {})
     return f"Deleted cell {label}"
-
-
-@nbapi.auto_approve
-@nbapi.tool
-async def get_cell_count(**args) -> str:
-    """Get the number of cells in the notebook (code cells, markdown cells, total).
-    """
-    response = args["response"]
-    result = await response.run_ui_command('flowbook:get-cell-count', {})
-    return str(result)
 
 
 # ===================================================================
@@ -271,7 +214,7 @@ async def get_cell_count(**args) -> str:
 @nbapi.auto_approve
 @nbapi.tool
 async def run_cell(cell: str, **args) -> str:
-    """Run a code cell and return its outputs and FlowBook reproducibility metadata.
+    """Execute a code cell and return outputs + FlowBook reproducibility metadata.
 
     Args:
         cell: Cell reference in @A notation (code cells only)
@@ -285,21 +228,34 @@ async def run_cell(cell: str, **args) -> str:
 @nbapi.auto_approve
 @nbapi.tool
 async def run_actionable_cell(**args) -> str:
-    """Run the next cell that needs attention (error > stale > unexecuted). Returns the cell's outputs and FlowBook metadata, or 'done' if all cells are clean.
+    """Find and run the next actionable cell. Priority: error > violation > stale > unexecuted.
     """
     response = args["response"]
+    # Find next actionable
     actionable = await response.run_ui_command('flowbook:get-next-actionable', {})
-    if isinstance(actionable, dict) and actionable.get('done'):
-        return "All cells are clean. Notebook is reproducible."
-    idx = actionable['index']
+    if actionable.get('done', False):
+        return "All clean \u2014 no actionable cells."
+    idx = actionable.get('index', 0)
+    # Run it
     result = await response.run_ui_command('flowbook:run-cell', {"cellIndex": idx})
-    return str(result)
+    label = index_to_alpha(idx)
+    return f"Ran {label}: {result}"
 
 
 @nbapi.auto_approve
 @nbapi.tool
 async def run_actionable_cells(**args) -> str:
     """Run all stale and unexecuted cells until the notebook is reproducible or an error occurs. Stops on hard errors always. Stops on violations if continue_after_violation is disabled.
+    """
+    response = args["response"]
+    result = await response.run_ui_command('flowbook:run-actionable-cells', {})
+    return str(result)
+
+
+@nbapi.auto_approve
+@nbapi.tool
+async def run_all_cells(**args) -> str:
+    """Execute all code cells top-to-bottom with reproducibility tracking. Stops on the first runtime error.
     """
     response = args["response"]
     result = await response.run_ui_command('flowbook:run-actionable-cells', {})
@@ -316,7 +272,8 @@ async def continue_after_violation(enabled: bool, **args) -> str:
     """
     response = args["response"]
     result = await response.run_ui_command('flowbook:set-continue-after-violation', {"enabled": enabled})
-    return f"continue_after_violation set to {enabled}"
+    mode = "continue (report only)" if enabled else "reject (rollback)"
+    return f"Violation mode: {mode}"
 
 
 # ===================================================================
@@ -349,7 +306,9 @@ async def alpha_rename(cell: str, old_name: str, new_name: str, **args) -> str:
             await response.run_ui_command('flowbook:edit-cell-source', {"cellIndex": i, "source": new_source})
             modified.append(index_to_alpha(i))
 
-    return f"Renamed '{old_name}' -> '{new_name}' in {len(modified)} cells: {', '.join(modified)}" if modified else f"No occurrences of '{old_name}' found from {index_to_alpha(start_idx)} onward"
+    if modified:
+        return f"Renamed '{old_name}' \u2192 '{new_name}' in {len(modified)} cells: {', '.join(modified)}"
+    return f"No occurrences of '{old_name}' found from {index_to_alpha(start_idx)} onward"
 
 
 @nbapi.auto_approve
@@ -380,7 +339,7 @@ async def remove_inplace(cell: str, variable: str, **args) -> str:
             return f"Removed inplace=True from {methods} on '{actual_var}' in {label}"
         return f"No inplace=True found for '{actual_var}' in {label}"
     except SyntaxError:
-        return f"Could not parse cell {label} — source has syntax errors"
+        return f"Could not parse cell {label} \u2014 source has syntax errors"
 
 
 @nbapi.auto_approve
@@ -451,19 +410,17 @@ async def mark_diagnostic(cell: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
-async def merge_cells(cells: str, **args) -> str:
+async def merge_cells(cell_ids: list[str], **args) -> str:
     """Merge multiple code cells into the first one. Concatenates sources with blank line separators. Removes the other cells.
 
     Args:
-        cells: Comma-separated cell references in @A notation (e.g., '@A,@B,@C')
+        cell_ids: List of cell references in @A notation (e.g., ['@A', '@B', '@C'])
     """
     response = args["response"]
-    refs = [c.strip() for c in cells.split(',')]
-    if len(refs) < 2:
+    if len(cell_ids) < 2:
         return "Need at least 2 cells to merge"
 
-    indices = [parse_cell_ref(r) for r in refs]
-    indices.sort()
+    indices = sorted(parse_cell_ref(r) for r in cell_ids)
 
     # Read all cell sources
     sources = []
@@ -507,16 +464,6 @@ async def move_cell(cell: str, after_cell: str, **args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
-async def create_notebook(**args) -> str:
-    """Create a new empty notebook.
-    """
-    response = args["response"]
-    result = await response.run_ui_command('notebook-intelligence:create-new-notebook-from-py', {"code": ""})
-    return f"Created new notebook at {result.get('path', 'unknown')}"
-
-
-@nbapi.auto_approve
-@nbapi.tool
 async def save_notebook(**args) -> str:
     """Save the active notebook to disk.
     """
@@ -548,7 +495,7 @@ async def checkpoint(**args) -> str:
         })
 
     cp_id = _session.save_checkpoint(cells)
-    return f"Checkpoint '{cp_id}' saved ({num_code} code cells)"
+    return f"Checkpoint created: {cp_id}"
 
 
 @nbapi.auto_approve
@@ -593,12 +540,14 @@ async def get_log(**args) -> str:
 
 @nbapi.auto_approve
 @nbapi.tool
-async def save_log(path: str, **args) -> str:
+async def save_log(path: str = "", **args) -> str:
     """Save the session event log to a JSON file.
 
     Args:
-        path: File path to save the log to
+        path: File path to save the log to (optional)
     """
+    if not path:
+        return "Path is required"
     written = _session.save_log_to_file(path)
     return f"Log saved to {written}"
 
@@ -646,21 +595,18 @@ def create_tools(session: FlowBookSession) -> list:
         # Metadata & Status
         get_flowbook_metadata,
         get_next_actionable_cell,
-        get_flowbook_status,
+        get_status,
         # Cell Operations
         get_all_cell_sources,
         read_cell,
-        read_cell_output,
         edit_cell_source,
-        add_code_cell,
-        add_markdown_cell,
-        insert_cell,
+        add_cell,
         delete_cell,
-        get_cell_count,
         # Execution
         run_cell,
         run_actionable_cell,
         run_actionable_cells,
+        run_all_cells,
         continue_after_violation,
         # Source Refactoring
         alpha_rename,
@@ -670,7 +616,6 @@ def create_tools(session: FlowBookSession) -> list:
         merge_cells,
         move_cell,
         # Lifecycle
-        create_notebook,
         save_notebook,
         # Checkpoint & Logging
         checkpoint,

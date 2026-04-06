@@ -1,18 +1,18 @@
-"""Unit tests for new/renamed tools and helpers in flowbook.mcp.server.
+"""Unit tests for MCP server tools and FlowBookTools integration.
 
 Tests cover:
-- _cell_label helper function
+- FlowBookTools._label (replaces old _cell_label)
 - get_next_actionable_cell_id session method
-- Renamed tools: read_cell, edit_cell_source
-- New tools: get_flowbook_metadata, run_actionable_cell, run_actionable_cells
+- Tool wrappers: read_cell, edit_cell_source, get_flowbook_metadata,
+  run_actionable_cell, run_actionable_cells, run_cell
 - run_cell calling _put_contents_api after execution
+- NotebookSession.add_cell and delete_cell
 """
 
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 
 from flowbook.mcp.server import (
-    _cell_label,
     read_cell,
     edit_cell_source,
     get_flowbook_metadata,
@@ -22,6 +22,7 @@ from flowbook.mcp.server import (
     _get_session,
 )
 from flowbook.mcp.session import NotebookSession
+from flowbook.tools.tools import FlowBookTools
 
 
 # ------------------------------------------------------------------
@@ -50,35 +51,41 @@ def _make_mock_session(cell_order=None, cell_flowbook_meta=None,
 def _make_ctx(session):
     """Build a mock MCP Context that returns the given session."""
     ctx = MagicMock()
-    ctx.request_context.lifespan_context = {"session": session}
+    tools = FlowBookTools(session)
+    ctx.request_context.lifespan_context = {"session": session, "tools": tools}
     return ctx
 
 
 # ==================================================================
-# _cell_label
+# FlowBookTools._label (replaces old _cell_label)
 # ==================================================================
 
 
 class TestCellLabel:
     def test_known_id_first(self):
         session = _make_mock_session(cell_order=["abc1", "def2", "ghi3"])
-        assert _cell_label(session, "abc1") == "@A"
+        tools = FlowBookTools(session)
+        assert tools._label("abc1") == "@A"
 
     def test_known_id_second(self):
         session = _make_mock_session(cell_order=["abc1", "def2", "ghi3"])
-        assert _cell_label(session, "def2") == "@B"
+        tools = FlowBookTools(session)
+        assert tools._label("def2") == "@B"
 
     def test_known_id_third(self):
         session = _make_mock_session(cell_order=["abc1", "def2", "ghi3"])
-        assert _cell_label(session, "ghi3") == "@C"
+        tools = FlowBookTools(session)
+        assert tools._label("ghi3") == "@C"
 
     def test_unknown_id_returns_raw(self):
         session = _make_mock_session(cell_order=["abc1"])
-        assert _cell_label(session, "unknown") == "unknown"
+        tools = FlowBookTools(session)
+        assert tools._label("unknown") == "unknown"
 
     def test_empty_order(self):
         session = _make_mock_session(cell_order=[])
-        assert _cell_label(session, "any") == "any"
+        tools = FlowBookTools(session)
+        assert tools._label("any") == "any"
 
 
 # ==================================================================
@@ -163,7 +170,7 @@ class TestReadCell:
             "outputs_text": "",
         }
         ctx = _make_ctx(session)
-        result = read_cell("abc1", ctx)
+        result = read_cell(cell="abc1", ctx=ctx)
         assert "@A" in result
         assert "abc1" in result
         assert "x = 1" in result
@@ -178,7 +185,7 @@ class TestReadCell:
             "outputs_text": "42\n",
         }
         ctx = _make_ctx(session)
-        result = read_cell("abc1", ctx)
+        result = read_cell(cell="abc1", ctx=ctx)
         assert "Output:" in result
         assert "42" in result
 
@@ -192,7 +199,7 @@ class TestReadCell:
             "flowbook": "Reads: (none)\nWrites: x",
         }
         ctx = _make_ctx(session)
-        result = read_cell("abc1", ctx)
+        result = read_cell(cell="abc1", ctx=ctx)
         assert "Writes: x" in result
 
 
@@ -210,7 +217,7 @@ class TestEditCellSource:
             "new_source_preview": "x = 99",
         }
         ctx = _make_ctx(session)
-        result = edit_cell_source("abc1", "x = 99", ctx)
+        result = edit_cell_source(cell="abc1", new_source="x = 99", ctx=ctx)
         assert "@A" in result
         assert "abc1" in result
         assert "marked stale" in result
@@ -225,7 +232,7 @@ class TestEditCellSource:
             "new_source_preview": "y = 2",
         }
         ctx = _make_ctx(session)
-        result = edit_cell_source("abc1", "y = 2", ctx)
+        result = edit_cell_source(cell="abc1", new_source="y = 2", ctx=ctx)
         assert "marked stale" not in result
 
 
@@ -251,7 +258,7 @@ class TestGetFlowbookMetadata:
             cell_flowbook_meta={"abc1": meta},
         )
         ctx = _make_ctx(session)
-        result = get_flowbook_metadata("abc1", ctx)
+        result = get_flowbook_metadata(cell="abc1", ctx=ctx)
         assert "@A" in result
         assert "abc1" in result
         # format_flowbook_meta produces "Reads:" and "Writes:" lines
@@ -264,19 +271,18 @@ class TestGetFlowbookMetadata:
             cell_flowbook_meta={},
         )
         ctx = _make_ctx(session)
-        result = get_flowbook_metadata("abc1", ctx)
+        result = get_flowbook_metadata(cell="abc1", ctx=ctx)
         assert "not been executed" in result
         assert "@A" in result
 
-    def test_unknown_cell_shows_raw_id(self):
+    def test_unknown_cell_raises(self):
         session = _make_mock_session(
             cell_order=["abc1"],
             cell_flowbook_meta={},
         )
         ctx = _make_ctx(session)
-        result = get_flowbook_metadata("zzzz", ctx)
-        assert "zzzz" in result
-        assert "not been executed" in result
+        with pytest.raises(ValueError, match="Cannot resolve"):
+            get_flowbook_metadata(cell="zzzz", ctx=ctx)
 
 
 # ==================================================================
@@ -501,7 +507,7 @@ class TestRunCellPutsContentsApi:
         }
         ctx = _make_ctx(session)
         # Call the server tool which delegates to session.run_cell
-        run_cell("abc1", ctx)
+        run_cell(cell="abc1", ctx=ctx)
         session.run_cell.assert_called_once_with("abc1")
         # The actual _put_contents_api call is inside session.run_cell,
         # which we've mocked. To verify the real implementation calls it,
@@ -547,6 +553,157 @@ class TestRunCellPutsContentsApi:
 # ==================================================================
 # _get_session helper
 # ==================================================================
+
+
+# ==================================================================
+# NotebookSession.add_cell
+# ==================================================================
+
+
+class TestAddCell:
+    def _make_session_with_cells(self):
+        """Create a partially-real session with a notebook in memory."""
+        cell_a = {"id": "aaaa", "cell_type": "code", "source": "x = 1", "metadata": {}, "outputs": []}
+        cell_b = {"id": "bbbb", "cell_type": "code", "source": "y = 2", "metadata": {}, "outputs": []}
+        session = MagicMock(spec=NotebookSession)
+        session.is_loaded = True
+        session.notebook = {"cells": [cell_a, cell_b]}
+        session._stale_cells = set()
+        session.executed_cells = set()
+        session.cell_flowbook_meta = {}
+        session.cell_status = {}
+        session.kernel_client = MagicMock()
+
+        # Use real _find_cell
+        def find_cell(cid):
+            for i, c in enumerate(session.notebook["cells"]):
+                if c.get("id") == cid:
+                    return i, c
+            raise ValueError(f"Cell {cid} not found")
+        session._find_cell.side_effect = find_cell
+
+        # Use real get_cell_order
+        def get_cell_order():
+            return [c["id"] for c in session.notebook["cells"] if c.get("cell_type") == "code"]
+        session.get_cell_order.side_effect = get_cell_order
+
+        return session
+
+    def test_append_to_end(self):
+        session = self._make_session_with_cells()
+        with patch("flowbook.mcp.session.KernelHelper"):
+            result = NotebookSession.add_cell(session, "z = 3")
+        assert result["cell_type"] == "code"
+        assert len(session.notebook["cells"]) == 3
+        assert session.notebook["cells"][-1]["source"] == "z = 3"
+        session._put_contents_api.assert_called_once()
+
+    def test_insert_after_cell(self):
+        session = self._make_session_with_cells()
+        with patch("flowbook.mcp.session.KernelHelper"):
+            result = NotebookSession.add_cell(session, "mid = 0", after_cell_id="aaaa")
+        assert len(session.notebook["cells"]) == 3
+        assert session.notebook["cells"][1]["source"] == "mid = 0"
+        assert session.notebook["cells"][2]["id"] == "bbbb"
+
+    def test_markdown_cell(self):
+        session = self._make_session_with_cells()
+        with patch("flowbook.mcp.session.KernelHelper") as mock_kh:
+            result = NotebookSession.add_cell(session, "# Title", cell_type="markdown")
+        assert result["cell_type"] == "markdown"
+        # Markdown cells should NOT notify kernel of structure change
+        mock_kh.execute_code.assert_not_called()
+
+    def test_invalid_after_cell_raises(self):
+        session = self._make_session_with_cells()
+        with pytest.raises(ValueError, match="not found"):
+            NotebookSession.add_cell(session, "z = 3", after_cell_id="zzzz")
+
+    def test_generated_id_is_unique(self):
+        session = self._make_session_with_cells()
+        with patch("flowbook.mcp.session.KernelHelper"):
+            result = NotebookSession.add_cell(session, "z = 3")
+        new_id = result["cell_id"]
+        existing = {"aaaa", "bbbb"}
+        assert new_id not in existing
+
+
+# ==================================================================
+# NotebookSession.delete_cell
+# ==================================================================
+
+
+class TestDeleteCell:
+    def _make_session_with_cells(self):
+        """Create a partially-real session with a notebook in memory."""
+        cell_a = {"id": "aaaa", "cell_type": "code", "source": "x = 1", "metadata": {}, "outputs": []}
+        cell_b = {"id": "bbbb", "cell_type": "code", "source": "y = 2", "metadata": {}, "outputs": []}
+        cell_c = {"id": "cccc", "cell_type": "code", "source": "z = 3", "metadata": {}, "outputs": []}
+        session = MagicMock(spec=NotebookSession)
+        session.is_loaded = True
+        session.notebook = {"cells": [cell_a, cell_b, cell_c]}
+        session._stale_cells = {"bbbb"}
+        session.executed_cells = {"aaaa", "bbbb"}
+        session.cell_flowbook_meta = {"bbbb": {"some": "meta"}}
+        session.cell_status = {"bbbb": "ok"}
+        session.kernel_client = MagicMock()
+
+        def find_cell(cid):
+            for i, c in enumerate(session.notebook["cells"]):
+                if c.get("id") == cid:
+                    return i, c
+            raise ValueError(f"Cell {cid} not found")
+        session._find_cell.side_effect = find_cell
+
+        def get_cell_order():
+            return [c["id"] for c in session.notebook["cells"] if c.get("cell_type") == "code"]
+        session.get_cell_order.side_effect = get_cell_order
+
+        return session
+
+    def test_removes_cell(self):
+        session = self._make_session_with_cells()
+        with patch("flowbook.mcp.session.KernelHelper"):
+            result = NotebookSession.delete_cell(session, "bbbb")
+        assert result["cell_id"] == "bbbb"
+        assert len(session.notebook["cells"]) == 2
+        remaining_ids = [c["id"] for c in session.notebook["cells"]]
+        assert "bbbb" not in remaining_ids
+
+    def test_cleans_up_tracking(self):
+        session = self._make_session_with_cells()
+        with patch("flowbook.mcp.session.KernelHelper"):
+            NotebookSession.delete_cell(session, "bbbb")
+        assert "bbbb" not in session.executed_cells
+        assert "bbbb" not in session.cell_flowbook_meta
+        assert "bbbb" not in session.cell_status
+        assert "bbbb" not in session._stale_cells
+
+    def test_notifies_kernel(self):
+        session = self._make_session_with_cells()
+        with patch("flowbook.mcp.session.KernelHelper") as mock_kh:
+            NotebookSession.delete_cell(session, "bbbb")
+        mock_kh.execute_code.assert_called_once()
+        call_kwargs = mock_kh.execute_code.call_args
+        fb_msg = call_kwargs.kwargs.get("flowbook_msg") or call_kwargs[1].get("flowbook_msg")
+        assert fb_msg["type"] == "notebook_structure"
+
+    def test_pushes_contents_api(self):
+        session = self._make_session_with_cells()
+        with patch("flowbook.mcp.session.KernelHelper"):
+            NotebookSession.delete_cell(session, "bbbb")
+        session._put_contents_api.assert_called_once()
+
+    def test_invalid_cell_raises(self):
+        session = self._make_session_with_cells()
+        with pytest.raises(ValueError, match="not found"):
+            NotebookSession.delete_cell(session, "zzzz")
+
+    def test_returns_new_cell_order(self):
+        session = self._make_session_with_cells()
+        with patch("flowbook.mcp.session.KernelHelper"):
+            result = NotebookSession.delete_cell(session, "bbbb")
+        assert result["new_cell_order"] == ["aaaa", "cccc"]
 
 
 class TestGetSession:

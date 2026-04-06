@@ -1,12 +1,16 @@
 ---
-description: 'Fix reproducibility violations in the currently open notebook using FlowBook NBI tools. Works on the active JupyterLab notebook — no file path needed.  Do not use outside of JupyterLab with NotebookIntelligence extension installed.'
+description: 'Fix reproducibility violations in the currently open notebook using FlowBook tools. Works on the active JupyterLab notebook — no file path needed.'
 ---
 
-# Fix Notebook for Reproducibility (NBI)
+# Fix Notebook for Reproducibility
 
-You are fixing reproducibility violations in the currently open Jupyter notebook using FlowBook's NBI tools. The notebook is already open in JupyterLab with `flowbook_kernel`. Do not search for the path. Use the active notebook.
+You are fixing reproducibility violations in the currently open Jupyter notebook. The notebook is already open in JupyterLab with `flowbook_kernel`.
 
-**Input**:
+**IMPORTANT**: Use ONLY `mcp__nbi__*` tools (e.g., `mcp__nbi__run_actionable_cells`, `mcp__nbi__checkpoint`, `mcp__nbi__read_cell`). Do NOT use `mcp__flowbook__*` tools — those are for CLI mode and will not update the notebook UI.
+
+**To read the notebook**, always use `mcp__nbi__get_all_cell_sources` (one call for the entire notebook). Do NOT call `mcp__nbi__read_cell` in a loop — it's slow and wasteful.
+
+**Report every tool call**: Before each `mcp__nbi__*` call, print a one-line status message describing what you're doing (e.g., "Running all actionable cells...", "Checkpointing before fix...", "Renaming 'df' → 'df_clean' from @C...").
 
 ## What Reproducibility Analysis Guarantees
 
@@ -28,7 +32,7 @@ When a violation is found, FlowBook marks cells **stale** — meaning their outp
 Run all cells to establish the baseline:
 
 ```
-run_actionable_cells()
+mcp__nbi__run_actionable_cells()
 ```
 
 This runs all stale and unexecuted cells, stopping on the first error or violation.
@@ -41,29 +45,29 @@ For each iteration:
 1. **Checkpoint** before attempting any fix:
 
    ```
-   checkpoint()
+   mcp__nbi__checkpoint()
    ```
 
 2. **Find the next problem**:
 
    ```
-   get_next_actionable_cell()
+   mcp__nbi__get_next_actionable_cell()
    ```
 
-   If it returns "done", you're done — go to Step 3.
+   If it returns "All clean.", you're done — go to Step 3.
 
 3. **If the actionable cell has a violation or error**, read it and fix:
 
    ```
-   read_cell("@C")
+   mcp__nbi__read_cell("@C")
    ```
 
    Categorize and fix using the taxonomy below.
 
-4. **After fixing, re-run from the fixed cell** to propagate changes:
+4. **After fixing, re-run** to propagate changes:
 
    ```
-   run_actionable_cells()
+   mcp__nbi__run_actionable_cells()
    ```
 
 5. **If things got worse**, undo:
@@ -72,14 +76,14 @@ For each iteration:
    restore(checkpoint_id)
    ```
 
-   Then try a different strategy. After restore, run `run_actionable_cells()` again.
+   Then try a different strategy. After restore, run `mcp__nbi__run_actionable_cells()` again.
 
 6. **If no progress** after 2 attempts on the same violation, skip it and move on.
 
 ### Step 3: Save and Report
 
 ```
-save_notebook()
+mcp__nbi__save_notebook()
 ```
 
 Print a summary:
@@ -89,7 +93,7 @@ Print a summary:
 
 | Cell | Strategy          | Change           |
 | ---- | ----------------- | ---------------- |
-| @D   | `insert_deepcopy` | `df` → `df_copy` |
+| @D   | `mcp__nbi__insert_deepcopy` | `df` → `df_copy` |
 
 Followed by a diagnosis blockquote for each fix:
 
@@ -109,10 +113,24 @@ Followed by a diagnosis blockquote for each fix:
 **Fix**: Alpha-rename the variable.
 
 ```
-checkpoint()
-read_cell("@B")
-alpha_rename("@B", "train", "train_combined")
-run_actionable_cells()
+mcp__nbi__checkpoint()
+mcp__nbi__read_cell("@B")
+mcp__nbi__alpha_rename("@B", "train", "train_combined")
+mcp__nbi__run_actionable_cells()
+```
+
+### 1b. In-place Column Reassignment
+
+**What it looks like**: A cell reads and overwrites the same column.
+**Error type**: `NO_READ_AND_WRITE`
+**Example**: `df['x'] = df['x'] + 1`
+
+**Fix**: Make a copy of the dataframe.
+
+```
+mcp__nbi__checkpoint()
+mcp__nbi__insert_deepcopy("@C", "df")
+mcp__nbi__run_actionable_cells()
 ```
 
 ### 2. Invalid Mutation (Unrecoverable)
@@ -123,25 +141,25 @@ run_actionable_cells()
 **Fix A** — For `inplace=True` (most common):
 
 ```
-checkpoint()
-remove_inplace("@C", "df")
-run_actionable_cells()
+mcp__nbi__checkpoint()
+mcp__nbi__remove_inplace("@C", "df")
+mcp__nbi__run_actionable_cells()
 ```
 
 **Fix B** — For `.fit()` or object mutation:
 
 ```
-checkpoint()
-insert_deepcopy("@C", "model")
-run_actionable_cells()
+mcp__nbi__checkpoint()
+mcp__nbi__insert_deepcopy("@C", "model")
+mcp__nbi__run_actionable_cells()
 ```
 
 **Fix C** — If allocation and mutation are in adjacent cells:
 
 ```
-checkpoint()
-merge_cells("@B,@C")
-run_actionable_cells()
+mcp__nbi__checkpoint()
+mcp__nbi__merge_cells(["@B", "@C"])
+mcp__nbi__run_actionable_cells()
 ```
 
 ### 3. Sequential Transformation Chain
@@ -153,17 +171,17 @@ run_actionable_cells()
 **Fix A** — Merge tightly coupled steps:
 
 ```
-checkpoint()
-merge_cells("@B,@C")
-run_actionable_cells()
+mcp__nbi__checkpoint()
+mcp__nbi__merge_cells(["@B", "@C"])
+mcp__nbi__run_actionable_cells()
 ```
 
 **Fix B** — Give each step its own output name:
 
 ```
-checkpoint()
-alpha_rename("@C", "df", "df_featured")
-run_actionable_cells()
+mcp__nbi__checkpoint()
+mcp__nbi__alpha_rename("@C", "df", "df_featured")
+mcp__nbi__run_actionable_cells()
 ```
 
 ### 4. Reusing Variable for Different Purposes
@@ -175,9 +193,9 @@ run_actionable_cells()
 **Fix**: Rename from the point of reuse onwards.
 
 ```
-checkpoint()
-alpha_rename("@D", "model", "rf_model")
-run_actionable_cells()
+mcp__nbi__checkpoint()
+mcp__nbi__alpha_rename("@D", "model", "rf_model")
+mcp__nbi__run_actionable_cells()
 ```
 
 Choose semantically meaningful names when possible (e.g., `lr_model` / `rf_model` rather than `model_v2`).
@@ -190,17 +208,17 @@ Choose semantically meaningful names when possible (e.g., `lr_model` / `rf_model
 **Fix A** — Mark the inspection cell as diagnostic (preferred for pure inspection):
 
 ```
-checkpoint()
-mark_diagnostic("@C")
-run_actionable_cells()
+mcp__nbi__checkpoint()
+mcp__nbi__mark_diagnostic("@C")
+mcp__nbi__run_actionable_cells()
 ```
 
 **Fix B** — Move the inspection after the mutation:
 
 ```
-checkpoint()
-move_cell("@C", "@D")
-run_actionable_cells()
+mcp__nbi__checkpoint()
+mcp__nbi__move_cell("@C", "@D")
+mcp__nbi__run_actionable_cells()
 ```
 
 ### Undoing a Failed Fix
@@ -208,18 +226,18 @@ run_actionable_cells()
 If a fix makes things worse (more violations, or introduces runtime errors):
 
 ```
-restore("ckpt_0")
+mcp__nbi__restore("ckpt_0")
 # Now try a different strategy...
 ```
 
 ## Guidelines
 
 1. **Preserve functionality**: Fixes must not change what the notebook computes, only how variables are named/scoped.
-2. **Minimal changes**: Prefer the smallest change that fixes the violation. `alpha_rename` is usually sufficient.
-3. **Use the algorithmic tools**: `alpha_rename`, `remove_inplace`, `insert_deepcopy`, `mark_diagnostic`, `merge_cells`, and `move_cell` are AST-based and reliable. Prefer them over manual `edit_cell_source` when possible.
-4. **Use `edit_cell_source` for complex cases**: When the algorithmic tools don't fit (e.g., restructuring logic, adding parameters to functions), fall back to reading the cell, modifying the source manually, and using `edit_cell_source`.
+2. **Minimal changes**: Prefer the smallest change that fixes the violation. `mcp__nbi__alpha_rename` is usually sufficient.
+3. **Use the algorithmic tools**: `mcp__nbi__alpha_rename`, `mcp__nbi__remove_inplace`, `mcp__nbi__insert_deepcopy`, `mcp__nbi__mark_diagnostic`, `mcp__nbi__merge_cells`, and `mcp__nbi__move_cell` are AST-based and reliable. Prefer them over manual `mcp__nbi__edit_cell_source` when possible.
+4. **Use `mcp__nbi__edit_cell_source` for complex cases**: When the algorithmic tools don't fit (e.g., restructuring logic, adding parameters to functions), fall back to reading the cell, modifying the source manually, and using `mcp__nbi__edit_cell_source`.
 5. **Always checkpoint before fixing**: This lets you safely undo if things go wrong.
-6. **Use `run_actionable_cells()`** after each fix to re-run all stale/unexecuted cells. It stops on the first error or violation.
+6. **Use `mcp__nbi__run_actionable_cells()`** after each fix to re-run all stale/unexecuted cells. It stops on the first error or violation.
 7. **Don't fix staleness directly**: Staleness is a _symptom_ of violations. Fix the violation and staleness resolves automatically. But stale cells DO need to be re-run to update the kernel state.
 8. **All cell references use @A notation**: @A = first code cell, @B = second, etc. Markdown cells are not counted.
-9. **Always report MCP calls you make**
+9. **Always report tool calls you make**

@@ -43,144 +43,18 @@ from flowbook.scripts.fix_repro_errors import (
 
 
 # ---------------------------------------------------------------------------
-# Metadata formatting
+# Metadata formatting — canonical definitions in flowbook.tools.format
+# Re-exported here for backward compatibility.
 # ---------------------------------------------------------------------------
 
-def format_loc(loc) -> str:
-    """Format a ReadLoc/WriteLoc dict (or pre-formatted string) as a human-readable string.
-
-    {"type": "var", "name": "df"} -> "df"
-    {"type": "col", "name": "df", "qualifier": "price"} -> "df.price"
-    {"type": "struct", "name": "df", "qualifier": "columns"} -> "df[columns]"
-    "df['age']" -> "df['age']"  (already formatted, from ReproducibilityError.locations)
-    """
-    if isinstance(loc, str):
-        return loc
-    name = loc.get("name", "?")
-    loc_type = loc.get("type", "var")
-    qualifier = loc.get("qualifier")
-    if loc_type == "col" and qualifier:
-        return f"{name}.{qualifier}"
-    if loc_type == "struct" and qualifier:
-        return f"{name}[{qualifier}]"
-    return name
-
-
-def format_loc_list(locs: list) -> str:
-    """Format a list of locs as comma-separated readable names."""
-    if not locs:
-        return "(none)"
-    return ", ".join(format_loc(loc) for loc in locs)
-
-
-def format_error(error: Dict[str, Any]) -> str:
-    """Format a reproducibility error dict as a readable string."""
-    etype = error.get("error_type", "unknown")
-    msg = error.get("message", "")
-    locs = error.get("locations", [])
-    causer = error.get("causer_cell", "")
-    parts = [f"{etype}: {msg}"]
-    if locs:
-        parts.append(f"  Locations: {format_loc_list(locs)}")
-    if causer:
-        parts.append(f"  Causer cell: {causer}")
-    return "\n".join(parts)
-
-
-def format_staleness_reasons(reasons: Dict[str, List[Dict[str, Any]]]) -> str:
-    """Format staleness reasons dict as readable text."""
-    if not reasons:
-        return "(none)"
-    lines = []
-    for cell_id, reason_list in reasons.items():
-        reason_strs = []
-        for r in reason_list:
-            rtype = r.get("type", "unknown")
-            loc = r.get("loc", "")
-            cause = r.get("cell_id", "")
-            s = rtype
-            if loc:
-                s += f": {loc}"
-            if cause:
-                s += f" (from cell {cause})"
-            reason_strs.append(s)
-        lines.append(f"  {cell_id}: {', '.join(reason_strs)}")
-    return "\n".join(lines)
-
-
-def format_flowbook_meta(meta: Dict[str, Any]) -> str:
-    """Format raw flowbook metadata into human+LLM-readable text."""
-    lines = []
-
-    reads = meta.get("read_locs", [])
-    writes = meta.get("write_locs", [])
-    changed = meta.get("changed_locs", [])
-    errors = meta.get("errors", [])
-    stale = meta.get("stale_cells", [])
-    reasons = meta.get("staleness_reasons", {})
-
-    lines.append(f"Reads: {format_loc_list(reads)}")
-    lines.append(f"Writes: {format_loc_list(writes)}")
-    if changed:
-        lines.append(f"Changed: {format_loc_list(changed)}")
-
-    if errors:
-        lines.append("Errors:")
-        for e in errors:
-            lines.append(f"  - {format_error(e)}")
-    else:
-        lines.append("Errors: (none)")
-
-    if stale:
-        lines.append(f"Stale cells: {', '.join(stale)}")
-        if reasons:
-            lines.append(f"Staleness reasons:\n{format_staleness_reasons(reasons)}")
-    else:
-        lines.append("Stale cells: (none)")
-
-    # Timing
-    exec_ms = meta.get("execute_duration_ms")
-    code_ms = meta.get("code_duration_ms")
-    if exec_ms is not None:
-        timing_parts = [f"total={exec_ms:.0f}ms"]
-        if code_ms is not None:
-            timing_parts.append(f"code={code_ms:.0f}ms")
-        lines.append(f"Timing: {', '.join(timing_parts)}")
-
-    return "\n".join(lines)
-
-
-def _to_str(value) -> str:
-    """Convert a value that may be a string or list of strings to a string."""
-    if isinstance(value, list):
-        return "".join(value)
-    return str(value) if value is not None else ""
-
-
-def format_outputs_text(outputs: List[Dict[str, Any]]) -> str:
-    """Extract human-readable text from cell outputs."""
-    parts = []
-    for output in outputs:
-        otype = output.get("output_type", "")
-        if otype == "stream":
-            parts.append(_to_str(output.get("text", "")))
-        elif otype == "execute_result":
-            data = output.get("data", {})
-            if "text/plain" in data:
-                parts.append(_to_str(data["text/plain"]))
-        elif otype == "display_data":
-            data = output.get("data", {})
-            if "text/plain" in data:
-                parts.append(_to_str(data["text/plain"]))
-            elif "text/html" in data:
-                parts.append("[HTML output]")
-            elif "image/png" in data:
-                parts.append("[Image output]")
-        elif otype == "error":
-            ename = output.get("ename", "Error")
-            evalue = output.get("evalue", "")
-            parts.append(f"{ename}: {evalue}")
-    return "\n".join(parts) if parts else "(no output)"
+from flowbook.tools.format import (  # noqa: F401
+    format_loc,
+    format_loc_list,
+    format_error,
+    format_staleness_reasons,
+    format_flowbook_meta,
+    format_outputs_text,
+)
 
 
 def _truncate_dict(d: Dict[str, Any], max_str_len: int = 500) -> Dict[str, Any]:
@@ -1398,6 +1272,120 @@ class NotebookSession:
         self._mark_cell_edited(cell_id)
         self._put_contents_api()
         return {"cell_id": cell_id, "new_source_preview": new_source[:200]}
+
+    def add_cell(self, source: str, cell_type: str = "code",
+                 after_cell_id: Optional[str] = None) -> Dict[str, Any]:
+        """Add a new cell to the notebook.
+
+        Generates a unique cell ID, inserts the cell, notifies the kernel
+        of the new structure, and syncs to JupyterLab via Contents API.
+
+        Args:
+            source: Source code (or markdown) for the new cell.
+            cell_type: "code" or "markdown".
+            after_cell_id: Insert after this cell. If None, appends to end.
+
+        Returns:
+            Dict with cell_id, cell_type, and new_cell_order.
+        """
+        self._require_loaded()
+        self._refresh_from_contents_api()
+
+        # Generate unique cell ID
+        existing_ids = {c.get("id", "") for c in self.notebook["cells"]}
+        if after_cell_id:
+            new_id = next_insertion_id(after_cell_id, existing_ids)
+        else:
+            # Append: use last cell's ID as base, or "a" if empty
+            code_cells = [c for c in self.notebook["cells"] if c.get("cell_type") == "code"]
+            base = code_cells[-1]["id"] if code_cells else "a"
+            new_id = next_insertion_id(base, existing_ids)
+
+        new_cell = {
+            "id": new_id,
+            "cell_type": cell_type,
+            "source": source,
+            "metadata": {},
+            "outputs": [] if cell_type == "code" else [],
+        }
+
+        if after_cell_id:
+            # Insert after the specified cell
+            insert_idx = None
+            for i, c in enumerate(self.notebook["cells"]):
+                if c.get("id") == after_cell_id:
+                    insert_idx = i + 1
+                    break
+            if insert_idx is None:
+                raise ValueError(f"Cell not found: {after_cell_id}")
+            self.notebook["cells"].insert(insert_idx, new_cell)
+        else:
+            self.notebook["cells"].append(new_cell)
+
+        # Notify kernel of updated structure
+        if cell_type == "code":
+            new_order = self.get_cell_order()
+            KernelHelper.execute_code(
+                self.kernel_client,
+                "",
+                timeout=10,
+                store_history=False,
+                flowbook_msg={"type": "notebook_structure", "cell_order": new_order},
+            )
+
+        self._put_contents_api()
+
+        return {
+            "cell_id": new_id,
+            "cell_type": cell_type,
+            "new_cell_order": self.get_cell_order(),
+        }
+
+    def delete_cell(self, cell_id: str) -> Dict[str, Any]:
+        """Remove a cell from the notebook.
+
+        Removes the cell, cleans up tracking state, notifies the kernel,
+        and syncs to JupyterLab via Contents API.
+
+        Args:
+            cell_id: The cell ID to delete.
+
+        Returns:
+            Dict with cell_id and new_cell_order.
+        """
+        self._require_loaded()
+        self._refresh_from_contents_api()
+
+        # Find and remove the cell
+        _, cell = self._find_cell(cell_id)
+        cell_type = cell.get("cell_type", "code")
+        self.notebook["cells"] = [
+            c for c in self.notebook["cells"] if c.get("id") != cell_id
+        ]
+
+        # Clean up tracking state
+        self.executed_cells.discard(cell_id)
+        self.cell_flowbook_meta.pop(cell_id, None)
+        self.cell_status.pop(cell_id, None)
+        self._stale_cells.discard(cell_id)
+
+        # Notify kernel of updated structure
+        if cell_type == "code":
+            new_order = self.get_cell_order()
+            KernelHelper.execute_code(
+                self.kernel_client,
+                "",
+                timeout=10,
+                store_history=False,
+                flowbook_msg={"type": "notebook_structure", "cell_order": new_order},
+            )
+
+        self._put_contents_api()
+
+        return {
+            "cell_id": cell_id,
+            "new_cell_order": self.get_cell_order(),
+        }
 
     def merge_cells(self, cell_ids: List[str]) -> Dict[str, Any]:
         """Merge multiple cells into the first one."""
