@@ -1052,25 +1052,51 @@ class NotebookSession:
     # ------------------------------------------------------------------
 
     def checkpoint(self) -> str:
-        """Snapshot current notebook cell sources. Returns checkpoint_id."""
+        """Snapshot current notebook cell sources and enforcer state.
+
+        Saves cell sources locally and asks the kernel to snapshot its
+        enforcer state (read/write sets, staleness, violations). Returns
+        a checkpoint_id that can be passed to restore().
+        """
         self._require_loaded()
         ckpt_id = f"ckpt_{uuid.uuid4().hex[:8]}"
         cell_sources = {}
         for cell in self.notebook["cells"]:
             cell_sources[cell.get("id", "")] = get_cell_source(cell)
 
+        # Ask kernel to checkpoint enforcer state
+        enforcer_snapshot_id = None
+        if self.kernel_client:
+            result = KernelHelper.execute_code(
+                self.kernel_client, "",
+                timeout=10,
+                store_history=False,
+                flowbook_msg={"type": "enforcer_checkpoint"},
+            )
+            # Extract checkpoint ID from flowbook response
+            for fm in result.get("flowbook_messages", []):
+                if fm.get("type") == "enforcer_checkpoint_result":
+                    enforcer_snapshot_id = fm.get("checkpoint_id")
+                    break
+
         self._checkpoints[ckpt_id] = {
             "timestamp": time.time(),
             "cell_sources": cell_sources,
             "cell_order": [c.get("id", "") for c in self.notebook["cells"]],
+            "enforcer_snapshot_id": enforcer_snapshot_id,
+            # Also save local metadata state for MCP-side restore
+            "cell_flowbook_meta": copy.deepcopy(self.cell_flowbook_meta),
+            "cell_status": dict(self.cell_status),
+            "stale_cells": set(self._stale_cells),
+            "executed_cells": set(self.executed_cells),
         }
         return ckpt_id
 
     def restore(self, checkpoint_id: str) -> Dict[str, Any]:
-        """Restore notebook cell sources to a checkpoint.
+        """Restore notebook cell sources and enforcer state from a checkpoint.
 
-        Does NOT restart the kernel. Changed cells are marked stale so
-        they can be re-run incrementally via run_until_clean() or manually.
+        Restores cell sources, tells the kernel to restore its enforcer
+        state, and restores local MCP metadata. Does NOT restart the kernel.
         """
         self._require_loaded()
         if checkpoint_id not in self._checkpoints:
@@ -1079,7 +1105,7 @@ class NotebookSession:
         ckpt = self._checkpoints[checkpoint_id]
         cell_sources = ckpt["cell_sources"]
 
-        # Restore cell sources and mark changed cells as stale
+        # Restore cell sources
         changed_cells = []
         for cell in self.notebook["cells"]:
             cid = cell.get("id", "")
@@ -1088,11 +1114,34 @@ class NotebookSession:
                 if old != cell_sources[cid]:
                     set_cell_source(cell, cell_sources[cid])
                     changed_cells.append(cid)
-                    # Mark as stale and notify kernel
-                    self._mark_cell_edited(cid)
-                    # Clear old violation metadata for changed cells
-                    self.cell_flowbook_meta.pop(cid, None)
-                    self.cell_status.pop(cid, None)
+
+        self._put_contents_api()
+
+        # Restore kernel enforcer state
+        enforcer_snapshot_id = ckpt.get("enforcer_snapshot_id")
+        if enforcer_snapshot_id and self.kernel_client:
+            KernelHelper.execute_code(
+                self.kernel_client, "",
+                timeout=10,
+                store_history=False,
+                flowbook_msg={
+                    "type": "enforcer_restore",
+                    "checkpoint_id": enforcer_snapshot_id,
+                },
+            )
+
+        # Restore local MCP metadata state
+        if "cell_flowbook_meta" in ckpt:
+            self.cell_flowbook_meta = copy.deepcopy(ckpt["cell_flowbook_meta"])
+            self.cell_status = dict(ckpt["cell_status"])
+            self._stale_cells = set(ckpt["stale_cells"])
+            self.executed_cells = set(ckpt["executed_cells"])
+        else:
+            # Backward compat: old checkpoints without metadata
+            for cid in changed_cells:
+                self._mark_cell_edited(cid)
+                self.cell_flowbook_meta.pop(cid, None)
+                self.cell_status.pop(cid, None)
 
         return {
             "checkpoint_id": checkpoint_id,

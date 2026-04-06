@@ -32,6 +32,11 @@ CELL_EDITED = "cell_edited"
 CONTINUE_AFTER_VIOLATION = "continue_after_violation"
 SYNC = "sync"
 EXEC_RESTORE = "exec_restore"
+ENFORCER_CHECKPOINT = "enforcer_checkpoint"
+ENFORCER_RESTORE = "enforcer_restore"
+
+# Kernel -> Client (enforcer checkpoint responses)
+ENFORCER_CHECKPOINT_RESULT = "enforcer_checkpoint_result"
 
 # IOPub message type for custom messages
 IOPUB_MSG_TYPE = "flowbook_update"

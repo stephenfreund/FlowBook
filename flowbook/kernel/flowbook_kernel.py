@@ -363,6 +363,7 @@ from flowbook.util.output import error, log, timer, output
 from flowbook.kernel.models import ReproducibilityMetadata
 from flowbook.kernel.protocol import (
     COMM_TARGET,
+    ENFORCER_CHECKPOINT_RESULT,
     IOPUB_MSG_TYPE,
     build_metadata_message,
     build_violation_message,
@@ -454,6 +455,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         # Continue after violation flag (default: stop on violation)
         self._continue_after_violation: bool = False
 
+        # Enforcer snapshots for checkpoint/restore (separate from memory checkpoints)
+        self._enforcer_snapshots: dict = {}
+
         # Comm channel for frontend communication (set when frontend opens comm)
         self._flowbook_comm = None
 
@@ -530,6 +534,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             self._set_continue_after_violation(msg["enabled"])
         elif msg_type == "sync":
             self._process_sync()
+        elif msg_type == "enforcer_checkpoint":
+            self._process_enforcer_checkpoint()
+        elif msg_type == "enforcer_restore":
+            self._process_enforcer_restore(msg["checkpoint_id"])
         elif msg_type == "exec_restore":
             # Deprecated but handle gracefully
             self._display.display_icon_and_text(
@@ -620,6 +628,54 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         )
         self._send_flowbook_message(build_metadata_message(metadata))
         self._send_flowbook_message(build_status_message("🔄", "Synced"))
+
+    def _process_enforcer_checkpoint(self) -> None:
+        """Snapshot the enforcer's reproducibility state.
+
+        Creates a deep copy of the NotebookState, seq_counter, and
+        continue_after_violation flag. Returns the checkpoint ID via
+        an enforcer_checkpoint_result message.
+        """
+        import copy
+        import uuid
+
+        ckpt_id = f"enforcer_ckpt_{uuid.uuid4().hex[:8]}"
+        self._enforcer_snapshots[ckpt_id] = {
+            "notebook_state": copy.deepcopy(self._enforcer._notebook_state),
+            "seq_counter": self._enforcer.seq_counter,
+            "continue_after_violation": self._continue_after_violation,
+        }
+        log(f"[enforcer_checkpoint] Created {ckpt_id}")
+        self._send_flowbook_message({
+            "type": ENFORCER_CHECKPOINT_RESULT,
+            "checkpoint_id": ckpt_id,
+        })
+
+    def _process_enforcer_restore(self, checkpoint_id: str) -> None:
+        """Restore the enforcer's reproducibility state from a snapshot.
+
+        Replaces the current NotebookState with the checkpointed copy,
+        restores seq_counter and continue_after_violation, then broadcasts
+        updated metadata to all clients so the UI reflects the restored state.
+        """
+        import copy
+
+        if checkpoint_id not in self._enforcer_snapshots:
+            log(f"[enforcer_restore] Unknown checkpoint: {checkpoint_id}")
+            self._send_flowbook_message(build_status_message(
+                "❌", f"Unknown enforcer checkpoint: {checkpoint_id}"
+            ))
+            return
+
+        snapshot = self._enforcer_snapshots[checkpoint_id]
+        self._enforcer._notebook_state = copy.deepcopy(snapshot["notebook_state"])
+        self._enforcer.seq_counter = snapshot["seq_counter"]
+        self._continue_after_violation = snapshot["continue_after_violation"]
+
+        log(f"[enforcer_restore] Restored from {checkpoint_id}")
+
+        # Broadcast full state so all clients update their UI
+        self._process_sync()
 
     # =========================================================================
     # Magic Commands

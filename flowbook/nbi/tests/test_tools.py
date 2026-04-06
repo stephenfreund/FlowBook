@@ -606,6 +606,7 @@ class TestCheckpoint:
             {'code_cells': 2},
             _make_cell('x = 1'),
             _make_cell('y = 2'),
+            {'checkpoint_id': 'enforcer_ckpt_abc'},  # enforcer-checkpoint
         ]
         result = await _call(
             tools.checkpoint, mock_response, mock_request
@@ -616,6 +617,8 @@ class TestCheckpoint:
         assert len(cells) == 2
         assert cells[0]['source'] == 'x = 1'
         assert cells[1]['source'] == 'y = 2'
+        # Verify enforcer snapshot ID was stored
+        assert session.get_enforcer_snapshot_id('ckpt_0') == 'enforcer_ckpt_abc'
 
     @pytest.mark.asyncio
     async def test_incremental_ids(self, mock_response, mock_request, session):
@@ -623,6 +626,7 @@ class TestCheckpoint:
             mock_response.run_ui_command.side_effect = [
                 {'code_cells': 1},
                 _make_cell('x = 1'),
+                {},  # enforcer-checkpoint
             ]
             await _call(tools.checkpoint, mock_response, mock_request)
         assert session.list_checkpoints()[0]['id'] == 'ckpt_0'

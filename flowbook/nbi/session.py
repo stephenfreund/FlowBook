@@ -23,12 +23,14 @@ class FlowBookSession:
     # Checkpoints
     # ------------------------------------------------------------------
 
-    def save_checkpoint(self, cells: list[dict]) -> str:
-        """Save a snapshot of cell sources/types.
+    def save_checkpoint(self, cells: list[dict],
+                        enforcer_snapshot_id: str = None) -> str:
+        """Save a snapshot of cell sources/types and link to kernel enforcer snapshot.
 
         Args:
             cells: List of dicts with keys: 'label', 'cell_type', 'source'
                    (as returned by flowbook:get-cell bridge command)
+            enforcer_snapshot_id: Optional ID from kernel's enforcer checkpoint
 
         Returns:
             Checkpoint ID string (e.g., 'ckpt_0', 'ckpt_1', ...)
@@ -36,17 +38,33 @@ class FlowBookSession:
         checkpoint_id = f'ckpt_{self._next_checkpoint_id}'
         self._next_checkpoint_id += 1
         # Store a defensive copy so later mutations don't affect the snapshot.
-        self._checkpoints[checkpoint_id] = [dict(c) for c in cells]
+        self._checkpoints[checkpoint_id] = {
+            'cells': [dict(c) for c in cells],
+            'enforcer_snapshot_id': enforcer_snapshot_id,
+        }
         return checkpoint_id
 
     def get_checkpoint(self, checkpoint_id: str) -> list[dict]:
-        """Retrieve a checkpoint by ID.
+        """Retrieve checkpoint cell data by ID.
 
         Raises KeyError if checkpoint_id not found.
         """
         if checkpoint_id not in self._checkpoints:
             raise KeyError(f'Checkpoint not found: {checkpoint_id}')
-        return self._checkpoints[checkpoint_id]
+        ckpt = self._checkpoints[checkpoint_id]
+        # Backward compat: old format was just a list of cells
+        if isinstance(ckpt, list):
+            return ckpt
+        return ckpt['cells']
+
+    def get_enforcer_snapshot_id(self, checkpoint_id: str) -> str:
+        """Get the kernel enforcer snapshot ID linked to a checkpoint."""
+        if checkpoint_id not in self._checkpoints:
+            return None
+        ckpt = self._checkpoints[checkpoint_id]
+        if isinstance(ckpt, list):
+            return None
+        return ckpt.get('enforcer_snapshot_id')
 
     def list_checkpoints(self) -> list[dict]:
         """List all checkpoints.
@@ -54,7 +72,8 @@ class FlowBookSession:
         Returns list of: {'id': str, 'cell_count': int, 'timestamp': str}
         """
         result = []
-        for cp_id, cells in self._checkpoints.items():
+        for cp_id, ckpt in self._checkpoints.items():
+            cells = ckpt['cells'] if isinstance(ckpt, dict) else ckpt
             result.append({
                 'id': cp_id,
                 'cell_count': len(cells),

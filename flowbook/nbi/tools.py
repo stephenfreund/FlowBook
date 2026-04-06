@@ -479,7 +479,7 @@ async def save_notebook(**args) -> str:
 @nbapi.auto_approve
 @nbapi.tool
 async def checkpoint(**args) -> str:
-    """Create a checkpoint (snapshot) of all cell sources. Use before making refactoring changes so you can restore if needed.
+    """Create a checkpoint (snapshot) of all cell sources and reproducibility state. Use before making refactoring changes so you can restore if needed.
     """
     response = args["response"]
     counts = await response.run_ui_command('flowbook:get-cell-count', {})
@@ -492,16 +492,24 @@ async def checkpoint(**args) -> str:
             'label': index_to_alpha(i),
             'cell_type': cell_data.get('cell_type', 'code'),
             'source': cell_data.get('source', ''),
+            'flowbook_meta': cell_data.get('flowbook_meta'),
         })
 
-    cp_id = _session.save_checkpoint(cells)
+    # Also checkpoint the kernel's enforcer state
+    enforcer_result = await response.run_ui_command('flowbook:enforcer-checkpoint', {})
+    enforcer_snapshot_id = None
+    if isinstance(enforcer_result, dict):
+        enforcer_snapshot_id = enforcer_result.get('checkpoint_id')
+
+    cp_id = _session.save_checkpoint(cells, enforcer_snapshot_id=enforcer_snapshot_id)
+
     return f"Checkpoint created: {cp_id}"
 
 
 @nbapi.auto_approve
 @nbapi.tool
 async def restore(checkpoint_id: str, **args) -> str:
-    """Restore cell sources from a checkpoint. Overwrites current cell sources with the saved snapshot.
+    """Restore cell sources and reproducibility state from a checkpoint.
 
     Args:
         checkpoint_id: Checkpoint ID (e.g., 'ckpt_0')
@@ -509,10 +517,18 @@ async def restore(checkpoint_id: str, **args) -> str:
     response = args["response"]
     cells = _session.get_checkpoint(checkpoint_id)
 
+    # Restore cell sources
     for i, cell_data in enumerate(cells):
         await response.run_ui_command('flowbook:edit-cell-source', {
             "cellIndex": i,
             "source": cell_data['source'],
+        })
+
+    # Restore kernel enforcer state
+    enforcer_snapshot_id = _session.get_enforcer_snapshot_id(checkpoint_id)
+    if enforcer_snapshot_id:
+        await response.run_ui_command('flowbook:enforcer-restore', {
+            "checkpointId": enforcer_snapshot_id,
         })
 
     return f"Restored {len(cells)} cells from checkpoint '{checkpoint_id}'"

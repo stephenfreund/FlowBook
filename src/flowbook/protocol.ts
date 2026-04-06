@@ -84,6 +84,15 @@ export interface IExecRestoreMessage {
   cell_id: string;
 }
 
+export interface IEnforcerCheckpointMessage {
+  type: 'enforcer_checkpoint';
+}
+
+export interface IEnforcerRestoreMessage {
+  type: 'enforcer_restore';
+  checkpoint_id: string;
+}
+
 /**
  * Discriminated union of all client -> kernel messages.
  */
@@ -92,4 +101,6 @@ export type FlowbookClientMessage =
   | ICellEditedMessage
   | IContinueAfterViolationMessage
   | ISyncMessage
-  | IExecRestoreMessage;
+  | IExecRestoreMessage
+  | IEnforcerCheckpointMessage
+  | IEnforcerRestoreMessage;

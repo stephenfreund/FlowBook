@@ -586,6 +586,36 @@ export function registerBridgeCommands(
   });
 
   // ------------------------------------------------------------------
+  // flowbook:enforcer-checkpoint — snapshot kernel enforcer state
+  // ------------------------------------------------------------------
+  app.commands.addCommand('flowbook:enforcer-checkpoint', {
+    execute: () => {
+      if (_executionHook) {
+        _executionHook.sendCommand({ type: 'enforcer_checkpoint' });
+      }
+      // The kernel responds via comm with enforcer_checkpoint_result
+      // which the executionHook processes. Return void for now.
+      return {};
+    }
+  });
+
+  // ------------------------------------------------------------------
+  // flowbook:enforcer-restore — restore kernel enforcer state
+  // ------------------------------------------------------------------
+  app.commands.addCommand('flowbook:enforcer-restore', {
+    execute: args => {
+      const checkpointId = args.checkpointId as string;
+      if (_executionHook) {
+        _executionHook.sendCommand({
+          type: 'enforcer_restore',
+          checkpoint_id: checkpointId
+        });
+      }
+      return {};
+    }
+  });
+
+  // ------------------------------------------------------------------
   // flowbook:run-cell — run a code cell and return metadata
   // ------------------------------------------------------------------
   app.commands.addCommand('flowbook:run-cell', {
