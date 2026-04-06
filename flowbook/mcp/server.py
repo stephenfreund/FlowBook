@@ -492,6 +492,14 @@ def print_log(ctx: Context) -> str:
 
 def main():
     """Entry point for the flowbook_mcp console script."""
+    import sys
+
+    # MCP uses STDIO for JSON protocol — any writes to stdout corrupt the stream.
+    # Redirect FlowBook's output module to stderr so log/timer messages don't
+    # interfere with MCP communication.
+    from flowbook.util.output import output
+    output._get_output_file = lambda: sys.stderr
+
     mcp.run(transport="stdio")
 
 
