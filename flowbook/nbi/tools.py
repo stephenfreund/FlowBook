@@ -15,6 +15,7 @@ import notebook_intelligence.api as nbapi
 
 from flowbook.nbi.cell_addressing import index_to_alpha, parse_cell_ref
 from flowbook.nbi.session import FlowBookSession
+from flowbook.tools.format import format_flowbook_meta
 from flowbook.scripts.fix_repro_errors import (
     rename_variable_in_code,
     find_actual_variable_name,
@@ -70,7 +71,10 @@ async def get_flowbook_metadata(cell: str, **args) -> str:
     response = args["response"]
     idx = parse_cell_ref(cell)
     meta = await response.run_ui_command('flowbook:get-metadata', {"cellIndex": idx})
-    return str(meta)
+    label = index_to_alpha(idx)
+    if not meta:
+        return f"Cell {label} has not been executed yet — no metadata available."
+    return f"{label}:\n{format_flowbook_meta(meta)}"
 
 
 @nbapi.auto_approve
@@ -80,7 +84,17 @@ async def get_next_actionable_cell(**args) -> str:
     """
     response = args["response"]
     result = await response.run_ui_command('flowbook:get-next-actionable', {})
-    return str(result)
+    if result.get('done', False):
+        return "All clean."
+    label = result.get('label', '?')
+    reason = result.get('reason', '?')
+    source = result.get('source', '')
+    line = f"{label}: {reason}"
+    if result.get('error'):
+        line += f" — {result['error']}"
+    if source:
+        line += f"\n>>> {source}"
+    return line
 
 
 @nbapi.auto_approve
@@ -90,7 +104,17 @@ async def get_status(**args) -> str:
     """
     response = args["response"]
     result = await response.run_ui_command('flowbook:get-status', {})
-    return str(result)
+    total = result.get('total_cells', 0)
+    executed = result.get('executed', 0)
+    stale = result.get('stale', 0)
+    clean = result.get('clean', 0)
+    violations = result.get('violations', 0)
+    reproducible = result.get('reproducible', False)
+
+    line = f"{executed}/{total} executed | {violations} violations | {stale} stale"
+    if reproducible:
+        line += " | reproducible ✓"
+    return line
 
 
 # ===================================================================
@@ -142,7 +166,22 @@ async def read_cell(cell: str = "", **args) -> str:
 
     idx = parse_cell_ref(cell)
     result = await response.run_ui_command('flowbook:get-cell', {"cellIndex": idx})
-    return str(result)
+    label = index_to_alpha(idx)
+    cell_id = result.get('cell_id', '?')
+    source = result.get('source', '')
+    outputs = result.get('outputs_text', '').strip() if isinstance(result.get('outputs_text'), str) else ''
+
+    line = f"{label} [{cell_id}]"
+    line += f"\n>>> {source}"
+    if outputs:
+        preview = outputs[:300]
+        if len(outputs) > 300:
+            preview += "..."
+        line += f"\nOutput: {preview}"
+    meta = result.get('flowbook_meta')
+    if meta:
+        line += f"\n{format_flowbook_meta(meta)}"
+    return line
 
 
 @nbapi.auto_approve
@@ -157,7 +196,9 @@ async def edit_cell_source(cell: str, new_source: str, **args) -> str:
     response = args["response"]
     idx = parse_cell_ref(cell)
     result = await response.run_ui_command('flowbook:edit-cell-source', {"cellIndex": idx, "source": new_source})
-    return str(result)
+    label = result.get('label', index_to_alpha(idx))
+    cell_id = result.get('cell_id', '?')
+    return f"Updated cell {label} [{cell_id}]"
 
 
 @nbapi.auto_approve
@@ -209,6 +250,78 @@ async def delete_cell(cell: str, **args) -> str:
 # Category 3: Execution
 # ===================================================================
 
+
+def _format_run_result(result: dict) -> str:
+    """Format a bridge run-cell result dict into a readable string.
+
+    Matches the MCP format: "@A [cell_id]: status — error_message\\nOutput: ...\\nFlowBook: ..."
+    """
+    label = result.get('label', '?')
+    cell_id = result.get('cell_id', '?')
+    status = result.get('status', '?')
+
+    line = f"{label} [{cell_id}]: {status}"
+
+    # Show error details from outputs
+    outputs = result.get('outputs_text', '').strip()
+    if status == 'error' and outputs:
+        # For errors, show the traceback prominently
+        preview = outputs[:500]
+        if len(outputs) > 500:
+            preview += "..."
+        line += f"\n{preview}"
+    elif outputs:
+        preview = outputs[:200]
+        if len(outputs) > 200:
+            preview += "..."
+        line += f"\nOutput: {preview}"
+
+    # Show FlowBook violations
+    errors = result.get('errors', [])
+    if errors:
+        for e in errors:
+            etype = e.get('error_type', e.get('predicate', '?'))
+            msg = e.get('message', '')
+            locs = e.get('locations', [])
+            line += f"\n  Violation: {etype}"
+            if msg:
+                line += f" — {msg}"
+            if locs:
+                line += f" [{', '.join(str(l) for l in locs)}]"
+
+    return line
+
+
+def _format_run_actionable_cells_result(result: dict) -> str:
+    """Format the bridge run-actionable-cells result."""
+    total = result.get('total_run', 0)
+    cells = result.get('cells_run', [])
+    violations = result.get('violations', [])
+    with_errors = result.get('with_errors', [])
+    done = result.get('done', False)
+
+    line = f"Ran {total} cells"
+    if with_errors:
+        line += f" | errors in: {', '.join(str(e) for e in with_errors)}"
+    line += f" | {len(violations)} violations"
+
+    if done and not violations and not with_errors:
+        line += "\nAll clean!"
+    elif violations:
+        for v in violations:
+            label = v.get('label', '?')
+            etype = v.get('error_type', v.get('predicate', '?'))
+            locs = v.get('locations', [])
+            line += f"\n  {label}: {etype}"
+            if locs:
+                line += f" [{', '.join(str(l) for l in locs)}]"
+
+    if cells:
+        line += f"\nCells: {', '.join(str(c) for c in cells)}"
+
+    return line
+
+
 @nbapi.auto_approve
 @nbapi.tool
 async def run_cell(cell: str, **args) -> str:
@@ -220,7 +333,7 @@ async def run_cell(cell: str, **args) -> str:
     response = args["response"]
     idx = parse_cell_ref(cell)
     result = await response.run_ui_command('flowbook:run-cell', {"cellIndex": idx})
-    return str(result)
+    return _format_run_result(result)
 
 
 @nbapi.auto_approve
@@ -229,15 +342,12 @@ async def run_actionable_cell(**args) -> str:
     """Find and run the next actionable cell. Priority: error > violation > stale > unexecuted.
     """
     response = args["response"]
-    # Find next actionable
     actionable = await response.run_ui_command('flowbook:get-next-actionable', {})
     if actionable.get('done', False):
         return "All clean \u2014 no actionable cells."
     idx = actionable.get('index', 0)
-    # Run it
     result = await response.run_ui_command('flowbook:run-cell', {"cellIndex": idx})
-    label = index_to_alpha(idx)
-    return f"Ran {label}: {result}"
+    return _format_run_result(result)
 
 
 @nbapi.auto_approve
@@ -247,7 +357,7 @@ async def run_actionable_cells(**args) -> str:
     """
     response = args["response"]
     result = await response.run_ui_command('flowbook:run-actionable-cells', {})
-    return str(result)
+    return _format_run_actionable_cells_result(result)
 
 
 @nbapi.auto_approve
@@ -257,7 +367,7 @@ async def run_all_cells(**args) -> str:
     """
     response = args["response"]
     result = await response.run_ui_command('flowbook:run-actionable-cells', {})
-    return str(result)
+    return _format_run_actionable_cells_result(result)
 
 
 @nbapi.auto_approve

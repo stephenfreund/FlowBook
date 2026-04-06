@@ -59,7 +59,7 @@ class TestGetFlowbookMetadata:
         mock_response.run_ui_command.assert_awaited_once_with(
             'flowbook:get-metadata', {'cellIndex': 2}
         )
-        assert 'reads' in result
+        assert 'Reads:' in result
 
     @pytest.mark.asyncio
     async def test_numeric_cell_ref(self, mock_response, mock_request):
@@ -97,7 +97,7 @@ class TestGetStatus:
         mock_response.run_ui_command.assert_awaited_once_with(
             'flowbook:get-status', {}
         )
-        assert 'total' in result
+        assert 'executed' in result
 
 
 # ==================================================================
@@ -128,7 +128,7 @@ class TestEditCellSource:
         mock_response.run_ui_command.assert_awaited_once_with(
             'flowbook:edit-cell-source', {'cellIndex': 2, 'source': 'y = 2'}
         )
-        assert 'ok' in result
+        assert 'Updated cell' in result
 
 
 class TestDeleteCell:
@@ -158,13 +158,18 @@ class TestDeleteCell:
 class TestRunCell:
     @pytest.mark.asyncio
     async def test_calls_bridge(self, mock_response, mock_request):
-        mock_response.run_ui_command.return_value = {'output': 'hello'}
+        mock_response.run_ui_command.return_value = {
+            'label': '@A', 'cell_id': 'ab12', 'status': 'ok',
+            'outputs_text': 'hello', 'errors': [],
+        }
         result = await _call(
             tools.run_cell, mock_response, mock_request, cell='@A'
         )
         mock_response.run_ui_command.assert_awaited_once_with(
             'flowbook:run-cell', {'cellIndex': 0}
         )
+        assert '@A' in result
+        assert 'ok' in result
         assert 'hello' in result
 
 
@@ -173,7 +178,7 @@ class TestRunActionableCell:
     async def test_runs_next_actionable(self, mock_response, mock_request):
         mock_response.run_ui_command.side_effect = [
             {'index': 2, 'reason': 'stale'},  # get-next-actionable
-            {'output': 'result'},               # run-cell
+            {'label': '@C', 'cell_id': 'cc', 'status': 'ok', 'outputs_text': '', 'errors': []},  # run-cell
         ]
         result = await _call(
             tools.run_actionable_cell, mock_response, mock_request
