@@ -328,8 +328,11 @@ def _format_run_actionable_cells_result(result: dict) -> str:
     done = result.get('done', False)
 
     line = f"Ran {total} cells"
-    if with_errors:
+    if with_errors and isinstance(with_errors, (list, tuple)):
         line += f" | errors in: {', '.join(str(e) for e in with_errors)}"
+    elif with_errors:
+        line += f" | {with_errors} errors"
+    violations = violations if isinstance(violations, (list, tuple)) else []
     line += f" | {len(violations)} violations"
 
     if done and not violations and not with_errors:
@@ -343,7 +346,7 @@ def _format_run_actionable_cells_result(result: dict) -> str:
             if locs:
                 line += f" [{', '.join(str(l) for l in locs)}]"
 
-    if cells:
+    if cells and isinstance(cells, (list, tuple)):
         line += f"\nCells: {', '.join(str(c) for c in cells)}"
 
     return line
