@@ -40,11 +40,25 @@ import traceback
 def _safe_tool(fn):
     """Decorator that catches exceptions and returns error text instead of raising.
 
-    Ensures Claude always gets a response from NBI tools, even on internal errors.
+    Checks that the FlowBook kernel is active before running the tool.
+    Ensures the LLM always gets a response, even on internal errors.
     """
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         try:
+            # Check FlowBook kernel is active before running any tool
+            response = kwargs.get('response')
+            if response and not getattr(response, '_flowbook_active', False):
+                try:
+                    active = await response.run_ui_command('flowbook:is-active', {})
+                    is_active = active.get('active', False) if isinstance(active, dict) else bool(active)
+                except Exception:
+                    is_active = False
+                if not is_active:
+                    return (
+                        "ERROR: FlowBook kernel is not active. "
+                        "Switch the notebook kernel to 'flowbook_kernel' and try again."
+                    )
             return await fn(*args, **kwargs)
         except Exception as exc:
             tb = traceback.format_exc()

@@ -16,6 +16,8 @@ def mock_response():
     """Create a mock ChatResponse with a configurable run_ui_command."""
     response = AsyncMock()
     response.run_ui_command = AsyncMock()
+    # Mark as FlowBook-active so the kernel check passes in tests
+    response._flowbook_active = True
     return response
 
 
