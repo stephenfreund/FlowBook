@@ -90,12 +90,14 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
         return changed
 
     def _install_mcp_server(self) -> bool:
-        """Register FlowBook MCP server in both NBI and Claude Code configs.
+        """Register FlowBook MCP servers in NBI and Claude Code configs.
 
-        NBI config (~/.jupyter/nbi/mcp.json): makes the MCP server available
-        to ALL NBI chat participants (GitHub Copilot, OpenAI, Claude, etc.)
+        NBI config (~/.jupyter/nbi/mcp.json): registers flowbook_nbi_mcp which
+        works on the active JupyterLab notebook — available to ALL NBI chat
+        participants (GitHub Copilot, OpenAI, etc.)
 
-        Claude Code config (~/.claude.json): makes it available to Claude Code CLI.
+        Claude Code config (~/.claude.json): registers flowbook_mcp (standalone)
+        for Claude Code CLI use.
 
         Returns True if either config was updated.
         """
@@ -105,7 +107,7 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
         return changed
 
     def _register_mcp_in_nbi(self) -> bool:
-        """Register FlowBook MCP server in NBI's mcp.json."""
+        """Register FlowBook NBI MCP server in NBI's mcp.json."""
         config_dir = Path.home() / '.jupyter' / 'nbi'
         config_path = config_dir / 'mcp.json'
 
@@ -132,7 +134,7 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
             json.dump(config, f, indent=2)
             f.write('\n')
 
-        log.info("Registered FlowBook MCP server in %s", config_path)
+        log.info("Registered FlowBook NBI MCP server in %s", config_path)
         return True
 
     def _register_mcp_in_claude(self) -> bool:

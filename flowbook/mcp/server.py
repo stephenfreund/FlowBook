@@ -101,8 +101,16 @@ async def lifespan(server: FastMCP):
 mcp = FastMCP(
     "flowbook",
     instructions=(
-        "FlowBook MCP server for Jupyter notebook reproducibility analysis. "
-        "Load a notebook, run cells, inspect violations, apply fixes, and save."
+        "FlowBook MCP server for Jupyter notebook reproducibility analysis.\n\n"
+        "Workflow:\n"
+        "1. load_notebook(path) to open a notebook and start the kernel.\n"
+        "2. run_actionable_cells() to run all stale/unexecuted cells (NOT run_all_cells).\n"
+        "3. If violations found, use checkpoint() then fix tools: alpha_rename, "
+        "insert_deepcopy, remove_inplace, mark_diagnostic, merge_cells, move_cell.\n"
+        "4. run_actionable_cells() again after each fix.\n"
+        "5. save_notebook() when done.\n\n"
+        "Use read_cell() with no args to see all cells. Use @A notation for cell references.\n"
+        "Always use run_actionable_cells (not run_all_cells) — it skips clean cells and stops on errors."
     ),
     lifespan=lifespan,
 )
