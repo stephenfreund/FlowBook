@@ -90,10 +90,53 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
         return changed
 
     def _install_mcp_server(self) -> bool:
-        """Register FlowBook MCP server in ~/.claude.json if not already present.
+        """Register FlowBook MCP server in both NBI and Claude Code configs.
 
-        Returns True if the config was updated.
+        NBI config (~/.jupyter/nbi/mcp.json): makes the MCP server available
+        to ALL NBI chat participants (GitHub Copilot, OpenAI, Claude, etc.)
+
+        Claude Code config (~/.claude.json): makes it available to Claude Code CLI.
+
+        Returns True if either config was updated.
         """
+        changed = False
+        changed |= self._register_mcp_in_nbi()
+        changed |= self._register_mcp_in_claude()
+        return changed
+
+    def _register_mcp_in_nbi(self) -> bool:
+        """Register FlowBook MCP server in NBI's mcp.json."""
+        config_dir = Path.home() / '.jupyter' / 'nbi'
+        config_path = config_dir / 'mcp.json'
+
+        config = {}
+        if config_path.exists():
+            try:
+                with open(config_path) as f:
+                    config = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                log.warning("Could not read %s; skipping NBI MCP install", config_path)
+                return False
+
+        mcp_servers = config.setdefault('mcpServers', {})
+
+        if 'flowbook' in mcp_servers:
+            return False
+
+        mcp_servers['flowbook'] = {
+            'command': 'flowbook_mcp',
+        }
+
+        config_dir.mkdir(parents=True, exist_ok=True)
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+            f.write('\n')
+
+        log.info("Registered FlowBook MCP server in %s", config_path)
+        return True
+
+    def _register_mcp_in_claude(self) -> bool:
+        """Register FlowBook MCP server in Claude Code's ~/.claude.json."""
         config_path = Path.home() / '.claude.json'
 
         config = {}
@@ -102,7 +145,7 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
                 with open(config_path) as f:
                     config = json.load(f)
             except (json.JSONDecodeError, OSError):
-                log.warning("Could not read ~/.claude.json; skipping MCP server install")
+                log.warning("Could not read ~/.claude.json; skipping Claude Code MCP install")
                 return False
 
         mcp_servers = config.setdefault('mcpServers', {})
