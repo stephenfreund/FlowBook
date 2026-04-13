@@ -90,52 +90,16 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
         return changed
 
     def _install_mcp_server(self) -> bool:
-        """Register FlowBook MCP servers in NBI and Claude Code configs.
+        """Register FlowBook MCP server in Claude Code config only.
 
-        NBI config (~/.jupyter/nbi/mcp.json): registers flowbook_nbi_mcp which
-        works on the active JupyterLab notebook — available to ALL NBI chat
-        participants (GitHub Copilot, OpenAI, etc.)
+        NOT registered in NBI's mcp.json — the NBI extension toolset already
+        makes FlowBook tools available to all NBI chat participants (Copilot,
+        OpenAI, etc.) via host.register_toolset(). Registering the MCP server
+        too would create duplicate tools that confuse model tool selection.
 
-        Claude Code config (~/.claude.json): registers flowbook_mcp (standalone)
-        for Claude Code CLI use.
-
-        Returns True if either config was updated.
+        Returns True if the config was updated.
         """
-        changed = False
-        changed |= self._register_mcp_in_nbi()
-        changed |= self._register_mcp_in_claude()
-        return changed
-
-    def _register_mcp_in_nbi(self) -> bool:
-        """Register FlowBook NBI MCP server in NBI's mcp.json."""
-        config_dir = Path.home() / '.jupyter' / 'nbi'
-        config_path = config_dir / 'mcp.json'
-
-        config = {}
-        if config_path.exists():
-            try:
-                with open(config_path) as f:
-                    config = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                log.warning("Could not read %s; skipping NBI MCP install", config_path)
-                return False
-
-        mcp_servers = config.setdefault('mcpServers', {})
-
-        if 'flowbook' in mcp_servers:
-            return False
-
-        mcp_servers['flowbook'] = {
-            'command': 'flowbook_mcp',
-        }
-
-        config_dir.mkdir(parents=True, exist_ok=True)
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=2)
-            f.write('\n')
-
-        log.info("Registered FlowBook NBI MCP server in %s", config_path)
-        return True
+        return self._register_mcp_in_claude()
 
     def _register_mcp_in_claude(self) -> bool:
         """Register FlowBook MCP server in Claude Code's ~/.claude.json."""
