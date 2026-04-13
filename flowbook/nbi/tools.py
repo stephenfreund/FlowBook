@@ -743,20 +743,28 @@ async def print_log(**args) -> str:
 FLOWBOOK_INSTRUCTIONS = """FlowBook provides reproducibility tracking for Jupyter notebooks running the flowbook_kernel.
 Cells are referenced using @A, @B, ... @Z, @AA notation (document order, code cells only). Markdown cells are not counted.
 
-Workflow:
-1. Use get_next_actionable_cell to find what needs attention (error > stale > unexecuted).
-2. Use run_actionable_cell to execute it with reproducibility checking.
-3. If a violation occurs, use refactoring tools to fix it:
-   - alpha_rename: rename a variable from a cell onward
-   - remove_inplace: convert df.method(inplace=True) to df = df.method()
-   - insert_deepcopy: insert copy.deepcopy() to break aliasing
-   - mark_diagnostic: exclude a cell from reproducibility tracking
-   - merge_cells: combine adjacent cells into one
-   - move_cell: reorder cells
-4. Use run_actionable_cells to run all remaining cells until clean or error.
-5. Use get_flowbook_metadata to inspect a cell's read/write sets and violations.
+IMPORTANT: Before each tool call, print a one-line status message explaining what you're doing (e.g., "Running all actionable cells...", "Checkpointing before fix...", "Renaming 'df' to 'df_clean' from @C...").
 
-Use checkpoint before making changes, restore if needed.
+To read the full notebook, call read_cell() with no arguments — returns all cells in one call. To read a single cell, pass its @-label (e.g., read_cell("@C")).
+
+Workflow for running and fixing a notebook:
+1. run_actionable_cells() — runs all stale/unexecuted cells, stops on first error or violation.
+2. If violations found:
+   a. checkpoint() — save state before attempting fix.
+   b. get_next_actionable_cell() — find the problem cell.
+   c. read_cell("@X") — read the problematic cell.
+   d. Apply the appropriate fix:
+      - alpha_rename("@X", "old", "new") — rename a variable from a cell onward (most common fix)
+      - insert_deepcopy("@X", "var") — copy a variable to break aliasing (for column reassignment)
+      - remove_inplace("@X", "var") — convert df.method(inplace=True) to df = df.method()
+      - mark_diagnostic("@X") — exclude inspection cell from tracking (df.info(), plots)
+      - merge_cells(["@X", "@Y"]) — combine adjacent cells
+      - move_cell("@X", "@Y") — reorder cells
+   e. run_actionable_cells() — re-run to check the fix worked.
+   f. If worse, restore(checkpoint_id) and try a different strategy.
+3. save_notebook() when done.
+
+Use checkpoint() before making changes, restore() if needed.
 Always use FlowBook tools for cell operations — they preserve cell identity and track reproducibility.
 Never use indices or cell IDs directly — always use @A notation.
 """
