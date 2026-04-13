@@ -92,14 +92,33 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
     def _install_mcp_server(self) -> bool:
         """Register FlowBook MCP server in Claude Code config only.
 
-        NOT registered in NBI's mcp.json — the NBI extension toolset already
-        makes FlowBook tools available to all NBI chat participants (Copilot,
-        OpenAI, etc.) via host.register_toolset(). Registering the MCP server
-        too would create duplicate tools that confuse model tool selection.
+        NOT registered in NBI's mcp.json — the NBI extension toolset
+        (host.register_toolset) makes FlowBook tools available to all NBI
+        chat participants. The MCP server uses NotebookSession which doesn't
+        update JupyterLab's UI reliably. NBI tools use run_ui_command bridge.
 
         Returns True if the config was updated.
         """
+        self._remove_mcp_from_nbi()  # Clean up if previously registered
         return self._register_mcp_in_claude()
+
+    def _remove_mcp_from_nbi(self):
+        """Remove FlowBook from NBI's mcp.json if previously registered."""
+        config_path = Path.home() / '.jupyter' / 'nbi' / 'mcp.json'
+        if not config_path.exists():
+            return
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            mcp_servers = config.get('mcpServers', {})
+            if 'flowbook' in mcp_servers:
+                del mcp_servers['flowbook']
+                with open(config_path, 'w') as f:
+                    json.dump(config, f, indent=2)
+                    f.write('\n')
+                log.info("Removed FlowBook MCP server from NBI mcp.json")
+        except (json.JSONDecodeError, OSError):
+            pass
 
     def _register_mcp_in_claude(self) -> bool:
         """Register FlowBook MCP server in Claude Code's ~/.claude.json."""
