@@ -172,15 +172,8 @@ run_actionable_cells()
 **Error type**: `NO_WRITE_AFTER_READ` (backward mutation)
 **Example**: Cell @B does `df = df.fillna(0)`, Cell @C does `df = df.assign(feature=...)`.
 
-**Fix A** — Merge tightly coupled steps:
 
-```
-checkpoint()
-merge_cells(["@B", "@C"])
-run_actionable_cells()
-```
-
-**Fix B** — Give each step its own output name:
+**Fix** — Give each step its own output name:
 
 ```
 checkpoint()
@@ -244,4 +237,4 @@ restore("ckpt_abc12345")
 6. **Use `run_actionable_cells()`** after each fix to re-run all stale/unexecuted cells. It stops on the first error or violation.
 7. **Don't fix staleness directly**: Staleness is a _symptom_ of violations. Fix the violation and staleness resolves automatically. But stale cells DO need to be re-run to update the kernel state.
 8. **All cell references use @A notation**: @A = first code cell, @B = second, etc. Markdown cells are not counted.
-9. **Always report tool calls you make**
+9. **Always report tool calls you make and show their result**

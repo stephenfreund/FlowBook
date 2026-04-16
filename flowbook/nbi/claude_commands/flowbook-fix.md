@@ -62,7 +62,15 @@ For each iteration:
    mcp__nbi__read_cell("@C")
    ```
 
-   Categorize and fix using the taxonomy below.
+   Categorize and determine the best fix using the taxonomy below.
+
+    **Ask the user to confirm the fix** before applying it. Present the violation and the proposed strategy, then wait for approval. For example:
+
+   > @C has `NO_READ_AND_WRITE` on `df` (`df['x'] = df['x'] + 1`).
+   > Proposed fix: Make a deep copy if `df` in `df_copy`
+   > Apply this fix? (yes / no / suggest alternative)
+
+   Only proceed once the user confirms. If they say no or suggest an alternative, pick a different strategy and ask again.
 
 4. **After fixing, re-run** to propagate changes:
 
@@ -168,15 +176,7 @@ mcp__nbi__run_actionable_cells()
 **Error type**: `NO_WRITE_AFTER_READ` (backward mutation)
 **Example**: Cell @B does `df = df.fillna(0)`, Cell @C does `df = df.assign(feature=...)`.
 
-**Fix A** — Merge tightly coupled steps:
-
-```
-mcp__nbi__checkpoint()
-mcp__nbi__merge_cells(["@B", "@C"])
-mcp__nbi__run_actionable_cells()
-```
-
-**Fix B** — Give each step its own output name:
+**Fix** - Give each step its own output name:
 
 ```
 mcp__nbi__checkpoint()
@@ -190,7 +190,7 @@ mcp__nbi__run_actionable_cells()
 **Error type**: `NO_WRITE_AFTER_READ`
 **Example**: `model` used for LogisticRegression in cell @B, reassigned to RandomForest in cell @D.
 
-**Fix**: Rename from the point of reuse onwards.
+**Fix** - Rename from the point of reuse onwards.
 
 ```
 mcp__nbi__checkpoint()

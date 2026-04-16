@@ -3,6 +3,8 @@
 import pytest
 from unittest.mock import MagicMock, call
 
+pytest.importorskip("notebook_intelligence")                                                                                                                                                           
+
 from flowbook.nbi.extension import FlowBookNBIExtension
 
 

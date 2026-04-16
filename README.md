@@ -38,20 +38,53 @@ directories.
 
 ## Install
 
-To install the extension, execute:
+To install the extension once it is on Pypi, execute:
 
 ```bash
-pip install flowbook
+pip install flowbook-python
 ```
 
+## Notebook Intelligence Integration
+
+FlowBook optionally integrates with
+[Notebook Intelligence](https://github.com/notebook-intelligence/notebook-intelligence),
+an AI coding assistant for JupyterLab. When both packages are installed,
+FlowBook registers itself as an NBI extension and exposes its full tool
+suite to NBI-connected AI agents (e.g., Claude in JupyterLab).
+
+**What you get:**
+
+- **AI-driven reproducibility fixes** — NBI agents can run cells,
+  inspect violations, and apply refactoring tools (alpha-rename,
+  remove-inplace, insert-deepcopy) to make a notebook reproducible
+  without manual intervention.
+- **Identity-safe cell editing** — FlowBook replaces NBI's built-in
+  cell-edit and cell-execute tools with versions that preserve cell IDs
+  and trigger staleness tracking.
+- **Claude Code integration** — FlowBook automatically registers its
+  MCP server and `/flowbook-fix` slash command with Claude Code when activated through
+  NBI.
+
+To enable the integration, install a forked version of 
+Notebook Intelligence alongside FlowBook:
+
+```bash
+pip install git+https://github.com/stephenfreund/notebook-intelligence.git
+```
+
+FlowBook works fully without Notebook Intelligence — the kernel,
+JupyterLab extension, MCP server, and CLI are all independent.
+
+
 ## Command Line Tools
+
+**These are mostly for use in development and experimentation.**
 
 FlowBook provides several command line tools for notebook processing,
 optimization, and analysis. See [CLI.md](CLI.md) for complete
 documentation.
 
 - `flowbook` - Main CLI for notebook processing commands
-- `flowlab` - Launch JupyterLab with FlowBook extensions
 
 ## Uninstall
 
