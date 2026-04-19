@@ -780,6 +780,56 @@ export function registerBridgeCommands(
   });
 
   // ------------------------------------------------------------------
+  // flowbook:add-cell — insert a new cell at a specific position.
+  //
+  // Semantics mirror the MCP / CLI add_cell path:
+  //   - cellIndex: widget index at which to insert (cell at and after
+  //     that index is pushed down by 1).
+  //   - When called with afterCodeCellIndex=N, inserts AT
+  //     widgetIndex(codeCellN) + 1 — i.e. immediately after @<N>.
+  //   - When both fields are omitted, appends at the end.
+  // The NBI add_cell tool passes one of these fields; we handle both
+  // here to keep the command self-contained.
+  // ------------------------------------------------------------------
+  app.commands.addCommand('flowbook:add-cell', {
+    execute: args => {
+      const panel = getPanel();
+      if (!panel.model) {
+        throw new Error('Notebook model not available');
+      }
+      const model = panel.model.sharedModel;
+      const source = (args.source as string) ?? '';
+      const cellType = (args.cellType as 'code' | 'markdown') ?? 'code';
+
+      let insertAt: number;
+      if (typeof args.afterCodeCellIndex === 'number') {
+        const widgetIdx = codeCellToWidgetIndex(
+          panel,
+          args.afterCodeCellIndex as number
+        );
+        insertAt = widgetIdx + 1;
+      } else if (typeof args.cellIndex === 'number') {
+        insertAt = args.cellIndex as number;
+      } else {
+        insertAt = model.cells.length;
+      }
+
+      model.insertCell(insertAt, {
+        cell_type: cellType,
+        metadata: { trusted: true },
+        source
+      });
+
+      // The new cell's widget picks up its ID from the shared model.
+      const inserted = panel.content.widgets[insertAt];
+      return {
+        cell_id: inserted?.model.id ?? null,
+        inserted_at: insertAt
+      };
+    }
+  });
+
+  // ------------------------------------------------------------------
   // flowbook:scratch-work — run code against the live kernel with
   // silent=True and namespace checkpoint/restore (flowbook_isolate).
   // Returns a ScratchResult dict (see flowbook/tools/mcp_content.py).

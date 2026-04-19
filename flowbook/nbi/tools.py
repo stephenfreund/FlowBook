@@ -255,22 +255,19 @@ async def add_cell(source: str, cell_type: str = "code",
     Args:
         source: Source code (or markdown) for the new cell
         cell_type: "code" or "markdown"
-        after_cell: Insert after this cell (optional; appends if empty)
+        after_cell: Insert after this cell in @A notation (optional;
+                    appends at the end if empty)
     """
     response = args["response"]
+    ui_args: dict = {"source": source, "cellType": cell_type}
     if after_cell:
-        after_idx = parse_cell_ref(after_cell)
-        if cell_type == "code":
-            await response.run_ui_command('notebook-intelligence:add-code-cell-to-active-notebook', {"source": source})
-        else:
-            await response.run_ui_command('notebook-intelligence:add-markdown-cell-to-active-notebook', {"source": source})
-    else:
-        if cell_type == "code":
-            await response.run_ui_command('notebook-intelligence:add-code-cell-to-active-notebook', {"source": source})
-        else:
-            await response.run_ui_command('notebook-intelligence:add-markdown-cell-to-active-notebook', {"source": source})
+        ui_args["afterCodeCellIndex"] = parse_cell_ref(after_cell)
+    result = await response.run_ui_command('flowbook:add-cell', ui_args)
     await response.run_ui_command('flowbook:notify-structure', {})
-    return f"Added {cell_type} cell"
+    cid = (result or {}).get("cell_id") if isinstance(result, dict) else None
+    if after_cell:
+        return f"Added {cell_type} cell after {after_cell}" + (f" [{cid}]" if cid else "")
+    return f"Added {cell_type} cell at end" + (f" [{cid}]" if cid else "")
 
 
 @nbapi.auto_approve
