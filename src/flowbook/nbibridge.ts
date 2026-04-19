@@ -808,25 +808,14 @@ export function registerBridgeCommands(
       let status: 'ok' | 'error' = 'ok';
       let error: any = null;
 
-      const future = kernel.requestExecute({
-        code,
-        silent: true,
-        store_history: false
-      });
-
-      // Inject the flowbook_isolate flag via the request metadata.
-      // Jupyter kernel protocol's cell_metadata rides on the outer message
-      // metadata; JupyterLab's requestExecute() uses the `metadata` field on
-      // the future's message. We set it before send:
-      try {
-        (future as any)._msg.metadata = {
-          ...((future as any)._msg.metadata || {}),
-          flowbook_isolate: true
-        };
-      } catch {
-        // If the message is already sealed, the kernel-side default is
-        // non-isolated (safe). Tests should catch this.
-      }
+      // Third arg is the message metadata — FlowBook's silent fast-path
+      // reads `flowbook_isolate` from there and wraps execution in
+      // checkpoint/restore.
+      const future = kernel.requestExecute(
+        { code, silent: true, store_history: false },
+        true,
+        { flowbook_isolate: true }
+      );
 
       future.onIOPub = (msg: any) => {
         const mt = msg.header.msg_type;

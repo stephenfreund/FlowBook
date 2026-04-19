@@ -759,23 +759,30 @@ async def print_log(**args) -> str:
 # Inspection — scratch_work & get_cell_outputs
 # ===================================================================
 
-def _render_for_participant(result: dict, request) -> object:
+def _render_for_participant(result, request) -> object:
     """Return a ToolContent for structured surfaces; else a markdown string.
 
-    Until `notebook-intelligence` is patched to understand `ToolContent`,
-    falling back to the markdown summary keeps the tool usable (images are
-    visible to the user via data-URIs but not as LLM image-vision).
+    If `result` is not a dict (e.g. notebook-intelligence stringified a
+    frontend-command error per chat-sidebar.tsx), surface it as a readable
+    error instead of crashing on result.get(...).
     """
-    participant_id = getattr(getattr(request, "participant", None), "id", None)
-    if participant_id in ("claude-code",) or True:
-        # Once notebook-intelligence supports ToolContent, the wrapper will
-        # pick the right surface automatically; until then, both paths just
-        # use the markdown summary for safety.
+    if not isinstance(result, dict):
+        msg = str(result) if result else "(empty response)"
+        if msg.startswith("Error executing command:"):
+            hint = (
+                " — the JupyterLab extension may be out of date. "
+                "Rebuild with `jlpm build` (or `jlpm watch`) and hard-refresh JupyterLab."
+            )
+            msg = msg + hint
+        return msg
+    try:
+        return build_tool_content(result)
+    except Exception as exc:
+        log.warning("build_tool_content failed: %s", exc)
         try:
-            return build_tool_content(result)
-        except Exception:
-            pass
-    return to_markdown(result)
+            return to_markdown(result)
+        except Exception as exc2:
+            return f"Internal error rendering result: {exc2}"
 
 
 @nbapi.tool
