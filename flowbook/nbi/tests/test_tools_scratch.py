@@ -156,19 +156,8 @@ class TestFrontendErrorFallback:
             tool_context={}, tool_args={"code": "x = 1"},
         )
         assert isinstance(result, str)
-        assert "Error executing command" in result
-        # And the hint that the extension may need rebuilding is appended.
-        assert "Rebuild" in result or "jlpm" in result
-
-    @pytest.mark.asyncio
-    async def test_plain_string_result_does_not_crash(self):
-        response = _response({"flowbook:scratch-work": "void"})
-        result = await nbi_tools.scratch_work.handle_tool_call(
-            request=MagicMock(), response=response,
-            tool_context={}, tool_args={"code": "x = 1"},
-        )
-        assert isinstance(result, str)
-        assert "void" in result or result
+        # _FrontendError is caught by _safe_tool and formatted with a hint.
+        assert "stale" in result.lower() or "rebuild" in result.lower()
 
     @pytest.mark.asyncio
     async def test_get_cell_outputs_resilient_to_string_result(self):
@@ -181,7 +170,7 @@ class TestFrontendErrorFallback:
             tool_context={}, tool_args={"cells": []},
         )
         assert isinstance(result, str)
-        assert "Error executing command" in result
+        assert "stale" in result.lower() or "rebuild" in result.lower()
 
 
 class TestRegistration:

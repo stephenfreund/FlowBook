@@ -122,3 +122,32 @@ class TestAddCellAfter:
             tool_args={"source": "x = 1"},
         )
         assert "end" in msg.lower()
+
+
+class TestAddCellFailsLoudWhenFrontendBroken:
+    @pytest.mark.asyncio
+    async def test_stringified_command_error_is_surfaced(self):
+        """If flowbook:add-cell isn't registered (stale bundle), chat-sidebar.tsx
+        returns an error string. add_cell must report failure, not success with
+        no cell_id."""
+        response = _response({
+            "flowbook:add-cell": "Error executing command: Command 'flowbook:add-cell' not registered.",
+        })
+        msg = await nbi_tools.add_cell.handle_tool_call(
+            request=MagicMock(), response=response,
+            tool_context={}, tool_args={"source": "x = 1", "after_cell": "@A"},
+        )
+        assert "Added" not in msg, f"Expected failure message, got: {msg!r}"
+        assert "stale" in msg.lower() or "rebuild" in msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_missing_cell_id_is_surfaced(self):
+        """If flowbook:add-cell returns a dict without cell_id, the tool must
+        surface that as an error — it means something went wrong on the frontend."""
+        response = _response({"flowbook:add-cell": {}})
+        msg = await nbi_tools.add_cell.handle_tool_call(
+            request=MagicMock(), response=response,
+            tool_context={}, tool_args={"source": "x = 1", "after_cell": "@A"},
+        )
+        assert "Added" not in msg
+        assert "unexpected" in msg.lower() or "stale" in msg.lower() or "rebuild" in msg.lower()

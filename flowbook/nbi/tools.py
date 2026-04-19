@@ -42,6 +42,39 @@ import functools
 import traceback
 
 
+_STALE_FRONTEND_HINT = (
+    "ERROR: FlowBook frontend extension is stale or not loaded. "
+    "Rebuild with `jlpm build`, reinstall with "
+    "`jupyter labextension develop . --overwrite`, and then RESTART "
+    "JupyterLab (not just a browser refresh — the lab server needs to "
+    "pick up the new bundle)."
+)
+
+
+def _is_frontend_error_string(value) -> bool:
+    """True when notebook-intelligence's chat-sidebar.tsx wrapped a frontend
+    command exception into a plain string like 'Error executing command: ...'.
+    Indicates the JupyterLab extension doesn't know the command we called —
+    usually because the bundle is stale."""
+    return isinstance(value, str) and value.startswith("Error executing command")
+
+
+class _FrontendError(Exception):
+    """Raised when run_ui_command returns a stringified command error."""
+    pass
+
+
+async def _ui(response, command: str, args: dict = None):
+    """Call response.run_ui_command, but raise _FrontendError if the result
+    is a stringified command error. Use this wherever a tool expects a
+    structured dict response so stale-bundle failures surface clearly
+    instead of crashing with 'str has no attribute get'."""
+    result = await response.run_ui_command(command, args or {})
+    if _is_frontend_error_string(result):
+        raise _FrontendError(f"{command!r}: {result}")
+    return result
+
+
 def _safe_tool(fn):
     """Decorator that catches exceptions and returns error text instead of raising.
 
@@ -56,15 +89,32 @@ def _safe_tool(fn):
             if response and not getattr(response, '_flowbook_active', False):
                 try:
                     active = await response.run_ui_command('flowbook:is-active', {})
-                    is_active = active.get('active', False) if isinstance(active, dict) else bool(active)
                 except Exception:
-                    is_active = False
+                    active = None
+                # If the frontend plugin isn't loaded at all, the canary
+                # comes back as an error string rather than a dict.
+                if _is_frontend_error_string(active):
+                    return _STALE_FRONTEND_HINT + f" (canary returned: {active!r})"
+                is_active = active.get('active', False) if isinstance(active, dict) else bool(active)
                 if not is_active:
                     return (
                         "ERROR: FlowBook kernel is not active. "
                         "Switch the notebook kernel to 'flowbook_kernel' and try again."
                     )
             return await fn(*args, **kwargs)
+        except _FrontendError as exc:
+            log.error("Tool %s hit frontend error: %s", fn.__name__, exc)
+            return f"{_STALE_FRONTEND_HINT}\n(underlying: {exc})"
+        except AttributeError as exc:
+            # Legacy safety net: catch the specific crash a tool gets when it
+            # calls .get() on a stringified command error. Maps to the same
+            # rebuild hint so agents get an actionable message.
+            if "'str' object has no attribute 'get'" in str(exc):
+                log.error("Tool %s hit stale-frontend crash: %s", fn.__name__, exc)
+                return _STALE_FRONTEND_HINT
+            tb = traceback.format_exc()
+            log.error("Tool %s failed: %s\n%s", fn.__name__, exc, tb)
+            return f"ERROR in {fn.__name__}: {type(exc).__name__}: {exc}"
         except Exception as exc:
             tb = traceback.format_exc()
             log.error("Tool %s failed: %s\n%s", fn.__name__, exc, tb)
@@ -262,12 +312,16 @@ async def add_cell(source: str, cell_type: str = "code",
     ui_args: dict = {"source": source, "cellType": cell_type}
     if after_cell:
         ui_args["afterCodeCellIndex"] = parse_cell_ref(after_cell)
-    result = await response.run_ui_command('flowbook:add-cell', ui_args)
+    result = await _ui(response, 'flowbook:add-cell', ui_args)
     await response.run_ui_command('flowbook:notify-structure', {})
-    cid = (result or {}).get("cell_id") if isinstance(result, dict) else None
+    if not isinstance(result, dict) or not result.get("cell_id"):
+        raise _FrontendError(
+            f"flowbook:add-cell returned an unexpected result: {result!r}"
+        )
+    cid = result["cell_id"]
     if after_cell:
-        return f"Added {cell_type} cell after {after_cell}" + (f" [{cid}]" if cid else "")
-    return f"Added {cell_type} cell at end" + (f" [{cid}]" if cid else "")
+        return f"Added {cell_type} cell after {after_cell} [{cid}]"
+    return f"Added {cell_type} cell at end [{cid}]"
 
 
 @nbapi.auto_approve
@@ -757,21 +811,13 @@ async def print_log(**args) -> str:
 # ===================================================================
 
 def _render_for_participant(result, request) -> object:
-    """Return a ToolContent for structured surfaces; else a markdown string.
+    """Turn a ScratchResult / CellOutputsResult dict into a ToolContent.
 
-    If `result` is not a dict (e.g. notebook-intelligence stringified a
-    frontend-command error per chat-sidebar.tsx), surface it as a readable
-    error instead of crashing on result.get(...).
+    Callers should have already vetted `result` via `_ui(...)`, so this
+    function assumes a dict. Once notebook-intelligence understands
+    ToolContent, the per-provider dispatch kicks in automatically; until
+    then, the participant wrapper stringifies via ToolContent.text_summary.
     """
-    if not isinstance(result, dict):
-        msg = str(result) if result else "(empty response)"
-        if msg.startswith("Error executing command:"):
-            hint = (
-                " — the JupyterLab extension may be out of date. "
-                "Rebuild with `jlpm build` (or `jlpm watch`) and hard-refresh JupyterLab."
-            )
-            msg = msg + hint
-        return msg
     try:
         return build_tool_content(result)
     except Exception as exc:
@@ -798,16 +844,8 @@ async def scratch_work(code: str, **args) -> object:
     """
     response = args["response"]
     request = args.get("request")
-    result = await response.run_ui_command(
-        'flowbook:scratch-work',
-        {"code": code},
-    )
-    rendered = _render_for_participant(result, request)
-    # Until notebook-intelligence is patched, ToolContent gets stringified.
-    # Calling to_markdown here ensures we always surface something readable.
-    if isinstance(rendered, ToolContent):
-        return rendered
-    return rendered
+    result = await _ui(response, 'flowbook:scratch-work', {"code": code})
+    return _render_for_participant(result, request)
 
 
 @nbapi.auto_approve
@@ -824,7 +862,7 @@ async def get_cell_outputs(cells: list, **args) -> object:
     response = args["response"]
     request = args.get("request")
     # Resolve @A refs to cell IDs by reading the current cell order.
-    order_counts = await response.run_ui_command('flowbook:get-cell-count', {})
+    order_counts = await _ui(response, 'flowbook:get-cell-count', {})
     num_code = order_counts.get('code_cells', 0)
     cell_ids: list[str] = []
     for ref in cells or []:
@@ -834,16 +872,11 @@ async def get_cell_outputs(cells: list, **args) -> object:
             if idx >= num_code:
                 cell_ids.append(ref)  # will surface as not-found
                 continue
-            cell_data = await response.run_ui_command(
-                'flowbook:get-cell', {"cellIndex": idx}
-            )
+            cell_data = await _ui(response, 'flowbook:get-cell', {"cellIndex": idx})
             cell_ids.append(cell_data.get('cell_id', ref))
         else:
             cell_ids.append(ref)
-    result = await response.run_ui_command(
-        'flowbook:get-cell-outputs',
-        {"cellIds": cell_ids},
-    )
+    result = await _ui(response, 'flowbook:get-cell-outputs', {"cellIds": cell_ids})
     return _render_for_participant(result, request)
 
 

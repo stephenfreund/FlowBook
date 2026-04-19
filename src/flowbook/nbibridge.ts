@@ -814,16 +814,14 @@ export function registerBridgeCommands(
         insertAt = model.cells.length;
       }
 
-      model.insertCell(insertAt, {
+      const inserted = model.insertCell(insertAt, {
         cell_type: cellType,
         metadata: { trusted: true },
         source
       });
 
-      // The new cell's widget picks up its ID from the shared model.
-      const inserted = panel.content.widgets[insertAt];
       return {
-        cell_id: inserted?.model.id ?? null,
+        cell_id: (inserted as any)?.id ?? null,
         inserted_at: insertAt
       };
     }
