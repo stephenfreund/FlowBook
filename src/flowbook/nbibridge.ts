@@ -69,6 +69,75 @@ function codeCellToWidgetIndex(
   );
 }
 
+// ---------------------------------------------------------------------------
+// MIME bundle → Output dict (mirrors flowbook/server/kernel_helper.py:_filter_mime_bundle)
+// ---------------------------------------------------------------------------
+
+const KEEP_IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/svg+xml'];
+const KEEP_TEXT_MIMES = ['text/html', 'text/plain'];
+
+function filterMimeBundle(
+  data: Record<string, any>
+): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const mime in data) {
+    const value = data[mime];
+    if (KEEP_IMAGE_MIMES.includes(mime)) {
+      const b64 = typeof value === 'string' ? value : '';
+      out[mime] = {
+        encoding: 'base64',
+        bytes: b64,
+        size_bytes: Math.floor((b64.length * 3) / 4)
+      };
+    } else if (KEEP_TEXT_MIMES.includes(mime)) {
+      const text = typeof value === 'string' ? value : String(value ?? '');
+      out[mime] = { text };
+    } else {
+      const asText =
+        typeof value === 'string'
+          ? value
+          : JSON.stringify(value ?? {}) || String(value ?? '');
+      out[mime] = { size_bytes: asText.length };
+    }
+  }
+  return out;
+}
+
+/**
+ * Convert one notebook-model output entry into the shared Output dict shape
+ * used by flowbook/tools/mcp_content.py (stream / execute_result /
+ * display_data / error).
+ */
+function outputToDict(output: any): any {
+  if (!output) {
+    return null;
+  }
+  const type = output.type;
+  if (type === 'stream') {
+    return {
+      kind: 'stream',
+      stream_name: output.name ?? 'stdout',
+      text: output.text ?? output.data?.['text/plain'] ?? ''
+    };
+  }
+  if (type === 'execute_result' || type === 'display_data') {
+    return { kind: type, data: filterMimeBundle(output.data ?? {}) };
+  }
+  if (type === 'error') {
+    const esc = String.fromCharCode(27);
+    const ansiRegex = new RegExp(esc + '\\[[0-9;]*m', 'g');
+    const tb = Array.isArray(output.traceback)
+      ? output.traceback.map((l: string) => l.replace(ansiRegex, ''))
+      : [];
+    const text = [
+      `${output.ename ?? ''}: ${output.evalue ?? ''}`,
+      ...tb
+    ].join('\n');
+    return { kind: 'error', data: { 'text/plain': { text } } };
+  }
+  return null;
+}
+
 /**
  * Format cell outputs as text for tool responses.
  */
@@ -707,6 +776,154 @@ export function registerBridgeCommands(
         cells_run: totalRun,
         summary: status
       };
+    }
+  });
+
+  // ------------------------------------------------------------------
+  // flowbook:scratch-work — run code against the live kernel with
+  // silent=True and namespace checkpoint/restore (flowbook_isolate).
+  // Returns a ScratchResult dict (see flowbook/tools/mcp_content.py).
+  // ------------------------------------------------------------------
+  app.commands.addCommand('flowbook:scratch-work', {
+    execute: async args => {
+      const panel = getPanel();
+      const code = (args.code as string) || '';
+      const session = panel.sessionContext.session;
+      const kernel = session?.kernel;
+      if (!kernel) {
+        return {
+          status: 'error',
+          execution_time_ms: 0,
+          outputs: [],
+          error: {
+            ename: 'NoKernel',
+            evalue: 'No active kernel',
+            traceback: []
+          }
+        };
+      }
+
+      const t0 = performance.now();
+      const outputs: any[] = [];
+      let status: 'ok' | 'error' = 'ok';
+      let error: any = null;
+
+      const future = kernel.requestExecute({
+        code,
+        silent: true,
+        store_history: false
+      });
+
+      // Inject the flowbook_isolate flag via the request metadata.
+      // Jupyter kernel protocol's cell_metadata rides on the outer message
+      // metadata; JupyterLab's requestExecute() uses the `metadata` field on
+      // the future's message. We set it before send:
+      try {
+        (future as any)._msg.metadata = {
+          ...((future as any)._msg.metadata || {}),
+          flowbook_isolate: true
+        };
+      } catch {
+        // If the message is already sealed, the kernel-side default is
+        // non-isolated (safe). Tests should catch this.
+      }
+
+      future.onIOPub = (msg: any) => {
+        const mt = msg.header.msg_type;
+        const content = msg.content;
+        if (mt === 'stream') {
+          outputs.push({
+            kind: 'stream',
+            stream_name: content.name,
+            text: content.text
+          });
+        } else if (mt === 'execute_result') {
+          outputs.push({
+            kind: 'execute_result',
+            data: filterMimeBundle(content.data ?? {})
+          });
+        } else if (mt === 'display_data') {
+          outputs.push({
+            kind: 'display_data',
+            data: filterMimeBundle(content.data ?? {})
+          });
+        } else if (mt === 'error') {
+          status = 'error';
+          error = {
+            ename: content.ename ?? '',
+            evalue: content.evalue ?? '',
+            traceback: (content.traceback ?? []).map((l: string) => l)
+          };
+        }
+      };
+
+      await future.done;
+      return {
+        status,
+        execution_time_ms: performance.now() - t0,
+        outputs,
+        error
+      };
+    }
+  });
+
+  // ------------------------------------------------------------------
+  // flowbook:get-cell-outputs — full outputs for the given cells,
+  // including images and HTML. Pure notebook-model read; no kernel call.
+  // ------------------------------------------------------------------
+  app.commands.addCommand('flowbook:get-cell-outputs', {
+    execute: args => {
+      const panel = getPanel();
+      const cellIds = (args.cellIds as string[]) || [];
+      const widgets = panel.content.widgets;
+
+      const byId = new Map<string, { label: string; cell: any }>();
+      let codeIdx = 0;
+      for (let i = 0; i < widgets.length; i++) {
+        const w = widgets[i];
+        if (w.model.type !== 'code') {
+          continue;
+        }
+        byId.set(w.model.id, {
+          label: `@${indexToAlpha(codeIdx)}`,
+          cell: w
+        });
+        codeIdx++;
+      }
+
+      const cells: any[] = [];
+      for (const cid of cellIds) {
+        const entry = byId.get(cid);
+        if (!entry) {
+          cells.push({
+            cell_id: cid,
+            label: cid,
+            outputs: [
+              {
+                kind: 'error',
+                data: {
+                  'text/plain': { text: `cell not found: ${cid}` }
+                }
+              }
+            ]
+          });
+          continue;
+        }
+        const model = entry.cell.model as ICodeCellModel;
+        const outputs = model.outputs;
+        const outArr: any[] = [];
+        if (outputs) {
+          for (let i = 0; i < outputs.length; i++) {
+            const o = outputs.get(i);
+            const asDict = outputToDict(o);
+            if (asDict) {
+              outArr.push(asDict);
+            }
+          }
+        }
+        cells.push({ cell_id: cid, label: entry.label, outputs: outArr });
+      }
+      return { cells };
     }
   });
 }

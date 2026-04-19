@@ -237,6 +237,20 @@ class FlowBookTools:
         label = self._label(cell_id)
         return format_run_result(result, label)
 
+    def scratch_work(self, code: str) -> dict:
+        """Run code against the live kernel WITHOUT affecting reproducibility
+        state. The user namespace is checkpointed before the call and restored
+        afterwards, so mutations do not persist. Returns a ScratchResult dict
+        (see flowbook/tools/mcp_content.py). The MCP and NBI wrappers convert
+        this to each surface's native multi-part content format."""
+        return self.session.scratch_work(code)
+
+    def get_cell_outputs(self, cells: list[str]) -> dict:
+        """Return full outputs (including images and HTML) for the given cells
+        as a CellOutputsResult dict. Accepts @A notation or cell IDs."""
+        cell_ids = [self._resolve_ref(c) for c in (cells or [])]
+        return self.session.get_cell_outputs(cell_ids)
+
     def run_all_cells(self) -> str:
         """Execute all code cells top-to-bottom."""
         result = self.session.run_all()

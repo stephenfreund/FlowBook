@@ -31,6 +31,7 @@ import urllib.request
 
 from flowbook.mcp.jupyter_config import discover_jupyter_server, discover_jupyter_server_root
 from flowbook.util.cell_ids import normalize_notebook_alpha, next_insertion_id
+from flowbook.util.cell_index import index_to_alpha
 from flowbook.server.kernel_helper import KernelHelper
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.scripts.fix_repro_errors import (
@@ -545,11 +546,13 @@ class NotebookSession:
         source = get_cell_source(cell)
         outputs = cell.get("outputs", [])
 
+        cell_order = self.get_cell_order()
+        label = index_to_alpha(cell_order.index(cell_id)) if cell_id in cell_order else None
         result = {
             "cell_id": cell_id,
             "cell_type": cell.get("cell_type", "code"),
             "source": source,
-            "outputs_text": format_outputs_text(outputs),
+            "outputs_text": format_outputs_text(outputs, cell_label=f"@{label}" if label else None),
             "execution_count": cell.get("execution_count"),
         }
 
@@ -638,6 +641,72 @@ class NotebookSession:
                 return msg
         return None
 
+    def scratch_work(self, code: str, timeout: float = 30.0) -> Dict[str, Any]:
+        """Run code against the live kernel with silent=True + isolate.
+
+        The code can read any live variable and produce any output, but any
+        namespace mutation is rolled back when the call finishes. Does NOT
+        create a cell, does NOT record reads/writes, does NOT stale anything.
+        Returns a ScratchResult dict (see flowbook/tools/mcp_content.py).
+        """
+        self._require_loaded()
+        return KernelHelper.execute_scratch(
+            self.kernel_client, code, timeout=timeout
+        )
+
+    def get_cell_outputs(self, cell_ids: list[str]) -> Dict[str, Any]:
+        """Read full outputs (images + HTML) for the given cells from the
+        in-memory notebook model. No kernel call. Returns a CellOutputsResult.
+        """
+        from flowbook.server.kernel_helper import _filter_mime_bundle
+
+        self._require_loaded()
+        self._refresh_from_contents_api()
+        cell_order = self.get_cell_order()
+
+        cells_out: list[dict] = []
+        for cid in cell_ids:
+            try:
+                idx, cell = self._find_cell(cid)
+            except Exception as exc:
+                cells_out.append({
+                    "cell_id": cid,
+                    "label": cid,
+                    "outputs": [{
+                        "kind": "error",
+                        "data": {"text/plain": {"text": f"cell not found: {exc}"}},
+                    }],
+                })
+                continue
+            label = index_to_alpha(cell_order.index(cid)) if cid in cell_order else cid
+            outs: list[dict] = []
+            for o in cell.get("outputs") or []:
+                ot = o.get("output_type")
+                if ot == "stream":
+                    outs.append({
+                        "kind": "stream",
+                        "stream_name": o.get("name", "stdout"),
+                        "text": o.get("text", ""),
+                    })
+                elif ot in ("execute_result", "display_data"):
+                    outs.append({
+                        "kind": ot,
+                        "data": _filter_mime_bundle(o.get("data") or {}),
+                    })
+                elif ot == "error":
+                    outs.append({
+                        "kind": "error",
+                        "data": {"text/plain": {
+                            "text": "\n".join([
+                                f"{o.get('ename','')}: {o.get('evalue','')}",
+                                *o.get("traceback", []),
+                            ])
+                        }},
+                    })
+            cells_out.append({"cell_id": cid, "label": label, "outputs": outs})
+
+        return {"cells": cells_out}
+
     def run_cell(self, cell_id: str, timeout: float = 300) -> Dict[str, Any]:
         """Execute a single cell and return outputs + flowbook metadata."""
         try:
@@ -691,10 +760,14 @@ class NotebookSession:
                 self.cell_status[cell_id] = "ok"
 
             # Build response
+            label = index_to_alpha(cell_order.index(cell_id)) if cell_id in cell_order else None
             response = {
                 "cell_id": cell_id,
                 "status": result["status"],
-                "outputs_text": format_outputs_text(result["outputs"]),
+                "outputs_text": format_outputs_text(
+                    result["outputs"],
+                    cell_label=f"@{label}" if label else None,
+                ),
             }
             if result.get("error_message"):
                 response["error_message"] = result["error_message"]

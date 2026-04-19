@@ -219,11 +219,31 @@ class TestFormatOutputsText:
 
     def test_display_data_html(self):
         outputs = [{"output_type": "display_data", "data": {"text/html": "<b>hi</b>"}}]
-        assert format_outputs_text(outputs) == "[HTML output]"
+        result = format_outputs_text(outputs)
+        assert "text/html" in result
+        assert "get_cell_outputs" in result
 
     def test_display_data_image(self):
         outputs = [{"output_type": "display_data", "data": {"image/png": "base64..."}}]
-        assert format_outputs_text(outputs) == "[Image output]"
+        result = format_outputs_text(outputs)
+        assert "image/png" in result
+        assert "get_cell_outputs" in result
+
+    def test_display_data_html_with_label_includes_label(self):
+        outputs = [{"output_type": "display_data", "data": {"text/html": "<b>hi</b>"}}]
+        result = format_outputs_text(outputs, cell_label="@C")
+        assert 'get_cell_outputs(["@C"])' in result
+
+    def test_display_data_text_and_image_both_rendered(self):
+        outputs = [{"output_type": "display_data", "data": {
+            "text/plain": "<Figure>", "image/png": "base64..."
+        }}]
+        result = format_outputs_text(outputs)
+        # text/plain passes through
+        assert "<Figure>" in result
+        # image gets a marker
+        assert "image/png" in result
+        assert "get_cell_outputs" in result
 
     def test_error(self):
         outputs = [{"output_type": "error", "ename": "ValueError", "evalue": "bad"}]

@@ -274,6 +274,42 @@ def run_cell(cell: str, ctx: Context) -> str:
 
 @mcp.tool()
 @_logged_tool
+def scratch_work(code: str, ctx: Context):
+    """Run code against the live kernel WITHOUT affecting reproducibility state.
+
+    The user namespace is checkpointed before the call and restored afterwards,
+    so any assignments, deletions, imports, or in-place mutations inside the
+    scratch code are rolled back. Does NOT create a cell, does NOT record
+    reads/writes, does NOT stale any cell. Returns full outputs including
+    images and HTML. Use for ad-hoc inspection (shapes, values, quick plots).
+
+    Standard checkpoint caveats apply: uncopyable objects and global state
+    outside shell.user_ns (e.g. numpy's global random) aren't restored.
+
+    Args:
+        code: Python code to execute.
+    """
+    from flowbook.tools.mcp_content import to_mcp_content
+    return to_mcp_content(_get_tools(ctx).scratch_work(code))
+
+
+@mcp.tool()
+@_logged_tool
+def get_cell_outputs(cells: list, ctx: Context):
+    """Return the full outputs of one or more cells, including images and HTML
+    tables. Companion to read_cell, which shows compact markers for non-text
+    outputs. Call this when you need to actually see an image or parse a full
+    HTML table the LLM couldn't infer from the marker alone.
+
+    Args:
+        cells: List of cell references (@A notation or 4-char cell IDs).
+    """
+    from flowbook.tools.mcp_content import to_mcp_content
+    return to_mcp_content(_get_tools(ctx).get_cell_outputs(cells))
+
+
+@mcp.tool()
+@_logged_tool
 def run_all_cells(ctx: Context) -> str:
     """Execute all code cells top-to-bottom with reproducibility tracking.
 

@@ -59,6 +59,7 @@ class TestFlowBookNBIExtension:
             "add_cell", "delete_cell",
             "run_cell", "run_actionable_cell", "run_actionable_cells", "run_all_cells",
             "continue_after_violation",
+            "scratch_work", "get_cell_outputs",
             "alpha_rename", "remove_inplace", "insert_deepcopy", "mark_diagnostic",
             "merge_cells", "move_cell",
             "save_notebook",

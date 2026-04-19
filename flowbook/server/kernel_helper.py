@@ -47,6 +47,33 @@ CSV_DOWNSAMPLE_PATCH_TEMPLATE = textwrap.dedent('''
 ''').strip()
 
 
+def _filter_mime_bundle(data: dict) -> dict:
+    """Convert a Jupyter MIME bundle to the `Output.data` shape used by
+    `mcp_content`: each kept MIME type becomes either a text Payload or a
+    base64 Payload; dropped types still appear so the adapter can emit a
+    marker, but their value is a size-only stub.
+    """
+    from flowbook.tools.mcp_content import KEEP_IMAGE_MIMES, KEEP_TEXT_MIMES
+
+    out: dict[str, dict] = {}
+    for mime, value in data.items():
+        if mime in KEEP_IMAGE_MIMES:
+            b64 = value if isinstance(value, str) else ""
+            out[mime] = {
+                "encoding": "base64",
+                "bytes": b64,
+                "size_bytes": (len(b64) * 3) // 4,
+            }
+        elif mime in KEEP_TEXT_MIMES:
+            text = value if isinstance(value, str) else str(value)
+            out[mime] = {"text": text}
+        else:
+            # Dropped MIME — keep a size stub so the adapter can emit a marker
+            as_text = value if isinstance(value, str) else str(value)
+            out[mime] = {"size_bytes": len(as_text)}
+    return out
+
+
 class KernelHelper:
     """Helper class for kernel communication."""
 
@@ -99,6 +126,97 @@ class KernelHelper:
         )
         log(f"CSV downsampling enabled: keeping top {proportion*100:.1f}% of rows")
         return result
+
+    @staticmethod
+    def execute_scratch(
+        kernel_client: FlowbookKernelClient,
+        code: str,
+        timeout: float = 30.0,
+    ) -> Dict[str, Any]:
+        """Run code against the live kernel with `silent=True` and a
+        kernel-side checkpoint/restore wrapper (flowbook_isolate=True).
+
+        The user namespace is restored after the call, no tracking is
+        recorded, no staleness is propagated, and no flowbook_update
+        messages are emitted. Stdout/stderr, execute_result, display_data,
+        and errors are collected from IOPub and returned as a dict matching
+        the `ScratchResult` shape used by `flowbook/tools/mcp_content.py`.
+        """
+        import time as _time
+
+        cell_metadata = {"timeout": timeout, "flowbook_isolate": True}
+        t0 = _time.time()
+        msg_id = kernel_client.execute(
+            code,
+            silent=True,
+            store_history=False,
+            cell_metadata=cell_metadata,
+        )
+
+        outputs: list[dict] = []
+        status = "ok"
+        error: dict | None = None
+
+        start = _time.time()
+        while True:
+            if _time.time() - start > timeout:
+                status = "error"
+                error = {
+                    "ename": "TimeoutError",
+                    "evalue": f"scratch_work timed out after {timeout}s",
+                    "traceback": [],
+                }
+                break
+            try:
+                msg = kernel_client.get_iopub_msg(timeout=1.0)
+            except Exception:
+                continue
+
+            if msg["parent_header"].get("msg_id") != msg_id:
+                continue
+
+            mt = msg["header"]["msg_type"]
+            content = msg["content"]
+
+            if mt == "stream":
+                outputs.append({
+                    "kind": "stream",
+                    "stream_name": content["name"],
+                    "text": content["text"],
+                })
+            elif mt == "execute_result":
+                outputs.append({
+                    "kind": "execute_result",
+                    "data": _filter_mime_bundle(content.get("data") or {}),
+                })
+            elif mt == "display_data":
+                outputs.append({
+                    "kind": "display_data",
+                    "data": _filter_mime_bundle(content.get("data") or {}),
+                })
+            elif mt == "error":
+                status = "error"
+                error = {
+                    "ename": content.get("ename", ""),
+                    "evalue": content.get("evalue", ""),
+                    "traceback": [line.rstrip() for line in content.get("traceback", [])],
+                }
+            elif mt == "status":
+                if content["execution_state"] == "idle":
+                    break
+
+        # Drain the shell reply (silent requests still produce one)
+        try:
+            kernel_client.get_shell_msg(timeout=1.0)
+        except Exception:
+            pass
+
+        return {
+            "status": status,
+            "execution_time_ms": (_time.time() - t0) * 1000.0,
+            "outputs": outputs,
+            "error": error,
+        }
 
     @staticmethod
     def execute_code(

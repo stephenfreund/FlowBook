@@ -1,5 +1,5 @@
 ---
-description: 'Fix reproducibility violations in the currently open notebook using FlowBook tools. Works on the active JupyterLab notebook — no file path needed.'
+description: 'Fix reproducibility violations in the current notebook'
 ---
 
 # Fix Notebook for Reproducibility

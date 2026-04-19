@@ -16,6 +16,11 @@ import notebook_intelligence.api as nbapi
 from flowbook.nbi.cell_addressing import index_to_alpha, parse_cell_ref
 from flowbook.nbi.session import FlowBookSession
 from flowbook.tools.format import format_flowbook_meta
+from flowbook.tools.mcp_content import (
+    ToolContent,
+    build_tool_content,
+    to_markdown,
+)
 from flowbook.scripts.fix_repro_errors import (
     rename_variable_in_code,
     find_actual_variable_name,
@@ -751,29 +756,199 @@ async def print_log(**args) -> str:
 
 
 # ===================================================================
+# Inspection — scratch_work & get_cell_outputs
+# ===================================================================
+
+def _render_for_participant(result: dict, request) -> object:
+    """Return a ToolContent for structured surfaces; else a markdown string.
+
+    Until `notebook-intelligence` is patched to understand `ToolContent`,
+    falling back to the markdown summary keeps the tool usable (images are
+    visible to the user via data-URIs but not as LLM image-vision).
+    """
+    participant_id = getattr(getattr(request, "participant", None), "id", None)
+    if participant_id in ("claude-code",) or True:
+        # Once notebook-intelligence supports ToolContent, the wrapper will
+        # pick the right surface automatically; until then, both paths just
+        # use the markdown summary for safety.
+        try:
+            return build_tool_content(result)
+        except Exception:
+            pass
+    return to_markdown(result)
+
+
+@nbapi.tool
+@_safe_tool
+async def scratch_work(code: str, **args) -> object:
+    """Run code against the live kernel WITHOUT affecting reproducibility state.
+
+    The user namespace is checkpointed before the call and restored afterwards,
+    so any assignments, deletions, imports, or in-place mutations inside the
+    scratch code are rolled back. Does NOT create a cell, does NOT record
+    reads/writes, does NOT stale any cell. Returns full outputs including
+    images and HTML. Use for ad-hoc inspection (shapes, values, quick plots).
+
+    Args:
+        code: Python code to execute.
+    """
+    response = args["response"]
+    request = args.get("request")
+    result = await response.run_ui_command(
+        'flowbook:scratch-work',
+        {"code": code},
+    )
+    rendered = _render_for_participant(result, request)
+    # Until notebook-intelligence is patched, ToolContent gets stringified.
+    # Calling to_markdown here ensures we always surface something readable.
+    if isinstance(rendered, ToolContent):
+        return rendered
+    return rendered
+
+
+@nbapi.auto_approve
+@nbapi.tool
+@_safe_tool
+async def get_cell_outputs(cells: list, **args) -> object:
+    """Return the full outputs of one or more cells, including images and
+    HTML tables. Companion to read_cell, which shows compact markers for
+    non-text outputs.
+
+    Args:
+        cells: List of cell references in @A notation or 4-char cell IDs.
+    """
+    response = args["response"]
+    request = args.get("request")
+    # Resolve @A refs to cell IDs by reading the current cell order.
+    order_counts = await response.run_ui_command('flowbook:get-cell-count', {})
+    num_code = order_counts.get('code_cells', 0)
+    cell_ids: list[str] = []
+    for ref in cells or []:
+        ref = (ref or "").strip()
+        if ref.startswith("@") or (ref and ref.isalpha() and ref.isupper()):
+            idx = parse_cell_ref(ref)
+            if idx >= num_code:
+                cell_ids.append(ref)  # will surface as not-found
+                continue
+            cell_data = await response.run_ui_command(
+                'flowbook:get-cell', {"cellIndex": idx}
+            )
+            cell_ids.append(cell_data.get('cell_id', ref))
+        else:
+            cell_ids.append(ref)
+    result = await response.run_ui_command(
+        'flowbook:get-cell-outputs',
+        {"cellIds": cell_ids},
+    )
+    return _render_for_participant(result, request)
+
+
+# ===================================================================
 # Tool list builder
 # ===================================================================
 
-FLOWBOOK_INSTRUCTIONS = """FlowBook provides reproducibility tracking for Jupyter notebooks running the flowbook_kernel.
-Cells are referenced using @A, @B, ... @Z, @AA notation (document order, code cells only). Markdown cells are not counted.
+FLOWBOOK_BACKGROUND = """# FlowBook — reproducibility for Jupyter notebooks
 
-IMPORTANT: Before each tool call, print a one-line status message explaining what you're doing (e.g., "Running all actionable cells...", "Checkpointing before fix...", "Renaming 'df' to 'df_clean' from @C...").
+FlowBook is a custom Jupyter kernel (`flowbook_kernel`) and toolset that turns a notebook
+into a reproducibility-checked program. It records the read and write set of every cell
+execution at fine granularity (variable, column, column-set, row-set, file) and enforces
+**rerun consistency**: if every cell is marked CLEAN, running the notebook top-to-bottom
+will reproduce the current outputs bit-for-bit.
 
-To read the full notebook, call read_cell() with no arguments — returns all cells in one call. To read a single cell, pass its @-label (e.g., read_cell("@C")).
+## Programming model
 
-Workflow for running and fixing a notebook:
+The notebook is an ordered list of code cells (markdown cells are skipped for indexing).
+Cells share a single Python namespace. Each execution of cell `i` is observed by the
+kernel, which records:
+
+  - `R[i]` — the set of locations the cell read.
+  - `W[i]` — the set of locations the cell wrote.
+
+A *location* is one of: a variable, a named column of a dataframe, a set of columns, a
+set of rows, or a file path. When a cell is rejected as violating reproducibility, the
+kernel rolls the namespace back to the state it had before the cell ran, so the
+notebook's semantics match what a top-to-bottom re-run would produce.
+
+## The four validity predicates
+
+After every execution of cell `i`, the kernel checks four predicates over the current
+`R` and `W`. If any predicate fails the execution is rejected (or flagged as a
+violation, if continue-after-violation mode is on).
+
+  1. **NoReadAndWrite** — `R[i] ∩ W[i] = ∅`. A cell that both reads and writes the
+     same location accumulates state across re-runs (e.g. `train = pd.concat([train, extra])`
+     grows `train` every time).
+  2. **WriteBeforeRead** — `R[i] ⊆ W[1..i-1]`. Every location a cell reads must have
+     been written by some earlier cell. Catches dangling references and typos.
+  3. **NoReadBeforeWrite** (forward contamination) — `R[i] ∩ W[i+1..n] = ∅`. A cell
+     must not read a location that is only written by a *later* cell; that implies the
+     notebook was executed out of order.
+  4. **NoWriteAfterRead** (backward mutation) — `W[i] ∩ R[1..i-1] = ∅`. A cell must
+     not write a location that an *earlier* cell read; re-running cell `i` would change
+     the earlier cell's inputs and break rerun consistency.
+
+In addition, **UNRECOVERABLE_MUTATION** flags in-place mutations (e.g. `df.drop(inplace=True)`,
+`model.fit(...)`, `list.append(...)`) that FlowBook cannot roll back. Such cells are
+rejected so the namespace is never corrupted.
+
+## Staleness
+
+A CLEAN cell becomes STALE automatically when a nearby cell is edited or re-run in a
+way that invalidates its recorded outputs:
+
+  - **Forward staleness** — cell `j > i` reads or writes a location cell `i` just wrote;
+    `j`'s outputs may no longer reflect what a top-to-bottom rerun would produce.
+  - **Backward staleness** — cell `j < i` was the last writer of a location that `i` no
+    longer writes; `j` must be re-run to re-establish its outputs.
+
+Staleness is a *symptom*, not a cause — it resolves automatically once the underlying
+violation is fixed and the affected cells are re-run.
+
+## Fix taxonomy
+
+Each violation has a preferred algorithmic fix (AST-based tools — reliable, prefer
+over manual edits):
+
+  - `alpha_rename(@X, old, new)` — rename a variable from cell `@X` onwards.
+    Fixes `NoReadAndWrite` on variables and `NoWriteAfterRead` from reusing a name.
+  - `insert_deepcopy(@X, var)` — introduce `var = var.copy()` to break aliasing.
+    Fixes `NoReadAndWrite` on columns (`df['x'] = df['x'] + 1`) and object mutation.
+  - `remove_inplace(@X, var)` — rewrite `df.method(inplace=True)` as `df = df.method()`.
+    Fixes `UNRECOVERABLE_MUTATION` from pandas `inplace=True`.
+  - `mark_diagnostic(@X)` — exclude a pure-inspection cell (`df.info()`, plots, `print(...)`)
+    from read/write tracking. Fixes `NoWriteAfterRead` when the inspection cell precedes
+    a legitimate writer.
+  - `merge_cells([@X, @Y])` — merge adjacent cells when an allocation and its mutation
+    were split across cells. Fixes `UNRECOVERABLE_MUTATION` from `obj = X(); obj.fit(...)`.
+  - `move_cell(@X, @Y)` — reorder cells. Useful when inspection cells would be correct
+    if placed after the mutating cell.
+
+## Cell addressing
+
+Cells are always referenced by **@-label**: `@A` is the first code cell, `@B` the
+second, continuing `@Z, @AA, @AB, ...`. Markdown cells are not counted. Never use raw
+integer indices or the kernel's internal cell IDs — always use `@A` notation, and
+always use the FlowBook tools (never write-through tools that rewrite cells without
+preserving identity).
+"""
+
+
+FLOWBOOK_INSTRUCTIONS = FLOWBOOK_BACKGROUND + """
+## Workflow
+
+IMPORTANT: Before each tool call, print a one-line status message explaining what you're doing
+(e.g., "Running all actionable cells...", "Checkpointing before fix...", "Renaming 'df' to 'df_clean' from @C...").
+
+To read the full notebook, call read_cell() with no arguments — returns all cells in one call.
+To read a single cell, pass its @-label (e.g., read_cell("@C")).
+
+Run-and-fix loop:
 1. run_actionable_cells() — runs all stale/unexecuted cells, stops on first error or violation.
 2. If violations found:
    a. checkpoint() — save state before attempting fix.
    b. get_next_actionable_cell() — find the problem cell.
    c. read_cell("@X") — read the problematic cell.
-   d. Apply the appropriate fix:
-      - alpha_rename("@X", "old", "new") — rename a variable from a cell onward (most common fix)
-      - insert_deepcopy("@X", "var") — copy a variable to break aliasing (for column reassignment)
-      - remove_inplace("@X", "var") — convert df.method(inplace=True) to df = df.method()
-      - mark_diagnostic("@X") — exclude inspection cell from tracking (df.info(), plots)
-      - merge_cells(["@X", "@Y"]) — combine adjacent cells
-      - move_cell("@X", "@Y") — reorder cells
+   d. Apply the appropriate fix from the taxonomy above.
    e. run_actionable_cells() — re-run to check the fix worked.
    f. If worse, restore(checkpoint_id) and try a different strategy.
 3. save_notebook() when done.
@@ -805,6 +980,9 @@ def create_tools(session: FlowBookSession) -> list:
         run_actionable_cells,
         run_all_cells,
         continue_after_violation,
+        # Inspection
+        scratch_work,
+        get_cell_outputs,
         # Source Refactoring
         alpha_rename,
         remove_inplace,

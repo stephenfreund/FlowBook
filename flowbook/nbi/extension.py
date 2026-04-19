@@ -15,11 +15,15 @@ from notebook_intelligence.util import get_jupyter_root_dir
 
 from flowbook.nbi.tools import create_tools, FLOWBOOK_INSTRUCTIONS
 from flowbook.nbi.session import FlowBookSession
+from flowbook.nbi.chat_participant import FlowBookChatParticipant
 
 log = logging.getLogger(__name__)
 
-# Directory containing Claude command files bundled with this package
-_CLAUDE_COMMANDS_DIR = Path(__file__).parent / 'claude_commands'
+# Directory holding the @flowbook participant's slash-command prompts. The same
+# files are installed (with a `flowbook-` filename prefix) as Claude Code slash
+# commands so CLI users get the identical workflow as `/flowbook-<name>`.
+_COMMANDS_DIR = Path(__file__).parent / 'commands'
+_CLAUDE_COMMAND_PREFIX = 'flowbook-'
 
 
 class FlowBookNBIExtension(NotebookIntelligenceExtension):
@@ -57,6 +61,11 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
         )
         host.register_toolset(toolset)
 
+        host.register_chat_participant(FlowBookChatParticipant(
+            tools=toolset.tools,
+            commands_dir=_COMMANDS_DIR,
+        ))
+
         changed = self._install_claude_commands()
         changed |= self._install_mcp_server()
         if changed:
@@ -78,8 +87,8 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
         target_dir = Path(root_dir) / '.claude' / 'commands'
         changed = False
 
-        for source in _CLAUDE_COMMANDS_DIR.glob('*.md'):
-            target = target_dir / source.name
+        for source in _COMMANDS_DIR.glob('*.md'):
+            target = target_dir / f'{_CLAUDE_COMMAND_PREFIX}{source.name}'
             if target.exists() and target.read_text() == source.read_text():
                 continue
             target_dir.mkdir(parents=True, exist_ok=True)

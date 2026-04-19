@@ -134,25 +134,67 @@ def _to_str(value) -> str:
     return str(value) if value is not None else ""
 
 
-def format_outputs_text(outputs: List[Dict[str, Any]]) -> str:
-    """Extract human-readable text from cell outputs."""
-    parts = []
+_RICH_MIME_LABELS = {
+    "image/png": "image/png",
+    "image/jpeg": "image/jpeg",
+    "image/svg+xml": "image/svg+xml",
+    "text/html": "text/html",
+    "application/vnd.jupyter.widget-view+json": "widget",
+    "application/vnd.plotly.v1+json": "plotly",
+    "application/vnd.vega.v5+json": "vega",
+    "application/vnd.vegalite.v4+json": "vega-lite",
+    "application/json": "application/json",
+    "text/latex": "text/latex",
+}
+
+
+def format_output_marker(mime: str, size_bytes: int, cell_label: str = None) -> str:
+    """One-line marker advertising a non-text output so the LLM knows to
+    fetch the full payload via `get_cell_outputs` when it needs to see it."""
+    mime_label = _RICH_MIME_LABELS.get(mime, mime)
+    kb = max(1, size_bytes // 1024) if size_bytes else 0
+    size_part = f": {kb} KB" if size_bytes else ""
+    if cell_label:
+        fetch_hint = f' — call get_cell_outputs(["{cell_label}"]) for full content'
+    else:
+        fetch_hint = " — call get_cell_outputs for full content"
+    return f"[{mime_label}{size_part}{fetch_hint}]"
+
+
+def _rich_data_size(data: Dict[str, Any], mime: str) -> int:
+    value = data.get(mime)
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, list):
+        return sum(len(s) if isinstance(s, str) else 0 for s in value)
+    return len(str(value))
+
+
+def format_outputs_text(outputs: List[Dict[str, Any]], cell_label: str = None) -> str:
+    """Extract human-readable text from cell outputs.
+
+    text/plain goes through inline. Non-text-plain outputs (images, HTML,
+    widgets, plotly/vega specs) become compact markers like::
+
+        [image/png: 42 KB — call get_cell_outputs(["@C"]) for full content]
+
+    so the LLM knows rich content exists and can pull it on demand.
+    """
+    parts: List[str] = []
     for output in outputs:
         otype = output.get("output_type", "")
         if otype == "stream":
             parts.append(_to_str(output.get("text", "")))
-        elif otype == "execute_result":
-            data = output.get("data", {})
+        elif otype in ("execute_result", "display_data"):
+            data = output.get("data", {}) or {}
             if "text/plain" in data:
                 parts.append(_to_str(data["text/plain"]))
-        elif otype == "display_data":
-            data = output.get("data", {})
-            if "text/plain" in data:
-                parts.append(_to_str(data["text/plain"]))
-            elif "text/html" in data:
-                parts.append("[HTML output]")
-            elif "image/png" in data:
-                parts.append("[Image output]")
+            for mime in data:
+                if mime == "text/plain":
+                    continue
+                parts.append(format_output_marker(mime, _rich_data_size(data, mime), cell_label))
         elif otype == "error":
             ename = output.get("ename", "Error")
             evalue = output.get("evalue", "")

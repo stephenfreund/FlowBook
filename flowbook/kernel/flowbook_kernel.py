@@ -1319,6 +1319,45 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 if cell_meta and "cell_order" in cell_meta:
                     self._enforcer.set_cell_order(cell_meta["cell_order"])
 
+                # Silent requests bypass the reproducibility pipeline entirely:
+                # no R/W tracking, no staleness updates, no flowbook_update
+                # IOPub traffic. Used by internal probes like memory measurement
+                # that must not perturb state.
+                #
+                # When cell_meta["flowbook_isolate"] is set the kernel also
+                # wraps the execution in checkpoint + restore so any namespace
+                # mutation is rolled back after the call. This is the mechanism
+                # behind the `scratch_work` tool.
+                if silent:
+                    isolate = bool((cell_meta or {}).get("flowbook_isolate"))
+                    if isolate:
+                        import uuid
+                        ckpt_id = f"__scratch__:{uuid.uuid4().hex[:8]}"
+                        self._take_checkpoint(ckpt_id)
+                        try:
+                            return await self._ipython_do_execute(
+                                code,
+                                silent,
+                                store_history,
+                                user_expressions,
+                                allow_stdin,
+                                cell_meta=cell_meta,
+                                cell_id=self._cell_id,
+                            )
+                        finally:
+                            self._restore_checkpoint(ckpt_id)
+                            self._apply_restore_memo()
+                            self._checkpoints.delete(ckpt_id)
+                    return await self._ipython_do_execute(
+                        code,
+                        silent,
+                        store_history,
+                        user_expressions,
+                        allow_stdin,
+                        cell_meta=cell_meta,
+                        cell_id=self._cell_id,
+                    )
+
                 # Check for notebook_structure magic (parse and remove if present)
                 code = self._process_structure_magic(code)
 
