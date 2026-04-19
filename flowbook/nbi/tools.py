@@ -828,6 +828,7 @@ def _render_for_participant(result, request) -> object:
             return f"Internal error rendering result: {exc2}"
 
 
+@nbapi.auto_approve
 @nbapi.tool
 @_safe_tool
 async def scratch_work(code: str, **args) -> object:
