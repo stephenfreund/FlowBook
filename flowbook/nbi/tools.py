@@ -12,6 +12,7 @@ import time
 import logging
 
 import notebook_intelligence.api as nbapi
+from notebook_intelligence.api import ImageData, MarkdownData
 
 from flowbook.nbi.cell_addressing import index_to_alpha, parse_cell_ref
 from flowbook.nbi.session import FlowBookSession
@@ -828,6 +829,74 @@ def _render_for_participant(result, request) -> object:
             return f"Internal error rendering result: {exc2}"
 
 
+# ---------------------------------------------------------------------------
+# Chat streaming — render scratch_work output for the human reader, in
+# parallel with the ToolContent that goes back to the LLM.
+# ---------------------------------------------------------------------------
+
+def _stream_code_block(response, language: str, text: str) -> None:
+    if not text:
+        return
+    response.stream(MarkdownData(f"```{language}\n{text}\n```"))
+
+
+def _stream_scratch_result(response, code: str, result: dict) -> None:
+    """Push scratch_work's code and captured outputs to the chat so the
+    user can actually see what ran and what it produced. Images stream via
+    ImageData (rendered inline as <img>), text via fenced code blocks."""
+    header = "### `scratch_work`"
+    if not isinstance(result, dict):
+        response.stream(MarkdownData(header))
+        _stream_code_block(response, "python", code)
+        response.stream(MarkdownData(f"_(no structured output: {result!r})_"))
+        return
+
+    status = result.get("status", "ok")
+    t_ms = float(result.get("execution_time_ms") or 0.0)
+    icon = "\u2713" if status == "ok" else "\u2717"
+    response.stream(MarkdownData(f"{header}  *{icon} {status} \u00b7 {t_ms:.1f} ms*"))
+    _stream_code_block(response, "python", code)
+
+    for out in result.get("outputs") or []:
+        kind = out.get("kind")
+        data = out.get("data") or {}
+        if kind == "stream":
+            name = out.get("stream_name", "stdout")
+            text = out.get("text", "") or ""
+            if text.strip():
+                response.stream(MarkdownData(f"**{name}**"))
+                _stream_code_block(response, "", text.rstrip("\n"))
+            continue
+
+        # execute_result / display_data: prefer images → html → text/plain
+        image_streamed = False
+        for mime in ("image/png", "image/jpeg", "image/svg+xml"):
+            img = data.get(mime)
+            if img and img.get("bytes"):
+                response.stream(ImageData(content=f"data:{mime};base64,{img['bytes']}"))
+                image_streamed = True
+                break
+
+        html = data.get("text/html")
+        if html and html.get("text"):
+            # Render HTML tables etc. as a text block (NBI's HTMLFrame is
+            # noisier and adds scroll chrome; fenced block reads fine).
+            _stream_code_block(response, "html", html["text"])
+
+        tp = data.get("text/plain")
+        if tp and tp.get("text") and not image_streamed:
+            _stream_code_block(response, "", tp["text"])
+
+    err = result.get("error")
+    if err:
+        ename = err.get("ename", "")
+        evalue = err.get("evalue", "")
+        tb = err.get("traceback") or []
+        response.stream(MarkdownData(f"**Error:** `{ename}: {evalue}`"))
+        if tb:
+            _stream_code_block(response, "", "\n".join(tb))
+
+
 @nbapi.auto_approve
 @nbapi.tool
 @_safe_tool
@@ -846,6 +915,7 @@ async def scratch_work(code: str, **args) -> object:
     response = args["response"]
     request = args.get("request")
     result = await _ui(response, 'flowbook:scratch-work', {"code": code})
+    _stream_scratch_result(response, code, result)
     return _render_for_participant(result, request)
 
 

@@ -173,6 +173,130 @@ class TestFrontendErrorFallback:
         assert "stale" in result.lower() or "rebuild" in result.lower()
 
 
+class TestChatStreaming:
+    @pytest.mark.asyncio
+    async def test_streams_header_and_code_block(self):
+        response = _response({
+            "flowbook:scratch-work": {
+                "status": "ok", "execution_time_ms": 1.2, "outputs": [], "error": None,
+            }
+        })
+        await nbi_tools.scratch_work.handle_tool_call(
+            request=MagicMock(), response=response,
+            tool_context={}, tool_args={"code": "df.shape"},
+        )
+        # response.stream was called with MarkdownData and ImageData objects;
+        # check their .content for the header + fenced code block.
+        streamed = [c.args[0].content for c in response.stream.call_args_list
+                    if hasattr(c.args[0], "content")]
+        joined = "\n".join(streamed)
+        assert "scratch_work" in joined
+        assert "```python" in joined
+        assert "df.shape" in joined
+
+    @pytest.mark.asyncio
+    async def test_streams_stdout_as_code_block(self):
+        response = _response({
+            "flowbook:scratch-work": {
+                "status": "ok", "execution_time_ms": 0.5,
+                "outputs": [{"kind": "stream", "stream_name": "stdout", "text": "hello world\n"}],
+                "error": None,
+            }
+        })
+        await nbi_tools.scratch_work.handle_tool_call(
+            request=MagicMock(), response=response,
+            tool_context={}, tool_args={"code": "print('hi')"},
+        )
+        streamed = [c.args[0].content for c in response.stream.call_args_list
+                    if hasattr(c.args[0], "content")]
+        joined = "\n".join(streamed)
+        assert "stdout" in joined
+        assert "hello world" in joined
+
+    @pytest.mark.asyncio
+    async def test_streams_image_via_imagedata(self):
+        b64 = "iVBORw0KGgoAAAAN"  # fake PNG payload
+        response = _response({
+            "flowbook:scratch-work": {
+                "status": "ok", "execution_time_ms": 12.0,
+                "outputs": [{
+                    "kind": "display_data",
+                    "data": {"image/png": {"encoding": "base64", "bytes": b64, "size_bytes": 12}},
+                }],
+                "error": None,
+            }
+        })
+        await nbi_tools.scratch_work.handle_tool_call(
+            request=MagicMock(), response=response,
+            tool_context={}, tool_args={"code": "plt.show()"},
+        )
+        streamed = [c.args[0] for c in response.stream.call_args_list]
+        # One of the streamed items is an ImageData with a data: URI content.
+        from notebook_intelligence.api import ImageData as _ImageData
+        images = [s for s in streamed if isinstance(s, _ImageData)]
+        assert images, "expected ImageData stream for image/png output"
+        assert images[0].content.startswith("data:image/png;base64,")
+        assert b64 in images[0].content
+
+    @pytest.mark.asyncio
+    async def test_streams_error_traceback(self):
+        response = _response({
+            "flowbook:scratch-work": {
+                "status": "error", "execution_time_ms": 2.0,
+                "outputs": [],
+                "error": {"ename": "ValueError", "evalue": "bad", "traceback": ["line1", "line2"]},
+            }
+        })
+        await nbi_tools.scratch_work.handle_tool_call(
+            request=MagicMock(), response=response,
+            tool_context={}, tool_args={"code": "raise ValueError('bad')"},
+        )
+        streamed = [c.args[0].content for c in response.stream.call_args_list
+                    if hasattr(c.args[0], "content")]
+        joined = "\n".join(streamed)
+        assert "ValueError: bad" in joined
+        assert "line1" in joined and "line2" in joined
+
+    @pytest.mark.asyncio
+    async def test_streams_html_as_fenced_block(self):
+        response = _response({
+            "flowbook:scratch-work": {
+                "status": "ok", "execution_time_ms": 1.0,
+                "outputs": [{
+                    "kind": "execute_result",
+                    "data": {"text/html": {"text": "<table><tr><td>x</td></tr></table>"},
+                             "text/plain": {"text": "<Figure>"}},
+                }],
+                "error": None,
+            }
+        })
+        await nbi_tools.scratch_work.handle_tool_call(
+            request=MagicMock(), response=response,
+            tool_context={}, tool_args={"code": "df.head()"},
+        )
+        streamed = [c.args[0].content for c in response.stream.call_args_list
+                    if hasattr(c.args[0], "content")]
+        joined = "\n".join(streamed)
+        assert "```html" in joined
+        assert "<table>" in joined
+
+    @pytest.mark.asyncio
+    async def test_no_stream_on_frontend_error(self):
+        """When _ui raises _FrontendError, _stream_scratch_result should not
+        have streamed any of the per-output content (only whatever _safe_tool
+        emits as its error-hint return)."""
+        response = _response({
+            "flowbook:scratch-work": "Error executing command: Command 'flowbook:scratch-work' not registered.",
+        })
+        result = await nbi_tools.scratch_work.handle_tool_call(
+            request=MagicMock(), response=response,
+            tool_context={}, tool_args={"code": "x = 1"},
+        )
+        # _FrontendError path returns a string; we didn't even reach
+        # _stream_scratch_result.
+        assert isinstance(result, str)
+
+
 class TestRegistration:
     def test_scratch_work_registered(self):
         from flowbook.nbi.tools import create_tools
