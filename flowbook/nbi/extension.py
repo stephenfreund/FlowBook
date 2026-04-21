@@ -10,7 +10,13 @@ import logging
 import shutil
 from pathlib import Path
 
-from notebook_intelligence.api import NotebookIntelligenceExtension, Toolset, Host
+from notebook_intelligence.api import (
+    NotebookIntelligenceExtension,
+    Tool,
+    ToolPreInvokeResponse,
+    Toolset,
+    Host,
+)
 from notebook_intelligence.util import get_jupyter_root_dir
 
 from flowbook.nbi.tools import create_tools, FLOWBOOK_INSTRUCTIONS
@@ -24,6 +30,42 @@ log = logging.getLogger(__name__)
 # commands so CLI users get the identical workflow as `/flowbook-<name>`.
 _COMMANDS_DIR = Path(__file__).parent / 'commands'
 _CLAUDE_COMMAND_PREFIX = 'flowbook-'
+
+
+class _QuietTool(Tool):
+    """Wrapper that hides tool-call parameters from the NBI chat window."""
+
+    def __init__(self, inner: Tool):
+        super().__init__()
+        self._inner = inner
+        # Propagate so SecuredExtensionTool sees auto-approve status
+        self._auto_approve = getattr(inner, '_auto_approve', False)
+
+    @property
+    def name(self):
+        return self._inner.name
+
+    @property
+    def title(self):
+        return self._inner.title
+
+    @property
+    def tags(self):
+        return self._inner.tags
+
+    @property
+    def description(self):
+        return self._inner.description
+
+    @property
+    def schema(self):
+        return self._inner.schema
+
+    def pre_invoke(self, request, tool_args):
+        return ToolPreInvokeResponse(message=f"Calling tool '{self.name}'")
+
+    async def handle_tool_call(self, request, response, tool_context, tool_args):
+        return await self._inner.handle_tool_call(request, response, tool_context, tool_args)
 
 
 class FlowBookNBIExtension(NotebookIntelligenceExtension):
@@ -51,12 +93,13 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
         host.disable_builtin_toolset("nbi-notebook-execute")
 
         session = FlowBookSession()
+        tools = [_QuietTool(t) for t in create_tools(session)]
         toolset = Toolset(
             id="flowbook-reproducibility",
             name="FlowBook Reproducibility",
             description="Notebook reproducibility tracking, cell editing, execution, and refactoring",
             provider=self,
-            tools=create_tools(session),
+            tools=tools,
             instructions=FLOWBOOK_INSTRUCTIONS,
         )
         host.register_toolset(toolset)
