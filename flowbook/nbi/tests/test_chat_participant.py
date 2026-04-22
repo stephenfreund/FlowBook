@@ -290,8 +290,8 @@ class TestBackground:
     def test_instructions_begins_with_background(self):
         assert FLOWBOOK_INSTRUCTIONS.startswith(FLOWBOOK_BACKGROUND)
 
-    def test_instructions_has_workflow_section(self):
-        assert "Workflow" in FLOWBOOK_INSTRUCTIONS
+    def test_instructions_has_fix_algorithm_section(self):
+        assert "Fix algorithm" in FLOWBOOK_INSTRUCTIONS
         assert "run_actionable_cells" in FLOWBOOK_INSTRUCTIONS
 
     def test_background_not_duplicated(self):

@@ -117,6 +117,8 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
                 "Restart any running Claude Code sessions to pick up the changes."
             )
 
+        self._set_default_nbi_participant()
+
     def _install_claude_commands(self) -> bool:
         """Copy Claude command files to the project-local .claude/commands/ directory.
 
@@ -140,6 +142,32 @@ class FlowBookNBIExtension(NotebookIntelligenceExtension):
             changed = True
 
         return changed
+
+    def _set_default_nbi_participant(self) -> None:
+        """Set `default_chat_participant_id` to 'flowbook' in NBI's user config
+        when unset, so unprefixed prompts in the NBI chat route to @flowbook.
+        Respects an existing user choice (any value already present is left alone).
+        Requires NBI patch adding `default_chat_participant_id` (else the key is
+        simply ignored by older NBI versions)."""
+        config_path = Path.home() / '.jupyter' / 'nbi' / 'config.json'
+        config: dict = {}
+        if config_path.exists():
+            try:
+                with open(config_path) as f:
+                    config = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                log.warning("Could not read %s; skipping NBI default-participant install", config_path)
+                return
+
+        if 'default_chat_participant_id' in config:
+            return
+
+        config['default_chat_participant_id'] = 'flowbook'
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+            f.write('\n')
+        log.info("Set NBI default_chat_participant_id=flowbook in %s", config_path)
 
     def _install_mcp_server(self) -> bool:
         """Register FlowBook MCP server in Claude Code config only.
