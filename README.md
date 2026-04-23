@@ -2,6 +2,13 @@
 
 # FlowBook
 
+by
+[Emery Berger](https://emeryberger.com),
+[Cormac Flanaga](https://users.soe.ucsc.edu/~cormac/),
+[Stephen Freund](https://www.cs.williams.edu/~freund/),
+[Eunice Jun](http://eunicemjun.com/)
+(ordered alphabetically)
+
 **Automatic reproducibility tracking for Jupyter notebooks.**
 
 FlowBook is a JupyterLab 4.0+ extension that tracks how data flows
@@ -22,46 +29,26 @@ notebook's outputs are guaranteed to match a fresh top-to-bottom run.
 - **Metadata panel** — a sidebar showing read/write sets, staleness
   reasons, dependency graphs, and timing information.
 
-## Quick Start
-
-```bash
-pip install -e .
-flowlab examples
-```
-
-Once JupyterLab opens, create or open a notebook and select the
-**FlowBook** kernel from the kernel picker. Start with
-`GettingStarted.ipynb`, then explore the `demos/` and `litmus/`
-directories.
-
 ## Requirements
 
 - JupyterLab >= 4.0.0
 
-## Install
+## Quick Start
 
-To install the extension, execute:
-
-```bash
-pip install flowbook
-```
-
-## Command Line Tools
-
-FlowBook provides several command line tools for notebook processing,
-optimization, and analysis. See [CLI.md](CLI.md) for complete
-documentation.
-
-- `flowbook` - Main CLI for notebook processing commands
-- `flowlab` - Launch JupyterLab with FlowBook extensions
-
-## Uninstall
-
-To remove the extension, execute:
+Install FlowBook using `pip`:
 
 ```bash
-pip uninstall flowbook
+python3 -m pip install flowbook-python
 ```
+
+Then launch jupyter lab
+
+```bash
+jupyter lab .
+```
+
+Once JupyterLab opens, create or open a notebook and select the
+**FlowBook** kernel from the kernel picker.
 
 ## Troubleshoot
 
@@ -79,9 +66,35 @@ the frontend extension, check the frontend extension is installed:
 jupyter labextension list
 ```
 
-## Contributing
+## Uninstall
 
-### Development install
+To remove the extension, execute:
+
+```bash
+pip uninstall flowbook
+```
+
+## Command Line Tools
+
+FlowBook provides several command line tools for notebook processing,
+optimization, and analysis. See [CLI.md](CLI.md) for complete
+documentation.
+
+- `flowbook` - Main CLI for notebook processing commands
+
+## Source Installation
+
+Clone this repository and then install it as an editable package
+
+```bash
+python3 -m pip install -e .
+jupyter lab examples/
+```
+
+Once JupyterLab opens, create or open a notebook and select the
+**FlowBook** kernel from the kernel picker. Start with
+`GettingStarted.ipynb`, then explore the `demos/` and `litmus/`
+directories.
 
 Note: You will need NodeJS to build the extension package.
 
@@ -130,7 +143,3 @@ pip uninstall flowbook
 In development mode, you will also need to remove the symlink created by `jupyter labextension develop`
 command. To find its location, you can run `jupyter labextension list` to figure out where the `labextensions`
 folder is located. Then you can remove the symlink named `flowbook` within that folder.
-
-### Packaging the extension
-
-See [RELEASE](RELEASE.md)

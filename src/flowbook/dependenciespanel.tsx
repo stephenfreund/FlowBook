@@ -548,9 +548,7 @@ export class DependenciesPanel extends Widget {
     if (!this._root) {
       this._root = createRoot(this.node);
     }
-    this._root.render(
-      <DependenciesDisplay cellData={this._cellData} />
-    );
+    this._root.render(<DependenciesDisplay cellData={this._cellData} />);
   }
 
   public updateGraph(cellData: ICellGraphData[]): void {

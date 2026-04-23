@@ -7,7 +7,11 @@
 
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { IOutput } from '@jupyterlab/nbformat';
-import { IReproducibilityError, IReproducibilityMetadata, asFlowbookOutput } from './types';
+import {
+  IReproducibilityError,
+  IReproducibilityMetadata,
+  asFlowbookOutput
+} from './types';
 import { indexToAlpha } from '../cellindexutils';
 
 /**

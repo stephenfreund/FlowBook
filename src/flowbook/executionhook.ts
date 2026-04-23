@@ -127,7 +127,6 @@ export class ReproducibilityExecutionHookManager {
       this._setupCellEditListener();
       this._setupComm();
     }
-
   }
 
   /**
@@ -275,7 +274,6 @@ export class ReproducibilityExecutionHookManager {
     this._comm = kernel.createComm(COMM_TARGET);
     this._comm.onMsg = this._onCommMessage.bind(this);
     this._comm.open();
-
   }
 
   /**

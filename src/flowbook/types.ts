@@ -329,7 +329,7 @@ export interface IFlowbookOutput {
   output_type: string;
   data?: Record<string, string>;
   metadata?: IFlowbookOutputMeta;
-  ename?: string;  // Present on error outputs
+  ename?: string; // Present on error outputs
   [key: string]: unknown;
 }
 
@@ -339,4 +339,3 @@ export interface IFlowbookOutput {
 export function asFlowbookOutput(out: unknown): IFlowbookOutput {
   return out as IFlowbookOutput;
 }
-

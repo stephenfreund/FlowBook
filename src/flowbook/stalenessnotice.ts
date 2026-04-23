@@ -8,7 +8,12 @@
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { IOutput } from '@jupyterlab/nbformat';
 import { StalenessManager } from './stalenessmanager';
-import { IStalenessReason, IFrontendStalenessReason, IReproducibilityMetadata, asFlowbookOutput } from './types';
+import {
+  IStalenessReason,
+  IFrontendStalenessReason,
+  IReproducibilityMetadata,
+  asFlowbookOutput
+} from './types';
 import { indexToAlpha } from '../cellindexutils';
 
 /**
@@ -41,7 +46,9 @@ export class StalenessNoticeManager {
 
     // Check if there's a violation (either in metadata or existing notice)
     // Violation implies specific issue, so skip staleness notice
-    const flowbookMeta = cell.model.getMetadata('flowbook') as IReproducibilityMetadata | undefined;
+    const flowbookMeta = cell.model.getMetadata('flowbook') as
+      | IReproducibilityMetadata
+      | undefined;
     const hasViolationMetadata =
       flowbookMeta?.errors && flowbookMeta.errors.length > 0;
     let hasViolationNotice = false;
@@ -62,8 +69,8 @@ export class StalenessNoticeManager {
     // Check if first output is already a staleness notice
     const hasNotice =
       outputs.length > 0 &&
-      asFlowbookOutput(outputs.get(0).toJSON()).metadata?.flowbook_staleness_notice ===
-        true;
+      asFlowbookOutput(outputs.get(0).toJSON()).metadata
+        ?.flowbook_staleness_notice === true;
 
     if (isStale) {
       const reason = stalenessManager.getReason(cell.model.id) || {

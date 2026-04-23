@@ -147,7 +147,9 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
       }
 
       // Check for violation
-      const meta = cell.model.getMetadata('flowbook') as IReproducibilityMetadata | undefined;
+      const meta = cell.model.getMetadata('flowbook') as
+        | IReproducibilityMetadata
+        | undefined;
       if (meta?.errors && meta.errors.length > 0) {
         break;
       }
