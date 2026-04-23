@@ -6,25 +6,19 @@
 [Stephen Freund](https://www.cs.williams.edu/~freund/),
 [Eunice Jun](http://eunicemjun.com/)
 
-**Automatic reproducibility tracking for Jupyter notebooks.**
+**Reproducibility enforcement for Jupyter notebooks.**
 
-FlowBook is a JupyterLab 4.0+ extension that tracks how data flows
-between cells and tells you exactly which cells are stale after an
-edit or out-of-order execution. When every cell is clean, your
-notebook's outputs are guaranteed to match a fresh top-to-bottom run.
+FlowBook is a JupyterLab extension that enforces _rerun consistency_:
+re-executing each cell from the current state would produce a result
+consistent with a top-to-bottom execution of the notebook,
+regardless of which cells have been run, modified, and rerun.
+Cells whose inputs may have changed are marked _stale_,
+and operations that would break rerun consistency (e.g., a later cell
+overwriting a value read by an earlier one) disallowed.
 
-### Key Features
-
-- **Always-on staleness tracking** — cells that need to be (re-)run
-  are highlighted in yellow, automatically, as you work.
-- **Violation detection** — cells whose execution would break
-  reproducibility (e.g., overwriting a variable read by an earlier
-  cell) are flagged in red and optionally rejected.
-- **Variable- and column-level precision** — FlowBook tracks
-  individual DataFrame columns, row sets, and file accesses, not just
-  top-level variable names.
-- **Metadata panel** — a sidebar showing read/write sets, staleness
-  reasons, dependency graphs, and timing information.
+When every cell is _clean_ — executed and rerun consistent —
+the notebook is guaranteed reproducible: running it top-to-bottom from
+an empty store yields exactly the outputs currently recorded.
 
 ## Requirements
 
@@ -46,6 +40,10 @@ jupyter lab .
 
 Once JupyterLab opens, create or open a notebook and select the
 **FlowBook** kernel from the kernel picker.
+
+To walk through FlowBook's features interactively, download the
+[Getting Started demo notebook](https://github.com/stephenfreund/FlowBook/raw/main/examples/GettingStarted.ipynb),
+open it in JupyterLab, and select the **FlowBook** kernel.
 
 ## Troubleshoot
 
