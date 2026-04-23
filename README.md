@@ -1,3 +1,5 @@
+![](https://github.com/stephenfreund/FlowBook/raw/main/media/flowbook-small.png)
+
 # FlowBook
 
 **Automatic reproducibility tracking for Jupyter notebooks.**
