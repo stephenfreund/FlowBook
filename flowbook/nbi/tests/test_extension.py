@@ -3,6 +3,11 @@
 import pytest
 from unittest.mock import MagicMock, call
 
+pytest.importorskip(
+    "notebook_intelligence",
+    reason="notebook_intelligence not installed; skipping NBI extension tests",
+)
+
 from flowbook.nbi.extension import FlowBookNBIExtension
 
 

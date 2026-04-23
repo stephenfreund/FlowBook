@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 import sys
 import os
-import socket
 import textwrap
 import time
 import traceback
@@ -21,67 +20,6 @@ from typing import List, Optional, Tuple, TypedDict
 
 Timing = TypedDict("Timing", {"key": str, "duration": float})
 Timings = List[Timing]
-
-
-class SocketStream:
-    """
-    File-like object that writes to a Unix domain socket.
-
-    Handles connection, reconnection, and buffering for streaming
-    output from kernels to the flowlab terminal.
-    """
-
-    def __init__(self, socket_path: str):
-        self.socket_path = socket_path
-        self._socket: Optional[socket.socket] = None
-        self._lock = threading.Lock()
-        self._connected = False
-
-    def _connect(self) -> bool:
-        """Attempt to connect to the output socket."""
-        if self._connected and self._socket:
-            return True
-
-        try:
-            self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self._socket.connect(self.socket_path)
-            self._connected = True
-            return True
-        except (OSError, ConnectionRefusedError):
-            self._socket = None
-            self._connected = False
-            return False
-
-    def write(self, text: str) -> int:
-        """Write text to the socket."""
-        with self._lock:
-            if not self._connect():
-                return 0
-
-            try:
-                data = text.encode("utf-8")
-                self._socket.sendall(data)
-                return len(text)
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                # Connection lost, mark for reconnection
-                self._connected = False
-                self._socket = None
-                return 0
-
-    def flush(self):
-        """Flush is a no-op for sockets (data is sent immediately)."""
-        pass
-
-    def close(self):
-        """Close the socket connection."""
-        with self._lock:
-            if self._socket:
-                try:
-                    self._socket.close()
-                except OSError:
-                    pass
-                self._socket = None
-                self._connected = False
 
 
 class Output:
@@ -103,42 +41,17 @@ class Output:
         self._timings_flushed = False  # Prevent double-write
         atexit.register(self._print_timings)
 
-    def _is_kernel_context(self):
-        """Detect if running inside a Jupyter/IPython kernel."""
-        if not hasattr(self, "_in_kernel"):
-            self._in_kernel = False
-            try:
-                from IPython import get_ipython
-
-                ip = get_ipython()
-                self._in_kernel = (
-                    ip is not None and ip.__class__.__name__ == "ZMQInteractiveShell"
-                )
-            except ImportError:
-                pass
-        return self._in_kernel
-
     def _get_output_file(self):
         """
         Get the output file handle.
 
-        Priority:
-        1. FLOWBOOK_OUTPUT_SOCKET - Unix socket for streaming to flowlab terminal
-        2. /dev/tty - Direct terminal access (works in kernel contexts)
-        3. sys.stdout - Default fallback
-
-        Returns:
-            File handle for output
+        Returns sys.__stdout__ (the original stdout) so writes bypass any
+        kernel-level sys.stdout replacement and reach the terminal that
+        launched the Jupyter Server. Requires ipykernel's capture_fd_output
+        to be disabled so fd 1 is not piped into IOPub (see the kernel
+        __main__.py modules).
         """
-        # Check for flowlab socket first (works in any context)
-        socket_path = os.environ.get("FLOWBOOK_OUTPUT_SOCKET")
-        if socket_path and os.path.exists(socket_path):
-            # Lazily create socket stream
-            if not hasattr(self, "_socket_stream") or self._socket_stream is None:
-                self._socket_stream = SocketStream(socket_path)
-            return self._socket_stream
-
-        return sys.stdout
+        return sys.__stdout__
 
     def set_timings_file(self, timings_file: str):
         self.timings_file = timings_file
@@ -293,38 +206,6 @@ class Output:
 
         def flush(self):
             self.file.flush()
-
-    class StreamOutputContext:
-        """
-        Output context that streams messages to a file-like object.
-
-        This context captures all output and sends it to a stream object
-        that has standard write() and flush() methods. The stream is
-        responsible for any text processing (e.g., ANSI code handling).
-        """
-
-        def __init__(self, outer, stream):
-            self.outer = outer
-            self.stream = stream
-
-        def __enter__(self):
-            with self.outer.lock:
-                self.outer.output_contexts.append(self)
-            return self
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            with self.outer.lock:
-                self.stream.flush()
-                self.outer.output_contexts.pop()
-
-        def write(self, message):
-            """Write message to the stream (preserving ANSI codes for stream to process)."""
-            self.stream.write(message)
-            self.stream.flush()
-
-        def flush(self):
-            """Flush the stream."""
-            self.stream.flush()
 
     class QuietOutputContext:
         """
@@ -490,35 +371,6 @@ def quiet():
 
 def tee_output(file_path: Path | str):
     return output.FileOutputContext(output, str(file_path))
-
-
-def stream_output(stream):
-    """
-    Create an output context that streams to a file-like object.
-
-    The stream object should have standard write() and flush() methods.
-
-    Args:
-        stream: A file-like object with write() and flush() methods
-
-    Returns:
-        StreamOutputContext that will capture and forward all output
-
-    Example:
-        class BroadcastStream:
-            def write(self, text):
-                # Custom write logic here
-                pass
-
-            def flush(self):
-                # Custom flush logic here
-                pass
-
-        with stream_output(BroadcastStream()):
-            log("This message will be streamed")
-            print("This too!")
-    """
-    return output.StreamOutputContext(output, stream)
 
 
 if __name__ == "__main__":

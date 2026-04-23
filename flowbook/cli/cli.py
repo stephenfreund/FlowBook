@@ -2,7 +2,8 @@
 Command-line interface for flowbook notebook processing.
 
 This CLI provides a unified interface for executing any registered notebook command.
-Kernel output is streamed to the terminal in real-time via Unix socket.
+Kernel log output reaches the terminal directly (no intermediate socket) because
+the flowbook kernel disables ipykernel's fd capture.
 """
 
 import argparse
@@ -14,7 +15,6 @@ from typing import Optional
 
 from flowbook.server.registry import CommandRegistry
 from flowbook.util.output import error, log, output, timer
-from flowbook.util.socket_receiver import setup_socket_receiver
 
 from flowbook.cli.helpers import (
     load_notebook,
@@ -159,7 +159,6 @@ def cli_main():
 
     kernel_manager = None
     kernel_client = None
-    socket_receiver = None
 
     try:
         # Load notebook
@@ -182,10 +181,6 @@ def cli_main():
 
         # Setup kernel if needed
         if command.requires_kernel:
-            # Set up socket receiver for kernel output
-            socket_receiver, socket_path = setup_socket_receiver("flowbook_cli")
-            log(f"Kernel output socket: {socket_path}")
-
             # Use command's preferred kernel if no --kernel-name was explicitly provided
             # (check if it's the default value)
             kernel_to_use = args.kernel_name
@@ -306,8 +301,6 @@ def cli_main():
         return 1
     finally:
         cleanup_kernel(kernel_client, kernel_manager, connection_file)
-        if socket_receiver:
-            socket_receiver.stop()
 
 
 if __name__ == "__main__":

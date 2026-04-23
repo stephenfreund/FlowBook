@@ -26,16 +26,7 @@ from flowbook.server.kernel_manager import KernelConnectionManager
 from flowbook.server.handlers import (
     FlowbookCommandHandler,
     CommandListHandler,
-    MessageStreamHandler,
     setup_handlers,
-)
-
-# Export message broadcasting
-from flowbook.server.message_broadcaster import (
-    MessageBroadcaster,
-    get_broadcaster,
-    Message,
-    MessageType,
 )
 
 __all__ = [
@@ -53,13 +44,7 @@ __all__ = [
     # Handlers
     "FlowbookCommandHandler",
     "CommandListHandler",
-    "MessageStreamHandler",
     "setup_handlers",
-    # Message broadcasting
-    "MessageBroadcaster",
-    "get_broadcaster",
-    "Message",
-    "MessageType",
 ]
 
 # Note: CLI functions (cli_main) are in flowbook.cli package

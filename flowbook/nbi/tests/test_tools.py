@@ -4,6 +4,11 @@ import ast
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
+pytest.importorskip(
+    "notebook_intelligence",
+    reason="notebook_intelligence not installed; skipping NBI tool tests",
+)
+
 from flowbook.nbi import tools
 from flowbook.nbi.session import FlowBookSession
 

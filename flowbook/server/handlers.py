@@ -6,10 +6,9 @@ import json
 import pprint
 import asyncio
 import traceback
-import uuid
 import tornado
 import concurrent.futures
-from jupyter_server.base.handlers import APIHandler, JupyterHandler
+from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
 
 from flowbook.server.registry import CommandRegistry
@@ -17,9 +16,8 @@ from flowbook.server.kernel_manager import (
     FlowbookKernelClient,
     KernelConnectionManager,
 )
-from flowbook.server.message_broadcaster import get_broadcaster, get_broadcast_stream
 from flowbook.kernel_discovery import read_discovery, write_discovery
-from flowbook.util.output import error, log, stream_output
+from flowbook.util.output import error, log
 
 
 # Global kernel manager instance
@@ -82,35 +80,26 @@ class FlowbookCommandHandler(APIHandler):
                     )
                     return
 
-            # Clear previous messages and execute command with output streaming to clients
-            # Run in executor to prevent blocking the event loop and allow SSE to flush
-            get_broadcaster().clear()
-
+            # Run the command in an executor to keep the event loop responsive.
             def run_command():
-                with stream_output(get_broadcast_stream()):
-                    log(f"Executing command {command_name}")
-                    log(f"Selected cell IDs: {selected_cell_ids}")
-                    # Create event loop for the thread
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        result = loop.run_until_complete(command.process(
-                            notebook_content,
-                            kernel_client=kernel_client,
-                            selected_cell_ids=selected_cell_ids,
-                            **params
-                        ))
-                        return result
-                    finally:
-                        loop.close()
+                log(f"Executing command {command_name}")
+                log(f"Selected cell IDs: {selected_cell_ids}")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(command.process(
+                        notebook_content,
+                        kernel_client=kernel_client,
+                        selected_cell_ids=selected_cell_ids,
+                        **params
+                    ))
+                    return result
+                finally:
+                    loop.close()
 
-            # Run in thread executor
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             result = await asyncio.get_event_loop().run_in_executor(executor, run_command)
             executor.shutdown(wait=True)
-
-            # Send END message to signal command completion
-            get_broadcaster().end()
 
             # Serialize ProcessingResult to JSON
             # Use model_dump() to convert Pydantic model to dict, then json.dumps
@@ -159,62 +148,6 @@ class KernelConnectionFileHandler(APIHandler):
         except Exception as e:
             self.set_status(404)
             self.finish(json.dumps({"error": f"Kernel not found: {str(e)}"}))
-
-
-class MessageStreamHandler(JupyterHandler):
-    """Handler for Server-Sent Events (SSE) message streaming."""
-
-    def initialize(self):
-        """Initialize the handler."""
-        self.broadcaster = get_broadcaster()
-        self.client_id = str(uuid.uuid4())
-        self.queue = None
-
-    @tornado.web.authenticated
-    async def get(self):
-        """Stream messages to the client via SSE."""
-        # Set headers for SSE
-        self.set_header('Content-Type', 'text/event-stream')
-        self.set_header('Cache-Control', 'no-cache')
-        self.set_header('Connection', 'keep-alive')
-        self.set_header('X-Accel-Buffering', 'no')
-
-        # Register this client with the broadcaster
-        self.queue = self.broadcaster.register_client(self.client_id)
-
-        try:
-            # Send initial connection message
-            self.write(f'data: {{"type":"connected","client_id":"{self.client_id}"}}\n\n')
-            await self.flush()
-
-            # Stream messages from the queue
-            while True:
-                try:
-                    # Wait for a message with timeout
-                    message = await asyncio.wait_for(self.queue.get(), timeout=30.0)
-
-                    # Send the message as SSE event
-                    self.write(f'data: {message.to_json()}\n\n')
-                    await self.flush()
-
-                except asyncio.TimeoutError:
-                    # Send keepalive comment every 30 seconds
-                    self.write(': keepalive\n\n')
-                    await self.flush()
-                except Exception as e:
-                    self.log.error(f"Error streaming message: {e}")
-                    break
-
-        except Exception as e:
-            self.log.error(f"SSE connection error: {e}")
-        finally:
-            # Unregister client on disconnect
-            self.broadcaster.unregister_client(self.client_id)
-
-    def on_connection_close(self):
-        """Handle client disconnection."""
-        if self.client_id:
-            self.broadcaster.unregister_client(self.client_id)
 
 
 class KernelDiscoveryHandler(APIHandler):
@@ -340,11 +273,6 @@ def setup_handlers(web_app):
         (
             url_path_join(base_url, "flowbook", "kernel", "(.+)", "connection"),
             KernelConnectionFileHandler,
-            {},
-        ),
-        (
-            url_path_join(base_url, "flowbook", "stream"),
-            MessageStreamHandler,
             {},
         ),
         (

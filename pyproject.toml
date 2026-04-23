@@ -67,7 +67,6 @@ flowbook_show_errors = "flowbook.cli.show_errors:main"
 flowbook_slurm_logs = "flowbook.cli.slurm_logs:main"
 flowbook_nb_diff = "flowbook.util.nb_diff:main"
 flowbook_compare_fixed_overhead = "flowbook.cli.compare_fixed_overhead:main"
-flowlab = "flowbook.cli.lab_cli:lab_main"
 flowbook_mcp = "flowbook.mcp.server:main"
 
 [tool.hatch.version]

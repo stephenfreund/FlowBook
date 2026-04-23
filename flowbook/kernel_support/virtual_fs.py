@@ -259,12 +259,6 @@ class VirtualFileSystem:
         Only tracks files under the notebook directory tree (if set).
         Always excludes internal FlowBook paths and explicitly excluded prefixes.
         """
-        # Filter out FlowBook/FlowLab internal socket files
-        if abs_path.endswith(".sock"):
-            basename = os.path.basename(abs_path)
-            if basename.startswith(("flowbook_", "flowlab_")):
-                return False
-
         # Filter out dynamically excluded prefixes (e.g., checkpoint storage dir)
         for prefix in self._excluded_prefixes:
             if abs_path.startswith(prefix):
