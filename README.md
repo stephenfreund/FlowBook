@@ -1,13 +1,13 @@
-![](https://github.com/stephenfreund/FlowBook/raw/main/media/flowbook-small.png)
-
 # FlowBook
-
 by
 [Emery Berger](https://emeryberger.com),
 [Cormac Flanaga](https://users.soe.ucsc.edu/~cormac/),
 [Stephen Freund](https://www.cs.williams.edu/~freund/),
 [Eunice Jun](http://eunicemjun.com/)
 (ordered alphabetically)
+
+![](https://github.com/stephenfreund/FlowBook/raw/main/media/flowbook-small.png)
+
 
 **Automatic reproducibility tracking for Jupyter notebooks.**
 
