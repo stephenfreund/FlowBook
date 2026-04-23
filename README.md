@@ -20,10 +20,6 @@ When every cell is _clean_ — executed and rerun consistent —
 the notebook is guaranteed reproducible: running it top-to-bottom from
 an empty store yields exactly the outputs currently recorded.
 
-## Requirements
-
-- JupyterLab >= 4.0.0
-
 ## Quick Start
 
 Install FlowBook using `pip`:
