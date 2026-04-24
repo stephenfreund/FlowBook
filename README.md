@@ -39,7 +39,11 @@ Once JupyterLab opens, create or open a notebook and select the
 
 To walk through FlowBook's features interactively, download the
 [Getting Started demo notebook](https://github.com/stephenfreund/FlowBook/raw/main/examples/GettingStarted.ipynb),
-open it in JupyterLab, and select the **FlowBook** kernel.
+open it in JupyterLab.  Be sure to use the **FlowBook Kernel**.
+
+For a longer, self-contained tutorial, download our 
+[FlowBook tutorial](https://github.com/stephenfreund/FlowBook/raw/main/examples/FlowBookTutorial.ipynb)
+
 
 ## Troubleshoot
 
