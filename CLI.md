@@ -2,16 +2,6 @@
 
 FlowBook provides command-line tools for interactive notebook development, overhead benchmarking, result analysis, and batch execution on clusters.
 
-## `flowlab` — Launch JupyterLab
-
-Start JupyterLab with FlowBook extensions enabled.
-
-```bash
-flowlab
-```
-
-This is a wrapper around `jupyter lab` that ensures FlowBook's server extension and frontend plugins are active.
-
 ## `flowbook` — Notebook Processing
 
 Unified CLI for running any registered notebook command. The most important subcommand for benchmarking is `compare-baseline`.
@@ -295,13 +285,3 @@ flowbook_timers flowbook-times.json --histplot "state_total_ms" --histplot "chec
 # Correlate state vs check time
 flowbook_timers flowbook-times.json --scatterplot "state_total_ms%check_total_ms"
 ```
-
-### Interactive development
-
-Launch JupyterLab with FlowBook's reproducibility tracking and UI extensions:
-
-```bash
-flowlab
-```
-
-Then select the `flowbook_kernel` for reproducibility enforcement or `experimental_kernel` for AI commands and profiling.

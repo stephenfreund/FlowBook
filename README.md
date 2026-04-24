@@ -1,6 +1,7 @@
 ![](https://github.com/stephenfreund/FlowBook/raw/main/media/flowbook-small.png)
 
 ---
+
 [Emery Berger](https://emeryberger.com),
 [Cormac Flanagan](https://users.soe.ucsc.edu/~cormac/),
 [Stephen Freund](https://www.cs.williams.edu/~freund/),
@@ -39,27 +40,78 @@ Once JupyterLab opens, create or open a notebook and select the
 
 To walk through FlowBook's features interactively, download the
 [Getting Started demo notebook](https://github.com/stephenfreund/FlowBook/raw/main/examples/GettingStarted.ipynb),
-open it in JupyterLab.  Be sure to use the **FlowBook Kernel**.
+open it in JupyterLab. Be sure to use the **FlowBook Kernel**.
 
-For a longer, self-contained tutorial, download our 
+For a longer, self-contained tutorial, download our
 [FlowBook tutorial](https://github.com/stephenfreund/FlowBook/raw/main/examples/FlowBookTutorial.ipynb)
-
 
 ## Troubleshoot
 
-If you are seeing the frontend extension, but it is not working, check
-that the server extension is enabled:
+If FlowBook does not appear to be working, work through these steps:
+
+**1. Confirm the server extension is enabled.**
 
 ```bash
 jupyter server extension list
 ```
 
-If the server extension is installed and enabled, but you are not seeing
-the frontend extension, check the frontend extension is installed:
+Look for `flowbook` marked as `enabled`. If it is missing or disabled,
+enable it:
+
+```bash
+jupyter server extension enable flowbook
+```
+
+**2. Confirm the frontend extension is installed.**
 
 ```bash
 jupyter labextension list
 ```
+
+Look for `flowbook` in the list of enabled extensions. If it is not
+there, reinstall the package:
+
+```bash
+python3 -m pip install --force-reinstall flowbook-python
+```
+
+**3. Confirm the FlowBook kernel is registered.**
+
+```bash
+jupyter kernelspec list
+```
+
+You should see `flowbook_kernel` in the output. If it is missing,
+reinstall the package (step 2) — the kernelspec is registered at
+install time.
+
+**4. Pick the FlowBook kernel in your notebook.**
+
+FlowBook only tracks notebooks running under the **FlowBook Kernel**.
+Use JupyterLab's kernel picker (top-right of the notebook) to switch
+away from the default Python kernel if you are not seeing
+staleness/violation markers.
+
+**5. Hard-refresh the browser.**
+
+After installing or upgrading, JupyterLab may cache older frontend
+assets. Do a hard refresh (`Cmd+Shift+R` on macOS, `Ctrl+Shift+F5` on
+Linux/Windows) and reopen the notebook.
+
+**6. Check the browser console and the JupyterLab server log.**
+
+Open the browser's developer tools (`Cmd+Option+I` / `Ctrl+Shift+I`)
+and look for errors in the Console tab. Also look at the terminal
+where you launched `jupyter lab` for server-side errors. These often
+point directly at the underlying problem (missing dependency, version
+mismatch, etc.).
+
+**7. Still stuck?**
+
+Please file an issue at
+[github.com/stephenfreund/FlowBook/issues](https://github.com/stephenfreund/FlowBook/issues)
+with the outputs of the commands above, your OS and Python version,
+and a minimal notebook that reproduces the problem.
 
 ## Uninstall
 
@@ -68,14 +120,6 @@ To remove the extension, execute:
 ```bash
 pip uninstall flowbook
 ```
-
-## Command Line Tools
-
-FlowBook provides several command line tools for notebook processing,
-optimization, and analysis. See [CLI.md](CLI.md) for complete
-documentation.
-
-- `flowbook` - Main CLI for notebook processing commands
 
 ## Source Installation
 
