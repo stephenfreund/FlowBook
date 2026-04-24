@@ -34,7 +34,7 @@ dependencies = [
     "dill",
     "markdown",
     "jupytext",
-    "pandas",
+    "pandas>=2.2",
     "numpy",
     "seaborn",
     "matplotlib",
