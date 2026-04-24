@@ -44,6 +44,12 @@ class FlowBookExtension(ExtensionApp):
                 "model": self.model,
                 "fast-model": self.fast_model,
             }
+            km = self.serverapp.kernel_manager
+            if km.default_kernel_name == "python3":
+                km.default_kernel_name = "flowbook_kernel"
+            ksm = self.serverapp.kernel_spec_manager
+            if not ksm.allowed_kernelspecs:
+                ksm.allowed_kernelspecs = {"flowbook_kernel", "python3"}
         make_kernels()
 
     def initialize_handlers(self):
@@ -70,12 +76,11 @@ def make_kernels():
     from flowbook.util.kernel_installer import install_kernel_spec
     from pathlib import Path
 
-    # Install FlowBook kernel
+    base = Path(__file__).parent
+    install_kernel_spec("flowbook_kernel", base / "kernel" / "kernelspec")
+    install_kernel_spec("checkpoint_kernel", base / "checkpoint_kernel" / "kernelspec")
+    install_kernel_spec("baseline_kernel", base / "baseline_kernel" / "kernelspec")
     install_kernel_spec(
-        "flowbook_kernel", Path(__file__).parent / "kernel" / "kernelspec"
-    )
-
-    # Install checkpoint kernel
-    install_kernel_spec(
-        "checkpoint_kernel", Path(__file__).parent / "checkpoint_kernel" / "kernelspec"
+        "flowbook_scalene_preload_kernel",
+        base / "kernel" / "scalene_kernelspec",
     )
