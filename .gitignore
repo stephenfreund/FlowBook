@@ -1,6 +1,7 @@
 .keys
 _ipython*
 *.bak
+.jupyter_ystore.db
 
 # Ignore all files in examples except .ipynb notebooks
 examples/**
@@ -11,6 +12,7 @@ examples/**
 lib/
 node_modules/
 *.log
+*.pdf
 .eslintcache
 .stylelintcache
 *.egg-info/
@@ -19,6 +21,9 @@ node_modules/
 flowbook/labextension
 # Version file is handled by hatchling
 flowbook/_version.py
+
+# Benchmark output
+flowbook-times.json
 
 # Created by https://www.gitignore.io/api/python
 # Edit at https://www.gitignore.io/?templates=python
