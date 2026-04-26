@@ -47,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.9', '3.11', '3.13']
 
     steps:
       - name: Checkout
@@ -88,3 +88,76 @@ jobs:
 
       - name: Verify flowbook CLI
         run: flowbook -h
+
+  pandas-versions:
+    name: Pandas ${{ matrix.pandas.lane }} (Python 3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        pandas:
+          - lane: min
+            spec: 'pandas==2.2.*'
+            pip_args: ''
+            allow_failure: false
+          - lane: v3
+            spec: 'pandas>=3,<4'
+            pip_args: ''
+            allow_failure: false
+          - lane: v4
+            spec: 'pandas>=4.0.0a0,<5'
+            pip_args: '--pre'
+            allow_failure: true
+    continue-on-error: ${{ matrix.pandas.allow_failure }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install hatchling hatch-nodejs-version hatch-jupyter-builder editables "jupyterlab>=4.0.0,<5"
+
+      - name: Install Node dependencies
+        run: jlpm install --no-immutable
+
+      - name: Build extension
+        run: |
+          set -x
+          HATCH_BUILD_HOOKS_ENABLE=false pip install -e "." --no-build-isolation
+
+      - name: Pin pandas to ${{ matrix.pandas.lane }} (${{ matrix.pandas.spec }})
+        run: |
+          python -m pip install --force-reinstall ${{ matrix.pandas.pip_args }} '${{ matrix.pandas.spec }}'
+          python -c "import pandas; print('pandas', pandas.__version__)"
+
+      - name: Run pandas-relevant tests
+        run: |
+          pytest -v \
+            flowbook/kernel_support/tests/test_column_tracking.py \
+            flowbook/kernel_support/tests/test_column_tracking_methods.py \
+            flowbook/kernel_support/tests/test_column_tracking_performance.py \
+            flowbook/kernel_support/tests/test_column_tracking_setitem_reads.py \
+            flowbook/kernel_support/tests/test_column_provenance.py \
+            flowbook/kernel_support/tests/test_chained_assignment_error.py \
+            flowbook/kernel_support/tests/test_memory_checkpoint.py \
+            flowbook/kernel_support/tests/test_memory_checkpoint_comprehensive.py \
+            flowbook/kernel_support/tests/test_memory_checkpoint_edge_cases.py \
+            flowbook/kernel_support/tests/test_tracking.py \
+            flowbook/kernel_support/tests/test_tracking_structural.py \
+            flowbook/kernel_support/tests/test_diff_structural.py \
+            flowbook/kernel_support/tests/test_diff_float_tolerance.py \
+            flowbook/kernel/tests/test_litmus.py \
+            flowbook/kernel/tests/test_paper_examples.py
