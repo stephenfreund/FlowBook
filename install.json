@@ -1,5 +1,5 @@
 {
   "packageManager": "python",
-  "packageName": "flowbook",
-  "uninstallInstructions": "Use your Python package manager (pip, conda, etc.) to uninstall the package flowbook"
+  "packageName": "flowbook-python",
+  "uninstallInstructions": "Use your Python package manager (pip, conda, etc.) to uninstall the package flowbook-python"
 }
