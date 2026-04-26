@@ -51,7 +51,7 @@ class TestNestedDataFrames:
         checkpoints.save('test', user_ns)
 
         # Modify the DataFrame
-        container.data['col'].iloc[0] = 'z'
+        container.data.loc[0, 'col'] = 'z'
 
         # Restore and verify
         checkpoints.restore('test', user_ns)

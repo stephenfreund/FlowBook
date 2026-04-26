@@ -22,6 +22,7 @@ Performance optimization (always-on pattern):
 import threading
 import types
 import pandas as pd
+from pandas._libs import lib
 from typing import Dict, Set, Iterable, Tuple, Optional, Generator, Any
 from collections import defaultdict
 
@@ -622,7 +623,7 @@ class ColumnAccessTracker:
         def tracked_merge(df: pd.DataFrame, right, how='inner', on=None,
                           left_on=None, right_on=None, left_index=False,
                           right_index=False, sort=False, suffixes=('_x', '_y'),
-                          copy=None, indicator=False, validate=None):
+                          copy=lib.no_default, indicator=False, validate=None):
             tracker = ColumnAccessTracker._get_active_tracker()
             if tracker is not None:
                 # Track columns read from left DataFrame (self)

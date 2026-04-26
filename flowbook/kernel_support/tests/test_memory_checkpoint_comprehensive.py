@@ -1191,7 +1191,7 @@ class TestEdgeCasesComprehensive:
         cp.save('test', user_ns)
 
         # Modify the regular column (sparse doesn't support assignment)
-        df['regular'].iloc[2] = 999
+        df.loc[2, 'regular'] = 999
 
         cp.restore('test', user_ns)
 

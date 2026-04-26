@@ -171,6 +171,21 @@ By default, the `jlpm build` command generates the source maps for this extensio
 jupyter lab build --minimize=False
 ```
 
+### Running tests
+
+Run the full Python test suite with `pytest`:
+
+```bash
+pytest flowbook/
+```
+
+To run the tests for a specific subpackage, point `pytest` at its `tests/` directory, e.g.:
+
+```bash
+pytest flowbook/kernel/tests/
+pytest flowbook/mcp/tests/
+```
+
 ### Development uninstall
 
 ```bash
