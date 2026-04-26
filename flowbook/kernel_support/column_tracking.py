@@ -564,6 +564,7 @@ class ColumnAccessTracker:
                             tracker.record_write(id(df), columns)
                         if tracker._cell_id is not None:
                             pre_len = len(df)
+                    del df  # pandas 2.x's chained-assignment check is sys.getrefcount(self.obj) <= 2; don't pin a third ref
                 original_loc_setitem(loc_indexer, key, value)
                 if pre_len is not None:
                     df = loc_indexer.obj
@@ -610,6 +611,7 @@ class ColumnAccessTracker:
                         columns = _extract_columns_from_iloc_key(key, df)
                         if columns:
                             tracker.record_write(id(df), columns)
+                    del df  # pandas 2.x's chained-assignment check is sys.getrefcount(self.obj) <= 2; don't pin a third ref
                 return original_iloc_setitem(iloc_indexer, key, value)
 
             _iLocIndexer.__setitem__ = tracked_iloc_setitem
