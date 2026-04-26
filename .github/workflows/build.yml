@@ -71,6 +71,9 @@ jobs:
       - name: Install Node dependencies
         run: jlpm install --no-immutable
 
+      - name: Build labextension
+        run: jlpm run build:prod
+
       - name: Build extension
         run: |
           set -x
@@ -98,7 +101,7 @@ jobs:
       matrix:
         pandas:
           - lane: min
-            spec: 'pandas==2.2.*'
+            spec: 'pandas==2.3.3'
             pip_args: ''
             allow_failure: false
           - lane: v3
@@ -106,8 +109,8 @@ jobs:
             pip_args: ''
             allow_failure: false
           - lane: v4
-            spec: 'pandas>=4.0.0a0,<5'
-            pip_args: '--pre'
+            spec: 'pandas'
+            pip_args: '--pre --extra-index-url https://pypi.anaconda.org/scientific-python-nightly-wheels/simple'
             allow_failure: true
     continue-on-error: ${{ matrix.pandas.allow_failure }}
 
@@ -132,6 +135,9 @@ jobs:
 
       - name: Install Node dependencies
         run: jlpm install --no-immutable
+
+      - name: Build labextension
+        run: jlpm run build:prod
 
       - name: Build extension
         run: |
