@@ -79,6 +79,9 @@ fields = ["description", "authors", "urls", "keywords"]
 artifacts = ["flowbook/labextension"]
 exclude = [".github", "binder"]
 
+[tool.hatch.build.targets.wheel]
+packages = ["flowbook"]
+
 [tool.hatch.build.targets.wheel.shared-data]
 "flowbook/labextension" = "share/jupyter/labextensions/flowbook"
 "install.json" = "share/jupyter/labextensions/flowbook/install.json"

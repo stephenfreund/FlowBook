@@ -71,14 +71,10 @@ jobs:
       - name: Install Node dependencies
         run: jlpm install --no-immutable
 
-      - name: Build labextension
-        run: jlpm run build:prod
-
       - name: Build extension
         run: |
           set -x
           HATCH_BUILD_HOOKS_ENABLE=false pip install -e "." --no-build-isolation
-          jupyter labextension develop . --overwrite
           jupyter labextension list
           jupyter labextension list 2>&1 | grep -ie "flowbook.*OK"
           jupyter server extension list
@@ -137,14 +133,10 @@ jobs:
       - name: Install Node dependencies
         run: jlpm install --no-immutable
 
-      - name: Build labextension
-        run: jlpm run build:prod
-
       - name: Build extension
         run: |
           set -x
           HATCH_BUILD_HOOKS_ENABLE=false pip install -e "." --no-build-isolation
-          jupyter labextension develop . --overwrite
 
       - name: Pin pandas to ${{ matrix.pandas.lane }} (${{ matrix.pandas.spec }})
         run: |
