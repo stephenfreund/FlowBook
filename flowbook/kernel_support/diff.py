@@ -3925,8 +3925,23 @@ class Diff:
         slots_a = getattr(type(val_a), "__slots__", None)
         slots_b = getattr(type(val_b), "__slots__", None)
 
-        # If neither has __dict__ nor __slots__, try direct equality
+        # If neither has __dict__ nor __slots__, we're looking at a C/Cython
+        # extension type (e.g. sklearn's Cython Tree). A raw `val_a != val_b`
+        # falls back to identity on such types and incorrectly reports them
+        # as different — which is what drove the "predict mutates model"
+        # false-positive. Prefer the object's pickle state (`__getstate__`)
+        # so we can recurse into its logical contents (arrays, scalars, etc.)
+        # and benefit from element-wise comparators that ignore incidental
+        # padding bytes in structured arrays.
         if not has_dict_a and not slots_a:
+            if hasattr(val_a, "__getstate__") and hasattr(val_b, "__getstate__"):
+                try:
+                    state_a = val_a.__getstate__()
+                    state_b = val_b.__getstate__()
+                except Exception:
+                    state_a = state_b = None
+                if state_a is not None or state_b is not None:
+                    return self._compare_values(state_a, state_b, f"{path}(__getstate__)")
             try:
                 if val_a != val_b:
                     return ValueComparison(
