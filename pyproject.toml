@@ -26,7 +26,7 @@ classifiers = [
 ]
 dependencies = [
     "jupyter_server>=2.4.0,<3",
-    "jupyterlab>=4.0.0",
+    "jupyterlab>=4.0.0,<5",
     "nbformat>=5.0.0",
     "jupyter",
     "termcolor",
@@ -55,6 +55,9 @@ dependencies = [
     "tornado",
 ]
 dynamic = ["version", "description", "authors", "urls", "keywords"]
+
+[project.optional-dependencies]
+mcp = ["jupyter-collaboration"]
 
 [project.scripts]
 flowbook = "flowbook.cli.cli:cli_main"

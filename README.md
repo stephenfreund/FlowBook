@@ -118,7 +118,7 @@ and a minimal notebook that reproduces the problem.
 To remove the extension, execute:
 
 ```bash
-pip uninstall flowbook
+pip uninstall flowbook-python
 ```
 
 ## Source Installation
@@ -191,7 +191,7 @@ pytest flowbook/mcp/tests/
 ```bash
 # Server extension must be manually disabled in develop mode
 jupyter server extension disable flowbook
-pip uninstall flowbook
+pip uninstall flowbook-python
 ```
 
 In development mode, you will also need to remove the symlink created by `jupyter labextension develop`
