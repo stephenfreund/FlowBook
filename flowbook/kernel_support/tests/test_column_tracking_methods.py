@@ -7,8 +7,15 @@ so that column-level staleness works correctly with Var(x) = binding-only.
 
 import pytest
 import pandas as pd
+from packaging.version import Version
 
 from flowbook.kernel_support.column_tracking import ColumnAccessTracker
+
+# Pandas 2.2.x with future.infer_string=True routes string-column reductions
+# through pyarrow, but lacks a fallback when pyarrow's compute kernel doesn't
+# accept the input (e.g. `sum` on `large_string` raises ArrowNotImplementedError).
+# Pandas 2.3 added that fallback. Skip the affected case until the floor moves.
+PANDAS_LT_2_3 = Version(pd.__version__) < Version("2.3")
 
 
 @pytest.fixture
@@ -64,6 +71,14 @@ class TestAggregationMethodTracking:
         df.std(numeric_only=True)
         assert "price" in reads
 
+    @pytest.mark.skipif(
+        PANDAS_LT_2_3,
+        reason=(
+            "pandas 2.2.x bug: df.apply(lambda x: x.sum()) on a string column "
+            "raises ArrowNotImplementedError instead of falling back. "
+            "Fixed in pandas 2.3."
+        ),
+    )
     def test_apply_records_all_columns(self, tracker, df):
         reads = _get_reads(tracker, df)
         df.apply(lambda x: x.sum())

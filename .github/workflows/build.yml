@@ -98,7 +98,7 @@ jobs:
       matrix:
         pandas:
           - lane: min
-            spec: 'pandas==2.3.3'
+            spec: 'pandas==2.2.3'
             pip_args: ''
             allow_failure: false
           - lane: v3
