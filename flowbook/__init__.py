@@ -80,7 +80,3 @@ def make_kernels():
     install_kernel_spec("flowbook_kernel", base / "kernel" / "kernelspec")
     install_kernel_spec("checkpoint_kernel", base / "checkpoint_kernel" / "kernelspec")
     install_kernel_spec("baseline_kernel", base / "baseline_kernel" / "kernelspec")
-    install_kernel_spec(
-        "flowbook_scalene_preload_kernel",
-        base / "kernel" / "scalene_kernelspec",
-    )

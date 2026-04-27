@@ -4,7 +4,6 @@ Tests for kernel/models.py - Pydantic models for kernel execution.
 Tests cover:
 - TrackingData: Variable access pattern tracking
 - ExecutionProfile: Profiling and timing data
-- MonotonicityViolation: Monotonicity constraint violations
 - ExecutionContext: Pre-execution state and configuration
 """
 
@@ -12,7 +11,6 @@ import pytest
 from flowbook.kernel_support.models import (
     TrackingData,
     ExecutionProfile,
-    MonotonicityViolation,
     ExecutionContext,
 )
 
@@ -133,55 +131,6 @@ class TestExecutionProfile:
         serialized = profile.model_dump()
         assert serialized["duration"] == 1.0
         assert serialized["profile"] == "test"
-
-
-class TestMonotonicityViolation:
-    """Tests for MonotonicityViolation model."""
-
-    def test_monotonicity_violation_required_fields(self):
-        """MonotonicityViolation requires all fields."""
-        with pytest.raises(Exception):
-            MonotonicityViolation()
-
-    def test_monotonicity_violation_creation(self):
-        """MonotonicityViolation stores provided values."""
-        violation = MonotonicityViolation(
-            violated_vars=["x", "y"],
-            diff_details="x changed from 1 to 2",
-            error_summary="Monotonicity violation: ['x', 'y']",
-        )
-        assert violation.violated_vars == ["x", "y"]
-        assert violation.diff_details == "x changed from 1 to 2"
-        assert violation.error_summary == "Monotonicity violation: ['x', 'y']"
-
-    def test_to_error_result(self):
-        """to_error_result creates proper kernel error format."""
-        violation = MonotonicityViolation(
-            violated_vars=["x"],
-            diff_details="Variable x was modified",
-            error_summary="Monotonicity violation: ['x']",
-        )
-        result = violation.to_error_result(execution_count=5)
-
-        assert result["status"] == "error"
-        assert result["execution_count"] == 5
-        assert result["ename"] == "MonotonicityError"
-        assert result["evalue"] == "Monotonicity violation: ['x']"
-        assert result["traceback"] == ["Variable x was modified"]
-
-    def test_to_error_result_multiple_vars(self):
-        """to_error_result handles multiple violated variables."""
-        violation = MonotonicityViolation(
-            violated_vars=["a", "b", "c"],
-            diff_details="Multiple variables modified:\na: 1->2\nb: 3->4\nc: 5->6",
-            error_summary="Monotonicity violation: ['a', 'b', 'c']",
-        )
-        result = violation.to_error_result(execution_count=10)
-
-        assert result["status"] == "error"
-        assert "a" in result["evalue"]
-        assert "b" in result["evalue"]
-        assert "c" in result["evalue"]
 
 
 class TestExecutionContext:

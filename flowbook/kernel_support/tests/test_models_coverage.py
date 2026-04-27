@@ -15,7 +15,6 @@ import pytest
 from flowbook.kernel_support.models import (
     TrackingData,
     ExecutionProfile,
-    MonotonicityViolation,
     ExecutionContext,
 )
 
@@ -290,21 +289,3 @@ class TestExecutionContext:
             original_code="!ls",
         )
         assert not ctx.should_profile
-
-
-class TestMonotonicityViolation:
-    """Tests for MonotonicityViolation.to_error_result."""
-
-    def test_to_error_result(self):
-        """to_error_result produces kernel error format."""
-        violation = MonotonicityViolation(
-            violated_vars=["x", "y"],
-            diff_details="x changed from 1 to 2",
-            error_summary="Monotonicity violation: ['x', 'y']",
-        )
-        result = violation.to_error_result(execution_count=5)
-        assert result["status"] == "error"
-        assert result["execution_count"] == 5
-        assert result["ename"] == "MonotonicityError"
-        assert result["evalue"] == "Monotonicity violation: ['x', 'y']"
-        assert "x changed from 1 to 2" in result["traceback"]

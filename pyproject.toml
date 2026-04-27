@@ -44,7 +44,6 @@ dependencies = [
     "pytest-asyncio",
     "hypothesis",
     "libcst>=1.0.0",
-    "scalene", 
     "filelock>=3.0",
     "pympler",
 
