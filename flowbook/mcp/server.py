@@ -28,7 +28,7 @@ from flowbook.mcp.session import (
     format_loc,
     format_outputs_text,
 )
-from flowbook.nbi.cell_addressing import index_to_alpha
+from flowbook.util.cell_index import index_to_alpha
 
 
 def _get_session(ctx: Context) -> NotebookSession:

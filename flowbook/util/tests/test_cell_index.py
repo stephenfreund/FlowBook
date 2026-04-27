@@ -1,16 +1,11 @@
-"""Tests for flowbook.nbi.cell_addressing module."""
+"""Tests for flowbook.util.cell_index."""
 
 import pytest
 
-from flowbook.nbi.cell_addressing import alpha_to_index, index_to_alpha, parse_cell_ref
-
-
-# ---------- index_to_alpha ----------
+from flowbook.util.cell_index import alpha_to_index, index_to_alpha, parse_cell_ref
 
 
 class TestIndexToAlpha:
-    """Tests for index_to_alpha."""
-
     def test_single_letters(self):
         assert index_to_alpha(0) == '@A'
         assert index_to_alpha(1) == '@B'
@@ -37,39 +32,33 @@ class TestIndexToAlpha:
             index_to_alpha(18278)
 
 
-# ---------- alpha_to_index ----------
-
-
 class TestAlphaToIndex:
-    """Tests for alpha_to_index."""
+    """alpha_to_index is strict: requires '@' prefix and uppercase."""
 
-    def test_single_letters_with_prefix(self):
+    def test_single_letters(self):
         assert alpha_to_index('@A') == 0
         assert alpha_to_index('@B') == 1
         assert alpha_to_index('@Z') == 25
 
-    def test_two_letters_with_prefix(self):
+    def test_two_letters(self):
         assert alpha_to_index('@AA') == 26
         assert alpha_to_index('@AB') == 27
         assert alpha_to_index('@AZ') == 51
         assert alpha_to_index('@BA') == 52
         assert alpha_to_index('@ZZ') == 701
 
-    def test_three_letters_with_prefix(self):
+    def test_three_letters(self):
         assert alpha_to_index('@AAA') == 702
         assert alpha_to_index('@AAB') == 703
         assert alpha_to_index('@ZZZ') == 18277
 
-    def test_without_prefix(self):
-        assert alpha_to_index('A') == 0
-        assert alpha_to_index('C') == 2
-        assert alpha_to_index('AA') == 26
-        assert alpha_to_index('ZZ') == 701
+    def test_missing_prefix_raises(self):
+        with pytest.raises(ValueError):
+            alpha_to_index('A')
 
-    def test_lowercase_accepted(self):
-        assert alpha_to_index('a') == 0
-        assert alpha_to_index('z') == 25
-        assert alpha_to_index('aa') == 26
+    def test_lowercase_raises(self):
+        with pytest.raises(ValueError):
+            alpha_to_index('@a')
 
     def test_empty_after_at_raises(self):
         with pytest.raises(ValueError):
@@ -84,11 +73,8 @@ class TestAlphaToIndex:
             alpha_to_index('@AAAA')
 
 
-# ---------- parse_cell_ref ----------
-
-
 class TestParseCellRef:
-    """Tests for parse_cell_ref."""
+    """parse_cell_ref is lenient: handles @-labels, plain letters, numbers."""
 
     def test_at_label(self):
         assert parse_cell_ref('@C') == 2
@@ -97,6 +83,11 @@ class TestParseCellRef:
     def test_plain_letters(self):
         assert parse_cell_ref('C') == 2
         assert parse_cell_ref('AA') == 26
+
+    def test_lowercase(self):
+        assert parse_cell_ref('a') == 0
+        assert parse_cell_ref('z') == 25
+        assert parse_cell_ref('aa') == 26
 
     def test_numeric_string(self):
         assert parse_cell_ref('2') == 2
@@ -112,12 +103,7 @@ class TestParseCellRef:
         assert parse_cell_ref(' 3 ') == 3
 
 
-# ---------- Round-trip ----------
-
-
 class TestRoundTrip:
-    """Verify index_to_alpha and alpha_to_index are inverses."""
-
     def test_round_trip_first_100(self):
         for i in range(100):
             assert alpha_to_index(index_to_alpha(i)) == i
@@ -127,12 +113,10 @@ class TestRoundTrip:
             assert alpha_to_index(index_to_alpha(i)) == i
 
     def test_round_trip_full_single(self):
-        """All 26 single-letter labels."""
         for i in range(26):
             assert alpha_to_index(index_to_alpha(i)) == i
 
     def test_round_trip_sample_two_letter(self):
-        """Sample of two-letter labels."""
         import random
         rng = random.Random(42)
         for _ in range(50):
@@ -140,7 +124,6 @@ class TestRoundTrip:
             assert alpha_to_index(index_to_alpha(i)) == i
 
     def test_round_trip_sample_three_letter(self):
-        """Sample of three-letter labels."""
         import random
         rng = random.Random(42)
         for _ in range(50):

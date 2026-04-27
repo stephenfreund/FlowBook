@@ -10,7 +10,7 @@ import logging
 
 import notebook_intelligence.api as nbapi
 
-from flowbook.nbi.cell_addressing import index_to_alpha, parse_cell_ref
+from flowbook.util.cell_index import index_to_alpha, parse_cell_ref
 from flowbook.nbi.session import FlowBookSession
 from flowbook.scripts.fix_repro_errors import (
     rename_variable_in_code,
