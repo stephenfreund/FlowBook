@@ -152,6 +152,7 @@ jobs:
             flowbook/kernel_support/tests/test_column_tracking_setitem_reads.py \
             flowbook/kernel_support/tests/test_column_provenance.py \
             flowbook/kernel_support/tests/test_chained_assignment_error.py \
+            flowbook/kernel_support/tests/test_heap_size.py \
             flowbook/kernel_support/tests/test_memory_checkpoint.py \
             flowbook/kernel_support/tests/test_memory_checkpoint_comprehensive.py \
             flowbook/kernel_support/tests/test_memory_checkpoint_edge_cases.py \
