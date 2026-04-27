@@ -2,11 +2,13 @@
 _ipython*
 *.bak
 .jupyter_ystore.db
+.virtual_documents/
 
 # Ignore all files in examples except .ipynb notebooks
 examples/**
 !examples/**/*.ipynb
 !examples/**/
+examples/**/.virtual_documents/
 
 *.bundle.*
 lib/
@@ -137,3 +139,4 @@ dmypy.json
 # Claude Code local files
 .claude/settings.local.json
 .claude/agent-memory/
+.mcp.json

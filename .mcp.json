@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "flowbook": {
-      "command": "python",
-      "args": ["-m", "flowbook.mcp.server"],
-      "cwd": "/Users/freund/other/FlowBook"
-    }
-  }
-}
