@@ -97,9 +97,9 @@ Print a summary:
 - Original violation count
 - Fixes applied table, always in this format:
 
-| Cell | Strategy | Change |
-|---|---|---|
-| D | `insert_deepcopy` | `df` → `df_D` |
+| Cell | Strategy          | Change        |
+| ---- | ----------------- | ------------- |
+| D    | `insert_deepcopy` | `df` → `df_D` |
 
 Followed by a diagnosis blockquote for each fix:
 
@@ -156,11 +156,13 @@ run_from(cell_id)
 ```
 
 **Proactive repair**: Even when `inplace=True` doesn't immediately trigger a violation, it can cause staleness tracking issues later. When you see `inplace=True` in any cell (e.g., `df.drop(..., inplace=True)`, `df.fillna(..., inplace=True)`, `df.reset_index(inplace=True)`), proactively convert it:
+
 ```
 checkpoint()
 remove_inplace("J", "store_data")
 run_from(cell_id)
 ```
+
 This converts `df.method(inplace=True)` to `df = df.method()`, making the mutation explicit and trackable.
 
 ### 3. Sequential Transformation Chain
@@ -239,7 +241,7 @@ restore("ckpt_abc12345")
 4. **Use `edit_cell_source` for complex cases**: When the algorithmic tools don't fit (e.g., restructuring logic, adding parameters to functions), fall back to reading the cell, modifying the source manually, and using `edit_cell_source`.
 5. **Always checkpoint before fixing**: This lets you safely undo if things go wrong.
 6. **Use `run_from(cell_id)`** after each fix to re-run from the fixed cell onwards. It skips clean cells and stops on the first error or violation.
-7. **Don't fix staleness directly**: Staleness is a *symptom* of violations. Fix the violation and staleness resolves automatically. But stale cells DO need to be re-run to update the kernel state.
+7. **Don't fix staleness directly**: Staleness is a _symptom_ of violations. Fix the violation and staleness resolves automatically. But stale cells DO need to be re-run to update the kernel state.
 8. **Naming convention for deepcopies**: When `insert_deepcopy` creates a copy, rename it to `{var}_{cell_id}` format (e.g., `df_G` for a copy of `df` introduced in cell G). This is clearer than `df_copy_copy_copy`. After `insert_deepcopy`, use `alpha_rename` to fix the generated name:
    ```
    insert_deepcopy("G", "df")      # Creates df_copy
